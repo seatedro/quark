@@ -1482,3 +1482,27 @@ fn accessibility_tree_nests_buttons_under_their_dialog() {
         "dialog | Dialog | Confirm\n  ok | Button | OK\n  cancel | Button | Cancel\n"
     );
 }
+
+// Regression: element style stored one corner radius and Div paint passed
+// [r; 4], so per-corner rounding could not reach the scene.
+#[test]
+fn div_rounded_corners_paints_background_with_per_corner_radii() {
+    let mut font_system = glyphon::FontSystem::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut scene = Scene::default();
+
+    let mut root = div()
+        .w(100.0)
+        .h(50.0)
+        .rounded_corners([8.0, 0.0, 4.0, 0.0])
+        .bg(Color::rgba(255, 0, 0, 255))
+        .into_any();
+    render_element(&mut root, &mut scene, &mut cx, 100.0, 50.0);
+
+    let radii = scene.primitives.iter().find_map(|p| match p {
+        quark_render::Primitive::RoundedRect(rr) => Some(rr.corner_radii),
+        _ => None,
+    });
+    assert_eq!(radii, Some([8.0, 0.0, 4.0, 0.0]));
+}

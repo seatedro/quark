@@ -112,7 +112,7 @@ impl IntoAnyElement for SvgIcon {
 // ---------------------------------------------------------------------------
 
 pub struct RasterImage {
-    rgba: std::sync::Arc<Vec<u8>>,
+    rgba: std::sync::Arc<[u8]>,
     src_width: u32,
     src_height: u32,
     cache_key: u64,
@@ -120,7 +120,7 @@ pub struct RasterImage {
 }
 
 pub fn raster_image(
-    rgba: std::sync::Arc<Vec<u8>>,
+    rgba: std::sync::Arc<[u8]>,
     src_width: u32,
     src_height: u32,
     cache_key: u64,
@@ -188,7 +188,7 @@ impl Element for RasterImage {
             rect: snapped,
             width: self.src_width,
             height: self.src_height,
-            rgba: (*self.rgba).clone(),
+            rgba: self.rgba.clone(),
             cache_key: self.cache_key,
         });
     }

@@ -19,7 +19,8 @@ pub struct ElementStyle {
     pub background: Option<Color>,
     pub border_color: Option<Color>,
     pub border_widths: [f32; 4],
-    pub corner_radius: f32,
+    /// Per-corner radii: [top-left, top-right, bottom-right, bottom-left].
+    pub corner_radii: [f32; 4],
     pub opacity: f32,
     pub z_index: i32,
     pub shadows: Vec<ShadowStyle>,
@@ -35,11 +36,19 @@ impl Default for ElementStyle {
             background: None,
             border_color: None,
             border_widths: [0.0; 4],
-            corner_radius: 0.0,
+            corner_radii: [0.0; 4],
             opacity: 1.0,
             z_index: 0,
             shadows: Vec::new(),
         }
+    }
+}
+
+impl ElementStyle {
+    /// Largest corner radius, for primitives that take a single radius
+    /// (shadows, effect quads, blur regions).
+    pub fn max_corner_radius(&self) -> f32 {
+        self.corner_radii.iter().copied().fold(0.0, f32::max)
     }
 }
 
@@ -93,7 +102,7 @@ pub fn apply_override(base: &mut ElementStyle, ov: &StyleOverride) {
         base.border_color = Some(bc);
     }
     if let Some(cr) = ov.corner_radius {
-        base.corner_radius = cr;
+        base.corner_radii = [cr; 4];
     }
     if let Some(op) = ov.opacity {
         base.opacity = op;
