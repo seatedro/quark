@@ -18,6 +18,13 @@ pub enum AppEvent {
     /// The desktop's light or dark preference, once when it is first known
     /// and again whenever it changes. See [`EventContext::theme`].
     ThemeChanged(Theme),
+    /// A dialog from [`EventContext::file_dialog`] closed. `paths` is empty
+    /// when the user cancelled.
+    #[cfg(feature = "dialogs")]
+    FileDialogClosed {
+        id: crate::platform::dialog::DialogId,
+        paths: Vec<std::path::PathBuf>,
+    },
     /// The user clicked a notification sent with [`EventContext::notify`]:
     /// its body ([`crate::platform::notification::DEFAULT_ACTION`]) or one of
     /// its action buttons. Linux and the BSDs only.

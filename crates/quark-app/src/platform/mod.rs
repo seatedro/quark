@@ -2,6 +2,8 @@
 //! instance handoff, deep links, and window state persistence.
 
 pub mod desktop_entry;
+#[cfg(feature = "dialogs")]
+pub mod dialog;
 #[cfg(feature = "notifications")]
 pub mod notification;
 pub mod single_instance;

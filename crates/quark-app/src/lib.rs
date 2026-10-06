@@ -15,6 +15,8 @@ pub mod ui;
 pub use input::{InputEvent, InputNormalizer, KeyChord, KeyKind};
 #[cfg(feature = "ui")]
 pub use quark_ui;
+#[cfg(feature = "clipboard-image")]
+pub use runner::ClipboardImage;
 pub use runner::{
     App, AppEvent, EventContext, FrameContext, RunError, TrafficLights, Waker, WindowChrome,
     WindowHandle, WindowOptions, run,

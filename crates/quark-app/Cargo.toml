@@ -24,6 +24,9 @@ tungstenite = { workspace = true, optional = true }
 serde_json = "1.0"
 # zbus (pure Rust D-Bus) on Linux instead of libdbus, so no C library or
 # system headers are needed. macOS and Windows use the crate's native backends.
+# The XDG portal backend on Linux talks D-Bus directly instead of linking GTK.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"], optional = true }
+pollster = { workspace = true, optional = true }
 notify-rust = { version = "4.18", default-features = false, features = ["z"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -72,6 +75,10 @@ notifications = ["dep:notify-rust"]
 # A system tray icon and menu through `EventContext::set_tray`. Off by
 # default: it adds tray-icon and muda to every build.
 tray = ["dep:tray-icon"]
+# Open and save dialogs through `EventContext::file_dialog`.
+dialogs = ["dep:rfd", "dep:pollster"]
+# Image get and set through `EventContext::clipboard_image`.
+clipboard-image = ["arboard/image-data"]
 
 [[example]]
 name = "hello_ui"

@@ -26,6 +26,8 @@ pub(super) struct Flags {
     pub(super) exit_requested: bool,
     pub(super) keep_running_without_windows: bool,
     pub(super) close: Vec<WindowHandle>,
+    #[cfg(feature = "dialogs")]
+    pub(super) next_dialog: u64,
 }
 
 impl Flags {
@@ -39,6 +41,15 @@ impl Flags {
             None => self.redraw_all = true,
         }
     }
+}
+
+/// Straight RGBA8 pixels, `width * height * 4` bytes.
+#[cfg(feature = "clipboard-image")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardImage {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
 }
 
 pub struct FrameContext<'a> {
@@ -234,6 +245,51 @@ impl EventContext<'_> {
         if let Some(clipboard) = self.clipboard() {
             let _ = clipboard.set_text(text);
         }
+    }
+
+    /// The clipboard's image, if it holds one.
+    #[cfg(feature = "clipboard-image")]
+    pub fn clipboard_image(&mut self) -> Option<ClipboardImage> {
+        let image = self.clipboard()?.get_image().ok()?;
+        Some(ClipboardImage {
+            width: image.width,
+            height: image.height,
+            rgba: image.bytes.into_owned(),
+        })
+    }
+
+    /// Put an image on the clipboard. Returns false if the clipboard is
+    /// unavailable or `rgba` does not match the size.
+    #[cfg(feature = "clipboard-image")]
+    pub fn set_clipboard_image(&mut self, image: &ClipboardImage) -> bool {
+        if image.rgba.len() != image.width * image.height * 4 {
+            return false;
+        }
+        let Some(clipboard) = self.clipboard() else {
+            return false;
+        };
+        clipboard
+            .set_image(arboard::ImageData {
+                width: image.width,
+                height: image.height,
+                bytes: std::borrow::Cow::Borrowed(&image.rgba),
+            })
+            .is_ok()
+    }
+
+    /// Show a native open or save dialog parented to the context's window.
+    /// The result arrives as [`AppEvent::FileDialogClosed`] with the returned
+    /// id.
+    #[cfg(feature = "dialogs")]
+    pub fn file_dialog(
+        &mut self,
+        dialog: crate::platform::dialog::FileDialog,
+    ) -> crate::platform::dialog::DialogId {
+        self.flags.next_dialog += 1;
+        let id = crate::platform::dialog::DialogId(self.flags.next_dialog);
+        let parent = self.native();
+        crate::platform::dialog::open(dialog, id, parent, self.events.clone());
+        id
     }
 
     /// The context's native window, for operations the context doesn't wrap
