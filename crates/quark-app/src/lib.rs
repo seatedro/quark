@@ -7,6 +7,7 @@ pub mod keymap;
 #[cfg(target_os = "macos")]
 pub mod macos_window;
 mod panic_hook;
+pub mod platform;
 mod runner;
 #[cfg(feature = "ui")]
 pub mod ui;

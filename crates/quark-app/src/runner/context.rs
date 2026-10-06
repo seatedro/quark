@@ -113,7 +113,6 @@ pub struct EventContext<'a> {
     pub(super) fallback_fonts: &'a mut Option<FontSystem>,
     pub(super) fonts: &'a FontSettings,
     pub(super) waker: &'a Waker,
-    #[allow(dead_code)]
     pub(super) events: &'a EventSink,
 }
 
@@ -248,6 +247,13 @@ impl EventContext<'_> {
 
     pub fn waker(&self) -> &Waker {
         self.waker
+    }
+
+    /// Show a desktop notification without blocking. Clicks come back as
+    /// [`AppEvent::NotificationAction`] where the platform reports them.
+    #[cfg(feature = "notifications")]
+    pub fn notify(&mut self, notification: crate::platform::notification::Notification) {
+        crate::platform::notification::show(notification, self.events.clone());
     }
 
     fn state(&self) -> Option<&WindowState> {

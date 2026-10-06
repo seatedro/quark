@@ -11,6 +11,14 @@ pub enum AppEvent {
     /// A window requested through [`EventContext::open_window`] could not be
     /// created. The handle is stale.
     WindowOpenFailed(WindowHandle),
+    /// The user clicked a notification sent with [`EventContext::notify`]:
+    /// its body ([`crate::platform::notification::DEFAULT_ACTION`]) or one of
+    /// its action buttons. Linux and the BSDs only.
+    #[cfg(feature = "notifications")]
+    NotificationAction { id: u64, action: String },
+    /// A notification was closed without an action. Linux and the BSDs only.
+    #[cfg(feature = "notifications")]
+    NotificationDismissed { id: u64 },
 }
 
 /// Posts [`AppEvent`]s to the main thread from any thread.
