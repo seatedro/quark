@@ -1,0 +1,17 @@
+[package]
+name = "quark-text"
+description = "Shared text shaping, layout, hit-testing, and layout caching for Quark."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quark.workspace = true
+cosmic-text.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+unicode-segmentation.workspace = true

@@ -4,6 +4,7 @@ members = [
   "crates/quark",
   "crates/quark-macros",
   "crates/quark-render",
+  "crates/quark-text",
   "crates/quark-ui",
   "crates/quark-components",
   "crates/quark-app",
@@ -20,12 +21,15 @@ repository = "https://github.com/seatedro/quark"
 quark = { path = "crates/quark" }
 quark-macros = { path = "crates/quark-macros" }
 quark-render = { path = "crates/quark-render" }
+quark-text = { path = "crates/quark-text" }
 quark-ui = { path = "crates/quark-ui" }
 quark-components = { path = "crates/quark-components" }
 quark-app = { path = "crates/quark-app" }
 accesskit = "0.24"
 accesskit_winit = "0.33"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+# Must stay on the cosmic-text minor that glyphon re-exports so FontSystem is one type.
+cosmic-text = "0.15"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 glyphon = "0.10.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

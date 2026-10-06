@@ -2465,6 +2465,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "quark-text"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "quark",
+ "serde",
+ "thiserror 2.0.21",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "quark-ui"
 version = "0.1.0"
 dependencies = [
