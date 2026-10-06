@@ -9,6 +9,8 @@ members = [
   "crates/quark-components",
   "crates/quark-app",
 ]
+# cargo-fuzz targets build on their own with nightly sanitizers.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
