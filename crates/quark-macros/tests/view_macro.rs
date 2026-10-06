@@ -10,8 +10,8 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use halogen::reactive::{Signal, SignalStore};
-use halogen_macros::view;
+use quark::reactive::{Signal, SignalStore};
+use quark_macros::view;
 
 use dsl::*;
 

@@ -16,10 +16,10 @@ use crate::actions::Action;
 use crate::editor::diff::element::EditorElement;
 use crate::editor::diff::state::ReviewCommentTarget;
 use crate::effects::Effect;
-use crate::ui::components::TooltipState;
-use crate::ui::element::DragHandler;
-use crate::ui::shell::UiFrame;
-use crate::ui::state::{AppState, FocusTarget, OverlaySurface, WorkspaceMode};
+use quark_components::TooltipState;
+use quark_ui::element::DragHandler;
+use quark_ui::shell::UiFrame;
+use quark_ui::state::{AppState, FocusTarget, OverlaySurface, WorkspaceMode};
 
 pub use keymap::{
     KeymapOverride, ShortcutCommand, ShortcutEntry, ShortcutGroup, active_bindings,
@@ -286,7 +286,7 @@ impl InputOutcome {
 
 #[derive(Debug, Clone)]
 enum ScrollTarget {
-    Region(crate::ui::element::ScrollActionBuilder),
+    Region(quark_ui::element::ScrollActionBuilder),
     ViewportFallback,
 }
 

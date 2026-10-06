@@ -1,0 +1,25 @@
+[package]
+name = "quark-app"
+description = "Window, event loop, input routing, and hot reload for Quark apps."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quark.workspace = true
+quark-render.workspace = true
+quark-ui.workspace = true
+quark-components.workspace = true
+accesskit.workspace = true
+accesskit_winit.workspace = true
+arboard.workspace = true
+raw-window-handle.workspace = true
+serde.workspace = true
+tracing.workspace = true
+winit.workspace = true
+subsecond = { workspace = true, optional = true }
+tungstenite = { workspace = true, optional = true }
+
+[features]
+hot-reload = ["dep:subsecond", "dep:tungstenite"]

@@ -1,6 +1,6 @@
-use crate::render::{BorderPrimitive, FontKind, Rect, RoundedRectPrimitive, ShadowPrimitive};
-use crate::ui::shell::UiFrame;
-use crate::ui::theme::{Color, Theme};
+use quark_render::{BorderPrimitive, FontKind, Rect, RoundedRectPrimitive, ShadowPrimitive};
+use crate::shell::UiFrame;
+use crate::theme::{Color, Theme};
 
 pub struct Sp;
 

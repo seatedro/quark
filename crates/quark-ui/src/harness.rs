@@ -9,15 +9,15 @@ use crate::core::review::{
     ReviewThread, ReviewThreadId, ReviewThreadPermissions, ReviewThreadStatus,
 };
 use crate::editor::diff::review::{build_review_thread_card, measure_review_thread_card_height};
-use crate::render::Scene;
-use crate::ui::accessibility::AccessibilityFrame;
-use crate::ui::element::{
+use quark_render::Scene;
+use crate::accessibility::AccessibilityFrame;
+use crate::element::{
     ElementContext, HitRegion, IntoAnyElement, ScrollRegion, SelectableTextRegion,
     TextInputHitArea, TooltipRegion, render_element_at,
 };
-use crate::ui::state::CardTextSelection;
-use crate::ui::theme::Theme;
-use halogen::reactive::SignalStore;
+use crate::state::CardTextSelection;
+use crate::theme::Theme;
+use quark::reactive::SignalStore;
 
 /// Physical card width for the harness render. Wide enough that the header line
 /// reference doesn't truncate at `HARNESS_UI_SCALE` (a real review column is wider
@@ -132,8 +132,8 @@ pub struct TextPiece {
     pub y: f32,
     pub height: f32,
     pub font_size: f32,
-    pub font_kind: crate::render::FontKind,
-    pub font_weight: crate::render::FontWeight,
+    pub font_kind: quark_render::FontKind,
+    pub font_weight: quark_render::FontWeight,
     pub italic: bool,
     pub text: String,
 }
@@ -141,7 +141,7 @@ pub struct TextPiece {
 /// Every `TextRun`/`RichTextRun` in the scene as a [`TextPiece`], sorted top-to-
 /// bottom then left-to-right (reading order).
 pub fn text_pieces(scene: &Scene) -> Vec<TextPiece> {
-    use crate::render::{FontStyle, Primitive};
+    use quark_render::{FontStyle, Primitive};
 
     let mut out = Vec::new();
     for primitive in &scene.primitives {
@@ -206,7 +206,7 @@ pub fn dump_text_layout(scene: &Scene, font_system: &mut glyphon::FontSystem) ->
     let mut out = String::new();
     for line in text_lines(scene) {
         for (i, p) in line.iter().enumerate() {
-            let adv = crate::ui::element::measure_text_advance(
+            let adv = crate::element::measure_text_advance(
                 font_system,
                 &p.text,
                 p.font_size,
@@ -218,8 +218,8 @@ pub fn dump_text_layout(scene: &Scene, font_system: &mut glyphon::FontSystem) ->
                 .map(|q| format!("{:+.0}", q.x - (p.x + adv)))
                 .unwrap_or_else(|| "·".to_owned());
             let kind = match p.font_kind {
-                crate::render::FontKind::Ui => "ui",
-                crate::render::FontKind::Mono => "mono",
+                quark_render::FontKind::Ui => "ui",
+                quark_render::FontKind::Mono => "mono",
             };
             let style = format!(
                 "{kind}/{:?}{}",
@@ -240,7 +240,7 @@ pub struct RenderedCard {
     pub scene: Scene,
     pub selectable: Vec<SelectableTextRegion>,
     pub accessibility: AccessibilityFrame,
-    pub semantic: halogen::SemanticFrame,
+    pub semantic: quark::SemanticFrame,
     pub hits: Vec<HitRegion>,
     pub scroll_regions: Vec<ScrollRegion>,
     pub text_input_hit_areas: Vec<TextInputHitArea>,
@@ -257,12 +257,12 @@ pub fn render_element_fixture(
     scale: f32,
 ) -> RenderedCard {
     let theme = Theme::default_dark().with_ui_scale(scale);
-    let mut font_system = crate::fonts::new_font_system();
+    let mut font_system = quark_render::fonts::new_font_system();
     let store = SignalStore::new();
     let mut scene = Scene::default();
     let mut cx = ElementContext::new(&theme, scale, &mut font_system, None, &store);
     cx.accessibility = AccessibilityFrame::new(width, height);
-    cx.semantic = halogen::SemanticFrame::new(width, height);
+    cx.semantic = quark::SemanticFrame::new(width, height);
     let mut root = root.into_any();
     render_element_at(&mut root, &mut scene, &mut cx, 0.0, 0.0, width, height);
 
@@ -280,8 +280,8 @@ pub fn render_element_fixture(
     }
 }
 
-pub fn dump_semantic(frame: &halogen::SemanticFrame) -> String {
-    halogen::dump_semantic(frame)
+pub fn dump_semantic(frame: &quark::SemanticFrame) -> String {
+    quark::dump_semantic(frame)
 }
 
 /// Build a dark-theme `ElementContext`, render the review-thread card at a fixed
@@ -319,7 +319,7 @@ fn render_review_card_with_avatars(
     thread: &ReviewThread,
     expanded: bool,
     selection: Option<&CardTextSelection>,
-    avatars: &HashMap<u64, crate::ui::components::avatar::AvatarImage>,
+    avatars: &HashMap<u64, crate::components::avatar::AvatarImage>,
     width: f32,
     scale: f32,
 ) -> RenderedCard {
@@ -328,7 +328,7 @@ fn render_review_card_with_avatars(
     // consistently with spacing/fonts that take the explicit `scale` — otherwise the
     // render mixes 1x icons/avatars with 2x spacing.
     let theme = Theme::default_dark().with_ui_scale(scale);
-    let mut font_system = crate::fonts::new_font_system();
+    let mut font_system = quark_render::fonts::new_font_system();
     let store = SignalStore::new();
 
     let height = {
@@ -347,7 +347,7 @@ fn render_review_card_with_avatars(
     let mut scene = Scene::default();
     let mut cx = ElementContext::new(&theme, scale, &mut font_system, None, &store);
     cx.accessibility = AccessibilityFrame::new(width, height);
-    cx.semantic = halogen::SemanticFrame::new(width, height);
+    cx.semantic = quark::SemanticFrame::new(width, height);
     let mut card = build_review_thread_card(
         thread, expanded, &theme, scale, width, avatars, selection, None,
     );
@@ -371,13 +371,13 @@ fn render_review_card_with_avatars(
 /// `preview` switches to the Preview tab (rendered markdown).
 pub fn render_review_composer(width: f32, scale: f32, preview: bool) -> RenderedCard {
     use crate::core::forge::github::{CreatePullRequestReviewComment, GitHubReviewSide};
-    use crate::render::Rect;
-    use crate::ui::state::{
+    use quark_render::Rect;
+    use crate::state::{
         AppState, AsyncStatus, FocusTarget, ReviewCommentComposerState, ReviewCommentDraft,
     };
 
     let theme = Theme::default_dark().with_ui_scale(scale);
-    let mut font_system = crate::fonts::new_font_system();
+    let mut font_system = quark_render::fonts::new_font_system();
     let mut state = AppState::default();
     let small = theme.metrics.ui_small_font_size;
 
@@ -429,8 +429,8 @@ pub fn render_review_composer(width: f32, scale: f32, preview: bool) -> Rendered
     let mut scene = Scene::default();
     let mut cx = ElementContext::new(&theme, scale, &mut font_system, None, &state.store);
     cx.accessibility = AccessibilityFrame::new(width, height);
-    cx.semantic = halogen::SemanticFrame::new(width, height);
-    let mut element = crate::ui::shell::build_review_composer(&state, &theme, scale, rect);
+    cx.semantic = quark::SemanticFrame::new(width, height);
+    let mut element = crate::shell::build_review_composer(&state, &theme, scale, rect);
     render_element_at(&mut element, &mut scene, &mut cx, 0.0, 0.0, width, height);
 
     RenderedCard {
@@ -454,13 +454,13 @@ pub fn render_review_composer(width: f32, scale: f32, preview: bool) -> Rendered
 /// tests can exercise selection + clipboard behaviour end to end without a window.
 #[cfg(test)]
 pub struct UiHarness {
-    pub state: crate::ui::state::AppState,
+    pub state: crate::state::AppState,
     input: crate::input::InputSystem,
     font_system: glyphon::FontSystem,
     editor: crate::editor::diff::element::EditorElement,
-    tooltip: crate::ui::components::TooltipState,
+    tooltip: crate::components::TooltipState,
     launch_at: std::time::Instant,
-    ui_frame: crate::ui::shell::UiFrame,
+    ui_frame: crate::shell::UiFrame,
     pub card: RenderedCard,
 }
 
@@ -471,20 +471,20 @@ impl UiHarness {
     /// viewport), which is all the card-selection input paths read.
     pub fn new(thread: &ReviewThread) -> Self {
         let card = render_review_card(thread, true, None);
-        let ui_frame = crate::ui::shell::UiFrame {
+        let ui_frame = crate::shell::UiFrame {
             selectable_text_runs: card.selectable.clone(),
             scene: card.scene.clone(),
             accessibility: card.accessibility.clone(),
             semantic: card.semantic.clone(),
             hits: card.hits.clone(),
-            ..crate::ui::shell::UiFrame::default()
+            ..crate::shell::UiFrame::default()
         };
         Self {
-            state: crate::ui::state::AppState::default(),
+            state: crate::state::AppState::default(),
             input: crate::input::InputSystem::default(),
-            font_system: crate::fonts::new_font_system(),
+            font_system: quark_render::fonts::new_font_system(),
             editor: crate::editor::diff::element::EditorElement::default(),
-            tooltip: crate::ui::components::TooltipState::default(),
+            tooltip: crate::components::TooltipState::default(),
             launch_at: std::time::Instant::now(),
             ui_frame,
             card,
@@ -599,14 +599,14 @@ mod tests {
 
     use super::*;
     use crate::actions::{Action, AppAction};
-    use crate::ui::accessibility::dump_accessibility;
-    use crate::ui::components::{
+    use crate::accessibility::dump_accessibility;
+    use crate::components::{
         Button, ButtonStyle, DropdownItem, FileTreeEntry, Modal, SegmentedControl, SegmentedItem,
         TabItem, checkbox, dropdown, file_tree, tab_bar, toggle,
     };
-    use crate::ui::element::div;
-    use crate::ui::icons::lucide;
-    use crate::ui::style::Styled;
+    use crate::element::div;
+    use crate::icons::lucide;
+    use crate::style::Styled;
 
     #[test]
     fn render_review_card_emits_selectable_text_and_a11y() {
@@ -641,7 +641,7 @@ mod tests {
             .semantic
             .nodes()
             .iter()
-            .find(|node| node.role == Some(halogen::SemanticRole::Button))
+            .find(|node| node.role == Some(quark::SemanticRole::Button))
             .expect("button semantic node");
         assert_eq!(button.label.as_deref(), Some("Debug"));
         assert!(button.actions.click);
@@ -654,8 +654,8 @@ mod tests {
     #[test]
     fn generic_fixture_captures_text_input_semantics() {
         let rendered = render_element_fixture(
-            crate::ui::element::text_input("Search", "needle")
-                .focus_target(crate::ui::state::FocusTarget::SearchInput)
+            crate::element::text_input("Search", "needle")
+                .focus_target(crate::state::FocusTarget::SearchInput)
                 .focused(true)
                 .w(240.0)
                 .h(56.0),
@@ -668,7 +668,7 @@ mod tests {
             .semantic
             .nodes()
             .iter()
-            .find(|node| node.role == Some(halogen::SemanticRole::TextInput))
+            .find(|node| node.role == Some(quark::SemanticRole::TextInput))
             .expect("text input semantic node");
         assert_eq!(input.label.as_deref(), Some("Search"));
         assert_eq!(input.value.as_deref(), Some("needle"));
@@ -679,7 +679,7 @@ mod tests {
     fn modal_semantics_are_nested_under_backdrop() {
         let rendered = render_element_fixture(
             Modal::new("Preferences", "", lucide::SETTINGS, 360.0, 500.0, 320.0)
-                .body_child(crate::ui::element::text("Body").text_sm()),
+                .body_child(crate::element::text("Body").text_sm()),
             500.0,
             320.0,
             1.0,
@@ -689,7 +689,7 @@ mod tests {
             .semantic
             .nodes()
             .iter()
-            .find(|node| node.role == Some(halogen::SemanticRole::Dialog))
+            .find(|node| node.role == Some(quark::SemanticRole::Dialog))
             .expect("dialog semantic node");
         assert_eq!(dialog.label.as_deref(), Some("Preferences"));
         assert!(
@@ -743,13 +743,13 @@ mod tests {
             .collect();
 
         for role in [
-            halogen::SemanticRole::CheckBox,
-            halogen::SemanticRole::Switch,
-            halogen::SemanticRole::RadioButton,
-            halogen::SemanticRole::ComboBox,
-            halogen::SemanticRole::MenuItem,
-            halogen::SemanticRole::Tab,
-            halogen::SemanticRole::TreeItem,
+            quark::SemanticRole::CheckBox,
+            quark::SemanticRole::Switch,
+            quark::SemanticRole::RadioButton,
+            quark::SemanticRole::ComboBox,
+            quark::SemanticRole::MenuItem,
+            quark::SemanticRole::Tab,
+            quark::SemanticRole::TreeItem,
         ] {
             assert!(roles.contains(&role), "missing semantic role {role:?}");
         }
@@ -882,9 +882,9 @@ mod tests {
         use std::sync::Arc;
 
         use crate::editor::diff::review::{REVIEW_AVATAR_FETCH_PX, REVIEW_AVATAR_PX};
-        use crate::render::Primitive;
-        use crate::ui::components::avatar::AvatarImage;
-        use crate::ui::state::{avatar_cache_key, avatar_url_sized};
+        use quark_render::Primitive;
+        use crate::components::avatar::AvatarImage;
+        use crate::state::{avatar_cache_key, avatar_url_sized};
 
         let mut thread = sample_review_thread();
         let raw = "https://avatars.example.com/u/1.png";
@@ -955,9 +955,9 @@ mod tests {
         let target_byte = region.runs[0].start + second_space;
 
         let prefix = &region.text[region.runs[0].start..target_byte];
-        let mut fs = crate::fonts::new_font_system();
+        let mut fs = quark_render::fonts::new_font_system();
         let target_x = region.text_origin.0
-            + crate::ui::element::measure_text_width(
+            + crate::element::measure_text_width(
                 &mut fs,
                 prefix,
                 region.font_size,
@@ -1001,7 +1001,7 @@ mod tests {
     #[test]
     fn rich_comment_body_renders_styled_pieces_and_copies_plain_text() {
         use crate::actions::AppAction;
-        use crate::render::{FontKind, FontStyle, FontWeight, Primitive};
+        use quark_render::{FontKind, FontStyle, FontWeight, Primitive};
 
         let thread = sample_review_thread();
         let mut harness = UiHarness::new(&thread);
@@ -1065,12 +1065,12 @@ mod tests {
     fn text_pieces_do_not_overlap_on_a_line() {
         let thread = sample_review_thread();
         let card = render_review_card(&thread, true, None);
-        let mut fs = crate::fonts::new_font_system();
+        let mut fs = quark_render::fonts::new_font_system();
 
         for line in text_lines(&card.scene) {
             for pair in line.windows(2) {
                 let (a, b) = (&pair[0], &pair[1]);
-                let adv = crate::ui::element::measure_text_advance(
+                let adv = crate::element::measure_text_advance(
                     &mut fs,
                     &a.text,
                     a.font_size,
@@ -1094,7 +1094,7 @@ mod tests {
     fn rich_body_pieces_are_spaced_across_style_boundaries() {
         let thread = sample_review_thread();
         let card = render_review_card(&thread, true, None);
-        let mut fs = crate::fonts::new_font_system();
+        let mut fs = quark_render::fonts::new_font_system();
         let pieces = text_pieces(&card.scene);
 
         // The code/bold/italic pieces and the normal text immediately after them.
@@ -1113,19 +1113,19 @@ mod tests {
                 "expected {right:?} after {left:?}, got {:?}",
                 b.text
             );
-            let adv = crate::ui::element::measure_text_advance(
+            let adv = crate::element::measure_text_advance(
                 &mut fs,
                 &a.text,
                 a.font_size,
                 a.font_kind,
                 a.font_weight,
             );
-            let space = crate::ui::element::measure_text_advance(
+            let space = crate::element::measure_text_advance(
                 &mut fs,
                 " ",
                 a.font_size,
-                crate::render::FontKind::Ui,
-                crate::render::FontWeight::Normal,
+                quark_render::FontKind::Ui,
+                quark_render::FontWeight::Normal,
             );
             let gap = b.x - (a.x + adv);
             assert!(
@@ -1179,7 +1179,7 @@ mod tests {
     #[test]
     fn drag_selects_comment_text_and_cmd_c_copies_it() {
         use crate::actions::AppAction;
-        use crate::ui::state::FocusTarget;
+        use crate::state::FocusTarget;
 
         let thread = sample_review_thread();
         let mut harness = UiHarness::new(&thread);
@@ -1305,13 +1305,13 @@ mod tests {
         use crate::editor::diff::review::{
             build_review_thread_card, measure_review_thread_card_height,
         };
-        use crate::ui::shell::build_inline_reply_composer;
-        use crate::ui::state::{AppState, AsyncStatus, FocusTarget, ReviewCommentComposerState};
+        use crate::shell::build_inline_reply_composer;
+        use crate::state::{AppState, AsyncStatus, FocusTarget, ReviewCommentComposerState};
 
         let scale = 2.0;
         let width = 520.0;
         let theme = Theme::default_dark().with_ui_scale(scale);
-        let mut font_system = crate::fonts::new_font_system();
+        let mut font_system = quark_render::fonts::new_font_system();
         let mut state = AppState::default();
         let thread = sample_review_thread();
 
@@ -1386,7 +1386,7 @@ mod tests {
             f32::from(with),
         );
 
-        let dump = crate::ui::accessibility::dump_accessibility(&cx.accessibility);
+        let dump = crate::accessibility::dump_accessibility(&cx.accessibility);
         assert!(
             dump.contains("text-editor:ReviewCommentEditor"),
             "inline composer must paint the review comment editor:\n{dump}"

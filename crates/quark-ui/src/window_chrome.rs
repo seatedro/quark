@@ -1,15 +1,15 @@
-use halogen::view;
+use quark::view;
 
 use crate::actions::{Action, ResizeEdge, WindowAction};
-use crate::ui::components::avatar::AvatarImage;
-use crate::ui::components::{Button, ButtonSize, ButtonStyle, avatar};
-use crate::ui::design::{Ico, Rad, Sp, Sz};
-use crate::ui::element::*;
-use crate::ui::icons::lucide;
-use crate::ui::shell::CursorHint;
-use crate::ui::state::{AppState, AsyncStatus, OverlaySurface, UpdateState, WorkspaceSource};
-use crate::ui::style::Styled;
-use crate::ui::theme::{Color, Theme, ThemeColors};
+use crate::components::avatar::AvatarImage;
+use crate::components::{Button, ButtonSize, ButtonStyle, avatar};
+use crate::design::{Ico, Rad, Sp, Sz};
+use crate::element::*;
+use crate::icons::lucide;
+use crate::shell::CursorHint;
+use crate::state::{AppState, AsyncStatus, OverlaySurface, UpdateState, WorkspaceSource};
+use crate::style::Styled;
+use crate::theme::{Color, Theme, ThemeColors};
 
 const ON_MACOS: bool = cfg!(target_os = "macos");
 
@@ -46,7 +46,7 @@ pub(crate) fn window_chrome(
         && state.workspace.source.get(&state.store) == WorkspaceSource::Compare
         && state.compare.mode.get(&state.store) == crate::core::compare::CompareMode::ThreeDot
         && state.repository.location.with(&state.store, |location| {
-            crate::ui::vcs::profile(location.as_ref()).is_working_copy_ref(&right_ref)
+            crate::vcs::profile(location.as_ref()).is_working_copy_ref(&right_ref)
         });
     // When a PR is actively open for review, the "PR preview" affordance is replaced by
     // a compact direct link to that pull request.
@@ -78,7 +78,7 @@ pub(crate) fn window_chrome(
         })
     });
 
-    let cluster = crate::ui::title_bar::compare_cluster_view(state, theme);
+    let cluster = crate::title_bar::compare_cluster_view(state, theme);
 
     let bar_border_b = if ref_picker_open {
         Color::TRANSPARENT

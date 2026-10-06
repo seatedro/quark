@@ -5,9 +5,9 @@ use accesskit::{
 };
 
 use crate::actions::Action;
-use crate::render::Rect;
-use crate::ui::element::ScrollActionBuilder;
-use crate::ui::state::FocusTarget;
+use quark_render::Rect;
+use crate::element::ScrollActionBuilder;
+use crate::state::FocusTarget;
 
 pub const ROOT_ID: NodeId = NodeId(1);
 

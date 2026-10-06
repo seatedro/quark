@@ -1,0 +1,63 @@
+use quark::SemanticRole;
+
+use quark_ui::design::{Shadow, Sp, Sz};
+use quark_ui::element::{Div, div};
+use quark_ui::style::Styled;
+use quark_ui::theme::Theme;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopoverSide {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+pub fn popover_panel(
+    anchor_x: f32,
+    anchor_y: f32,
+    anchor_w: f32,
+    anchor_h: f32,
+    side: PopoverSide,
+    theme: &Theme,
+) -> Div {
+    let tc = &theme.colors;
+    let m = &theme.metrics;
+
+    let gap = m.spacing_xs;
+    let (x, y) = match side {
+        PopoverSide::Bottom => (anchor_x, anchor_y + anchor_h + gap),
+        PopoverSide::Top => (anchor_x, anchor_y - gap),
+        PopoverSide::Right => (anchor_x + anchor_w + gap, anchor_y),
+        PopoverSide::Left => (anchor_x - gap, anchor_y),
+    };
+
+    div()
+        .absolute()
+        .left(x)
+        .top(y)
+        .z_index(200)
+        .flex_col()
+        .id("popover")
+        .test_id("popover")
+        .semantic_role(SemanticRole::Group)
+        .focus_scope("popover")
+        .key_context("popover")
+        .bg(tc.elevated_surface)
+        .border(tc.border)
+        .rounded(m.panel_radius)
+        .shadow_preset(Shadow::POPOVER)
+}
+
+pub fn popover_section() -> Div {
+    div().flex_col().w_full()
+}
+
+pub fn popover_divider(theme: &Theme) -> Div {
+    let tc = &theme.colors;
+    let scale = theme.metrics.ui_scale();
+    div()
+        .w_full()
+        .py((Sp::XS * scale).round())
+        .child(div().w_full().h(Sz::SEPARATOR_W).bg(tc.border_variant))
+}

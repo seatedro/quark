@@ -2,9 +2,9 @@ use winit::event::{MouseScrollDelta, TouchPhase};
 
 use crate::actions::{Action, AppAction, EditorAction, FileListAction, SettingsAction};
 use crate::editor::diff::element::EditorElement;
-use crate::ui::element::ScrollActionBuilder;
-use crate::ui::shell::UiFrame;
-use crate::ui::state::AppState;
+use quark_ui::element::ScrollActionBuilder;
+use quark_ui::shell::UiFrame;
+use quark_ui::state::AppState;
 
 use super::{InputOutcome, InputSystem, ScrollTarget};
 
@@ -150,7 +150,7 @@ impl InputSystem {
 }
 
 fn active_overlay_row_height_px(state: &AppState) -> f32 {
-    use crate::ui::state::OverlaySurface;
+    use quark_ui::state::OverlaySurface;
     match state.overlays_top() {
         Some(
             OverlaySurface::RepoPicker | OverlaySurface::RefPicker | OverlaySurface::ThemePicker,

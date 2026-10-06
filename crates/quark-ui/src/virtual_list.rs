@@ -1,14 +1,14 @@
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct VirtualListWindow {
+pub struct VirtualListWindow {
     pub range: Range<usize>,
     pub top_spacer: f32,
     pub bottom_spacer: f32,
     pub total_extent: f32,
 }
 
-pub(crate) fn virtual_list_total_extent(item_count: usize, item_extent: f32, item_gap: f32) -> f32 {
+pub fn virtual_list_total_extent(item_count: usize, item_extent: f32, item_gap: f32) -> f32 {
     if item_count == 0 {
         return 0.0;
     }
@@ -21,7 +21,7 @@ pub(crate) fn virtual_list_total_extent(item_count: usize, item_extent: f32, ite
 /// Extent reserved by the wrapper around one windowed row: every row keeps
 /// its full stride (row + gap) except the last, which drops the trailing gap
 /// so the column height matches `virtual_list_total_extent`.
-pub(crate) fn virtual_row_wrapper_extent(
+pub fn virtual_row_wrapper_extent(
     global_index: usize,
     total_rows: usize,
     row_extent: f32,
@@ -38,7 +38,7 @@ pub(crate) fn virtual_row_wrapper_extent(
 /// header row whenever the section key changes between consecutive items.
 /// Indices whose item fails to resolve are skipped without affecting the
 /// current section.
-pub(crate) fn build_sectioned_rows<R, S: PartialEq>(
+pub fn build_sectioned_rows<R, S: PartialEq>(
     filtered_indices: &[usize],
     mut section_of: impl FnMut(usize) -> Option<S>,
     mut section_row: impl FnMut(&S) -> R,
@@ -67,7 +67,7 @@ pub(crate) fn build_sectioned_rows<R, S: PartialEq>(
 /// Step a list selection by `delta` rows, clamping to bounds and skipping
 /// section-header rows in the direction of travel. Returns `None` when the
 /// list is empty.
-pub(crate) fn step_selection(
+pub fn step_selection(
     current: usize,
     delta: i32,
     len: usize,
@@ -95,7 +95,7 @@ pub(crate) fn step_selection(
     Some(idx)
 }
 
-pub(crate) fn virtual_list_window(
+pub fn virtual_list_window(
     item_count: usize,
     scroll_offset: f32,
     viewport_extent: f32,

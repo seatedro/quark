@@ -11,15 +11,15 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::actions::Action;
 use crate::effects::Effect;
-use crate::render::Scene;
-use crate::render::scene::{BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect};
-use crate::ui::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
-use crate::ui::design::{Alpha, Sz};
-use crate::ui::theme::Theme;
+use quark_render::Scene;
+use quark_render::scene::{BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect};
+use crate::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
+use crate::design::{Alpha, Sz};
+use crate::theme::Theme;
 use accesskit::Role as AccessibilityRole;
-pub use halogen::hit::{ClickEvent, CursorHint, HitIdentity, Hitbox, HitboxBehavior, HitboxId};
-use halogen::reactive::{Signal, SignalStore};
-use halogen::{
+pub use quark::hit::{ClickEvent, CursorHint, HitIdentity, Hitbox, HitboxBehavior, HitboxId};
+use quark::reactive::{Signal, SignalStore};
+use quark::{
     FocusScopeId, KeyContext, SemanticActions, SemanticFrame, SemanticNode, SemanticNodeState,
     SemanticRole, StyleState, TabStop, TestId, UiEventBinding, UiEventKind, UiEventPhase,
     UiEventResult, UiKey, UiNodeId,
@@ -38,10 +38,10 @@ pub type Bounds = Rect;
 // ---------------------------------------------------------------------------
 
 /// Diffy's hit region: a halogen hit region specialized on `ClickResult`.
-pub type HitRegion = halogen::hit::HitRegion<ClickResult>;
+pub type HitRegion = quark::hit::HitRegion<ClickResult>;
 
 /// Diffy's click handler: a halogen click handler producing `ClickResult`.
-pub type ClickHandler = halogen::hit::ClickHandler<ClickResult>;
+pub type ClickHandler = quark::hit::ClickHandler<ClickResult>;
 
 /// Helpers that make sense only when the handler's output is diffy's
 /// `ClickResult`. Extension trait so we can add methods without owning the
@@ -58,7 +58,7 @@ pub trait ClickHandlerActionExt {
 
 impl ClickHandlerActionExt for ClickHandler {
     fn from_action(action: Action) -> Self {
-        halogen::hit::ClickHandler::new(move |_| ClickResult::Actions(vec![action.clone()]))
+        quark::hit::ClickHandler::new(move |_| ClickResult::Actions(vec![action.clone()]))
     }
 
     fn peek_actions(&self) -> Vec<Action> {
@@ -81,7 +81,7 @@ pub enum ClickResult {
 
 pub trait DragHandler {
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action>;
-    fn on_release(&mut self, state: &crate::ui::state::AppState) -> DragReleaseResult;
+    fn on_release(&mut self, state: &crate::state::AppState) -> DragReleaseResult;
     fn cursor(&self) -> CursorHint {
         CursorHint::Default
     }
@@ -166,7 +166,7 @@ impl DragHandler for ScrollbarDragHandler {
         self.compute_scroll_action(y).into_iter().collect()
     }
 
-    fn on_release(&mut self, _state: &crate::ui::state::AppState) -> DragReleaseResult {
+    fn on_release(&mut self, _state: &crate::state::AppState) -> DragReleaseResult {
         match &self.action_builder {
             ScrollActionBuilder::ViewportGlobal => DragReleaseResult {
                 actions: vec![crate::actions::EditorAction::EndViewportScrollbarDrag.into()],
@@ -227,7 +227,7 @@ impl ScrollActionBuilder {
     }
 }
 
-pub use halogen::hit::TooltipRegion;
+pub use quark::hit::TooltipRegion;
 
 // ---------------------------------------------------------------------------
 // ElementContext
@@ -240,7 +240,7 @@ pub struct ElementContext<'a> {
     pub mouse_position: Option<(f32, f32)>,
     pub hits: Vec<HitRegion>,
     pub scroll_regions: Vec<ScrollRegion>,
-    pub focus: Option<crate::ui::state::FocusTarget>,
+    pub focus: Option<crate::state::FocusTarget>,
     pub signal_store: &'a SignalStore,
     pub clock_ms: u64,
     pub debug_wireframe: bool,
@@ -351,8 +351,8 @@ impl<'a> ElementContext<'a> {
         &mut self,
         text: &str,
         font_size: f32,
-        font_kind: crate::render::FontKind,
-        font_weight: crate::render::FontWeight,
+        font_kind: quark_render::FontKind,
+        font_weight: quark_render::FontWeight,
     ) -> f32 {
         if text.is_empty() {
             return 0.0;
@@ -405,7 +405,7 @@ impl<'a> ElementContext<'a> {
         self.signal_store.update(signal, f);
     }
 
-    pub fn with_focus(mut self, focus: Option<crate::ui::state::FocusTarget>) -> Self {
+    pub fn with_focus(mut self, focus: Option<crate::state::FocusTarget>) -> Self {
         self.focus = focus;
         self
     }
@@ -415,7 +415,7 @@ impl<'a> ElementContext<'a> {
         self
     }
 
-    pub fn is_focused(&self, target: crate::ui::state::FocusTarget) -> bool {
+    pub fn is_focused(&self, target: crate::state::FocusTarget) -> bool {
         self.focus == Some(target)
     }
 
@@ -532,7 +532,7 @@ impl<'a> ElementContext<'a> {
     }
 
     pub fn run_hit_test(&mut self) {
-        self.hovered_hitboxes = halogen::hit::resolve_hovered(&self.hitboxes, self.mouse_position);
+        self.hovered_hitboxes = quark::hit::resolve_hovered(&self.hitboxes, self.mouse_position);
     }
 }
 
@@ -976,11 +976,11 @@ pub fn render_element_at(
 // Div — the fundamental container element
 // ---------------------------------------------------------------------------
 
-use crate::render::{BorderPrimitive, FontWeight, RoundedRectPrimitive, ShadowPrimitive};
-use crate::ui::style::{ElementStyle, StyleOverride, Styled, apply_override};
-use crate::ui::theme::Color;
+use quark_render::{BorderPrimitive, FontWeight, RoundedRectPrimitive, ShadowPrimitive};
+use crate::style::{ElementStyle, StyleOverride, Styled, apply_override};
+use crate::theme::Color;
 
-pub use halogen::style::{
+pub use quark::style::{
     BackgroundEffect, color_tint, linear_gradient, noise_gradient, radial_gradient, shimmer,
     vignette,
 };
@@ -1001,7 +1001,7 @@ pub struct Div {
     hide_scrollbar: bool,
     clips: bool,
     block_mouse: bool,
-    focus_target: Option<crate::ui::state::FocusTarget>,
+    focus_target: Option<crate::state::FocusTarget>,
     tooltip: Option<String>,
     hit_identity: Option<HitIdentity>,
     semantic_id: Option<UiNodeId>,
@@ -1282,7 +1282,7 @@ impl Div {
         self
     }
 
-    pub fn focus_ring(mut self, target: crate::ui::state::FocusTarget) -> Self {
+    pub fn focus_ring(mut self, target: crate::state::FocusTarget) -> Self {
         self.focus_target = Some(target);
         self
     }
@@ -1297,7 +1297,7 @@ impl Div {
         self
     }
 
-    pub fn track_focus(self, target: crate::ui::state::FocusTarget) -> Self {
+    pub fn track_focus(self, target: crate::state::FocusTarget) -> Self {
         self.focus_ring(target)
     }
 
@@ -1959,7 +1959,7 @@ impl IntoAnyElement for Spacer {
 // TextElement — text with intrinsic sizing
 // ---------------------------------------------------------------------------
 
-use crate::render::{FontKind, TextPrimitive};
+use quark_render::{FontKind, TextPrimitive};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TextAlign {
@@ -2259,7 +2259,7 @@ pub struct TextInput {
     cursor: usize,
     anchor: usize,
     cursor_moved_at_ms: u64,
-    focus_target: Option<crate::ui::state::FocusTarget>,
+    focus_target: Option<crate::state::FocusTarget>,
     bare: bool,
     masked: bool,
 }
@@ -2312,7 +2312,7 @@ impl TextInput {
         self
     }
 
-    pub fn focus_target(mut self, target: crate::ui::state::FocusTarget) -> Self {
+    pub fn focus_target(mut self, target: crate::state::FocusTarget) -> Self {
         self.focus_target = Some(target);
         self
     }
@@ -2344,7 +2344,7 @@ pub struct TextInputHitArea {
     pub text_height: f32,
     pub value: String,
     pub font_size: f32,
-    pub focus_target: crate::ui::state::FocusTarget,
+    pub focus_target: crate::state::FocusTarget,
     pub multiline: bool,
 }
 
@@ -2576,9 +2576,9 @@ impl Element for TextInput {
                 AccessibilityRole::PasswordInput
             } else {
                 match target {
-                    crate::ui::state::FocusTarget::SearchInput
-                    | crate::ui::state::FocusTarget::SidebarSearch
-                    | crate::ui::state::FocusTarget::CommandPaletteInput => {
+                    crate::state::FocusTarget::SearchInput
+                    | crate::state::FocusTarget::SidebarSearch
+                    | crate::state::FocusTarget::CommandPaletteInput => {
                         AccessibilityRole::SearchInput
                     }
                     _ => AccessibilityRole::TextInput,
@@ -2637,7 +2637,7 @@ impl IntoAnyElement for TextInput {
 // SelectableText — multi-line, mouse-selectable static text
 // ---------------------------------------------------------------------------
 
-use crate::render::scene::{FontStyle, RichTextPrimitive, RichTextSpan};
+use quark_render::scene::{FontStyle, RichTextPrimitive, RichTextSpan};
 
 /// One run of comment text with a single display style. The concatenation of
 /// every span's `text` is the plain string selection and copy operate on, so the
@@ -3235,7 +3235,7 @@ impl IntoAnyElement for CodeBlock {
 /// Map a phosphor highlight kind onto the theme's `syntax_*` palette.
 pub fn syntax_kind_color(
     kind: phosphor::HighlightKind,
-    tc: &crate::ui::theme::ThemeColors,
+    tc: &crate::theme::ThemeColors,
 ) -> Color {
     use phosphor::HighlightKind::*;
     match kind {
@@ -3414,15 +3414,15 @@ impl Element for SvgIcon {
             .unwrap_or_else(|| self.color.unwrap_or(cx.theme.colors.icon));
         let scale = cx.theme.metrics.ui_scale();
         let px_size = (self.size * scale).ceil() as u32;
-        let key = crate::ui::icons::cache_key(self.svg, px_size, color);
-        let (rgba, w, h) = crate::ui::icons::rasterize_svg(self.svg, px_size, color);
+        let key = quark_render::icons::cache_key(self.svg, px_size, color);
+        let (rgba, w, h) = quark_render::icons::rasterize_svg(self.svg, px_size, color);
         let snapped = Bounds {
             x: bounds.x.round(),
             y: bounds.y.round(),
             width: bounds.width.round(),
             height: bounds.height.round(),
         };
-        scene.image(crate::render::ImagePrimitive {
+        scene.image(quark_render::ImagePrimitive {
             rect: snapped,
             width: w,
             height: h,
@@ -3515,7 +3515,7 @@ impl Element for RasterImage {
             width: bounds.width.round(),
             height: bounds.height.round(),
         };
-        scene.image(crate::render::ImagePrimitive {
+        scene.image(quark_render::ImagePrimitive {
             rect: snapped,
             width: self.src_width,
             height: self.src_height,
@@ -3854,13 +3854,13 @@ fn truncate_text_to_fit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::Theme;
+    use crate::theme::Theme;
 
     fn test_cx<'a>(
         font_system: &'a mut glyphon::FontSystem,
         store: &'a mut SignalStore,
     ) -> ElementContext<'a> {
-        crate::fonts::configure_font_system(font_system);
+        quark_render::fonts::configure_font_system(font_system);
         let theme = Box::leak(Box::new(Theme::default_dark()));
         ElementContext::new(theme, 1.0, font_system, None, store)
     }
@@ -3970,7 +3970,7 @@ mod tests {
         let text_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::TextRun(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::TextRun(_)))
             .count();
         assert_eq!(text_count, 1);
     }
@@ -3989,7 +3989,7 @@ mod tests {
         let text_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::TextRun(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::TextRun(_)))
             .count();
         assert_eq!(text_count, 1);
     }
@@ -4069,9 +4069,9 @@ mod tests {
         let bg_prim = scene
             .primitives
             .iter()
-            .find(|p| matches!(p, crate::render::Primitive::RoundedRect(_)));
+            .find(|p| matches!(p, quark_render::Primitive::RoundedRect(_)));
         assert!(bg_prim.is_some());
-        if let crate::render::Primitive::RoundedRect(rr) = bg_prim.unwrap() {
+        if let quark_render::Primitive::RoundedRect(rr) = bg_prim.unwrap() {
             assert_eq!(rr.color, blue, "hover bg should be blue");
         }
     }
@@ -4101,9 +4101,9 @@ mod tests {
         let bg_prim = scene
             .primitives
             .iter()
-            .find(|p| matches!(p, crate::render::Primitive::RoundedRect(_)))
+            .find(|p| matches!(p, quark_render::Primitive::RoundedRect(_)))
             .expect("expected a rounded rect");
-        if let crate::render::Primitive::RoundedRect(rr) = bg_prim {
+        if let quark_render::Primitive::RoundedRect(rr) = bg_prim {
             assert_eq!(rr.color, blue, "hover bg should apply at offset");
             assert_eq!(rr.rect.x, 400.0, "rect x should be globally offset");
             assert_eq!(rr.rect.y, 300.0, "rect y should be globally offset");
@@ -4134,7 +4134,7 @@ mod tests {
 
         render_element(&mut root, &mut scene, &mut cx, 200.0, 50.0);
 
-        if let crate::render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
+        if let quark_render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
             assert_eq!(rr.color, red, "should use normal bg when not hovered");
         }
     }
@@ -4188,7 +4188,7 @@ mod tests {
         let rect_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::RoundedRect(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::RoundedRect(_)))
             .count();
         assert!(
             rect_count >= 2,
@@ -4199,7 +4199,7 @@ mod tests {
         let text_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::TextRun(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::TextRun(_)))
             .count();
         assert_eq!(text_count, 3, "should have 3 text labels");
 
@@ -4258,7 +4258,7 @@ mod tests {
     #[test]
     fn measure_text_width_accounts_for_font_weight() {
         let mut font_system = glyphon::FontSystem::new();
-        crate::fonts::configure_font_system(&mut font_system);
+        quark_render::fonts::configure_font_system(&mut font_system);
         let text = "Open Compare";
         let font_size = 12.0;
 
@@ -4299,7 +4299,7 @@ mod tests {
     #[test]
     fn truncate_text_to_fit_accounts_for_font_weight() {
         let mut font_system = glyphon::FontSystem::new();
-        crate::fonts::configure_font_system(&mut font_system);
+        quark_render::fonts::configure_font_system(&mut font_system);
         let text = "Open Compare With Repository";
         let font_size = 12.0;
         let max_width = measure_text_width(
@@ -4362,7 +4362,7 @@ mod tests {
             .primitives
             .iter()
             .find_map(|primitive| match primitive {
-                crate::render::Primitive::TextRun(text) => Some(text.clone()),
+                quark_render::Primitive::TextRun(text) => Some(text.clone()),
                 _ => None,
             })
             .expect("expected a text primitive");
@@ -4440,7 +4440,7 @@ mod tests {
         let text_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::TextRun(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::TextRun(_)))
             .count();
         assert_eq!(text_count, 5);
     }
@@ -4473,7 +4473,7 @@ mod tests {
                 .primitives
                 .iter()
                 .find_map(|primitive| match primitive {
-                    crate::render::Primitive::TextRun(text) => Some(text.rect.y),
+                    quark_render::Primitive::TextRun(text) => Some(text.rect.y),
                     _ => None,
                 })
                 .expect("expected nested text primitive")
@@ -4512,7 +4512,7 @@ mod tests {
         let clip_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::ClipStart(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::ClipStart(_)))
             .count();
         assert_eq!(clip_count, 1, "scroll container should clip");
 
@@ -4521,7 +4521,7 @@ mod tests {
             .primitives
             .iter()
             .find_map(|p| {
-                if let crate::render::Primitive::RoundedRect(rr) = p {
+                if let quark_render::Primitive::RoundedRect(rr) = p {
                     Some(rr)
                 } else {
                     None
@@ -4556,12 +4556,12 @@ mod tests {
         let clip_starts = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::ClipStart(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::ClipStart(_)))
             .count();
         let clip_ends = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::ClipEnd))
+            .filter(|p| matches!(p, quark_render::Primitive::ClipEnd))
             .count();
 
         assert_eq!(clip_starts, 1, "overflow-hidden should push a clip region");
@@ -4594,7 +4594,7 @@ mod tests {
             .primitives
             .iter()
             .find_map(|p| match p {
-                crate::render::Primitive::ClipStart(c) => Some(*c),
+                quark_render::Primitive::ClipStart(c) => Some(*c),
                 _ => None,
             })
             .expect("should emit a ClipStart");
@@ -4635,11 +4635,11 @@ mod tests {
         let rr_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::RoundedRect(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::RoundedRect(_)))
             .count();
         assert_eq!(rr_count, 1, "canvas should emit one rounded rect");
 
-        if let crate::render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
+        if let quark_render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
             assert_eq!(rr.color, green, "canvas rect should be green");
             assert!(
                 (rr.rect.width - 100.0).abs() < 1.0,
@@ -4743,18 +4743,18 @@ mod tests {
         let rr_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::RoundedRect(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::RoundedRect(_)))
             .count();
         assert_eq!(rr_count, 1, "button should emit one background rect");
 
         let text_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::TextRun(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::TextRun(_)))
             .count();
         assert_eq!(text_count, 1, "button should emit one text primitive");
 
-        if let crate::render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
+        if let quark_render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
             assert_eq!(rr.color, blue, "button bg should be blue");
         }
     }
@@ -4792,7 +4792,7 @@ mod tests {
             .primitives
             .iter()
             .find_map(|p| {
-                if let crate::render::Primitive::RoundedRect(rr) = p {
+                if let quark_render::Primitive::RoundedRect(rr) = p {
                     Some(rr)
                 } else {
                     None
@@ -4805,7 +4805,7 @@ mod tests {
             .primitives
             .iter()
             .find_map(|p| {
-                if let crate::render::Primitive::Border(b) = p {
+                if let quark_render::Primitive::Border(b) = p {
                     Some(b)
                 } else {
                     None
@@ -4835,7 +4835,7 @@ mod tests {
 
         render_element(&mut root, &mut scene, &mut cx, 100.0, 50.0);
 
-        if let crate::render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
+        if let quark_render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
             assert_eq!(rr.color, blue, "when(true) should apply bg override");
         }
     }
@@ -4876,10 +4876,10 @@ mod tests {
             None,
             &mut store,
         )
-        .with_focus(Some(crate::ui::state::FocusTarget::FileList));
+        .with_focus(Some(crate::state::FocusTarget::FileList));
 
-        assert!(cx.is_focused(crate::ui::state::FocusTarget::FileList));
-        assert!(!cx.is_focused(crate::ui::state::FocusTarget::Editor));
+        assert!(cx.is_focused(crate::state::FocusTarget::FileList));
+        assert!(!cx.is_focused(crate::state::FocusTarget::Editor));
     }
 
     #[test]
@@ -4893,7 +4893,7 @@ mod tests {
             .w(200.0)
             .h(56.0)
             .on_click(
-                crate::actions::OverlayAction::OpenRefPicker(crate::ui::state::CompareField::Left)
+                crate::actions::OverlayAction::OpenRefPicker(crate::state::CompareField::Left)
                     .into(),
             )
             .into_any();
@@ -4904,7 +4904,7 @@ mod tests {
         let text_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::TextRun(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::TextRun(_)))
             .count();
         assert_eq!(text_count, 2, "should have label + value text");
 
@@ -4933,7 +4933,7 @@ mod tests {
 
         render_element(&mut root, &mut scene, &mut cx, 100.0, 50.0);
 
-        if let crate::render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
+        if let quark_render::Primitive::RoundedRect(rr) = &scene.primitives[0] {
             assert_eq!(rr.color, red, "when(false) should keep original bg");
         }
     }
@@ -4960,7 +4960,7 @@ mod tests {
         let effect_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::EffectQuad(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::EffectQuad(_)))
             .count();
         assert_eq!(effect_count, 1, "should emit one effect quad");
 
@@ -4968,12 +4968,12 @@ mod tests {
         let rr_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::RoundedRect(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::RoundedRect(_)))
             .count();
         assert_eq!(rr_count, 0, "effect should replace solid bg");
 
-        if let crate::render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
-            assert_eq!(eq.effect_type, crate::render::EffectType::NoiseGradient);
+        if let quark_render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
+            assert_eq!(eq.effect_type, quark_render::EffectType::NoiseGradient);
             assert_eq!(eq.color_a, a);
             assert_eq!(eq.color_b, b);
             assert!((eq.params[0] - 0.02).abs() < 0.001);
@@ -5005,12 +5005,12 @@ mod tests {
         let effect_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::EffectQuad(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::EffectQuad(_)))
             .count();
         assert_eq!(effect_count, 1);
 
-        if let crate::render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
-            assert_eq!(eq.effect_type, crate::render::EffectType::LinearGradient);
+        if let quark_render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
+            assert_eq!(eq.effect_type, quark_render::EffectType::LinearGradient);
             assert!((eq.params[0] - angle).abs() < 0.001);
         } else {
             panic!("expected EffectQuad primitive");
@@ -5040,12 +5040,12 @@ mod tests {
         let effect_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::EffectQuad(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::EffectQuad(_)))
             .count();
         let rr_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::RoundedRect(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::RoundedRect(_)))
             .count();
 
         assert_eq!(effect_count, 1, "effect should be emitted");
@@ -5079,7 +5079,7 @@ mod tests {
         let blur_count = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, crate::render::Primitive::BlurRegion(_)))
+            .filter(|p| matches!(p, quark_render::Primitive::BlurRegion(_)))
             .count();
         assert_eq!(blur_count, 1, "should emit one blur region");
 
@@ -5087,16 +5087,16 @@ mod tests {
         let blur_idx = scene
             .primitives
             .iter()
-            .position(|p| matches!(p, crate::render::Primitive::BlurRegion(_)))
+            .position(|p| matches!(p, quark_render::Primitive::BlurRegion(_)))
             .unwrap();
         let bg_idx = scene
             .primitives
             .iter()
-            .position(|p| matches!(p, crate::render::Primitive::RoundedRect(_)))
+            .position(|p| matches!(p, quark_render::Primitive::RoundedRect(_)))
             .unwrap();
         assert!(blur_idx < bg_idx, "blur should precede background");
 
-        if let crate::render::Primitive::BlurRegion(br) = &scene.primitives[blur_idx] {
+        if let quark_render::Primitive::BlurRegion(br) = &scene.primitives[blur_idx] {
             assert!((br.blur_radius - 12.0).abs() < 0.1);
             assert!((br.corner_radius - 14.0).abs() < 0.1);
             assert!((br.rect.width - 400.0).abs() < 1.0);
@@ -5123,8 +5123,8 @@ mod tests {
 
         render_element(&mut root, &mut scene, &mut cx, 200.0, 200.0);
 
-        if let crate::render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
-            assert_eq!(eq.effect_type, crate::render::EffectType::RadialGradient);
+        if let quark_render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
+            assert_eq!(eq.effect_type, quark_render::EffectType::RadialGradient);
         } else {
             panic!("expected EffectQuad");
         }
@@ -5148,8 +5148,8 @@ mod tests {
 
         render_element(&mut root, &mut scene, &mut cx, 300.0, 20.0);
 
-        if let crate::render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
-            assert_eq!(eq.effect_type, crate::render::EffectType::Shimmer);
+        if let quark_render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
+            assert_eq!(eq.effect_type, quark_render::EffectType::Shimmer);
             assert!((eq.params[0] - 2.0).abs() < 0.01, "speed should be 2.0");
         } else {
             panic!("expected EffectQuad");
@@ -5173,8 +5173,8 @@ mod tests {
 
         render_element(&mut root, &mut scene, &mut cx, 800.0, 600.0);
 
-        if let crate::render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
-            assert_eq!(eq.effect_type, crate::render::EffectType::Vignette);
+        if let quark_render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
+            assert_eq!(eq.effect_type, quark_render::EffectType::Vignette);
             assert!((eq.params[0] - 0.5).abs() < 0.01, "intensity should be 0.5");
         } else {
             panic!("expected EffectQuad");
@@ -5198,8 +5198,8 @@ mod tests {
 
         render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
 
-        if let crate::render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
-            assert_eq!(eq.effect_type, crate::render::EffectType::ColorTint);
+        if let quark_render::Primitive::EffectQuad(eq) = &scene.primitives[0] {
+            assert_eq!(eq.effect_type, quark_render::EffectType::ColorTint);
             assert_eq!(eq.color_a, tint);
         } else {
             panic!("expected EffectQuad");
@@ -5227,7 +5227,7 @@ mod tests {
 
         // Glow should produce a ShadowPrimitive with offset [0, 0].
         let shadow = scene.primitives.iter().find_map(|p| {
-            if let crate::render::Primitive::Shadow(s) = p {
+            if let quark_render::Primitive::Shadow(s) = p {
                 Some(s)
             } else {
                 None
@@ -5260,11 +5260,11 @@ mod tests {
         let has_push = scene
             .primitives
             .iter()
-            .any(|p| matches!(p, crate::render::Primitive::ZIndexPush(10)));
+            .any(|p| matches!(p, quark_render::Primitive::ZIndexPush(10)));
         let has_pop = scene
             .primitives
             .iter()
-            .any(|p| matches!(p, crate::render::Primitive::ZIndexPop));
+            .any(|p| matches!(p, quark_render::Primitive::ZIndexPop));
         assert!(has_push, "z_index(10) should emit ZIndexPush(10)");
         assert!(has_pop, "z_index(10) should emit ZIndexPop");
     }
@@ -5287,7 +5287,7 @@ mod tests {
         let has_push = scene
             .primitives
             .iter()
-            .any(|p| matches!(p, crate::render::Primitive::ZIndexPush(_)));
+            .any(|p| matches!(p, quark_render::Primitive::ZIndexPush(_)));
         assert!(!has_push, "z_index 0 should not emit ZIndexPush");
     }
 

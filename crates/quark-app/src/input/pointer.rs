@@ -12,11 +12,11 @@ use crate::editor::diff::anchor::EditorOverlayKind;
 use crate::editor::diff::element::EditorElement;
 use crate::editor::diff::render_doc::{FileHeaderMeta, INVALID_U32, RenderDoc, RenderRowKind};
 use crate::editor::diff::state::{LineSelectionKey, ReviewCommentTarget};
-use crate::ui::components::{TooltipSide, TooltipState};
-use crate::ui::element::{ClickEvent, ClickResult, DragHandler, HitIdentity};
-use crate::ui::icons::lucide;
-use crate::ui::shell::UiFrame;
-use crate::ui::state::{AppState, FocusTarget, WorkspaceSource};
+use quark_components::{TooltipSide, TooltipState};
+use quark_ui::element::{ClickEvent, ClickResult, DragHandler, HitIdentity};
+use quark_ui::icons::lucide;
+use quark_ui::shell::UiFrame;
+use quark_ui::state::{AppState, FocusTarget, WorkspaceSource};
 
 use super::{InputOutcome, InputSystem};
 
@@ -41,11 +41,11 @@ impl InputSystem {
             .find(|t| t.track_rect.contains(x, y))
         {
             let on_thumb = y >= track.thumb_top && y <= track.thumb_top + track.thumb_height;
-            let mut handler = crate::ui::element::ScrollbarDragHandler::new(track, y);
+            let mut handler = quark_ui::element::ScrollbarDragHandler::new(track, y);
             let mut outcome = InputOutcome::default();
             if matches!(
                 track.action_builder,
-                crate::ui::element::ScrollActionBuilder::ViewportGlobal
+                quark_ui::element::ScrollActionBuilder::ViewportGlobal
             ) {
                 let content_height_px = track.content_height.max(0.0).round() as u32;
                 let viewport_height_px = track.viewport_height.max(0.0).round() as u32;
@@ -587,7 +587,7 @@ impl InputSystem {
         } else {
             let from_hits = hovered_hit
                 .map(|hit| hit.cursor)
-                .unwrap_or(crate::ui::shell::CursorHint::Default);
+                .unwrap_or(quark_ui::shell::CursorHint::Default);
             let over_text = ui_frame
                 .text_input_hit_areas
                 .iter()
@@ -596,8 +596,8 @@ impl InputSystem {
                     .selectable_text_runs
                     .iter()
                     .any(|region| region.bounds.contains(x, y));
-            if from_hits == crate::ui::shell::CursorHint::Default && over_text {
-                crate::ui::shell::CursorHint::Text
+            if from_hits == quark_ui::shell::CursorHint::Default && over_text {
+                quark_ui::shell::CursorHint::Text
             } else {
                 from_hits
             }
@@ -656,11 +656,11 @@ impl InputSystem {
             .iter()
             .any(|t| t.track_rect.contains(x, y))
         {
-            crate::ui::shell::CursorHint::Pointer
+            quark_ui::shell::CursorHint::Pointer
         } else if editor.file_header_path_at(x, y).is_some() {
-            crate::ui::shell::CursorHint::Pointer
+            quark_ui::shell::CursorHint::Pointer
         } else if review_add_hover {
-            crate::ui::shell::CursorHint::Pointer
+            quark_ui::shell::CursorHint::Pointer
         } else if let Some(row) = block_row {
             // Whole-row-clickable blocks (e.g. expand chips) show a pointer anywhere on
             // the row. Granular blocks (review thread cards, whose own `on_click` is None
@@ -668,15 +668,15 @@ impl InputSystem {
             // element hit cursor — so the pointer shows only over actual controls — and
             // never fall through to the code-row Text cursor.
             if editor.block_action_for_row_at(row, x, y).is_some() {
-                crate::ui::shell::CursorHint::Pointer
+                quark_ui::shell::CursorHint::Pointer
             } else {
                 cursor_hint
             }
-        } else if cursor_hint == crate::ui::shell::CursorHint::Default
+        } else if cursor_hint == quark_ui::shell::CursorHint::Default
             && hovered_row.is_some()
             && !editor.is_gutter_hit(x, y)
         {
-            crate::ui::shell::CursorHint::Text
+            quark_ui::shell::CursorHint::Text
         } else {
             cursor_hint
         };
@@ -705,10 +705,10 @@ impl InputSystem {
 
         if let Some(window) = window {
             let icon = match cursor_hint {
-                crate::ui::shell::CursorHint::Default => CursorIcon::Default,
-                crate::ui::shell::CursorHint::Pointer => CursorIcon::Pointer,
-                crate::ui::shell::CursorHint::Text => CursorIcon::Text,
-                crate::ui::shell::CursorHint::ResizeCol => CursorIcon::EwResize,
+                quark_ui::shell::CursorHint::Default => CursorIcon::Default,
+                quark_ui::shell::CursorHint::Pointer => CursorIcon::Pointer,
+                quark_ui::shell::CursorHint::Text => CursorIcon::Text,
+                quark_ui::shell::CursorHint::ResizeCol => CursorIcon::EwResize,
             };
             window.set_cursor(icon);
         }
@@ -857,7 +857,7 @@ fn file_meta_for_line(doc: &RenderDoc, line_index: usize) -> Option<&FileHeaderM
 /// it agrees with what's on screen), then resolves the byte within that line's
 /// substring via the same single-line shaping used for text inputs.
 fn card_text_byte_at(
-    region: &crate::ui::element::SelectableTextRegion,
+    region: &quark_ui::element::SelectableTextRegion,
     x: f32,
     y: f32,
     font_system: Option<&mut glyphon::FontSystem>,

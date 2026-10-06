@@ -9,12 +9,12 @@ use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::fonts::FontSettings;
-use crate::render::scene::{
+use crate::scene::{
     ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive,
 };
 
-use super::shaders::{BLIT_SHADER, BLUR_SHADER, EFFECT_SHADER, QUAD_SHADER, SHADOW_SHADER};
-use super::text::{color_to_linear, measure_mono_char_width, prepare_text_areas};
+use crate::shaders::{BLIT_SHADER, BLUR_SHADER, EFFECT_SHADER, QUAD_SHADER, SHADOW_SHADER};
+use crate::text::{color_to_linear, measure_mono_char_width, prepare_text_areas};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextMetrics {
@@ -2236,7 +2236,7 @@ struct ClippedEffectQuad {
 
 #[derive(Debug, Clone)]
 struct ClippedImage {
-    primitive: crate::render::scene::ImagePrimitive,
+    primitive: crate::scene::ImagePrimitive,
     clip: Rect,
 }
 
@@ -2551,19 +2551,19 @@ fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> Fla
                     if icon.rect.intersection(clip.scissor).is_some() {
                         let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
                         let cache_key =
-                            crate::ui::icons::cache_key(&icon.name, px_size, icon.color);
+                            crate::icons::cache_key(&icon.name, px_size, icon.color);
                         // Only rasterize (and copy RGBA out of the icon cache)
                         // when the texture is not on the GPU yet; once
                         // uploaded, the cache key alone is enough to draw.
                         let (rgba, w, h) = if image_cache.contains_key(&cache_key) {
                             (Vec::new(), 0, 0)
                         } else {
-                            crate::ui::icons::rasterize_svg(&icon.name, px_size, icon.color)
+                            crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
                         };
                         let zl = current_z!();
                         zl.images.push(ClippedImage {
-                            primitive: crate::render::scene::ImagePrimitive {
-                                rect: crate::render::Rect {
+                            primitive: crate::scene::ImagePrimitive {
+                                rect: crate::Rect {
                                     x: icon.rect.x.round(),
                                     y: icon.rect.y.round(),
                                     width: icon.rect.width.round(),
@@ -2759,8 +2759,8 @@ mod tests {
 
     #[test]
     fn child_quad_inherits_rounded_clip_from_parent() {
-        use crate::render::scene::{ClipPrimitive, Primitive, RoundedRectPrimitive, Scene};
-        use crate::ui::theme::Color;
+        use crate::scene::{ClipPrimitive, Primitive, RoundedRectPrimitive, Scene};
+        use quark::Color;
 
         let viewport = Rect {
             x: 0.0,

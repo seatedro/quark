@@ -1,7 +1,10 @@
 [package]
-name = "halogen-macros"
+name = "quark-macros"
+description = "The view! and Store macros for Quark."
 version.workspace = true
-edition = "2024"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [lib]
 proc-macro = true
@@ -12,6 +15,6 @@ quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 
 [dev-dependencies]
-# Dev-only cycle (halogen depends on this crate) is allowed by cargo and gives
+# Dev-only cycle (quark depends on this crate) is allowed by cargo and gives
 # `{@sig}` integration coverage against the real `SignalStore`.
-halogen = { path = "../halogen" }
+quark = { path = "../quark" }

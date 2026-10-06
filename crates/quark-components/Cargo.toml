@@ -1,0 +1,12 @@
+[package]
+name = "quark-components"
+description = "Component library for Quark."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quark.workspace = true
+quark-render.workspace = true
+quark-ui.workspace = true

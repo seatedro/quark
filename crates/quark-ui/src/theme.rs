@@ -1,7 +1,7 @@
-use crate::ui::palette::{self, Scale, Step};
+use crate::palette::{self, Scale, Step};
 use serde::{Deserialize, Serialize};
 
-pub use halogen::Color;
+pub use quark::Color;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

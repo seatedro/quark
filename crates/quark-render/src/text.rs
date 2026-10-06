@@ -6,12 +6,12 @@ use glyphon::{
     TextBounds,
 };
 
-use crate::render::scene::{
+use crate::scene::{
     FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, TextPrimitive,
 };
-use crate::ui::theme::Color;
+use quark::Color;
 
-use super::renderer::{CachedTextBuffer, ClippedRichText, ClippedText};
+use crate::renderer::{CachedTextBuffer, ClippedRichText, ClippedText};
 
 pub(super) fn prepare_text_areas<'a>(
     font_system: &mut FontSystem,

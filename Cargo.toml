@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/quark",
+  "crates/quark-macros",
+  "crates/quark-render",
+  "crates/quark-ui",
+  "crates/quark-components",
+  "crates/quark-app",
+]
+# quark-ui, quark-components, and quark-app still carry diffy-specific imports.
+# They join default-members as their decoupling lands.
+default-members = ["crates/quark", "crates/quark-macros", "crates/quark-render"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "GPL-3.0-only"
+repository = "https://github.com/seatedro/quark"
+
+[workspace.dependencies]
+quark = { path = "crates/quark" }
+quark-macros = { path = "crates/quark-macros" }
+quark-render = { path = "crates/quark-render" }
+quark-ui = { path = "crates/quark-ui" }
+quark-components = { path = "crates/quark-components" }
+quark-app = { path = "crates/quark-app" }
+accesskit = "0.24"
+accesskit_winit = "0.33"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+glyphon = "0.10.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+pollster = "0.4.0"
+profiling = "1.0"
+raw-window-handle = "0.6"
+resvg = { version = "0.45", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+subsecond = "0.7"
+taffy = "0.9.2"
+thiserror = "2"
+tracing = "0.1.44"
+tungstenite = "0.29"
+unicode-segmentation = "1.12"
+wgpu = "28.0.0"
+winit = "0.30"
+
+[profile.dev]
+opt-level = 1
+debug = 1

@@ -1221,7 +1221,7 @@ mod tests {
 
     fn make_editor(width: f32, height: f32) -> (glyphon::FontSystem, Editor) {
         let mut font_system = glyphon::FontSystem::new();
-        crate::fonts::configure_font_system(&mut font_system);
+        quark_render::fonts::configure_font_system(&mut font_system);
 
         let mut editor = Editor::default();
         editor.sync_size(&mut font_system, width, height);

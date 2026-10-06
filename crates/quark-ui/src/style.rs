@@ -1,13 +1,13 @@
 //! Style system — shared layout + visual properties for elements.
 //!
 //! Pure data types (`ElementStyle`, `StyleOverride`, `ShadowStyle`, `apply_override`)
-//! live in `halogen::style`. The `Styled` trait defined here layers diffy's
+//! live in `quark::style`. The `Styled` trait defined here layers diffy's
 //! design-token shortcuts (`Sp`, `Rad`, `ShadowLayer`) on top.
 
-use crate::ui::design::{Rad, ShadowLayer, Sp};
-use crate::ui::theme::Color;
+use crate::design::{Rad, ShadowLayer, Sp};
+use crate::theme::Color;
 
-pub use halogen::style::{ElementStyle, ShadowStyle, StyleOverride, apply_override};
+pub use quark::style::{ElementStyle, ShadowStyle, StyleOverride, apply_override};
 
 // ---------------------------------------------------------------------------
 // Styled trait — fluent setters shared across element types

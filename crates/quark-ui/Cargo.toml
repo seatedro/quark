@@ -1,0 +1,16 @@
+[package]
+name = "quark-ui"
+description = "Element tree, layout, styling, theming, and text input for Quark."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quark.workspace = true
+quark-render.workspace = true
+accesskit.workspace = true
+glyphon.workspace = true
+serde.workspace = true
+taffy.workspace = true
+unicode-segmentation.workspace = true

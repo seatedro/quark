@@ -7,7 +7,7 @@
 //!   Step 9:     Saturated semantic indicator
 //!   Steps 10-12: Text and icons (increasing contrast)
 
-use crate::ui::theme::Color;
+use crate::theme::Color;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]

@@ -7,8 +7,8 @@ use crate::actions::{
 };
 use crate::core::vcs::model::RefKind;
 use crate::editor::diff::element::EditorElement;
-use crate::ui::shell::UiFrame;
-use crate::ui::state::{
+use quark_ui::shell::UiFrame;
+use quark_ui::state::{
     AppState, AppView, FocusTarget, OverlaySurface, SettingsSection, SidebarTab, WorkspaceMode,
     WorkspaceSource,
 };
@@ -405,7 +405,7 @@ fn digit_shortcut_index(text: &str) -> Option<usize> {
 
 fn compare_menu_action_at(state: &AppState, index: usize) -> Option<Vec<Action>> {
     let profile = state.repository.location.with(&state.store, |location| {
-        crate::ui::vcs::profile(location.as_ref())
+        quark_ui::vcs::profile(location.as_ref())
     });
     let modes = profile.compare_modes();
     if let Some(mode) = modes.get(index) {
@@ -435,7 +435,7 @@ fn compare_menu_action_at(state: &AppState, index: usize) -> Option<Vec<Action>>
 
 fn branch_compare_preset_action(
     state: &AppState,
-    profile: crate::ui::vcs::VcsUiProfile,
+    profile: quark_ui::vcs::VcsUiProfile,
 ) -> Option<Action> {
     let (head_branch, trunk) = state.repository.refs.with(&state.store, |refs| {
         let head = refs
@@ -464,7 +464,7 @@ fn branch_compare_preset_action(
 
 fn current_change_compare_preset_action(
     state: &AppState,
-    profile: crate::ui::vcs::VcsUiProfile,
+    profile: quark_ui::vcs::VcsUiProfile,
 ) -> Option<Action> {
     let current_change = state.repository.changes.with(&state.store, |changes| {
         changes
@@ -480,7 +480,7 @@ fn current_change_compare_preset_action(
 
 fn head_commit_compare_preset_action(
     state: &AppState,
-    profile: crate::ui::vcs::VcsUiProfile,
+    profile: quark_ui::vcs::VcsUiProfile,
 ) -> Option<Action> {
     if !profile.shows_head_commit_preset() {
         return None;
@@ -1043,8 +1043,8 @@ mod tests {
     use crate::editor::diff::render_doc::{ByteRange, RenderDoc, RenderLine, RenderRowKind};
     use crate::editor::diff::state::{ViewportTextPoint, ViewportTextSelection, ViewportTextSide};
     use crate::input::KeyKind;
-    use crate::ui::shell::UiFrame;
-    use crate::ui::state::ViewportDocument;
+    use quark_ui::shell::UiFrame;
+    use quark_ui::state::ViewportDocument;
 
     #[test]
     fn viewport_copy_shortcut_copies_current_text_selection() {

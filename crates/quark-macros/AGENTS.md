@@ -1,12 +1,12 @@
 # AGENTS.md
 
-Guidance for agents working in `crates/halogen-macros`. The root `AGENTS.md`
+Guidance for agents working in `crates/quark-macros`. The root `AGENTS.md`
 still applies; this node covers the proc-macro boundary that is easy to break
 with plausible-looking changes.
 
 ## Purpose And Scope
 
-`halogen-macros` owns compile-time parsing and lowering for
+`quark-macros` owns compile-time parsing and lowering for
 `#[derive(Store)]` and `view!`.
 
 It does not own runtime reactivity, scene primitives, layout behavior, app
@@ -26,7 +26,7 @@ the `halogen` crate and Diffy's UI builders must provide.
 - `#[derive(Store)]` only supports non-generic structs with named fields.
   Tuple structs, unit structs, enums, unions, and generics should fail with
   clear compile errors.
-- Store leaves become `::halogen::reactive::Signal<T>`. `#[store(flatten)]`
+- Store leaves become `::quark::reactive::Signal<T>`. `#[store(flatten)]`
   maps a named `Foo` field to `FooStore`; `#[store(skip)]` omits the field from
   the generated store.
 - Generated stores derive `Clone`, `Copy`, and `Debug`, expose `new` and
@@ -52,7 +52,7 @@ the `halogen` crate and Diffy's UI builders must provide.
 
 - Prefer extending the parser AST and code generation deliberately over ad hoc
   token-string manipulation.
-- Preserve hygienic internal names like `__halogen_children` and `__w`; avoid
+- Preserve hygienic internal names like `__quark_children` and `__w`; avoid
   names that can collide with user bindings unless they are already part of the
   macro convention.
 - Add or update token-output tests for every syntax, slot, class mapping, or
@@ -74,7 +74,7 @@ the `halogen` crate and Diffy's UI builders must provide.
 
 ## Validation
 
-- Focused macro tests: `cargo test -p halogen-macros`
+- Focused macro tests: `cargo test -p quark-macros`
 - Store derive integration: `cargo test -p halogen --test store_derive`
 - UI lowering fallout: run `cargo test -p halogen` when macro output changes
   exported contracts.

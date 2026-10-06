@@ -1,0 +1,25 @@
+[package]
+name = "quark-render"
+description = "wgpu renderer, text shaping, and font loading for Quark scenes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quark.workspace = true
+bytemuck.workspace = true
+glyphon.workspace = true
+image.workspace = true
+pollster.workspace = true
+profiling.workspace = true
+resvg.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[features]
+# Enables the no-surface offscreen render path used by fixture renders.
+headless-render = []

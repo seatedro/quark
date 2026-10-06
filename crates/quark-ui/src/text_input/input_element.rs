@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use crate::core::text::{DiffTokenSpan, SyntaxTokenKind};
 use crate::editor::{Editor, EditorMode, SelectionRect};
-use crate::render::scene::{
+use quark_render::scene::{
     FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, RichTextSpan, TextPrimitive,
 };
-use crate::render::{RectPrimitive, RoundedRectPrimitive, Scene};
-use crate::ui::accessibility::{AccessibilityAction, AccessibilityNode};
-use crate::ui::design::{Alpha, Sz};
-use crate::ui::element::*;
-use crate::ui::state::FocusTarget;
-use crate::ui::style::{ElementStyle, Styled};
+use quark_render::{RectPrimitive, RoundedRectPrimitive, Scene};
+use crate::accessibility::{AccessibilityAction, AccessibilityNode};
+use crate::design::{Alpha, Sz};
+use crate::element::*;
+use crate::state::FocusTarget;
+use crate::style::{ElementStyle, Styled};
 
 pub struct CursorSnapshot {
     pub x: f32,
@@ -27,7 +27,7 @@ pub struct TextEditorElement {
     content_height: f32,
     scroll_y: f32,
     font_size: f32,
-    text_color: crate::ui::theme::Color,
+    text_color: crate::theme::Color,
     mode: EditorMode,
     text: Arc<str>,
     syntax_spans: Vec<DiffTokenSpan>,
@@ -46,7 +46,7 @@ pub fn text_editor_element() -> TextEditorElement {
         content_height: 0.0,
         scroll_y: 0.0,
         font_size: 14.0,
-        text_color: crate::ui::theme::Color::rgba(255, 255, 255, 255),
+        text_color: crate::theme::Color::rgba(255, 255, 255, 255),
         mode: EditorMode::ProseInput,
         text: Arc::from(""),
         syntax_spans: Vec::new(),
@@ -97,7 +97,7 @@ impl TextEditorElement {
         self
     }
 
-    pub fn text_color(mut self, color: crate::ui::theme::Color) -> Self {
+    pub fn text_color(mut self, color: crate::theme::Color) -> Self {
         self.text_color = color;
         self
     }
@@ -277,7 +277,7 @@ impl Element for TextEditorElement {
         if self.is_empty {
             let placeholder_color = theme.colors.text_muted.with_alpha(Alpha::PLACEHOLDER);
             let content_h = line_height;
-            scene.text(crate::render::scene::TextPrimitive {
+            scene.text(quark_render::scene::TextPrimitive {
                 rect: Rect {
                     x: text_x,
                     y: text_y,
@@ -376,8 +376,8 @@ fn gutter_digits(max_line: usize) -> usize {
 fn build_editor_spans(
     text: &str,
     syntax_spans: &[DiffTokenSpan],
-    default_color: crate::ui::theme::Color,
-    theme: &crate::ui::theme::Theme,
+    default_color: crate::theme::Color,
+    theme: &crate::theme::Theme,
 ) -> Arc<[RichTextSpan]> {
     if text.is_empty() {
         return Arc::from(Vec::new());
@@ -437,7 +437,7 @@ fn valid_text_range(text: &str, start: usize, end: usize) -> Option<(usize, usiz
 fn push_editor_span(
     out: &mut Vec<RichTextSpan>,
     text: &str,
-    color: crate::ui::theme::Color,
+    color: crate::theme::Color,
     font_weight: Option<FontWeight>,
     font_style: Option<FontStyle>,
 ) {
@@ -465,10 +465,10 @@ fn push_editor_span(
 
 fn syntax_style(
     syntax_kind: SyntaxTokenKind,
-    default_color: crate::ui::theme::Color,
-    theme: &crate::ui::theme::Theme,
+    default_color: crate::theme::Color,
+    theme: &crate::theme::Theme,
 ) -> (
-    crate::ui::theme::Color,
+    crate::theme::Color,
     Option<FontWeight>,
     Option<FontStyle>,
 ) {

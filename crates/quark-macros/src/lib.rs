@@ -137,7 +137,7 @@ fn derive_store_impl(input: syn::DeriveInput) -> Result<TokenStream2> {
             }
             FieldKind::Leaf => {
                 decls.push(quote! {
-                    #fvis #fname: ::halogen::reactive::Signal<#fty>,
+                    #fvis #fname: ::quark::reactive::Signal<#fty>,
                 });
                 inits.push(quote! {
                     #fname: store.create(initial.#fname),
@@ -169,7 +169,7 @@ fn derive_store_impl(input: syn::DeriveInput) -> Result<TokenStream2> {
     } else {
         quote! {
             /// Read every signal and reconstruct the original plain struct.
-            pub fn snapshot(&self, store: &::halogen::reactive::SignalStore) -> #name {
+            pub fn snapshot(&self, store: &::quark::reactive::SignalStore) -> #name {
                 #name {
                     #(#snapshot_fields)*
                 }
@@ -181,7 +181,7 @@ fn derive_store_impl(input: syn::DeriveInput) -> Result<TokenStream2> {
     // The `where` bound lets the impl compile even when it isn't.
     let new_default_impl = quote! {
         /// Create a store initialized from `Original::default()`.
-        pub fn new_default(store: &::halogen::reactive::SignalStore) -> Self
+        pub fn new_default(store: &::quark::reactive::SignalStore) -> Self
         where
             #name: Default,
         {
@@ -199,7 +199,7 @@ fn derive_store_impl(input: syn::DeriveInput) -> Result<TokenStream2> {
             /// Create a new store by consuming an initial value, allocating
             /// signals for each leaf field in the provided `SignalStore`.
             pub fn new(
-                store: &::halogen::reactive::SignalStore,
+                store: &::quark::reactive::SignalStore,
                 initial: #name,
             ) -> Self {
                 Self {
@@ -734,24 +734,24 @@ impl EmitCtx {
         for child in children {
             let stmt = match self.emit_node(child) {
                 ChildMode::Child(tokens) => quote! {
-                    __halogen_children.push(#tokens);
+                    __quark_children.push(#tokens);
                 },
                 ChildMode::Optional(tokens) => quote! {
-                    if let Some(__halogen_child) = (#tokens) {
-                        __halogen_children.push(__halogen_child);
+                    if let Some(__quark_child) = (#tokens) {
+                        __quark_children.push(__quark_child);
                     }
                 },
                 ChildMode::Spread(tokens) => quote! {
-                    __halogen_children.extend(#tokens);
+                    __quark_children.extend(#tokens);
                 },
             };
             stmts.push(stmt);
         }
 
         quote! {{
-            let mut __halogen_children = Vec::new();
+            let mut __quark_children = Vec::new();
             #(#stmts)*
-            __halogen_children
+            __quark_children
         }}
     }
 
@@ -1047,11 +1047,11 @@ impl EmitCtx {
         match self.emit_node(child) {
             ChildMode::Child(tokens) => quote! { #chain.#method(#tokens) },
             ChildMode::Optional(tokens) => quote! {{
-                let __halogen_slot = #chain;
-                if let Some(__halogen_value) = (#tokens) {
-                    __halogen_slot.#method(__halogen_value)
+                let __quark_slot = #chain;
+                if let Some(__quark_value) = (#tokens) {
+                    __quark_slot.#method(__quark_value)
                 } else {
-                    __halogen_slot
+                    __quark_slot
                 }
             }},
             ChildMode::Spread(_) => {
@@ -1075,18 +1075,18 @@ impl EmitCtx {
             chain = match self.emit_node(child) {
                 ChildMode::Child(tokens) => quote! { #chain.#method(#tokens) },
                 ChildMode::Optional(tokens) => quote! {{
-                    let __halogen_slot = #chain;
-                    if let Some(__halogen_child) = (#tokens) {
-                        __halogen_slot.#method(__halogen_child)
+                    let __quark_slot = #chain;
+                    if let Some(__quark_child) = (#tokens) {
+                        __quark_slot.#method(__quark_child)
                     } else {
-                        __halogen_slot
+                        __quark_slot
                     }
                 }},
                 ChildMode::Spread(tokens) => quote! {
                     (#tokens)
                         .into_iter()
-                        .fold(#chain, |__halogen_slot, __halogen_child| {
-                            __halogen_slot.#method(__halogen_child)
+                        .fold(#chain, |__quark_slot, __quark_child| {
+                            __quark_slot.#method(__quark_child)
                         })
                 },
             };
@@ -1372,30 +1372,30 @@ mod tests {
             ((actions)
                 .into_iter()
                 .flat_map(|action| {
-                    let mut __halogen_children = Vec::new();
-                    __halogen_children.push(Button::new(action).into_any());
-                    __halogen_children
+                    let mut __quark_children = Vec::new();
+                    __quark_children.push(Button::new(action).into_any());
+                    __quark_children
                 })
                 .collect::<Vec<_>>())
                 .into_iter()
                 .fold(
                     {
-                        let __halogen_slot = Toolbar::new()
+                        let __quark_slot = Toolbar::new()
                             .left_child(Button::new(Action::ToggleSidebar).into_any());
-                        if let Some(__halogen_child) =
+                        if let Some(__quark_child) =
                             (if show_search {
                                 Some(Button::new(Action::CloseSearch).into_any())
                             } else {
                                 None
                             })
                         {
-                            __halogen_slot.left_child(__halogen_child)
+                            __quark_slot.left_child(__quark_child)
                         } else {
-                            __halogen_slot
+                            __quark_slot
                         }
                     },
-                    |__halogen_slot, __halogen_child| {
-                        __halogen_slot.right_child(__halogen_child)
+                    |__quark_slot, __quark_child| {
+                        __quark_slot.right_child(__quark_child)
                     }
                 )
                 .into_any()
@@ -1486,18 +1486,18 @@ mod tests {
                     (items)
                         .into_iter()
                         .flat_map(|item| {
-                            let mut __halogen_children = Vec::new();
-                            if let Some(__halogen_child) =
+                            let mut __quark_children = Vec::new();
+                            if let Some(__quark_child) =
                                 (if show_separators {
                                     Some(text("|").into_any())
                                 } else {
                                     None
                                 })
                             {
-                                __halogen_children.push(__halogen_child);
+                                __quark_children.push(__quark_child);
                             }
-                            __halogen_children.push(text(item).into_any());
-                            __halogen_children
+                            __quark_children.push(text(item).into_any());
+                            __quark_children
                         })
                         .collect::<Vec<_>>()
                 )
@@ -1531,10 +1531,10 @@ mod tests {
                 .children(
                     (if picker_open {
                         Some({
-                            let mut __halogen_children = Vec::new();
-                            __halogen_children.push(text("divider").into_any());
-                            __halogen_children.push(text("compare").into_any());
-                            __halogen_children
+                            let mut __quark_children = Vec::new();
+                            __quark_children.push(text("divider").into_any());
+                            __quark_children.push(text("compare").into_any());
+                            __quark_children
                         })
                     } else {
                         None
@@ -1565,10 +1565,10 @@ mod tests {
         let expected = quote! {
             div()
                 .children({
-                    let mut __halogen_children = Vec::new();
-                    __halogen_children.push(text("left").into_any());
-                    __halogen_children.push(text("right").into_any());
-                    __halogen_children
+                    let mut __quark_children = Vec::new();
+                    __quark_children.push(text("left").into_any());
+                    __quark_children.push(text("right").into_any());
+                    __quark_children
                 })
                 .into_any()
         }
