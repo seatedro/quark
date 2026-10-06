@@ -1,8 +1,4 @@
 //! Window, event loop, input normalization, and hot reload for Quark apps.
-//!
-//! `input/pointer.rs` and `input/keyboard.rs` are the source app's widget routing,
-//! carried over with history and kept out of the module tree until a generic
-//! router replaces them.
 
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;

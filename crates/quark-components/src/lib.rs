@@ -3,10 +3,6 @@
 //!
 //! Components emit app actions as [`quark_ui::Action`] values supplied by the
 //! caller; none of them know the hosting app's action or state types.
-//!
-//! `compare_progress.rs`, `sidebar.rs`, `file_tree.rs`, and `file_icon.rs`
-//! are diffy product views carried over with history. They still read
-//! diffy state and stay out of the module tree.
 
 pub mod avatar;
 pub mod badge;
