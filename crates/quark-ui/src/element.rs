@@ -10,10 +10,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use crate::action::{Action, FocusId};
-use quark_render::Scene;
-use quark_render::scene::{BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect};
 use crate::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
+use crate::action::{Action, FocusId};
 use crate::design::{Alpha, Sz};
 use crate::theme::Theme;
 use accesskit::Role as AccessibilityRole;
@@ -24,6 +22,8 @@ use quark::{
     SemanticRole, StyleState, TabStop, TestId, UiEventBinding, UiEventKind, UiEventPhase,
     UiEventResult, UiKey, UiNodeId,
 };
+use quark_render::Scene;
+use quark_render::scene::{BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect};
 
 pub use taffy::NodeId as LayoutId;
 
@@ -987,9 +987,9 @@ pub fn render_element_at(
 // Div — the fundamental container element
 // ---------------------------------------------------------------------------
 
-use quark_render::{BorderPrimitive, FontWeight, RoundedRectPrimitive, ShadowPrimitive};
 use crate::style::{ElementStyle, StyleOverride, Styled, apply_override};
 use crate::theme::Color;
+use quark_render::{BorderPrimitive, FontWeight, RoundedRectPrimitive, ShadowPrimitive};
 
 pub use quark::style::{
     BackgroundEffect, color_tint, linear_gradient, noise_gradient, radial_gradient, shimmer,
@@ -4867,7 +4867,9 @@ mod tests {
             .w(260.0)
             .h(400.0)
             .scroll_y(0.0)
-            .on_scroll(ScrollActionBuilder::new(|d| TestAction::ScrollList(d).into()))
+            .on_scroll(ScrollActionBuilder::new(|d| {
+                TestAction::ScrollList(d).into()
+            }))
             .child(div().w_full().h(1000.0))
             .into_any();
 
@@ -4875,10 +4877,7 @@ mod tests {
 
         assert_eq!(cx.scroll_regions.len(), 1);
         let action = cx.scroll_regions[0].action_builder.build(3);
-        assert_eq!(
-            action,
-            TestAction::ScrollList(3).into()
-        );
+        assert_eq!(action, TestAction::ScrollList(3).into());
     }
 
     #[test]

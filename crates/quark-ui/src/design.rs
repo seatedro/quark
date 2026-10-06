@@ -1,7 +1,5 @@
-use quark_render::{
-    BorderPrimitive, FontKind, Rect, RoundedRectPrimitive, Scene, ShadowPrimitive,
-};
 use crate::theme::{Color, Theme};
+use quark_render::{BorderPrimitive, FontKind, Rect, RoundedRectPrimitive, Scene, ShadowPrimitive};
 
 pub struct Sp;
 
