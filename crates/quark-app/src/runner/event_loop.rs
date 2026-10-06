@@ -2,6 +2,9 @@ use super::*;
 
 /// Open a window and drive `app` until it exits or the window is closed.
 pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
+    if options.panic_hook {
+        crate::panic_hook::install(&options.title);
+    }
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let waker = Waker(event_loop.create_proxy());

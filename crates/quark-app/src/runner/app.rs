@@ -50,6 +50,10 @@ pub struct WindowOptions {
     pub icon: Option<Icon>,
     pub fonts: FontSettings,
     pub traffic_lights: Option<TrafficLights>,
+    /// Log panics (message, location, backtrace) through `tracing` and to a
+    /// crash log in the platform state directory, then run the previous
+    /// hook. Installed once per process by [`run`].
+    pub panic_hook: bool,
 }
 
 impl Default for WindowOptions {
@@ -62,6 +66,7 @@ impl Default for WindowOptions {
             icon: None,
             fonts: FontSettings::default(),
             traffic_lights: None,
+            panic_hook: true,
         }
     }
 }

@@ -6,6 +6,7 @@ pub mod input;
 pub mod keymap;
 #[cfg(target_os = "macos")]
 pub mod macos_window;
+mod panic_hook;
 mod runner;
 
 pub use input::{InputEvent, InputNormalizer, KeyChord, KeyKind};
