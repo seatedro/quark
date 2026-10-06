@@ -4,10 +4,6 @@ Every test in quark must earn its place. A test exists to catch a specific
 regression in observable behavior. If you cannot name the regression it
 catches, do not write it.
 
-This follows Ghostty's approach: tests sit next to the code, data structures
-check their own invariants, fuzzers and conformance suites cover what
-hand-written cases cannot, and every fixed bug leaves a regression test.
-
 ## Rules
 
 1. **Tests live next to the code.** Put unit tests in a `#[cfg(test)] mod
@@ -21,17 +17,16 @@ hand-written cases cannot, and every fixed bug leaves a regression test.
    observable output: strings, byte offsets, rects, tree dumps, pixels. Do
    not assert on private fields or call counts.
 4. **Use domain test helpers.** Give types small `#[cfg(test)]` helpers that
-   build state and dump it as text (Ghostty's `testWriteString` and
-   `dumpStringAlloc`). A test should read as input, action, expected text.
+   build state and dump it as text. A test should read as input, action,
+   expected text.
 5. **Every bug fix adds a regression test** that fails without the fix. Put
    the issue or commit in a comment above it.
 6. **Data structures check their own invariants.** Non-trivial
    data structures (`BlockOrder`, `AnimationTable`, row height trees, text
    layout columns, the node store) get a `verify_integrity(&self) ->
    Result<(), IntegrityError>`, called through `debug_assert!` after
-   mutations and compiled out of release builds. Ghostty's
-   `Page.verifyIntegrity` is the model. Tests then drive operations and let
-   the integrity check do the deep asserting.
+   mutations and compiled out of release builds. Tests then drive
+   operations and let the integrity check do the deep asserting.
 7. **Repeated cases become properties or tables.** When a test
    would repeat with different numbers, write a `proptest` property or a
    table-driven test instead of near-duplicate functions.
@@ -50,7 +45,7 @@ hand-written cases cannot, and every fixed bug leaves a regression test.
 | Kani | Small bounded cores that must hold for all inputs: Fenwick tree, `BlockOrder` index, selection repair | `#[cfg(kani)]` harnesses in the module |
 | `cargo-fuzz` | Anything that parses or decodes untrusted input: Markdown, input event normalization, text layout of arbitrary strings | `fuzz/` with a committed, minimized corpus |
 | Miri | Undefined behavior in quark's own `unsafe` and `bytemuck` casts | CI job over the crates that do not touch the GPU |
-| Conformance suites | Behavior an external spec defines: CommonMark spec tests, AT-SPI tree through cua | CI job that reports without failing until the baseline passes, like Ghostty's esctest job |
+| Conformance suites | Behavior an external spec defines: CommonMark spec tests, AT-SPI tree through cua | CI job that reports without failing until the baseline passes |
 | Headless render | Renderer behavior: draw order, borders, clipping | pixel probes at chosen coordinates, never whole-image goldens |
 
 A fuzzer crash becomes a regression unit test with the minimized input.
