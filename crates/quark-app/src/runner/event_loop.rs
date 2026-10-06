@@ -25,15 +25,13 @@ pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
 struct Runner<A> {
     app: A,
     options: WindowOptions,
-    window: Option<Arc<Window>>,
-    renderer: Option<Renderer>,
+    window: Option<WindowState>,
     waker: Waker,
     input: InputNormalizer,
     clipboard: Option<arboard::Clipboard>,
     flags: Flags,
     launch_at: Instant,
     startup_failure: Option<RunError>,
-    accessibility_adapter: Option<AccessibilityAdapter>,
     accessibility_latest_tree: Arc<Mutex<TreeUpdate>>,
     accessibility_action_sender: Sender<ActionRequest>,
     accessibility_actions: Receiver<ActionRequest>,
@@ -48,7 +46,6 @@ impl<A: App> Runner<A> {
             app,
             options,
             window: None,
-            renderer: None,
             waker,
             input: InputNormalizer::default(),
             clipboard: None,
@@ -58,7 +55,6 @@ impl<A: App> Runner<A> {
             },
             launch_at: Instant::now(),
             startup_failure: None,
-            accessibility_adapter: None,
             accessibility_latest_tree: Arc::new(Mutex::new(empty_tree_update())),
             accessibility_action_sender,
             accessibility_actions,
@@ -87,7 +83,8 @@ impl<A: App> Runner<A> {
     fn create_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), RunError> {
         let window = Arc::new(event_loop.create_window(self.window_attributes())?);
         let size = window.inner_size();
-        let accessibility_adapter = AccessibilityAdapter::with_direct_handlers(
+        let scale_factor = window.scale_factor();
+        let accessibility = AccessibilityAdapter::with_direct_handlers(
             event_loop,
             &window,
             AccessibilityActivation {
@@ -100,53 +97,55 @@ impl<A: App> Runner<A> {
             AccessibilityDeactivation,
         );
         let mut renderer = Renderer::new(window.clone(), &self.options.fonts)?;
-        renderer.resize(size.width, size.height, window.scale_factor());
+        renderer.resize(size.width, size.height, scale_factor);
         window.set_visible(true);
         position_traffic_lights(&window, self.options.traffic_lights);
-        self.renderer = Some(renderer);
-        self.accessibility_adapter = Some(accessibility_adapter);
-        self.window = Some(window);
+        self.window = Some(WindowState {
+            window,
+            renderer,
+            accessibility,
+            scale_factor,
+            surface_size: size,
+            chrome: self.options.chrome,
+            traffic_lights: self.options.traffic_lights,
+        });
         Ok(())
     }
 
     fn with_event_cx(&mut self, f: impl FnOnce(&mut A, &mut EventContext)) {
-        let (Some(window), Some(renderer)) = (self.window.as_deref(), self.renderer.as_mut())
-        else {
+        let Some(state) = self.window.as_mut() else {
             return;
         };
         let mut cx = EventContext {
-            window,
-            renderer,
+            window: &state.window,
+            renderer: &mut state.renderer,
             flags: &mut self.flags,
             clipboard: &mut self.clipboard,
             input: &self.input,
             waker: &self.waker,
-            traffic_lights: self.options.traffic_lights,
+            traffic_lights: state.traffic_lights,
         };
         f(&mut self.app, &mut cx);
     }
 
     fn sync_window_metrics(&mut self, size: PhysicalSize<u32>, scale_factor: f64) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.resize(size.width, size.height, scale_factor);
-        }
-        if let Some(window) = self.window.as_deref() {
-            position_traffic_lights(window, self.options.traffic_lights);
+        if let Some(state) = self.window.as_mut() {
+            state.sync_metrics(size, scale_factor);
         }
         self.flags.needs_redraw = true;
     }
 
     fn redraw(&mut self) {
-        let (Some(window), Some(renderer)) = (self.window.as_deref(), self.renderer.as_mut())
-        else {
+        let Some(state) = self.window.as_mut() else {
             return;
         };
+        let renderer = &mut state.renderer;
         self.flags.needs_redraw = false;
         let elapsed = self.launch_at.elapsed();
         let text_metrics = renderer.text_metrics();
         let mut cx = FrameContext {
-            size: window.inner_size(),
-            scale_factor: renderer.scale_factor(),
+            size: state.surface_size,
+            scale_factor: state.scale_factor,
             text_metrics,
             font_system: renderer.font_system_mut(),
             elapsed,
@@ -169,9 +168,7 @@ impl<A: App> Runner<A> {
             if let Ok(mut latest) = self.accessibility_latest_tree.lock() {
                 *latest = update.clone();
             }
-            if let Some(adapter) = self.accessibility_adapter.as_mut() {
-                adapter.update_if_active(|| update);
-            }
+            state.accessibility.update_if_active(|| update);
         }
     }
 
@@ -209,24 +206,22 @@ impl<A: App> ApplicationHandler for Runner<A> {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = self.window.as_ref() else {
+        let Some(state) = self.window.as_mut() else {
             return;
         };
-        if window.id() != window_id {
+        if state.id() != window_id {
             return;
         }
-        if let Some(adapter) = self.accessibility_adapter.as_mut() {
-            adapter.process_event(window, &event);
-        }
+        state.accessibility.process_event(&state.window, &event);
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                let scale_factor = window.scale_factor();
+                let scale_factor = state.window.scale_factor();
                 self.sync_window_metrics(size, scale_factor);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                let size = window.inner_size();
+                let size = state.window.inner_size();
                 self.sync_window_metrics(size, scale_factor);
             }
             WindowEvent::RedrawRequested => self.redraw(),
@@ -264,9 +259,9 @@ impl<A: App> ApplicationHandler for Runner<A> {
         });
 
         if self.flags.needs_redraw
-            && let Some(window) = self.window.as_ref()
+            && let Some(state) = self.window.as_ref()
         {
-            window.request_redraw();
+            state.window.request_redraw();
         }
     }
 }
