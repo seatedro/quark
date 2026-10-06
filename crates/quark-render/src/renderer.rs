@@ -2930,6 +2930,29 @@ mod tests {
             .collect();
         assert_eq!(kinds, [PrimKind::Quad, PrimKind::Text]);
     }
+
+    // -- Borders -----------------------------------------------------------------
+
+    // Regression: the border shader used the widest side on every side, so a
+    // bottom-only border drew a full outline.
+    #[test]
+    fn render_bottom_only_border_leaves_other_sides_empty() {
+        let mut scene = Scene::default();
+        scene.push(Primitive::Border(crate::scene::BorderPrimitive {
+            rect: rect(4.0, 4.0, 40.0, 40.0),
+            widths: [0.0, 0.0, 4.0, 0.0],
+            corner_radii: [6.0; 4],
+            color: quark::Color::rgba(255, 255, 255, 255),
+        }));
+        let Some(image) = render_pixels(&scene, 48, 48) else {
+            return;
+        };
+        let lit = |x: u32, y: u32| image.get_pixel(x, y).0[0] > 128;
+        assert!(lit(24, 42), "bottom border missing");
+        assert!(!lit(24, 5), "top side drew a border");
+        assert!(!lit(5, 24), "left side drew a border");
+        assert!(!lit(42, 24), "right side drew a border");
+    }
 }
 
 // Text preparation, caching, and color helpers are in text.rs
