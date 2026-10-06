@@ -32,6 +32,59 @@ pub enum TextError {
     TextTooLong,
 }
 
+/// A broken [`TextLayout`] column invariant, reported by
+/// [`TextLayout::verify_integrity`].
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
+pub enum IntegrityError {
+    #[error("{table}.{column} has {len} entries, expected {expected}")]
+    ColumnLength {
+        table: &'static str,
+        column: &'static str,
+        len: usize,
+        expected: usize,
+    },
+    #[error("layout has no lines")]
+    NoLines,
+    #[error("layout size {width}x{height} is not finite and non-negative")]
+    Size { width: f32, height: f32 },
+    #[error("line {line} glyphs {start}..{end} do not continue from glyph {expected}")]
+    LineGlyphs {
+        line: usize,
+        start: usize,
+        end: usize,
+        expected: usize,
+    },
+    #[error(
+        "line {line} bytes {start}..{end} are out of bounds, off a char boundary, or out of order"
+    )]
+    LineBytes {
+        line: usize,
+        start: usize,
+        end: usize,
+    },
+    #[error("glyph {glyph} bytes {start}..{end} are out of bounds or off a char boundary")]
+    GlyphBytes {
+        glyph: usize,
+        start: usize,
+        end: usize,
+    },
+    #[error("glyph {glyph} is outside the glyph range of its line {line}")]
+    GlyphLine { glyph: usize, line: usize },
+    #[error("glyph {glyph} has span {span} but there are {spans} spans")]
+    GlyphSpan {
+        glyph: usize,
+        span: u32,
+        spans: usize,
+    },
+    #[error("run {run} glyphs {start}..{end} do not continue from glyph {expected} on one line")]
+    RunGlyphs {
+        run: usize,
+        start: usize,
+        end: usize,
+        expected: usize,
+    },
+}
+
 /// Shaping-relevant style for a whole text block. Colors are deliberately
 /// absent: they do not affect layout, so the renderer maps [`GlyphRun::span`]
 /// to colors at paint time and color changes never invalidate a layout.
@@ -300,16 +353,33 @@ impl TextLayout {
 
         for run in buffer.layout_runs() {
             let para_start = paragraphs[run.line_i].0.start;
-            let line_index = lines.top.len() as u32;
+            let min_start = run
+                .glyphs
+                .iter()
+                .map(|g| para_start + g.start)
+                .min()
+                .unwrap_or(usize::MAX);
+            let first_of_paragraph = line_paragraph.last() != Some(&run.line_i);
+            // Glyph wrapping can split one multi-glyph cluster over several
+            // visual lines that then share a start byte. Line starts must
+            // strictly increase for `line_for_byte`, so fold such a line into
+            // the previous one; its glyphs keep their own painted positions.
+            let continuation = !first_of_paragraph
+                && lines
+                    .byte_start
+                    .last()
+                    .is_some_and(|&prev| min_start == usize::MAX || min_start <= prev as usize);
+            let line_index = if continuation {
+                lines.top.len() as u32 - 1
+            } else {
+                lines.top.len() as u32
+            };
             let glyph_start = glyphs.len() as u32;
-            let mut min_start = usize::MAX;
             for g in run.glyphs {
-                let start = para_start + g.start;
-                min_start = min_start.min(start);
                 glyphs.x.push(g.x * inv);
                 glyphs.advance.push(g.w * inv);
                 glyphs.line.push(line_index);
-                glyphs.byte_start.push(start as u32);
+                glyphs.byte_start.push((para_start + g.start) as u32);
                 glyphs.byte_end.push((para_start + g.end) as u32);
                 glyphs.level.push(g.level.number());
                 glyphs.span.push(g.metadata as u32);
@@ -323,7 +393,14 @@ impl TextLayout {
                     .phys_y
                     .push(run.line_y + g.y - g.font_size * g.y_offset);
             }
-            let first_of_paragraph = line_paragraph.last() != Some(&run.line_i);
+            width = width.max(run.line_w * inv);
+            height = height.max((run.line_top + run.line_height) * inv);
+            if continuation {
+                let last = line_index as usize;
+                lines.glyph_end[last] = glyphs.len() as u32;
+                lines.width[last] = lines.width[last].max(run.line_w * inv);
+                continue;
+            }
             let byte_start = if first_of_paragraph || min_start == usize::MAX {
                 para_start
             } else {
@@ -339,8 +416,6 @@ impl TextLayout {
             lines.glyph_end.push(glyphs.len() as u32);
             lines.rtl.push(run.rtl);
             line_paragraph.push(run.line_i);
-            width = width.max(run.line_w * inv);
-            height = height.max((run.line_top + run.line_height) * inv);
         }
 
         for i in 0..line_paragraph.len() {
@@ -353,7 +428,7 @@ impl TextLayout {
         }
 
         let runs = build_runs(&glyphs, &lines);
-        Ok(Self {
+        let layout = Self {
             text: params.text.clone(),
             spans: params.spans.clone(),
             style,
@@ -365,7 +440,160 @@ impl TextLayout {
             lines,
             runs,
             buffer,
-        })
+        };
+        debug_assert_eq!(layout.verify_integrity(), Ok(()));
+        Ok(layout)
+    }
+
+    /// Checks the column invariants hit-testing, carets, and painting rely
+    /// on: equal column lengths, lines and runs tiling the glyphs in order,
+    /// line starts strictly increasing, and every byte offset in bounds and on
+    /// a char boundary. [`TextSystem::layout`](crate::TextSystem::layout)
+    /// calls this through `debug_assert!`, so release builds skip it.
+    pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
+        let g = &self.glyphs;
+        let l = &self.lines;
+        let r = &self.runs;
+        let glyph_count = g.len();
+        let line_count = l.top.len();
+        let run_count = r.line.len();
+        let columns = [
+            ("glyphs", "advance", g.advance.len(), glyph_count),
+            ("glyphs", "line", g.line.len(), glyph_count),
+            ("glyphs", "byte_start", g.byte_start.len(), glyph_count),
+            ("glyphs", "byte_end", g.byte_end.len(), glyph_count),
+            ("glyphs", "level", g.level.len(), glyph_count),
+            ("glyphs", "span", g.span.len(), glyph_count),
+            ("glyphs", "font_id", g.font_id.len(), glyph_count),
+            ("glyphs", "glyph_id", g.glyph_id.len(), glyph_count),
+            ("glyphs", "font_size", g.font_size.len(), glyph_count),
+            ("glyphs", "font_weight", g.font_weight.len(), glyph_count),
+            ("glyphs", "flags", g.flags.len(), glyph_count),
+            ("glyphs", "phys_x", g.phys_x.len(), glyph_count),
+            ("glyphs", "phys_y", g.phys_y.len(), glyph_count),
+            ("lines", "byte_start", l.byte_start.len(), line_count),
+            ("lines", "byte_end", l.byte_end.len(), line_count),
+            ("lines", "height", l.height.len(), line_count),
+            ("lines", "baseline", l.baseline.len(), line_count),
+            ("lines", "width", l.width.len(), line_count),
+            ("lines", "glyph_start", l.glyph_start.len(), line_count),
+            ("lines", "glyph_end", l.glyph_end.len(), line_count),
+            ("lines", "rtl", l.rtl.len(), line_count),
+            ("runs", "span", r.span.len(), run_count),
+            ("runs", "rtl", r.rtl.len(), run_count),
+            ("runs", "glyph_start", r.glyph_start.len(), run_count),
+            ("runs", "glyph_end", r.glyph_end.len(), run_count),
+        ];
+        for (table, column, len, expected) in columns {
+            if len != expected {
+                return Err(IntegrityError::ColumnLength {
+                    table,
+                    column,
+                    len,
+                    expected,
+                });
+            }
+        }
+        // `hit` and `caret` index line `count - 1` unconditionally.
+        if line_count == 0 {
+            return Err(IntegrityError::NoLines);
+        }
+        if !(self.width.is_finite() && self.width >= 0.0)
+            || !(self.height.is_finite() && self.height >= 0.0)
+        {
+            return Err(IntegrityError::Size {
+                width: self.width,
+                height: self.height,
+            });
+        }
+
+        let text = self.text.as_ref();
+        let in_text = |start: usize, end: usize| {
+            start <= end
+                && end <= text.len()
+                && text.is_char_boundary(start)
+                && text.is_char_boundary(end)
+        };
+        let mut next_glyph = 0;
+        for line in 0..line_count {
+            let (gs, ge) = (l.glyph_start[line] as usize, l.glyph_end[line] as usize);
+            if gs != next_glyph || ge < gs || ge > glyph_count {
+                return Err(IntegrityError::LineGlyphs {
+                    line,
+                    start: gs,
+                    end: ge,
+                    expected: next_glyph,
+                });
+            }
+            next_glyph = ge;
+            let (bs, be) = (l.byte_start[line] as usize, l.byte_end[line] as usize);
+            // `line_for_byte` binary-searches line starts.
+            let after_previous = line == 0 || bs > l.byte_start[line - 1] as usize;
+            let before_next = l.byte_start.get(line + 1).is_none_or(|&n| be <= n as usize);
+            if !in_text(bs, be) || !after_previous || !before_next {
+                return Err(IntegrityError::LineBytes {
+                    line,
+                    start: bs,
+                    end: be,
+                });
+            }
+        }
+        if next_glyph != glyph_count {
+            return Err(IntegrityError::LineGlyphs {
+                line: line_count,
+                start: glyph_count,
+                end: glyph_count,
+                expected: next_glyph,
+            });
+        }
+
+        for glyph in 0..glyph_count {
+            let (start, end) = (g.byte_start[glyph] as usize, g.byte_end[glyph] as usize);
+            if !in_text(start, end) {
+                return Err(IntegrityError::GlyphBytes { glyph, start, end });
+            }
+            let line = g.line[glyph] as usize;
+            let on_line = line < line_count
+                && (l.glyph_start[line] as usize..l.glyph_end[line] as usize).contains(&glyph);
+            if !on_line {
+                return Err(IntegrityError::GlyphLine { glyph, line });
+            }
+            if g.span[glyph] as usize > self.spans.len() {
+                return Err(IntegrityError::GlyphSpan {
+                    glyph,
+                    span: g.span[glyph],
+                    spans: self.spans.len(),
+                });
+            }
+        }
+
+        let mut next_glyph = 0;
+        for run in 0..run_count {
+            let (gs, ge) = (r.glyph_start[run] as usize, r.glyph_end[run] as usize);
+            let line = r.line[run] as usize;
+            let same_line = gs < ge
+                && ge <= glyph_count
+                && line < line_count
+                && (gs..ge).all(|i| g.line[i] as usize == line);
+            if gs != next_glyph || !same_line {
+                return Err(IntegrityError::RunGlyphs {
+                    run,
+                    start: gs,
+                    end: ge,
+                    expected: next_glyph,
+                });
+            }
+            next_glyph = ge;
+        }
+        if next_glyph != glyph_count {
+            return Err(IntegrityError::RunGlyphs {
+                run: run_count,
+                start: glyph_count,
+                end: glyph_count,
+                expected: next_glyph,
+            });
+        }
+        Ok(())
     }
 
     pub fn text(&self) -> &Arc<str> {
@@ -463,7 +691,9 @@ impl TextLayout {
         let g = &self.glyphs;
         let range = self.glyph_range(line);
         if range.is_empty() {
-            return self.lines.byte_start[line] as usize;
+            // An empty line can start inside a grapheme ("\n\r\n" is "\n\r"
+            // plus "\n" to the layout but "\n" plus "\r\n" as graphemes).
+            return self.snap_grapheme(self.lines.byte_start[line] as usize);
         }
         // Glyph storage order is not visual (RTL runs are stored logically),
         // so scan for the containing glyph and the visual extremes.
@@ -492,8 +722,9 @@ impl TextLayout {
         } else {
             // Falls back to the nearest glyph when x is in a gap between glyphs.
             let i = inside.unwrap_or(nearest.1);
-            let w = g.advance[i];
-            let mut frac = if w > 0.0 { (x - g.x[i]) / w } else { 0.0 };
+            let (x0, x1) = self.cluster_extent(i);
+            let w = x1 - x0;
+            let mut frac = if w > 0.0 { (x - x0) / w } else { 0.0 };
             if g.rtl(i) {
                 frac = 1.0 - frac;
             }
@@ -521,8 +752,10 @@ impl TextLayout {
     /// line; RTL/mixed runs may produce several per line.
     pub fn selection_rects(&self, range: Range<usize>) -> impl Iterator<Item = Rect> + use<> {
         let len = self.text.len();
-        let a = range.start.min(range.end).min(len);
-        let b = range.end.max(range.start).min(len);
+        // Snap like `caret` so arbitrary offsets never slice inside a char
+        // and rect edges line up with carets.
+        let a = self.snap_grapheme(range.start.min(range.end).min(len));
+        let b = self.snap_grapheme(range.end.max(range.start).min(len));
         let mut rects = Vec::new();
         if a == b {
             return rects.into_iter();
@@ -652,21 +885,36 @@ impl TextLayout {
     }
 
     fn leading_x(&self, i: usize) -> f32 {
-        let g = &self.glyphs;
-        if g.rtl(i) {
-            g.x[i] + g.advance[i]
-        } else {
-            g.x[i]
-        }
+        let (x0, x1) = self.cluster_extent(i);
+        if self.glyphs.rtl(i) { x1 } else { x0 }
     }
 
     fn trailing_x(&self, i: usize) -> f32 {
+        let (x0, x1) = self.cluster_extent(i);
+        if self.glyphs.rtl(i) { x0 } else { x1 }
+    }
+
+    /// Visual `(left, right)` of glyph `i`'s whole cluster. A cluster can
+    /// shape to several adjacent glyphs (a ZWJ sequence without a color font,
+    /// marks the font cannot compose), and carets must use the cluster's edges
+    /// rather than its first glyph's.
+    fn cluster_extent(&self, i: usize) -> (f32, f32) {
         let g = &self.glyphs;
-        if g.rtl(i) {
-            g.x[i]
-        } else {
-            g.x[i] + g.advance[i]
+        let same = |j: usize| {
+            g.line[j] == g.line[i]
+                && g.byte_start[j] == g.byte_start[i]
+                && g.byte_end[j] == g.byte_end[i]
+        };
+        let mut first = i;
+        while first > 0 && same(first - 1) {
+            first -= 1;
         }
+        let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+        for j in (first..g.len()).take_while(|&j| same(j)) {
+            x0 = x0.min(g.x[j]);
+            x1 = x1.max(g.x[j] + g.advance[j]);
+        }
+        (x0, x1)
     }
 
     /// x of `byte` inside glyph `i`'s cluster, splitting the advance evenly
@@ -681,7 +929,8 @@ impl TextLayout {
         if g.rtl(i) {
             frac = 1.0 - frac;
         }
-        g.x[i] + g.advance[i] * frac
+        let (x0, x1) = self.cluster_extent(i);
+        x0 + (x1 - x0) * frac
     }
 
     /// Byte at logical fraction `frac` (0 = cluster start) through glyph `i`'s
@@ -809,4 +1058,424 @@ fn span_attrs(style: &TextStyle, span: &TextSpan, index: usize) -> Attrs<'static
         .weight(cosmic_text::Weight(weight_value(style.font_kind, weight)))
         .style(font_style)
         .metadata(index + 1)
+}
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+    use quark::scene::FontStyle;
+    use quark::{FontKind, FontWeight};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    use super::*;
+    use crate::system::test_system;
+
+    const LOREM: &str = "The quick brown fox jumps over the lazy dog while the sleepy cat \
+                         watches from a sunny windowsill and dreams of mice.";
+
+    fn layout(text: &str, wrap: Option<f32>) -> TextLayout {
+        let params = TextParams::new(text, TextStyle::new(14.0)).wrap_width(wrap);
+        test_system().layout(&params).expect("layout")
+    }
+
+    fn grapheme_boundaries(text: &str) -> Vec<usize> {
+        let mut out: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+        out.push(text.len());
+        out
+    }
+
+    /// `PROPTEST_CASES` overrides the per-property default for heavier runs.
+    fn config(default_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default_cases);
+        let mut config = ProptestConfig::with_cases(cases);
+        if cfg!(miri) {
+            config.failure_persistence = None;
+        }
+        config
+    }
+
+    /// Left-to-right pieces: ligature candidates, multibyte chars, a
+    /// combining sequence, a ZWJ emoji sequence (all `.notdef` past Latin in
+    /// the vendored fonts), spaces, and every line ending.
+    const LTR_PIECES: &[&str] = &[
+        "a",
+        "b",
+        "W",
+        "fi",
+        "ffi",
+        "office",
+        " ",
+        "  ",
+        "\n",
+        "\r\n",
+        "\r",
+        "\u{e9}",
+        "e\u{301}",
+        "\u{3b1}",
+        "\u{65e5}",
+        "\u{1f600}",
+        "\u{1f469}\u{200d}\u{1f4bb}",
+    ];
+    const RTL_PIECES: &[&str] = &["\u{5e9}\u{5dc}", "\u{5d5}\u{5dd} ", "\u{627}\u{644}"];
+
+    fn text(pieces: &'static [&'static str]) -> impl Strategy<Value = String> {
+        prop::collection::vec(prop::sample::select(pieces), 0..24).prop_map(|v| {
+            // The layout reads "\n\r" as one line ending while grapheme
+            // segmentation pairs a following "\r\n", so a line can start
+            // inside a grapheme and no caret round trip is possible there.
+            let mut text = v.concat();
+            while text.contains("\n\r") {
+                text = text.replace("\n\r", "\n");
+            }
+            text
+        })
+    }
+
+    fn mixed_text() -> impl Strategy<Value = String> {
+        let all: &'static [&'static str] = Box::leak([LTR_PIECES, RTL_PIECES].concat().into());
+        text(all)
+    }
+
+    fn wrap() -> impl Strategy<Value = Option<f32>> {
+        prop_oneof![Just(None), (1.0f32..300.0).prop_map(Some)]
+    }
+
+    fn assert_rects_within_bounds(
+        layout: &TextLayout,
+        range: Range<usize>,
+    ) -> Result<(), TestCaseError> {
+        let (width, height) = layout.size();
+        // Lines can align within the wrap width, which can exceed the
+        // measured width, and empty lines get a 0.3 em marker even in a
+        // narrower layout.
+        let box_width = layout.wrap_width().map_or(width, |w| w.max(width));
+        let max_x = box_width.max(layout.style().font_size * 0.3) + 0.01;
+        for r in layout.selection_rects(range.clone()) {
+            prop_assert!(
+                r.x >= -0.01
+                    && r.y >= -0.01
+                    && r.x + r.width <= max_x
+                    && r.y + r.height <= height + 0.01,
+                "rect {:?} outside {}x{} for {:?}",
+                r,
+                width,
+                height,
+                range
+            );
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(config(48))]
+
+        // Catches carets and hits disagreeing (a click lands one grapheme off)
+        // at wraps, ligatures, combining marks, and line endings.
+        #[test]
+        fn layout_caret_then_hit_returns_each_grapheme_boundary(
+            text in text(LTR_PIECES),
+            wrap in wrap(),
+        ) {
+            let layout = layout(&text, wrap);
+            prop_assert_eq!(layout.verify_integrity(), Ok(()));
+            // Some distinct offsets share one caret: whitespace hung past a
+            // wrap has no glyphs, and "\n\r" is one line ending but two
+            // graphemes. Those must round-trip to the same caret; the rest
+            // must round-trip to the same byte.
+            let carets: Vec<(usize, Caret)> = grapheme_boundaries(&text)
+                .into_iter()
+                .map(|b| (b, layout.caret(b)))
+                .collect();
+            for &(b, caret) in &carets {
+                let hit = layout.hit(caret.x, caret.y + caret.height * 0.5);
+                prop_assert_eq!(layout.caret(hit), caret, "byte {} in {:?}", b, text);
+                if carets.iter().filter(|(_, c)| *c == caret).count() == 1 {
+                    prop_assert_eq!(hit, b, "caret {:?} in {:?}", caret, text);
+                }
+            }
+            // Offsets past the end clamp to the end.
+            prop_assert_eq!(layout.caret(text.len() + 7), layout.caret(text.len()));
+        }
+
+        // Catches hit returning an offset inside a grapheme (or past the
+        // text) for bidi text and points off the layout. Carets at bidi run
+        // boundaries have two visual positions, so this does not demand a
+        // round trip; the left-to-right property above does.
+        #[test]
+        fn layout_hit_in_bidi_text_returns_grapheme_boundary(
+            text in mixed_text(),
+            wrap in wrap(),
+            points in prop::collection::vec((-50.0f32..400.0, -50.0f32..400.0), 1..8),
+        ) {
+            let layout = layout(&text, wrap);
+            prop_assert_eq!(layout.verify_integrity(), Ok(()));
+            let boundaries = grapheme_boundaries(&text);
+            for (x, y) in points {
+                let b = layout.hit(x, y);
+                prop_assert!(boundaries.contains(&b), "hit({x}, {y}) = {b} in {:?}", text);
+                let caret = layout.caret(b);
+                prop_assert!(caret.x.is_finite() && caret.line < layout.line_count());
+            }
+        }
+
+        // Left-to-right only: cosmic-text lets an RTL word wider than the
+        // wrap width overflow to negative x. Widths start above the widest
+        // single cluster for the same reason.
+        #[test]
+        fn layout_selection_rects_stay_within_layout_bounds(
+            text in text(LTR_PIECES),
+            wrap in prop_oneof![Just(None), (40.0f32..300.0).prop_map(Some)],
+            a in 0usize..120,
+            b in 0usize..120,
+        ) {
+            let layout = layout(&text, wrap);
+            assert_rects_within_bounds(&layout, a..b)?;
+        }
+    }
+
+    #[test]
+    fn text_system_vendored_sans_resolves_to_geist() {
+        let layout = layout("Hello", None);
+        let sys = test_system();
+        let face = sys.font_system().db().face(layout.glyphs().font_id[0]);
+        assert!(face.is_some_and(|f| f.families.iter().any(|(name, _)| name == "Geist")));
+    }
+
+    #[test]
+    fn layout_narrower_wrap_width_adds_lines_within_width() {
+        assert_eq!(layout(LOREM, None).line_count(), 1);
+        let mut previous = 1;
+        for width in [400.0, 200.0, 100.0] {
+            let wrapped = layout(LOREM, Some(width));
+            assert!(wrapped.line_count() > previous, "width {width}");
+            previous = wrapped.line_count();
+            let (w, h) = wrapped.size();
+            assert!(w <= width + 1.0, "width {w} exceeds wrap {width}");
+            let line_height = 14.0 * DEFAULT_LINE_HEIGHT_FACTOR;
+            assert!((h - line_height * wrapped.line_count() as f32).abs() < 0.5);
+        }
+    }
+
+    #[test]
+    fn layout_at_2x_scale_reports_same_logical_size() {
+        let params = TextParams::new(LOREM, TextStyle::new(14.0)).wrap_width(Some(200.0));
+        let one = test_system().layout(&params).expect("1x");
+        let two = test_system()
+            .layout(&params.clone().scale_factor(2.0))
+            .expect("2x");
+        assert_eq!(one.line_count(), two.line_count());
+        assert!((one.size().1 - two.size().1).abs() < 0.5);
+        assert!((one.size().0 - two.size().0).abs() < 4.0);
+    }
+
+    #[test]
+    fn layout_line_ranges_are_absolute_and_exclude_line_endings() {
+        let cases: &[(&str, &[Range<usize>])] = &[
+            ("hello\nworld\r\n\nend", &[0..5, 6..11, 13..13, 14..17]),
+            ("abc\n", &[0..3, 4..4]),
+            ("a\rb\n\rc", &[0..1, 2..3, 5..6]),
+        ];
+        for (text, expected) in cases {
+            let layout = layout(text, None);
+            let ranges: Vec<_> = layout.lines().map(|l| l.byte_range).collect();
+            assert_eq!(ranges, *expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn layout_glyph_offsets_are_absolute_across_paragraphs() {
+        let text = "hello\nworld";
+        let layout = layout(text, None);
+        let g = layout.glyphs();
+        let w = (0..g.len())
+            .find(|&i| &text[g.byte_start[i] as usize..g.byte_end[i] as usize] == "w")
+            .expect("w glyph");
+        assert_eq!((g.byte_start[w], g.line[w]), (6, 1));
+    }
+
+    #[test]
+    fn hit_outside_layout_clamps_to_nearest_line_edge() {
+        let layout = layout("one\ntwo", None);
+        let cases = [
+            ((-50.0, -50.0), 0),
+            ((1000.0, -50.0), 3),
+            ((-50.0, 1000.0), 4),
+            ((1000.0, 1000.0), 7),
+        ];
+        for ((x, y), expected) in cases {
+            assert_eq!(layout.hit(x, y), expected, "hit({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn caret_inside_combining_sequence_snaps_to_its_start() {
+        let layout = layout("e\u{301}x", None);
+        assert_eq!(layout.caret(2), layout.caret(0));
+    }
+
+    #[test]
+    fn selection_rects_across_three_lines_start_and_end_at_carets() {
+        let layout = layout(LOREM, Some(120.0));
+        let line0 = layout.line(0).expect("line 0");
+        let line2 = layout.line(2).expect("line 2");
+        let a = line0.byte_range.start + 2;
+        let b = line2.byte_range.start + 3;
+        let rects: Vec<_> = layout.selection_rects(a..b).collect();
+        assert_eq!(rects.len(), 3, "{rects:?}");
+        assert!(rects.windows(2).all(|w| w[0].y < w[1].y));
+        assert!((rects[0].x - layout.caret(a).x).abs() < 0.01);
+        assert!((rects[2].x + rects[2].width - layout.caret(b).x).abs() < 0.01);
+        assert!(rects[1].x.abs() < 0.01);
+        assert_eq!(layout.selection_rects(b..a).collect::<Vec<_>>(), rects);
+    }
+
+    #[test]
+    fn selection_rects_mark_empty_line_inside_range() {
+        let layout = layout("a\n\nb", None);
+        assert_eq!(layout.selection_rects(0..4).count(), 3);
+    }
+
+    #[test]
+    fn glyph_runs_split_at_span_boundaries() {
+        let spans = vec![TextSpan {
+            range: 6..10,
+            weight: Some(FontWeight::Bold),
+            style: Some(FontStyle::Italic),
+        }];
+        let params = TextParams::new("plain bold plain", TextStyle::new(14.0)).spans(spans);
+        let layout = test_system().layout(&params).expect("layout");
+        let runs: Vec<_> = layout.glyph_runs().collect();
+        assert_eq!(runs.iter().map(|r| r.span).collect::<Vec<_>>(), [0, 1, 0]);
+        assert_eq!(layout.glyphs().byte_start[runs[1].glyphs.start], 6);
+    }
+
+    // Regression: mono text used Basic shaping, which skipped font fallback.
+    #[test]
+    fn layout_char_missing_from_base_font_falls_back_in_both_kinds() {
+        for kind in [FontKind::Ui, FontKind::Mono] {
+            let params = TextParams::new("a\u{3b1}", TextStyle::new(14.0).kind(kind));
+            let layout = test_system().layout(&params).expect("layout");
+            let g = layout.glyphs();
+            assert_eq!(g.byte_start[1], 1);
+            assert_ne!(g.glyph_id[1], 0, "{kind:?} alpha is .notdef");
+            assert_ne!(
+                g.font_id[1], g.font_id[0],
+                "{kind:?} alpha did not fall back"
+            );
+        }
+    }
+
+    // Hebrew has no vendored font, so this runs on `.notdef` boxes; bidi
+    // levels and caret geometry do not depend on the glyphs.
+    #[test]
+    fn rtl_paragraph_carets_run_right_to_left_and_round_trip() {
+        let text = "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd}";
+        let layout = layout(text, None);
+        assert!(layout.line(0).expect("line").rtl);
+        assert!(layout.caret(0).x > layout.caret(text.len()).x);
+        for b in grapheme_boundaries(text) {
+            let caret = layout.caret(b);
+            assert_eq!(layout.hit(caret.x, caret.y + 1.0), b, "byte {b}");
+        }
+    }
+
+    #[test]
+    fn mixed_direction_rtl_word_selects_as_one_rect() {
+        let mixed = "ab \u{5e9}\u{5dc}\u{5d5}\u{5dd} cd";
+        let layout = layout(mixed, None);
+        assert!(!layout.line(0).expect("line").rtl);
+        assert!(layout.caret(3).x > layout.caret(5).x);
+        assert_eq!(layout.selection_rects(3..11).count(), 1);
+    }
+
+    // Regression: found by layout_hit_then_caret property. Without a color
+    // emoji font a ZWJ sequence is one cluster of three glyphs, and the caret
+    // after it sat after the first glyph.
+    #[test]
+    fn caret_after_multi_glyph_cluster_sits_at_its_last_glyph() {
+        let text = "a\u{1f469}\u{200d}\u{1f4bb}";
+        let layout = layout(text, None);
+        let end = layout.caret(text.len());
+        assert!((end.x - layout.size().0).abs() < 0.01, "{end:?}");
+        assert_eq!(layout.hit(end.x, end.y + 1.0), text.len());
+    }
+
+    // Regression: found by layout_caret_then_hit property. Glyph wrapping
+    // put each glyph of one cluster on its own line, giving three lines with
+    // the same start byte.
+    #[test]
+    fn layout_cluster_wider_than_wrap_width_stays_on_one_line() {
+        let text = "\u{1f469}\u{200d}\u{1f4bb}";
+        let layout = layout(text, Some(1.0));
+        assert_eq!(layout.line_count(), 1);
+        assert!(layout.caret(text.len()).x > layout.caret(0).x);
+    }
+
+    // Regression: found by layout_selection_rects property; an end offset
+    // inside a multibyte char panicked while slicing.
+    #[test]
+    fn selection_rects_offset_inside_char_snaps_to_char_start() {
+        let layout = layout("a\u{e9}b", None);
+        let inside: Vec<_> = layout.selection_rects(0..2).collect();
+        assert_eq!(inside, layout.selection_rects(0..1).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn hit_on_empty_line_starting_inside_grapheme_returns_boundary() {
+        // Lines start at 0, 2, 3; graphemes are "\n" and "\r\n".
+        let layout = layout("\n\r\n", None);
+        let line = layout.line(1).expect("line 1");
+        assert_eq!(line.byte_range, 2..2);
+        assert_eq!(layout.hit(0.0, line.top + 1.0), 1);
+    }
+
+    #[test]
+    fn layout_invalid_params_return_matching_error() {
+        let style = TextStyle::new(12.0);
+        let span = |range: Range<usize>| TextSpan {
+            range,
+            weight: None,
+            style: None,
+        };
+        let cases = [
+            (
+                TextParams::new("x", TextStyle::new(0.0)),
+                TextError::InvalidFontSize(0.0),
+            ),
+            (
+                TextParams::new("x", style.line_height(-1.0)),
+                TextError::InvalidLineHeight(-1.0),
+            ),
+            (
+                TextParams::new("x", style).scale_factor(0.0),
+                TextError::InvalidScaleFactor(0.0),
+            ),
+            (
+                TextParams::new("x", style).wrap_width(Some(f32::NAN)),
+                TextError::InvalidWrapWidth,
+            ),
+            (
+                TextParams::new("x", style).spans(vec![span(0..5)]),
+                TextError::InvalidSpan {
+                    index: 0,
+                    start: 0,
+                    end: 5,
+                },
+            ),
+            (
+                TextParams::new("\u{e9}", style).spans(vec![span(0..1)]),
+                TextError::InvalidSpan {
+                    index: 0,
+                    start: 0,
+                    end: 1,
+                },
+            ),
+        ];
+        let mut sys = test_system();
+        for (params, expected) in cases {
+            assert_eq!(sys.layout(&params).err(), Some(expected));
+        }
+    }
 }
