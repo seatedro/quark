@@ -1,0 +1,919 @@
+use super::*;
+
+// ---------------------------------------------------------------------------
+// Div — the fundamental container element
+// ---------------------------------------------------------------------------
+
+/// A flexbox container. The core building block.
+pub struct Div {
+    base_style: ElementStyle,
+    hover_style: Option<StyleOverride>,
+    bg_effect: Option<BackgroundEffect>,
+    blur_radius: Option<f32>,
+    children: Vec<AnyElement>,
+    on_click: Option<Action>,
+    on_click_handler: Option<ClickHandler>,
+    on_scroll: Option<ScrollActionBuilder>,
+    cursor: CursorHint,
+    scroll_y: f32,
+    scroll_total_height: f32,
+    hide_scrollbar: bool,
+    clips: bool,
+    block_mouse: bool,
+    focus_target: Option<FocusId>,
+    tooltip: Option<String>,
+    hit_identity: Option<HitIdentity>,
+    semantic_id: Option<UiNodeId>,
+    semantic_key: Option<UiKey>,
+    test_id: Option<TestId>,
+    semantic_role: Option<SemanticRole>,
+    focus_scope: Option<FocusScopeId>,
+    tab_stop: Option<TabStop>,
+    key_context: Option<KeyContext>,
+    event_bindings: Vec<UiEventBinding>,
+    accessibility_id: Option<String>,
+    accessibility_role: Option<AccessibilityRole>,
+    accessibility_label: Option<String>,
+    accessibility_value: Option<String>,
+    accessibility_description: Option<String>,
+    accessibility_selected: Option<bool>,
+    accessibility_toggled: Option<bool>,
+    accessibility_expanded: Option<bool>,
+    accessibility_disabled: bool,
+}
+
+pub fn div() -> Div {
+    Div {
+        base_style: ElementStyle::default(),
+        hover_style: None,
+        bg_effect: None,
+        blur_radius: None,
+        children: Vec::new(),
+        on_click: None,
+        on_click_handler: None,
+        on_scroll: None,
+        cursor: CursorHint::Default,
+        scroll_y: 0.0,
+        scroll_total_height: 0.0,
+        hide_scrollbar: false,
+        clips: false,
+        block_mouse: false,
+        focus_target: None,
+        tooltip: None,
+        hit_identity: None,
+        semantic_id: None,
+        semantic_key: None,
+        test_id: None,
+        semantic_role: None,
+        focus_scope: None,
+        tab_stop: None,
+        key_context: None,
+        event_bindings: Vec::new(),
+        accessibility_id: None,
+        accessibility_role: None,
+        accessibility_label: None,
+        accessibility_value: None,
+        accessibility_description: None,
+        accessibility_selected: None,
+        accessibility_toggled: None,
+        accessibility_expanded: None,
+        accessibility_disabled: false,
+    }
+}
+
+fn role_labels_descendant_text(role: AccessibilityRole) -> bool {
+    matches!(
+        role,
+        AccessibilityRole::Button
+            | AccessibilityRole::DefaultButton
+            | AccessibilityRole::CheckBox
+            | AccessibilityRole::Switch
+            | AccessibilityRole::RadioButton
+            | AccessibilityRole::Tab
+            | AccessibilityRole::TreeItem
+            | AccessibilityRole::ListItem
+            | AccessibilityRole::ListBoxOption
+            | AccessibilityRole::MenuItem
+            | AccessibilityRole::MenuItemCheckBox
+            | AccessibilityRole::MenuItemRadio
+            | AccessibilityRole::MenuListOption
+            | AccessibilityRole::ComboBox
+            | AccessibilityRole::EditableComboBox
+    )
+}
+
+fn semantic_role_to_accessibility(role: SemanticRole) -> Option<AccessibilityRole> {
+    match role {
+        SemanticRole::Button => Some(AccessibilityRole::Button),
+        SemanticRole::Dialog => Some(AccessibilityRole::Dialog),
+        SemanticRole::CheckBox => Some(AccessibilityRole::CheckBox),
+        SemanticRole::Switch => Some(AccessibilityRole::Switch),
+        SemanticRole::RadioButton => Some(AccessibilityRole::RadioButton),
+        SemanticRole::Tab => Some(AccessibilityRole::Tab),
+        SemanticRole::TreeItem => Some(AccessibilityRole::TreeItem),
+        SemanticRole::ListItem => Some(AccessibilityRole::ListItem),
+        SemanticRole::ListBoxOption => Some(AccessibilityRole::ListBoxOption),
+        SemanticRole::MenuItem => Some(AccessibilityRole::MenuItem),
+        SemanticRole::ComboBox => Some(AccessibilityRole::ComboBox),
+        SemanticRole::TextInput => Some(AccessibilityRole::TextInput),
+        SemanticRole::Label => Some(AccessibilityRole::Label),
+        SemanticRole::ScrollArea | SemanticRole::Group => None,
+    }
+}
+
+fn accessibility_role_to_semantic(role: AccessibilityRole) -> Option<SemanticRole> {
+    match role {
+        AccessibilityRole::Button | AccessibilityRole::DefaultButton => Some(SemanticRole::Button),
+        AccessibilityRole::Dialog => Some(SemanticRole::Dialog),
+        AccessibilityRole::CheckBox | AccessibilityRole::MenuItemCheckBox => {
+            Some(SemanticRole::CheckBox)
+        }
+        AccessibilityRole::Switch => Some(SemanticRole::Switch),
+        AccessibilityRole::RadioButton | AccessibilityRole::MenuItemRadio => {
+            Some(SemanticRole::RadioButton)
+        }
+        AccessibilityRole::Tab => Some(SemanticRole::Tab),
+        AccessibilityRole::TreeItem => Some(SemanticRole::TreeItem),
+        AccessibilityRole::ListItem => Some(SemanticRole::ListItem),
+        AccessibilityRole::ListBoxOption | AccessibilityRole::MenuListOption => {
+            Some(SemanticRole::ListBoxOption)
+        }
+        AccessibilityRole::MenuItem => Some(SemanticRole::MenuItem),
+        AccessibilityRole::ComboBox | AccessibilityRole::EditableComboBox => {
+            Some(SemanticRole::ComboBox)
+        }
+        AccessibilityRole::TextInput
+        | AccessibilityRole::SearchInput
+        | AccessibilityRole::PasswordInput => Some(SemanticRole::TextInput),
+        AccessibilityRole::Label => Some(SemanticRole::Label),
+        AccessibilityRole::ScrollView => Some(SemanticRole::ScrollArea),
+        _ => None,
+    }
+}
+
+impl Styled for Div {
+    fn element_style_mut(&mut self) -> &mut ElementStyle {
+        &mut self.base_style
+    }
+}
+
+impl Div {
+    // -- Children --
+
+    pub fn child(mut self, child: impl IntoAnyElement) -> Self {
+        self.children.push(child.into_any());
+        self
+    }
+
+    pub fn children(mut self, children: impl IntoIterator<Item = AnyElement>) -> Self {
+        self.children.extend(children);
+        self
+    }
+
+    pub fn optional_child(mut self, child: Option<impl IntoAnyElement>) -> Self {
+        if let Some(c) = child {
+            self.children.push(c.into_any());
+        }
+        self
+    }
+
+    pub fn children_from<I, E>(mut self, iter: I) -> Self
+    where
+        I: IntoIterator<Item = E>,
+        E: IntoAnyElement,
+    {
+        for item in iter {
+            self.children.push(item.into_any());
+        }
+        self
+    }
+
+    // -- Interaction --
+
+    pub fn on_click(mut self, action: impl Into<Action>) -> Self {
+        self.on_click = Some(action.into());
+        self.cursor = CursorHint::Pointer;
+        self
+    }
+
+    pub fn on_click_handler(mut self, handler: ClickHandler) -> Self {
+        self.on_click_handler = Some(handler);
+        self.cursor = CursorHint::Pointer;
+        self
+    }
+
+    /// Make this element capture the mouse: its hitbox uses `HitboxBehavior::BlockMouse`,
+    /// so hover resolution culls any overlapping hitbox registered *behind* it (lower in
+    /// the paint order). Use on elevated surfaces (cards, popovers) so hovering them does
+    /// not also highlight elements underneath, and on the topmost of two overlapping
+    /// controls so only it reports hover. Registers a hitbox even without `on_click`.
+    pub fn block_mouse(mut self) -> Self {
+        self.block_mouse = true;
+        self
+    }
+
+    /// Attach an opaque identity payload used by hover/click dispatch to
+    /// route behavior without pattern-matching the app's Action enum.
+    pub fn hit_identity(mut self, identity: HitIdentity) -> Self {
+        self.hit_identity = Some(identity);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiNodeId>) -> Self {
+        self.semantic_id = Some(id.into());
+        self
+    }
+
+    pub fn key(mut self, key: impl Into<UiKey>) -> Self {
+        self.semantic_key = Some(key.into());
+        self
+    }
+
+    pub fn test_id(mut self, id: impl Into<TestId>) -> Self {
+        self.test_id = Some(id.into());
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.accessibility_role = self
+            .accessibility_role
+            .or(semantic_role_to_accessibility(role));
+        self.semantic_role = Some(role);
+        self
+    }
+
+    pub fn cursor(mut self, cursor: CursorHint) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
+    /// Register a scroll action for this div. Scroll wheel events inside
+    /// this div's bounds will dispatch through the action builder.
+    pub fn on_scroll(mut self, builder: ScrollActionBuilder) -> Self {
+        self.on_scroll = Some(builder);
+        self
+    }
+
+    /// Full style override on hover.
+    pub fn hover(mut self, f: impl FnOnce(StyleOverride) -> StyleOverride) -> Self {
+        self.hover_style = Some(f(StyleOverride::default()));
+        self
+    }
+
+    /// Convenience: set only the hover background.
+    pub fn hover_bg(self, color: Color) -> Self {
+        self.hover(|s| s.bg(color))
+    }
+
+    /// Convenience: set only the hover text color (propagates to child text elements).
+    pub fn hover_text_color(self, color: Color) -> Self {
+        self.hover(|s| s.text_color(color))
+    }
+
+    /// Convenience: set only the hover icon color (propagates to child svg icons).
+    pub fn hover_icon_color(self, color: Color) -> Self {
+        self.hover(|s| s.icon_color(color))
+    }
+
+    /// Conditionally apply style/config changes.
+    pub fn when(self, condition: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if condition { f(self) } else { self }
+    }
+
+    // -- Scroll / clip --
+
+    pub fn scroll_y(mut self, offset: f32) -> Self {
+        self.scroll_y = offset;
+        self.clips = true;
+        // Tell taffy the element is a scroll container so it constrains to
+        // the available space instead of expanding to fit all children.
+        self.base_style.layout.overflow.y = taffy::Overflow::Hidden;
+        self
+    }
+
+    pub fn scroll_total(mut self, total_height: f32) -> Self {
+        self.scroll_total_height = total_height;
+        self
+    }
+
+    pub fn hide_scrollbar(mut self) -> Self {
+        self.hide_scrollbar = true;
+        self
+    }
+
+    pub fn focus_ring(mut self, target: FocusId) -> Self {
+        self.focus_target = Some(target);
+        self
+    }
+
+    pub fn focus_scope(mut self, scope: impl Into<FocusScopeId>) -> Self {
+        self.focus_scope = Some(scope.into());
+        self
+    }
+
+    pub fn tab_stop(mut self, tab_stop: impl Into<TabStop>) -> Self {
+        self.tab_stop = Some(tab_stop.into());
+        self
+    }
+
+    pub fn track_focus(self, target: FocusId) -> Self {
+        self.focus_ring(target)
+    }
+
+    pub fn key_context(mut self, context: impl Into<KeyContext>) -> Self {
+        self.key_context = Some(context.into());
+        self
+    }
+
+    pub fn on_event_capture(mut self, kind: UiEventKind, result: UiEventResult) -> Self {
+        self.event_bindings
+            .push(UiEventBinding::new(kind, UiEventPhase::Capture).with_result(result));
+        self
+    }
+
+    pub fn on_event(mut self, kind: UiEventKind, result: UiEventResult) -> Self {
+        self.event_bindings
+            .push(UiEventBinding::new(kind, UiEventPhase::Target).with_result(result));
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<String>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    pub fn accessibility_id(mut self, id: impl Into<String>) -> Self {
+        self.accessibility_id = Some(id.into());
+        self
+    }
+
+    pub fn accessibility_role(mut self, role: AccessibilityRole) -> Self {
+        self.accessibility_role = Some(role);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
+    }
+
+    pub fn accessibility_value(mut self, value: impl Into<String>) -> Self {
+        self.accessibility_value = Some(value.into());
+        self
+    }
+
+    pub fn accessibility_description(mut self, description: impl Into<String>) -> Self {
+        self.accessibility_description = Some(description.into());
+        self
+    }
+
+    pub fn accessibility_selected(mut self, selected: bool) -> Self {
+        self.accessibility_selected = Some(selected);
+        self
+    }
+
+    pub fn accessibility_toggled(mut self, toggled: bool) -> Self {
+        self.accessibility_toggled = Some(toggled);
+        self
+    }
+
+    pub fn accessibility_expanded(mut self, expanded: bool) -> Self {
+        self.accessibility_expanded = Some(expanded);
+        self
+    }
+
+    pub fn accessibility_disabled(mut self, disabled: bool) -> Self {
+        self.accessibility_disabled = disabled;
+        self
+    }
+
+    pub fn clip(mut self) -> Self {
+        self.clips = true;
+        self
+    }
+
+    /// Set a procedural GPU background effect (noise gradient, linear gradient).
+    /// This replaces the solid `bg()` color for the background pass.
+    pub fn bg_effect(mut self, effect: BackgroundEffect) -> Self {
+        self.bg_effect = Some(effect);
+        self
+    }
+
+    /// Apply a frosted-glass Gaussian blur backdrop to this div.
+    /// Everything rendered behind this div will be blurred within its bounds.
+    /// Typical radius: 8–20 pixels.
+    pub fn blur(mut self, radius: f32) -> Self {
+        self.blur_radius = Some(radius);
+        self
+    }
+
+    // -- Internal: resolve style with overrides --
+
+    fn resolve_style(&self, hovered: bool) -> ElementStyle {
+        let mut resolved = self.base_style.clone();
+        if hovered {
+            if let Some(ref ov) = self.hover_style {
+                apply_override(&mut resolved, ov);
+            }
+        }
+        resolved
+    }
+}
+
+/// Div's prepaint state: an optional hitbox ID (registered when on_click is set).
+pub struct DivPrepaintState {
+    hitbox_id: Option<HitboxId>,
+}
+
+impl Element for Div {
+    type LayoutState = Vec<LayoutId>;
+    type PrepaintState = DivPrepaintState;
+
+    fn request_layout(
+        &mut self,
+        engine: &mut LayoutEngine,
+        cx: &mut ElementContext,
+    ) -> (LayoutId, Self::LayoutState) {
+        // Layout children first, collecting their IDs.
+        let child_ids: Vec<LayoutId> = self
+            .children
+            .iter_mut()
+            .map(|child| child.request_layout(engine, cx))
+            .collect();
+
+        let id = engine.request_layout(self.base_style.layout.clone(), &child_ids);
+        (id, child_ids)
+    }
+
+    fn prepaint(
+        &mut self,
+        bounds: Bounds,
+        _layout_state: &mut Self::LayoutState,
+        engine: &LayoutEngine,
+        cx: &mut ElementContext,
+    ) -> DivPrepaintState {
+        let z = self.base_style.z_index;
+        if z != 0 {
+            cx.push_z_index(z);
+        }
+
+        let hitbox_id = if self.block_mouse {
+            Some(cx.insert_hitbox(bounds, HitboxBehavior::BlockMouse))
+        } else if self.on_click.is_some()
+            || self.on_click_handler.is_some()
+            || self.hover_style.is_some()
+        {
+            Some(cx.insert_hitbox(bounds, HitboxBehavior::Normal))
+        } else {
+            None
+        };
+
+        if let Some(ref builder) = self.on_scroll {
+            cx.scroll_regions.push(ScrollRegion {
+                bounds,
+                action_builder: builder.clone(),
+            });
+        }
+
+        if self.scroll_y != 0.0 {
+            for child in &mut self.children {
+                child.prepaint_with_offset(engine, cx, 0.0, -self.scroll_y);
+            }
+        } else {
+            for child in &mut self.children {
+                child.prepaint(engine, cx);
+            }
+        }
+
+        if z != 0 {
+            cx.pop_z_index();
+        }
+
+        DivPrepaintState { hitbox_id }
+    }
+
+    fn paint(
+        &mut self,
+        bounds: Bounds,
+        _layout_state: &mut Self::LayoutState,
+        prepaint_state: &mut DivPrepaintState,
+        engine: &LayoutEngine,
+        scene: &mut Scene,
+        cx: &mut ElementContext,
+    ) {
+        let hovered = prepaint_state
+            .hitbox_id
+            .map_or(false, |id| cx.is_hovered(id));
+        let mut style = self.resolve_style(hovered);
+        let r = style.corner_radius;
+        let z = style.z_index;
+        let opacity = style.opacity;
+
+        if opacity < 1.0 {
+            if let Some(ref mut bg) = style.background {
+                bg.a = (bg.a as f32 * opacity) as u8;
+            }
+        }
+
+        if z != 0 {
+            scene.push_z_index(z);
+        }
+
+        if let Some(radius) = self.blur_radius {
+            scene.blur_region(BlurRegionPrimitive {
+                rect: bounds,
+                blur_radius: radius,
+                corner_radius: r,
+            });
+        }
+
+        // Shadows
+        for s in &style.shadows {
+            scene.shadow(ShadowPrimitive {
+                rect: bounds,
+                blur_radius: s.blur_radius,
+                corner_radius: s.corner_radius.max(r),
+                offset: s.offset,
+                color: s.color,
+            });
+        }
+
+        // Background — effect quad takes priority over solid color.
+        if let Some(effect) = self.bg_effect {
+            let (effect_type, params, color_a, color_b) = match effect {
+                BackgroundEffect::NoiseGradient {
+                    scale,
+                    color_a,
+                    color_b,
+                } => (EffectType::NoiseGradient, [scale, 0.0], color_a, color_b),
+                BackgroundEffect::LinearGradient {
+                    angle,
+                    color_a,
+                    color_b,
+                } => (EffectType::LinearGradient, [angle, 0.0], color_a, color_b),
+                BackgroundEffect::RadialGradient { color_a, color_b } => {
+                    (EffectType::RadialGradient, [0.0, 0.0], color_a, color_b)
+                }
+                BackgroundEffect::Shimmer {
+                    base,
+                    highlight,
+                    speed,
+                } => (EffectType::Shimmer, [speed, 0.0], base, highlight),
+                BackgroundEffect::Vignette { color, intensity } => (
+                    EffectType::Vignette,
+                    [intensity, 0.0],
+                    color,
+                    Color::TRANSPARENT,
+                ),
+                BackgroundEffect::ColorTint { color } => {
+                    (EffectType::ColorTint, [0.0, 0.0], color, Color::TRANSPARENT)
+                }
+            };
+            scene.effect_quad(EffectQuadPrimitive {
+                rect: bounds,
+                effect_type,
+                color_a,
+                color_b,
+                params,
+                corner_radius: r,
+            });
+        } else if let Some(bg) = style.background {
+            scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, r, bg));
+        }
+
+        // Border
+        if let Some(border) = style.border_color {
+            if style.border_widths != [0.0; 4] {
+                scene.border(BorderPrimitive {
+                    rect: bounds,
+                    widths: style.border_widths,
+                    corner_radii: [r; 4],
+                    color: border,
+                });
+            }
+        }
+
+        if let Some(target) = self.focus_target {
+            if cx.is_focused(target) {
+                let ring_inset = -2.0;
+                let ring_bounds = Rect {
+                    x: bounds.x + ring_inset,
+                    y: bounds.y + ring_inset,
+                    width: bounds.width - ring_inset * 2.0,
+                    height: bounds.height - ring_inset * 2.0,
+                };
+                scene.border(BorderPrimitive {
+                    rect: ring_bounds,
+                    widths: [2.0; 4],
+                    corner_radii: [(r + 2.0); 4],
+                    color: cx.theme.colors.focus_border,
+                });
+            }
+        }
+
+        let click_action = self.on_click.clone();
+        let has_click_action = click_action
+            .as_ref()
+            .is_some_and(|action| !action.is::<NoopAction>());
+        let accessibility_label = self
+            .accessibility_label
+            .clone()
+            .or_else(|| self.tooltip.clone());
+        let accessibility_role = self.accessibility_role.or_else(|| {
+            (click_action.is_some() && accessibility_label.is_some())
+                .then_some(AccessibilityRole::Button)
+        });
+        let semantic_role = self
+            .semantic_role
+            .or_else(|| accessibility_role.and_then(accessibility_role_to_semantic))
+            .or_else(|| self.on_scroll.is_some().then_some(SemanticRole::ScrollArea));
+        let suppress_descendant_accessibility_text =
+            accessibility_role.is_some_and(role_labels_descendant_text);
+
+        let mut semantic_actions = SemanticActions::default();
+        if has_click_action || self.on_click_handler.is_some() {
+            semantic_actions = semantic_actions.clickable().focusable();
+        }
+        if self.focus_target.is_some() {
+            semantic_actions = semantic_actions.focusable();
+        }
+        if self.on_scroll.is_some() {
+            semantic_actions = semantic_actions.scrollable();
+        }
+        if self.tooltip.is_some() {
+            semantic_actions = semantic_actions.tooltip();
+        }
+        if self.block_mouse || self.hit_identity.is_some() {
+            semantic_actions = semantic_actions.hit_test();
+        }
+
+        let mut style_state = StyleState::empty();
+        if hovered {
+            style_state.insert(StyleState::HOVER);
+        }
+        if let Some(target) = self.focus_target {
+            if cx.is_focused(target) {
+                style_state.insert(StyleState::FOCUS_VISIBLE);
+            }
+        }
+        if self.accessibility_disabled {
+            style_state.insert(StyleState::DISABLED);
+        }
+        if self.accessibility_selected.unwrap_or(false) {
+            style_state.insert(StyleState::SELECTED);
+        }
+        if self.accessibility_toggled.unwrap_or(false) {
+            style_state.insert(StyleState::CHECKED);
+        }
+        if self.accessibility_expanded.unwrap_or(false) {
+            style_state.insert(StyleState::EXPANDED);
+        }
+
+        let semantic_id = self
+            .semantic_id
+            .clone()
+            .or_else(|| self.accessibility_id.clone().map(UiNodeId::from));
+        let should_emit_semantic = semantic_id.is_some()
+            || self.semantic_key.is_some()
+            || self.test_id.is_some()
+            || semantic_role.is_some()
+            || !semantic_actions.is_empty()
+            || self.focus_scope.is_some()
+            || self.tab_stop.is_some()
+            || self.key_context.is_some()
+            || !self.event_bindings.is_empty()
+            || !style_state.is_empty();
+        let semantic_parent = if should_emit_semantic {
+            let mut node = SemanticNode::new(bounds);
+            node.id = semantic_id;
+            node.key = self.semantic_key.clone();
+            node.test_id = self.test_id.clone();
+            node.parent = cx.current_semantic_parent();
+            node.role = semantic_role;
+            node.label = accessibility_label.clone();
+            node.value = self.accessibility_value.clone();
+            node.description = self.accessibility_description.clone();
+            node.tooltip = self.tooltip.clone();
+            node.actions = semantic_actions;
+            node.state = SemanticNodeState {
+                disabled: self.accessibility_disabled,
+                selected: self.accessibility_selected,
+                toggled: self.accessibility_toggled,
+                expanded: self.accessibility_expanded,
+                style_state,
+            };
+            node.focus_scope = self.focus_scope.clone();
+            node.tab_stop = self.tab_stop;
+            node.key_context = self.key_context.clone();
+            node.event_bindings = self.event_bindings.clone();
+            Some(cx.semantic.push(node))
+        } else {
+            None
+        };
+
+        if let Some(role) = accessibility_role {
+            let key = self.accessibility_id.clone().unwrap_or_else(|| {
+                format!(
+                    "div:{role:?}:{:?}:{:?}:{:.0}:{:.0}:{:.0}:{:.0}",
+                    accessibility_label,
+                    click_action,
+                    bounds.x,
+                    bounds.y,
+                    bounds.width,
+                    bounds.height
+                )
+            });
+            let mut node =
+                AccessibilityNode::new(key, role, bounds).disabled(self.accessibility_disabled);
+            if let Some(label) = accessibility_label {
+                node = node.label(label);
+            }
+            if let Some(value) = self.accessibility_value.clone() {
+                node = node.value(value);
+            }
+            if let Some(description) = self.accessibility_description.clone() {
+                node = node.description(description);
+            }
+            if let Some(selected) = self.accessibility_selected {
+                node = node.selected(selected);
+            }
+            if let Some(toggled) = self.accessibility_toggled {
+                node = node.toggled(toggled);
+            }
+            if let Some(expanded) = self.accessibility_expanded {
+                node = node.expanded(expanded);
+            }
+            if !self.accessibility_disabled
+                && let Some(action) = click_action
+                && !action.is::<NoopAction>()
+            {
+                node = node.action(AccessibilityAction::Click(action));
+            } else if let Some(builder) = self.on_scroll.clone() {
+                node = node.action(AccessibilityAction::Scroll(builder));
+            }
+            cx.accessibility.push(node);
+        }
+
+        // Register parent hit BEFORE children so that children's hit regions
+        // (pushed later) are found first by the reverse search in handle_left_click.
+        // This gives correct z-order: child clicks take priority over parent clicks.
+        let identity = self.hit_identity.take();
+        let handler = self
+            .on_click_handler
+            .take()
+            .or_else(|| self.on_click.take().map(ClickHandler::from_action));
+        if let Some(handler) = handler {
+            let mut region = HitRegion::new(bounds, self.cursor, handler);
+            region.identity = identity;
+            cx.hits.push(region);
+        }
+
+        if let Some(tip) = self.tooltip.take() {
+            cx.tooltip_regions.push(TooltipRegion { bounds, text: tip });
+        }
+
+        let should_clip = self.clips
+            || style.layout.overflow.x != taffy::Overflow::Visible
+            || style.layout.overflow.y != taffy::Overflow::Visible;
+
+        if should_clip {
+            if r > 0.0 {
+                scene.clip_rounded(bounds, [r; 4]);
+            } else {
+                scene.clip(bounds);
+            }
+        }
+
+        let pushed_text_color = if hovered {
+            self.hover_style.as_ref().and_then(|ov| ov.text_color)
+        } else {
+            None
+        };
+        let pushed_icon_color = if hovered {
+            self.hover_style.as_ref().and_then(|ov| ov.icon_color)
+        } else {
+            None
+        };
+        if let Some(tc) = pushed_text_color {
+            cx.push_text_color(tc);
+        }
+        if let Some(ic) = pushed_icon_color {
+            cx.push_icon_color(ic);
+        }
+        cx.push_accessibility_text_hidden(suppress_descendant_accessibility_text);
+        if let Some(index) = semantic_parent {
+            cx.push_semantic_parent(index);
+        }
+
+        if self.scroll_y != 0.0 {
+            for child in &mut self.children {
+                child.paint_with_offset(engine, scene, cx, 0.0, -self.scroll_y);
+            }
+        } else {
+            for child in &mut self.children {
+                child.paint(engine, scene, cx);
+            }
+        }
+
+        if semantic_parent.is_some() {
+            cx.pop_semantic_parent();
+        }
+        cx.pop_accessibility_text_hidden();
+        if pushed_icon_color.is_some() {
+            cx.pop_icon_color();
+        }
+        if pushed_text_color.is_some() {
+            cx.pop_text_color();
+        }
+
+        if self.scroll_total_height > bounds.height && !self.hide_scrollbar {
+            let content_h = self.scroll_total_height;
+            let max_scroll = content_h - bounds.height;
+            let sb_width = 8.0;
+            let sb_margin = 6.0;
+            let track = Rect {
+                x: bounds.right() - sb_width,
+                y: bounds.y + sb_margin,
+                width: sb_width,
+                height: (bounds.height - sb_margin * 2.0).max(0.0),
+            };
+            let thumb_h = (track.height / content_h * bounds.height)
+                .max(32.0)
+                .min(track.height);
+            let thumb_y = if max_scroll > 0.0 {
+                (self.scroll_y / max_scroll) * (track.height - thumb_h)
+            } else {
+                0.0
+            };
+
+            scene.rounded_rect(RoundedRectPrimitive::uniform(
+                track,
+                4.0,
+                Color::rgba(128, 128, 128, 10),
+            ));
+
+            scene.rounded_rect(RoundedRectPrimitive::uniform(
+                Rect {
+                    x: track.x + 1.0,
+                    y: track.y + thumb_y + 1.0,
+                    width: track.width - 2.0,
+                    height: thumb_h - 2.0,
+                },
+                3.0,
+                cx.theme.colors.scrollbar_thumb,
+            ));
+
+            if let Some(ref builder) = self.on_scroll {
+                let hit_w = sb_width + 12.0;
+                let track_rect = Rect {
+                    x: track.x - 6.0,
+                    y: bounds.y,
+                    width: hit_w,
+                    height: bounds.height,
+                };
+                cx.scrollbar_tracks.push(ScrollbarTrack {
+                    track_rect,
+                    thumb_top: track.y + thumb_y,
+                    thumb_height: thumb_h,
+                    content_height: content_h,
+                    viewport_height: bounds.height,
+                    action_builder: builder.clone(),
+                });
+            }
+        }
+
+        if should_clip {
+            scene.pop_clip();
+        }
+
+        // Debug wireframe: 1px outline around every div
+        if cx.debug_wireframe {
+            // Cycle colors by depth using bounds position as a hash
+            let hash = ((bounds.x as u32).wrapping_mul(7) ^ (bounds.y as u32).wrapping_mul(13)) % 6;
+            let wire_color = match hash {
+                0 => Color::rgba(255, 80, 80, 120),  // red
+                1 => Color::rgba(80, 255, 80, 120),  // green
+                2 => Color::rgba(80, 80, 255, 120),  // blue
+                3 => Color::rgba(255, 255, 80, 120), // yellow
+                4 => Color::rgba(255, 80, 255, 120), // magenta
+                _ => Color::rgba(80, 255, 255, 120), // cyan
+            };
+            scene.border(BorderPrimitive {
+                rect: bounds,
+                widths: [1.0; 4],
+                corner_radii: [r; 4],
+                color: wire_color,
+            });
+        }
+
+        if z != 0 {
+            scene.pop_z_index();
+        }
+    }
+}
+
+impl IntoAnyElement for Div {
+    fn into_any(self) -> AnyElement {
+        element_into_any(self)
+    }
+}
