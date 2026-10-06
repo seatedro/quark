@@ -47,3 +47,42 @@ jobs:
           # include Vulkan.
           WGPU_BACKEND: vulkan
         run: cargo test --workspace
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add miri rust-src
+          cargo +nightly miri setup
+
+      - uses: Swatinem/rust-cache@v2
+
+      # quark only: quark-text's tests parse and shape the vendored fonts,
+      # which is far too slow under Miri, and quark-text has no unsafe of its
+      # own (the font parsing it would exercise is third-party).
+      - name: Miri
+        env:
+          # Properties run a handful of cases under Miri; the Test job runs
+          # the full counts.
+          PROPTEST_CASES: "8"
+          # zerocopy 0.8.60 (via proptest's rand_chacha) calls
+          # align_of_val_raw under cfg(miri) without enabling its feature.
+          RUSTFLAGS: "-Zcrate-attr=feature(layout_for_ptr)"
+        run: cargo +nightly miri test -p quark
+
+  kani:
+    runs-on: ubuntu-latest
+    # Report-only until a baseline run passes: the harnesses go through std's
+    # HashMap (BlockOrder's index), which Kani handles slowly, and they have
+    # not been run outside CI yet.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: model-checking/kani-github-action@v1
+        with:
+          args: -p quark
