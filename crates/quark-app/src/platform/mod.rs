@@ -7,3 +7,4 @@ pub mod notification;
 pub mod single_instance;
 #[cfg(feature = "tray")]
 pub mod tray;
+pub mod window_state;

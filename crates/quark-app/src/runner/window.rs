@@ -36,11 +36,30 @@ pub(super) struct WindowState {
     pub(super) scale_factor: f64,
     pub(super) surface_size: PhysicalSize<u32>,
     pub(super) traffic_lights: Option<TrafficLights>,
+    pub(super) persist_key: Option<String>,
 }
 
 impl WindowState {
     pub(super) fn id(&self) -> WindowId {
         self.window.id()
+    }
+
+    /// Save the window's geometry if it opted in. Failures only cost the
+    /// saved placement, so they are logged and dropped.
+    pub(super) fn persist(&self) {
+        let Some(path) = self.persist_key.as_deref().and_then(state_path) else {
+            return;
+        };
+        let size = self.window.inner_size();
+        let geometry = WindowGeometry {
+            position: self.window.outer_position().ok().map(|p| (p.x, p.y)),
+            width: size.width,
+            height: size.height,
+            maximized: self.window.is_maximized(),
+        };
+        if let Err(error) = geometry.save_to(&path) {
+            tracing::warn!("could not save window state to {}: {error}", path.display());
+        }
     }
 
     pub(super) fn sync_metrics(&mut self, size: PhysicalSize<u32>, scale_factor: f64) {
@@ -51,7 +70,10 @@ impl WindowState {
     }
 }
 
-pub(super) fn window_attributes(options: &WindowOptions) -> WindowAttributes {
+pub(super) fn window_attributes(
+    options: &WindowOptions,
+    event_loop: &ActiveEventLoop,
+) -> WindowAttributes {
     let (width, height) = options.size;
     let mut attrs = Window::default_attributes()
         .with_title(options.title.clone())
@@ -59,6 +81,33 @@ pub(super) fn window_attributes(options: &WindowOptions) -> WindowAttributes {
         .with_window_icon(options.icon.clone())
         // Shown once the renderer exists, so the first paint isn't blank.
         .with_visible(false);
+    if let Some(saved) = options
+        .persist_key
+        .as_deref()
+        .and_then(state_path)
+        .and_then(|path| WindowGeometry::load_from(&path))
+    {
+        let monitors: Vec<MonitorArea> = event_loop
+            .available_monitors()
+            .map(|monitor| {
+                let position = monitor.position();
+                let size = monitor.size();
+                MonitorArea {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width,
+                    height: size.height,
+                }
+            })
+            .collect();
+        let geometry = saved.clamped_to(&monitors);
+        attrs = attrs
+            .with_inner_size(PhysicalSize::new(geometry.width, geometry.height))
+            .with_maximized(geometry.maximized);
+        if let Some((x, y)) = geometry.position {
+            attrs = attrs.with_position(PhysicalPosition::new(x, y));
+        }
+    }
     if let Some((width, height)) = options.min_size {
         attrs = attrs.with_min_inner_size(LogicalSize::new(width, height));
     }

@@ -69,6 +69,10 @@ pub struct WindowOptions {
     /// crash log in the platform state directory, then run the previous
     /// hook. Installed once per process by [`run`].
     pub panic_hook: bool,
+    /// Save this window's size and position under this key when it closes
+    /// and restore them when a window with the same key opens. See
+    /// [`crate::platform::window_state`].
+    pub persist_key: Option<String>,
 }
 
 impl Default for WindowOptions {
@@ -82,6 +86,7 @@ impl Default for WindowOptions {
             fonts: FontSettings::default(),
             traffic_lights: None,
             panic_hook: true,
+            persist_key: None,
         }
     }
 }

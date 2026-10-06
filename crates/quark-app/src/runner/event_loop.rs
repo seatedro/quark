@@ -82,7 +82,7 @@ impl<A: App> Runner<A> {
         event_loop: &ActiveEventLoop,
         options: &WindowOptions,
     ) -> Result<WindowState, RunError> {
-        let window = Arc::new(event_loop.create_window(window_attributes(options))?);
+        let window = Arc::new(event_loop.create_window(window_attributes(options, event_loop))?);
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
         let accessibility_tree = Arc::new(Mutex::new(empty_tree_update()));
@@ -112,6 +112,7 @@ impl<A: App> Runner<A> {
             scale_factor,
             surface_size: size,
             traffic_lights: options.traffic_lights,
+            persist_key: options.persist_key.clone(),
         })
     }
 
@@ -176,8 +177,11 @@ impl<A: App> Runner<A> {
             let Some(handle) = self.flags.close.pop() else {
                 break;
             };
-            if self.windows.remove(handle).is_none() {
+            let Some(entry) = self.windows.remove(handle) else {
                 continue;
+            };
+            if let Some(state) = entry.open() {
+                state.persist();
             }
             if self.focused == Some(handle) {
                 self.focused = None;
@@ -346,6 +350,14 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 for event in state.input.normalize(event) {
                     self.with_event_cx(event_loop, Some(handle), |app, cx| app.event(event, cx));
                 }
+            }
+        }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        for (_, entry) in self.windows.iter() {
+            if let Some(state) = entry.open() {
+                state.persist();
             }
         }
     }

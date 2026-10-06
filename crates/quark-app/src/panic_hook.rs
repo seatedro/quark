@@ -78,19 +78,19 @@ fn crash_log_path(app_name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     home().map(|home| home.join("Library").join("Logs"))
 }
 
 #[cfg(target_os = "windows")]
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_STATE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
