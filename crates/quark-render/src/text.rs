@@ -6,9 +6,7 @@ use glyphon::{
     TextBounds,
 };
 
-use crate::scene::{
-    FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, TextPrimitive,
-};
+use crate::scene::{FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, TextPrimitive};
 use quark::Color;
 
 use crate::renderer::{CachedTextBuffer, ClippedRichText, ClippedText};

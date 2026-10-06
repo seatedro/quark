@@ -9,9 +9,7 @@ use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::fonts::FontSettings;
-use crate::scene::{
-    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive,
-};
+use crate::scene::{ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive};
 
 use crate::shaders::{BLIT_SHADER, BLUR_SHADER, EFFECT_SHADER, QUAD_SHADER, SHADOW_SHADER};
 use crate::text::{color_to_linear, measure_mono_char_width, prepare_text_areas};
@@ -2550,8 +2548,7 @@ fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> Fla
                 if let Some(clip) = clips.last().copied() {
                     if icon.rect.intersection(clip.scissor).is_some() {
                         let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
-                        let cache_key =
-                            crate::icons::cache_key(&icon.name, px_size, icon.color);
+                        let cache_key = crate::icons::cache_key(&icon.name, px_size, icon.color);
                         // Only rasterize (and copy RGBA out of the icon cache)
                         // when the texture is not on the GPU yet; once
                         // uploaded, the cache key alone is enough to draw.
