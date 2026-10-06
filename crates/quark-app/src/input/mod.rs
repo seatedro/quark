@@ -1,43 +1,30 @@
-mod keyboard;
-mod keymap;
-mod pointer;
+//! Platform-neutral input events and the winit normalization that produces
+//! them. Routing events to widgets is left to the app or a UI layer.
+
 mod scroll;
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::path::PathBuf;
 
 use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::Window;
 
-use crate::actions::Action;
-use crate::editor::diff::element::EditorElement;
-use crate::editor::diff::state::ReviewCommentTarget;
-use crate::effects::Effect;
-use quark_components::TooltipState;
-use quark_ui::element::DragHandler;
-use quark_ui::shell::UiFrame;
-use quark_ui::state::{AppState, FocusTarget, OverlaySurface, WorkspaceMode};
-
-pub use keymap::{
-    KeymapOverride, ShortcutCommand, ShortcutEntry, ShortcutGroup, active_bindings,
-    binding_conflict, binding_matches, format_binding, override_for, reset_override, set_override,
-    shortcut_entries, shortcut_entry, shortcut_groups,
-};
-pub use pointer::hit_test_text_offset;
 pub use scroll::{quantize_scroll_delta_px, scroll_delta_to_px};
 
+/// Pointer coordinates are physical pixels relative to the window's content
+/// area, matching the coordinate space of the `Scene` the app draws.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     TextInput(String),
     KeyPress(KeyChord),
     KeyRelease(KeyChord),
+    ModifiersChanged(ModifiersState),
     PointerMoved {
         x: f32,
         y: f32,
     },
+    PointerLeft,
     PointerButton {
         button: MouseButton,
         state: ElementState,
@@ -48,6 +35,9 @@ pub enum InputEvent {
     },
     Focused(bool),
     ImePreedit(String, Option<(usize, usize)>),
+    FileHovered(PathBuf),
+    FileHoverCancelled,
+    FileDropped(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +56,7 @@ pub struct KeyChord {
 }
 
 impl KeyChord {
-    fn from_key_event(event: &KeyEvent, modifiers: ModifiersState) -> Self {
+    pub fn from_key_event(event: &KeyEvent, modifiers: ModifiersState) -> Self {
         let logical = match &event.logical_key {
             Key::Named(named) => KeyKind::Named(*named),
             Key::Character(text) => KeyKind::Character(text.to_string()),
@@ -236,175 +226,49 @@ fn named_binding_key(named: NamedKey) -> Option<(&'static str, bool)> {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputOwner {
-    TextField(FocusTarget),
-    Overlay(OverlaySurface),
-    Editor,
-    Workspace,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InputContext {
-    pub owner: InputOwner,
-    pub overlay: Option<OverlaySurface>,
-    pub focus: Option<FocusTarget>,
-    pub workspace_mode: WorkspaceMode,
-    pub ime_active: bool,
-}
-
-#[derive(Default)]
-pub struct InputOutcome {
-    pub actions: Vec<Action>,
-    pub effects: Vec<Effect>,
-    pub dirty: bool,
-}
-
-impl InputOutcome {
-    fn action(action: Action) -> Self {
-        Self {
-            actions: vec![action],
-            effects: Vec::new(),
-            dirty: true,
-        }
-    }
-
-    fn actions(actions: Vec<Action>) -> Self {
-        Self {
-            dirty: !actions.is_empty(),
-            actions,
-            effects: Vec::new(),
-        }
-    }
-
-    fn merge(&mut self, mut other: Self) {
-        self.actions.append(&mut other.actions);
-        self.effects.append(&mut other.effects);
-        self.dirty |= other.dirty;
-    }
-}
-
-#[derive(Debug, Clone)]
-enum ScrollTarget {
-    Region(quark_ui::element::ScrollActionBuilder),
-    ViewportFallback,
-}
-
-pub struct InputSystem {
+/// Turns raw winit window events into `InputEvent`s, tracking the modifier,
+/// pointer, and IME composition state that individual events don't carry.
+#[derive(Debug, Default)]
+pub struct InputNormalizer {
     modifiers: ModifiersState,
-    mouse_position: Option<(f32, f32)>,
-    mouse_drag_target: Option<FocusTarget>,
-    viewport_text_drag_active: bool,
-    card_text_drag_active: bool,
-    review_line_drag_anchor: Option<usize>,
-    review_line_drag_target: Option<ReviewCommentTarget>,
-    pointer_capture: Option<Box<dyn DragHandler>>,
-    file_list_scroll_remainder_px: f32,
-    overlay_scroll_remainder_px: f32,
-    editor_scroll_remainder_px: f32,
-    viewport_scroll_remainder_px: f32,
-    pending_g: bool,
+    pointer_position: Option<(f32, f32)>,
     ime_composing: bool,
 }
 
-impl Default for InputSystem {
-    fn default() -> Self {
-        Self {
-            modifiers: ModifiersState::default(),
-            mouse_position: None,
-            mouse_drag_target: None,
-            viewport_text_drag_active: false,
-            card_text_drag_active: false,
-            review_line_drag_anchor: None,
-            review_line_drag_target: None,
-            pointer_capture: None,
-            file_list_scroll_remainder_px: 0.0,
-            overlay_scroll_remainder_px: 0.0,
-            editor_scroll_remainder_px: 0.0,
-            viewport_scroll_remainder_px: 0.0,
-            pending_g: false,
-            ime_composing: false,
-        }
-    }
-}
-
-impl InputSystem {
-    pub fn set_modifiers(&mut self, modifiers: ModifiersState) {
-        self.modifiers = modifiers;
+impl InputNormalizer {
+    pub fn modifiers(&self) -> ModifiersState {
+        self.modifiers
     }
 
-    pub fn mouse_position(&self) -> Option<(f32, f32)> {
-        self.mouse_position
+    pub fn pointer_position(&self) -> Option<(f32, f32)> {
+        self.pointer_position
     }
 
-    pub fn handle_window_event(
-        &mut self,
-        state: &mut AppState,
-        ui_frame: &mut UiFrame,
-        editor: &EditorElement,
-        mut font_system: Option<&mut glyphon::FontSystem>,
-        window: Option<&Arc<Window>>,
-        tooltip_state: &mut TooltipState,
-        launch_at: Instant,
-        event: WindowEvent,
-    ) -> Option<InputOutcome> {
-        let events = self.normalize_window_event(event);
-        if events.is_empty() {
-            return None;
-        }
-
-        let mut outcome = InputOutcome::default();
-        for event in events {
-            let next = self.route_input_event(
-                state,
-                ui_frame,
-                editor,
-                font_system.as_deref_mut(),
-                window,
-                tooltip_state,
-                launch_at,
-                event,
-            );
-            outcome.merge(next);
-        }
-        Some(outcome)
+    pub fn ime_composing(&self) -> bool {
+        self.ime_composing
     }
 
-    #[cfg(test)]
-    pub(crate) fn handle_input_event_for_test(
-        &mut self,
-        state: &mut AppState,
-        ui_frame: &mut UiFrame,
-        editor: &EditorElement,
-        font_system: Option<&mut glyphon::FontSystem>,
-        window: Option<&Arc<Window>>,
-        tooltip_state: &mut TooltipState,
-        launch_at: Instant,
-        event: InputEvent,
-    ) -> InputOutcome {
-        self.route_input_event(
-            state,
-            ui_frame,
-            editor,
-            font_system,
-            window,
-            tooltip_state,
-            launch_at,
-            event,
-        )
-    }
-
-    fn normalize_window_event(&mut self, event: WindowEvent) -> Vec<InputEvent> {
+    pub fn normalize(&mut self, event: WindowEvent) -> Vec<InputEvent> {
         match event {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
-                Vec::new()
+                vec![InputEvent::ModifiersChanged(self.modifiers)]
             }
-            WindowEvent::Focused(focused) => vec![InputEvent::Focused(focused)],
-            WindowEvent::CursorMoved { position, .. } => vec![InputEvent::PointerMoved {
-                x: position.x as f32,
-                y: position.y as f32,
-            }],
+            WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.ime_composing = false;
+                }
+                vec![InputEvent::Focused(focused)]
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = (position.x as f32, position.y as f32);
+                self.pointer_position = Some((x, y));
+                vec![InputEvent::PointerMoved { x, y }]
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.pointer_position = None;
+                vec![InputEvent::PointerLeft]
+            }
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 vec![InputEvent::Wheel { delta, phase }]
             }
@@ -422,6 +286,9 @@ impl InputSystem {
                 self.normalize_keyboard_event(event)
             }
             WindowEvent::Ime(ime) => self.normalize_ime_event(ime),
+            WindowEvent::HoveredFile(path) => vec![InputEvent::FileHovered(path)],
+            WindowEvent::HoveredFileCancelled => vec![InputEvent::FileHoverCancelled],
+            WindowEvent::DroppedFile(path) => vec![InputEvent::FileDropped(path)],
             _ => Vec::new(),
         }
     }
@@ -433,7 +300,7 @@ impl InputSystem {
             ElementState::Pressed => {
                 events.push(InputEvent::KeyPress(chord));
                 if let Some(text) =
-                    keyboard::key_text_from_key_event(&event, self.modifiers, self.ime_composing)
+                    key_text(event.text.as_deref(), self.modifiers, self.ime_composing)
                 {
                     events.push(InputEvent::TextInput(text));
                 }
@@ -460,102 +327,78 @@ impl InputSystem {
             }
         }
     }
-
-    fn route_input_event(
-        &mut self,
-        state: &mut AppState,
-        ui_frame: &mut UiFrame,
-        editor: &EditorElement,
-        font_system: Option<&mut glyphon::FontSystem>,
-        window: Option<&Arc<Window>>,
-        tooltip_state: &mut TooltipState,
-        launch_at: Instant,
-        event: InputEvent,
-    ) -> InputOutcome {
-        match event {
-            InputEvent::TextInput(text) => self.route_text_input(state, text),
-            InputEvent::KeyPress(chord) => self.route_key_press(state, ui_frame, editor, chord),
-            InputEvent::KeyRelease(chord) => {
-                if chord.logical_char() != Some("g") {
-                    self.pending_g = false;
-                }
-                InputOutcome::default()
-            }
-            InputEvent::PointerMoved { x, y } => self.handle_pointer_moved(
-                state,
-                ui_frame,
-                editor,
-                font_system,
-                window,
-                tooltip_state,
-                launch_at,
-                x,
-                y,
-            ),
-            InputEvent::PointerButton {
-                button: MouseButton::Left,
-                state: ElementState::Pressed,
-            } => {
-                let Some((x, y)) = self.mouse_position else {
-                    return InputOutcome::default();
-                };
-                self.handle_left_click(state, ui_frame, editor, font_system, x, y)
-            }
-            InputEvent::PointerButton {
-                button: MouseButton::Left,
-                state: ElementState::Released,
-            } => self.handle_left_release(state),
-            InputEvent::PointerButton {
-                button: MouseButton::Right,
-                state: ElementState::Pressed,
-            } => {
-                let Some((x, y)) = self.mouse_position else {
-                    return InputOutcome::default();
-                };
-                self.handle_right_click(state, ui_frame, editor, x, y)
-            }
-            InputEvent::PointerButton { .. } => InputOutcome::default(),
-            InputEvent::Wheel { delta, phase } => {
-                self.handle_wheel(state, ui_frame, editor, delta, phase)
-            }
-            InputEvent::Focused(focused) => {
-                if !focused {
-                    self.pending_g = false;
-                    self.mouse_drag_target = None;
-                    self.viewport_text_drag_active = false;
-                    self.card_text_drag_active = false;
-                    self.review_line_drag_anchor = None;
-                    self.review_line_drag_target = None;
-                    self.pointer_capture = None;
-                    self.ime_composing = false;
-                }
-                InputOutcome::default()
-            }
-            InputEvent::ImePreedit(_, _) => InputOutcome::default(),
-        }
-    }
 }
 
-pub fn resolve_input_context(state: &AppState, ime_active: bool) -> InputContext {
-    let owner = if let Some(target) = state
-        .ui
-        .focus
-        .get(&state.store)
-        .filter(|_| state.is_text_focused())
-    {
-        InputOwner::TextField(target)
-    } else if let Some(overlay) = state.overlays_top() {
-        InputOwner::Overlay(overlay)
-    } else if state.ui.focus.get(&state.store) == Some(FocusTarget::Editor) {
-        InputOwner::Editor
-    } else {
-        InputOwner::Workspace
-    };
-    InputContext {
-        owner,
-        overlay: state.overlays_top(),
-        focus: state.ui.focus.get(&state.store),
-        workspace_mode: state.workspace.mode.get(&state.store),
-        ime_active,
+/// Text a key press should insert. Shortcut chords and keys pressed mid-IME
+/// composition produce none: the IME delivers its own commit.
+fn key_text(text: Option<&str>, modifiers: ModifiersState, ime_composing: bool) -> Option<String> {
+    if ime_composing || modifiers.control_key() || modifiers.super_key() {
+        return None;
+    }
+    let text = text?;
+    if text.is_empty() || text.chars().all(char::is_control) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chord(logical: KeyKind, modifiers: ModifiersState) -> KeyChord {
+        KeyChord {
+            logical,
+            physical: None,
+            modifiers,
+            repeat: false,
+        }
+    }
+
+    #[test]
+    fn binding_string_infers_shift_from_shifted_characters() {
+        let question = chord(KeyKind::Character("?".into()), ModifiersState::SHIFT);
+        assert_eq!(question.binding_string().as_deref(), Some("shift+/"));
+
+        let upper = chord(KeyKind::Character("N".into()), ModifiersState::empty());
+        assert_eq!(upper.binding_string().as_deref(), Some("shift+n"));
+
+        let save = chord(
+            KeyKind::Character("s".into()),
+            ModifiersState::SUPER | ModifiersState::CONTROL,
+        );
+        assert_eq!(save.binding_string().as_deref(), Some("cmd+ctrl+s"));
+
+        let escape = chord(KeyKind::Named(NamedKey::Escape), ModifiersState::empty());
+        assert_eq!(escape.binding_string().as_deref(), Some("escape"));
+    }
+
+    #[test]
+    fn key_text_skips_shortcuts_composition_and_control_chars() {
+        assert_eq!(
+            key_text(Some("a"), ModifiersState::empty(), false).as_deref(),
+            Some("a")
+        );
+        assert_eq!(key_text(Some("a"), ModifiersState::CONTROL, false), None);
+        assert_eq!(key_text(Some("a"), ModifiersState::empty(), true), None);
+        assert_eq!(
+            key_text(Some("\u{8}"), ModifiersState::empty(), false),
+            None
+        );
+    }
+
+    #[test]
+    fn ime_commit_ends_composition_and_inserts_text() {
+        let mut input = InputNormalizer::default();
+        let preedit = input.normalize(WindowEvent::Ime(Ime::Preedit("ni".into(), Some((2, 2)))));
+        assert_eq!(
+            preedit,
+            vec![InputEvent::ImePreedit("ni".into(), Some((2, 2)))]
+        );
+        assert!(input.ime_composing());
+
+        let commit = input.normalize(WindowEvent::Ime(Ime::Commit("你".into())));
+        assert_eq!(commit, vec![InputEvent::TextInput("你".into())]);
+        assert!(!input.ime_composing());
     }
 }
