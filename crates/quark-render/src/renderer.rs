@@ -65,8 +65,14 @@ pub enum RenderError {
     PngWrite(String),
 }
 
-/// GPU-resident images keyed by content hash (icons, avatars).
-type ImageCache = HashMap<u64, (wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>;
+/// GPU-resident image (icon, avatar). The bind group keeps the view alive.
+struct CachedImage {
+    _texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
+/// GPU-resident images keyed by content hash.
+type ImageCache = HashMap<u64, CachedImage>;
 
 // ---------------------------------------------------------------------------
 // TexturePool — reusable offscreen render targets
@@ -286,10 +292,14 @@ pub struct Renderer {
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
-    text_renderer: TextRenderer,
+    /// One text renderer per text segment of the frame, grown on demand.
+    text_renderers: Vec<TextRenderer>,
     text_cache: HashMap<u64, CachedTextBuffer>,
     text_cache_frame: u64,
     cached_mono_char_width: Option<(f32, f32)>,
+    flattener: Flattener,
+    flat: FlattenedScene,
+    batches: FrameBatches,
 }
 
 impl Renderer {
@@ -737,10 +747,13 @@ impl Renderer {
             swash_cache,
             viewport,
             atlas,
-            text_renderer,
+            text_renderers: vec![text_renderer],
             text_cache: HashMap::new(),
             text_cache_frame: 0,
             cached_mono_char_width: None,
+            flattener: Flattener::default(),
+            flat: FlattenedScene::default(),
+            batches: FrameBatches::default(),
         })
     }
 
@@ -846,9 +859,8 @@ impl Renderer {
     /// `width`/`height` and `scale_factor` (which must match the scale used to
     /// build the scene), read the pixels back, and write them as a PNG to `path`.
     ///
-    /// This is a self-contained, no-swapchain draw flow (no blur) used by the
-    /// dev/test "screenshot" leg. Pixel readback honours the wgpu 256-byte
-    /// `bytes_per_row` alignment by padding rows on copy and unpadding on read.
+    /// This is a self-contained, no-swapchain draw flow used by the dev/test
+    /// "screenshot" leg.
     #[cfg(any(test, feature = "headless-render"))]
     pub fn render_to_png(
         &mut self,
@@ -858,18 +870,34 @@ impl Renderer {
         scale_factor: f32,
         path: &std::path::Path,
     ) -> Result<(), RenderError> {
+        let (w, h) = (width.max(1), height.max(1));
+        let pixels = self.render_to_rgba(scene, w, h, scale_factor)?;
+        let buffer = image::RgbaImage::from_raw(w, h, pixels)
+            .expect("readback pixel buffer matches dimensions");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        buffer
+            .save(path)
+            .map_err(|e| RenderError::PngWrite(e.to_string()))
+    }
+
+    /// Render `scene` offscreen and return tightly packed sRGB RGBA8 rows.
+    /// Pixel readback honours the wgpu 256-byte `bytes_per_row` alignment by
+    /// padding rows on copy and unpadding on read.
+    #[cfg(any(test, feature = "headless-render"))]
+    pub fn render_to_rgba(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+        scale_factor: f32,
+    ) -> Result<Vec<u8>, RenderError> {
         let w = width.max(1);
         let h = height.max(1);
 
         self.texture_pool.begin_frame();
         self.instance_buffer_pool.begin_frame();
-
-        let viewport_rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: w as f32,
-            height: h as f32,
-        };
         self.queue.write_buffer(
             &self.viewport_buffer,
             0,
@@ -882,8 +910,7 @@ impl Renderer {
                 height: h,
             },
         );
-
-        let flattened = flatten_scene(scene, viewport_rect, &self.image_cache);
+        self.flatten(scene, w, h);
 
         // Owned target texture (COPY_SRC so we can read it back). Format matches
         // the surface format the pipelines were built against.
@@ -902,185 +929,23 @@ impl Renderer {
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Pre-upload any cached images referenced by the scene.
-        for zl in &flattened.z_layers {
-            for img in &zl.images {
-                let key = img.primitive.cache_key;
-                if key != 0
-                    && !self.image_cache.contains_key(&key)
-                    && !img.primitive.rgba.is_empty()
-                    && img.primitive.width > 0
-                    && img.primitive.height > 0
-                {
-                    let texture = self.device.create_texture_with_data(
-                        &self.queue,
-                        &wgpu::TextureDescriptor {
-                            label: Some("diffy_cached_image"),
-                            size: wgpu::Extent3d {
-                                width: img.primitive.width,
-                                height: img.primitive.height,
-                                depth_or_array_layers: 1,
-                            },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                            view_formats: &[],
-                        },
-                        wgpu::util::TextureDataOrder::LayerMajor,
-                        &img.primitive.rgba,
-                    );
-                    let tview = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                    let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("diffy_cached_image_bind"),
-                        layout: &self.texture_bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&tview),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.sampler),
-                            },
-                        ],
-                    });
-                    self.image_cache.insert(key, (texture, tview, bind_group));
-                }
-            }
-        }
-
-        let device = &self.device;
-        let queue = &self.queue;
-        let buffer_pool = &mut self.instance_buffer_pool;
-        let z_layer_buffers: Vec<Vec<LayerBuffers>> = flattened
-            .z_layers
-            .iter()
-            .map(|zl| {
-                zl.draw_layers
-                    .iter()
-                    .map(|layer| {
-                        let (si, sc) = build_shadow_instances(&layer.shadows);
-                        let sb = buffer_pool.upload(device, queue, "diffy_shadow_instances", &si);
-                        let (qi, qc) = build_quad_instances(&layer.quads);
-                        let qb = buffer_pool.upload(device, queue, "diffy_quad_instances", &qi);
-                        let (ei, ec) = build_effect_quad_instances(&layer.effect_quads);
-                        let eb =
-                            buffer_pool.upload(device, queue, "diffy_effect_quad_instances", &ei);
-                        LayerBuffers {
-                            shadow_buffer: sb,
-                            shadow_commands: sc,
-                            quad_buffer: qb,
-                            quad_commands: qc,
-                            effect_buffer: eb,
-                            effect_commands: ec,
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("diffy_png_encoder"),
             });
+        self.record_frame(&mut encoder, &view, w, h, scale_factor as f64)?;
 
-        let mut first = true;
-        for (zl, layer_buffers) in flattened.z_layers.iter().zip(z_layer_buffers.iter()) {
-            let text_areas = prepare_text_areas(
-                &mut self.font_system,
-                &mut self.text_cache,
-                &mut self.text_cache_frame,
-                &zl.texts,
-                &zl.rich_texts,
-                scale_factor as f64,
-            );
-            self.text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )?;
-
-            {
-                let load = if first {
-                    first = false;
-                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
-                } else {
-                    wgpu::LoadOp::Load
-                };
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("diffy_png_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                draw_layers(
-                    &mut pass,
-                    layer_buffers,
-                    &self.shadow_pipeline,
-                    &self.effect_quad_pipeline,
-                    &self.quad_pipeline,
-                    &self.viewport_bind_group,
-                    w,
-                    h,
-                );
-                draw_images(
-                    &mut pass,
-                    &zl.images,
-                    &mut self.instance_buffer_pool,
-                    &self.device,
-                    &self.queue,
-                    &self.blit_pipeline,
-                    &self.viewport_bind_group,
-                    &self.image_cache,
-                    w,
-                    h,
-                );
-                pass.set_scissor_rect(0, 0, w, h);
-                self.text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)?;
-            }
-
-            self.queue.submit(Some(encoder.finish()));
-            encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("diffy_png_encoder"),
-                });
-        }
-
-        // Copy the rendered texture into a readback buffer (256-byte row align).
         let bytes_per_pixel = 4u32;
         let unpadded_bytes_per_row = w * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-        let buffer_size = (padded_bytes_per_row * h) as u64;
-
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("diffy_png_readback"),
-            size: buffer_size,
+            size: (padded_bytes_per_row * h) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target,
@@ -1125,17 +990,9 @@ impl Renderer {
         }
         readback.unmap();
 
-        let buffer = image::RgbaImage::from_raw(w, h, pixels)
-            .expect("readback pixel buffer matches dimensions");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        buffer
-            .save(path)
-            .map_err(|e| RenderError::PngWrite(e.to_string()))?;
-
+        self.atlas.trim();
         self.texture_pool.trim_unused();
-        Ok(())
+        Ok(pixels)
     }
 
     pub fn render(&mut self, scene: &Scene, time_seconds: f32) -> Result<FrameStats, RenderError> {
@@ -1144,20 +1001,13 @@ impl Renderer {
         }
         let render_started_at = Instant::now();
         self.texture_pool.begin_frame();
-
-        let viewport_rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: self.surface_config.width as f32,
-            height: self.surface_config.height as f32,
-        };
+        self.instance_buffer_pool.begin_frame();
+        let sw = self.surface_config.width;
+        let sh = self.surface_config.height;
 
         // Update time in the viewport uniform buffer.
         let viewport_uniform = ViewportUniform {
-            resolution: [
-                self.surface_config.width as f32,
-                self.surface_config.height as f32,
-            ],
+            resolution: [sw as f32, sh as f32],
             time: time_seconds,
             _padding: 0.0,
         };
@@ -1167,7 +1017,7 @@ impl Renderer {
             bytemuck::bytes_of(&viewport_uniform),
         );
 
-        let flattened = flatten_scene(scene, viewport_rect, &self.image_cache);
+        self.flatten(scene, sw, sh);
 
         let surface = self
             .surface
@@ -1180,7 +1030,6 @@ impl Renderer {
                 surface.configure(&self.device, &self.surface_config);
                 return Err(RenderError::SurfaceAcquire);
             }
-            Err(wgpu::SurfaceError::Timeout) => return Err(RenderError::SurfaceAcquire),
             Err(_) => return Err(RenderError::SurfaceAcquire),
         };
         let acquire_us = acquire_started_at.elapsed().as_micros() as u64;
@@ -1188,8 +1037,8 @@ impl Renderer {
         self.viewport.update(
             &self.queue,
             Resolution {
-                width: self.surface_config.width,
-                height: self.surface_config.height,
+                width: sw,
+                height: sh,
             },
         );
 
@@ -1201,515 +1050,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("diffy_frame_encoder"),
             });
-
-        self.instance_buffer_pool.begin_frame();
-
-        // Build GPU buffers for each z-layer's draw layers.
-        struct ZLayerBuffers {
-            layer_buffers: Vec<LayerBuffers>,
-        }
-
-        let device = &self.device;
-        let queue = &self.queue;
-        let buffer_pool = &mut self.instance_buffer_pool;
-        let z_layer_buffers: Vec<ZLayerBuffers> = flattened
-            .z_layers
-            .iter()
-            .map(|zl| {
-                let layer_buffers = zl
-                    .draw_layers
-                    .iter()
-                    .map(|layer| {
-                        let (si, sc) = build_shadow_instances(&layer.shadows);
-                        let sb = buffer_pool.upload(device, queue, "diffy_shadow_instances", &si);
-                        let (qi, qc) = build_quad_instances(&layer.quads);
-                        let qb = buffer_pool.upload(device, queue, "diffy_quad_instances", &qi);
-                        let (ei, ec) = build_effect_quad_instances(&layer.effect_quads);
-                        let eb =
-                            buffer_pool.upload(device, queue, "diffy_effect_quad_instances", &ei);
-                        LayerBuffers {
-                            shadow_buffer: sb,
-                            shadow_commands: sc,
-                            quad_buffer: qb,
-                            quad_commands: qc,
-                            effect_buffer: eb,
-                            effect_commands: ec,
-                        }
-                    })
-                    .collect();
-                ZLayerBuffers { layer_buffers }
-            })
-            .collect();
-
-        let single_z = flattened.z_layers.len() <= 1;
-
-        for zl in &flattened.z_layers {
-            for img in &zl.images {
-                let key = img.primitive.cache_key;
-                if key != 0 && !self.image_cache.contains_key(&key) {
-                    if !img.primitive.rgba.is_empty()
-                        && img.primitive.width > 0
-                        && img.primitive.height > 0
-                    {
-                        let texture = self.device.create_texture_with_data(
-                            &self.queue,
-                            &wgpu::TextureDescriptor {
-                                label: Some("diffy_cached_image"),
-                                size: wgpu::Extent3d {
-                                    width: img.primitive.width,
-                                    height: img.primitive.height,
-                                    depth_or_array_layers: 1,
-                                },
-                                mip_level_count: 1,
-                                sample_count: 1,
-                                dimension: wgpu::TextureDimension::D2,
-                                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                                view_formats: &[],
-                            },
-                            wgpu::util::TextureDataOrder::LayerMajor,
-                            &img.primitive.rgba,
-                        );
-                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        let bind_group =
-                            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some("diffy_cached_image_bind"),
-                                layout: &self.texture_bind_group_layout,
-                                entries: &[
-                                    wgpu::BindGroupEntry {
-                                        binding: 0,
-                                        resource: wgpu::BindingResource::TextureView(&view),
-                                    },
-                                    wgpu::BindGroupEntry {
-                                        binding: 1,
-                                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                                    },
-                                ],
-                            });
-                        self.image_cache.insert(key, (texture, view, bind_group));
-                    }
-                }
-            }
-        }
-
-        if single_z && flattened.blur_regions.is_empty() {
-            // ---- Fast path: single z-layer, no blur ----
-            let zl = &flattened.z_layers[0];
-            let zlb = &z_layer_buffers[0];
-
-            let text_areas = prepare_text_areas(
-                &mut self.font_system,
-                &mut self.text_cache,
-                &mut self.text_cache_frame,
-                &zl.texts,
-                &zl.rich_texts,
-                self.scale_factor,
-            );
-            self.text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )?;
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("diffy_frame_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            draw_layers(
-                &mut pass,
-                &zlb.layer_buffers,
-                &self.shadow_pipeline,
-                &self.effect_quad_pipeline,
-                &self.quad_pipeline,
-                &self.viewport_bind_group,
-                self.surface_config.width,
-                self.surface_config.height,
-            );
-
-            draw_images(
-                &mut pass,
-                &zl.images,
-                &mut self.instance_buffer_pool,
-                &self.device,
-                &self.queue,
-                &self.blit_pipeline,
-                &self.viewport_bind_group,
-                &self.image_cache,
-                self.surface_config.width,
-                self.surface_config.height,
-            );
-
-            pass.set_scissor_rect(0, 0, self.surface_config.width, self.surface_config.height);
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)?;
-        } else if flattened.blur_regions.is_empty() {
-            // ---- Multi z-layer path: separate text render per z-layer ----
-            // Each z-layer gets its own encoder+submit so that
-            // text_renderer.prepare() for layer N cannot destroy the vertex
-            // buffer that layer N-1's render pass still references.
-            let sw = self.surface_config.width;
-            let sh = self.surface_config.height;
-            let mut first = true;
-
-            for (zl, zlb) in flattened.z_layers.iter().zip(z_layer_buffers.iter()) {
-                let text_areas = prepare_text_areas(
-                    &mut self.font_system,
-                    &mut self.text_cache,
-                    &mut self.text_cache_frame,
-                    &zl.texts,
-                    &zl.rich_texts,
-                    self.scale_factor,
-                );
-                self.text_renderer.prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    text_areas,
-                    &mut self.swash_cache,
-                )?;
-
-                {
-                    let load = if first {
-                        first = false;
-                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
-                    } else {
-                        wgpu::LoadOp::Load
-                    };
-
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("diffy_z_layer_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
-
-                    draw_layers(
-                        &mut pass,
-                        &zlb.layer_buffers,
-                        &self.shadow_pipeline,
-                        &self.effect_quad_pipeline,
-                        &self.quad_pipeline,
-                        &self.viewport_bind_group,
-                        sw,
-                        sh,
-                    );
-
-                    draw_images(
-                        &mut pass,
-                        &zl.images,
-                        &mut self.instance_buffer_pool,
-                        &self.device,
-                        &self.queue,
-                        &self.blit_pipeline,
-                        &self.viewport_bind_group,
-                        &self.image_cache,
-                        sw,
-                        sh,
-                    );
-
-                    pass.set_scissor_rect(0, 0, sw, sh);
-                    self.text_renderer
-                        .render(&self.atlas, &self.viewport, &mut pass)?;
-                }
-
-                self.queue.submit(Some(encoder.finish()));
-                encoder = self
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("diffy_frame_encoder"),
-                    });
-            }
-        } else {
-            // ---- Blur path: render via offscreen intermediates ----
-            // Flatten all z-layers into a single draw layer list for the blur.
-            let all_layer_bufs: Vec<LayerBuffers> = z_layer_buffers
-                .into_iter()
-                .flat_map(|z| z.layer_buffers.into_iter())
-                .collect();
-            let all_texts: Vec<ClippedText> = flattened
-                .z_layers
-                .iter()
-                .flat_map(|z| z.texts.iter().cloned())
-                .collect();
-            let all_rich: Vec<ClippedRichText> = flattened
-                .z_layers
-                .iter()
-                .flat_map(|z| z.rich_texts.iter().cloned())
-                .collect();
-            let blur = flattened.blur_regions[0];
-            let sw = self.surface_config.width;
-            let sh = self.surface_config.height;
-
-            let scene_target = self.texture_pool.acquire(&self.device, sw, sh);
-            let h_target = self.texture_pool.acquire(&self.device, sw, sh);
-            let v_target = self.texture_pool.acquire(&self.device, sw, sh);
-
-            // Bind groups are cached per pooled texture: layout and sampler
-            // never change, so a steady-state blur frame creates none.
-            let scene_bind = self.texture_pool.bind_group(
-                &self.device,
-                &self.texture_bind_group_layout,
-                &self.sampler,
-                &scene_target,
-            );
-            let h_bind = self.texture_pool.bind_group(
-                &self.device,
-                &self.texture_bind_group_layout,
-                &self.sampler,
-                &h_target,
-            );
-            let v_bind = self.texture_pool.bind_group(
-                &self.device,
-                &self.texture_bind_group_layout,
-                &self.sampler,
-                &v_target,
-            );
-
-            let sigma = (blur.blur_radius * 0.5).max(0.5);
-            let br = blur.rect;
-            let uv_min_x = br.x / sw as f32;
-            let uv_min_y = br.y / sh as f32;
-            let uv_max_x = br.right() / sw as f32;
-            let uv_max_y = br.bottom() / sh as f32;
-
-            // Step 1: Render pre-blur layers → scene_tex.
-            {
-                let scene_view = self.texture_pool.view(&scene_target);
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("diffy_blur_scene_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: scene_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                let end = blur.layer_break.min(all_layer_bufs.len());
-                draw_layers(
-                    &mut pass,
-                    &all_layer_bufs[..end],
-                    &self.shadow_pipeline,
-                    &self.effect_quad_pipeline,
-                    &self.quad_pipeline,
-                    &self.viewport_bind_group,
-                    sw,
-                    sh,
-                );
-            }
-
-            // Step 2: Horizontal blur → h_target.
-            {
-                let h_view = self.texture_pool.view(&h_target);
-                let blur_inst = BlurInstance {
-                    bounds: [br.x, br.y, br.width, br.height],
-                    uv_rect: [uv_min_x, uv_min_y, uv_max_x, uv_max_y],
-                    blur_params: [1.0, 0.0, sigma, 0.0],
-                };
-                let buf = self
-                    .instance_buffer_pool
-                    .upload(
-                        &self.device,
-                        &self.queue,
-                        "diffy_blur_h_instance",
-                        &[blur_inst],
-                    )
-                    .expect("single blur instance upload");
-
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("diffy_blur_h_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: h_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                pass.set_pipeline(&self.blur_pipeline);
-                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
-                pass.set_bind_group(1, &scene_bind, &[]);
-                pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..4, 0..1);
-            }
-
-            // Step 3: Vertical blur → v_target.
-            {
-                let v_view = self.texture_pool.view(&v_target);
-                let blur_inst = BlurInstance {
-                    bounds: [br.x, br.y, br.width, br.height],
-                    uv_rect: [uv_min_x, uv_min_y, uv_max_x, uv_max_y],
-                    blur_params: [0.0, 1.0, sigma, 0.0],
-                };
-                let buf = self
-                    .instance_buffer_pool
-                    .upload(
-                        &self.device,
-                        &self.queue,
-                        "diffy_blur_v_instance",
-                        &[blur_inst],
-                    )
-                    .expect("single blur instance upload");
-
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("diffy_blur_v_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: v_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                pass.set_pipeline(&self.blur_pipeline);
-                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
-                pass.set_bind_group(1, &h_bind, &[]);
-                pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..4, 0..1);
-            }
-
-            // Step 4: Composite to surface.
-            {
-                let text_areas = prepare_text_areas(
-                    &mut self.font_system,
-                    &mut self.text_cache,
-                    &mut self.text_cache_frame,
-                    &all_texts,
-                    &all_rich,
-                    self.scale_factor,
-                );
-                // Full-screen blit of scene_tex.
-                let scene_blit = BlitInstance {
-                    bounds: [0.0, 0.0, sw as f32, sh as f32],
-                    uv_rect: [0.0, 0.0, 1.0, 1.0],
-                    tint: [1.0, 1.0, 1.0, 1.0],
-                };
-                let scene_blit_buf = self
-                    .instance_buffer_pool
-                    .upload(&self.device, &self.queue, "diffy_scene_blit", &[scene_blit])
-                    .expect("single blit upload");
-                // Blur region blit.
-                let blur_blit = BlitInstance {
-                    bounds: [br.x, br.y, br.width, br.height],
-                    uv_rect: [uv_min_x, uv_min_y, uv_max_x, uv_max_y],
-                    tint: [1.0, 1.0, 1.0, 1.0],
-                };
-                let blur_blit_buf = self
-                    .instance_buffer_pool
-                    .upload(&self.device, &self.queue, "diffy_blur_blit", &[blur_blit])
-                    .expect("single blit upload");
-
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("diffy_composite_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-
-                // Blit scene background.
-                pass.set_pipeline(&self.blit_pipeline);
-                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
-                pass.set_bind_group(1, &scene_bind, &[]);
-                pass.set_vertex_buffer(0, scene_blit_buf.slice(..));
-                pass.draw(0..4, 0..1);
-
-                // Blit blurred region on top.
-                pass.set_bind_group(1, &v_bind, &[]);
-                pass.set_vertex_buffer(0, blur_blit_buf.slice(..));
-                pass.draw(0..4, 0..1);
-
-                // Render remaining layers (modal content, etc.) on top.
-                let start = blur.layer_break.min(all_layer_bufs.len());
-                pass.set_scissor_rect(0, 0, sw, sh);
-                draw_layers(
-                    &mut pass,
-                    &all_layer_bufs[start..],
-                    &self.shadow_pipeline,
-                    &self.effect_quad_pipeline,
-                    &self.quad_pipeline,
-                    &self.viewport_bind_group,
-                    sw,
-                    sh,
-                );
-
-                self.text_renderer.prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    text_areas,
-                    &mut self.swash_cache,
-                )?;
-                pass.set_scissor_rect(0, 0, sw, sh);
-                self.text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)?;
-            }
-
-            self.texture_pool.release(scene_target);
-            self.texture_pool.release(h_target);
-            self.texture_pool.release(v_target);
-        }
+        self.record_frame(&mut encoder, &view, sw, sh, self.scale_factor)?;
 
         let present_started_at = Instant::now();
         self.queue.submit(Some(encoder.finish()));
@@ -1723,12 +1064,442 @@ impl Renderer {
             .saturating_sub(present_us);
         Ok(FrameStats {
             primitive_count: scene.len(),
-            viewport_width: self.surface_config.width,
-            viewport_height: self.surface_config.height,
+            viewport_width: sw,
+            viewport_height: sh,
             cpu_us,
             acquire_us,
             present_us,
         })
+    }
+
+    fn flatten(&mut self, scene: &Scene, width: u32, height: u32) {
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+        };
+        flatten_scene_into(
+            scene,
+            viewport,
+            &self.image_cache,
+            &mut self.flattener,
+            &mut self.flat,
+        );
+    }
+
+    /// Upload, prepare, and encode the flattened frame into `encoder`,
+    /// targeting `target`. Everything goes into one encoder: each text segment
+    /// has its own `TextRenderer`, so preparing one cannot overwrite the
+    /// vertices another segment's pass reads.
+    fn record_frame(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+    ) -> Result<(), RenderError> {
+        let flat = std::mem::take(&mut self.flat);
+        let mut batches = std::mem::take(&mut self.batches);
+        let result = self.record_flattened(
+            encoder,
+            target,
+            &flat,
+            &mut batches,
+            width,
+            height,
+            scale_factor,
+        );
+        self.flat = flat;
+        self.batches = batches;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_flattened(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        flat: &FlattenedScene,
+        batches: &mut FrameBatches,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+    ) -> Result<(), RenderError> {
+        for image in &flat.images {
+            self.ensure_image_uploaded(&image.primitive);
+        }
+
+        build_batches(flat, batches);
+        let device = &self.device;
+        let queue = &self.queue;
+        let pool = &mut self.instance_buffer_pool;
+        let mut buffers = FrameBuffers {
+            shadow: pool.upload(device, queue, "diffy_shadow_instances", &batches.shadows),
+            effect: pool.upload(
+                device,
+                queue,
+                "diffy_effect_quad_instances",
+                &batches.effects,
+            ),
+            quad: pool.upload(device, queue, "diffy_quad_instances", &batches.quads),
+            image: pool.upload(device, queue, "diffy_image_blit", &batches.images),
+            ..FrameBuffers::default()
+        };
+
+        // Prepare every text segment before recording any pass.
+        while self.text_renderers.len() < batches.text_steps {
+            self.text_renderers.push(TextRenderer::new(
+                &mut self.atlas,
+                &self.device,
+                wgpu::MultisampleState::default(),
+                None,
+            ));
+        }
+        let mut text_index = 0;
+        for step in &flat.steps {
+            let DrawStep::Batch {
+                kind: PrimKind::Text,
+                items,
+                rich,
+            } = step
+            else {
+                continue;
+            };
+            let text_areas = prepare_text_areas(
+                &mut self.font_system,
+                &mut self.text_cache,
+                &mut self.text_cache_frame,
+                &flat.texts[items.start as usize..items.end as usize],
+                &flat.rich_texts[rich.start as usize..rich.end as usize],
+                scale_factor,
+            );
+            self.text_renderers[text_index].prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                text_areas,
+                &mut self.swash_cache,
+            )?;
+            text_index += 1;
+        }
+
+        let blur_targets = self.prepare_blur(flat, &mut buffers, width, height);
+        let result = self.encode_steps(
+            encoder,
+            target,
+            flat,
+            batches,
+            &buffers,
+            blur_targets.as_ref(),
+            width,
+            height,
+        );
+        if let Some(targets) = blur_targets {
+            self.texture_pool.release(targets.scene);
+            self.texture_pool.release(targets.h);
+            self.texture_pool.release(targets.v);
+        }
+        result
+    }
+
+    /// Acquire offscreen targets and upload blur instances when the frame has
+    /// blur regions.
+    fn prepare_blur(
+        &mut self,
+        flat: &FlattenedScene,
+        buffers: &mut FrameBuffers,
+        width: u32,
+        height: u32,
+    ) -> Option<BlurTargets> {
+        if !flat.steps.iter().any(|s| matches!(s, DrawStep::Blur(_))) {
+            return None;
+        }
+        let scene = self.texture_pool.acquire(&self.device, width, height);
+        let h = self.texture_pool.acquire(&self.device, width, height);
+        let v = self.texture_pool.acquire(&self.device, width, height);
+        // Pooled textures can be larger than the frame; passes on them set a
+        // viewport of the frame size, so UVs divide by the texture size.
+        let (tw, th) = (scene.width as f32, scene.height as f32);
+
+        let mut blur_instances = Vec::new();
+        let mut blit_instances = Vec::new();
+        for step in &flat.steps {
+            let DrawStep::Blur(region) = step else {
+                continue;
+            };
+            let sigma = (region.blur_radius * 0.5).max(0.5);
+            let br = region.rect;
+            let uv = [br.x / tw, br.y / th, br.right() / tw, br.bottom() / th];
+            let bounds = [br.x, br.y, br.width, br.height];
+            blur_instances.push(BlurInstance {
+                bounds,
+                uv_rect: uv,
+                blur_params: [1.0, 0.0, sigma, 0.0],
+            });
+            blur_instances.push(BlurInstance {
+                bounds,
+                uv_rect: uv,
+                blur_params: [0.0, 1.0, sigma, 0.0],
+            });
+            blit_instances.push(BlitInstance {
+                bounds,
+                uv_rect: uv,
+                tint: [1.0; 4],
+            });
+        }
+        blit_instances.push(BlitInstance {
+            bounds: [0.0, 0.0, width as f32, height as f32],
+            uv_rect: [0.0, 0.0, width as f32 / tw, height as f32 / th],
+            tint: [1.0; 4],
+        });
+        let pool = &mut self.instance_buffer_pool;
+        buffers.blur = pool.upload(
+            &self.device,
+            &self.queue,
+            "diffy_blur_instances",
+            &blur_instances,
+        );
+        buffers.blur_blit = pool.upload(
+            &self.device,
+            &self.queue,
+            "diffy_blur_blit",
+            &blit_instances,
+        );
+
+        let layout = &self.texture_bind_group_layout;
+        let sampler = &self.sampler;
+        let scene_bind = self
+            .texture_pool
+            .bind_group(&self.device, layout, sampler, &scene);
+        let h_bind = self
+            .texture_pool
+            .bind_group(&self.device, layout, sampler, &h);
+        let v_bind = self
+            .texture_pool
+            .bind_group(&self.device, layout, sampler, &v);
+        Some(BlurTargets {
+            scene_view: self.texture_pool.view(&scene).clone(),
+            h_view: self.texture_pool.view(&h).clone(),
+            v_view: self.texture_pool.view(&v).clone(),
+            scene,
+            h,
+            v,
+            scene_bind,
+            h_bind,
+            v_bind,
+        })
+    }
+
+    /// Record the frame's passes. Without blur this is one pass on `target`.
+    /// With blur, steps draw into an offscreen scene texture; at each blur step
+    /// the region is blurred (horizontal then vertical pass) and composited
+    /// back before later steps draw, and the scene is finally copied to
+    /// `target`.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_steps(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        flat: &FlattenedScene,
+        batches: &FrameBatches,
+        buffers: &FrameBuffers,
+        blur: Option<&BlurTargets>,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RenderError> {
+        let draw_view = blur.map_or(target, |b| &b.scene_view);
+        let set_viewport = |pass: &mut wgpu::RenderPass<'_>| {
+            if blur.is_some() {
+                pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+            }
+        };
+        let mut load = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
+        let mut blurs_done = 0u32;
+        let mut start = 0;
+        loop {
+            let end = flat.steps[start..]
+                .iter()
+                .position(|s| matches!(s, DrawStep::Blur(_)))
+                .map_or(flat.steps.len(), |p| start + p);
+            {
+                let mut pass = begin_pass(encoder, "diffy_frame_pass", draw_view, load);
+                set_viewport(&mut pass);
+                if let (Some(b), Some(buf)) = (blur, &buffers.blur_blit)
+                    && blurs_done > 0
+                {
+                    pass.set_pipeline(&self.blit_pipeline);
+                    pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+                    pass.set_bind_group(1, &b.v_bind, &[]);
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.set_scissor_rect(0, 0, width, height);
+                    pass.draw(0..4, blurs_done - 1..blurs_done);
+                }
+                for i in start..end {
+                    self.draw_step(
+                        &mut pass,
+                        &flat.steps[i],
+                        batches.step_cmds[i].clone(),
+                        batches,
+                        buffers,
+                        width,
+                        height,
+                    )?;
+                }
+            }
+            load = wgpu::LoadOp::Load;
+            if end == flat.steps.len() {
+                break;
+            }
+            let (Some(b), Some(buf)) = (blur, &buffers.blur) else {
+                break;
+            };
+            for (dir, source, dest) in [(0, &b.scene_bind, &b.h_view), (1, &b.h_bind, &b.v_view)] {
+                let mut pass = begin_pass(
+                    encoder,
+                    "diffy_blur_pass",
+                    dest,
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                );
+                set_viewport(&mut pass);
+                pass.set_pipeline(&self.blur_pipeline);
+                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+                pass.set_bind_group(1, source, &[]);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                let instance = blurs_done * 2 + dir;
+                pass.draw(0..4, instance..instance + 1);
+            }
+            blurs_done += 1;
+            start = end + 1;
+        }
+
+        if let (Some(b), Some(buf)) = (blur, &buffers.blur_blit) {
+            let mut pass = begin_pass(
+                encoder,
+                "diffy_composite_pass",
+                target,
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            );
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+            pass.set_bind_group(1, &b.scene_bind, &[]);
+            pass.set_vertex_buffer(0, buf.slice(..));
+            pass.draw(0..4, blurs_done..blurs_done + 1);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_step(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        step: &DrawStep,
+        cmds: std::ops::Range<u32>,
+        batches: &FrameBatches,
+        buffers: &FrameBuffers,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RenderError> {
+        let DrawStep::Batch { kind, .. } = step else {
+            return Ok(());
+        };
+        let cmds = cmds.start as usize..cmds.end as usize;
+        let (pipeline, buffer) = match kind {
+            PrimKind::Shadow => (&self.shadow_pipeline, &buffers.shadow),
+            PrimKind::Effect => (&self.effect_quad_pipeline, &buffers.effect),
+            PrimKind::Quad => (&self.quad_pipeline, &buffers.quad),
+            PrimKind::Image => {
+                let Some(buffer) = &buffers.image else {
+                    return Ok(());
+                };
+                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                for command in &batches.image_cmds[cmds] {
+                    // The cache lookup is the gate: icons resolved from a prior
+                    // frame carry an empty `rgba` but still draw via their
+                    // uploaded texture. Images that were never uploadable miss.
+                    let Some(entry) = self.image_cache.get(&command.cache_key) else {
+                        continue;
+                    };
+                    let Some((sx, sy, sw, sh)) = scissor_rect(command.clip, width, height) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, &entry.bind_group, &[]);
+                    pass.set_scissor_rect(sx, sy, sw, sh);
+                    pass.draw(0..4, command.instance_start..command.instance_end);
+                }
+                return Ok(());
+            }
+            PrimKind::Text => {
+                pass.set_scissor_rect(0, 0, width, height);
+                self.text_renderers[cmds.start].render(&self.atlas, &self.viewport, pass)?;
+                return Ok(());
+            }
+        };
+        let Some(buffer) = buffer else {
+            return Ok(());
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &self.viewport_bind_group, &[]);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        for command in &batches.quad_cmds[cmds] {
+            let Some((sx, sy, sw, sh)) = scissor_rect(command.clip, width, height) else {
+                continue;
+            };
+            pass.set_scissor_rect(sx, sy, sw, sh);
+            pass.draw(0..4, command.instance_range());
+        }
+        Ok(())
+    }
+
+    /// Upload `image` to the GPU cache under its key if it is not there yet.
+    fn ensure_image_uploaded(&mut self, image: &crate::scene::ImagePrimitive) {
+        let key = image.cache_key;
+        if key == 0
+            || self.image_cache.contains_key(&key)
+            || image.rgba.is_empty()
+            || image.width == 0
+            || image.height == 0
+        {
+            return;
+        }
+        let texture = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("diffy_cached_image"),
+                size: wgpu::Extent3d {
+                    width: image.width,
+                    height: image.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &image.rgba,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = create_texture_bind_group(
+            &self.device,
+            &self.texture_bind_group_layout,
+            &view,
+            &self.sampler,
+        );
+        self.image_cache.insert(
+            key,
+            CachedImage {
+                _texture: texture,
+                bind_group,
+            },
+        );
     }
 }
 
@@ -1736,113 +1507,55 @@ impl Renderer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-struct LayerBuffers {
-    shadow_buffer: Option<wgpu::Buffer>,
-    shadow_commands: Vec<QuadDrawCommand>,
-    quad_buffer: Option<wgpu::Buffer>,
-    quad_commands: Vec<QuadDrawCommand>,
-    effect_buffer: Option<wgpu::Buffer>,
-    effect_commands: Vec<QuadDrawCommand>,
+/// Instance buffers for one frame, one per pipeline.
+#[derive(Default)]
+struct FrameBuffers {
+    shadow: Option<wgpu::Buffer>,
+    effect: Option<wgpu::Buffer>,
+    quad: Option<wgpu::Buffer>,
+    image: Option<wgpu::Buffer>,
+    /// Two instances per blur region: horizontal then vertical.
+    blur: Option<wgpu::Buffer>,
+    /// One instance per blur region (composite the blurred region), then a
+    /// final full-target instance (copy the offscreen scene to the output).
+    blur_blit: Option<wgpu::Buffer>,
 }
 
-fn draw_layers<'pass>(
-    pass: &mut wgpu::RenderPass<'pass>,
-    layers: &'pass [LayerBuffers],
-    shadow_pipeline: &'pass wgpu::RenderPipeline,
-    effect_quad_pipeline: &'pass wgpu::RenderPipeline,
-    quad_pipeline: &'pass wgpu::RenderPipeline,
-    viewport_bind_group: &'pass wgpu::BindGroup,
-    viewport_w: u32,
-    viewport_h: u32,
-) {
-    for lb in layers {
-        if let Some(ref shadow_buf) = lb.shadow_buffer {
-            pass.set_pipeline(shadow_pipeline);
-            pass.set_bind_group(0, viewport_bind_group, &[]);
-            pass.set_vertex_buffer(0, shadow_buf.slice(..));
-            for command in &lb.shadow_commands {
-                let Some((sx, sy, sw, sh)) = scissor_rect(command.clip, viewport_w, viewport_h)
-                else {
-                    continue;
-                };
-                pass.set_scissor_rect(sx, sy, sw, sh);
-                pass.draw(0..4, command.instance_range());
-            }
-        }
-
-        if let Some(ref effect_buf) = lb.effect_buffer {
-            pass.set_pipeline(effect_quad_pipeline);
-            pass.set_bind_group(0, viewport_bind_group, &[]);
-            pass.set_vertex_buffer(0, effect_buf.slice(..));
-            for command in &lb.effect_commands {
-                let Some((sx, sy, sw, sh)) = scissor_rect(command.clip, viewport_w, viewport_h)
-                else {
-                    continue;
-                };
-                pass.set_scissor_rect(sx, sy, sw, sh);
-                pass.draw(0..4, command.instance_range());
-            }
-        }
-
-        if let Some(ref quad_buf) = lb.quad_buffer {
-            pass.set_pipeline(quad_pipeline);
-            pass.set_bind_group(0, viewport_bind_group, &[]);
-            pass.set_vertex_buffer(0, quad_buf.slice(..));
-            for command in &lb.quad_commands {
-                let Some((sx, sy, sw, sh)) = scissor_rect(command.clip, viewport_w, viewport_h)
-                else {
-                    continue;
-                };
-                pass.set_scissor_rect(sx, sy, sw, sh);
-                pass.draw(0..4, command.instance_range());
-            }
-        }
-    }
+/// Offscreen targets used when a frame contains blur regions.
+struct BlurTargets {
+    scene: OffscreenTarget,
+    h: OffscreenTarget,
+    v: OffscreenTarget,
+    scene_view: wgpu::TextureView,
+    h_view: wgpu::TextureView,
+    v_view: wgpu::TextureView,
+    scene_bind: wgpu::BindGroup,
+    h_bind: wgpu::BindGroup,
+    v_bind: wgpu::BindGroup,
 }
 
-fn draw_images<'pass>(
-    pass: &mut wgpu::RenderPass<'pass>,
-    images: &[ClippedImage],
-    buffer_pool: &mut TransientBufferPool,
-    device: &'pass wgpu::Device,
-    queue: &wgpu::Queue,
-    blit_pipeline: &'pass wgpu::RenderPipeline,
-    viewport_bind_group: &'pass wgpu::BindGroup,
-    image_cache: &'pass ImageCache,
-    viewport_w: u32,
-    viewport_h: u32,
-) {
-    for img in images {
-        // The cache lookup is the gate: icons resolved from a prior frame
-        // carry an empty `rgba` (rasterization skipped) but still draw via
-        // their uploaded texture. Images that were never uploadable simply
-        // miss the cache.
-        let bind_group = match image_cache.get(&img.primitive.cache_key) {
-            Some((_, _, bg)) => bg,
-            None => continue,
-        };
-
-        let r = img.primitive.rect;
-        let blit_inst = BlitInstance {
-            bounds: [r.x, r.y, r.width, r.height],
-            uv_rect: [0.0, 0.0, 1.0, 1.0],
-            tint: [1.0, 1.0, 1.0, 1.0],
-        };
-        let Some(buf) = buffer_pool.upload(device, queue, "diffy_image_blit", &[blit_inst]) else {
-            continue;
-        };
-
-        let Some((sx, sy, sw, sh)) = scissor_rect(img.clip, viewport_w, viewport_h) else {
-            continue;
-        };
-
-        pass.set_pipeline(blit_pipeline);
-        pass.set_bind_group(0, viewport_bind_group, &[]);
-        pass.set_bind_group(1, bind_group, &[]);
-        pass.set_vertex_buffer(0, buf.slice(..));
-        pass.set_scissor_rect(sx, sy, sw, sh);
-        pass.draw(0..4, 0..1);
-    }
+fn begin_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    label: &'static str,
+    view: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
 }
 
 fn scissor_rect(clip: Rect, viewport_w: u32, viewport_h: u32) -> Option<(u32, u32, u32, u32)> {
@@ -2175,17 +1888,35 @@ impl ViewportUniform {
 // ---------------------------------------------------------------------------
 // Scene flattening
 // ---------------------------------------------------------------------------
+//
+// Draw order follows paint order across primitive kinds. Each z-layer is split
+// into ordered segments, one primitive kind per segment, and each segment is
+// one batched draw (per scissor clip). A primitive joins the most recent
+// segment of its kind unless something of another kind painted after that
+// segment overlaps it, in which case it opens a new segment. Disjoint content
+// (list rows: background, text, background, text) therefore stays in two
+// batches, while a selection quad painted over text gets its own segment above
+// the text. Overlap tests use the clipped bounds of each primitive, with a
+// chunked bounding-box prefilter so long frames stay near linear.
 
-/// A draw layer groups shadows that must render before their corresponding
-/// quads. Layers are rendered in order: for each layer we draw all its shadows,
-/// then all its quads. A new layer starts when a shadow primitive appears after
-/// quads have already been added to the current layer, ensuring correct
-/// depth ordering for elevated surfaces like modals.
-#[derive(Debug, Clone, Default)]
-struct DrawLayer {
-    shadows: Vec<ClippedShadow>,
-    quads: Vec<ClippedQuad>,
-    effect_quads: Vec<ClippedEffectQuad>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimKind {
+    Shadow = 0,
+    Effect = 1,
+    Quad = 2,
+    Image = 3,
+    Text = 4,
+}
+
+const KIND_COUNT: usize = 5;
+
+/// Sort key that puts every primitive in its final draw position: z-layer,
+/// then segment within the layer, then paint order within the segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub(super) struct DrawKey {
+    z: i32,
+    segment: u32,
+    seq: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2193,59 +1924,86 @@ struct FlattenedBlurRegion {
     /// Screen-space bounds of the blur region.
     rect: Rect,
     blur_radius: f32,
-    /// Index into the layers vec: this blur applies after all layers
-    /// up to (but not including) this index have been rendered.
-    layer_break: usize,
-}
-
-/// A z-layer groups all draw layers and text for one z-index value.
-/// Rendered in z-index order: lower z-indices first, higher on top.
-#[derive(Debug, Clone, Default)]
-struct ZLayer {
-    draw_layers: Vec<DrawLayer>,
-    texts: Vec<ClippedText>,
-    rich_texts: Vec<ClippedRichText>,
-    images: Vec<ClippedImage>,
 }
 
 #[derive(Debug, Clone)]
+enum DrawStep {
+    /// One segment. `items` indexes the kind's sorted array in
+    /// `FlattenedScene`; for text, `items` covers plain runs and `rich` covers
+    /// rich runs (plain runs of a segment draw before its rich runs).
+    Batch {
+        kind: PrimKind,
+        items: std::ops::Range<u32>,
+        rich: std::ops::Range<u32>,
+    },
+    /// Blur everything drawn so far inside the region, then keep drawing on
+    /// top of the result.
+    Blur(FlattenedBlurRegion),
+}
+
+/// Flattened scene in draw order. Kept on the renderer and refilled every
+/// frame so its vectors keep their capacity.
+#[derive(Debug, Default)]
 struct FlattenedScene {
-    z_layers: Vec<ZLayer>,
-    blur_regions: Vec<FlattenedBlurRegion>,
+    shadows: Vec<ClippedShadow>,
+    effect_quads: Vec<ClippedEffectQuad>,
+    quads: Vec<ClippedQuad>,
+    images: Vec<ClippedImage>,
+    texts: Vec<ClippedText>,
+    rich_texts: Vec<ClippedRichText>,
+    steps: Vec<DrawStep>,
+}
+
+impl FlattenedScene {
+    fn clear(&mut self) {
+        self.shadows.clear();
+        self.effect_quads.clear();
+        self.quads.clear();
+        self.images.clear();
+        self.texts.clear();
+        self.rich_texts.clear();
+        self.steps.clear();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ClippedShadow {
+    key: DrawKey,
     instance: ShadowInstance,
     clip: Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ClippedQuad {
+    key: DrawKey,
     instance: QuadInstance,
     clip: Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ClippedEffectQuad {
+    key: DrawKey,
     instance: EffectQuadInstance,
     clip: Rect,
 }
 
 #[derive(Debug, Clone)]
 struct ClippedImage {
+    key: DrawKey,
     primitive: crate::scene::ImagePrimitive,
     clip: Rect,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct ClippedText {
+    pub(super) key: DrawKey,
     pub(super) primitive: TextPrimitive,
     pub(super) clip: Rect,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct ClippedRichText {
+    pub(super) key: DrawKey,
     pub(super) primitive: RichTextPrimitive,
     pub(super) clip: Rect,
 }
@@ -2263,10 +2021,163 @@ impl QuadDrawCommand {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ImageDrawCommand {
+    instance_start: u32,
+    instance_end: u32,
+    cache_key: u64,
+    clip: Rect,
+}
+
 #[derive(Debug)]
 pub(super) struct CachedTextBuffer {
     pub(super) buffer: Buffer,
     pub(super) last_used_frame: u64,
+}
+
+/// Bounds of everything drawn after some segment, for overlap queries. Rects
+/// are grouped in chunks of consecutive pushes; paint order is spatially
+/// coherent, so chunk bounds reject most queries without visiting the rects.
+#[derive(Debug, Default)]
+struct BlockerList {
+    rects: Vec<Rect>,
+    chunks: Vec<Rect>,
+}
+
+const BLOCKER_CHUNK: usize = 32;
+
+impl BlockerList {
+    fn clear(&mut self) {
+        self.rects.clear();
+        self.chunks.clear();
+    }
+
+    fn push(&mut self, rect: Rect) {
+        if self.rects.len().is_multiple_of(BLOCKER_CHUNK) {
+            self.chunks.push(rect);
+        } else if let Some(chunk) = self.chunks.last_mut() {
+            *chunk = rect_union(*chunk, rect);
+        }
+        self.rects.push(rect);
+    }
+
+    fn overlaps(&self, rect: Rect) -> bool {
+        self.chunks.iter().enumerate().any(|(i, chunk)| {
+            if !rects_overlap(*chunk, rect) {
+                return false;
+            }
+            let start = i * BLOCKER_CHUNK;
+            let end = (start + BLOCKER_CHUNK).min(self.rects.len());
+            self.rects[start..end]
+                .iter()
+                .any(|blocker| rects_overlap(*blocker, rect))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SegmentSlot {
+    Batch(PrimKind),
+    Blur(FlattenedBlurRegion),
+}
+
+/// Segment assignment state for one z-layer.
+#[derive(Debug, Default)]
+struct ZBuilder {
+    z: i32,
+    segments: Vec<SegmentSlot>,
+    /// Most recent segment of each kind that can still take primitives.
+    latest: [Option<u32>; KIND_COUNT],
+    /// Per kind: bounds of primitives drawn after that kind's latest segment.
+    blockers: [BlockerList; KIND_COUNT],
+}
+
+impl ZBuilder {
+    fn reset(&mut self, z: i32) {
+        self.z = z;
+        self.segments.clear();
+        self.latest = [None; KIND_COUNT];
+        for blockers in &mut self.blockers {
+            blockers.clear();
+        }
+    }
+
+    /// Choose the segment for a primitive of `kind` covering `bounds`.
+    fn place(&mut self, kind: PrimKind, bounds: Rect) -> u32 {
+        let k = kind as usize;
+        let segment = match self.latest[k] {
+            Some(segment) if !self.blockers[k].overlaps(bounds) => segment,
+            _ => {
+                let segment = self.segments.len() as u32;
+                self.segments.push(SegmentSlot::Batch(kind));
+                self.latest[k] = Some(segment);
+                self.blockers[k].clear();
+                segment
+            }
+        };
+        for j in 0..KIND_COUNT {
+            if j != k
+                && let Some(latest) = self.latest[j]
+                && segment > latest
+            {
+                self.blockers[j].push(bounds);
+            }
+        }
+        segment
+    }
+
+    /// A blur samples everything before it, so nothing after it may merge
+    /// into an earlier segment.
+    fn barrier(&mut self, blur: FlattenedBlurRegion) {
+        self.segments.push(SegmentSlot::Blur(blur));
+        self.latest = [None; KIND_COUNT];
+        for blockers in &mut self.blockers {
+            blockers.clear();
+        }
+    }
+}
+
+/// Reusable scratch state for `flatten_scene_into`.
+#[derive(Debug, Default)]
+struct Flattener {
+    builders: Vec<ZBuilder>,
+    active: usize,
+    clips: Vec<ActiveClip>,
+    z_stack: Vec<i32>,
+    seq: u32,
+}
+
+impl Flattener {
+    fn builder(&mut self) -> &mut ZBuilder {
+        let z = self.z_stack.last().copied().unwrap_or(0);
+        let index = match self.builders[..self.active].iter().position(|b| b.z == z) {
+            Some(index) => index,
+            None => {
+                if self.active == self.builders.len() {
+                    self.builders.push(ZBuilder::default());
+                }
+                self.builders[self.active].reset(z);
+                self.active += 1;
+                self.active - 1
+            }
+        };
+        &mut self.builders[index]
+    }
+
+    fn place(&mut self, kind: PrimKind, bounds: Rect) -> DrawKey {
+        self.seq += 1;
+        let seq = self.seq;
+        let builder = self.builder();
+        DrawKey {
+            z: builder.z,
+            segment: builder.place(kind, bounds),
+            seq,
+        }
+    }
+
+    fn barrier(&mut self, blur: FlattenedBlurRegion) {
+        self.builder().barrier(blur);
+    }
 }
 
 /// Active clip state carried on the flatten_scene stack.
@@ -2338,89 +2249,64 @@ impl ActiveClip {
     }
 }
 
+#[cfg(test)]
 fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> FlattenedScene {
-    use std::collections::BTreeMap;
+    let mut out = FlattenedScene::default();
+    flatten_scene_into(
+        scene,
+        viewport,
+        image_cache,
+        &mut Flattener::default(),
+        &mut out,
+    );
+    out
+}
 
-    let mut clips = vec![ActiveClip::root(viewport)];
-    let mut z_index_stack = vec![0i32];
-    let mut z_map: BTreeMap<i32, ZLayer> = BTreeMap::new();
-
-    // Ensure z=0 always exists.
-    z_map.insert(0, ZLayer::default());
-
-    let mut flattened = FlattenedScene {
-        z_layers: Vec::new(),
-        blur_regions: Vec::new(),
-    };
-
-    // Helper: get (or create) the current z-layer's draw layers.
-    macro_rules! current_z {
-        () => {{
-            let z = *z_index_stack.last().unwrap();
-            z_map.entry(z).or_insert_with(|| ZLayer {
-                draw_layers: vec![DrawLayer::default()],
-                ..Default::default()
-            })
-        }};
-    }
-
-    // Ensure the current z-layer has at least one draw layer.
-    macro_rules! ensure_draw_layer {
-        ($zl:expr) => {
-            if $zl.draw_layers.is_empty() {
-                $zl.draw_layers.push(DrawLayer::default());
-            }
-        };
-    }
+fn flatten_scene_into(
+    scene: &Scene,
+    viewport: Rect,
+    image_cache: &ImageCache,
+    fl: &mut Flattener,
+    out: &mut FlattenedScene,
+) {
+    out.clear();
+    fl.active = 0;
+    fl.seq = 0;
+    fl.clips.clear();
+    fl.clips.push(ActiveClip::root(viewport));
+    fl.z_stack.clear();
+    fl.z_stack.push(0);
 
     for primitive in &scene.primitives {
         match primitive {
-            Primitive::Rect(rect) => {
-                let zl = current_z!();
-                ensure_draw_layer!(zl);
-                push_quad(
-                    rect.rect,
-                    color_to_linear(rect.color),
-                    [0.0; 4],
-                    [0.0; 4],
-                    [0.0; 4],
-                    &clips,
-                    &mut zl.draw_layers.last_mut().unwrap().quads,
-                );
-            }
-            Primitive::RoundedRect(rect) => {
-                let zl = current_z!();
-                ensure_draw_layer!(zl);
-                push_quad(
-                    rect.rect,
-                    color_to_linear(rect.color),
-                    [0.0; 4],
-                    rect.corner_radii,
-                    [0.0; 4],
-                    &clips,
-                    &mut zl.draw_layers.last_mut().unwrap().quads,
-                );
-            }
-            Primitive::Border(border) => {
-                let zl = current_z!();
-                ensure_draw_layer!(zl);
-                push_quad(
-                    border.rect,
-                    [0.0; 4],
-                    color_to_linear(border.color),
-                    border.corner_radii,
-                    border.widths,
-                    &clips,
-                    &mut zl.draw_layers.last_mut().unwrap().quads,
-                );
-            }
+            Primitive::Rect(rect) => push_quad(
+                rect.rect,
+                color_to_linear(rect.color),
+                [0.0; 4],
+                [0.0; 4],
+                [0.0; 4],
+                fl,
+                &mut out.quads,
+            ),
+            Primitive::RoundedRect(rect) => push_quad(
+                rect.rect,
+                color_to_linear(rect.color),
+                [0.0; 4],
+                rect.corner_radii,
+                [0.0; 4],
+                fl,
+                &mut out.quads,
+            ),
+            Primitive::Border(border) => push_quad(
+                border.rect,
+                [0.0; 4],
+                color_to_linear(border.color),
+                border.corner_radii,
+                border.widths,
+                fl,
+                &mut out.quads,
+            ),
             Primitive::Shadow(shadow) => {
-                let zl = current_z!();
-                ensure_draw_layer!(zl);
-                if !zl.draw_layers.last().unwrap().quads.is_empty() {
-                    zl.draw_layers.push(DrawLayer::default());
-                }
-
                 let sigma = (shadow.blur_radius * 0.5).max(0.5);
                 let expansion = sigma * 3.0;
                 let offset_x = shadow.offset[0];
@@ -2431,182 +2317,218 @@ fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> Fla
                     width: shadow.rect.width + expansion * 2.0,
                     height: shadow.rect.height + expansion * 2.0,
                 };
-                if let Some(clip) = clips.last().copied() {
-                    if expanded.intersection(clip.scissor).is_some() {
-                        let color = color_to_linear(shadow.color);
-                        zl.draw_layers
-                            .last_mut()
-                            .unwrap()
-                            .shadows
-                            .push(ClippedShadow {
-                                instance: ShadowInstance {
-                                    draw_bounds: [
-                                        expanded.x,
-                                        expanded.y,
-                                        expanded.width,
-                                        expanded.height,
-                                    ],
-                                    shadow_bounds: [
-                                        shadow.rect.x + offset_x,
-                                        shadow.rect.y + offset_y,
-                                        shadow.rect.width,
-                                        shadow.rect.height,
-                                    ],
-                                    color,
-                                    params: [sigma, shadow.corner_radius, 0.0, 0.0],
-                                    clip_bounds: clip.clip_bounds_attr(),
-                                    clip_radii: clip.clip_radii_attr(),
-                                },
-                                clip: clip.scissor,
-                            });
-                    }
+                let clip = *fl.clips.last().expect("root clip");
+                if let Some(bounds) = expanded.intersection(clip.scissor) {
+                    let key = fl.place(PrimKind::Shadow, bounds);
+                    out.shadows.push(ClippedShadow {
+                        key,
+                        instance: ShadowInstance {
+                            draw_bounds: [expanded.x, expanded.y, expanded.width, expanded.height],
+                            shadow_bounds: [
+                                shadow.rect.x + offset_x,
+                                shadow.rect.y + offset_y,
+                                shadow.rect.width,
+                                shadow.rect.height,
+                            ],
+                            color: color_to_linear(shadow.color),
+                            params: [sigma, shadow.corner_radius, 0.0, 0.0],
+                            clip_bounds: clip.clip_bounds_attr(),
+                            clip_radii: clip.clip_radii_attr(),
+                        },
+                        clip: clip.scissor,
+                    });
                 }
             }
             Primitive::TextRun(text) => {
-                if let Some(clip) = clips.last().copied()
-                    && let Some(intersection) = text.rect.intersection(clip.scissor)
-                {
-                    let zl = current_z!();
-                    zl.texts.push(ClippedText {
+                let clip = *fl.clips.last().expect("root clip");
+                if let Some(intersection) = text.rect.intersection(clip.scissor) {
+                    let key = fl.place(PrimKind::Text, intersection);
+                    out.texts.push(ClippedText {
+                        key,
                         primitive: text.clone(),
                         clip: intersection,
                     });
                 }
             }
             Primitive::RichTextRun(text) => {
-                if let Some(clip) = clips.last().copied()
-                    && let Some(intersection) = text.rect.intersection(clip.scissor)
-                {
-                    let zl = current_z!();
-                    zl.rich_texts.push(ClippedRichText {
+                let clip = *fl.clips.last().expect("root clip");
+                if let Some(intersection) = text.rect.intersection(clip.scissor) {
+                    let key = fl.place(PrimKind::Text, intersection);
+                    out.rich_texts.push(ClippedRichText {
+                        key,
                         primitive: text.clone(),
                         clip: intersection,
                     });
                 }
             }
             Primitive::BlurRegion(blur) => {
-                if let Some(clip) = clips.last().copied() {
-                    if blur.rect.intersection(clip.scissor).is_some() {
-                        let zl = current_z!();
-                        ensure_draw_layer!(zl);
-                        zl.draw_layers.push(DrawLayer::default());
-                        flattened.blur_regions.push(FlattenedBlurRegion {
-                            rect: blur.rect,
-                            blur_radius: blur.blur_radius,
-                            layer_break: zl.draw_layers.len() - 1,
-                        });
-                    }
+                let clip = *fl.clips.last().expect("root clip");
+                if let Some(rect) = blur.rect.intersection(clip.scissor) {
+                    fl.barrier(FlattenedBlurRegion {
+                        rect,
+                        blur_radius: blur.blur_radius,
+                    });
                 }
             }
             Primitive::EffectQuad(effect) => {
-                if let Some(clip) = clips.last().copied() {
-                    if effect.rect.intersection(clip.scissor).is_some() {
-                        let color_a = color_to_linear(effect.color_a);
-                        let color_b = color_to_linear(effect.color_b);
-                        let zl = current_z!();
-                        ensure_draw_layer!(zl);
-                        zl.draw_layers
-                            .last_mut()
-                            .unwrap()
-                            .effect_quads
-                            .push(ClippedEffectQuad {
-                                instance: EffectQuadInstance {
-                                    bounds: [
-                                        effect.rect.x,
-                                        effect.rect.y,
-                                        effect.rect.width,
-                                        effect.rect.height,
-                                    ],
-                                    color_a,
-                                    color_b,
-                                    params: [
-                                        effect.effect_type as u32 as f32,
-                                        effect.params[0],
-                                        effect.params[1],
-                                        effect.corner_radius,
-                                    ],
-                                    clip_bounds: clip.clip_bounds_attr(),
-                                    clip_radii: clip.clip_radii_attr(),
-                                },
-                                clip: clip.scissor,
-                            });
-                    }
+                let clip = *fl.clips.last().expect("root clip");
+                if let Some(bounds) = effect.rect.intersection(clip.scissor) {
+                    let key = fl.place(PrimKind::Effect, bounds);
+                    out.effect_quads.push(ClippedEffectQuad {
+                        key,
+                        instance: EffectQuadInstance {
+                            bounds: [
+                                effect.rect.x,
+                                effect.rect.y,
+                                effect.rect.width,
+                                effect.rect.height,
+                            ],
+                            color_a: color_to_linear(effect.color_a),
+                            color_b: color_to_linear(effect.color_b),
+                            params: [
+                                effect.effect_type as u32 as f32,
+                                effect.params[0],
+                                effect.params[1],
+                                effect.corner_radius,
+                            ],
+                            clip_bounds: clip.clip_bounds_attr(),
+                            clip_radii: clip.clip_radii_attr(),
+                        },
+                        clip: clip.scissor,
+                    });
                 }
             }
             Primitive::Image(img) => {
-                if let Some(clip) = clips.last().copied() {
-                    if img.rect.intersection(clip.scissor).is_some() {
-                        let zl = current_z!();
-                        zl.images.push(ClippedImage {
-                            primitive: img.clone(),
-                            clip: clip.scissor,
-                        });
-                    }
+                let clip = *fl.clips.last().expect("root clip");
+                if let Some(bounds) = img.rect.intersection(clip.scissor) {
+                    let key = fl.place(PrimKind::Image, bounds);
+                    out.images.push(ClippedImage {
+                        key,
+                        primitive: img.clone(),
+                        clip: clip.scissor,
+                    });
                 }
             }
             Primitive::Icon(icon) => {
-                if let Some(clip) = clips.last().copied() {
-                    if icon.rect.intersection(clip.scissor).is_some() {
-                        let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
-                        let cache_key = crate::icons::cache_key(&icon.name, px_size, icon.color);
-                        // Only rasterize (and copy RGBA out of the icon cache)
-                        // when the texture is not on the GPU yet; once
-                        // uploaded, the cache key alone is enough to draw.
-                        let (rgba, w, h) = if image_cache.contains_key(&cache_key) {
-                            (Vec::new(), 0, 0)
-                        } else {
-                            crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
-                        };
-                        let zl = current_z!();
-                        zl.images.push(ClippedImage {
-                            primitive: crate::scene::ImagePrimitive {
-                                rect: crate::Rect {
-                                    x: icon.rect.x.round(),
-                                    y: icon.rect.y.round(),
-                                    width: icon.rect.width.round(),
-                                    height: icon.rect.height.round(),
-                                },
-                                width: w,
-                                height: h,
-                                rgba,
-                                cache_key,
-                            },
-                            clip: clip.scissor,
-                        });
-                    }
+                let clip = *fl.clips.last().expect("root clip");
+                let rect = crate::Rect {
+                    x: icon.rect.x.round(),
+                    y: icon.rect.y.round(),
+                    width: icon.rect.width.round(),
+                    height: icon.rect.height.round(),
+                };
+                if let Some(bounds) = rect.intersection(clip.scissor) {
+                    let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
+                    let cache_key = crate::icons::cache_key(&icon.name, px_size, icon.color);
+                    // Only rasterize (and copy RGBA out of the icon cache)
+                    // when the texture is not on the GPU yet; once
+                    // uploaded, the cache key alone is enough to draw.
+                    let (rgba, w, h) = if image_cache.contains_key(&cache_key) {
+                        (Vec::new(), 0, 0)
+                    } else {
+                        crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
+                    };
+                    let key = fl.place(PrimKind::Image, bounds);
+                    out.images.push(ClippedImage {
+                        key,
+                        primitive: crate::scene::ImagePrimitive {
+                            rect,
+                            width: w,
+                            height: h,
+                            rgba,
+                            cache_key,
+                        },
+                        clip: clip.scissor,
+                    });
                 }
             }
             Primitive::ClipStart(ClipPrimitive { rect, corner_radii }) => {
-                let next = clips
+                let next = fl
+                    .clips
                     .last()
                     .and_then(|clip| clip.push(*rect, *corner_radii))
-                    .unwrap_or_else(|| ActiveClip {
+                    .unwrap_or(ActiveClip {
                         scissor: Rect::default(),
                         rounded_rect: Rect::default(),
                         corner_radii: [0.0; 4],
                     });
-                clips.push(next);
+                fl.clips.push(next);
             }
             Primitive::ClipEnd => {
-                if clips.len() > 1 {
-                    clips.pop();
+                if fl.clips.len() > 1 {
+                    fl.clips.pop();
                 }
             }
-            Primitive::ZIndexPush(z) => {
-                z_index_stack.push(*z);
-            }
+            Primitive::ZIndexPush(z) => fl.z_stack.push(*z),
             Primitive::ZIndexPop => {
-                if z_index_stack.len() > 1 {
-                    z_index_stack.pop();
+                if fl.z_stack.len() > 1 {
+                    fl.z_stack.pop();
                 }
             }
             Primitive::LayerBoundary => {}
         }
     }
 
-    // Collect z-layers sorted by z-index (BTreeMap is already sorted).
-    flattened.z_layers = z_map.into_values().collect();
-    flattened
+    // Put every kind's array into draw order, then walk the z-layers'
+    // segment lists to slice those arrays into steps.
+    out.shadows.sort_unstable_by_key(|item| item.key);
+    out.effect_quads.sort_unstable_by_key(|item| item.key);
+    out.quads.sort_unstable_by_key(|item| item.key);
+    out.images.sort_unstable_by_key(|item| item.key);
+    out.texts.sort_unstable_by_key(|item| item.key);
+    out.rich_texts.sort_unstable_by_key(|item| item.key);
+
+    let builders = &mut fl.builders[..fl.active];
+    builders.sort_unstable_by_key(|builder| builder.z);
+    let mut cursors = [0usize; KIND_COUNT];
+    let mut rich_cursor = 0usize;
+    for builder in builders.iter() {
+        for (segment, slot) in builder.segments.iter().enumerate() {
+            let (z, segment) = (builder.z, segment as u32);
+            match *slot {
+                SegmentSlot::Blur(region) => out.steps.push(DrawStep::Blur(region)),
+                SegmentSlot::Batch(kind) => {
+                    let cursor = &mut cursors[kind as usize];
+                    let items = match kind {
+                        PrimKind::Shadow => take_run(&out.shadows, cursor, z, segment, |i| i.key),
+                        PrimKind::Effect => {
+                            take_run(&out.effect_quads, cursor, z, segment, |i| i.key)
+                        }
+                        PrimKind::Quad => take_run(&out.quads, cursor, z, segment, |i| i.key),
+                        PrimKind::Image => take_run(&out.images, cursor, z, segment, |i| i.key),
+                        PrimKind::Text => take_run(&out.texts, cursor, z, segment, |i| i.key),
+                    };
+                    let rich = if kind == PrimKind::Text {
+                        take_run(&out.rich_texts, &mut rich_cursor, z, segment, |i| i.key)
+                    } else {
+                        0..0
+                    };
+                    if !items.is_empty() || !rich.is_empty() {
+                        out.steps.push(DrawStep::Batch { kind, items, rich });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Advance `cursor` over the items keyed to (`z`, `segment`) and return them.
+fn take_run<T>(
+    items: &[T],
+    cursor: &mut usize,
+    z: i32,
+    segment: u32,
+    key: impl Fn(&T) -> DrawKey,
+) -> std::ops::Range<u32> {
+    let start = *cursor;
+    while *cursor < items.len() {
+        let k = key(&items[*cursor]);
+        if k.z != z || k.segment != segment {
+            break;
+        }
+        *cursor += 1;
+    }
+    start as u32..*cursor as u32
 }
 
 fn push_quad(
@@ -2615,120 +2537,177 @@ fn push_quad(
     border_color: [f32; 4],
     corner_radii: [f32; 4],
     border_widths: [f32; 4],
-    clips: &[ActiveClip],
+    fl: &mut Flattener,
     out: &mut Vec<ClippedQuad>,
 ) {
-    if let Some(clip) = clips.last().copied() {
-        if rect.intersection(clip.scissor).is_some() {
-            out.push(ClippedQuad {
-                instance: QuadInstance {
-                    bounds: [rect.x, rect.y, rect.width, rect.height],
-                    background,
-                    border_color,
-                    corner_radii,
-                    border_widths,
-                    clip_bounds: clip.clip_bounds_attr(),
-                    clip_radii: clip.clip_radii_attr(),
-                },
-                clip: clip.scissor,
-            });
-        }
+    let clip = *fl.clips.last().expect("root clip");
+    if let Some(bounds) = rect.intersection(clip.scissor) {
+        let key = fl.place(PrimKind::Quad, bounds);
+        out.push(ClippedQuad {
+            key,
+            instance: QuadInstance {
+                bounds: [rect.x, rect.y, rect.width, rect.height],
+                background,
+                border_color,
+                corner_radii,
+                border_widths,
+                clip_bounds: clip.clip_bounds_attr(),
+                clip_radii: clip.clip_radii_attr(),
+            },
+            clip: clip.scissor,
+        });
     }
 }
 
 // ---------------------------------------------------------------------------
-// Quad instance batching
+// GPU batches
 // ---------------------------------------------------------------------------
 
-fn build_quad_instances(quads: &[ClippedQuad]) -> (Vec<QuadInstance>, Vec<QuadDrawCommand>) {
-    let mut instances = Vec::with_capacity(quads.len());
-    let mut commands = Vec::with_capacity(quads.len());
-
-    let mut i = 0;
-    while i < quads.len() {
-        let start = i as u32;
-        let clip = quads[i].clip;
-        instances.push(quads[i].instance);
-        i += 1;
-
-        while i < quads.len() && rects_equal(quads[i].clip, clip) {
-            instances.push(quads[i].instance);
-            i += 1;
-        }
-
-        commands.push(QuadDrawCommand {
-            instance_start: start,
-            instance_end: i as u32,
-            clip,
-        });
-    }
-
-    (instances, commands)
+/// Per-frame instance data in draw order, one array per pipeline. Kept on the
+/// renderer so the vectors keep their capacity between frames.
+#[derive(Default)]
+struct FrameBatches {
+    shadows: Vec<ShadowInstance>,
+    effects: Vec<EffectQuadInstance>,
+    quads: Vec<QuadInstance>,
+    images: Vec<BlitInstance>,
+    /// Scissor batches for shadow, effect, and quad steps. Each step's range
+    /// indexes the instance array of its own kind.
+    quad_cmds: Vec<QuadDrawCommand>,
+    image_cmds: Vec<ImageDrawCommand>,
+    /// Per step: a range into `quad_cmds` or `image_cmds`, or for text the
+    /// index of its text renderer (`start`).
+    step_cmds: Vec<std::ops::Range<u32>>,
+    text_steps: usize,
 }
 
-fn build_shadow_instances(
-    shadows: &[ClippedShadow],
-) -> (Vec<ShadowInstance>, Vec<QuadDrawCommand>) {
-    let mut instances = Vec::with_capacity(shadows.len());
-    let mut commands = Vec::with_capacity(shadows.len());
-
-    let mut i = 0;
-    while i < shadows.len() {
-        let start = i as u32;
-        let clip = shadows[i].clip;
-        instances.push(shadows[i].instance);
-        i += 1;
-
-        while i < shadows.len() && rects_equal(shadows[i].clip, clip) {
-            instances.push(shadows[i].instance);
-            i += 1;
+fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
+    out.shadows.clear();
+    out.shadows
+        .extend(flat.shadows.iter().map(|item| item.instance));
+    out.effects.clear();
+    out.effects
+        .extend(flat.effect_quads.iter().map(|item| item.instance));
+    out.quads.clear();
+    out.quads
+        .extend(flat.quads.iter().map(|item| item.instance));
+    out.images.clear();
+    out.images.extend(flat.images.iter().map(|item| {
+        let r = item.primitive.rect;
+        BlitInstance {
+            bounds: [r.x, r.y, r.width, r.height],
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            tint: [1.0, 1.0, 1.0, 1.0],
         }
+    }));
+    out.quad_cmds.clear();
+    out.image_cmds.clear();
+    out.step_cmds.clear();
+    out.text_steps = 0;
 
-        commands.push(QuadDrawCommand {
-            instance_start: start,
-            instance_end: i as u32,
-            clip,
-        });
+    for step in &flat.steps {
+        let range = match step {
+            DrawStep::Blur(_) => 0..0,
+            DrawStep::Batch { kind, items, .. } => {
+                let (start, end) = (items.start as usize, items.end as usize);
+                match kind {
+                    PrimKind::Shadow => push_clip_batches(
+                        flat.shadows[start..end].iter().map(|i| i.clip),
+                        items.start,
+                        &mut out.quad_cmds,
+                    ),
+                    PrimKind::Effect => push_clip_batches(
+                        flat.effect_quads[start..end].iter().map(|i| i.clip),
+                        items.start,
+                        &mut out.quad_cmds,
+                    ),
+                    PrimKind::Quad => push_clip_batches(
+                        flat.quads[start..end].iter().map(|i| i.clip),
+                        items.start,
+                        &mut out.quad_cmds,
+                    ),
+                    PrimKind::Image => {
+                        let first = out.image_cmds.len();
+                        for (offset, image) in flat.images[start..end].iter().enumerate() {
+                            let index = items.start + offset as u32;
+                            let key = image.primitive.cache_key;
+                            let own = out.image_cmds.len() > first;
+                            match out.image_cmds.last_mut() {
+                                Some(last)
+                                    if own
+                                        && last.cache_key == key
+                                        && rects_equal(last.clip, image.clip) =>
+                                {
+                                    last.instance_end = index + 1;
+                                }
+                                _ => out.image_cmds.push(ImageDrawCommand {
+                                    instance_start: index,
+                                    instance_end: index + 1,
+                                    cache_key: key,
+                                    clip: image.clip,
+                                }),
+                            }
+                        }
+                        first as u32..out.image_cmds.len() as u32
+                    }
+                    PrimKind::Text => {
+                        out.text_steps += 1;
+                        (out.text_steps - 1) as u32..out.text_steps as u32
+                    }
+                }
+            }
+        };
+        out.step_cmds.push(range);
     }
-
-    (instances, commands)
 }
 
-fn build_effect_quad_instances(
-    effects: &[ClippedEffectQuad],
-) -> (Vec<EffectQuadInstance>, Vec<QuadDrawCommand>) {
-    let mut instances = Vec::with_capacity(effects.len());
-    let mut commands = Vec::with_capacity(effects.len());
-
-    let mut i = 0;
-    while i < effects.len() {
-        let start = i as u32;
-        let clip = effects[i].clip;
-        instances.push(effects[i].instance);
-        i += 1;
-
-        while i < effects.len() && rects_equal(effects[i].clip, clip) {
-            instances.push(effects[i].instance);
-            i += 1;
+/// Append scissor batches for consecutive instances that share a clip and
+/// return the range of commands added.
+fn push_clip_batches(
+    clips: impl Iterator<Item = Rect>,
+    first_instance: u32,
+    out: &mut Vec<QuadDrawCommand>,
+) -> std::ops::Range<u32> {
+    let first = out.len();
+    for (index, clip) in (first_instance..).zip(clips) {
+        let own = out.len() > first;
+        match out.last_mut() {
+            Some(last) if own && rects_equal(last.clip, clip) => {
+                last.instance_end = index + 1;
+            }
+            _ => out.push(QuadDrawCommand {
+                instance_start: index,
+                instance_end: index + 1,
+                clip,
+            }),
         }
-
-        commands.push(QuadDrawCommand {
-            instance_start: start,
-            instance_end: i as u32,
-            clip,
-        });
     }
-
-    (instances, commands)
+    first as u32..out.len() as u32
 }
 
 fn rects_equal(a: Rect, b: Rect) -> bool {
     a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height
 }
 
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+}
+
+fn rect_union(a: Rect, b: Rect) -> Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect {
+        x,
+        y,
+        width: a.right().max(b.right()) - x,
+        height: a.bottom().max(b.bottom()) - y,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fonts::FontSettings;
 
     #[test]
     fn scissor_rect_clamps_to_render_target() {
@@ -2799,12 +2778,7 @@ mod tests {
         scene.push(Primitive::ClipEnd);
 
         let flat = flatten_scene(&scene, viewport, &ImageCache::new());
-        let quads: Vec<&QuadInstance> = flat
-            .z_layers
-            .iter()
-            .flat_map(|z| z.draw_layers.iter())
-            .flat_map(|dl| dl.quads.iter().map(|q| &q.instance))
-            .collect();
+        let quads: Vec<&QuadInstance> = flat.quads.iter().map(|q| &q.instance).collect();
 
         // Expect 2 quads: the parent bg and the child bg.
         assert_eq!(quads.len(), 2, "expected 2 quads, got {}", quads.len());
@@ -2831,6 +2805,130 @@ mod tests {
             [cluster.x, cluster.y, cluster.width, cluster.height],
             "child bg should inherit rounded clip bounds from parent",
         );
+    }
+
+    // -- Headless GPU helpers ------------------------------------------------
+
+    /// Headless renderer, or `None` when no adapter exists (a failure when
+    /// `QUARK_REQUIRE_GPU` is set).
+    fn gpu_renderer(width: u32, height: u32) -> Option<Renderer> {
+        match Renderer::new_headless(width, height, 1.0, &FontSettings::default()) {
+            Ok(renderer) => Some(renderer),
+            Err(RenderError::NoAdapter) => {
+                assert!(
+                    std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                    "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+                );
+                None
+            }
+            Err(error) => panic!("headless renderer failed: {error}"),
+        }
+    }
+
+    fn render_pixels(scene: &Scene, width: u32, height: u32) -> Option<image::RgbaImage> {
+        let mut renderer = gpu_renderer(width, height)?;
+        let pixels = renderer
+            .render_to_rgba(scene, width, height, 1.0)
+            .expect("offscreen render");
+        Some(image::RgbaImage::from_raw(width, height, pixels).expect("pixel buffer size"))
+    }
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn white_text(rect: Rect, text: &str) -> Primitive {
+        Primitive::TextRun(TextPrimitive {
+            rect,
+            text: text.into(),
+            color: quark::Color::rgba(255, 255, 255, 255),
+            font_size: 16.0,
+            font_kind: crate::scene::FontKind::Ui,
+            font_weight: crate::scene::FontWeight::Normal,
+        })
+    }
+
+    fn solid(rect: Rect, r: u8, g: u8, b: u8) -> Primitive {
+        Primitive::Rect(crate::scene::RectPrimitive {
+            rect,
+            color: quark::Color::rgba(r, g, b, 255),
+        })
+    }
+
+    fn any_light_pixel(image: &image::RgbaImage, area: Rect) -> bool {
+        let (x0, y0) = (area.x as u32, area.y as u32);
+        let (x1, y1) = (area.right() as u32, area.bottom() as u32);
+        (y0..y1).any(|y| {
+            (x0..x1).any(|x| {
+                let p = image.get_pixel(x, y).0;
+                p[0] > 128 && p[1] > 128 && p[2] > 128
+            })
+        })
+    }
+
+    // -- Draw order ------------------------------------------------------------
+
+    // Regression: each z-layer drew all quads, then images, then text, so a
+    // quad painted after text (selection highlight, overlay) sat under it.
+    #[test]
+    fn render_quad_painted_after_text_covers_text() {
+        let band = rect(4.0, 4.0, 120.0, 24.0);
+        let mut scene = Scene::default();
+        scene.push(white_text(band, "WWWWWWWW"));
+        scene.push(solid(band, 200, 0, 0));
+        let Some(image) = render_pixels(&scene, 128, 32) else {
+            return;
+        };
+        assert!(
+            !any_light_pixel(&image, band),
+            "text drew over the quad painted after it"
+        );
+    }
+
+    // Guards the single-encoder path: every text segment has its own text
+    // renderer, so preparing a later z-layer's text must not erase earlier text.
+    #[test]
+    fn render_text_in_two_z_layers_draws_both() {
+        let low = rect(4.0, 4.0, 120.0, 24.0);
+        let high = rect(4.0, 36.0, 120.0, 24.0);
+        let mut scene = Scene::default();
+        scene.push(white_text(low, "WWWWWWWW"));
+        scene.push(Primitive::ZIndexPush(1));
+        scene.push(white_text(high, "WWWWWWWW"));
+        scene.push(Primitive::ZIndexPop);
+        let Some(image) = render_pixels(&scene, 128, 64) else {
+            return;
+        };
+        assert!(any_light_pixel(&image, low), "z=0 text is missing");
+        assert!(any_light_pixel(&image, high), "z=1 text is missing");
+    }
+
+    // Splitting at every kind transition would cost one draw and one text
+    // renderer per list row; disjoint rows must stay in a quad and a text batch.
+    #[test]
+    fn flatten_disjoint_rows_keep_one_quad_and_one_text_batch() {
+        let mut scene = Scene::default();
+        scene.push(solid(rect(0.0, 0.0, 200.0, 400.0), 10, 10, 10));
+        for row in 0..20 {
+            let row_rect = rect(0.0, row as f32 * 20.0, 200.0, 20.0);
+            scene.push(solid(row_rect, 30, 30, 30));
+            scene.push(white_text(row_rect, "row"));
+        }
+        let flat = flatten_scene(&scene, rect(0.0, 0.0, 200.0, 400.0), &ImageCache::new());
+        let kinds: Vec<PrimKind> = flat
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                DrawStep::Batch { kind, .. } => Some(*kind),
+                DrawStep::Blur(_) => None,
+            })
+            .collect();
+        assert_eq!(kinds, [PrimKind::Quad, PrimKind::Text]);
     }
 }
 
