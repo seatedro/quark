@@ -317,7 +317,13 @@ pub trait Styled: Sized {
     }
 
     fn rounded(mut self, r: f32) -> Self {
-        self.element_style_mut().corner_radius = r;
+        self.element_style_mut().corner_radii = [r; 4];
+        self
+    }
+
+    /// Per-corner radii: [top-left, top-right, bottom-right, bottom-left].
+    fn rounded_corners(mut self, radii: [f32; 4]) -> Self {
+        self.element_style_mut().corner_radii = radii;
         self
     }
 
@@ -327,7 +333,7 @@ pub trait Styled: Sized {
     }
 
     fn shadow(mut self, blur: f32, offset_y: f32, color: Color) -> Self {
-        let r = self.element_style_mut().corner_radius;
+        let r = self.element_style_mut().max_corner_radius();
         self.element_style_mut().shadows.push(ShadowStyle {
             blur_radius: blur,
             offset: [0.0, offset_y],
@@ -596,7 +602,7 @@ pub trait Styled: Sized {
         self.rounded(0.0)
     }
     fn rounded_full(mut self) -> Self {
-        self.element_style_mut().corner_radius = 9999.0;
+        self.element_style_mut().corner_radii = [9999.0; 4];
         self
     }
 

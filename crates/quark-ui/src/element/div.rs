@@ -505,7 +505,8 @@ impl Element for Div {
             .hitbox_id
             .map_or(false, |id| cx.is_hovered(id));
         let mut style = self.resolve_style(hovered);
-        let r = style.corner_radius;
+        let radii = style.corner_radii;
+        let r = style.max_corner_radius();
         let z = style.z_index;
         let opacity = style.opacity;
 
@@ -578,7 +579,11 @@ impl Element for Div {
                 corner_radius: r,
             });
         } else if let Some(bg) = style.background {
-            scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, r, bg));
+            scene.rounded_rect(RoundedRectPrimitive {
+                rect: bounds,
+                corner_radii: radii,
+                color: bg,
+            });
         }
 
         // Border
@@ -587,7 +592,7 @@ impl Element for Div {
                 scene.border(BorderPrimitive {
                     rect: bounds,
                     widths: style.border_widths,
-                    corner_radii: [r; 4],
+                    corner_radii: radii,
                     color: border,
                 });
             }
@@ -605,7 +610,7 @@ impl Element for Div {
                 scene.border(BorderPrimitive {
                     rect: ring_bounds,
                     widths: [2.0; 4],
-                    corner_radii: [(r + 2.0); 4],
+                    corner_radii: radii.map(|c| c + 2.0),
                     color: cx.theme.colors.focus_border,
                 });
             }
@@ -778,7 +783,7 @@ impl Element for Div {
 
         if should_clip {
             if r > 0.0 {
-                scene.clip_rounded(bounds, [r; 4]);
+                scene.clip_rounded(bounds, radii);
             } else {
                 scene.clip(bounds);
             }
@@ -901,7 +906,7 @@ impl Element for Div {
             scene.border(BorderPrimitive {
                 rect: bounds,
                 widths: [1.0; 4],
-                corner_radii: [r; 4],
+                corner_radii: radii,
                 color: wire_color,
             });
         }
