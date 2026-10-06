@@ -340,7 +340,7 @@ impl Element for SelectableText {
             && bounds.width > 0.0
             && bounds.height > 0.0
         {
-            cx.accessibility.push(
+            cx.push_accessibility(
                 AccessibilityNode::new(
                     format!(
                         "selectable-text:{:?}:{:.0}:{:.0}",

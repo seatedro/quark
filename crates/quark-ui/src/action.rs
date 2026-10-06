@@ -61,16 +61,11 @@ impl fmt::Debug for Action {
     }
 }
 
-/// Opaque identity of a focusable target. Apps map their own focus enum to
-/// and from this id (`impl From<MyFocus> for FocusId`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FocusId(pub u64);
-
-impl FocusId {
-    pub const fn new(id: u64) -> Self {
-        Self(id)
-    }
-}
+/// Identity of a focusable target, shared with `quark::FocusTree` and
+/// accessibility focus. Apps map their own focus enum to it
+/// (`impl From<MyFocus> for FocusId`) or derive it from a stable key with
+/// [`FocusId::from_key`].
+pub use quark::FocusId;
 
 #[cfg(test)]
 mod tests {

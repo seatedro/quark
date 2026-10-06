@@ -361,16 +361,18 @@ impl Element for TextInput {
                 .value(accessible_value.clone());
             semantic_node.parent = cx.current_semantic_parent();
             semantic_node.actions = SemanticActions::default().text_value().hit_test();
+            semantic_node.focus = Some(target);
             semantic_node.state = SemanticNodeState {
                 style_state,
                 ..SemanticNodeState::default()
             };
-            cx.semantic.push(semantic_node);
-            cx.accessibility.push(
+            let semantic_index = cx.semantic.push(semantic_node);
+            cx.push_accessibility_for_semantic(
                 AccessibilityNode::new(semantic_id, role, bounds)
                     .label(accessibility_label)
                     .value(accessible_value)
                     .action(AccessibilityAction::TextValue(target)),
+                semantic_index,
             );
             cx.text_input_hit_areas.push(TextInputHitArea {
                 bounds,

@@ -1,5 +1,5 @@
 use crate::{
-    FocusNode, FocusScopeId, FocusTree, KeyContext, Rect, StyleState, TabStop, TestId,
+    FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, Rect, StyleState, TabStop, TestId,
     UiEventBinding, UiEventRoute, UiKey, UiNodeId,
 };
 
@@ -107,6 +107,9 @@ pub struct SemanticNode {
     pub bounds: Rect,
     pub actions: SemanticActions,
     pub state: SemanticNodeState,
+    /// Focus target this node represents. Falls back to a hash of the
+    /// node's stable id when unset.
+    pub focus: Option<FocusId>,
     pub focus_scope: Option<FocusScopeId>,
     pub tab_stop: Option<TabStop>,
     pub key_context: Option<KeyContext>,
@@ -128,6 +131,7 @@ impl SemanticNode {
             bounds,
             actions: SemanticActions::default(),
             state: SemanticNodeState::default(),
+            focus: None,
             focus_scope: None,
             tab_stop: None,
             key_context: None,
@@ -259,7 +263,10 @@ impl SemanticFrame {
             if !(node.actions.focus || node.actions.text_value || node.tab_stop.is_some()) {
                 continue;
             }
-            let Some(id) = self.stable_node_id(index) else {
+            let Some(id) = node
+                .focus
+                .or_else(|| self.stable_node_id(index).map(FocusId::from))
+            else {
                 continue;
             };
             tree.register(FocusNode {
@@ -401,8 +408,8 @@ mod tests {
         let order: Vec<_> = tree
             .tab_order(Some(&scope))
             .into_iter()
-            .map(|node| node.id.as_str().to_owned())
+            .map(|node| node.id)
             .collect();
-        assert_eq!(order, vec!["save"]);
+        assert_eq!(order, vec![FocusId::from_key("save")]);
     }
 }

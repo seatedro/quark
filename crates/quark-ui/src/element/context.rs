@@ -261,6 +261,43 @@ impl<'a> ElementContext<'a> {
         self.semantic_parent_stack.pop();
     }
 
+    /// Push an accessibility node under the nearest semantic ancestor that has
+    /// an accessibility node, or under the window when none does.
+    pub fn push_accessibility(&mut self, node: AccessibilityNode) -> accesskit::NodeId {
+        let parent = self.accessible_semantic_ancestor();
+        self.accessibility.push_child(node, parent)
+    }
+
+    /// Like [`Self::push_accessibility`], and records that the node represents
+    /// semantic node `semantic_index`, so descendants nest beneath it.
+    pub fn push_accessibility_for_semantic(
+        &mut self,
+        node: AccessibilityNode,
+        semantic_index: usize,
+    ) -> accesskit::NodeId {
+        let id = self.push_accessibility(node);
+        self.accessibility.bind_semantic(semantic_index, id);
+        id
+    }
+
+    fn accessible_semantic_ancestor(&self) -> Option<accesskit::NodeId> {
+        let mut current = self.current_semantic_parent();
+        while let Some(index) = current {
+            if let Some(id) = self.accessibility.semantic_owner(index) {
+                return Some(id);
+            }
+            // Parents are pushed before children; requiring a smaller index
+            // guarantees the walk ends even on a malformed frame.
+            current = self
+                .semantic
+                .nodes()
+                .get(index)
+                .and_then(|node| node.parent)
+                .filter(|parent| *parent < index);
+        }
+        None
+    }
+
     pub fn current_element_offset(&self) -> (f32, f32) {
         *self.element_offset_stack.last().unwrap_or(&(0.0, 0.0))
     }
