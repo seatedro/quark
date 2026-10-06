@@ -251,7 +251,9 @@ pub struct ImagePrimitive {
     pub rect: Rect,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    /// Shared so painting the same image every frame does not copy pixels.
+    /// May be empty when the renderer already holds `cache_key`.
+    pub rgba: std::sync::Arc<[u8]>,
     pub cache_key: u64,
 }
 

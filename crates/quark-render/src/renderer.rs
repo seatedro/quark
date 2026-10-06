@@ -69,7 +69,13 @@ pub enum RenderError {
 struct CachedImage {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    last_used_frame: u64,
 }
+
+/// Frames an uploaded image may go undrawn before its texture is dropped.
+/// Matches the text buffer cache horizon; re-uploading is cheap because the
+/// pixels stay in the primitive (raster images) or the CPU icon cache.
+const KEEP_UNUSED_IMAGE_FRAMES: u64 = 240;
 
 /// GPU-resident images keyed by content hash.
 type ImageCache = HashMap<u64, CachedImage>;
@@ -286,6 +292,7 @@ pub struct Renderer {
     texture_pool: TexturePool,
     instance_buffer_pool: TransientBufferPool,
     image_cache: ImageCache,
+    image_frame: u64,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
     font_system: FontSystem,
@@ -741,6 +748,7 @@ impl Renderer {
             texture_pool,
             instance_buffer_pool: TransientBufferPool::default(),
             image_cache: HashMap::new(),
+            image_frame: 0,
             viewport_buffer,
             viewport_bind_group,
             font_system,
@@ -1127,6 +1135,7 @@ impl Renderer {
         height: u32,
         scale_factor: f64,
     ) -> Result<(), RenderError> {
+        self.image_frame += 1;
         for image in &flat.images {
             self.ensure_image_uploaded(&image.primitive);
         }
@@ -1203,6 +1212,9 @@ impl Renderer {
             self.texture_pool.release(targets.h);
             self.texture_pool.release(targets.v);
         }
+        let frame = self.image_frame;
+        self.image_cache
+            .retain(|_, image| frame - image.last_used_frame <= KEEP_UNUSED_IMAGE_FRAMES);
         result
     }
 
@@ -1456,15 +1468,15 @@ impl Renderer {
         Ok(())
     }
 
-    /// Upload `image` to the GPU cache under its key if it is not there yet.
+    /// Upload `image` to the GPU cache under its key if it is not there yet,
+    /// and mark the entry used this frame.
     fn ensure_image_uploaded(&mut self, image: &crate::scene::ImagePrimitive) {
         let key = image.cache_key;
-        if key == 0
-            || self.image_cache.contains_key(&key)
-            || image.rgba.is_empty()
-            || image.width == 0
-            || image.height == 0
-        {
+        if let Some(cached) = self.image_cache.get_mut(&key) {
+            cached.last_used_frame = self.image_frame;
+            return;
+        }
+        if key == 0 || image.rgba.is_empty() || image.width == 0 || image.height == 0 {
             return;
         }
         let texture = self.device.create_texture_with_data(
@@ -1498,6 +1510,7 @@ impl Renderer {
             CachedImage {
                 _texture: texture,
                 bind_group,
+                last_used_frame: self.image_frame,
             },
         );
     }
@@ -2424,7 +2437,7 @@ fn flatten_scene_into(
                     // when the texture is not on the GPU yet; once
                     // uploaded, the cache key alone is enough to draw.
                     let (rgba, w, h) = if image_cache.contains_key(&cache_key) {
-                        (Vec::new(), 0, 0)
+                        (empty_rgba(), 0, 0)
                     } else {
                         crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
                     };
@@ -2510,6 +2523,12 @@ fn flatten_scene_into(
             }
         }
     }
+}
+
+/// Shared empty pixel buffer for icons whose texture is already uploaded.
+fn empty_rgba() -> Arc<[u8]> {
+    static EMPTY: std::sync::LazyLock<Arc<[u8]>> = std::sync::LazyLock::new(|| Arc::from([]));
+    EMPTY.clone()
 }
 
 /// Advance `cursor` over the items keyed to (`z`, `segment`) and return them.

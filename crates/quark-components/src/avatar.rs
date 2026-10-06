@@ -11,7 +11,7 @@ use quark_ui::theme::Color;
 /// RGBA bitmap input for an avatar. Already circular-masked on the CPU side.
 #[derive(Debug, Clone)]
 pub struct AvatarImage {
-    pub rgba: Arc<Vec<u8>>,
+    pub rgba: Arc<[u8]>,
     pub width: u32,
     pub height: u32,
     pub cache_key: u64,

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use quark::Color;
 
 static CACHE: Mutex<Option<HashMap<u64, CachedIcon>>> = Mutex::new(None);
 
 struct CachedIcon {
-    rgba: Vec<u8>,
+    rgba: Arc<[u8]>,
     width: u32,
     height: u32,
 }
@@ -26,7 +26,9 @@ pub fn cache_key(svg: &str, size: u32, color: Color) -> u64 {
     h.finish()
 }
 
-pub fn rasterize_svg(svg: &str, size: u32, color: Color) -> (Vec<u8>, u32, u32) {
+/// Rasterize `svg` at `size` px tinted with `color`. Results are cached, and
+/// the shared bytes make repeat calls a refcount bump instead of a copy.
+pub fn rasterize_svg(svg: &str, size: u32, color: Color) -> (Arc<[u8]>, u32, u32) {
     let key = cache_key(svg, size, color);
 
     let mut guard = CACHE.lock().unwrap();
@@ -47,7 +49,7 @@ pub fn rasterize_svg(svg: &str, size: u32, color: Color) -> (Vec<u8>, u32, u32) 
         Ok(t) => t,
         Err(_) => {
             let empty = vec![0u8; (size * size * 4) as usize];
-            return (empty, size, size);
+            return (empty.into(), size, size);
         }
     };
 
@@ -70,6 +72,7 @@ pub fn rasterize_svg(svg: &str, size: u32, color: Color) -> (Vec<u8>, u32, u32) 
             px[3] = ((px[3] as u16 * mult) / 255) as u8;
         }
     }
+    let rgba: Arc<[u8]> = rgba.into();
     cache.insert(
         key,
         CachedIcon {
