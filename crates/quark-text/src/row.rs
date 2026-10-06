@@ -64,3 +64,25 @@ impl<M: RowMeasure> RowMeasure for RowHeights<M> {
             .or_insert_with(|| inner.measure(key, width))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    #[test]
+    fn row_heights_return_cached_height_until_invalidated_or_width_changes() {
+        // Row content the inner measure reads; changing it does not reach the
+        // cache until the row is invalidated or the width changes.
+        let content = RefCell::new(HashMap::from([(1u64, 10.0f32)]));
+        let mut rows = RowHeights::new(|key: u64, width: f32| content.borrow()[&key] + width);
+        assert_eq!(rows.measure(1, 100.0), 110.0);
+        content.borrow_mut().insert(1, 20.0);
+        assert_eq!(rows.measure(1, 100.0), 110.0);
+        rows.invalidate(1);
+        assert_eq!(rows.measure(1, 100.0), 120.0);
+        content.borrow_mut().insert(1, 30.0);
+        assert_eq!(rows.measure(1, 200.0), 230.0);
+    }
+}

@@ -168,3 +168,60 @@ fn style_tag(style: Option<FontStyle>) -> u8 {
         Some(FontStyle::Italic) => 1,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fonts::FontSettings;
+    use crate::layout::TextStyle;
+    use crate::system::test_system;
+
+    const TEXT: &str = "The quick brown fox jumps over the lazy dog.";
+
+    fn params(wrap: f32) -> TextParams {
+        TextParams::new(TEXT, TextStyle::new(14.0)).wrap_width(Some(wrap))
+    }
+
+    #[test]
+    fn layout_cache_equal_params_in_new_arc_return_cached_layout() {
+        let mut sys = test_system();
+        let mut cache = LayoutCache::new(2);
+        cache.begin_frame();
+        let first = cache.layout(&mut sys, &params(150.0)).expect("layout");
+        let again = cache.layout(&mut sys, &params(150.0)).expect("layout");
+        assert!(Arc::ptr_eq(&first, &again));
+        let wide = cache.layout(&mut sys, &params(300.0)).expect("layout");
+        assert!(!Arc::ptr_eq(&first, &wide));
+    }
+
+    #[test]
+    fn layout_cache_trim_evicts_only_entries_idle_past_limit() {
+        let mut sys = test_system();
+        let mut cache = LayoutCache::new(2);
+        cache.begin_frame();
+        let kept = cache.layout(&mut sys, &params(150.0)).expect("layout");
+        cache.layout(&mut sys, &params(300.0)).expect("layout");
+        for _ in 0..3 {
+            cache.begin_frame();
+            cache.layout(&mut sys, &params(150.0)).expect("layout");
+        }
+        assert_eq!(cache.trim(), 1);
+        let again = cache.layout(&mut sys, &params(150.0)).expect("layout");
+        assert!(Arc::ptr_eq(&kept, &again));
+    }
+
+    #[test]
+    fn layout_cache_font_settings_change_relayouts() {
+        // Its own system: changing fonts on the shared one would race other
+        // tests.
+        let mut sys = TextSystem::vendored_only(&FontSettings::default());
+        let mut cache = LayoutCache::new(2);
+        let before = cache.layout(&mut sys, &params(150.0)).expect("layout");
+        sys.set_font_settings(&FontSettings {
+            ui_family: "Inter".into(),
+            ..FontSettings::default()
+        });
+        let after = cache.layout(&mut sys, &params(150.0)).expect("layout");
+        assert!(!Arc::ptr_eq(&before, &after));
+    }
+}
