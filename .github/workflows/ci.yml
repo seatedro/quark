@@ -29,10 +29,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # TODO: drop continue-on-error once crates/quark-render/src/{renderer,text}.rs
-      # and crates/quark-ui/src/icons.rs are formatted.
       - name: Format
-        continue-on-error: true
         run: cargo fmt --all --check
 
       # TODO: switch to `cargo clippy --workspace --all-targets -- -D warnings`
