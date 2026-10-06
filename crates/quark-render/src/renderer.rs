@@ -321,7 +321,7 @@ impl Renderer {
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
         let surface = instance.create_surface(window.clone())?;
         let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -404,7 +404,7 @@ impl Renderer {
     ) -> Result<Self, RenderError> {
         let size = PhysicalSize::new(width.max(1), height.max(1));
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
         let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: None,
