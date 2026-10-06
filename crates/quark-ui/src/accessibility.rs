@@ -117,8 +117,12 @@ impl AccessibilityNode {
         if let Some(label) = &self.label {
             node.set_label(label.clone());
         }
-        if let Some(value) = &self.value {
-            node.set_value(value.clone());
+        // accesskit reads a Label node's name from its value, so static text
+        // with only a label would reach screen readers unnamed.
+        match (&self.value, &self.label) {
+            (Some(value), _) => node.set_value(value.clone()),
+            (None, Some(label)) if self.role == Role::Label => node.set_value(label.clone()),
+            (None, _) => {}
         }
         if let Some(description) = &self.description {
             node.set_description(description.clone());
@@ -399,6 +403,15 @@ mod tests {
         };
         assert_eq!(children(ROOT_ID), vec![dialog]);
         assert_eq!(children(dialog), vec![ok]);
+    }
+
+    #[test]
+    fn label_node_publishes_its_text_as_value() {
+        let mut frame = AccessibilityFrame::new(100.0, 100.0);
+        let id = frame.push(AccessibilityNode::new("text", Role::Label, rect()).label("Hello"));
+        let update = frame.tree_update("Test", None);
+        let node = update.nodes.iter().find(|(node_id, _)| *node_id == id);
+        assert_eq!(node.and_then(|(_, node)| node.value()), Some("Hello"));
     }
 
     #[test]
