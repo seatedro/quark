@@ -1,18 +1,40 @@
 use super::*;
 
-/// Everything the runner owns for one native window. The runner holds a single
-/// one today; a multi-window runner would keep a table of these by
-/// [`WindowId`].
+/// A table slot: windows requested from an `EventContext` wait as `Pending`
+/// until the runner gets back to the event loop and can create them.
+pub(super) enum WindowEntry {
+    Pending(Box<WindowOptions>),
+    Open(Box<WindowState>),
+}
+
+impl WindowEntry {
+    pub(super) fn open(&self) -> Option<&WindowState> {
+        match self {
+            Self::Open(state) => Some(state),
+            Self::Pending(_) => None,
+        }
+    }
+
+    pub(super) fn open_mut(&mut self) -> Option<&mut WindowState> {
+        match self {
+            Self::Open(state) => Some(state),
+            Self::Pending(_) => None,
+        }
+    }
+}
+
+/// Everything the runner owns for one native window. Each window has its own
+/// renderer: `quark_render::Renderer` owns its wgpu device and `FontSystem`,
+/// so windows do not share GPU resources or loaded fonts.
 pub(super) struct WindowState {
-    pub(super) window: Arc<Window>,
+    // Declared before `window` so the surface goes first on drop.
     pub(super) renderer: Renderer,
     pub(super) accessibility: AccessibilityAdapter,
+    pub(super) accessibility_tree: Arc<Mutex<TreeUpdate>>,
+    pub(super) window: Arc<Window>,
+    pub(super) input: InputNormalizer,
     pub(super) scale_factor: f64,
     pub(super) surface_size: PhysicalSize<u32>,
-    // Kept per window so a multi-window runner can open windows with
-    // different chrome; nothing reads it while there is one window.
-    #[allow(dead_code)]
-    pub(super) chrome: WindowChrome,
     pub(super) traffic_lights: Option<TrafficLights>,
 }
 
@@ -26,6 +48,23 @@ impl WindowState {
         self.scale_factor = scale_factor;
         self.renderer.resize(size.width, size.height, scale_factor);
         position_traffic_lights(&self.window, self.traffic_lights);
+    }
+}
+
+pub(super) fn window_attributes(options: &WindowOptions) -> WindowAttributes {
+    let (width, height) = options.size;
+    let mut attrs = Window::default_attributes()
+        .with_title(options.title.clone())
+        .with_inner_size(LogicalSize::new(width, height))
+        .with_window_icon(options.icon.clone())
+        // Shown once the renderer exists, so the first paint isn't blank.
+        .with_visible(false);
+    if let Some((width, height)) = options.min_size {
+        attrs = attrs.with_min_inner_size(LogicalSize::new(width, height));
+    }
+    match options.chrome {
+        WindowChrome::System => attrs,
+        WindowChrome::Custom => custom_chrome(attrs),
     }
 }
 

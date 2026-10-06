@@ -18,18 +18,31 @@ impl Waker {
 /// Runner state that contexts mutate on the app's behalf.
 #[derive(Debug, Default)]
 pub(super) struct Flags {
-    pub(super) needs_redraw: bool,
+    /// Windows to redraw on the next pass. Duplicates are harmless.
+    pub(super) redraw: Vec<WindowHandle>,
+    pub(super) redraw_all: bool,
+    /// When reached, every window redraws.
     pub(super) next_frame_at: Option<Instant>,
     pub(super) exit_requested: bool,
+    pub(super) keep_running_without_windows: bool,
+    pub(super) close: Vec<WindowHandle>,
 }
 
 impl Flags {
     fn request_frame_at(&mut self, at: Instant) {
         self.next_frame_at = Some(self.next_frame_at.map_or(at, |next| next.min(at)));
     }
+
+    fn request_redraw(&mut self, window: Option<WindowHandle>) {
+        match window {
+            Some(window) => self.redraw.push(window),
+            None => self.redraw_all = true,
+        }
+    }
 }
 
 pub struct FrameContext<'a> {
+    pub(super) window: WindowHandle,
     pub(super) size: PhysicalSize<u32>,
     pub(super) scale_factor: f64,
     pub(super) text_metrics: TextMetrics,
@@ -40,6 +53,11 @@ pub struct FrameContext<'a> {
 }
 
 impl FrameContext<'_> {
+    /// The window this frame is for.
+    pub fn window_handle(&self) -> WindowHandle {
+        self.window
+    }
+
     /// Drawable size in physical pixels.
     pub fn size(&self) -> (f32, f32) {
         (
@@ -72,9 +90,9 @@ impl FrameContext<'_> {
         self.elapsed
     }
 
-    /// Draw another frame right after this one, for animation.
+    /// Draw another frame of this window right after this one, for animation.
     pub fn request_frame(&mut self) {
-        self.flags.needs_redraw = true;
+        self.flags.redraw.push(self.window);
     }
 
     pub fn request_frame_at(&mut self, at: Instant) {
@@ -87,18 +105,26 @@ impl FrameContext<'_> {
 }
 
 pub struct EventContext<'a> {
-    pub(super) window: &'a Window,
-    pub(super) renderer: &'a mut Renderer,
+    pub(super) windows: &'a mut WindowTable<WindowEntry>,
+    pub(super) window: Option<WindowHandle>,
     pub(super) flags: &'a mut Flags,
     pub(super) clipboard: &'a mut Option<arboard::Clipboard>,
-    pub(super) input: &'a InputNormalizer,
+    /// Stands in for a renderer's `FontSystem` while no window is open.
+    pub(super) fallback_fonts: &'a mut Option<FontSystem>,
+    pub(super) fonts: &'a FontSettings,
     pub(super) waker: &'a Waker,
-    pub(super) traffic_lights: Option<TrafficLights>,
+    #[allow(dead_code)]
+    pub(super) events: &'a EventSink,
 }
 
 impl EventContext<'_> {
+    /// Redraw the context's window, or every window when the context has none.
     pub fn request_redraw(&mut self) {
-        self.flags.needs_redraw = true;
+        self.flags.request_redraw(self.window);
+    }
+
+    pub fn request_redraw_all(&mut self) {
+        self.flags.redraw_all = true;
     }
 
     pub fn request_frame_at(&mut self, at: Instant) {
@@ -109,43 +135,93 @@ impl EventContext<'_> {
         self.flags.exit_requested = true;
     }
 
-    /// Last pointer position in physical pixels, if the pointer is inside.
+    /// The window this event is for. `None` only for app events that arrive
+    /// while no window is open.
+    pub fn window_handle(&self) -> Option<WindowHandle> {
+        self.window
+    }
+
+    /// Open another window. It is created when the current callback returns;
+    /// until then the handle is valid but the window has no native surface.
+    /// Failure arrives as [`AppEvent::WindowOpenFailed`].
+    pub fn open_window(&mut self, options: WindowOptions) -> WindowHandle {
+        self.windows.insert(WindowEntry::Pending(Box::new(options)))
+    }
+
+    /// Close a window when the current callback returns, without asking
+    /// [`App::close_requested`]. Stale handles are ignored.
+    pub fn close_window(&mut self, window: WindowHandle) {
+        self.flags.close.push(window);
+    }
+
+    /// Every open or opening window.
+    pub fn windows(&self) -> Vec<WindowHandle> {
+        self.windows.handles()
+    }
+
+    /// By default the app exits when its last window closes. Tray and
+    /// background apps turn that off and call [`EventContext::exit`] instead.
+    pub fn set_exit_when_last_window_closes(&mut self, exit: bool) {
+        self.flags.keep_running_without_windows = !exit;
+    }
+
+    /// Last pointer position in physical pixels, if the pointer is inside the
+    /// context's window.
     pub fn pointer_position(&self) -> Option<(f32, f32)> {
-        self.input.pointer_position()
+        self.state()?.input.pointer_position()
     }
 
     pub fn modifiers(&self) -> ModifiersState {
-        self.input.modifiers()
+        self.state()
+            .map(|state| state.input.modifiers())
+            .unwrap_or_default()
     }
 
     pub fn scale_factor(&self) -> f32 {
-        self.window.scale_factor() as f32
+        self.state().map_or(1.0, |state| state.scale_factor as f32)
     }
 
     pub fn font_system(&mut self) -> &mut FontSystem {
-        self.renderer.font_system_mut()
+        let fonts = self.fonts;
+        let window = self.window;
+        if let Some(state) = window
+            .and_then(|window| self.windows.get_mut(window))
+            .and_then(WindowEntry::open_mut)
+        {
+            return state.renderer.font_system_mut();
+        }
+        self.fallback_fonts
+            .get_or_insert_with(|| quark_render::fonts::new_font_system_with_settings(fonts))
     }
 
     pub fn set_cursor(&mut self, cursor: CursorIcon) {
-        self.window.set_cursor(cursor);
+        if let Some(window) = self.native() {
+            window.set_cursor(cursor);
+        }
     }
 
     /// winit leaves IME off by default; enable it while a text field has focus.
     pub fn set_ime_allowed(&mut self, allowed: bool) {
-        self.window.set_ime_allowed(allowed);
+        if let Some(window) = self.native() {
+            window.set_ime_allowed(allowed);
+        }
     }
 
     /// Where the IME candidate window should appear, in physical pixels.
     pub fn set_ime_cursor_area(&mut self, x: f32, y: f32, width: f32, height: f32) {
-        self.window.set_ime_cursor_area(
-            PhysicalPosition::new(x as f64, y as f64),
-            PhysicalSize::new(width as f64, height as f64),
-        );
+        if let Some(window) = self.native() {
+            window.set_ime_cursor_area(
+                PhysicalPosition::new(x as f64, y as f64),
+                PhysicalSize::new(width as f64, height as f64),
+            );
+        }
     }
 
     pub fn set_title(&mut self, title: &str) {
-        self.window.set_title(title);
-        position_traffic_lights(self.window, self.traffic_lights);
+        if let Some(state) = self.state() {
+            state.window.set_title(title);
+            position_traffic_lights(&state.window, state.traffic_lights);
+        }
     }
 
     pub fn clipboard_text(&mut self) -> Option<String> {
@@ -158,14 +234,28 @@ impl EventContext<'_> {
         }
     }
 
-    /// The native window, for operations the context doesn't wrap (drag,
-    /// resize, minimize, maximize).
-    pub fn window(&self) -> &Window {
-        self.window
+    /// The context's native window, for operations the context doesn't wrap
+    /// (drag, resize, minimize, maximize).
+    pub fn window(&self) -> Option<&Window> {
+        self.native()
+    }
+
+    /// Another open window, by handle.
+    pub fn window_by_handle(&self, window: WindowHandle) -> Option<&Window> {
+        let state = self.windows.get(window)?.open()?;
+        Some(&state.window)
     }
 
     pub fn waker(&self) -> &Waker {
         self.waker
+    }
+
+    fn state(&self) -> Option<&WindowState> {
+        self.windows.get(self.window?)?.open()
+    }
+
+    fn native(&self) -> Option<&Window> {
+        self.state().map(|state| &*state.window)
     }
 
     fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
