@@ -36,8 +36,8 @@ pub use event::{
 pub use focus::{FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, TabStop};
 pub use geometry::Rect;
 pub use hit::{
-    ClickEvent, ClickHandler, CursorHint, HitIdentity, HitRegion, Hitbox, HitboxBehavior, HitboxId,
-    TooltipRegion, resolve_hovered,
+    ClickEvent, CursorHint, EMPTY_CLIP, HitFlags, HitId, HitIdentity, HitTable, TooltipRegion,
+    UNCLIPPED,
 };
 pub use identity::{TestId, UiKey, UiNodeId, stable_hash};
 pub use retained::{DisposedNode, RetainedNode, RetainedTree};
