@@ -114,6 +114,8 @@ pub struct EventContext<'a> {
     pub(super) fonts: &'a FontSettings,
     pub(super) waker: &'a Waker,
     pub(super) events: &'a EventSink,
+    #[cfg(feature = "tray")]
+    pub(super) tray: &'a mut Option<tray_icon::TrayIcon>,
 }
 
 impl EventContext<'_> {
@@ -263,6 +265,22 @@ impl EventContext<'_> {
         primary: crate::platform::single_instance::PrimaryInstance,
     ) {
         primary.spawn(self.events.clone());
+    }
+
+    /// Show a tray icon, replacing any previous one.
+    #[cfg(feature = "tray")]
+    pub fn set_tray(
+        &mut self,
+        options: crate::platform::tray::TrayOptions,
+    ) -> Result<(), crate::platform::tray::TrayError> {
+        *self.tray = None;
+        *self.tray = Some(crate::platform::tray::create(options, self.events)?);
+        Ok(())
+    }
+
+    #[cfg(feature = "tray")]
+    pub fn remove_tray(&mut self) {
+        *self.tray = None;
     }
 
     fn state(&self) -> Option<&WindowState> {

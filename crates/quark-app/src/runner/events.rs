@@ -23,6 +23,12 @@ pub enum AppEvent {
     /// A notification was closed without an action. Linux and the BSDs only.
     #[cfg(feature = "notifications")]
     NotificationDismissed { id: u64 },
+    /// The tray icon was clicked with the primary button.
+    #[cfg(feature = "tray")]
+    TrayClicked,
+    /// A tray menu item was picked; carries its id.
+    #[cfg(feature = "tray")]
+    TrayMenu(String),
 }
 
 /// Posts [`AppEvent`]s to the main thread from any thread.

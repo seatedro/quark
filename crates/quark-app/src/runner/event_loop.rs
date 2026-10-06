@@ -38,6 +38,8 @@ struct Runner<A> {
     app_events: Receiver<AppEvent>,
     clipboard: Option<arboard::Clipboard>,
     fallback_fonts: Option<FontSystem>,
+    #[cfg(feature = "tray")]
+    tray: Option<tray_icon::TrayIcon>,
     flags: Flags,
     launch_at: Instant,
     startup_failure: Option<RunError>,
@@ -63,6 +65,8 @@ impl<A: App> Runner<A> {
             app_events,
             clipboard: None,
             fallback_fonts: None,
+            #[cfg(feature = "tray")]
+            tray: None,
             flags: Flags::default(),
             launch_at: Instant::now(),
             startup_failure: None,
@@ -146,6 +150,8 @@ impl<A: App> Runner<A> {
             fonts: &self.fonts,
             waker: &self.waker,
             events: &self.events,
+            #[cfg(feature = "tray")]
+            tray: &mut self.tray,
         };
         f(&mut self.app, &mut cx);
         self.apply_window_changes(event_loop);

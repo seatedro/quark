@@ -5,3 +5,5 @@ pub mod desktop_entry;
 #[cfg(feature = "notifications")]
 pub mod notification;
 pub mod single_instance;
+#[cfg(feature = "tray")]
+pub mod tray;
