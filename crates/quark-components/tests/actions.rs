@@ -1,5 +1,6 @@
 //! Components emit the app actions their caller supplies.
 
+use quark::StyleState;
 use quark::reactive::SignalStore;
 use quark_components::{Modal, PickerItem, Toast, ToastKind, ToastStack, picker_list};
 use quark_render::Scene;
@@ -9,6 +10,7 @@ use quark_ui::element::{
     AnyElement, ElementContext, InputRouter, IntoAnyElement, ScrollActionBuilder, render_element,
 };
 use quark_ui::icons::lucide;
+use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +87,36 @@ fn hit_actions(root: AnyElement) -> (Vec<Action>, Vec<Action>) {
         .flat_map(|(x, y)| router.wheel(x, y, 2).actions)
         .collect();
     (clicks, scrolls)
+}
+
+#[test]
+fn modal_scrim_blocks_hover_and_click_beneath() {
+    let under = quark_ui::element::div()
+        .w(100.0)
+        .h(100.0)
+        .test_id("under")
+        .hover_bg(quark_ui::theme::Color::rgba(255, 0, 0, 255))
+        .on_click(Demo::Select(0));
+    let modal = Modal::new(
+        "Title",
+        "",
+        lucide::SETTINGS,
+        360.0,
+        800.0,
+        600.0,
+        Demo::Dismiss,
+    );
+    let root = quark_ui::element::div()
+        .w(800.0)
+        .h(600.0)
+        .child(under)
+        .child(modal.into_any());
+
+    let (mut router, hovered) = paint(root.into_any(), Some((50.0, 50.0)));
+    let clicked = router.pointer_down(50.0, 50.0, &mut None).actions;
+
+    assert_eq!(hovered, ["modal-backdrop"]);
+    assert_eq!(clicked, [Action::from(Demo::Dismiss)]);
 }
 
 #[test]
