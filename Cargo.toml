@@ -8,15 +8,6 @@ members = [
   "crates/quark-components",
   "crates/quark-app",
 ]
-# quark-components still carries diffy-specific imports.
-# It joins default-members as its decoupling lands.
-default-members = [
-  "crates/quark",
-  "crates/quark-macros",
-  "crates/quark-render",
-  "crates/quark-ui",
-  "crates/quark-app",
-]
 
 [workspace.package]
 version = "0.1.0"
