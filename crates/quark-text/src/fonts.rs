@@ -1,11 +1,8 @@
-//! Minimal font loading for [`crate::TextSystem`].
-//!
-//! Duplicated from `quark-render/src/fonts.rs` (loading + generic family
-//! resolution only; the family catalog stays in quark-render for now). The
-//! font assets are read from quark-render's asset directory until the
-//! integration task moves them here.
+//! Vendored fonts, generic family resolution for [`crate::TextSystem`], and
+//! the family catalog shown in font pickers.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 
 use cosmic_text::fontdb;
 use serde::{Deserialize, Serialize};
@@ -14,6 +11,12 @@ const LEGACY_SYSTEM_FONT_SELECTION: &str = "__diffy_system_font__";
 
 pub const UI_FAMILY: &str = "Geist";
 pub const MONO_FAMILY: &str = "Geist Mono";
+pub const INTER_FAMILY: &str = "Inter";
+pub const IBM_PLEX_SANS_FAMILY: &str = "IBM Plex Sans";
+pub const SOURCE_SANS_3_FAMILY: &str = "Source Sans 3";
+pub const JETBRAINS_MONO_FAMILY: &str = "JetBrains Mono";
+pub const IBM_PLEX_MONO_FAMILY: &str = "IBM Plex Mono";
+pub const FIRA_CODE_FAMILY: &str = "Fira Code";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontRole {
@@ -48,7 +51,7 @@ impl FontSettings {
 
 macro_rules! font {
     ($file:literal) => {
-        include_bytes!(concat!("../../quark-render/assets/fonts/", $file)) as &[u8]
+        include_bytes!(concat!("../assets/fonts/", $file)) as &[u8]
     };
 }
 
@@ -115,4 +118,194 @@ fn default_family(role: FontRole) -> &'static str {
         FontRole::Ui => UI_FAMILY,
         FontRole::Mono => MONO_FAMILY,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontFamilyOption {
+    pub label: &'static str,
+    pub family: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontFamilySource {
+    Bundled,
+    System,
+}
+
+impl FontFamilySource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bundled => "Bundled",
+            Self::System => "System",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFamilyEntry {
+    pub label: String,
+    pub family: String,
+    pub source: FontFamilySource,
+    pub monospaced: bool,
+}
+
+const UI_FONT_OPTIONS: &[FontFamilyOption] = &[
+    FontFamilyOption {
+        label: "Geist",
+        family: UI_FAMILY,
+    },
+    FontFamilyOption {
+        label: "Inter",
+        family: INTER_FAMILY,
+    },
+    FontFamilyOption {
+        label: "IBM Plex Sans",
+        family: IBM_PLEX_SANS_FAMILY,
+    },
+    FontFamilyOption {
+        label: "Source Sans 3",
+        family: SOURCE_SANS_3_FAMILY,
+    },
+];
+
+const MONO_FONT_OPTIONS: &[FontFamilyOption] = &[
+    FontFamilyOption {
+        label: "Geist Mono",
+        family: MONO_FAMILY,
+    },
+    FontFamilyOption {
+        label: "JetBrains Mono",
+        family: JETBRAINS_MONO_FAMILY,
+    },
+    FontFamilyOption {
+        label: "IBM Plex Mono",
+        family: IBM_PLEX_MONO_FAMILY,
+    },
+    FontFamilyOption {
+        label: "Fira Code",
+        family: FIRA_CODE_FAMILY,
+    },
+];
+
+static FONT_CATALOG: OnceLock<FontCatalog> = OnceLock::new();
+
+pub fn bundled_font_options(role: FontRole) -> &'static [FontFamilyOption] {
+    match role {
+        FontRole::Ui => UI_FONT_OPTIONS,
+        FontRole::Mono => MONO_FONT_OPTIONS,
+    }
+}
+
+/// Bundled families first, then installed system families. Scans system
+/// fonts once per process.
+pub fn font_family_entries(role: FontRole) -> &'static [FontFamilyEntry] {
+    let catalog = FONT_CATALOG.get_or_init(build_font_catalog);
+    match role {
+        FontRole::Ui => &catalog.ui,
+        FontRole::Mono => &catalog.mono,
+    }
+}
+
+pub fn font_selection_label(selection: &str) -> String {
+    let selection = selection.trim();
+    UI_FONT_OPTIONS
+        .iter()
+        .chain(MONO_FONT_OPTIONS.iter())
+        .find(|option| option.family == selection)
+        .map(|option| option.label.to_owned())
+        .unwrap_or_else(|| selection.to_owned())
+}
+
+#[derive(Debug)]
+struct FontCatalog {
+    ui: Vec<FontFamilyEntry>,
+    mono: Vec<FontFamilyEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CatalogFamily {
+    source: FontFamilySource,
+    monospaced: bool,
+}
+
+impl Default for CatalogFamily {
+    fn default() -> Self {
+        Self {
+            source: FontFamilySource::System,
+            monospaced: false,
+        }
+    }
+}
+
+fn build_font_catalog() -> FontCatalog {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    for source in vendored_font_sources() {
+        db.load_font_source(source);
+    }
+
+    let mut families = BTreeMap::<String, CatalogFamily>::new();
+    for face in db.faces() {
+        let source = match &face.source {
+            fontdb::Source::Binary(_) => FontFamilySource::Bundled,
+            _ => FontFamilySource::System,
+        };
+        for (family, _) in &face.families {
+            if !show_catalog_family(family, source) {
+                continue;
+            }
+            let entry = families.entry(family.clone()).or_default();
+            entry.monospaced |= face.monospaced;
+            if source == FontFamilySource::Bundled {
+                entry.source = FontFamilySource::Bundled;
+            }
+        }
+    }
+
+    FontCatalog {
+        ui: build_role_catalog(FontRole::Ui, &families),
+        mono: build_role_catalog(FontRole::Mono, &families),
+    }
+}
+
+fn show_catalog_family(family: &str, source: FontFamilySource) -> bool {
+    !family.is_empty() && (source == FontFamilySource::Bundled || !family.starts_with('.'))
+}
+
+fn build_role_catalog(
+    role: FontRole,
+    families: &BTreeMap<String, CatalogFamily>,
+) -> Vec<FontFamilyEntry> {
+    let pinned = bundled_font_options(role);
+    let mut entries = Vec::new();
+
+    for option in pinned {
+        let monospaced = families
+            .get(option.family)
+            .map(|family| family.monospaced)
+            .unwrap_or(matches!(role, FontRole::Mono));
+        entries.push(FontFamilyEntry {
+            label: option.label.to_owned(),
+            family: option.family.to_owned(),
+            source: FontFamilySource::Bundled,
+            monospaced,
+        });
+    }
+
+    for (family, info) in families {
+        if pinned.iter().any(|option| option.family == family) {
+            continue;
+        }
+        if role == FontRole::Mono && !info.monospaced {
+            continue;
+        }
+        entries.push(FontFamilyEntry {
+            label: family.clone(),
+            family: family.clone(),
+            source: info.source,
+            monospaced: info.monospaced,
+        });
+    }
+
+    entries
 }

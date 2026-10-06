@@ -2457,6 +2457,7 @@ dependencies = [
  "pollster",
  "profiling",
  "quark",
+ "quark-text",
  "resvg",
  "serde",
  "thiserror 2.0.21",
