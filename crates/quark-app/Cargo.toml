@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 quark.workspace = true
 quark-render.workspace = true
+quark-ui = { workspace = true, optional = true }
 accesskit.workspace = true
 accesskit_winit.workspace = true
 arboard.workspace = true
@@ -32,4 +33,13 @@ quark-render = { workspace = true, features = ["headless-render"] }
 image.workspace = true
 
 [features]
+default = ["ui"]
+# The quark-ui element adapter (`quark_app::ui`). Lives here rather than in
+# quark-ui because the adapter implements `App`, and quark-ui must not
+# depend on the windowing runner.
+ui = ["dep:quark-ui"]
 hot-reload = ["dep:subsecond", "dep:tungstenite", "dep:serde_json"]
+
+[[example]]
+name = "hello_ui"
+required-features = ["ui"]

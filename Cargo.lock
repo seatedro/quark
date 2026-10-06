@@ -2415,6 +2415,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "quark",
  "quark-render",
+ "quark-ui",
  "raw-window-handle",
  "serde",
  "serde_json",
