@@ -1,4 +1,37 @@
-use crate::UiNodeId;
+use crate::{UiNodeId, stable_hash};
+
+/// Identity of a focusable target. One id serves the [`FocusTree`], element
+/// focus rings, and accessibility focus, so a target focused through any of
+/// them is the same target in the others.
+///
+/// Build it from a stable key with [`FocusId::from_key`] (or from a
+/// [`UiNodeId`]); apps with their own focus enum can still map it through
+/// [`FocusId::new`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FocusId(pub u64);
+
+impl FocusId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// Hash a stable key; equal keys give equal ids across runs.
+    pub const fn from_key(key: &str) -> Self {
+        Self(stable_hash(key))
+    }
+}
+
+impl From<&UiNodeId> for FocusId {
+    fn from(id: &UiNodeId) -> Self {
+        Self::from_key(id.as_str())
+    }
+}
+
+impl From<UiNodeId> for FocusId {
+    fn from(id: UiNodeId) -> Self {
+        Self::from(&id)
+    }
+}
 
 /// Stable identity for a focus scope. Scopes can own tab order and modal traps.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -94,7 +127,7 @@ impl From<i32> for TabStop {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FocusNode {
-    pub id: UiNodeId,
+    pub id: FocusId,
     pub scope: Option<FocusScopeId>,
     pub tab_stop: TabStop,
     pub key_context: Option<KeyContext>,
@@ -140,24 +173,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn focus_id_from_key_matches_node_id() {
+        const SAVE: FocusId = FocusId::from_key("save");
+        assert_eq!(SAVE, FocusId::from(&UiNodeId::from("save")));
+        assert_ne!(SAVE, FocusId::from_key("cancel"));
+    }
+
+    #[test]
     fn tab_order_is_scoped_sorted_and_trappable() {
         let modal = FocusScopeId::from("modal");
         let sidebar = FocusScopeId::from("sidebar");
         let mut tree = FocusTree::default();
         tree.register(FocusNode {
-            id: "later".into(),
+            id: FocusId::from_key("later"),
             scope: Some(modal.clone()),
             tab_stop: TabStop::new(20),
             key_context: Some(KeyContext::from("dialog")),
         });
         tree.register(FocusNode {
-            id: "first".into(),
+            id: FocusId::from_key("first"),
             scope: Some(modal.clone()),
             tab_stop: TabStop::new(10),
             key_context: None,
         });
         tree.register(FocusNode {
-            id: "outside".into(),
+            id: FocusId::from_key("outside"),
             scope: Some(sidebar),
             tab_stop: TabStop::new(0),
             key_context: None,
@@ -166,16 +206,17 @@ mod tests {
         let scoped: Vec<_> = tree
             .tab_order(Some(&modal))
             .into_iter()
-            .map(|node| node.id.as_str().to_owned())
+            .map(|node| node.id)
             .collect();
-        assert_eq!(scoped, vec!["first", "later"]);
+        let expected = vec![FocusId::from_key("first"), FocusId::from_key("later")];
+        assert_eq!(scoped, expected);
 
         tree.trap_modal_scope(modal);
         let trapped: Vec<_> = tree
             .tab_order(None)
             .into_iter()
-            .map(|node| node.id.as_str().to_owned())
+            .map(|node| node.id)
             .collect();
-        assert_eq!(trapped, vec!["first", "later"]);
+        assert_eq!(trapped, expected);
     }
 }

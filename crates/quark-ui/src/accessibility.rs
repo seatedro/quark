@@ -296,13 +296,9 @@ fn ax_rect(rect: Rect) -> AxRect {
     )
 }
 
+/// Ids 0 and 1 are reserved for the runner's placeholder root and [`ROOT_ID`].
 fn stable_node_id(key: &str) -> NodeId {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in key.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    NodeId(hash.max(2))
+    NodeId(quark::stable_hash(key).max(2))
 }
 
 #[cfg(test)]

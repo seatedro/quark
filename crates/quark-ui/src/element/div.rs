@@ -702,6 +702,7 @@ impl Element for Div {
                 expanded: self.accessibility_expanded,
                 style_state,
             };
+            node.focus = self.focus_target;
             node.focus_scope = self.focus_scope.clone();
             node.tab_stop = self.tab_stop;
             node.key_context = self.key_context.clone();

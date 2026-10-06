@@ -361,6 +361,7 @@ impl Element for TextInput {
                 .value(accessible_value.clone());
             semantic_node.parent = cx.current_semantic_parent();
             semantic_node.actions = SemanticActions::default().text_value().hit_test();
+            semantic_node.focus = Some(target);
             semantic_node.state = SemanticNodeState {
                 style_state,
                 ..SemanticNodeState::default()
