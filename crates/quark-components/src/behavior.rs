@@ -1,12 +1,11 @@
-use crate::actions::Action;
 use quark_ui::element::Div;
-use quark_ui::state::FocusTarget;
 use quark_ui::style::Styled;
+use quark_ui::{Action, FocusId};
 
 use super::Button;
 
 pub trait Clickable: Sized {
-    fn on_click_action(self, action: Action) -> Self;
+    fn on_click_action(self, action: impl Into<Action>) -> Self;
 }
 
 pub trait Disableable: Sized {
@@ -14,7 +13,7 @@ pub trait Disableable: Sized {
 }
 
 pub trait Focusable: Sized {
-    fn track_focus(self, target: FocusTarget) -> Self;
+    fn track_focus(self, target: FocusId) -> Self;
 }
 
 pub trait Tooltipable: Sized {
@@ -37,13 +36,13 @@ pub trait TreeLike: Focusable + Selectable {}
 pub trait PopoverLike: Focusable + Layered {}
 
 impl Clickable for Div {
-    fn on_click_action(self, action: Action) -> Self {
+    fn on_click_action(self, action: impl Into<Action>) -> Self {
         self.on_click(action)
     }
 }
 
 impl Focusable for Div {
-    fn track_focus(self, target: FocusTarget) -> Self {
+    fn track_focus(self, target: FocusId) -> Self {
         Div::track_focus(self, target)
     }
 }

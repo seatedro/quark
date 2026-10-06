@@ -1,12 +1,46 @@
 use quark::{SemanticRole, view};
 
+use quark_ui::Action;
 use quark_ui::design::{Ico, Rad, Sp};
+use quark_ui::element::CursorHint;
 use quark_ui::element::*;
-use quark_ui::shell::CursorHint;
-use quark_ui::state::{PickerItem, PickerLabelStyle};
 use quark_ui::style::Styled;
 use quark_ui::theme::{Color, Theme, ThemeColors};
 use quark_ui::virtual_list::virtual_list_total_extent;
+
+/// A row the picker can show. Only `label` and `detail` are required.
+pub trait PickerItem {
+    fn label(&self) -> &str;
+    fn detail(&self) -> Option<&str>;
+    fn label_style(&self) -> PickerLabelStyle {
+        PickerLabelStyle::Default
+    }
+    /// Byte ranges of `label` drawn in the accent color (fuzzy-match hits).
+    fn highlight_ranges(&self) -> &[(usize, usize)] {
+        &[]
+    }
+    fn icon_svg(&self) -> Option<&'static str> {
+        None
+    }
+    fn is_section_header(&self) -> bool {
+        false
+    }
+    fn rhs(&self) -> Option<&str> {
+        None
+    }
+    fn is_disabled(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PickerLabelStyle {
+    #[default]
+    Default,
+    /// Identifier label whose first `prefix_len` bytes (the unique short
+    /// prefix) are bold and colored; `emphasized` brightens the prefix.
+    IdPrefix { prefix_len: usize, emphasized: bool },
+}
 
 pub fn picker_list<T: PickerItem>(
     entries: &[T],
@@ -14,6 +48,8 @@ pub fn picker_list<T: PickerItem>(
     scroll_top_px: f32,
     max_visible: usize,
     theme: &Theme,
+    on_select: impl Fn(usize) -> Action,
+    on_scroll: ScrollActionBuilder,
 ) -> AnyElement {
     let tc = &theme.colors;
     let scale = theme.metrics.ui_scale();
@@ -31,7 +67,7 @@ pub fn picker_list<T: PickerItem>(
              test_id={"picker-list"}
              semantic_role={SemanticRole::ScrollArea}
              overflow_hidden scroll_y={scroll} scroll_total={total_h}
-             on_scroll={ScrollActionBuilder::Custom(crate::actions::scroll_active_overlay_list_px)}
+             on_scroll={on_scroll}
              hide_scrollbar>
             for (i, entry) in entries.iter().enumerate() {
                 if entry.is_section_header() {
@@ -39,7 +75,7 @@ pub fn picker_list<T: PickerItem>(
                         <text class="text-xs truncate" color={tc.text_muted}>{entry.label()}</text>
                     </div>
                 } else {
-                    {picker_row(i, entry, selected_index, row_h, icon_size, theme)}
+                    {picker_row(i, entry, selected_index, row_h, icon_size, theme, on_select(i))}
                 }
             }
         </div>
@@ -53,6 +89,7 @@ fn picker_row<T: PickerItem>(
     row_h: f32,
     icon_size: f32,
     theme: &Theme,
+    on_select: Action,
 ) -> AnyElement {
     let tc = &theme.colors;
     let scale = theme.metrics.ui_scale();
@@ -83,7 +120,7 @@ fn picker_row<T: PickerItem>(
              h={row_h} gap={Sp::SM} px={Sp::MD} rounded={Rad::MD}
              bg={row_bg}
              @when {!selected && !disabled} { hover_bg={tc.sidebar_row_hover} }
-             on_click={crate::actions::OverlayAction::SelectOverlayEntry(i).into()}
+             on_click={on_select}
              hit_identity={HitIdentity::OverlayEntry(i)}
              accessibility_role={accesskit::Role::ListBoxOption}
              accessibility_id={format!("picker-row:{i}:{}", entry.label())}
@@ -115,12 +152,12 @@ fn picker_label(
     let tc = &theme.colors;
     let base_color = if selected { tc.text_strong } else { tc.text };
 
-    if let PickerLabelStyle::JjChangeId {
+    if let PickerLabelStyle::IdPrefix {
         prefix_len,
-        working_copy,
+        emphasized,
     } = label_style
     {
-        return jj_change_id_label(label_text, prefix_len, working_copy, highlights, tc);
+        return id_prefix_label(label_text, prefix_len, emphasized, highlights, tc);
     }
 
     if highlights.is_empty() {
@@ -158,10 +195,10 @@ fn picker_label(
     }
 }
 
-fn jj_change_id_label(
+fn id_prefix_label(
     label_text: &str,
     prefix_len: usize,
-    working_copy: bool,
+    emphasized: bool,
     highlights: &[(usize, usize)],
     tc: &ThemeColors,
 ) -> AnyElement {
@@ -172,7 +209,7 @@ fn jj_change_id_label(
         0
     };
     let (prefix, rest) = label_text.split_at(split);
-    let prefix_color = if working_copy {
+    let prefix_color = if emphasized {
         tc.syntax_keyword.lerp(tc.text_strong, 0.28)
     } else {
         tc.syntax_keyword

@@ -1,6 +1,6 @@
 use quark::{SemanticRole, view};
 
-use crate::actions::Action;
+use quark_ui::Action;
 use quark_ui::design::{Shadow, Sp};
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, svg_icon, text,
@@ -18,10 +18,10 @@ pub struct DropdownItem {
 }
 
 impl DropdownItem {
-    pub fn new(label: impl Into<String>, action: Action) -> Self {
+    pub fn new(label: impl Into<String>, action: impl Into<Action>) -> Self {
         Self {
             label: label.into(),
-            action,
+            action: action.into(),
             selected: false,
             icon: None,
             description: None,
@@ -68,8 +68,8 @@ impl Dropdown {
         self
     }
 
-    pub fn on_toggle(mut self, action: Action) -> Self {
-        self.on_toggle = Some(action);
+    pub fn on_toggle(mut self, action: impl Into<Action>) -> Self {
+        self.on_toggle = Some(action.into());
         self
     }
 

@@ -1,7 +1,7 @@
 use quark::SemanticRole;
 use quark::view;
 
-use crate::actions::Action;
+use quark_ui::Action;
 use quark_ui::design::{Ico, Rad, Shadow, Sp, Sz};
 use quark_ui::element::*;
 use quark_ui::style::Styled;
@@ -25,9 +25,11 @@ pub struct Modal {
     window_height: f32,
     body: Vec<AnyElement>,
     footer: Vec<AnyElement>,
+    on_dismiss: Action,
 }
 
 impl Modal {
+    /// `on_dismiss` is emitted when the backdrop outside the panel is clicked.
     pub fn new(
         title: impl Into<String>,
         subtitle: impl Into<String>,
@@ -35,6 +37,7 @@ impl Modal {
         max_width: f32,
         window_width: f32,
         window_height: f32,
+        on_dismiss: impl Into<Action>,
     ) -> Self {
         Self {
             title: title.into(),
@@ -49,6 +52,7 @@ impl Modal {
             window_height,
             body: Vec::new(),
             footer: Vec::new(),
+            on_dismiss: on_dismiss.into(),
         }
     }
 
@@ -113,7 +117,7 @@ impl RenderOnce for Modal {
                  w={panel_width} p={padding} gap={gap}
                  bg={tc.elevated_surface} rounded={Rad::XXXL}
                  border_b={tc.border} shadow_preset={Shadow::MODAL}
-                 on_click={Action::Noop}
+                 on_click={quark_ui::element::NoopAction}
                  id={format!("modal:{accessibility_label}")}
                  test_id={"modal"}
                  semantic_role={SemanticRole::Dialog}
@@ -141,7 +145,7 @@ impl RenderOnce for Modal {
                  bg={tc.overlay_scrim}
                  id={"overlay.backdrop"}
                  test_id={"modal-backdrop"}
-                 on_click={crate::actions::OverlayAction::CloseOverlay.into()}
+                 on_click={self.on_dismiss}
                  hit_identity={HitIdentity::OverlayBackdrop}
                  @when {self.align == ModalAlign::Center} { justify_center }
                  @when {self.align == ModalAlign::Top} { pt={Sz::MODAL_TOP_OFFSET} }>

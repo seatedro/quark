@@ -1,11 +1,74 @@
 use quark::{SemanticRole, view};
 
-use crate::actions::{Action, ContextMenuEntry};
 use quark_render::Rect;
+use quark_ui::Action;
 use quark_ui::design::{Ico, Shadow, Sp, Sz};
 use quark_ui::element::{AnyElement, IntoAnyElement, div, svg_icon, text};
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
+
+/// One row of a context menu: a clickable item or a separator.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContextMenuEntry {
+    Item {
+        label: String,
+        icon: Option<&'static str>,
+        action: Action,
+        shortcut: Option<String>,
+        destructive: bool,
+        disabled: bool,
+    },
+    Separator,
+}
+
+impl ContextMenuEntry {
+    pub fn item(label: impl Into<String>, action: impl Into<Action>) -> Self {
+        Self::Item {
+            label: label.into(),
+            icon: None,
+            action: action.into(),
+            shortcut: None,
+            destructive: false,
+            disabled: false,
+        }
+    }
+
+    pub fn icon(mut self, svg: &'static str) -> Self {
+        if let Self::Item { icon, .. } = &mut self {
+            *icon = Some(svg);
+        }
+        self
+    }
+
+    pub fn shortcut(mut self, s: impl Into<String>) -> Self {
+        if let Self::Item { shortcut, .. } = &mut self {
+            *shortcut = Some(s.into());
+        }
+        self
+    }
+
+    pub fn destructive(mut self) -> Self {
+        if let Self::Item { destructive, .. } = &mut self {
+            *destructive = true;
+        }
+        self
+    }
+
+    pub fn disabled(mut self) -> Self {
+        if let Self::Item { disabled, .. } = &mut self {
+            *disabled = true;
+        }
+        self
+    }
+
+    pub fn disabled_if(self, disabled: bool) -> Self {
+        if disabled { self.disabled() } else { self }
+    }
+
+    pub fn separator() -> Self {
+        Self::Separator
+    }
+}
 
 pub fn context_menu_layer(
     entries: Vec<ContextMenuEntry>,
@@ -28,7 +91,7 @@ pub fn context_menu_layer(
              py={m.spacing_xs}
              bg={tc.elevated_surface} border={tc.border}
              rounded={m.panel_radius} shadow_preset={Shadow::CONTEXT_MENU}
-             on_click={Action::Noop}>
+             on_click={quark_ui::element::NoopAction}>
             for entry in entries {
                 match entry {
                     ContextMenuEntry::Item { label, icon, action, shortcut, destructive, disabled } => {

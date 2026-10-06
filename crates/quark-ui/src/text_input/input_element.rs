@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
-use crate::core::text::{DiffTokenSpan, SyntaxTokenKind};
-use crate::editor::{Editor, EditorMode, SelectionRect};
+use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind};
+use crate::FocusId;
+use crate::accessibility::{AccessibilityAction, AccessibilityNode};
+use crate::design::{Alpha, Sz};
+use crate::element::*;
+use crate::style::{ElementStyle, Styled};
 use quark_render::scene::{
     FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, RichTextSpan, TextPrimitive,
 };
 use quark_render::{RectPrimitive, RoundedRectPrimitive, Scene};
-use crate::accessibility::{AccessibilityAction, AccessibilityNode};
-use crate::design::{Alpha, Sz};
-use crate::element::*;
-use crate::state::FocusTarget;
-use crate::style::{ElementStyle, Styled};
 
 pub struct CursorSnapshot {
     pub x: f32,
@@ -30,13 +29,20 @@ pub struct TextEditorElement {
     text_color: crate::theme::Color,
     mode: EditorMode,
     text: Arc<str>,
-    syntax_spans: Vec<DiffTokenSpan>,
+    syntax_spans: Vec<SyntaxSpan>,
     line_tops: Vec<(usize, f32)>,
-    focus_target: FocusTarget,
+    focus_target: FocusId,
+    on_scroll: ScrollActionBuilder,
     base_style: ElementStyle,
 }
 
-pub fn text_editor_element() -> TextEditorElement {
+/// Multiline editor surface for an [`Editor`]. `focus_target` identifies it
+/// for clicks and accessibility focus; `on_scroll` turns wheel input over it
+/// into app actions.
+pub fn text_editor_element(
+    focus_target: FocusId,
+    on_scroll: ScrollActionBuilder,
+) -> TextEditorElement {
     TextEditorElement {
         is_empty: true,
         placeholder: String::new(),
@@ -51,7 +57,8 @@ pub fn text_editor_element() -> TextEditorElement {
         text: Arc::from(""),
         syntax_spans: Vec::new(),
         line_tops: Vec::new(),
-        focus_target: FocusTarget::FileList,
+        focus_target,
+        on_scroll,
         base_style: ElementStyle::default(),
     }
 }
@@ -112,7 +119,7 @@ impl TextEditorElement {
         self
     }
 
-    pub fn syntax_spans(mut self, spans: &[DiffTokenSpan]) -> Self {
+    pub fn syntax_spans(mut self, spans: &[SyntaxSpan]) -> Self {
         self.syntax_spans.clear();
         self.syntax_spans.extend_from_slice(spans);
         self
@@ -140,7 +147,7 @@ impl TextEditorElement {
         self
     }
 
-    pub fn focus_target(mut self, target: FocusTarget) -> Self {
+    pub fn focus_target(mut self, target: FocusId) -> Self {
         self.focus_target = target;
         self
     }
@@ -175,7 +182,7 @@ impl Element for TextEditorElement {
         cx.insert_hitbox(bounds, HitboxBehavior::Normal);
         cx.scroll_regions.push(ScrollRegion {
             bounds,
-            action_builder: ScrollActionBuilder::Custom(crate::actions::editor_scroll_px),
+            action_builder: self.on_scroll.clone(),
         });
     }
 
@@ -375,7 +382,7 @@ fn gutter_digits(max_line: usize) -> usize {
 
 fn build_editor_spans(
     text: &str,
-    syntax_spans: &[DiffTokenSpan],
+    syntax_spans: &[SyntaxSpan],
     default_color: crate::theme::Color,
     theme: &crate::theme::Theme,
 ) -> Arc<[RichTextSpan]> {
@@ -467,11 +474,7 @@ fn syntax_style(
     syntax_kind: SyntaxTokenKind,
     default_color: crate::theme::Color,
     theme: &crate::theme::Theme,
-) -> (
-    crate::theme::Color,
-    Option<FontWeight>,
-    Option<FontStyle>,
-) {
+) -> (crate::theme::Color, Option<FontWeight>, Option<FontStyle>) {
     use SyntaxTokenKind::*;
     let color = match syntax_kind {
         Keyword | Builtin => theme.colors.syntax_keyword,

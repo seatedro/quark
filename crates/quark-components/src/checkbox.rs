@@ -1,6 +1,6 @@
 use quark::{SemanticRole, view};
 
-use crate::actions::Action;
+use quark_ui::Action;
 use quark_ui::design::{Shadow, Sp, Sz};
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, svg_icon, text,
@@ -31,8 +31,8 @@ impl Checkbox {
         self
     }
 
-    pub fn on_toggle(mut self, action: Action) -> Self {
-        self.on_toggle = Some(action);
+    pub fn on_toggle(mut self, action: impl Into<Action>) -> Self {
+        self.on_toggle = Some(action.into());
         self
     }
 
@@ -124,8 +124,8 @@ impl Toggle {
         self
     }
 
-    pub fn on_toggle(mut self, action: Action) -> Self {
-        self.on_toggle = Some(action);
+    pub fn on_toggle(mut self, action: impl Into<Action>) -> Self {
+        self.on_toggle = Some(action.into());
         self
     }
 

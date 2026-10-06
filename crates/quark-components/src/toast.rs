@@ -1,12 +1,35 @@
+use quark::view;
+use quark_ui::Action;
 use quark_ui::animation::{AnimationKey, AnimationState};
 use quark_ui::design::{Alpha, Ico, Rad, Shadow, Sp, Sz};
+use quark_ui::element::CursorHint;
 use quark_ui::element::*;
 use quark_ui::icons::lucide;
-use quark_ui::shell::CursorHint;
-use quark_ui::state::{Toast, ToastKind};
 use quark_ui::style::Styled;
 use quark_ui::theme::{Color, Theme, ThemeColors};
-use quark::view;
+
+/// A notification shown by [`ToastStack`]. The app owns the list and its
+/// lifetime; the stack only renders it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Toast {
+    /// Stable identity, used to key entrance and progress animations.
+    pub id: u64,
+    pub kind: ToastKind,
+    pub message: String,
+    pub description: Option<String>,
+    pub created_at_ms: u64,
+    /// Hovered toasts pause their lifetime bar.
+    pub hovered: bool,
+    /// When `Some`, the toast renders an externally driven progress bar in
+    /// place of the time-based one.
+    pub progress: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Error,
+}
 
 /// Sonner-style stacking constants (unscaled).
 const STACK_PEEK: f32 = 10.0;
@@ -14,8 +37,9 @@ const MAX_VISIBLE_BEHIND: usize = 2;
 const TOAST_Z_BASE: i32 = 300;
 /// Vertical gap between toasts when fanned out.
 const FAN_GAP: f32 = 10.0;
-/// Mirrors state::TOAST_LIFETIME_MS.
-const TOAST_LIFETIME_MS: u64 = 5_000;
+/// Lifetime the time-based progress bar counts down; apps should
+/// auto-dismiss on the same schedule.
+pub const TOAST_LIFETIME_MS: u64 = 5_000;
 
 /// Wide enough for actionable command/error detail without dominating the app.
 pub const TOAST_WIDTH: f32 = 460.0;
@@ -94,6 +118,7 @@ fn severity_icon(kind: ToastKind) -> &'static str {
 /// Per-toast visual props, built by the stack.
 struct ToastVisuals {
     index: usize,
+    dismiss: Action,
     kind: ToastKind,
     title_lines: Vec<String>,
     description_lines: Vec<String>,
@@ -165,7 +190,7 @@ impl RenderOnce for ToastVisuals {
                 rounded={CORNER_RADIUS}
                 border={tc.border}
                 shadow_preset={Shadow::TOAST}
-                on_click={crate::actions::AppAction::DismissToast(self.index).into()}
+                on_click={self.dismiss.clone()}
                 hit_identity={HitIdentity::Toast(self.index)}
                 cursor={CursorHint::Pointer}
                 z_index={self.z}
@@ -198,7 +223,7 @@ impl RenderOnce for ToastVisuals {
                         w={CLOSE_SIZE} h={CLOSE_SIZE}
                         rounded={Rad::MD}
                         hover_bg={tc.ghost_element_hover}
-                        on_click={crate::actions::AppAction::DismissToast(self.index).into()}
+                        on_click={self.dismiss.clone()}
                         hit_identity={HitIdentity::Toast(self.index)}
                         cursor={CursorHint::Pointer}
                     >
@@ -232,6 +257,8 @@ pub struct ToastStack<'a> {
     pub clock_ms: u64,
     /// Parallel to `toasts`: pre-wrapped lines + total height per toast.
     pub layouts: &'a [ToastLayout],
+    /// Builds the action emitted when the toast at an index is clicked.
+    pub on_dismiss: Box<dyn Fn(usize) -> Action + 'a>,
 }
 
 impl<'a> ToastStack<'a> {
@@ -244,6 +271,7 @@ impl<'a> ToastStack<'a> {
         status_bar_height: f32,
         clock_ms: u64,
         layouts: &'a [ToastLayout],
+        on_dismiss: impl Fn(usize) -> Action + 'a,
     ) -> Self {
         Self {
             toasts,
@@ -254,6 +282,7 @@ impl<'a> ToastStack<'a> {
             status_bar_height,
             clock_ms,
             layouts,
+            on_dismiss: Box::new(on_dismiss),
         }
     }
 
@@ -371,6 +400,7 @@ impl<'a> ToastStack<'a> {
 
             container = container.child(ToastVisuals {
                 index: toast_idx,
+                dismiss: (self.on_dismiss)(toast_idx),
                 kind: toast.kind,
                 title_lines: layout.title_lines,
                 description_lines: layout.description_lines,
