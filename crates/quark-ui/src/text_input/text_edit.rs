@@ -1,325 +1,295 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::actions::TextEditAction;
-use crate::effects::{AiEffect, Effect, UiEffect};
-use crate::platform::secrets::AiKeyKind;
-
-use super::*;
-
-pub(super) fn reduce_action(state: &mut AppState, action: TextEditAction) -> Vec<Effect> {
-    state.apply_text_edit_action(action)
+/// A text editing command, independent of which widget has focus.
+///
+/// Platform input (keys, IME commits, clipboard reads) is translated into
+/// these by the app and routed to the focused [`TextField`] or
+/// [`super::Editor`]. IME commits arrive as `InsertText`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextEditCommand {
+    InsertText(String),
+    Backspace,
+    BackspaceWord,
+    BackspaceLine,
+    DeleteForward,
+    DeleteForwardWord,
+    CursorLeft,
+    CursorRight,
+    CursorUp,
+    CursorDown,
+    CursorWordLeft,
+    CursorWordRight,
+    CursorHome,
+    CursorEnd,
+    CursorSoftHome,
+    CursorSoftEnd,
+    SelectLeft,
+    SelectRight,
+    SelectUp,
+    SelectDown,
+    SelectWordLeft,
+    SelectWordRight,
+    SelectHome,
+    SelectEnd,
+    SelectSoftHome,
+    SelectSoftEnd,
+    SelectAll,
+    Copy,
+    Cut,
+    Paste(String),
+    SetTextCursor(usize),
+    ExtendTextSelection(usize),
 }
 
-impl AppState {
-    pub(super) fn selection_range(&self) -> Option<(usize, usize)> {
-        let c = self.text_edit.cursor.get(&self.store);
-        let a = self.text_edit.anchor.get(&self.store);
-        if c == a {
+/// What applying a [`TextEditCommand`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextEditOutcome {
+    /// The text was modified.
+    pub text_changed: bool,
+    /// The cursor or selection anchor moved.
+    pub selection_changed: bool,
+    /// Text the app should write to the system clipboard (copy or cut).
+    pub clipboard_write: Option<String>,
+}
+
+/// Single-line text field model: text plus a caret and selection anchor,
+/// both byte offsets on grapheme boundaries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextField {
+    text: String,
+    cursor: usize,
+    anchor: usize,
+}
+
+impl TextField {
+    /// A field holding `text` with the caret at the end.
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let len = text.len();
+        Self {
+            text,
+            cursor: len,
+            anchor: len,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Replace the text and put the caret at the end.
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        *self = Self::new(text);
+    }
+
+    /// Byte offset of the caret.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Byte offset of the selection anchor. Equals `cursor` when nothing is selected.
+    pub fn anchor(&self) -> usize {
+        self.anchor
+    }
+
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        if self.cursor == self.anchor {
             None
         } else {
-            Some((c.min(a), c.max(a)))
+            Some((self.cursor.min(self.anchor), self.cursor.max(self.anchor)))
         }
     }
 
-    /// Delete the current selection and collapse cursor. Returns true if something was deleted.
-    pub(super) fn delete_selection(&mut self) -> bool {
-        self.clamp_cursor();
-        if let Some((start, end)) = self.selection_range() {
-            self.update_focused_text(|text| {
-                text.drain(start..end);
-            });
-            self.text_edit.cursor.set(&self.store, start);
-            self.text_edit.anchor.set(&self.store, start);
-            true
-        } else {
-            false
-        }
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection_range()
+            .map(|(start, end)| &self.text[start..end])
     }
 
-    /// Called after text mutation to sync compare fields and rebuild pickers.
-    pub(super) fn after_text_mutation(&mut self) -> Vec<Effect> {
-        match self.ui.focus.get(&self.store) {
-            Some(FocusTarget::PickerInput) => match self.overlays.picker.kind.get(&self.store) {
-                PickerKind::Repository => self.rebuild_repo_picker(),
-                PickerKind::LeftRef => {
-                    self.compare.resolved_left.set(&self.store, None);
-                    return self.rebuild_ref_picker(CompareField::Left);
-                }
-                PickerKind::RightRef => {
-                    self.compare.resolved_right.set(&self.store, None);
-                    return self.rebuild_ref_picker(CompareField::Right);
-                }
-                PickerKind::Theme => self.rebuild_theme_picker(),
-                PickerKind::UiFont | PickerKind::MonoFont => self.rebuild_font_picker(),
-            },
-            Some(FocusTarget::CommandPaletteInput) => return self.rebuild_command_palette(),
-            Some(FocusTarget::SearchInput) => self.recompute_search_matches(),
-            Some(FocusTarget::SettingsOpenAiKey) => {
-                if !self.startup.keyring_enabled {
-                    return Vec::new();
-                }
-                return vec![ai_key_save_effect(AiKeyKind::OpenAi, &self.ai_openai_key)];
+    pub fn apply(&mut self, cmd: TextEditCommand) -> TextEditOutcome {
+        use TextEditCommand::*;
+        let before = (self.cursor, self.anchor);
+        let mut outcome = TextEditOutcome::default();
+        match cmd {
+            InsertText(value) | Paste(value) => outcome.text_changed = self.insert_text(&value),
+            Backspace => outcome.text_changed = self.backspace(),
+            DeleteForward => outcome.text_changed = self.delete_forward(),
+            CursorLeft => self.cursor_left(false),
+            CursorRight => self.cursor_right(false),
+            CursorWordLeft => self.cursor_word_left(false),
+            CursorWordRight => self.cursor_word_right(false),
+            CursorHome => self.cursor_home(false),
+            CursorEnd => self.cursor_end(false),
+            SelectLeft => self.cursor_left(true),
+            SelectRight => self.cursor_right(true),
+            SelectWordLeft => self.cursor_word_left(true),
+            SelectWordRight => self.cursor_word_right(true),
+            SelectHome => self.cursor_home(true),
+            SelectEnd => self.cursor_end(true),
+            SelectAll => self.select_all(),
+            Copy => outcome.clipboard_write = self.copy(),
+            Cut => {
+                outcome.clipboard_write = self.cut();
+                outcome.text_changed = outcome.clipboard_write.is_some();
             }
-            Some(FocusTarget::SettingsAnthropicKey) => {
-                if !self.startup.keyring_enabled {
-                    return Vec::new();
-                }
-                return vec![ai_key_save_effect(
-                    AiKeyKind::Anthropic,
-                    &self.ai_anthropic_key,
-                )];
-            }
-            _ => {}
+            SetTextCursor(offset) => self.move_cursor(offset, false),
+            ExtendTextSelection(offset) => self.move_cursor(offset, true),
+            // Multiline and word/line deletion commands only apply to `Editor`.
+            BackspaceWord | BackspaceLine | DeleteForwardWord | CursorUp | CursorDown
+            | CursorSoftHome | CursorSoftEnd | SelectUp | SelectDown | SelectSoftHome
+            | SelectSoftEnd => {}
         }
-        Vec::new()
+        outcome.selection_changed = (self.cursor, self.anchor) != before;
+        outcome
     }
 
-    /// Should we persist settings after editing the current field?
-    pub(super) fn needs_persist(&self) -> bool {
-        matches!(
-            self.ui.focus.get(&self.store),
-            Some(FocusTarget::PickerInput)
-                if matches!(self.overlays.picker.kind.get(&self.store), PickerKind::LeftRef | PickerKind::RightRef)
-        )
-    }
-
-    pub(super) fn text_edit_effects(&mut self) -> Vec<Effect> {
-        let mut effects = self.after_text_mutation();
-        if self.needs_persist() {
-            effects.extend(self.persist_settings_effect());
-        }
-        effects
-    }
-
-    pub(super) fn insert_text(&mut self, value: String) -> Vec<Effect> {
-        if self.with_focused_text(|_| ()).is_none() {
-            return Vec::new();
-        }
-        self.delete_selection();
+    /// Insert at the caret, replacing any selection. Returns true if the text changed.
+    pub fn insert_text(&mut self, value: &str) -> bool {
+        let deleted = self.delete_selection();
         self.clamp_cursor();
-        let cursor = self.text_edit.cursor.get(&self.store);
-        self.update_focused_text(|text| {
-            text.insert_str(cursor, &value);
-        });
-        let new_cursor = cursor + value.len();
-        self.text_edit.cursor.set(&self.store, new_cursor);
-        self.text_edit.anchor.set(&self.store, new_cursor);
-        self.touch_cursor();
-        self.text_edit_effects()
+        self.text.insert_str(self.cursor, value);
+        self.cursor += value.len();
+        self.anchor = self.cursor;
+        deleted || !value.is_empty()
     }
 
-    pub(super) fn backspace(&mut self) -> Vec<Effect> {
-        if self.with_focused_text(|_| ()).is_none() {
-            return Vec::new();
-        }
+    /// Delete the selection, or the grapheme before the caret.
+    pub fn backspace(&mut self) -> bool {
         if self.delete_selection() {
-            self.touch_cursor();
-            return self.text_edit_effects();
+            return true;
         }
-        let cursor = self.text_edit.cursor.get(&self.store);
-        if cursor == 0 {
-            return Vec::new();
+        if self.cursor == 0 {
+            return false;
         }
-        let prev = self
-            .with_focused_text(|t| prev_grapheme_boundary(t, cursor))
-            .unwrap_or(0);
-        self.update_focused_text(|text| {
-            text.drain(prev..cursor);
-        });
-        self.text_edit.cursor.set(&self.store, prev);
-        self.text_edit.anchor.set(&self.store, prev);
-        self.touch_cursor();
-        self.text_edit_effects()
+        let prev = prev_grapheme_boundary(&self.text, self.cursor);
+        self.text.drain(prev..self.cursor);
+        self.cursor = prev;
+        self.anchor = prev;
+        true
     }
 
-    pub(super) fn delete_forward(&mut self) -> Vec<Effect> {
-        if self.with_focused_text(|_| ()).is_none() {
-            return Vec::new();
-        }
+    /// Delete the selection, or the grapheme after the caret.
+    pub fn delete_forward(&mut self) -> bool {
         if self.delete_selection() {
-            self.touch_cursor();
-            return self.text_edit_effects();
+            return true;
         }
-        let cursor = self.text_edit.cursor.get(&self.store);
-        let len = self.with_focused_text(|s| s.len()).unwrap_or(0);
-        if cursor >= len {
-            return Vec::new();
+        if self.cursor >= self.text.len() {
+            return false;
         }
-        let next = self
-            .with_focused_text(|t| next_grapheme_boundary(t, cursor))
-            .unwrap_or(cursor);
-        self.update_focused_text(|text| {
-            text.drain(cursor..next);
-        });
-        self.touch_cursor();
-        self.text_edit_effects()
+        let next = next_grapheme_boundary(&self.text, self.cursor);
+        self.text.drain(self.cursor..next);
+        true
     }
 
-    pub(super) fn move_cursor(&mut self, offset: usize, extend_selection: bool) {
-        self.text_edit.cursor.set(&self.store, offset);
+    /// Delete the selection and collapse the caret. Returns true if something was deleted.
+    pub fn delete_selection(&mut self) -> bool {
+        self.clamp_cursor();
+        let Some((start, end)) = self.selection_range() else {
+            return false;
+        };
+        self.text.drain(start..end);
+        self.cursor = start;
+        self.anchor = start;
+        true
+    }
+
+    /// Move the caret to `offset`, keeping the anchor when `extend_selection`.
+    pub fn move_cursor(&mut self, offset: usize, extend_selection: bool) {
+        self.cursor = floor_char_boundary(&self.text, offset);
         if !extend_selection {
-            self.text_edit.anchor.set(&self.store, offset);
+            self.anchor = self.cursor;
         }
-        self.touch_cursor();
     }
 
-    pub(super) fn cursor_left(&mut self, extend: bool) {
+    pub fn cursor_left(&mut self, extend: bool) {
         if !extend && self.selection_range().is_some() {
-            let start = self
-                .text_edit
-                .cursor
-                .get(&self.store)
-                .min(self.text_edit.anchor.get(&self.store));
-            self.move_cursor(start, false);
+            self.move_cursor(self.cursor.min(self.anchor), false);
             return;
         }
-        let cursor = self.text_edit.cursor.get(&self.store);
-        if cursor == 0 {
+        if self.cursor == 0 {
             return;
         }
-        let prev = self
-            .with_focused_text(|t| prev_grapheme_boundary(t, cursor))
-            .unwrap_or(0);
-        self.move_cursor(prev, extend);
+        self.move_cursor(prev_grapheme_boundary(&self.text, self.cursor), extend);
     }
 
-    pub(super) fn cursor_right(&mut self, extend: bool) {
+    pub fn cursor_right(&mut self, extend: bool) {
         if !extend && self.selection_range().is_some() {
-            let end = self
-                .text_edit
-                .cursor
-                .get(&self.store)
-                .max(self.text_edit.anchor.get(&self.store));
-            self.move_cursor(end, false);
+            self.move_cursor(self.cursor.max(self.anchor), false);
             return;
         }
-        let cursor = self.text_edit.cursor.get(&self.store);
-        let len = self.with_focused_text(|s| s.len()).unwrap_or(0);
-        if cursor >= len {
+        if self.cursor >= self.text.len() {
             return;
         }
-        let next = self
-            .with_focused_text(|t| next_grapheme_boundary(t, cursor))
-            .unwrap_or(cursor);
-        self.move_cursor(next, extend);
+        self.move_cursor(next_grapheme_boundary(&self.text, self.cursor), extend);
     }
 
-    pub(super) fn cursor_word_left(&mut self, extend: bool) {
+    pub fn cursor_word_left(&mut self, extend: bool) {
         if !extend && self.selection_range().is_some() {
-            let start = self
-                .text_edit
-                .cursor
-                .get(&self.store)
-                .min(self.text_edit.anchor.get(&self.store));
-            self.move_cursor(start, false);
+            self.move_cursor(self.cursor.min(self.anchor), false);
             return;
         }
-        let cursor = self.text_edit.cursor.get(&self.store);
-        let pos = self
-            .with_focused_text(|t| prev_word_boundary(t, cursor))
-            .unwrap_or(0);
-        self.move_cursor(pos, extend);
+        self.move_cursor(prev_word_boundary(&self.text, self.cursor), extend);
     }
 
-    pub(super) fn cursor_word_right(&mut self, extend: bool) {
+    pub fn cursor_word_right(&mut self, extend: bool) {
         if !extend && self.selection_range().is_some() {
-            let end = self
-                .text_edit
-                .cursor
-                .get(&self.store)
-                .max(self.text_edit.anchor.get(&self.store));
-            self.move_cursor(end, false);
+            self.move_cursor(self.cursor.max(self.anchor), false);
             return;
         }
-        let cursor = self.text_edit.cursor.get(&self.store);
-        let len = self.with_focused_text(|s| s.len()).unwrap_or(0);
-        let pos = self
-            .with_focused_text(|t| next_word_boundary(t, cursor))
-            .unwrap_or(len);
-        self.move_cursor(pos, extend);
+        self.move_cursor(next_word_boundary(&self.text, self.cursor), extend);
     }
 
-    pub(super) fn cursor_home(&mut self, extend: bool) {
+    pub fn cursor_home(&mut self, extend: bool) {
         self.move_cursor(0, extend);
     }
 
-    pub(super) fn cursor_end(&mut self, extend: bool) {
-        let len = self.with_focused_text(|s| s.len()).unwrap_or(0);
-        self.move_cursor(len, extend);
+    pub fn cursor_end(&mut self, extend: bool) {
+        self.move_cursor(self.text.len(), extend);
     }
 
-    pub(super) fn select_all(&mut self) {
-        let len = self.with_focused_text(|s| s.len()).unwrap_or(0);
-        self.text_edit.anchor.set(&self.store, 0);
-        self.text_edit.cursor.set(&self.store, len);
-        self.touch_cursor();
+    pub fn select_all(&mut self) {
+        self.anchor = 0;
+        self.cursor = self.text.len();
     }
 
-    /// Copy text selection or, if none, the selected overlay entry.
-    /// Returns `(effects, Some(value))` when copying an entry (toast-worthy).
-    pub(super) fn copy_selection(&self) -> (Vec<Effect>, Option<String>) {
-        if let Some((start, end)) = self.selection_range() {
-            if let Some(selected) = self.with_focused_text(|text| text[start..end].to_string()) {
-                return (vec![UiEffect::SetClipboard(selected).into()], None);
-            }
-        }
-        // No text selection — copy the selected picker/palette entry's value.
-        if matches!(
-            self.ui.focus.get(&self.store),
-            Some(FocusTarget::PickerInput)
-        ) {
-            let selected = self.overlays.picker.selected_index.get(&self.store);
-            let value = self.overlays.picker.entries.with(&self.store, |entries| {
-                entries.get(selected).map(|e| e.value.clone())
-            });
-            if let Some(value) = value {
-                return (
-                    vec![UiEffect::SetClipboard(value.clone()).into()],
-                    Some(value),
-                );
-            }
-        }
-        if matches!(
-            self.ui.focus.get(&self.store),
-            Some(FocusTarget::CommandPaletteInput)
-        ) {
-            let selected = self
-                .overlays
-                .command_palette
-                .selected_index
-                .get(&self.store);
-            let label = self
-                .overlays
-                .command_palette
-                .entries
-                .with(&self.store, |entries| {
-                    entries.get(selected).map(|e| e.label.clone())
-                });
-            if let Some(label) = label {
-                return (
-                    vec![UiEffect::SetClipboard(label.clone()).into()],
-                    Some(label),
-                );
-            }
-        }
-        (Vec::new(), None)
+    /// The selected text to put on the clipboard, if any.
+    pub fn copy(&self) -> Option<String> {
+        self.selected_text().map(str::to_owned)
     }
 
-    pub(super) fn cut_selection(&mut self) -> Vec<Effect> {
-        let (mut effects, ..) = self.copy_selection();
-        if self.delete_selection() {
-            self.touch_cursor();
-            effects.extend(self.text_edit_effects());
-        }
-        effects
+    /// Remove the selection and return it for the clipboard.
+    pub fn cut(&mut self) -> Option<String> {
+        let copied = self.copy()?;
+        self.delete_selection();
+        Some(copied)
     }
 
-    pub(super) fn paste(&mut self, value: String) -> Vec<Effect> {
+    /// Insert clipboard contents, replacing any selection.
+    pub fn paste(&mut self, value: &str) -> bool {
         self.insert_text(value)
+    }
+
+    /// Commit composed IME text at the caret.
+    pub fn commit_ime(&mut self, value: &str) -> bool {
+        self.insert_text(value)
+    }
+
+    /// Pull the caret and anchor back inside the text onto char boundaries,
+    /// for when the owner replaced the text out from under them.
+    fn clamp_cursor(&mut self) {
+        self.cursor = floor_char_boundary(&self.text, self.cursor);
+        self.anchor = floor_char_boundary(&self.text, self.anchor);
     }
 }
 
-pub(super) fn prev_grapheme_boundary(text: &str, offset: usize) -> usize {
+fn floor_char_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+pub fn prev_grapheme_boundary(text: &str, offset: usize) -> usize {
     if offset == 0 {
         return 0;
     }
@@ -333,7 +303,7 @@ pub(super) fn prev_grapheme_boundary(text: &str, offset: usize) -> usize {
     prev
 }
 
-pub(super) fn next_grapheme_boundary(text: &str, offset: usize) -> usize {
+pub fn next_grapheme_boundary(text: &str, offset: usize) -> usize {
     for (idx, grapheme) in text.grapheme_indices(true) {
         if idx >= offset {
             return idx + grapheme.len();
@@ -342,12 +312,13 @@ pub(super) fn next_grapheme_boundary(text: &str, offset: usize) -> usize {
     text.len()
 }
 
-pub(super) fn prev_word_boundary(text: &str, offset: usize) -> usize {
+/// Start of the word before `offset`. Words are ASCII alphanumeric runs.
+pub fn prev_word_boundary(text: &str, offset: usize) -> usize {
     if offset == 0 {
         return 0;
     }
     let bytes = text.as_bytes();
-    let mut pos = offset;
+    let mut pos = offset.min(bytes.len());
     // Skip whitespace/punctuation backwards
     while pos > 0 && !bytes[pos - 1].is_ascii_alphanumeric() {
         pos -= 1;
@@ -359,7 +330,8 @@ pub(super) fn prev_word_boundary(text: &str, offset: usize) -> usize {
     pos
 }
 
-pub(super) fn next_word_boundary(text: &str, offset: usize) -> usize {
+/// Start of the word after `offset`. Words are ASCII alphanumeric runs.
+pub fn next_word_boundary(text: &str, offset: usize) -> usize {
     let len = text.len();
     if offset >= len {
         return len;
@@ -377,589 +349,136 @@ pub(super) fn next_word_boundary(text: &str, offset: usize) -> usize {
     pos
 }
 
-fn ai_key_save_effect(kind: AiKeyKind, value: &str) -> Effect {
-    if value.is_empty() {
-        AiEffect::ClearAiKey { kind }.into()
-    } else {
-        AiEffect::SaveAiKey {
-            kind,
-            value: value.to_owned(),
-        }
-        .into()
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use TextEditCommand::*;
 
-impl AppState {
-    pub(super) fn apply_text_edit_action(&mut self, action: TextEditAction) -> Vec<Effect> {
-        use TextEditAction::*;
-        if self.ui.focus.get(&self.store) == Some(FocusTarget::CommitEditor) {
-            return self.apply_commit_editor_action(action);
-        }
-        if self.ui.focus.get(&self.store) == Some(FocusTarget::ReviewCommentEditor) {
-            return self.apply_review_comment_editor_action(action);
-        }
-        if self.ui.focus.get(&self.store) == Some(FocusTarget::SettingsSteeringPrompt) {
-            return self.apply_steering_prompt_action(action);
-        }
-        if matches!(
-            self.ui.focus.get(&self.store),
-            Some(FocusTarget::TextCompareLeft | FocusTarget::TextCompareRight)
-        ) {
-            return self.apply_text_compare_editor_action(action);
-        }
-        match action {
-            InsertText(value) => self.insert_text(value),
-            Backspace => self.backspace(),
-            DeleteForward => self.delete_forward(),
-            CursorLeft => {
-                self.cursor_left(false);
-                Vec::new()
-            }
-            CursorRight => {
-                self.cursor_right(false);
-                Vec::new()
-            }
-            CursorWordLeft => {
-                self.cursor_word_left(false);
-                Vec::new()
-            }
-            CursorWordRight => {
-                self.cursor_word_right(false);
-                Vec::new()
-            }
-            CursorHome => {
-                self.cursor_home(false);
-                Vec::new()
-            }
-            CursorEnd => {
-                self.cursor_end(false);
-                Vec::new()
-            }
-            SelectLeft => {
-                self.cursor_left(true);
-                Vec::new()
-            }
-            SelectRight => {
-                self.cursor_right(true);
-                Vec::new()
-            }
-            SelectWordLeft => {
-                self.cursor_word_left(true);
-                Vec::new()
-            }
-            SelectWordRight => {
-                self.cursor_word_right(true);
-                Vec::new()
-            }
-            SelectHome => {
-                self.cursor_home(true);
-                Vec::new()
-            }
-            SelectEnd => {
-                self.cursor_end(true);
-                Vec::new()
-            }
-            SelectAll => {
-                self.select_all();
-                Vec::new()
-            }
-            Copy => {
-                let (effects, copied) = self.copy_selection();
-                if let Some(value) = copied {
-                    let truncated = if value.len() > 32 {
-                        format!("{}…", &value[..32])
-                    } else {
-                        value
-                    };
-                    self.push_info(&format!("Copied {truncated}"));
-                }
-                effects
-            }
-            Cut => self.cut_selection(),
-            Paste(value) => self.paste(value),
-            SetTextCursor(offset) => {
-                self.move_cursor(offset, false);
-                Vec::new()
-            }
-            ExtendTextSelection(offset) => {
-                self.move_cursor(offset, true);
-                Vec::new()
-            }
-            _ => Vec::new(),
-        }
+    fn field(text: &str, anchor: usize, cursor: usize) -> TextField {
+        let mut f = TextField::new(text);
+        f.move_cursor(anchor, false);
+        f.move_cursor(cursor, true);
+        f
     }
 
-    fn apply_commit_editor_action(&mut self, action: TextEditAction) -> Vec<Effect> {
-        use TextEditAction::*;
-        match action {
-            InsertText(value) => self.commit_editor.insert_text(&value),
-            Backspace => self.commit_editor.delete_backward(),
-            BackspaceWord => self.commit_editor.delete_backward_word(),
-            BackspaceLine => self.commit_editor.delete_backward_line(),
-            DeleteForward => self.commit_editor.delete_forward(),
-            DeleteForwardWord => self.commit_editor.delete_forward_word(),
-            CursorLeft => self.commit_editor.move_left(false),
-            CursorRight => self.commit_editor.move_right(false),
-            CursorUp => self.commit_editor.move_up(false),
-            CursorDown => self.commit_editor.move_down(false),
-            CursorWordLeft => self.commit_editor.move_word_left(false),
-            CursorWordRight => self.commit_editor.move_word_right(false),
-            CursorHome => self.commit_editor.move_home(false),
-            CursorEnd => self.commit_editor.move_end(false),
-            CursorSoftHome => self.commit_editor.move_soft_home(false),
-            CursorSoftEnd => self.commit_editor.move_soft_end(false),
-            SelectLeft => self.commit_editor.move_left(true),
-            SelectRight => self.commit_editor.move_right(true),
-            SelectUp => self.commit_editor.move_up(true),
-            SelectDown => self.commit_editor.move_down(true),
-            SelectWordLeft => self.commit_editor.move_word_left(true),
-            SelectWordRight => self.commit_editor.move_word_right(true),
-            SelectHome => self.commit_editor.move_home(true),
-            SelectEnd => self.commit_editor.move_end(true),
-            SelectSoftHome => self.commit_editor.move_soft_home(true),
-            SelectSoftEnd => self.commit_editor.move_soft_end(true),
-            SelectAll => self.commit_editor.select_all(),
-            Copy => {
-                if let Some(text) = self.commit_editor.selected_text() {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        let _ = clipboard.set_text(text);
-                    }
-                }
-            }
-            Cut => {
-                if let Some(text) = self.commit_editor.selected_text() {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        let _ = clipboard.set_text(text);
-                    }
-                    self.commit_editor.delete_backward();
-                }
-            }
-            Paste(value) => self.commit_editor.insert_text(&value),
-            _ => {}
-        }
-        Vec::new()
+    #[test]
+    fn backspace_removes_whole_grapheme_cluster() {
+        // Family emoji is one grapheme made of several code points joined by ZWJ.
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let mut f = TextField::new(format!("a{family}"));
+        let out = f.apply(Backspace);
+        assert!(out.text_changed);
+        assert_eq!(f.text(), "a");
+        assert_eq!(f.cursor(), 1);
     }
 
-    fn apply_review_comment_editor_action(&mut self, action: TextEditAction) -> Vec<Effect> {
-        use TextEditAction::*;
-        match action {
-            InsertText(value) => self.review_comment_editor.insert_text(&value),
-            Backspace => self.review_comment_editor.delete_backward(),
-            BackspaceWord => self.review_comment_editor.delete_backward_word(),
-            BackspaceLine => self.review_comment_editor.delete_backward_line(),
-            DeleteForward => self.review_comment_editor.delete_forward(),
-            DeleteForwardWord => self.review_comment_editor.delete_forward_word(),
-            CursorLeft => self.review_comment_editor.move_left(false),
-            CursorRight => self.review_comment_editor.move_right(false),
-            CursorUp => self.review_comment_editor.move_up(false),
-            CursorDown => self.review_comment_editor.move_down(false),
-            CursorWordLeft => self.review_comment_editor.move_word_left(false),
-            CursorWordRight => self.review_comment_editor.move_word_right(false),
-            CursorHome => self.review_comment_editor.move_home(false),
-            CursorEnd => self.review_comment_editor.move_end(false),
-            CursorSoftHome => self.review_comment_editor.move_soft_home(false),
-            CursorSoftEnd => self.review_comment_editor.move_soft_end(false),
-            SelectLeft => self.review_comment_editor.move_left(true),
-            SelectRight => self.review_comment_editor.move_right(true),
-            SelectUp => self.review_comment_editor.move_up(true),
-            SelectDown => self.review_comment_editor.move_down(true),
-            SelectWordLeft => self.review_comment_editor.move_word_left(true),
-            SelectWordRight => self.review_comment_editor.move_word_right(true),
-            SelectHome => self.review_comment_editor.move_home(true),
-            SelectEnd => self.review_comment_editor.move_end(true),
-            SelectSoftHome => self.review_comment_editor.move_soft_home(true),
-            SelectSoftEnd => self.review_comment_editor.move_soft_end(true),
-            SelectAll => self.review_comment_editor.select_all(),
-            Copy => {
-                if let Some(text) = self.review_comment_editor.selected_text()
-                    && let Ok(mut clipboard) = arboard::Clipboard::new()
-                {
-                    let _ = clipboard.set_text(text);
-                }
-            }
-            Cut => {
-                if let Some(text) = self.review_comment_editor.selected_text()
-                    && let Ok(mut clipboard) = arboard::Clipboard::new()
-                {
-                    let _ = clipboard.set_text(text);
-                    self.review_comment_editor.delete_backward();
-                }
-            }
-            Paste(value) => self.review_comment_editor.insert_text(&value),
-            _ => {}
-        }
-        Vec::new()
+    #[test]
+    fn cursor_moves_over_combining_marks() {
+        let mut f = TextField::new("e\u{301}x");
+        f.apply(CursorHome);
+        f.apply(CursorRight);
+        assert_eq!(f.cursor(), "e\u{301}".len());
+        f.apply(DeleteForward);
+        assert_eq!(f.text(), "e\u{301}");
+        f.apply(CursorLeft);
+        assert_eq!(f.cursor(), 0);
     }
 
-    fn apply_steering_prompt_action(&mut self, action: TextEditAction) -> Vec<Effect> {
-        use TextEditAction::*;
-        let mut changed = true;
-        match action {
-            InsertText(value) => self.steering_prompt_editor.insert_text(&value),
-            Backspace => self.steering_prompt_editor.delete_backward(),
-            BackspaceWord => self.steering_prompt_editor.delete_backward_word(),
-            BackspaceLine => self.steering_prompt_editor.delete_backward_line(),
-            DeleteForward => self.steering_prompt_editor.delete_forward(),
-            DeleteForwardWord => self.steering_prompt_editor.delete_forward_word(),
-            CursorLeft => {
-                self.steering_prompt_editor.move_left(false);
-                changed = false;
-            }
-            CursorRight => {
-                self.steering_prompt_editor.move_right(false);
-                changed = false;
-            }
-            CursorUp => {
-                self.steering_prompt_editor.move_up(false);
-                changed = false;
-            }
-            CursorDown => {
-                self.steering_prompt_editor.move_down(false);
-                changed = false;
-            }
-            CursorWordLeft => {
-                self.steering_prompt_editor.move_word_left(false);
-                changed = false;
-            }
-            CursorWordRight => {
-                self.steering_prompt_editor.move_word_right(false);
-                changed = false;
-            }
-            CursorHome => {
-                self.steering_prompt_editor.move_home(false);
-                changed = false;
-            }
-            CursorEnd => {
-                self.steering_prompt_editor.move_end(false);
-                changed = false;
-            }
-            CursorSoftHome => {
-                self.steering_prompt_editor.move_soft_home(false);
-                changed = false;
-            }
-            CursorSoftEnd => {
-                self.steering_prompt_editor.move_soft_end(false);
-                changed = false;
-            }
-            SelectLeft => {
-                self.steering_prompt_editor.move_left(true);
-                changed = false;
-            }
-            SelectRight => {
-                self.steering_prompt_editor.move_right(true);
-                changed = false;
-            }
-            SelectUp => {
-                self.steering_prompt_editor.move_up(true);
-                changed = false;
-            }
-            SelectDown => {
-                self.steering_prompt_editor.move_down(true);
-                changed = false;
-            }
-            SelectWordLeft => {
-                self.steering_prompt_editor.move_word_left(true);
-                changed = false;
-            }
-            SelectWordRight => {
-                self.steering_prompt_editor.move_word_right(true);
-                changed = false;
-            }
-            SelectHome => {
-                self.steering_prompt_editor.move_home(true);
-                changed = false;
-            }
-            SelectEnd => {
-                self.steering_prompt_editor.move_end(true);
-                changed = false;
-            }
-            SelectSoftHome => {
-                self.steering_prompt_editor.move_soft_home(true);
-                changed = false;
-            }
-            SelectSoftEnd => {
-                self.steering_prompt_editor.move_soft_end(true);
-                changed = false;
-            }
-            SelectAll => {
-                self.steering_prompt_editor.select_all();
-                changed = false;
-            }
-            Copy => {
-                changed = false;
-                if let Some(text) = self.steering_prompt_editor.selected_text() {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        let _ = clipboard.set_text(text);
-                    }
-                }
-            }
-            Cut => {
-                if let Some(text) = self.steering_prompt_editor.selected_text() {
-                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                        let _ = clipboard.set_text(text);
-                    }
-                    self.steering_prompt_editor.delete_backward();
-                }
-            }
-            Paste(value) => self.steering_prompt_editor.insert_text(&value),
-            _ => changed = false,
-        }
-        if changed {
-            let snapshot = self.steering_prompt_editor.text().to_owned();
-            if self.settings.ai_steering_prompt != snapshot {
-                self.settings.ai_steering_prompt = snapshot;
-                return self.persist_settings_effect();
-            }
-        }
-        Vec::new()
+    #[test]
+    fn word_movement_skips_punctuation_and_spaces() {
+        let mut f = TextField::new("foo.bar  baz");
+        f.apply(CursorWordLeft);
+        assert_eq!(f.cursor(), 9);
+        f.apply(CursorWordLeft);
+        assert_eq!(f.cursor(), 4);
+        f.apply(CursorWordLeft);
+        assert_eq!(f.cursor(), 0);
+        f.apply(CursorWordRight);
+        assert_eq!(f.cursor(), 4);
+        f.apply(CursorWordRight);
+        assert_eq!(f.cursor(), 9);
     }
 
-    fn apply_text_compare_editor_action(&mut self, action: TextEditAction) -> Vec<Effect> {
-        let target = self.ui.focus.get(&self.store);
-        let changed = {
-            let Some(editor) = (match target {
-                Some(FocusTarget::TextCompareLeft) => Some(&mut self.text_compare.left_editor),
-                Some(FocusTarget::TextCompareRight) => Some(&mut self.text_compare.right_editor),
-                _ => None,
-            }) else {
-                return Vec::new();
-            };
-
-            let mut changed = false;
-            use TextEditAction::*;
-            match action {
-                InsertText(value) => {
-                    editor.insert_text(&value);
-                    changed = !value.is_empty();
-                }
-                Backspace => {
-                    editor.delete_backward();
-                    changed = true;
-                }
-                BackspaceWord => {
-                    editor.delete_backward_word();
-                    changed = true;
-                }
-                BackspaceLine => {
-                    editor.delete_backward_line();
-                    changed = true;
-                }
-                DeleteForward => {
-                    editor.delete_forward();
-                    changed = true;
-                }
-                DeleteForwardWord => {
-                    editor.delete_forward_word();
-                    changed = true;
-                }
-                CursorLeft => editor.move_left(false),
-                CursorRight => editor.move_right(false),
-                CursorUp => editor.move_up(false),
-                CursorDown => editor.move_down(false),
-                CursorWordLeft => editor.move_word_left(false),
-                CursorWordRight => editor.move_word_right(false),
-                CursorHome => editor.move_home(false),
-                CursorEnd => editor.move_end(false),
-                CursorSoftHome => editor.move_soft_home(false),
-                CursorSoftEnd => editor.move_soft_end(false),
-                SelectLeft => editor.move_left(true),
-                SelectRight => editor.move_right(true),
-                SelectUp => editor.move_up(true),
-                SelectDown => editor.move_down(true),
-                SelectWordLeft => editor.move_word_left(true),
-                SelectWordRight => editor.move_word_right(true),
-                SelectHome => editor.move_home(true),
-                SelectEnd => editor.move_end(true),
-                SelectSoftHome => editor.move_soft_home(true),
-                SelectSoftEnd => editor.move_soft_end(true),
-                SelectAll => editor.select_all(),
-                Copy => {
-                    if let Some(text) = editor.selected_text()
-                        && let Ok(mut clipboard) = arboard::Clipboard::new()
-                    {
-                        let _ = clipboard.set_text(text);
-                    }
-                }
-                Cut => {
-                    if let Some(text) = editor.selected_text() {
-                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                            let _ = clipboard.set_text(text);
-                        }
-                        editor.delete_backward();
-                        changed = true;
-                    }
-                }
-                Paste(value) => {
-                    editor.insert_text(&value);
-                    changed = !value.is_empty();
-                }
-                _ => {}
-            }
-            changed
-        };
-        if changed {
-            self.mark_text_compare_dirty();
-        }
-        Vec::new()
-    }
-}
-
-/// Cursor/selection state for the currently focused text field.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Store)]
-pub struct TextEditState {
-    /// Byte offset of the caret.
-    pub cursor: usize,
-    /// Byte offset of the selection anchor.  Equal to `cursor` when nothing is selected.
-    pub anchor: usize,
-    /// Timestamp (clock_ms) when the cursor last moved — used to reset blink phase.
-    pub cursor_moved_at_ms: u64,
-}
-
-impl AppState {
-    /// Set cursor and anchor to the same offset and refresh the blink timestamp.
-    pub(super) fn reset_text_edit(&mut self, offset: usize) {
-        self.text_edit.cursor.set(&self.store, offset);
-        self.text_edit.anchor.set(&self.store, offset);
-        self.text_edit
-            .cursor_moved_at_ms
-            .set(&self.store, self.clock_ms);
+    #[test]
+    fn select_word_then_backspace_deletes_selection() {
+        let mut f = TextField::new("hello world");
+        let out = f.apply(SelectWordLeft);
+        assert!(out.selection_changed && !out.text_changed);
+        assert_eq!(f.selected_text(), Some("world"));
+        f.apply(Backspace);
+        assert_eq!(f.text(), "hello ");
+        assert_eq!(f.selection_range(), None);
     }
 
-    /// Run `f` against the text string for the given focus target, if it's a text field.
-    pub(super) fn with_text_for_focus<R>(
-        &self,
-        target: FocusTarget,
-        f: impl FnOnce(&str) -> R,
-    ) -> Option<R> {
-        match target {
-            FocusTarget::PickerInput => match self.overlays.picker.kind.get(&self.store) {
-                PickerKind::Repository
-                | PickerKind::Theme
-                | PickerKind::UiFont
-                | PickerKind::MonoFont => {
-                    Some(self.overlays.picker.query.with(&self.store, |s| f(s)))
-                }
-                PickerKind::LeftRef => Some(self.compare.left_ref.with(&self.store, |s| f(s))),
-                PickerKind::RightRef => Some(self.compare.right_ref.with(&self.store, |s| f(s))),
-            },
-            FocusTarget::CommandPaletteInput => Some(
-                self.overlays
-                    .command_palette
-                    .query
-                    .with(&self.store, |s| f(s)),
-            ),
-            FocusTarget::SidebarSearch => Some(self.file_list.filter.with(&self.store, |s| f(s))),
-            FocusTarget::SearchInput => Some(self.editor.search.query.with(&self.store, |s| f(s))),
-            FocusTarget::CommitEditor => None,
-            FocusTarget::SettingsOpenAiKey => Some(f(&self.ai_openai_key)),
-            FocusTarget::SettingsAnthropicKey => Some(f(&self.ai_anthropic_key)),
-            FocusTarget::SettingsSteeringPrompt => None,
-            FocusTarget::TextCompareLeft | FocusTarget::TextCompareRight => None,
-            _ => None,
-        }
+    #[test]
+    fn arrow_collapses_selection_to_its_edge() {
+        let mut f = field("abcdef", 1, 4);
+        f.apply(CursorLeft);
+        assert_eq!((f.cursor(), f.anchor()), (1, 1));
+        let mut f = field("abcdef", 4, 1);
+        f.apply(CursorRight);
+        assert_eq!((f.cursor(), f.anchor()), (4, 4));
     }
 
-    pub(super) fn with_focused_text<R>(&self, f: impl FnOnce(&str) -> R) -> Option<R> {
-        let target = self.ui.focus.get(&self.store)?;
-        self.with_text_for_focus(target, f)
+    #[test]
+    fn paste_replaces_selection() {
+        let mut f = field("one two three", 4, 7);
+        let out = f.apply(Paste("2".into()));
+        assert!(out.text_changed);
+        assert_eq!(f.text(), "one 2 three");
+        assert_eq!(f.cursor(), 5);
     }
 
-    pub(super) fn update_focused_text<R>(&mut self, f: impl FnOnce(&mut String) -> R) -> Option<R> {
-        match self.ui.focus.get(&self.store) {
-            Some(FocusTarget::PickerInput) => match self.overlays.picker.kind.get(&self.store) {
-                PickerKind::Repository
-                | PickerKind::Theme
-                | PickerKind::UiFont
-                | PickerKind::MonoFont => {
-                    let mut out = None;
-                    self.overlays
-                        .picker
-                        .query
-                        .update(&self.store, |s| out = Some(f(s)));
-                    out
-                }
-                PickerKind::LeftRef => {
-                    let mut out = None;
-                    self.compare
-                        .left_ref
-                        .update(&self.store, |s| out = Some(f(s)));
-                    out
-                }
-                PickerKind::RightRef => {
-                    let mut out = None;
-                    self.compare
-                        .right_ref
-                        .update(&self.store, |s| out = Some(f(s)));
-                    out
-                }
-            },
-            Some(FocusTarget::CommandPaletteInput) => {
-                let mut out = None;
-                self.overlays
-                    .command_palette
-                    .query
-                    .update(&self.store, |s| out = Some(f(s)));
-                out
-            }
-            Some(FocusTarget::SidebarSearch) => {
-                let mut out = None;
-                self.file_list
-                    .filter
-                    .update(&self.store, |s| out = Some(f(s)));
-                out
-            }
-            Some(FocusTarget::SearchInput) => {
-                let mut out = None;
-                self.editor
-                    .search
-                    .query
-                    .update(&self.store, |s| out = Some(f(s)));
-                out
-            }
-            Some(FocusTarget::CommitEditor) => None,
-            Some(FocusTarget::SettingsOpenAiKey) => {
-                if !self.ai_key_editable(AiKeyKind::OpenAi) {
-                    return None;
-                }
-                let result = f(&mut self.ai_openai_key);
-                Some(result)
-            }
-            Some(FocusTarget::SettingsAnthropicKey) => {
-                if !self.ai_key_editable(AiKeyKind::Anthropic) {
-                    return None;
-                }
-                let result = f(&mut self.ai_anthropic_key);
-                Some(result)
-            }
-            Some(FocusTarget::SettingsSteeringPrompt) => None,
-            _ => None,
-        }
+    #[test]
+    fn copy_and_cut_request_clipboard_writes() {
+        let mut f = TextField::new("abc");
+        assert_eq!(f.apply(Copy).clipboard_write, None);
+        f.apply(SelectAll);
+        let out = f.apply(Copy);
+        assert_eq!(out.clipboard_write.as_deref(), Some("abc"));
+        assert!(!out.text_changed);
+        let out = f.apply(Cut);
+        assert_eq!(out.clipboard_write.as_deref(), Some("abc"));
+        assert!(out.text_changed);
+        assert_eq!(f.text(), "");
     }
 
-    pub(super) fn touch_cursor(&mut self) {
-        self.text_edit
-            .cursor_moved_at_ms
-            .set(&self.store, self.clock_ms);
+    #[test]
+    fn select_home_and_end_extend_from_anchor() {
+        let mut f = TextField::new("abcdef");
+        f.apply(SetTextCursor(3));
+        f.apply(SelectHome);
+        assert_eq!(f.selected_text(), Some("abc"));
+        f.apply(SelectEnd);
+        assert_eq!(f.selected_text(), Some("def"));
+        f.apply(ExtendTextSelection(5));
+        assert_eq!(f.selected_text(), Some("de"));
     }
 
-    pub(super) fn clamp_cursor(&mut self) {
-        let cursor_now = self.text_edit.cursor.get(&self.store);
-        let anchor_now = self.text_edit.anchor.get(&self.store);
-        let Some((cursor, anchor)) = self.with_focused_text(|text| {
-            let len = text.len();
-            let mut cursor = cursor_now.min(len);
-            while cursor > 0 && !text.is_char_boundary(cursor) {
-                cursor -= 1;
-            }
-            let mut anchor = anchor_now.min(len);
-            while anchor > 0 && !text.is_char_boundary(anchor) {
-                anchor -= 1;
-            }
-            (cursor, anchor)
-        }) else {
-            return;
-        };
-        self.text_edit.cursor.set(&self.store, cursor);
-        self.text_edit.anchor.set(&self.store, anchor);
+    #[test]
+    fn set_cursor_clamps_to_char_boundary() {
+        let mut f = TextField::new("é");
+        f.apply(SetTextCursor(1));
+        assert_eq!(f.cursor(), 0);
+        f.apply(SetTextCursor(99));
+        assert_eq!(f.cursor(), 2);
+    }
+
+    #[test]
+    fn noop_commands_report_nothing() {
+        let mut f = TextField::new("abc");
+        assert_eq!(f.apply(DeleteForward), TextEditOutcome::default());
+        assert_eq!(f.apply(CursorUp), TextEditOutcome::default());
+        f.apply(CursorHome);
+        assert_eq!(f.apply(Backspace), TextEditOutcome::default());
+    }
+
+    #[test]
+    fn ime_commit_inserts_at_cursor() {
+        let mut f = TextField::new("ab");
+        f.apply(CursorLeft);
+        assert!(f.commit_ime("日本"));
+        assert_eq!(f.text(), "a日本b");
+        assert_eq!(f.cursor(), 1 + "日本".len());
     }
 }

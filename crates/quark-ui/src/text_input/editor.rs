@@ -1,14 +1,49 @@
 use std::sync::Arc;
 
-use crate::core::text::DiffTokenSpan;
-
 use glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Wrap};
 
-pub mod diff;
-pub mod input_element;
+use super::text_edit::{TextEditCommand, TextEditOutcome};
 
 const LINE_HEIGHT_FACTOR: f32 = 1.35;
 const SYNTAX_HIGHLIGHT_MAX_BYTES: usize = 256 * 1024;
+
+/// Syntax category of a highlighted span. The highlighter assigns it and the
+/// renderer maps it to a theme color.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SyntaxTokenKind {
+    #[default]
+    Normal = 0,
+    Keyword,
+    String,
+    Comment,
+    Number,
+    Type,
+    Function,
+    Operator,
+    Punctuation,
+    Variable,
+    Constant,
+    Builtin,
+    Attribute,
+    Tag,
+    Property,
+    Namespace,
+    Label,
+    Preprocessor,
+}
+
+/// A highlighted byte range of the editor text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyntaxSpan {
+    pub offset: u32,
+    pub length: u32,
+    pub kind: SyntaxTokenKind,
+}
+
+/// Produces syntax spans for the full editor text. Called lazily on flush
+/// after the text changes, and only in code modes.
+pub type SyntaxHighlighter = Arc<dyn Fn(&str) -> Vec<SyntaxSpan> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EditorMode {
@@ -66,8 +101,8 @@ pub struct Editor {
     buffer: Option<Buffer>,
     dirty: bool,
     syntax_dirty: bool,
-    syntax_path: Option<String>,
-    syntax_spans: Vec<DiffTokenSpan>,
+    syntax_highlighter: Option<SyntaxHighlighter>,
+    syntax_spans: Vec<SyntaxSpan>,
     desired_x: Option<f32>,
     reveal_cursor_on_flush: bool,
     pub scroll_y: f32,
@@ -88,7 +123,7 @@ impl Default for Editor {
             buffer: None,
             dirty: true,
             syntax_dirty: true,
-            syntax_path: None,
+            syntax_highlighter: None,
             syntax_spans: Vec::new(),
             desired_x: None,
             reveal_cursor_on_flush: false,
@@ -112,7 +147,7 @@ impl Clone for Editor {
             buffer: None,
             dirty: true,
             syntax_dirty: true,
-            syntax_path: self.syntax_path.clone(),
+            syntax_highlighter: self.syntax_highlighter.clone(),
             syntax_spans: self.syntax_spans.clone(),
             desired_x: self.desired_x,
             reveal_cursor_on_flush: self.reveal_cursor_on_flush,
@@ -235,20 +270,16 @@ impl Editor {
         }
     }
 
-    pub fn set_syntax_path(&mut self, path: impl Into<String>) {
-        let path = path.into();
-        if self.syntax_path.as_deref() == Some(path.as_str()) {
-            return;
-        }
-        self.syntax_path = (!path.is_empty()).then_some(path);
+    pub fn set_syntax_highlighter(&mut self, highlighter: SyntaxHighlighter) {
+        self.syntax_highlighter = Some(highlighter);
         self.syntax_dirty = true;
     }
 
-    pub fn clear_syntax_path(&mut self) {
-        if self.syntax_path.is_none() && self.syntax_spans.is_empty() {
+    pub fn clear_syntax_highlighter(&mut self) {
+        if self.syntax_highlighter.is_none() && self.syntax_spans.is_empty() {
             return;
         }
-        self.syntax_path = None;
+        self.syntax_highlighter = None;
         self.syntax_spans.clear();
         self.syntax_dirty = false;
     }
@@ -517,13 +548,10 @@ impl Editor {
         if !self.mode.is_code() || self.text.len() > SYNTAX_HIGHLIGHT_MAX_BYTES {
             return;
         }
-        let Some(path) = self.syntax_path.as_deref() else {
+        let Some(highlighter) = &self.syntax_highlighter else {
             return;
         };
-        let highlighter = crate::core::syntax::Highlighter::new();
-        if let Ok(spans) = highlighter.highlight(path, &self.text) {
-            self.syntax_spans = spans;
-        }
+        self.syntax_spans = highlighter(&self.text);
     }
 
     pub fn set_font_size(&mut self, font_system: &mut glyphon::FontSystem, font_size: f32) {
@@ -649,7 +677,7 @@ impl Editor {
         Arc::from(self.text.as_str())
     }
 
-    pub fn syntax_spans(&self) -> &[DiffTokenSpan] {
+    pub fn syntax_spans(&self) -> &[SyntaxSpan] {
         &self.syntax_spans
     }
 
@@ -1213,6 +1241,78 @@ impl Editor {
         let max_scroll = (self.content_height() - self.last_height).max(0.0);
         self.scroll_y = (self.scroll_y + delta_px).clamp(0.0, max_scroll);
     }
+
+    /// Apply a text editing command. Pointer-driven caret placement
+    /// (`SetTextCursor`, `ExtendTextSelection`) goes through `click`/`drag`
+    /// instead and is ignored here.
+    pub fn apply(&mut self, cmd: TextEditCommand) -> TextEditOutcome {
+        use TextEditCommand::*;
+        let before = (self.text.len(), self.cursor, self.anchor);
+        let mut outcome = TextEditOutcome::default();
+        let mut mutated = false;
+        match cmd {
+            InsertText(value) | Paste(value) => {
+                self.insert_text(&value);
+                outcome.text_changed = !value.is_empty();
+            }
+            Backspace => {
+                self.delete_backward();
+                mutated = true;
+            }
+            BackspaceWord => {
+                self.delete_backward_word();
+                mutated = true;
+            }
+            BackspaceLine => {
+                self.delete_backward_line();
+                mutated = true;
+            }
+            DeleteForward => {
+                self.delete_forward();
+                mutated = true;
+            }
+            DeleteForwardWord => {
+                self.delete_forward_word();
+                mutated = true;
+            }
+            CursorLeft => self.move_left(false),
+            CursorRight => self.move_right(false),
+            CursorUp => self.move_up(false),
+            CursorDown => self.move_down(false),
+            CursorWordLeft => self.move_word_left(false),
+            CursorWordRight => self.move_word_right(false),
+            CursorHome => self.move_home(false),
+            CursorEnd => self.move_end(false),
+            CursorSoftHome => self.move_soft_home(false),
+            CursorSoftEnd => self.move_soft_end(false),
+            SelectLeft => self.move_left(true),
+            SelectRight => self.move_right(true),
+            SelectUp => self.move_up(true),
+            SelectDown => self.move_down(true),
+            SelectWordLeft => self.move_word_left(true),
+            SelectWordRight => self.move_word_right(true),
+            SelectHome => self.move_home(true),
+            SelectEnd => self.move_end(true),
+            SelectSoftHome => self.move_soft_home(true),
+            SelectSoftEnd => self.move_soft_end(true),
+            SelectAll => self.select_all(),
+            Copy => outcome.clipboard_write = self.selected_text(),
+            Cut => {
+                outcome.clipboard_write = self.selected_text();
+                if outcome.clipboard_write.is_some() {
+                    self.delete_backward();
+                    outcome.text_changed = true;
+                }
+            }
+            SetTextCursor(_) | ExtendTextSelection(_) => {}
+        }
+        // Deletions never keep the length, so a length check detects whether they did anything.
+        if mutated {
+            outcome.text_changed = self.text.len() != before.0;
+        }
+        outcome.selection_changed = (self.cursor, self.anchor) != (before.1, before.2);
+        outcome
+    }
 }
 
 #[cfg(test)]
@@ -1227,6 +1327,22 @@ mod tests {
         editor.sync_size(&mut font_system, width, height);
 
         (font_system, editor)
+    }
+
+    #[test]
+    fn apply_reports_text_selection_and_clipboard_changes() {
+        use TextEditCommand::*;
+        let mut editor = Editor::default();
+        let out = editor.apply(InsertText("hello world".into()));
+        assert!(out.text_changed);
+        let out = editor.apply(SelectWordLeft);
+        assert!(out.selection_changed && !out.text_changed);
+        let out = editor.apply(Cut);
+        assert_eq!(out.clipboard_write.as_deref(), Some("world"));
+        assert!(out.text_changed);
+        assert_eq!(editor.text_str(), "hello ");
+        editor.apply(CursorHome);
+        assert_eq!(editor.apply(Backspace), TextEditOutcome::default());
     }
 
     #[test]
