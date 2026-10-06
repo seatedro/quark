@@ -1,7 +1,7 @@
 //! Style system — shared layout + visual properties for elements.
 //!
 //! Pure data types (`ElementStyle`, `StyleOverride`, `ShadowStyle`, `apply_override`)
-//! live in `quark::style`. The `Styled` trait defined here layers diffy's
+//! live in `quark::style`. The `Styled` trait defined here layers the
 //! design-token shortcuts (`Sp`, `Rad`, `ShadowLayer`) on top.
 
 use crate::design::{Rad, ShadowLayer, Sp};
