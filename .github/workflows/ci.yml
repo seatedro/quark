@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev \
+            mesa-vulkan-drivers libegl1 libgl1-mesa-dri
+
+      # rustup reads rust-toolchain.toml (nightly, default profile) here.
+      - name: Install toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # TODO: drop continue-on-error once crates/quark-render/src/{renderer,text}.rs
+      # and crates/quark-ui/src/icons.rs are formatted.
+      - name: Format
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      # TODO: switch to `cargo clippy --workspace --all-targets -- -D warnings`
+      # once the existing warnings in crates/ are fixed.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        env:
+          # Turns a missing wgpu adapter into a failure in the headless render
+          # test instead of a silent skip; lavapipe provides the adapter.
+          QUARK_REQUIRE_GPU: "1"
+          # Only takes effect once quark-render builds its Instance from env
+          # (InstanceDescriptor::from_env_or_default); default backends already
+          # include Vulkan.
+          WGPU_BACKEND: vulkan
+        run: cargo test --workspace
