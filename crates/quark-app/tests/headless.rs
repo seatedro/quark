@@ -14,6 +14,12 @@ fn renders_scene_offscreen() {
     let mut renderer = match Renderer::new_headless(width, height, 1.0, &FontSettings::default()) {
         Ok(renderer) => renderer,
         Err(RenderError::NoAdapter) => {
+            // A skip reports as a pass, so CI sets QUARK_REQUIRE_GPU to turn a
+            // missing adapter into a failure instead of silent lost coverage.
+            assert!(
+                std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+            );
             eprintln!("skipping: no wgpu adapter available");
             return;
         }
@@ -53,9 +59,11 @@ fn renders_scene_offscreen() {
         font_weight: FontWeight::Normal,
     });
 
+    // QUARK_HEADLESS_OUT keeps the rendered PNG for visual inspection.
+    let keep = std::env::var_os("QUARK_HEADLESS_OUT").map(std::path::PathBuf::from);
     let dir = std::env::temp_dir().join(format!("quark-app-headless-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("scene.png");
+    let path = keep.clone().unwrap_or_else(|| dir.join("scene.png"));
     renderer
         .render_to_png(&scene, width, height, 1.0, &path)
         .expect("offscreen render");
