@@ -281,6 +281,7 @@ impl AnimationTable {
         self.velocities[row] = 0.0;
         self.updated_ms[row] = now_ms;
         self.active[row] = false;
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
 
     /// Starts or retargets an animation toward `target`.
@@ -290,6 +291,18 @@ impl AnimationTable {
     /// retargeted to the same target keeps its original timing. Unknown rows
     /// snap to `target` (call [`set`](Self::set) first to animate in).
     pub fn animate_to(
+        &mut self,
+        key: AnimKey,
+        prop: PropId,
+        target: f32,
+        motion: Motion,
+        now_ms: u64,
+    ) {
+        self.animate_row_to(key, prop, target, motion, now_ms);
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
+    }
+
+    fn animate_row_to(
         &mut self,
         key: AnimKey,
         prop: PropId,
@@ -367,6 +380,7 @@ impl AnimationTable {
                 any |= self.active[row];
             }
         }
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         any
     }
 
@@ -410,6 +424,7 @@ impl AnimationTable {
                 row += 1;
             }
         }
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         removed
     }
 
@@ -425,6 +440,7 @@ impl AnimationTable {
                 row += 1;
             }
         }
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         removed
     }
 
@@ -432,10 +448,53 @@ impl AnimationTable {
         match self.row(key, prop) {
             Some(row) => {
                 self.swap_remove_row(row);
+                debug_assert_eq!(self.verify_integrity(), Ok(()));
                 true
             }
             None => false,
         }
+    }
+
+    /// Checks that every column has one entry per row, `index` maps each
+    /// row's `(key, prop)` to that row, and inactive rows rest exactly on
+    /// their target. Mutations call this through `debug_assert!`, so release
+    /// builds skip it. O(rows).
+    pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
+        let rows = self.keys.len();
+        let columns = [
+            ("props", self.props.len()),
+            ("values", self.values.len()),
+            ("velocities", self.velocities.len()),
+            ("targets", self.targets.len()),
+            ("kinds", self.kinds.len()),
+            ("updated_ms", self.updated_ms.len()),
+            ("active", self.active.len()),
+        ];
+        for (column, len) in columns {
+            if len != rows {
+                return Err(IntegrityError::ColumnLength { column, len, rows });
+            }
+        }
+        if self.index.len() != rows {
+            return Err(IntegrityError::IndexLength {
+                rows,
+                index: self.index.len(),
+            });
+        }
+        for row in 0..rows {
+            let found = self.index.get(&(self.keys[row], self.props[row])).copied();
+            if found != Some(row as u32) {
+                return Err(IntegrityError::IndexRow { row, index: found });
+            }
+            // Every path that clears `active` also snaps to the target, so an
+            // inactive row away from it would never be ticked there.
+            let (value, target) = (self.values[row], self.targets[row]);
+            let on_target = value == target || (value.is_nan() && target.is_nan());
+            if !self.active[row] && !(on_target && self.velocities[row] == 0.0) {
+                return Err(IntegrityError::InactiveOffTarget { row });
+            }
+        }
+        Ok(())
     }
 
     fn spring_at_rest(&self, row: usize) -> bool {
@@ -494,6 +553,48 @@ impl AnimationTable {
     }
 }
 
+/// A broken [`AnimationTable`] invariant, reported by
+/// [`AnimationTable::verify_integrity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityError {
+    ColumnLength {
+        column: &'static str,
+        len: usize,
+        rows: usize,
+    },
+    IndexLength {
+        rows: usize,
+        index: usize,
+    },
+    /// `index` maps row `row`'s `(key, prop)` to `index` instead.
+    IndexRow {
+        row: usize,
+        index: Option<u32>,
+    },
+    InactiveOffTarget {
+        row: usize,
+    },
+}
+
+impl std::fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ColumnLength { column, len, rows } => {
+                write!(f, "column {column} has {len} entries for {rows} rows")
+            }
+            Self::IndexLength { rows, index } => {
+                write!(f, "{rows} rows but {index} index entries")
+            }
+            Self::IndexRow { row, index } => write!(f, "row {row} is indexed at {index:?}"),
+            Self::InactiveOffTarget { row } => {
+                write!(f, "inactive row {row} is not at rest on its target")
+            }
+        }
+    }
+}
+
+impl std::error::Error for IntegrityError {}
+
 /// Semi-implicit Euler with uniform substeps. The step is bounded by
 /// `1/240 s` and by the spring's natural frequency and damping rate, which
 /// keeps the integrator stable for any `dt` and stiff springs.
@@ -538,6 +639,10 @@ fn step_spring(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use proptest::prelude::*;
+
     use super::*;
 
     const K: AnimKey = AnimKey(1);
@@ -548,49 +653,225 @@ mod tests {
         (a - b).abs() <= eps
     }
 
-    #[test]
-    fn curves_hit_endpoints() {
-        let curves = [
-            Curve::Linear,
-            Curve::EaseOutCubic,
-            Curve::EaseInOutCubic,
-            Curve::CubicBezier {
-                x1: 0.25,
-                y1: 0.1,
-                x2: 0.25,
-                y2: 1.0,
-            },
-        ];
-        for curve in curves {
-            assert!(close(curve.eval(0.0), 0.0, 1e-5), "{curve:?}");
-            assert!(close(curve.eval(1.0), 1.0, 1e-5), "{curve:?}");
+    /// `PROPTEST_CASES` overrides the per-property default for heavier runs.
+    fn config(default_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default_cases);
+        let mut config = ProptestConfig::with_cases(cases);
+        if cfg!(miri) {
+            // Miri's isolation forbids the regression file lookups.
+            config.failure_persistence = None;
         }
-        let linear_bezier = Curve::CubicBezier {
-            x1: 0.0,
-            y1: 0.0,
-            x2: 1.0,
-            y2: 1.0,
-        };
-        assert!(close(linear_bezier.eval(0.3), 0.3, 1e-4));
-        assert!(close(Curve::EaseInOutCubic.eval(0.5), 0.5, 1e-6));
-        assert!(Curve::EaseOutCubic.eval(0.5) > 0.5);
+        config
+    }
+
+    fn curve() -> impl Strategy<Value = Curve> {
+        let unit = 0.0f32..=1.0;
+        prop_oneof![
+            Just(Curve::Linear),
+            Just(Curve::EaseOutCubic),
+            Just(Curve::EaseInOutCubic),
+            (unit.clone(), unit.clone(), unit.clone(), unit)
+                .prop_map(|(x1, y1, x2, y2)| { Curve::CubicBezier { x1, y1, x2, y2 } }),
+        ]
+    }
+
+    /// Stiffness spans soft to very stiff (log-uniform) and damping ratios
+    /// span underdamped to overdamped, so every spring settles in well under
+    /// a minute.
+    fn spring() -> impl Strategy<Value = SpringParams> {
+        (3.0f32..10.8, 0.5f32..5.0, 0.3f32..2.0).prop_map(|(ln_k, mass, zeta)| {
+            let stiffness = ln_k.exp();
+            SpringParams {
+                stiffness,
+                damping: 2.0 * zeta * (stiffness * mass).sqrt(),
+                mass,
+            }
+        })
+    }
+
+    fn frame_gaps() -> impl Strategy<Value = Vec<u64>> {
+        prop::collection::vec(1u64..=250, 1..8)
+    }
+
+    /// Ticks with the repeating `gaps` until the row settles, checking the
+    /// value and velocity stay finite. Returns the settle time.
+    fn tick_until_settled(
+        t: &mut AnimationTable,
+        gaps: &[u64],
+        mut now: u64,
+    ) -> Result<u64, TestCaseError> {
+        let deadline = now + 60_000;
+        for gap in gaps.iter().cycle() {
+            now += gap;
+            let moving = t.tick(now);
+            let (x, v) = (
+                t.get(K, X).unwrap_or(f32::NAN),
+                t.velocity(K, X).unwrap_or(f32::NAN),
+            );
+            prop_assert!(x.is_finite() && v.is_finite(), "x = {x}, v = {v} at {now}");
+            if !moving {
+                return Ok(now);
+            }
+            prop_assert!(now < deadline, "still moving at {now} ms");
+        }
+        unreachable!("gaps is non-empty")
+    }
+
+    proptest! {
+        #![proptest_config(config(64))]
+
+        // Catches the bezier solver or a curve formula missing 0 or 1.
+        #[test]
+        fn curve_eval_maps_endpoints_to_zero_and_one(curve in curve()) {
+            prop_assert!(close(curve.eval(0.0), 0.0, 1e-5), "{curve:?}");
+            prop_assert!(close(curve.eval(1.0), 1.0, 1e-5), "{curve:?}");
+        }
+
+        // Catches the Newton/bisection solver landing on the wrong root,
+        // which shows up as a tween stepping backwards.
+        #[test]
+        fn curve_eval_with_unit_controls_never_decreases(
+            curve in curve(),
+            a in 0.0f32..=1.0,
+            b in 0.0f32..=1.0,
+        ) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            prop_assert!(curve.eval(lo) <= curve.eval(hi) + 1e-4, "{curve:?} {lo} {hi}");
+        }
+
+        #[test]
+        fn cubic_bezier_on_diagonal_is_identity(t in 0.0f32..=1.0) {
+            let diagonal = Curve::CubicBezier { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 };
+            prop_assert!(close(diagonal.eval(t), t, 1e-4));
+        }
+
+        // Catches unstable integration (NaN, blow-up) for stiff springs or
+        // long frames and springs that never report rest.
+        #[test]
+        fn spring_random_params_and_frames_settle_exactly_on_target(
+            params in spring(),
+            start in -1000.0f32..1000.0,
+            target in -1000.0f32..1000.0,
+            gaps in frame_gaps(),
+        ) {
+            let mut t = AnimationTable::new();
+            t.set(K, X, start, 0);
+            t.animate_to(K, X, target, Motion::Spring(params), 0);
+            tick_until_settled(&mut t, &gaps, 0)?;
+            prop_assert_eq!(t.get(K, X), Some(target));
+            prop_assert_eq!(t.velocity(K, X), Some(0.0));
+        }
+
+        // Catches retargeting resetting velocity or value, which reads as a
+        // visible jerk when a spring changes direction mid-flight.
+        #[test]
+        fn spring_retarget_midflight_keeps_value_and_velocity(
+            params in spring(),
+            first in -1000.0f32..1000.0,
+            second in -1000.0f32..1000.0,
+            gaps in frame_gaps(),
+            frames in 0usize..20,
+        ) {
+            let mut t = AnimationTable::new();
+            t.set(K, X, 0.0, 0);
+            t.animate_to(K, X, first, Motion::Spring(params), 0);
+            let mut now = 0;
+            for gap in gaps.iter().cycle().take(frames) {
+                now += gap;
+                t.tick(now);
+            }
+            let (x, v) = (t.get(K, X).unwrap_or(f32::NAN), t.velocity(K, X).unwrap_or(f32::NAN));
+            t.animate_to(K, X, second, Motion::Spring(params), now);
+            // A retarget onto the current resting point may snap by up to
+            // the rest threshold.
+            let eps = t.rest_epsilon;
+            prop_assert!(close(t.get(K, X).unwrap_or(f32::NAN), x, eps));
+            prop_assert!(close(t.velocity(K, X).unwrap_or(f32::NAN), v, eps));
+            if t.is_animating(K, X) {
+                tick_until_settled(&mut t, &gaps, now)?;
+            }
+            prop_assert_eq!(t.get(K, X), Some(second));
+        }
+
+        // Drives arbitrary mutations so the debug integrity check catches
+        // index drift across swap-removals; also checks rows exist exactly
+        // when the model says so and retiring never drops a moving row.
+        #[test]
+        fn animation_table_arbitrary_ops_keep_rows_and_index(
+            ops in prop::collection::vec((0u8..7, 0u64..3, 0u16..3, -10.0f32..10.0, 0u64..120), 0..40),
+        ) {
+            let mut t = AnimationTable::new();
+            let mut model: HashSet<(AnimKey, PropId)> = HashSet::new();
+            let mut now = 0;
+            for (op, key, prop, value, ms) in ops {
+                let (key, prop) = (AnimKey(key), PropId(prop));
+                match op {
+                    0 => {
+                        t.set(key, prop, value, now);
+                        model.insert((key, prop));
+                    }
+                    1 => {
+                        let motion = Motion::Tween {
+                            duration_ms: ms as u32,
+                            delay_ms: (ms / 3) as u32,
+                            curve: Curve::EaseOutCubic,
+                        };
+                        t.animate_to(key, prop, value, motion, now);
+                        model.insert((key, prop));
+                    }
+                    2 => {
+                        t.animate_to(key, prop, value, Motion::spring(300.0, 30.0, 1.0), now);
+                        model.insert((key, prop));
+                    }
+                    3 => {
+                        now += ms;
+                        t.tick(now);
+                    }
+                    4 => {
+                        prop_assert_eq!(t.remove(key, prop), model.remove(&(key, prop)));
+                    }
+                    5 => {
+                        let before = model.len();
+                        model.retain(|(k, _)| *k != key);
+                        prop_assert_eq!(t.remove_key(key), before - model.len());
+                    }
+                    _ => {
+                        let moving: Vec<_> =
+                            model.iter().copied().filter(|(k, p)| t.is_animating(*k, *p)).collect();
+                        let removed = t.retire_settled(1e-3);
+                        let before = model.len();
+                        model.retain(|(k, p)| t.get(*k, *p).is_some());
+                        prop_assert_eq!(removed, before - model.len());
+                        for (k, p) in moving {
+                            prop_assert!(t.get(k, p).is_some(), "retired moving row {k:?} {p:?}");
+                        }
+                    }
+                }
+                prop_assert_eq!(t.verify_integrity(), Ok(()));
+                prop_assert_eq!(t.len(), model.len());
+                for (k, p) in &model {
+                    prop_assert!(t.get(*k, *p).is_some());
+                }
+            }
+        }
     }
 
     #[test]
-    fn tween_runs_from_start_to_target() {
+    fn tween_linear_is_half_at_midpoint_and_target_at_end() {
         let mut t = AnimationTable::new();
         t.set(K, OPACITY, 0.0, 0);
         t.animate_to(K, OPACITY, 1.0, Motion::tween(100, Curve::Linear), 0);
-        assert_eq!(t.get(K, OPACITY), Some(0.0));
         assert!(t.tick(50));
         assert!(close(t.get(K, OPACITY).unwrap_or(f32::NAN), 0.5, 1e-5));
         assert!(!t.tick(100));
         assert_eq!(t.get(K, OPACITY), Some(1.0));
-        assert_eq!(t.next_deadline(), None);
     }
 
     #[test]
-    fn tween_retarget_starts_from_current_value() {
+    fn tween_retarget_midway_starts_from_current_value() {
         let mut t = AnimationTable::new();
         t.set(K, OPACITY, 0.0, 0);
         t.animate_to(K, OPACITY, 1.0, Motion::tween(100, Curve::Linear), 0);
@@ -602,109 +883,75 @@ mod tests {
     }
 
     #[test]
-    fn spring_settles_on_target() {
+    fn spring_tick_after_long_stall_snaps_to_target() {
         let mut t = AnimationTable::new();
         t.set(K, X, 0.0, 0);
-        t.animate_to(K, X, 100.0, Motion::spring(170.0, 26.0, 1.0), 0);
-        let mut now = 0;
-        while t.tick(now) && now < 10_000 {
-            now += 16;
-        }
-        assert!(now < 10_000, "spring never settled");
-        assert_eq!(t.get(K, X), Some(100.0));
-        assert_eq!(t.velocity(K, X), Some(0.0));
-        assert_eq!(t.retire_settled(1e-3), 1);
-        assert_eq!(t.get(K, X), None);
-    }
-
-    #[test]
-    fn spring_retarget_keeps_velocity() {
-        let mut t = AnimationTable::new();
-        t.set(K, X, 0.0, 0);
-        let motion = Motion::spring(200.0, 20.0, 1.0);
-        t.animate_to(K, X, 100.0, motion, 0);
-        t.tick(50);
-        let v = t.velocity(K, X).unwrap_or(0.0);
-        assert!(v > 0.0);
-        t.animate_to(K, X, -100.0, motion, 50);
-        assert_eq!(t.velocity(K, X), Some(v));
-        assert_eq!(t.target(K, X), Some(-100.0));
-        // Momentum carries it further positive before it turns around.
-        let before = t.get(K, X).unwrap_or(f32::NAN);
-        t.tick(58);
-        assert!(t.get(K, X).unwrap_or(f32::NAN) > before);
-    }
-
-    #[test]
-    fn spring_is_stable_with_large_dt_and_stiffness() {
-        let mut t = AnimationTable::new();
-        t.set(K, X, 0.0, 0);
-        t.animate_to(K, X, 1.0, Motion::spring(50_000.0, 5.0, 1.0), 0);
-        t.tick(500);
-        let x = t.get(K, X).unwrap_or(f32::NAN);
-        assert!(x.is_finite() && x.abs() < 3.0, "x = {x}");
-
-        // A multi-minute stall snaps rather than integrating forever.
-        t.animate_to(K, X, 10.0, Motion::spring(300.0, 30.0, 1.0), 500);
-        assert!(!t.tick(500 + 600_000));
+        t.animate_to(K, X, 10.0, Motion::spring(300.0, 30.0, 1.0), 0);
+        assert!(!t.tick(600_000));
         assert_eq!(t.get(K, X), Some(10.0));
     }
 
     #[test]
-    fn deadline_and_active_reporting() {
+    fn next_deadline_delayed_tween_reports_start_and_holds_value() {
         let mut t = AnimationTable::new();
-        assert_eq!(t.next_deadline(), None);
-        assert!(!t.tick(0));
-
         t.set(K, OPACITY, 0.0, 0);
-        t.animate_to(
-            K,
-            OPACITY,
-            1.0,
-            Motion::Tween {
-                duration_ms: 100,
-                delay_ms: 200,
-                curve: Curve::EaseOutCubic,
-            },
-            0,
-        );
-        assert!(t.has_active());
+        let motion = Motion::Tween {
+            duration_ms: 100,
+            delay_ms: 200,
+            curve: Curve::EaseOutCubic,
+        };
+        t.animate_to(K, OPACITY, 1.0, motion, 0);
         assert_eq!(t.next_deadline(), Some(200));
         assert!(t.tick(100));
         assert_eq!(t.get(K, OPACITY), Some(0.0));
+    }
 
+    #[test]
+    fn next_deadline_reports_earliest_active_row_and_none_when_idle() {
+        let mut t = AnimationTable::new();
+        t.set(K, OPACITY, 0.0, 0);
+        t.animate_to(K, OPACITY, 1.0, Motion::tween(100, Curve::Linear), 0);
         let other = AnimKey(2);
-        t.set(other, X, 0.0, 100);
-        t.animate_to(other, X, 5.0, Motion::spring(300.0, 30.0, 1.0), 100);
-        assert_eq!(t.next_deadline(), Some(100));
-
-        assert_eq!(t.remove_key(other), 1);
-        assert_eq!(t.next_deadline(), Some(200));
-        assert!(!t.tick(300));
+        t.set(other, X, 0.0, 50);
+        t.animate_to(other, X, 1.0, Motion::tween(100, Curve::Linear), 50);
+        t.tick(60);
+        // The tween row was last advanced to 60, the same as the other row.
+        assert_eq!(t.next_deadline(), Some(60));
+        t.remove_key(other);
+        assert!(!t.tick(100));
         assert_eq!(t.next_deadline(), None);
     }
 
     #[test]
-    fn unknown_row_snaps_and_swap_remove_keeps_index() {
+    fn animate_to_unknown_row_snaps_to_target() {
         let mut t = AnimationTable::new();
         t.animate_to(K, X, 3.0, Motion::tween(100, Curve::Linear), 0);
         assert_eq!(t.get(K, X), Some(3.0));
         assert!(!t.is_animating(K, X));
-
-        for i in 0..5u16 {
-            t.set(AnimKey(9), PropId(10 + i), f32::from(i), 0);
-        }
-        assert_eq!(t.remove_key(K), 1);
-        for i in 0..5u16 {
-            assert_eq!(t.get(AnimKey(9), PropId(10 + i)), Some(f32::from(i)));
-        }
     }
 
     #[test]
-    fn ui_key_hash_is_stable() {
-        let a = AnimKey::from(&UiKey::from("row.42"));
-        let b = AnimKey::from_str_key("row.42");
-        assert_eq!(a, b);
-        assert_ne!(a, AnimKey::from_str_key("row.43"));
+    fn retire_settled_removes_resting_rows_and_keeps_moving_ones() {
+        let mut t = AnimationTable::new();
+        t.set(K, X, 5.0, 0);
+        t.set(K, OPACITY, 0.0, 0);
+        t.animate_to(K, OPACITY, 1.0, Motion::tween(100, Curve::Linear), 0);
+        assert_eq!(t.retire_settled(1e-3), 1);
+        assert_eq!(t.get(K, X), None);
+        assert_eq!(t.get(K, OPACITY), Some(0.0));
+    }
+
+    // Keys must hash the same across runs and platforms, so pin FNV-1a's
+    // published test vectors.
+    #[test]
+    fn anim_key_from_str_matches_fnv1a_vectors() {
+        let vectors = [
+            ("", 0xcbf2_9ce4_8422_2325),
+            ("a", 0xaf63_dc4c_8601_ec8c),
+            ("foobar", 0x8594_4171_f739_67e8),
+        ];
+        for (input, expected) in vectors {
+            assert_eq!(AnimKey::from_str_key(input), AnimKey(expected), "{input:?}");
+        }
     }
 }
