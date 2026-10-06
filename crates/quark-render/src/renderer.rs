@@ -1247,9 +1247,16 @@ impl Renderer {
             let br = region.rect;
             let uv = [br.x / tw, br.y / th, br.right() / tw, br.bottom() / th];
             let bounds = [br.x, br.y, br.width, br.height];
+            // The vertical pass samples up to six (scaled) texels above and
+            // below the region, so the horizontal pass covers that margin
+            // too; otherwise the region's top and bottom edges blend with
+            // the cleared, transparent texels around it.
+            let reach = 6.0 * (sigma / 6.0).max(1.0) + 1.0;
+            let top = (br.y - reach).max(0.0);
+            let bottom = (br.bottom() + reach).min(height as f32);
             blur_instances.push(BlurInstance {
-                bounds,
-                uv_rect: uv,
+                bounds: [br.x, top, br.width, bottom - top],
+                uv_rect: [br.x / tw, top / th, br.right() / tw, bottom / th],
                 blur_params: [1.0, 0.0, sigma, 0.0],
             });
             blur_instances.push(BlurInstance {
@@ -1950,7 +1957,9 @@ enum DrawStep {
         rich: std::ops::Range<u32>,
     },
     /// Blur everything drawn so far inside the region, then keep drawing on
-    /// top of the result.
+    /// top of the result. "So far" means final draw order: lower z-layers and
+    /// earlier segments of this layer, whatever their scene order. The blur
+    /// is rectangular; `BlurRegionPrimitive::corner_radius` is not applied.
     Blur(FlattenedBlurRegion),
 }
 
@@ -2971,6 +2980,87 @@ mod tests {
         assert!(!lit(24, 5), "top side drew a border");
         assert!(!lit(5, 24), "left side drew a border");
         assert!(!lit(42, 24), "right side drew a border");
+    }
+
+    // -- Blur --------------------------------------------------------------------
+
+    fn blur(rect: Rect, blur_radius: f32) -> Primitive {
+        Primitive::BlurRegion(crate::scene::BlurRegionPrimitive {
+            rect,
+            blur_radius,
+            corner_radius: 0.0,
+        })
+    }
+
+    /// Black left half, white right half, so a blur turns the seam gray.
+    fn push_seam(scene: &mut Scene, area: Rect) {
+        let half = area.width / 2.0;
+        scene.push(solid(rect(area.x, area.y, half, area.height), 0, 0, 0));
+        scene.push(solid(
+            rect(area.x + half, area.y, half, area.height),
+            255,
+            255,
+            255,
+        ));
+    }
+
+    fn is_gray(pixel: [u8; 4]) -> bool {
+        (40..=215).contains(&pixel[0])
+    }
+
+    // Regression: only blur_regions[0] was honored; later regions stayed sharp.
+    #[test]
+    fn render_second_blur_region_blurs_its_content() {
+        let mut scene = Scene::default();
+        push_seam(&mut scene, rect(0.0, 0.0, 64.0, 32.0));
+        push_seam(&mut scene, rect(0.0, 32.0, 64.0, 32.0));
+        scene.push(blur(rect(0.0, 0.0, 64.0, 32.0), 12.0));
+        scene.push(blur(rect(0.0, 32.0, 64.0, 32.0), 12.0));
+        let Some(image) = render_pixels(&scene, 64, 64) else {
+            return;
+        };
+        assert!(
+            is_gray(image.get_pixel(33, 16).0),
+            "first region not blurred"
+        );
+        assert!(
+            is_gray(image.get_pixel(33, 48).0),
+            "second region not blurred"
+        );
+    }
+
+    // Regression: the blur path drew all text last, sharp over the blur, even
+    // text painted before the blur region.
+    #[test]
+    fn render_text_painted_before_blur_region_is_blurred() {
+        let band = rect(4.0, 4.0, 120.0, 24.0);
+        let mut scene = Scene::default();
+        scene.push(white_text(band, "WWWWWWWW"));
+        scene.push(blur(rect(0.0, 0.0, 128.0, 32.0), 24.0));
+        let Some(image) = render_pixels(&scene, 128, 32) else {
+            return;
+        };
+        let brightest = image.pixels().map(|p| p.0[0]).max().unwrap_or(0);
+        assert!(brightest < 200, "sharp text survived the blur: {brightest}");
+    }
+
+    // Regression: the windowed blur path never drew images. render() and
+    // render_to_rgba now share one encoder path, so this probe covers it.
+    #[test]
+    fn render_image_after_blur_region_draws() {
+        let mut scene = Scene::default();
+        scene.push(blur(rect(0.0, 0.0, 32.0, 32.0), 8.0));
+        scene.push(Primitive::Image(crate::scene::ImagePrimitive {
+            rect: rect(8.0, 8.0, 16.0, 16.0),
+            width: 2,
+            height: 2,
+            rgba: Arc::from(vec![255u8; 16]),
+            cache_key: 7,
+        }));
+        let Some(image) = render_pixels(&scene, 32, 32) else {
+            return;
+        };
+        assert!(image.get_pixel(16, 16).0[0] > 200, "image missing");
     }
 }
 
