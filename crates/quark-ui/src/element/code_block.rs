@@ -202,7 +202,7 @@ impl Element for CodeBlock {
                 .collect::<Vec<_>>()
                 .join("\n");
             if !body.is_empty() {
-                cx.accessibility.push(
+                cx.push_accessibility(
                     AccessibilityNode::new(
                         format!(
                             "code-block:{:?}:{:.0}:{:.0}",

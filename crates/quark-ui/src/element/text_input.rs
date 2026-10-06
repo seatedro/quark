@@ -366,12 +366,13 @@ impl Element for TextInput {
                 style_state,
                 ..SemanticNodeState::default()
             };
-            cx.semantic.push(semantic_node);
-            cx.accessibility.push(
+            let semantic_index = cx.semantic.push(semantic_node);
+            cx.push_accessibility_for_semantic(
                 AccessibilityNode::new(semantic_id, role, bounds)
                     .label(accessibility_label)
                     .value(accessible_value)
                     .action(AccessibilityAction::TextValue(target)),
+                semantic_index,
             );
             cx.text_input_hit_areas.push(TextInputHitArea {
                 bounds,

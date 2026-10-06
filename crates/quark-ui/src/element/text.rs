@@ -221,7 +221,7 @@ impl Element for TextElement {
                 width: text_width.max(1.0).min(bounds.width.max(1.0)),
                 height: bounds.height,
             };
-            cx.accessibility.push(
+            cx.push_accessibility(
                 AccessibilityNode::new(
                     format!(
                         "text:{:?}:{:.0}:{:.0}:{:.0}:{:.0}",

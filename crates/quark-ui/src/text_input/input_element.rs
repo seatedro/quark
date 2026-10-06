@@ -341,7 +341,7 @@ impl Element for TextEditorElement {
         scene.pop_clip();
 
         let target = self.focus_target;
-        cx.accessibility.push(
+        cx.push_accessibility(
             AccessibilityNode::new(
                 format!("text-editor:{target:?}"),
                 accesskit::Role::MultilineTextInput,

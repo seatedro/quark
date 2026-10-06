@@ -1411,7 +1411,7 @@ fn z_index_hitbox_priority() {
 }
 
 #[test]
-fn focus_tree_uses_element_focus_ids() {
+fn focus_tree_registers_focus_ring_and_text_input_targets() {
     let mut font_system = glyphon::FontSystem::new();
     let mut store = SignalStore::new();
     let mut cx = test_cx(&mut font_system, &mut store);
@@ -1436,4 +1436,49 @@ fn focus_tree_uses_element_focus_ids() {
     let order: Vec<_> = tree.tab_order(None).into_iter().map(|n| n.id).collect();
     assert!(order.contains(&FOCUS_LIST), "{order:?}");
     assert!(order.contains(&SEARCH), "{order:?}");
+}
+
+#[test]
+fn accessibility_tree_nests_buttons_under_their_dialog() {
+    let mut font_system = glyphon::FontSystem::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut scene = Scene::default();
+
+    let button = |id: &str, label: &str| {
+        div()
+            .w(80.0)
+            .h(30.0)
+            .accessibility_id(id)
+            .accessibility_role(AccessibilityRole::Button)
+            .accessibility_label(label)
+            .child(text(label))
+    };
+    let mut root = div()
+        .w(400.0)
+        .h(300.0)
+        .flex_col()
+        .child(
+            div()
+                .w(300.0)
+                .h(200.0)
+                .accessibility_id("dialog")
+                .accessibility_role(AccessibilityRole::Dialog)
+                .accessibility_label("Confirm")
+                // A role-less group between dialog and buttons must not break nesting.
+                .child(
+                    div()
+                        .flex_row()
+                        .focus_scope("dialog")
+                        .child(button("ok", "OK"))
+                        .child(button("cancel", "Cancel")),
+                ),
+        )
+        .into_any();
+    render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
+
+    assert_eq!(
+        crate::accessibility::dump_accessibility_tree(&cx.accessibility),
+        "dialog | Dialog | Confirm\n  ok | Button | OK\n  cancel | Button | Cancel\n"
+    );
 }

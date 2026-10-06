@@ -682,7 +682,9 @@ impl Element for Div {
             || self.tab_stop.is_some()
             || self.key_context.is_some()
             || !self.event_bindings.is_empty()
-            || !style_state.is_empty();
+            || !style_state.is_empty()
+            // Accessible divs need a semantic node so descendants nest under them.
+            || accessibility_role.is_some();
         let semantic_parent = if should_emit_semantic {
             let mut node = SemanticNode::new(bounds);
             node.id = semantic_id;
@@ -752,7 +754,10 @@ impl Element for Div {
             } else if let Some(builder) = self.on_scroll.clone() {
                 node = node.action(AccessibilityAction::Scroll(builder));
             }
-            cx.accessibility.push(node);
+            match semantic_parent {
+                Some(index) => cx.push_accessibility_for_semantic(node, index),
+                None => cx.push_accessibility(node),
+            };
         }
 
         // Register parent hit BEFORE children so that children's hit regions

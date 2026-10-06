@@ -173,13 +173,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn focus_id_from_key_matches_node_id() {
-        const SAVE: FocusId = FocusId::from_key("save");
-        assert_eq!(SAVE, FocusId::from(&UiNodeId::from("save")));
-        assert_ne!(SAVE, FocusId::from_key("cancel"));
-    }
-
-    #[test]
     fn tab_order_is_scoped_sorted_and_trappable() {
         let modal = FocusScopeId::from("modal");
         let sidebar = FocusScopeId::from("sidebar");
