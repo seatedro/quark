@@ -1,465 +1,129 @@
+//! Key-binding tables with user overrides. The command type is supplied by the
+//! app; bindings are strings like `"mod+shift+p"` as produced by
+//! `KeyChord::binding_string`, where `mod` matches either Cmd or Ctrl.
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ShortcutCommand {
-    OpenSearch,
-    OpenCommandPalette,
-    IncreaseUiScale,
-    DecreaseUiScale,
-    ToggleSidebar,
-    OpenSettings,
-    ShowKeymaps,
-    NextHunk,
-    PreviousHunk,
-    FocusFileList,
-    FocusEditor,
-    MoveDown,
-    MoveUp,
-    MoveRowDown,
-    MoveRowUp,
-    NextFile,
-    PreviousFile,
-    ToggleFocus,
-    FocusSidebarSearch,
-    SidebarFiles,
-    SidebarCommits,
-    ScrollHalfPageDown,
-    ScrollHalfPageUp,
-    PageDown,
-    PageUp,
-    GoToBottom,
-    UnifiedView,
-    SplitView,
-    OpenCompareMenu,
-    RefreshView,
-    ToggleFileTree,
-    ExpandFolders,
-    CollapseFolders,
-    ToggleWrap,
-    SettingsAppearance,
-    SettingsEditor,
-    SettingsBehavior,
-    SettingsKeymaps,
-    SettingsClankers,
-    SettingsAbout,
-    SettingsNextSection,
-    SettingsPreviousSection,
-    ToggleThemeMode,
-    OpenThemePicker,
-    ToggleContinuousScroll,
-    ToggleAutoUpdate,
-    CheckUpdates,
-    Stage,
-    Unstage,
-    Discard,
-    StageAll,
-    UnstageAll,
-    FocusCommitMessage,
-    SubmitCommit,
-    ToggleLineSelection,
-    ToggleLineSelectionRange,
-    ReviewSelectedLines,
-    FetchRemotes,
-    PullCurrentBranch,
-    OpenPublishMenu,
-    ConfirmOverlay,
-    CloseOverlay,
-    ToggleDebugOverlay,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeymapOverride {
-    pub command: ShortcutCommand,
+pub struct KeymapOverride<C> {
+    pub command: C,
     pub binding: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShortcutScope {
-    Global,
-    Workspace,
-    Settings,
-    TextField,
-}
+/// Where a binding applies. Two bindings conflict only when their scopes
+/// overlap; `GLOBAL` overlaps every scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShortcutScope(pub &'static str);
 
 impl ShortcutScope {
-    fn overlaps(self, other: Self) -> bool {
-        self == other || self == Self::Global || other == Self::Global
+    pub const GLOBAL: Self = Self("global");
+
+    pub fn overlaps(self, other: Self) -> bool {
+        self == other || self == Self::GLOBAL || other == Self::GLOBAL
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ShortcutEntry {
-    pub command: ShortcutCommand,
+pub struct ShortcutEntry<C: 'static> {
+    pub command: C,
     pub scope: ShortcutScope,
     pub keys: &'static [&'static str],
     pub description: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ShortcutGroup {
-    pub title: &'static str,
-    pub entries: &'static [ShortcutEntry],
-}
-
-const NAVIGATION: &[ShortcutEntry] = &[
-    workspace_entry(ShortcutCommand::NextHunk, &["]"], "Next hunk"),
-    workspace_entry(ShortcutCommand::PreviousHunk, &["["], "Previous hunk"),
-    workspace_entry(ShortcutCommand::FocusFileList, &["h"], "Focus file list"),
-    workspace_entry(ShortcutCommand::FocusEditor, &["l"], "Focus diff"),
-    workspace_entry(
-        ShortcutCommand::MoveDown,
-        &["j"],
-        "Move selection or scroll down",
-    ),
-    workspace_entry(
-        ShortcutCommand::MoveUp,
-        &["k"],
-        "Move selection or scroll up",
-    ),
-    workspace_entry(
-        ShortcutCommand::MoveRowDown,
-        &["shift+j"],
-        "Move diff row cursor down",
-    ),
-    workspace_entry(
-        ShortcutCommand::MoveRowUp,
-        &["shift+k"],
-        "Move diff row cursor up",
-    ),
-    workspace_entry(ShortcutCommand::NextFile, &["n"], "Next file"),
-    workspace_entry(ShortcutCommand::PreviousFile, &["shift+n"], "Previous file"),
-    workspace_entry(
-        ShortcutCommand::ToggleFocus,
-        &["tab"],
-        "Toggle sidebar / editor focus",
-    ),
-    workspace_entry(
-        ShortcutCommand::FocusSidebarSearch,
-        &["/"],
-        "Focus sidebar search",
-    ),
-    workspace_entry(
-        ShortcutCommand::SidebarFiles,
-        &["shift+f"],
-        "Files sidebar tab",
-    ),
-    workspace_entry(
-        ShortcutCommand::SidebarCommits,
-        &["shift+c"],
-        "Commits sidebar tab",
-    ),
-];
-
-const SCROLLING: &[ShortcutEntry] = &[
-    workspace_entry(
-        ShortcutCommand::ScrollHalfPageDown,
-        &["d"],
-        "Scroll down half page",
-    ),
-    workspace_entry(
-        ShortcutCommand::ScrollHalfPageUp,
-        &["u"],
-        "Scroll up half page",
-    ),
-    workspace_entry(ShortcutCommand::PageDown, &["space"], "Page down"),
-    workspace_entry(ShortcutCommand::PageUp, &["shift+space"], "Page up"),
-    workspace_entry(ShortcutCommand::GoToBottom, &["shift+g"], "Go to bottom"),
-];
-
-const VIEW: &[ShortcutEntry] = &[
-    workspace_entry(ShortcutCommand::UnifiedView, &["1"], "Unified diff view"),
-    workspace_entry(ShortcutCommand::SplitView, &["2"], "Split diff view"),
-    workspace_entry(
-        ShortcutCommand::OpenCompareMenu,
-        &["m"],
-        "Open compare menu",
-    ),
-    workspace_entry(ShortcutCommand::RefreshView, &["r"], "Refresh current view"),
-    workspace_entry(ShortcutCommand::ToggleFileTree, &["t"], "Toggle file tree"),
-    workspace_entry(
-        ShortcutCommand::ExpandFolders,
-        &["=", "shift+="],
-        "Expand folders",
-    ),
-    workspace_entry(ShortcutCommand::CollapseFolders, &["-"], "Collapse folders"),
-    workspace_entry(ShortcutCommand::ToggleWrap, &["w"], "Toggle line wrapping"),
-    global_entry(ShortcutCommand::ToggleSidebar, &["mod+b"], "Toggle sidebar"),
-];
-
-const SEARCH: &[ShortcutEntry] = &[
-    global_entry(ShortcutCommand::OpenSearch, &["mod+f"], "Open search"),
-    global_entry(
-        ShortcutCommand::OpenCommandPalette,
-        &["mod+p", "mod+k"],
-        "Command palette",
-    ),
-    global_entry(ShortcutCommand::ShowKeymaps, &["shift+/"], "Open keymaps"),
-];
-
-const SETTINGS: &[ShortcutEntry] = &[
-    global_entry(ShortcutCommand::OpenSettings, &["mod+,"], "Open settings"),
-    global_entry(
-        ShortcutCommand::IncreaseUiScale,
-        &["mod+=", "mod+shift+="],
-        "Increase UI scale",
-    ),
-    global_entry(
-        ShortcutCommand::DecreaseUiScale,
-        &["mod+-"],
-        "Decrease UI scale",
-    ),
-    settings_entry(
-        ShortcutCommand::SettingsAppearance,
-        &["1"],
-        "Settings: Appearance",
-    ),
-    settings_entry(ShortcutCommand::SettingsEditor, &["2"], "Settings: Editor"),
-    settings_entry(
-        ShortcutCommand::SettingsBehavior,
-        &["3"],
-        "Settings: Behavior",
-    ),
-    settings_entry(
-        ShortcutCommand::SettingsKeymaps,
-        &["4"],
-        "Settings: Keymaps",
-    ),
-    settings_entry(
-        ShortcutCommand::SettingsClankers,
-        &["5"],
-        "Settings: Clankers",
-    ),
-    settings_entry(ShortcutCommand::SettingsAbout, &["6"], "Settings: About"),
-    settings_entry(
-        ShortcutCommand::SettingsNextSection,
-        &["j"],
-        "Next settings section",
-    ),
-    settings_entry(
-        ShortcutCommand::SettingsPreviousSection,
-        &["k"],
-        "Previous settings section",
-    ),
-    settings_entry(
-        ShortcutCommand::ToggleThemeMode,
-        &["t"],
-        "Toggle theme mode",
-    ),
-    settings_entry(ShortcutCommand::OpenThemePicker, &["b"], "Browse themes"),
-    settings_entry(ShortcutCommand::ToggleWrap, &["w"], "Toggle wrap"),
-    settings_entry(
-        ShortcutCommand::ToggleContinuousScroll,
-        &["c"],
-        "Toggle continuous scroll",
-    ),
-    settings_entry(
-        ShortcutCommand::ToggleAutoUpdate,
-        &["a"],
-        "Toggle auto-update",
-    ),
-    settings_entry(ShortcutCommand::CheckUpdates, &["u"], "Check updates"),
-];
-
-const WORKING_TREE: &[ShortcutEntry] = &[
-    workspace_entry(
-        ShortcutCommand::Stage,
-        &["s"],
-        "Stage file / hunk / selected lines",
-    ),
-    workspace_entry(
-        ShortcutCommand::Unstage,
-        &["shift+s", "shift+u"],
-        "Unstage file / hunk / selected lines",
-    ),
-    workspace_entry(
-        ShortcutCommand::Discard,
-        &["x"],
-        "Discard file / hunk / selected lines",
-    ),
-    workspace_entry(ShortcutCommand::StageAll, &["a"], "Stage all"),
-    workspace_entry(ShortcutCommand::UnstageAll, &["shift+a"], "Unstage all"),
-    workspace_entry(
-        ShortcutCommand::FocusCommitMessage,
-        &["c"],
-        "Focus commit message",
-    ),
-    text_field_entry(
-        ShortcutCommand::SubmitCommit,
-        &["mod+enter"],
-        "Create commit from message",
-    ),
-    workspace_entry(
-        ShortcutCommand::ToggleLineSelection,
-        &["v"],
-        "Select changed line",
-    ),
-    workspace_entry(
-        ShortcutCommand::ToggleLineSelectionRange,
-        &["shift+v"],
-        "Select changed line range",
-    ),
-    workspace_entry(
-        ShortcutCommand::ReviewSelectedLines,
-        &["shift+r"],
-        "Comment on selected lines",
-    ),
-];
-
-const REPOSITORY: &[ShortcutEntry] = &[
-    workspace_entry(ShortcutCommand::FetchRemotes, &["f"], "Fetch remotes"),
-    workspace_entry(
-        ShortcutCommand::PullCurrentBranch,
-        &["p"],
-        "Pull current branch",
-    ),
-    workspace_entry(
-        ShortcutCommand::OpenPublishMenu,
-        &["shift+p"],
-        "Publish options",
-    ),
-];
-
-const DEBUG: &[ShortcutEntry] = &[global_entry(
-    ShortcutCommand::ToggleDebugOverlay,
-    &["mod+shift+d"],
-    "Toggle debug overlay",
-)];
-
-const GROUPS: &[ShortcutGroup] = &[
-    ShortcutGroup {
-        title: "Navigation",
-        entries: NAVIGATION,
-    },
-    ShortcutGroup {
-        title: "Scrolling",
-        entries: SCROLLING,
-    },
-    ShortcutGroup {
-        title: "View",
-        entries: VIEW,
-    },
-    ShortcutGroup {
-        title: "Search",
-        entries: SEARCH,
-    },
-    ShortcutGroup {
-        title: "Settings",
-        entries: SETTINGS,
-    },
-    ShortcutGroup {
-        title: "Working Tree",
-        entries: WORKING_TREE,
-    },
-    ShortcutGroup {
-        title: "Repository",
-        entries: REPOSITORY,
-    },
-    ShortcutGroup {
-        title: "Debug",
-        entries: DEBUG,
-    },
-];
-
-const fn global_entry(
-    command: ShortcutCommand,
-    keys: &'static [&'static str],
-    description: &'static str,
-) -> ShortcutEntry {
-    entry(ShortcutScope::Global, command, keys, description)
-}
-
-const fn workspace_entry(
-    command: ShortcutCommand,
-    keys: &'static [&'static str],
-    description: &'static str,
-) -> ShortcutEntry {
-    entry(ShortcutScope::Workspace, command, keys, description)
-}
-
-const fn settings_entry(
-    command: ShortcutCommand,
-    keys: &'static [&'static str],
-    description: &'static str,
-) -> ShortcutEntry {
-    entry(ShortcutScope::Settings, command, keys, description)
-}
-
-const fn text_field_entry(
-    command: ShortcutCommand,
-    keys: &'static [&'static str],
-    description: &'static str,
-) -> ShortcutEntry {
-    entry(ShortcutScope::TextField, command, keys, description)
-}
-
-const fn entry(
-    scope: ShortcutScope,
-    command: ShortcutCommand,
-    keys: &'static [&'static str],
-    description: &'static str,
-) -> ShortcutEntry {
-    ShortcutEntry {
-        command,
-        scope,
-        keys,
-        description,
+impl<C> ShortcutEntry<C> {
+    pub const fn new(
+        scope: ShortcutScope,
+        command: C,
+        keys: &'static [&'static str],
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command,
+            scope,
+            keys,
+            description,
+        }
     }
 }
 
-pub fn shortcut_groups() -> &'static [ShortcutGroup] {
-    GROUPS
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortcutGroup<C: 'static> {
+    pub title: &'static str,
+    pub entries: &'static [ShortcutEntry<C>],
 }
 
-pub fn shortcut_entries() -> impl Iterator<Item = &'static ShortcutEntry> {
-    GROUPS.iter().flat_map(|group| group.entries.iter())
+/// An app's default bindings, grouped for display.
+#[derive(Debug, Clone, Copy)]
+pub struct Keymap<C: 'static> {
+    groups: &'static [ShortcutGroup<C>],
 }
 
-pub fn shortcut_entry(command: ShortcutCommand) -> Option<&'static ShortcutEntry> {
-    shortcut_entries().find(|entry| entry.command == command)
+impl<C: Copy + PartialEq> Keymap<C> {
+    pub const fn new(groups: &'static [ShortcutGroup<C>]) -> Self {
+        Self { groups }
+    }
+
+    pub fn groups(&self) -> &'static [ShortcutGroup<C>] {
+        self.groups
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = &'static ShortcutEntry<C>> + use<C> {
+        self.groups.iter().flat_map(|group| group.entries.iter())
+    }
+
+    pub fn entry(&self, command: C) -> Option<&'static ShortcutEntry<C>> {
+        self.entries().find(|entry| entry.command == command)
+    }
+
+    pub fn active_bindings<'a>(
+        &self,
+        overrides: &'a [KeymapOverride<C>],
+        command: C,
+    ) -> Vec<&'a str> {
+        if let Some(binding) = override_for(overrides, command) {
+            return vec![binding.binding.as_str()];
+        }
+        self.entry(command)
+            .map(|entry| entry.keys.to_vec())
+            .unwrap_or_default()
+    }
+
+    pub fn binding_matches(
+        &self,
+        overrides: &[KeymapOverride<C>],
+        command: C,
+        binding: &str,
+    ) -> bool {
+        self.active_bindings(overrides, command)
+            .iter()
+            .any(|candidate| binding_eq(candidate, binding))
+    }
+
+    pub fn binding_conflict(
+        &self,
+        overrides: &[KeymapOverride<C>],
+        entry: &ShortcutEntry<C>,
+        binding: &str,
+    ) -> Option<&'static ShortcutEntry<C>> {
+        self.entries().find(|candidate| {
+            candidate.command != entry.command
+                && candidate.scope.overlaps(entry.scope)
+                && self.binding_matches(overrides, candidate.command, binding)
+        })
+    }
 }
 
-pub fn override_for(
-    overrides: &[KeymapOverride],
-    command: ShortcutCommand,
-) -> Option<&KeymapOverride> {
+pub fn override_for<C: PartialEq>(
+    overrides: &[KeymapOverride<C>],
+    command: C,
+) -> Option<&KeymapOverride<C>> {
     overrides.iter().find(|binding| binding.command == command)
 }
 
-pub fn active_bindings(overrides: &[KeymapOverride], command: ShortcutCommand) -> Vec<&str> {
-    if let Some(binding) = override_for(overrides, command) {
-        return vec![binding.binding.as_str()];
-    }
-    shortcut_entry(command)
-        .map(|entry| entry.keys.to_vec())
-        .unwrap_or_default()
-}
-
-pub fn binding_matches(
-    overrides: &[KeymapOverride],
-    command: ShortcutCommand,
-    binding: &str,
-) -> bool {
-    active_bindings(overrides, command)
-        .iter()
-        .any(|candidate| binding_eq(candidate, binding))
-}
-
-pub fn binding_conflict(
-    overrides: &[KeymapOverride],
-    entry: &ShortcutEntry,
-    binding: &str,
-) -> Option<&'static ShortcutEntry> {
-    shortcut_entries().find(|candidate| {
-        candidate.command != entry.command
-            && candidate.scope.overlaps(entry.scope)
-            && binding_matches(overrides, candidate.command, binding)
-    })
-}
-
-pub fn set_override(
-    overrides: &mut Vec<KeymapOverride>,
-    command: ShortcutCommand,
+pub fn set_override<C: PartialEq>(
+    overrides: &mut Vec<KeymapOverride<C>>,
+    command: C,
     binding: String,
 ) {
     if let Some(existing) = overrides
@@ -472,7 +136,7 @@ pub fn set_override(
     }
 }
 
-pub fn reset_override(overrides: &mut Vec<KeymapOverride>, command: ShortcutCommand) {
+pub fn reset_override<C: PartialEq>(overrides: &mut Vec<KeymapOverride<C>>, command: C) {
     overrides.retain(|binding| binding.command != command);
 }
 
@@ -575,18 +239,76 @@ fn title_case(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Command {
+        Open,
+        Save,
+        Next,
+        Submit,
+    }
+
+    const EDITOR: ShortcutScope = ShortcutScope("editor");
+    const FIELD: ShortcutScope = ShortcutScope("text-field");
+
+    const FILE: &[ShortcutEntry<Command>] = &[
+        ShortcutEntry::new(ShortcutScope::GLOBAL, Command::Open, &["mod+o"], "Open"),
+        ShortcutEntry::new(ShortcutScope::GLOBAL, Command::Save, &["mod+s"], "Save"),
+    ];
+    const EDITING: &[ShortcutEntry<Command>] = &[
+        ShortcutEntry::new(EDITOR, Command::Next, &["n", "mod+enter"], "Next"),
+        ShortcutEntry::new(FIELD, Command::Submit, &["mod+enter"], "Submit"),
+    ];
+    const KEYMAP: Keymap<Command> = Keymap::new(&[
+        ShortcutGroup {
+            title: "File",
+            entries: FILE,
+        },
+        ShortcutGroup {
+            title: "Editing",
+            entries: EDITING,
+        },
+    ]);
+
     #[test]
     fn default_keymap_has_no_contextual_conflicts() {
         let overrides = Vec::new();
-        for entry in shortcut_entries() {
+        for entry in KEYMAP.entries() {
             for binding in entry.keys {
                 assert!(
-                    binding_conflict(&overrides, entry, binding).is_none(),
+                    KEYMAP
+                        .binding_conflict(&overrides, entry, binding)
+                        .is_none(),
                     "{} should not conflict on {}",
                     entry.description,
                     binding
                 );
             }
         }
+    }
+
+    #[test]
+    fn override_replaces_defaults_and_is_checked_for_conflicts() {
+        let mut overrides = Vec::new();
+        assert!(KEYMAP.binding_matches(&overrides, Command::Save, "cmd+s"));
+        assert!(KEYMAP.binding_matches(&overrides, Command::Save, "ctrl+s"));
+
+        set_override(&mut overrides, Command::Save, "mod+n".into());
+        assert!(!KEYMAP.binding_matches(&overrides, Command::Save, "cmd+s"));
+        assert!(KEYMAP.binding_matches(&overrides, Command::Save, "ctrl+n"));
+
+        // A global binding conflicts with any scope.
+        let next = KEYMAP.entry(Command::Next).unwrap();
+        let conflict = KEYMAP.binding_conflict(&overrides, next, "mod+o");
+        assert_eq!(conflict.map(|entry| entry.command), Some(Command::Open));
+
+        reset_override(&mut overrides, Command::Save);
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn format_binding_uses_display_names() {
+        assert_eq!(format_binding("shift+/"), "?");
+        assert_eq!(format_binding("ctrl+shift+arrowup"), "Ctrl+Shift+Up");
+        assert_eq!(format_binding("g g"), "G then G");
     }
 }
