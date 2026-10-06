@@ -7,9 +7,12 @@
 //! - `scene` — immediate-mode render primitives
 //! - `semantic` — retained native UI semantics for accessibility, focus,
 //!   events, hit testing, and devtools
+//! - `selection` — document-wide text selection keyed by stable block keys
+//! - `animation` — tween/spring table keyed by stable UI identity and prop
 
 pub use quark_macros::{Store, view};
 
+pub mod animation;
 pub mod color;
 pub mod event;
 pub mod focus;
@@ -19,10 +22,12 @@ pub mod identity;
 pub mod reactive;
 pub mod retained;
 pub mod scene;
+pub mod selection;
 pub mod semantic;
 pub mod style;
 pub mod style_state;
 
+pub use animation::{AnimKey, AnimKind, AnimationTable, Curve, Motion, PropId, SpringParams};
 pub use color::Color;
 pub use event::{
     DragSession, PointerCapture, RoutedEventStep, UiEventBinding, UiEventKind, UiEventPhase,
@@ -41,6 +46,7 @@ pub use scene::{
     FontWeight, IconPrimitive, ImagePrimitive, Primitive, RectPrimitive, RichTextPrimitive,
     RichTextSpan, RoundedRectPrimitive, Scene, ShadowPrimitive, TextPrimitive,
 };
+pub use selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText, copy_text};
 pub use semantic::{
     SemanticActions, SemanticFrame, SemanticNode, SemanticNodeState, SemanticRole, dump_semantic,
 };
