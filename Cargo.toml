@@ -35,6 +35,8 @@ glyphon = "0.10.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 pollster = "0.4.0"
 profiling = "1.0"
+# Tests only. Drops fork/timeout/regex strategies to keep builds small.
+proptest = { version = "1", default-features = false, features = ["std"] }
 raw-window-handle = "0.6"
 resvg = { version = "0.45", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
