@@ -46,3 +46,10 @@ winit = "0.30"
 [profile.dev]
 opt-level = 1
 debug = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+# Keep the default panic = "unwind" so the panic hook can log before exit.
+panic = "unwind"
