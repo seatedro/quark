@@ -2336,6 +2336,8 @@ dependencies = [
 name = "quark-components"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "glyphon",
  "quark",
  "quark-render",
  "quark-ui",

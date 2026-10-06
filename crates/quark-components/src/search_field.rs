@@ -1,7 +1,7 @@
 use quark::view;
 
-use crate::actions::Action;
 use crate::{Button, ButtonSize};
+use quark_ui::Action;
 use quark_ui::design::{Ico, Sp};
 use quark_ui::element::*;
 use quark_ui::icons::lucide;

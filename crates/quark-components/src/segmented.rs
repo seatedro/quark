@@ -1,9 +1,9 @@
-use crate::actions::Action;
-use quark_ui::design::{Rad, Sp};
-use quark_ui::element::*;
-use quark_ui::shell::CursorHint;
-use quark_ui::style::Styled;
 use quark::{SemanticRole, view};
+use quark_ui::Action;
+use quark_ui::design::{Rad, Sp};
+use quark_ui::element::CursorHint;
+use quark_ui::element::*;
+use quark_ui::style::Styled;
 
 pub struct SegmentedItem {
     pub label: String,
@@ -13,10 +13,10 @@ pub struct SegmentedItem {
 }
 
 impl SegmentedItem {
-    pub fn new(label: impl Into<String>, action: Action, selected: bool) -> Self {
+    pub fn new(label: impl Into<String>, action: impl Into<Action>, selected: bool) -> Self {
         Self {
             label: label.into(),
-            action,
+            action: action.into(),
             selected,
             tooltip_text: None,
         }

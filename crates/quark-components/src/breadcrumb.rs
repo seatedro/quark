@@ -1,6 +1,6 @@
 use quark::{SemanticRole, view};
 
-use crate::actions::Action;
+use quark_ui::Action;
 use quark_ui::design::Sp;
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, svg_icon, text,
@@ -10,7 +10,7 @@ use quark_ui::style::Styled;
 
 pub struct Breadcrumb {
     segments: Vec<String>,
-    on_click_segment: Option<fn(usize) -> Action>,
+    on_click_segment: Option<Box<dyn Fn(usize) -> Action>>,
 }
 
 pub fn breadcrumb(segments: impl IntoIterator<Item = impl Into<String>>) -> Breadcrumb {
@@ -21,8 +21,8 @@ pub fn breadcrumb(segments: impl IntoIterator<Item = impl Into<String>>) -> Brea
 }
 
 impl Breadcrumb {
-    pub fn on_click_segment(mut self, f: fn(usize) -> Action) -> Self {
-        self.on_click_segment = Some(f);
+    pub fn on_click_segment(mut self, f: impl Fn(usize) -> Action + 'static) -> Self {
+        self.on_click_segment = Some(Box::new(f));
         self
     }
 }
@@ -45,7 +45,7 @@ impl RenderOnce for Breadcrumb {
                         <div px={m.spacing_xs}
                              py={Sp::XXS}
                              rounded={m.control_radius - Sp::XS * scale}
-                             @when {i != last && self.on_click_segment.is_some()} { on_click={(self.on_click_segment.unwrap())(i)} }
+                             @when {i != last && self.on_click_segment.is_some()} { on_click={(self.on_click_segment.as_ref().unwrap())(i)} }
                              @when {i != last && self.on_click_segment.is_some()} {
                                  id={format!("breadcrumb:{i}:{segment}")}
                                  key={segment.clone()}

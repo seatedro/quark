@@ -1,10 +1,10 @@
 use quark::SemanticRole;
 use quark::view;
 
-use crate::actions::Action;
+use quark_ui::Action;
 use quark_ui::design::{Alpha, Ico, Rad, Sp};
+use quark_ui::element::CursorHint;
 use quark_ui::element::*;
-use quark_ui::shell::CursorHint;
 use quark_ui::style::Styled;
 use quark_ui::theme::Color;
 
@@ -35,11 +35,11 @@ pub struct Button {
 }
 
 impl Button {
-    pub fn new(action: Action) -> Self {
+    pub fn new(action: impl Into<Action>) -> Self {
         Self {
             icon: None,
             label: None,
-            action,
+            action: action.into(),
             style: ButtonStyle::Ghost,
             size: ButtonSize::Default,
             active: false,
@@ -149,7 +149,11 @@ impl RenderOnce for Button {
         let actual_px = if icon_only { unscaled_py } else { unscaled_px };
         let fixed = self.fixed_size.map(|s| (s * scale).round());
         let icon = self.icon;
-        let action = if disabled { Action::Noop } else { self.action };
+        let action = if disabled {
+            quark_ui::element::NoopAction.into()
+        } else {
+            self.action
+        };
         let tooltip_text = self.tooltip_text;
         let cursor = if disabled {
             CursorHint::Default

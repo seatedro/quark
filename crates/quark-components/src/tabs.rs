@@ -1,6 +1,6 @@
 use quark::{SemanticRole, view};
 
-use crate::actions::Action;
+use quark_ui::Action;
 use quark_ui::design::{Rad, Shadow, Sp, Sz};
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, svg_icon, text,
@@ -17,10 +17,10 @@ pub struct TabItem {
 }
 
 impl TabItem {
-    pub fn new(label: impl Into<String>, action: Action) -> Self {
+    pub fn new(label: impl Into<String>, action: impl Into<Action>) -> Self {
         Self {
             label: label.into(),
-            action,
+            action: action.into(),
             active: false,
             count: None,
             icon: None,

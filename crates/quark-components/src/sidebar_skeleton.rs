@@ -4,7 +4,7 @@
 //! rather than blank.
 //!
 //! Widths are deterministic (fixed table) to avoid layout thrash between
-//! frames. The animation is GPU-side via halogen's shimmer effect — no
+//! frames. The animation is GPU-side via quark's shimmer effect — no
 //! per-frame CPU work.
 
 use quark::view;
