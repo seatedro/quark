@@ -10,6 +10,8 @@ pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
     let waker = Waker(event_loop.create_proxy());
 
     let mut runner = Runner::new(app, options, waker);
+    #[cfg(target_os = "linux")]
+    crate::platform::theme::watch(runner.events.clone());
 
     #[cfg(feature = "hot-reload")]
     {
@@ -32,6 +34,7 @@ struct Runner<A> {
     fonts: FontSettings,
     windows: WindowTable<WindowEntry>,
     focused: Option<WindowHandle>,
+    theme: Option<Theme>,
     started: bool,
     waker: Waker,
     events: EventSink,
@@ -59,6 +62,7 @@ impl<A: App> Runner<A> {
             first_window: Some(options),
             windows: WindowTable::default(),
             focused: None,
+            theme: None,
             started: false,
             waker,
             events,
@@ -151,6 +155,7 @@ impl<A: App> Runner<A> {
             fonts: &self.fonts,
             waker: &self.waker,
             events: &self.events,
+            theme: self.theme,
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
         };
@@ -275,9 +280,35 @@ impl<A: App> Runner<A> {
         }
     }
 
+    /// Deliver a theme change once, however many windows or sources report
+    /// it.
+    fn theme_changed(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: Option<WindowHandle>,
+        theme: Theme,
+    ) {
+        if self.theme == Some(theme) {
+            return;
+        }
+        self.theme = Some(theme);
+        let window = window.or_else(|| self.default_window());
+        self.with_event_cx(event_loop, window, |app, cx| {
+            app.app_event(AppEvent::ThemeChanged(theme), cx)
+        });
+    }
+
     fn process_app_events(&mut self, event_loop: &ActiveEventLoop) {
+        // Hold events that beat the first window until `init` has run.
+        if !self.started {
+            return;
+        }
         let events: Vec<_> = self.app_events.try_iter().collect();
         for event in events {
+            if let AppEvent::ThemeChanged(theme) = event {
+                self.theme_changed(event_loop, None, theme);
+                continue;
+            }
             let window = self.default_window();
             self.with_event_cx(event_loop, window, |app, cx| app.app_event(event, cx));
         }
@@ -304,6 +335,16 @@ impl<A: App> ApplicationHandler for Runner<A> {
         self.started = true;
         self.focused = Some(handle);
         self.with_event_cx(event_loop, Some(handle), |app, cx| app.init(cx));
+        // macOS and Windows report the theme through the window; on Linux it
+        // comes from the settings portal.
+        if let Some(theme) = self
+            .windows
+            .get(handle)
+            .and_then(WindowEntry::open)
+            .and_then(|state| state.window.theme())
+        {
+            self.theme_changed(event_loop, Some(handle), theme);
+        }
         self.flags.redraw_all = true;
     }
 
@@ -343,6 +384,9 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 self.flags.redraw.push(handle);
             }
             WindowEvent::RedrawRequested => self.redraw(handle),
+            WindowEvent::ThemeChanged(theme) => {
+                self.theme_changed(event_loop, Some(handle), theme);
+            }
             event => {
                 if let WindowEvent::Focused(true) = event {
                     self.focused = Some(handle);

@@ -21,7 +21,7 @@ use winit::error::{EventLoopError, OsError};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{CursorIcon, Icon, Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Icon, Theme, Window, WindowAttributes, WindowId};
 
 use crate::input::{InputEvent, InputNormalizer};
 use crate::platform::window_state::{MonitorArea, WindowGeometry, state_path};

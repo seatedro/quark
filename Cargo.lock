@@ -2544,6 +2544,7 @@ dependencies = [
  "accesskit",
  "accesskit_winit",
  "arboard",
+ "futures-lite",
  "glyphon",
  "image",
  "interprocess",
@@ -2563,6 +2564,7 @@ dependencies = [
  "tray-icon",
  "tungstenite",
  "winit",
+ "zbus",
 ]
 
 [[package]]

@@ -31,6 +31,18 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSButton", "NSControl", "NSResponder"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 
+# The desktop theme from the XDG settings portal. Both crates are already in
+# every Linux build through accesskit's AT-SPI backend, so they add no size.
+[target.'cfg(target_os = "linux")'.dependencies.zbus]
+version = "5"
+default-features = false
+features = ["async-io"]
+
+[target.'cfg(target_os = "linux")'.dependencies.futures-lite]
+version = "2"
+default-features = false
+features = ["std"]
+
 # On Linux the tray speaks StatusNotifierItem over D-Bus through ksni (zbus,
 # already in the tree for accesskit) instead of libappindicator, so it needs
 # no GTK. Menus are snapshotted for ksni rather than built as GTK widgets.

@@ -114,6 +114,7 @@ pub struct EventContext<'a> {
     pub(super) fonts: &'a FontSettings,
     pub(super) waker: &'a Waker,
     pub(super) events: &'a EventSink,
+    pub(super) theme: Option<Theme>,
     #[cfg(feature = "tray")]
     pub(super) tray: &'a mut Option<tray_icon::TrayIcon>,
 }
@@ -249,6 +250,12 @@ impl EventContext<'_> {
 
     pub fn waker(&self) -> &Waker {
         self.waker
+    }
+
+    /// The desktop's light or dark preference, if the platform reports one.
+    /// Changes arrive as [`AppEvent::ThemeChanged`].
+    pub fn theme(&self) -> Option<Theme> {
+        self.theme
     }
 
     /// Show a desktop notification without blocking. Clicks come back as
