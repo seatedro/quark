@@ -5,8 +5,11 @@
 //! [`AppEvent::NotificationDismissed`] on Linux and the BSDs, where the
 //! freedesktop notification spec reports them. macOS and Windows show the
 //! notification but report nothing back.
+//!
+//! [`AppEvent::NotificationAction`]: crate::AppEvent::NotificationAction
+//! [`AppEvent::NotificationDismissed`]: crate::AppEvent::NotificationDismissed
 
-use crate::runner::{AppEvent, EventSink};
+use crate::runner::EventSink;
 
 /// The action id reported when the user clicks the notification body.
 pub const DEFAULT_ACTION: &str = "default";
@@ -23,7 +26,7 @@ pub struct Notification {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotificationAction {
-    /// Reported back in [`AppEvent::NotificationAction`].
+    /// Reported back in [`crate::AppEvent::NotificationAction`].
     pub id: String,
     pub label: String,
 }
@@ -39,6 +42,8 @@ pub(crate) fn show(notification: Notification, events: EventSink) {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn show_blocking(notification: Notification, events: EventSink) {
+    use crate::runner::AppEvent;
+
     let mut native = native(&notification);
     // Servers invoke the "default" action when the body is clicked; most do
     // not draw it as a button.
