@@ -8,9 +8,9 @@
 //! 3. **paint** — emit scene primitives using resolved hover/hit state.
 
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 
-use crate::actions::Action;
-use crate::effects::Effect;
+use crate::action::{Action, FocusId};
 use quark_render::Scene;
 use quark_render::scene::{BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect};
 use crate::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
@@ -34,18 +34,18 @@ pub use taffy::NodeId as LayoutId;
 pub type Bounds = Rect;
 
 // ---------------------------------------------------------------------------
-// HitRegion / ClickHandler — halogen-generic hit-testing, diffy-typed result
+// HitRegion / ClickHandler — generic hit-testing specialized on ClickResult
 // ---------------------------------------------------------------------------
 
-/// Diffy's hit region: a halogen hit region specialized on `ClickResult`.
+/// Hit region specialized on `ClickResult`.
 pub type HitRegion = quark::hit::HitRegion<ClickResult>;
 
-/// Diffy's click handler: a halogen click handler producing `ClickResult`.
+/// Click handler producing `ClickResult`.
 pub type ClickHandler = quark::hit::ClickHandler<ClickResult>;
 
-/// Helpers that make sense only when the handler's output is diffy's
+/// Helpers that make sense only when the handler's output is
 /// `ClickResult`. Extension trait so we can add methods without owning the
-/// underlying halogen type.
+/// underlying `quark::hit` type.
 pub trait ClickHandlerActionExt {
     /// Build a handler that emits `action` on click. Action is captured by
     /// value and cloned per invocation.
@@ -70,7 +70,7 @@ impl ClickHandlerActionExt for ClickHandler {
 }
 
 // ---------------------------------------------------------------------------
-// ClickResult / DragHandler — diffy-local payload types
+// ClickResult / DragHandler — click payload types
 // ---------------------------------------------------------------------------
 
 pub enum ClickResult {
@@ -81,7 +81,7 @@ pub enum ClickResult {
 
 pub trait DragHandler {
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action>;
-    fn on_release(&mut self, state: &crate::state::AppState) -> DragReleaseResult;
+    fn on_release(&mut self) -> DragReleaseResult;
     fn cursor(&self) -> CursorHint {
         CursorHint::Default
     }
@@ -89,14 +89,12 @@ pub trait DragHandler {
 
 pub struct DragReleaseResult {
     pub actions: Vec<Action>,
-    pub effects: Vec<Effect>,
 }
 
 impl DragReleaseResult {
     pub fn empty() -> Self {
         Self {
             actions: Vec::new(),
-            effects: Vec::new(),
         }
     }
 }
@@ -143,21 +141,7 @@ impl ScrollbarDragHandler {
         };
         let target_px = (fraction * max_scroll) as u32;
 
-        match &self.action_builder {
-            ScrollActionBuilder::FileList => {
-                Some(crate::actions::FileListAction::ScrollFileListToPx(target_px).into())
-            }
-            ScrollActionBuilder::ViewportLines => {
-                Some(crate::actions::EditorAction::ScrollViewportTo(target_px).into())
-            }
-            ScrollActionBuilder::ViewportGlobal => {
-                Some(crate::actions::EditorAction::ScrollViewportToGlobal(target_px).into())
-            }
-            ScrollActionBuilder::SettingsKeymaps => {
-                Some(crate::actions::SettingsAction::ScrollKeymapsToPx(target_px).into())
-            }
-            ScrollActionBuilder::Custom(_) => None,
-        }
+        self.action_builder.build_to_px(target_px)
     }
 }
 
@@ -166,13 +150,9 @@ impl DragHandler for ScrollbarDragHandler {
         self.compute_scroll_action(y).into_iter().collect()
     }
 
-    fn on_release(&mut self, _state: &crate::state::AppState) -> DragReleaseResult {
-        match &self.action_builder {
-            ScrollActionBuilder::ViewportGlobal => DragReleaseResult {
-                actions: vec![crate::actions::EditorAction::EndViewportScrollbarDrag.into()],
-                effects: Vec::new(),
-            },
-            _ => DragReleaseResult::empty(),
+    fn on_release(&mut self) -> DragReleaseResult {
+        DragReleaseResult {
+            actions: self.action_builder.on_drag_end.iter().cloned().collect(),
         }
     }
 }
@@ -198,32 +178,63 @@ pub struct ScrollbarTrack {
     pub action_builder: ScrollActionBuilder,
 }
 
-/// How to convert a scroll delta (in lines) into an Action.
-#[derive(Debug, Clone)]
-pub enum ScrollActionBuilder {
-    /// Emit `crate::actions::FileListAction::ScrollFileList(delta).into()`.
-    FileList,
-    /// Emit `crate::actions::EditorAction::ScrollViewportLines(delta).into()`.
-    ViewportLines,
-    /// Continuous-scroll: drag emits global-pixel `ScrollViewportToGlobal`,
-    /// wheel still falls back to `ScrollViewportLines`.
-    ViewportGlobal,
-    /// Settings → Keymaps section list.
-    SettingsKeymaps,
-    /// Use a custom action constructor.
-    Custom(fn(i32) -> Action),
+/// How to convert scroll input into app actions.
+///
+/// `by_lines` handles wheel deltas (in lines). `to_px` handles scrollbar
+/// drags with an absolute pixel offset; without it, dragging the thumb
+/// emits nothing. `on_drag_end` is emitted when a scrollbar drag releases.
+#[derive(Clone)]
+pub struct ScrollActionBuilder {
+    pub by_lines: Rc<dyn Fn(i32) -> Action>,
+    pub to_px: Option<Rc<dyn Fn(u32) -> Action>>,
+    pub on_drag_end: Option<Action>,
 }
 
 impl ScrollActionBuilder {
-    pub fn build(&self, delta: i32) -> Action {
-        match self {
-            Self::FileList => crate::actions::FileListAction::ScrollFileList(delta).into(),
-            Self::ViewportLines | Self::ViewportGlobal => {
-                crate::actions::EditorAction::ScrollViewportLines(delta).into()
-            }
-            Self::SettingsKeymaps => crate::actions::SettingsAction::ScrollKeymapsPx(delta).into(),
-            Self::Custom(f) => f(delta),
+    pub fn new(by_lines: impl Fn(i32) -> Action + 'static) -> Self {
+        Self {
+            by_lines: Rc::new(by_lines),
+            to_px: None,
+            on_drag_end: None,
         }
+    }
+
+    pub fn with_to_px(mut self, to_px: impl Fn(u32) -> Action + 'static) -> Self {
+        self.to_px = Some(Rc::new(to_px));
+        self
+    }
+
+    pub fn with_drag_end(mut self, action: impl Into<Action>) -> Self {
+        self.on_drag_end = Some(action.into());
+        self
+    }
+
+    pub fn build(&self, delta: i32) -> Action {
+        (self.by_lines)(delta)
+    }
+
+    pub fn build_to_px(&self, target_px: u32) -> Option<Action> {
+        self.to_px.as_ref().map(|f| f(target_px))
+    }
+}
+
+impl std::fmt::Debug for ScrollActionBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScrollActionBuilder")
+            .field("to_px", &self.to_px.is_some())
+            .field("on_drag_end", &self.on_drag_end)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Click payload that swallows a click without doing anything. Elements
+/// carrying it get a hitbox but no accessibility click action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoopAction;
+
+impl From<NoopAction> for Action {
+    fn from(value: NoopAction) -> Self {
+        Action::new(value)
     }
 }
 
@@ -240,7 +251,7 @@ pub struct ElementContext<'a> {
     pub mouse_position: Option<(f32, f32)>,
     pub hits: Vec<HitRegion>,
     pub scroll_regions: Vec<ScrollRegion>,
-    pub focus: Option<crate::state::FocusTarget>,
+    pub focus: Option<FocusId>,
     pub signal_store: &'a SignalStore,
     pub clock_ms: u64,
     pub debug_wireframe: bool,
@@ -405,7 +416,7 @@ impl<'a> ElementContext<'a> {
         self.signal_store.update(signal, f);
     }
 
-    pub fn with_focus(mut self, focus: Option<crate::state::FocusTarget>) -> Self {
+    pub fn with_focus(mut self, focus: Option<FocusId>) -> Self {
         self.focus = focus;
         self
     }
@@ -415,7 +426,7 @@ impl<'a> ElementContext<'a> {
         self
     }
 
-    pub fn is_focused(&self, target: crate::state::FocusTarget) -> bool {
+    pub fn is_focused(&self, target: FocusId) -> bool {
         self.focus == Some(target)
     }
 
@@ -1001,7 +1012,7 @@ pub struct Div {
     hide_scrollbar: bool,
     clips: bool,
     block_mouse: bool,
-    focus_target: Option<crate::state::FocusTarget>,
+    focus_target: Option<FocusId>,
     tooltip: Option<String>,
     hit_identity: Option<HitIdentity>,
     semantic_id: Option<UiNodeId>,
@@ -1171,8 +1182,8 @@ impl Div {
 
     // -- Interaction --
 
-    pub fn on_click(mut self, action: Action) -> Self {
-        self.on_click = Some(action);
+    pub fn on_click(mut self, action: impl Into<Action>) -> Self {
+        self.on_click = Some(action.into());
         self.cursor = CursorHint::Pointer;
         self
     }
@@ -1282,7 +1293,7 @@ impl Div {
         self
     }
 
-    pub fn focus_ring(mut self, target: crate::state::FocusTarget) -> Self {
+    pub fn focus_ring(mut self, target: FocusId) -> Self {
         self.focus_target = Some(target);
         self
     }
@@ -1297,7 +1308,7 @@ impl Div {
         self
     }
 
-    pub fn track_focus(self, target: crate::state::FocusTarget) -> Self {
+    pub fn track_focus(self, target: FocusId) -> Self {
         self.focus_ring(target)
     }
 
@@ -1595,7 +1606,7 @@ impl Element for Div {
         let click_action = self.on_click.clone();
         let has_click_action = click_action
             .as_ref()
-            .is_some_and(|action| !matches!(action, Action::Noop));
+            .is_some_and(|action| !action.is::<NoopAction>());
         let accessibility_label = self
             .accessibility_label
             .clone()
@@ -1726,7 +1737,7 @@ impl Element for Div {
             }
             if !self.accessibility_disabled
                 && let Some(action) = click_action
-                && !matches!(action, Action::Noop)
+                && !action.is::<NoopAction>()
             {
                 node = node.action(AccessibilityAction::Click(action));
             } else if let Some(builder) = self.on_scroll.clone() {
@@ -2259,9 +2270,10 @@ pub struct TextInput {
     cursor: usize,
     anchor: usize,
     cursor_moved_at_ms: u64,
-    focus_target: Option<crate::state::FocusTarget>,
+    focus_target: Option<FocusId>,
     bare: bool,
     masked: bool,
+    search: bool,
 }
 
 pub fn text_input(label: impl Into<String>, value: impl Into<String>) -> TextInput {
@@ -2278,6 +2290,7 @@ pub fn text_input(label: impl Into<String>, value: impl Into<String>) -> TextInp
         focus_target: None,
         bare: false,
         masked: false,
+        search: false,
     }
 }
 
@@ -2292,8 +2305,8 @@ impl TextInput {
         self
     }
 
-    pub fn on_click(mut self, action: Action) -> Self {
-        self.on_click = Some(action);
+    pub fn on_click(mut self, action: impl Into<Action>) -> Self {
+        self.on_click = Some(action.into());
         self
     }
 
@@ -2312,7 +2325,7 @@ impl TextInput {
         self
     }
 
-    pub fn focus_target(mut self, target: crate::state::FocusTarget) -> Self {
+    pub fn focus_target(mut self, target: FocusId) -> Self {
         self.focus_target = Some(target);
         self
     }
@@ -2324,6 +2337,12 @@ impl TextInput {
 
     pub fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
+        self
+    }
+
+    /// Expose the field to assistive tech as a search box.
+    pub fn search(mut self, search: bool) -> Self {
+        self.search = search;
         self
     }
 }
@@ -2344,7 +2363,7 @@ pub struct TextInputHitArea {
     pub text_height: f32,
     pub value: String,
     pub font_size: f32,
-    pub focus_target: crate::state::FocusTarget,
+    pub focus_target: FocusId,
     pub multiline: bool,
 }
 
@@ -2575,13 +2594,10 @@ impl Element for TextInput {
             let role = if self.masked {
                 AccessibilityRole::PasswordInput
             } else {
-                match target {
-                    crate::state::FocusTarget::SearchInput
-                    | crate::state::FocusTarget::SidebarSearch
-                    | crate::state::FocusTarget::CommandPaletteInput => {
-                        AccessibilityRole::SearchInput
-                    }
-                    _ => AccessibilityRole::TextInput,
+                if self.search {
+                    AccessibilityRole::SearchInput
+                } else {
+                    AccessibilityRole::TextInput
                 }
             };
             let accessible_value = if self.masked {
@@ -3232,25 +3248,6 @@ impl IntoAnyElement for CodeBlock {
     }
 }
 
-/// Map a phosphor highlight kind onto the theme's `syntax_*` palette.
-pub fn syntax_kind_color(
-    kind: phosphor::HighlightKind,
-    tc: &crate::theme::ThemeColors,
-) -> Color {
-    use phosphor::HighlightKind::*;
-    match kind {
-        Keyword | Builtin => tc.syntax_keyword,
-        String => tc.syntax_string,
-        Comment | Label | Preprocessor => tc.syntax_comment,
-        Function => tc.syntax_function,
-        Number | Constant => tc.syntax_number,
-        Type | Namespace | Tag => tc.syntax_type,
-        Attribute | Property => tc.syntax_property,
-        Operator | Punctuation => tc.syntax_operator,
-        Normal | Variable => tc.text,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Canvas — custom painting element
 // ---------------------------------------------------------------------------
@@ -3856,6 +3853,25 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
 
+    #[derive(Debug, Clone, PartialEq)]
+    enum TestAction {
+        OpenRepoPicker,
+        Bootstrap,
+        StartDeviceFlow,
+        SelectFile(usize),
+        ScrollList(i32),
+        OpenRefPicker,
+    }
+
+    impl From<TestAction> for Action {
+        fn from(value: TestAction) -> Self {
+            Action::new(value)
+        }
+    }
+
+    const FOCUS_LIST: FocusId = FocusId::new(1);
+    const FOCUS_EDITOR: FocusId = FocusId::new(2);
+
     fn test_cx<'a>(
         font_system: &'a mut glyphon::FontSystem,
         store: &'a mut SignalStore,
@@ -4030,7 +4046,7 @@ mod tests {
         let mut root = div()
             .w(200.0)
             .h(50.0)
-            .on_click(crate::actions::OverlayAction::OpenRepoPicker.into())
+            .on_click(TestAction::OpenRepoPicker)
             .into_any();
 
         render_element(&mut root, &mut scene, &mut cx, 200.0, 50.0);
@@ -4038,7 +4054,7 @@ mod tests {
         assert_eq!(cx.hits.len(), 1);
         assert_eq!(
             cx.hits[0].on_click.peek_actions(),
-            vec![crate::actions::OverlayAction::OpenRepoPicker.into()]
+            vec![TestAction::OpenRepoPicker.into()]
         );
         assert_eq!(cx.hits[0].cursor, CursorHint::Pointer);
         assert!(cx.hits[0].rect.width > 0.0);
@@ -4060,7 +4076,7 @@ mod tests {
             .h(50.0)
             .bg(red)
             .hover_bg(blue)
-            .on_click(crate::actions::AppAction::Bootstrap.into())
+            .on_click(TestAction::Bootstrap)
             .into_any();
 
         render_element(&mut root, &mut scene, &mut cx, 200.0, 50.0);
@@ -4093,7 +4109,7 @@ mod tests {
             .h(50.0)
             .bg(red)
             .hover_bg(blue)
-            .on_click(crate::actions::AppAction::Bootstrap.into())
+            .on_click(TestAction::Bootstrap)
             .into_any();
 
         render_element_at(&mut root, &mut scene, &mut cx, 400.0, 300.0, 200.0, 50.0);
@@ -4129,7 +4145,7 @@ mod tests {
             .h(50.0)
             .bg(red)
             .hover_bg(blue)
-            .on_click(crate::actions::AppAction::Bootstrap.into())
+            .on_click(TestAction::Bootstrap)
             .into_any();
 
         render_element(&mut root, &mut scene, &mut cx, 200.0, 50.0);
@@ -4167,7 +4183,7 @@ mod tests {
                             .rounded(7.0)
                             .bg(theme.colors.element_background)
                             .hover_bg(theme.colors.element_hover)
-                            .on_click(crate::actions::OverlayAction::OpenRepoPicker.into())
+                            .on_click(TestAction::OpenRepoPicker)
                             .child(text("Compare").text_sm().color(theme.colors.text)),
                     )
                     .child(
@@ -4176,7 +4192,7 @@ mod tests {
                             .py(6.0)
                             .rounded(7.0)
                             .hover_bg(theme.colors.ghost_element_hover)
-                            .on_click(crate::actions::GitHubAction::StartGitHubDeviceFlow.into())
+                            .on_click(TestAction::StartDeviceFlow)
                             .child(text("Sign in").text_sm().color(theme.colors.text_muted)),
                     ),
             )
@@ -4207,11 +4223,11 @@ mod tests {
         assert_eq!(cx.hits.len(), 2);
         assert_eq!(
             cx.hits[0].on_click.peek_actions(),
-            vec![crate::actions::OverlayAction::OpenRepoPicker.into()]
+            vec![TestAction::OpenRepoPicker.into()]
         );
         assert_eq!(
             cx.hits[1].on_click.peek_actions(),
-            vec![crate::actions::GitHubAction::StartGitHubDeviceFlow.into()]
+            vec![TestAction::StartDeviceFlow.into()]
         );
     }
 
@@ -4420,7 +4436,7 @@ mod tests {
                         .flex_row()
                         .rounded(7.0)
                         .hover_bg(theme.colors.sidebar_row_hover)
-                        .on_click(crate::actions::FileListAction::SelectFile(i).into())
+                        .on_click(TestAction::SelectFile(i))
                         .child(text(*path).text_sm().color(theme.colors.text))
                         .into_any()
                 }),
@@ -4433,7 +4449,7 @@ mod tests {
         assert_eq!(cx.hits.len(), 4);
         assert_eq!(
             cx.hits[2].on_click.peek_actions(),
-            vec![crate::actions::FileListAction::SelectFile(2).into()]
+            vec![TestAction::SelectFile(2).into()]
         );
 
         // Should have text for header + 4 files = 5 text primitives
@@ -4782,7 +4798,7 @@ mod tests {
             .bg(red)
             .border_b(blue)
             .hover(|s| s.bg(green).border_color(green))
-            .on_click(crate::actions::AppAction::Bootstrap.into())
+            .on_click(TestAction::Bootstrap)
             .into_any();
 
         render_element(&mut root, &mut scene, &mut cx, 200.0, 50.0);
@@ -4851,7 +4867,7 @@ mod tests {
             .w(260.0)
             .h(400.0)
             .scroll_y(0.0)
-            .on_scroll(ScrollActionBuilder::FileList)
+            .on_scroll(ScrollActionBuilder::new(|d| TestAction::ScrollList(d).into()))
             .child(div().w_full().h(1000.0))
             .into_any();
 
@@ -4861,7 +4877,7 @@ mod tests {
         let action = cx.scroll_regions[0].action_builder.build(3);
         assert_eq!(
             action,
-            crate::actions::FileListAction::ScrollFileList(3).into()
+            TestAction::ScrollList(3).into()
         );
     }
 
@@ -4876,10 +4892,10 @@ mod tests {
             None,
             &mut store,
         )
-        .with_focus(Some(crate::state::FocusTarget::FileList));
+        .with_focus(Some(FOCUS_LIST));
 
-        assert!(cx.is_focused(crate::state::FocusTarget::FileList));
-        assert!(!cx.is_focused(crate::state::FocusTarget::Editor));
+        assert!(cx.is_focused(FOCUS_LIST));
+        assert!(!cx.is_focused(FOCUS_EDITOR));
     }
 
     #[test]
@@ -4892,10 +4908,7 @@ mod tests {
         let mut root = text_input("Branch", "main")
             .w(200.0)
             .h(56.0)
-            .on_click(
-                crate::actions::OverlayAction::OpenRefPicker(crate::state::CompareField::Left)
-                    .into(),
-            )
+            .on_click(TestAction::OpenRefPicker)
             .into_any();
 
         render_element(&mut root, &mut scene, &mut cx, 200.0, 56.0);

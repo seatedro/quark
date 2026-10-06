@@ -4,21 +4,20 @@ use accesskit::{
     Action as AxAction, Node, NodeId, Rect as AxRect, Role, Toggled, Tree, TreeId, TreeUpdate,
 };
 
-use crate::actions::Action;
-use quark_render::Rect;
+use crate::action::{Action, FocusId};
 use crate::element::ScrollActionBuilder;
-use crate::state::FocusTarget;
+use quark_render::Rect;
 
 pub const ROOT_ID: NodeId = NodeId(1);
 
 #[derive(Debug, Clone)]
 pub enum AccessibilityAction {
     Click(Action),
-    Focus(FocusTarget),
-    TextValue(FocusTarget),
+    Focus(FocusId),
+    TextValue(FocusId),
     Scroll(ScrollActionBuilder),
     EditorViewport {
-        focus: FocusTarget,
+        focus: FocusId,
         scroll: ScrollActionBuilder,
     },
 }
@@ -220,10 +219,11 @@ impl AccessibilityFrame {
         self.actions.get(&id)
     }
 
-    pub fn tree_update(&self, focus: Option<FocusTarget>) -> TreeUpdate {
+    /// `app_name` labels the root window node.
+    pub fn tree_update(&self, app_name: &str, focus: Option<FocusId>) -> TreeUpdate {
         let mut root = Node::new(Role::Window);
         root.set_bounds(ax_rect(self.root_bounds));
-        root.set_label(crate::platform::startup::app_display_name());
+        root.set_label(app_name);
         root.set_children(self.nodes.iter().map(|node| node.id).collect::<Vec<_>>());
 
         let mut nodes = Vec::with_capacity(self.nodes.len() + 1);
@@ -250,8 +250,8 @@ impl AccessibilityFrame {
             nodes,
             tree: Some(Tree {
                 root: ROOT_ID,
-                toolkit_name: Some("Diffy Halogen".to_owned()),
-                toolkit_version: Some(crate::APP_VERSION.to_owned()),
+                toolkit_name: Some("Quark".to_owned()),
+                toolkit_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }),
             tree_id: TreeId::ROOT,
             focus: focused,
@@ -259,8 +259,8 @@ impl AccessibilityFrame {
     }
 }
 
-pub fn empty_tree_update() -> TreeUpdate {
-    AccessibilityFrame::new(1.0, 1.0).tree_update(None)
+pub fn empty_tree_update(app_name: &str) -> TreeUpdate {
+    AccessibilityFrame::new(1.0, 1.0).tree_update(app_name, None)
 }
 
 /// One stable line per node, in tree order:
@@ -326,7 +326,7 @@ mod tests {
         frame.push(AccessibilityNode::new("same", Role::Label, rect()).label("One"));
         frame.push(AccessibilityNode::new("same", Role::Label, rect()).label("Two"));
 
-        let update = frame.tree_update(None);
+        let update = frame.tree_update("Test", None);
         let root = update
             .nodes
             .iter()

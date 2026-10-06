@@ -1,5 +1,6 @@
-use quark_render::{BorderPrimitive, FontKind, Rect, RoundedRectPrimitive, ShadowPrimitive};
-use crate::shell::UiFrame;
+use quark_render::{
+    BorderPrimitive, FontKind, Rect, RoundedRectPrimitive, Scene, ShadowPrimitive,
+};
 use crate::theme::{Color, Theme};
 
 pub struct Sp;
@@ -330,19 +331,19 @@ impl Elevation {
         }
     }
 
-    pub fn paint(self, frame: &mut UiFrame, rect: Rect, fill: Color, border: Color, theme: &Theme) {
+    pub fn paint(self, scene: &mut Scene, rect: Rect, fill: Color, border: Color, theme: &Theme) {
         let radius = self.radius(theme);
         match self {
             Self::Surface => {}
             Self::Raised => {
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 3.0,
                     corner_radius: radius,
                     offset: [0.0, 2.0],
                     color: Color::rgba(0, 0, 0, 30),
                 });
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 18.0,
                     corner_radius: radius,
@@ -351,21 +352,21 @@ impl Elevation {
                 });
             }
             Self::Popover => {
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 3.0,
                     corner_radius: radius,
                     offset: [0.0, 2.0],
                     color: Color::rgba(0, 0, 0, 25),
                 });
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 8.0,
                     corner_radius: radius,
                     offset: [0.0, 4.0],
                     color: Color::rgba(0, 0, 0, 35),
                 });
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 16.0,
                     corner_radius: radius,
@@ -374,28 +375,28 @@ impl Elevation {
                 });
             }
             Self::Modal => {
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 3.0,
                     corner_radius: radius,
                     offset: [0.0, 2.0],
                     color: Color::rgba(0, 0, 0, 30),
                 });
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 8.0,
                     corner_radius: radius,
                     offset: [0.0, 4.0],
                     color: Color::rgba(0, 0, 0, 20),
                 });
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 24.0,
                     corner_radius: radius,
                     offset: [0.0, 8.0],
                     color: Color::rgba(0, 0, 0, 50),
                 });
-                frame.scene.shadow(ShadowPrimitive {
+                scene.shadow(ShadowPrimitive {
                     rect,
                     blur_radius: 1.0,
                     corner_radius: radius,
@@ -404,17 +405,13 @@ impl Elevation {
                 });
             }
         }
-        frame
-            .scene
-            .rounded_rect(RoundedRectPrimitive::uniform(rect, radius, fill));
-        frame
-            .scene
-            .border(BorderPrimitive::uniform(rect, 1.0, radius, border));
+        scene.rounded_rect(RoundedRectPrimitive::uniform(rect, radius, fill));
+        scene.border(BorderPrimitive::uniform(rect, 1.0, radius, border));
     }
 
-    pub fn paint_default(self, frame: &mut UiFrame, rect: Rect, theme: &Theme) {
+    pub fn paint_default(self, scene: &mut Scene, rect: Rect, theme: &Theme) {
         self.paint(
-            frame,
+            scene,
             rect,
             self.default_fill(theme),
             self.default_border(theme),
