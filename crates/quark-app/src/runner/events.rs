@@ -11,6 +11,10 @@ pub enum AppEvent {
     /// A window requested through [`EventContext::open_window`] could not be
     /// created. The handle is stale.
     WindowOpenFailed(WindowHandle),
+    /// Another launch of the app forwarded its command line arguments (deep
+    /// link URLs, file paths) through
+    /// [`crate::platform::single_instance`], then exited.
+    OpenUrls(Vec<String>),
     /// The user clicked a notification sent with [`EventContext::notify`]:
     /// its body ([`crate::platform::notification::DEFAULT_ACTION`]) or one of
     /// its action buttons. Linux and the BSDs only.

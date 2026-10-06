@@ -31,6 +31,10 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSButton", "NSControl", "NSResponder"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 
+# Named pipes for single instance handoff; Unix uses std's Unix sockets.
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "2.2", default-features = false }
+
 [dev-dependencies]
 quark-render = { workspace = true, features = ["headless-render"] }
 image.workspace = true

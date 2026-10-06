@@ -256,6 +256,15 @@ impl EventContext<'_> {
         crate::platform::notification::show(notification, self.events.clone());
     }
 
+    /// Deliver arguments from later launches of the app as
+    /// [`AppEvent::OpenUrls`]. See [`crate::platform::single_instance`].
+    pub fn listen_for_instances(
+        &mut self,
+        primary: crate::platform::single_instance::PrimaryInstance,
+    ) {
+        primary.spawn(self.events.clone());
+    }
+
     fn state(&self) -> Option<&WindowState> {
         self.windows.get(self.window?)?.open()
     }
