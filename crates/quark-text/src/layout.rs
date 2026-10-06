@@ -997,26 +997,38 @@ fn build_runs(glyphs: &GlyphColumns, lines: &LineColumns) -> RunColumns {
     runs
 }
 
-/// Splits on `\n`, `\r\n`, `\r`, `\n\r` exactly like cosmic-text's
-/// `Buffer::set_text`, always ending with a paragraph that has no line ending
-/// (empty after a trailing newline).
+/// Splits on `\n`, `\r\n`, `\r`, `\n\r` like cosmic-text's
+/// `Buffer::set_text`, and also on the other Unicode bidi paragraph
+/// separators (U+001C..U+001E, U+0085, U+2029), always ending with a
+/// paragraph that has no line ending (empty after a trailing newline).
+///
+/// cosmic-text asserts that a line is one bidi paragraph, so a separator
+/// followed by text of the other direction would panic if left inside.
 fn split_paragraphs(text: &str) -> Vec<(Range<usize>, LineEnding)> {
+    const OTHER_SEPARATORS: [char; 5] = ['\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2029}'];
     let mut out = Vec::new();
     let mut start = 0;
-    while let Some(i) = text[start..].find(['\r', '\n']) {
+    while let Some(i) =
+        text[start..].find(|c| c == '\r' || c == '\n' || OTHER_SEPARATORS.contains(&c))
+    {
         let end = start + i;
         let after = &text[end..];
-        let ending = if after.starts_with("\r\n") {
-            LineEnding::CrLf
+        let (ending, len) = if after.starts_with("\r\n") {
+            (LineEnding::CrLf, 2)
         } else if after.starts_with("\n\r") {
-            LineEnding::LfCr
+            (LineEnding::LfCr, 2)
         } else if after.starts_with('\n') {
-            LineEnding::Lf
+            (LineEnding::Lf, 1)
+        } else if after.starts_with('\r') {
+            (LineEnding::Cr, 1)
         } else {
-            LineEnding::Cr
+            // LineEnding has no variant for these; it is only metadata to
+            // cosmic-text, and offsets come from `len`.
+            let sep = after.chars().next().map_or(1, char::len_utf8);
+            (LineEnding::Lf, sep)
         };
         out.push((start..end, ending));
-        start = end + ending.as_str().len();
+        start = end + len;
     }
     out.push((start..text.len(), LineEnding::None));
     out
@@ -1117,6 +1129,7 @@ mod tests {
         "\u{65e5}",
         "\u{1f600}",
         "\u{1f469}\u{200d}\u{1f4bb}",
+        "\u{2029}",
     ];
     const RTL_PIECES: &[&str] = &["\u{5e9}\u{5dc}", "\u{5d5}\u{5dd} ", "\u{627}\u{644}"];
 
@@ -1429,6 +1442,23 @@ mod tests {
         let line = layout.line(1).expect("line 1");
         assert_eq!(line.byte_range, 2..2);
         assert_eq!(layout.hit(0.0, line.top + 1.0), 1);
+    }
+
+    // Regression: fuzz crash (fuzz/corpus/text_layout/crash_gs_rtl).
+    // cosmic-text panicked on a bidi paragraph separator followed by text of
+    // the other direction.
+    #[test]
+    fn layout_bidi_paragraph_separators_start_new_lines() {
+        let cases: &[(&str, &[Range<usize>])] = &[
+            ("\u{1d}\u{5d5}", &[0..0, 1..3]),
+            ("a\u{2029}\u{5d5}", &[0..1, 4..6]),
+            ("\u{5d5}\u{85}a", &[0..2, 4..5]),
+        ];
+        for (text, expected) in cases {
+            let layout = layout(text, None);
+            let ranges: Vec<_> = layout.lines().map(|l| l.byte_range).collect();
+            assert_eq!(ranges, *expected, "{text:?}");
+        }
     }
 
     #[test]
