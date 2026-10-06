@@ -625,8 +625,16 @@ fn step_spring(
     let h = dt_s / steps as f32;
     for _ in 0..steps {
         let accel = (-k * (x - target) - c * v) / mass;
-        v += accel * h;
-        x += v * h;
+        let next_v = v + accel * h;
+        let next_x = x + next_v * h;
+        // f32 rounding can park x a few ulps from the target with a velocity
+        // that balances the spring force; nothing changes after that, so the
+        // spring would never reach rest and would tick forever.
+        if next_x == x && next_v == v {
+            return (target, 0.0, true);
+        }
+        v = next_v;
+        x = next_x;
         if (x - target).abs() <= rest && v.abs() <= rest {
             return (target, 0.0, true);
         }
@@ -889,6 +897,22 @@ mod tests {
         t.animate_to(K, X, 10.0, Motion::spring(300.0, 30.0, 1.0), 0);
         assert!(!t.tick(600_000));
         assert_eq!(t.get(K, X), Some(10.0));
+    }
+
+    // Regression: found by spring_random_params_and_frames_settle_exactly_on_target.
+    // The spring stalled one ulp from 462.5025 with v = -3.15e-3 and stayed
+    // active forever.
+    #[test]
+    fn spring_stalled_by_f32_rounding_still_settles() {
+        let mut t = AnimationTable::new();
+        t.set(K, X, -342.61945, 0);
+        t.animate_to(K, X, 462.5025, Motion::spring(12090.947, 117.11381, 0.5), 0);
+        let mut now = 0;
+        while t.tick(now) {
+            now += 3;
+            assert!(now < 10_000, "spring never settled");
+        }
+        assert_eq!(t.get(K, X), Some(462.5025));
     }
 
     #[test]
