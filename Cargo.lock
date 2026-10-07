@@ -2793,6 +2793,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quark-diff"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "quark-macros"
 version = "0.1.0"
 dependencies = [

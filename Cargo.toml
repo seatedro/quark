@@ -5,6 +5,7 @@ members = [
   "crates/quark-macros",
   "crates/quark-render",
   "crates/quark-text",
+  "crates/quark-diff",
   "crates/quark-syntax",
   "crates/quark-ui",
   "crates/quark-components",
@@ -30,6 +31,7 @@ quark-render = { path = "crates/quark-render" }
 # them on by default.
 quark-text = { path = "crates/quark-text", default-features = false }
 quark-syntax = { path = "crates/quark-syntax" }
+quark-diff = { path = "crates/quark-diff" }
 quark-ui = { path = "crates/quark-ui" }
 quark-components = { path = "crates/quark-components" }
 quark-app = { path = "crates/quark-app" }
