@@ -1,4 +1,4 @@
-use quark::view;
+use quark::{Props, view};
 
 use quark_ui::design::{Alpha, Rad, Sp, Sz};
 use quark_ui::element::{
@@ -17,18 +17,20 @@ pub enum BadgeVariant {
     Accent,
 }
 
+/// A small status pill: `badge("New").success()`, or in `view!`
+/// `<Badge label="New" variant={BadgeVariant::Success} />`.
+#[derive(Props)]
 pub struct Badge {
+    #[prop(into)]
     label: String,
+    #[prop(default = BadgeVariant::Default)]
     variant: BadgeVariant,
+    #[prop(optional)]
     icon: Option<&'static str>,
 }
 
 pub fn badge(label: impl Into<String>) -> Badge {
-    Badge {
-        label: label.into(),
-        variant: BadgeVariant::Default,
-        icon: None,
-    }
+    Badge::builder().label(label).build()
 }
 
 impl Badge {

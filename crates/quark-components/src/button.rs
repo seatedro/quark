@@ -1,5 +1,6 @@
 use quark::{Props, view};
 
+use crate::Child;
 use quark_ui::Action;
 use quark_ui::design::{Alpha, Ico, Rad, Sp};
 use quark_ui::element::CursorHint;
@@ -44,10 +45,10 @@ pub struct Button {
     tooltip: Option<std::sync::Arc<str>>,
     #[prop(optional)]
     fixed_size: Option<f32>,
-    /// Content after the icon and label; text here names the button for
-    /// screen readers when it has no label or tooltip.
+    /// Content after the icon and label. When it is all text and there is
+    /// no label or tooltip, it is also the button's accessible name.
     #[prop(default)]
-    children: Vec<AnyElement>,
+    children: Vec<Child>,
 }
 
 impl Button {
@@ -169,17 +170,14 @@ impl RenderOnce for Button {
 
         let label_text = self.label;
         let children = self.children;
-        // Without a label or tooltip, text children name the button (a
-        // button's descendant text is its accessible name); with neither,
-        // the name is empty, as before children existed.
+        // A button hides its descendants' text from screen readers, so
+        // text children have to become its name explicitly.
         let accessibility_label = label_text
             .clone()
             .or_else(|| tooltip_text.as_deref().map(str::to_owned))
-            .or_else(|| children.is_empty().then(String::new));
-        let accessibility_id = format!(
-            "button:{action:?}:{}",
-            accessibility_label.as_deref().unwrap_or_default()
-        );
+            .or_else(|| Child::text_of(&children))
+            .unwrap_or_default();
+        let accessibility_id = format!("button:{action:?}:{accessibility_label}");
 
         let label_el = label_text.map(|label| {
             let mut txt = text(label).medium().color(text_color);
@@ -196,9 +194,7 @@ impl RenderOnce for Button {
                  id={accessibility_id.clone()}
                  test-id="button"
                  role="button"
-                 @when {accessibility_label.is_some()} {
-                     aria-label={accessibility_label.unwrap_or_default()}
-                 }
+                 aria-label={accessibility_label}
                  accessibility_id={accessibility_id}
                  aria-selected={self.active}
                  aria-disabled={disabled}
@@ -222,7 +218,7 @@ impl RenderOnce for Button {
                     <icon svg={icon.unwrap()} size={icon_size} color={icon_color} />
                 }
                 {?label_el}
-                {...children}
+                {...children.into_iter().map(Child::into_any)}
             </div>
         }
     }
