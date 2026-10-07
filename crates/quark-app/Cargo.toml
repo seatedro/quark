@@ -198,5 +198,12 @@ required-features = ["ui"]
 test = true
 
 [[example]]
+name = "text_demo"
+required-features = ["ui"]
+# Its test module drives the editor and locale switch through
+# `quark_app::testing`.
+test = true
+
+[[example]]
 name = "platform_demo"
 required-features = ["notifications"]
