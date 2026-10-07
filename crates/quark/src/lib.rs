@@ -1,14 +1,55 @@
-//! Quark — declarative UI toolkit with fine-grained reactivity.
+//! The core crate of Quark, a native Rust UI framework. It holds the parts
+//! that know nothing about windows, GPUs, or text shaping; `quark-ui` and
+//! `quark-app` build on them.
 //!
-//! - `view!` declarative macro (re-exported from `quark_macros`)
-//! - `reactive` module with `Signal`, `SignalStore`, memos, tracking
-//! - `geometry::Rect` — pure 2D rectangle
-//! - `hit` — pointer hit-testing primitives generic over a click-result payload
-//! - `scene` — immediate-mode render primitives
-//! - `semantic` — retained native UI semantics for accessibility, focus,
-//!   events, hit testing, and devtools
-//! - `selection` — document-wide text selection keyed by stable block keys
-//! - `animation` — tween/spring table keyed by stable UI identity and prop
+//! - [`reactive`]: `Signal<T>` handles into a `SignalStore`, memos, and
+//!   dependency tracking.
+//! - [`view!`] and [`Store`], re-exported from `quark-macros`.
+//! - [`geometry`]: [`Rect`].
+//! - [`hit`]: one hit table per frame, in paint order, for hover, click,
+//!   wheel, and drag.
+//! - [`scene`]: the primitives the paint phase emits and the renderer draws.
+//! - [`semantic`]: retained semantics for accessibility, focus, events, and
+//!   devtools.
+//! - [`selection`]: text selection across many blocks, keyed by stable
+//!   [`BlockKey`]s.
+//! - [`animation`]: tween and spring rows keyed by stable UI identity and
+//!   property.
+//!
+//! A memo recomputes only when a signal it read changed:
+//!
+//! ```
+//! use quark::reactive::SignalStore;
+//!
+//! let store = SignalStore::new();
+//! let count = store.create(2);
+//! let doubled = store.create_memo(move |s| count.get(s) * 2);
+//! assert_eq!(doubled.get(&store), 4);
+//!
+//! count.set(&store, 5);
+//! assert_eq!(doubled.get(&store), 10);
+//! ```
+//!
+//! A selection names blocks by key and byte offset, so it can span blocks
+//! that are not on screen:
+//!
+//! ```
+//! use std::collections::HashMap;
+//! use quark::{BlockKey, BlockOrder, Selection, SelectionPoint, copy_text};
+//!
+//! let mut order = BlockOrder::new();
+//! order.extend([BlockKey(1), BlockKey(2)]);
+//! let text = HashMap::from([
+//!     (BlockKey(1), "Hello world".to_string()),
+//!     (BlockKey(2), "Second block".to_string()),
+//! ]);
+//!
+//! let selection = Selection::new(
+//!     SelectionPoint::new(BlockKey(1), 6),
+//!     SelectionPoint::new(BlockKey(2), 6),
+//! );
+//! assert_eq!(copy_text(&selection, &order, &text, "\n"), "world\nSecond");
+//! ```
 
 pub use quark_macros::{Store, view};
 
