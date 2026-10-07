@@ -25,6 +25,7 @@ pub mod tabs;
 pub mod toast;
 pub mod toolbar;
 pub mod tooltip;
+pub mod tree;
 
 pub use avatar::*;
 pub use badge::*;
@@ -50,3 +51,7 @@ pub use toast::{
 };
 pub use toolbar::Toolbar;
 pub use tooltip::*;
+pub use tree::{
+    CollectionEnv, DropPosition, DropTarget, NodeId, SelectMods, SelectionMode, TreeEvent,
+    TreeIntegrityError, TreeKey, TreeNav, TreeOutcome, TreeState, tree_view,
+};
