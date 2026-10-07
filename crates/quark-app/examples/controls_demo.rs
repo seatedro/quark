@@ -12,7 +12,7 @@ use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome};
-use quark_app::quark_ui::theme::{Theme, ThemeMode};
+use quark_app::quark_ui::theme::Theme;
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, UiSender, ViewContext, WindowOptions};
@@ -307,6 +307,8 @@ mod tests {
     use accesskit::Role;
     use quark_app::quark_ui::accessibility::dump_accessibility_states;
     use quark_app::testing::{By, Node, UiTestHarness};
+
+    use quark_app::quark_ui::theme::ThemeMode;
 
     use super::*;
 
