@@ -37,7 +37,7 @@ pub fn heading_style(level: u8) -> (f32, FontWeight) {
 }
 
 /// Hands out block keys that are never reused, so blocks of different
-/// messages, or of one message before and after an edit, cannot collide.
+/// rows, or of one row before and after an edit, cannot collide.
 #[derive(Debug, Clone, Default)]
 pub struct BlockKeys {
     next: u64,
@@ -87,7 +87,7 @@ impl MarkdownBlocks {
     }
 
     /// Forgets every conversion and the highlights of every block, as when
-    /// the message is removed.
+    /// the row is removed.
     pub fn clear(&mut self, syntax: &mut SyntaxHighlighter) {
         for key in self.keys.drain(..) {
             syntax.forget(key);

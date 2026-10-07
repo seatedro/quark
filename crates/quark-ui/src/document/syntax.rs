@@ -1,10 +1,10 @@
-//! Code block highlighting for markdown messages.
+//! Code block highlighting for markdown rows.
 //!
 //! With the `syntax` feature, highlighting runs on a `quark-syntax` worker
 //! thread. A code block renders plain (or with its previous highlight,
 //! while its source only grew) until its result arrives; the app calls
 //! [`SyntaxHighlighter::poll`] each frame and rebuilds its markdown
-//! messages when it returns blocks. Without the feature every block is
+//! rows when it returns blocks. Without the feature every block is
 //! plain.
 
 use quark::selection::BlockKey;
@@ -31,7 +31,7 @@ fn mono(text: &str) -> StyledSpan {
 }
 
 /// Highlights code blocks off the UI thread. One per app, shared by every
-/// markdown message.
+/// markdown row.
 #[derive(Default)]
 pub struct SyntaxHighlighter {
     #[cfg(feature = "syntax")]
@@ -44,7 +44,7 @@ impl SyntaxHighlighter {
     }
 
     /// Takes finished highlights and returns the code blocks they are
-    /// for; rebuild those blocks' messages so they pick the colors up.
+    /// for; rebuild those blocks' rows so they pick the colors up.
     pub fn poll(&mut self) -> Vec<BlockKey> {
         #[cfg(feature = "syntax")]
         {
@@ -72,7 +72,7 @@ impl SyntaxHighlighter {
 
     /// Drops everything kept for the block `slot`: its source, its
     /// highlight, and any pending request's result. Call it when the block
-    /// leaves its message or its message is removed.
+    /// leaves its row or its row is removed.
     pub fn forget(&mut self, slot: BlockKey) {
         #[cfg(feature = "syntax")]
         self.inner.forget(slot);
