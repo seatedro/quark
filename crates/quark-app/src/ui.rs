@@ -18,6 +18,7 @@ use quark::SemanticFrame;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame};
+use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, CursorHint, Delivery, ElementContext, InputRouter, render_element,
 };
@@ -69,9 +70,16 @@ pub struct ViewContext<'a, 'f> {
     pub frame: &'a mut FrameContext<'f>,
     pub theme: &'a Theme,
     focus: Option<FocusId>,
+    animations: &'a mut AnimationTable,
 }
 
 impl ViewContext<'_, '_> {
+    /// The window's animation table, ticked to this frame's clock. Rows
+    /// still moving after paint schedule the next frame.
+    pub fn animations(&mut self) -> &mut AnimationTable {
+        self.animations
+    }
+
     pub fn focus(&self) -> Option<FocusId> {
         self.focus
     }
@@ -117,6 +125,7 @@ pub struct UiAdapter<U: UiApp> {
     ime_area: Option<Rect>,
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
+    animations: AnimationTable,
 }
 
 /// Open a window titled by `options` and run `app` in it.
@@ -141,6 +150,7 @@ impl<U: UiApp> UiAdapter<U> {
             ime_allowed: false,
             ime_area: None,
             scale_factor: 1.0,
+            animations: AnimationTable::new(),
         }
     }
 
@@ -273,6 +283,7 @@ fn paint(root: &mut AnyElement, ecx: &mut ElementContext, width: f32, height: f3
     ecx.accessibility = AccessibilityFrame::new(width, height);
     ecx.semantic = SemanticFrame::new(width, height);
     render_element(root, &mut scene, ecx, width, height);
+    ecx.finish_frame();
     Painted {
         scene,
         input: ecx.take_input_frame(),
@@ -355,10 +366,12 @@ impl<U: UiApp> App for UiAdapter<U> {
         let (width, height) = cx.size();
         let scale = cx.scale_factor();
         let clock_ms = cx.elapsed().as_millis() as u64;
+        self.animations.tick(clock_ms);
         let mut root = self.app.view(&mut ViewContext {
             frame: cx,
             theme: &self.theme,
             focus: self.focus,
+            animations: &mut self.animations,
         });
 
         let text = cx.text();
@@ -373,7 +386,8 @@ impl<U: UiApp> App for UiAdapter<U> {
                 &self.signals,
             )
             .with_focus(self.focus)
-            .with_clock(clock_ms),
+            .with_clock(clock_ms)
+            .with_animations(&mut self.animations),
             width,
             height,
         );

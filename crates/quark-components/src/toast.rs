@@ -1,6 +1,6 @@
 use quark::view;
 use quark_ui::Action;
-use quark_ui::animation::{AnimationKey, AnimationState};
+use quark_ui::animation::{AnimKey, AnimationTable, Curve, Motion, PropId};
 use quark_ui::design::{Alpha, Ico, Rad, Shadow, Sp, Sz};
 use quark_ui::element::CursorHint;
 use quark_ui::element::*;
@@ -29,6 +29,79 @@ pub struct Toast {
 pub enum ToastKind {
     Info,
     Error,
+}
+
+/// Entrance slide, 0 (below its resting place) to 1 (resting).
+const ENTRANCE: PropId = PropId(0);
+/// Displayed external progress, eased toward [`Toast::progress`].
+const PROGRESS: PropId = PropId(1);
+/// Stack spread, 0 (collapsed) to 1 (fanned).
+const FAN: PropId = PropId(2);
+const ENTER_MS: u32 = 300;
+const EXIT_MS: u32 = 200;
+const FAN_MS: u32 = 250;
+const PROGRESS_MS: u32 = 200;
+
+fn toast_key(id: u64) -> AnimKey {
+    AnimKey::from_str_key(&format!("quark.toast.{id}"))
+}
+
+fn stack_key() -> AnimKey {
+    AnimKey::from_str_key("quark.toast-stack")
+}
+
+fn ease(duration_ms: u32) -> Motion {
+    Motion::tween(duration_ms, Curve::EaseOutQuint)
+}
+
+/// Slide toast `id` in from below. Call once when the toast is shown.
+pub fn animate_toast_in(table: &mut AnimationTable, id: u64, now_ms: u64) {
+    let key = toast_key(id);
+    table.set(key, ENTRANCE, 0.0, now_ms);
+    table.animate_to(key, ENTRANCE, 1.0, ease(ENTER_MS), now_ms);
+}
+
+/// Slide toast `id` out. Keep it in the app's list until [`retire_toast`]
+/// reports the exit finished.
+pub fn animate_toast_out(table: &mut AnimationTable, id: u64, now_ms: u64) {
+    let key = toast_key(id);
+    if table.get(key, ENTRANCE).is_none() {
+        table.set(key, ENTRANCE, 1.0, now_ms);
+    }
+    table.animate_to(key, ENTRANCE, 0.0, ease(EXIT_MS), now_ms);
+}
+
+/// Fan the stack out (hovered) or collapse it.
+pub fn animate_toast_fan(table: &mut AnimationTable, fanned: bool, now_ms: u64) {
+    let key = stack_key();
+    if table.get(key, FAN).is_none() {
+        table.set(key, FAN, 0.0, now_ms);
+    }
+    table.animate_to(
+        key,
+        FAN,
+        if fanned { 1.0 } else { 0.0 },
+        ease(FAN_MS),
+        now_ms,
+    );
+}
+
+/// Ease toast `id`'s progress bar toward `progress`. The first call snaps.
+pub fn animate_toast_progress(table: &mut AnimationTable, id: u64, progress: f32, now_ms: u64) {
+    table.animate_to(toast_key(id), PROGRESS, progress, ease(PROGRESS_MS), now_ms);
+}
+
+/// Remove toast `id`'s settled rows; the stack then draws it at rest.
+/// Returns `true` once its exit has finished, when the app should drop it.
+pub fn retire_toast(table: &mut AnimationTable, id: u64) -> bool {
+    let key = toast_key(id);
+    let exited = table.target(key, ENTRANCE) == Some(0.0) && !table.is_animating(key, ENTRANCE);
+    for prop in [ENTRANCE, PROGRESS] {
+        if table.get(key, prop).is_some() && !table.is_animating(key, prop) {
+            table.remove(key, prop);
+        }
+    }
+    exited
 }
 
 /// Sonner-style stacking constants (unscaled).
@@ -249,7 +322,7 @@ impl RenderOnce for ToastVisuals {
 
 pub struct ToastStack<'a> {
     pub toasts: &'a [Toast],
-    pub animation: &'a AnimationState,
+    pub animation: &'a AnimationTable,
     pub window_width: f32,
     pub window_height: f32,
     pub ui_scale: f32,
@@ -264,7 +337,7 @@ pub struct ToastStack<'a> {
 impl<'a> ToastStack<'a> {
     pub fn new(
         toasts: &'a [Toast],
-        animation: &'a AnimationState,
+        animation: &'a AnimationTable,
         window_width: f32,
         window_height: f32,
         ui_scale: f32,
@@ -295,10 +368,7 @@ impl<'a> ToastStack<'a> {
         let side_margin = (Sp::XL * scale).round();
         let container_left = (self.window_width - container_w - side_margin).max(side_margin);
 
-        let fan_t = self
-            .animation
-            .progress(AnimationKey::ToastStackFan)
-            .unwrap_or(0.0);
+        let fan_t = self.animation.get(stack_key(), FAN).unwrap_or(0.0);
 
         let count = self.toasts.len();
         let visible = count.min(MAX_VISIBLE_BEHIND + 1);
@@ -377,7 +447,7 @@ impl<'a> ToastStack<'a> {
             let bottom = if depth == 0 {
                 let anim_t = self
                     .animation
-                    .progress(AnimationKey::ToastEntrance(toast.id))
+                    .get(toast_key(toast.id), ENTRANCE)
                     .unwrap_or(1.0);
                 bottom_raw - (1.0 - anim_t) * layout.height
             } else {
@@ -392,7 +462,7 @@ impl<'a> ToastStack<'a> {
             };
             let external_progress = toast.progress.map(|raw| {
                 self.animation
-                    .progress(AnimationKey::ToastProgress(toast.id))
+                    .get(toast_key(toast.id), PROGRESS)
                     .unwrap_or(raw)
             });
 
