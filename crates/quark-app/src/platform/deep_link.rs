@@ -96,10 +96,11 @@ pub(crate) mod registry {
     use std::io;
 
     use windows::Win32::Foundation::WIN32_ERROR;
+    #[cfg(feature = "autostart")]
+    use windows::Win32::System::Registry::RegDeleteKeyValueW;
     use windows::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
-        RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW,
-        RegGetValueW, RegSetValueExW,
+        RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegSetValueExW,
     };
     use windows::core::{HSTRING, PCWSTR};
 
@@ -149,6 +150,7 @@ pub(crate) mod registry {
     }
 
     /// Delete one value under `HKEY_CURRENT_USER\<key>`. Missing is fine.
+    #[cfg(feature = "autostart")]
     pub(crate) fn delete_value(key: &str, name: &str) -> io::Result<()> {
         let key = HSTRING::from(key);
         let name = HSTRING::from(name);
@@ -160,6 +162,7 @@ pub(crate) mod registry {
     }
 
     /// A string value under `HKEY_CURRENT_USER\<key>`.
+    #[cfg(feature = "autostart")]
     pub(crate) fn current_user_string(key: &str, name: &str) -> Option<String> {
         get_string(HKEY_CURRENT_USER, key, name)
     }
