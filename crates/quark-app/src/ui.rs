@@ -195,6 +195,8 @@ pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
     focus: &'a mut Option<FocusId>,
     key_bindings: &'a mut KeyBindings,
+    /// Set when a drag out took the pointer from the adapter.
+    pointer_taken: &'a mut bool,
     announcer: &'a mut Announcer,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
@@ -210,6 +212,19 @@ impl UiContext<'_, '_> {
     /// when the user edits the keymap.
     pub fn key_bindings_mut(&mut self) -> &mut KeyBindings {
         self.key_bindings
+    }
+
+    /// Drag `paths` out of the window as files
+    /// ([`EventContext::start_drag_out`]). The platform takes the pointer,
+    /// so the adapter ends its pointer capture: the drag that called this
+    /// gets its release right after.
+    pub fn start_drag_out<P: AsRef<std::path::Path>>(
+        &mut self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Result<(), crate::platform::drag_out::DragOutError> {
+        self.window.start_drag_out(paths)?;
+        *self.pointer_taken = true;
+        Ok(())
     }
 
     pub fn set_focus(&mut self, focus: Option<FocusId>) {
@@ -288,6 +303,8 @@ pub struct UiAdapter<U: UiApp> {
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
     key_bindings: KeyBindings,
+    /// A drag out took the pointer during the last dispatch.
+    pointer_taken: bool,
     accessibility: AccessibilityFrame,
     announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
@@ -345,6 +362,7 @@ impl<U: UiApp> UiAdapter<U> {
             hovered: Vec::new(),
             router: InputRouter::default(),
             key_bindings: KeyBindings::new(),
+            pointer_taken: false,
             accessibility: AccessibilityFrame::default(),
             announcer: Announcer::default(),
             text_areas: Vec::new(),
@@ -419,6 +437,7 @@ impl<U: UiApp> UiAdapter<U> {
             window: cx,
             focus: &mut self.focus,
             key_bindings: &mut self.key_bindings,
+            pointer_taken: &mut self.pointer_taken,
             announcer: &mut self.announcer,
             sender: &self.sender,
         };
@@ -451,6 +470,12 @@ impl<U: UiApp> UiAdapter<U> {
             self.with_app(cx, |app, ucx| app.update(action, ucx));
         }
         redraw(Redraw::Action, cx);
+        // The platform's drag loop gets the release, so the drag the app
+        // was tracking ends here instead.
+        if std::mem::take(&mut self.pointer_taken) {
+            let delivery = self.router.cancel_pointer();
+            self.deliver(delivery, cx);
+        }
     }
 
     /// Hand a routed event's actions to the app. A delivery without actions

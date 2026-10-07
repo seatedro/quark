@@ -39,8 +39,8 @@ puffin_http = { version = "0.17", optional = true }
 muda = { version = "0.21", default-features = false }
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSMenu", "NSMenuItem", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder"] }
-objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSBundle", "NSAppleEventDescriptor", "NSAppleEventManager", "NSSet", "NSDictionary", "NSError", "NSArray"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSMenu", "NSMenuItem", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSImage", "NSPasteboard", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSBundle", "NSAppleEventDescriptor", "NSAppleEventManager", "NSSet", "NSDictionary", "NSError", "NSArray", "NSURL"] }
 # Click and action callbacks for notifications in bundled apps.
 objc2-user-notifications = { version = "0.3", optional = true, default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
@@ -48,7 +48,8 @@ objc2-user-notifications = { version = "0.3", optional = true, default-features 
 version = "0.21"
 default-features = false
 
-# Taskbar overlay badges, menu accelerators, and URL scheme registration.
+# Taskbar overlay badges, menu accelerators, URL scheme registration, and
+# dragging files out (shell data objects, OLE drag and drop).
 # Already in every Windows build through accesskit and wgpu.
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
@@ -56,8 +57,10 @@ features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_System_Com",
+  "Win32_System_Ole",
   "Win32_System_Registry",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
 ]
 

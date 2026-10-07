@@ -1,12 +1,13 @@
 //! Operating system integration beyond the window: menus, notifications,
-//! badges, single instance handoff, deep links, and window state
-//! persistence.
+//! badges, single instance handoff, deep links, dragging files out, and
+//! window state persistence.
 
 pub mod badge;
 pub mod deep_link;
 pub mod desktop_entry;
 #[cfg(feature = "dialogs")]
 pub mod dialog;
+pub mod drag_out;
 #[cfg(feature = "ui")]
 pub mod menu;
 #[cfg(any(target_os = "macos", windows))]

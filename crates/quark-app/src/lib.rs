@@ -17,6 +17,8 @@ macro_rules! profile_scope {
 
 #[cfg(feature = "devtools")]
 mod devtools;
+#[cfg(all(test, feature = "test-support"))]
+mod drag_out_tests;
 
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
