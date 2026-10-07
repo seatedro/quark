@@ -609,14 +609,17 @@ pub enum TranscriptIntegrityError {
 pub enum TranscriptCommand {
     Copy,
     SelectAll,
+    /// Open find (see [`Transcript::set_find_query`] and [`find_bar`]).
+    Find,
 }
 
-/// The command a pressed key triggers. Bound to `mod+c` and `mod+a`, so
-/// Cmd and Ctrl both work and one table serves every platform.
+/// The command a pressed key triggers. Bound to `mod+c`, `mod+a`, and
+/// `mod+f`, so Cmd and Ctrl both work and one table serves every platform.
 pub fn key_command(pressed: &Binding) -> Option<TranscriptCommand> {
     [
         ("mod+c", TranscriptCommand::Copy),
         ("mod+a", TranscriptCommand::SelectAll),
+        ("mod+f", TranscriptCommand::Find),
     ]
     .into_iter()
     .find(|(pattern, _)| pattern.parse::<Binding>().is_ok_and(|p| p.matches(pressed)))
@@ -1039,6 +1042,18 @@ impl<G: BlockGeometry> Transcript<G> {
     /// view at `align` on the next prepare.
     pub fn find_next(&mut self, align: ScrollAlign) -> Option<FindMatch> {
         let found = self.find.as_mut()?.next_match().cloned()?;
+        self.reveal(
+            found.block,
+            found.range.start.get()..found.range.end.get(),
+            align,
+        );
+        Some(found)
+    }
+
+    /// Scrolls the current match into view at `align` on the next prepare,
+    /// as after typing into a find field.
+    pub fn reveal_current_match(&mut self, align: ScrollAlign) -> Option<FindMatch> {
+        let found = self.find.as_ref()?.current().cloned()?;
         self.reveal(
             found.block,
             found.range.start.get()..found.range.end.get(),

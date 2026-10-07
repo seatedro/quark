@@ -204,14 +204,20 @@ const TRANSCRIPT_FRAME_BUDGET: u64 = 16;
 
 #[test]
 fn a_repeated_transcript_frame_allocates_a_constant_few() {
-    for accessibility in [false, true] {
+    for (accessibility, find) in [(false, None), (true, None), (false, Some("message"))] {
         let mut ui = chat(accessibility);
+        if let Some(query) = find {
+            ui.app_mut().transcript.set_find_query(query);
+            // The rows rebuild with highlights, then settle.
+            ui.frame();
+            ui.frame();
+        }
         let ((), allocated) = test_alloc::count(|| {
             ui.frame();
         });
         assert!(
             allocated <= TRANSCRIPT_FRAME_BUDGET,
-            "{allocated} allocations (a11y={accessibility})"
+            "{allocated} allocations (a11y={accessibility}, find={find:?})"
         );
     }
 }
@@ -256,6 +262,7 @@ fn report_transcript_frame_allocations() {
             ui.frame();
         });
         eprintln!("transcript a11y={accessibility}: {n} allocations");
+
         let ((), sites) = test_alloc::profile(|| {
             ui.frame();
         });

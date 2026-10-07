@@ -245,6 +245,11 @@ impl MarkdownTranscript {
         self.transcript.find_prev(align)
     }
 
+    /// See [`Transcript::reveal_current_match`].
+    pub fn reveal_current_match(&mut self, align: ScrollAlign) -> Option<FindMatch> {
+        self.transcript.reveal_current_match(align)
+    }
+
     /// See [`Transcript::close_find`].
     pub fn close_find(&mut self) {
         self.transcript.close_find();
