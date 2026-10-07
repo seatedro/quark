@@ -2757,6 +2757,7 @@ name = "quark-components"
 version = "0.1.0"
 dependencies = [
  "accesskit",
+ "proptest",
  "quark",
  "quark-render",
  "quark-text",

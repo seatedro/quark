@@ -1602,3 +1602,65 @@ impl DragHandler for RowDrag {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Add(u32),
+        Move(u32, u32, u8),
+        Toggle(u32),
+        Key(u8),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (0..64u32).prop_map(Op::Add),
+            (0..64u32, 0..64u32, 0..3u8).prop_map(|(n, t, p)| Op::Move(n, t, p)),
+            (0..64u32).prop_map(Op::Toggle),
+            (0..6u8).prop_map(Op::Key),
+        ]
+    }
+
+    proptest! {
+        // Moves, expansion, and navigation in any order keep every link,
+        // count, and row consistent, never lose a node, and refuse exactly
+        // the moves into the node itself or its subtree.
+        #[test]
+        fn random_edits_keep_the_tree_consistent(ops in prop::collection::vec(op(), 1..80)) {
+            let mut tree = TreeState::new("t", FocusId::from_key("t"));
+            tree.add(None, "root");
+            for op in ops {
+                let pick = |i: u32| tree.node(1 + i % tree.len() as u32).unwrap();
+                match op {
+                    Op::Add(p) => {
+                        let parent = pick(p);
+                        tree.add(Some(parent), "n");
+                    }
+                    Op::Move(n, t, p) => {
+                        let (node, target) = (pick(n), pick(t));
+                        let into_itself = node == target || tree.data.is_descendant(target.0, node.0);
+                        let position = [DropPosition::Before, DropPosition::Inside, DropPosition::After][p as usize];
+                        let moved = tree.move_node(node, DropTarget { node: target, position });
+                        prop_assert_eq!(moved, !into_itself);
+                    }
+                    Op::Toggle(n) => {
+                        let node = pick(n);
+                        tree.toggle(node);
+                    }
+                    Op::Key(k) => {
+                        let nav = [TreeNav::Up, TreeNav::Down, TreeNav::Left, TreeNav::Right, TreeNav::Home, TreeNav::End][k as usize];
+                        tree.handle(TreeEvent::Key(TreeKey::Extend(nav)), SelectMods::default(), 0);
+                        tree.handle(TreeEvent::Key(TreeKey::Nav(nav)), SelectMods::default(), 0);
+                    }
+                }
+                tree.ensure_rows();
+                prop_assert_eq!(tree.verify_integrity(), Ok(()));
+            }
+        }
+    }
+}
