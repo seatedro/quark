@@ -1,11 +1,12 @@
 //! A small form built from quark-ui elements through the `UiApp` adapter.
 //! The published accessibility tree has a named dialog containing a
-//! heading, a text field, and two buttons. Escape quits.
+//! heading, a text field, and two buttons. The adapter routes typing,
+//! editing keys, IME, and the clipboard to the field; Escape quits.
 
 use accesskit::Role;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text, text_input};
 use quark_app::quark_ui::style::Styled;
-use quark_app::quark_ui::text_input::{TextEditCommand, TextField, command_for_binding};
+use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
@@ -53,6 +54,7 @@ impl HelloUi {
 
 impl UiApp for HelloUi {
     type Action = Msg;
+    type Message = ();
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
@@ -118,10 +120,17 @@ impl UiApp for HelloUi {
         }
     }
 
-    fn edit_text(&mut self, target: FocusId, command: TextEditCommand) {
+    fn edit_text(&mut self, target: FocusId, command: TextEditCommand) -> TextEditOutcome {
+        if target != NAME_FIELD {
+            return TextEditOutcome::default();
+        }
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        self.name.apply_at(command, now_ms)
+    }
+
+    fn set_preedit(&mut self, target: FocusId, text: String, cursor: Option<(usize, usize)>) {
         if target == NAME_FIELD {
-            let now_ms = self.started.elapsed().as_millis() as u64;
-            self.name.apply_at(command, now_ms);
+            self.name.set_preedit(text, cursor);
         }
     }
 
@@ -132,48 +141,13 @@ impl UiApp for HelloUi {
     }
 
     fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
-        let editing = cx.focus() == Some(NAME_FIELD);
         match event {
             InputEvent::KeyPress(chord) if chord.named() == Some(NamedKey::Escape) => {
                 cx.window.exit();
                 true
             }
-            InputEvent::TextInput(text) if editing => {
-                self.edit(TextEditCommand::InsertText(text.clone()), cx);
-                true
-            }
-            InputEvent::ImePreedit(text, cursor) if editing => {
-                self.name.set_preedit(text.clone(), *cursor);
-                cx.window.request_redraw();
-                true
-            }
-            InputEvent::KeyPress(chord) if editing => {
-                let binding = chord.binding_string().unwrap_or_default();
-                let command = match binding.as_str() {
-                    "ctrl+v" | "cmd+v" => cx.window.clipboard_text().map(TextEditCommand::Paste),
-                    other => command_for_binding(other),
-                };
-                match command {
-                    Some(command) => {
-                        self.edit(command, cx);
-                        true
-                    }
-                    None => false,
-                }
-            }
             _ => false,
         }
-    }
-}
-
-impl HelloUi {
-    fn edit(&mut self, command: TextEditCommand, cx: &mut UiContext) {
-        let now_ms = self.started.elapsed().as_millis() as u64;
-        let outcome = self.name.apply_at(command, now_ms);
-        if let Some(text) = outcome.clipboard_write {
-            cx.window.set_clipboard_text(&text);
-        }
-        cx.window.request_redraw();
     }
 }
 

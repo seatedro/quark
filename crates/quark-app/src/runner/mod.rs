@@ -22,7 +22,7 @@ use quark_render::fonts::FontSettings;
 use quark_render::{GpuContext, RenderError, Renderer, TextMetrics};
 use quark_text::{LayoutCache, TextError, TextLayout, TextParams, TextSystem};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -39,6 +39,8 @@ mod event_loop;
 mod events;
 mod scale;
 mod table;
+#[cfg(all(test, feature = "ui"))]
+mod testing;
 mod text;
 mod window;
 
@@ -50,5 +52,7 @@ pub use events::*;
 pub use scale::scene_to_physical;
 pub use table::WindowHandle;
 use table::WindowTable;
+#[cfg(all(test, feature = "ui"))]
+pub(crate) use testing::TestRunner;
 pub use text::AppText;
 use window::*;

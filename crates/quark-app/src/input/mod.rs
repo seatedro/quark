@@ -2,6 +2,8 @@
 //! them. Routing events to widgets is left to the app or a UI layer.
 
 mod scroll;
+#[cfg(feature = "ui")]
+mod ui_input;
 
 use std::path::PathBuf;
 
@@ -11,7 +13,9 @@ use winit::event::{
 };
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
-pub use scroll::{quantize_scroll_delta_px, scroll_delta_to_px};
+pub use scroll::scroll_delta_to_px;
+#[cfg(feature = "ui")]
+pub use ui_input::{PointerButton, UiInput};
 
 /// Pointer coordinates and wheel pixel deltas are logical points relative to
 /// the window's content area, matching the coordinate space of the `Scene`
@@ -103,11 +107,7 @@ impl KeyChord {
     }
 
     pub fn binding_string(&self) -> Option<String> {
-        let (key, inferred_shift) = match &self.logical {
-            KeyKind::Character(text) => character_binding_key(text)?,
-            KeyKind::Named(named) => named_binding_key(*named)?,
-            KeyKind::Other => return None,
-        };
+        let (key, inferred_shift) = binding_key(&self.logical)?;
 
         let mut parts = Vec::new();
         if self.modifiers.super_key() {
@@ -124,6 +124,16 @@ impl KeyChord {
         }
         parts.push(key);
         Some(parts.join("+"))
+    }
+}
+
+/// The key name a binding uses for `logical`, and whether the character
+/// implies Shift (`?` is Shift with `/`).
+fn binding_key(logical: &KeyKind) -> Option<(&'static str, bool)> {
+    match logical {
+        KeyKind::Character(text) => character_binding_key(text),
+        KeyKind::Named(named) => named_binding_key(*named),
+        KeyKind::Other => None,
     }
 }
 
