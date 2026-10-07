@@ -2827,8 +2827,10 @@ dependencies = [
  "proptest",
  "quark",
  "serde",
+ "sys-locale",
  "thiserror 2.0.21",
  "tracing",
+ "unicode-script",
  "unicode-segmentation",
 ]
 

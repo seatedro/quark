@@ -12,10 +12,21 @@ cosmic-text.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 unicode-segmentation.workspace = true
+# The versions cosmic-text uses: its Fallback trait takes a unicode-script
+# Script, and its own locale lookup is private.
+unicode-script = "0.5"
+sys-locale = "0.3"
 profiling = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [features]
+default = ["emoji-font", "cjk-font"]
+# Noto Color Emoji (CBDT bitmaps, 10.7 MB): emoji render in color and the
+# same on every machine.
+emoji-font = []
+# A 3.7 MB subset of Noto Sans CJK SC covering common Chinese, Japanese,
+# and Korean text, for machines without a CJK system font.
+cjk-font = []
 # A profiler scope and tracing span around text shaping. quark-app's
 # profile-puffin and profile-tracy features pick the backend.
 profile = ["dep:profiling", "dep:tracing"]
