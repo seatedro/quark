@@ -1457,7 +1457,6 @@ impl Renderer {
         let segments = self.upload_segments();
 
         let mut text_steps = 0;
-        let mut buffers = Vec::with_capacity(frames.len());
         for frame in frames.iter_mut() {
             build_batches(&frame.flat, &mut frame.batches);
             frame.text_base = text_steps;
@@ -1465,7 +1464,7 @@ impl Renderer {
             let (device, queue) = (&self.device, &self.queue);
             let pool = &mut self.instance_buffer_pool;
             let batches = &frame.batches;
-            buffers.push(FrameBuffers {
+            frame.buffers = FrameBuffers {
                 shadow: pool.upload(device, queue, "quark_shadow_instances", &batches.shadows),
                 effect: pool.upload(
                     device,
@@ -1478,7 +1477,7 @@ impl Renderer {
                 path: pool.upload(device, queue, "quark_path_instances", &batches.paths),
                 layer: pool.upload(device, queue, "quark_layer_instances", &batches.layers),
                 ..FrameBuffers::default()
-            });
+            };
         }
         self.prepare_layer_viewports(frames);
 
@@ -1507,42 +1506,30 @@ impl Renderer {
             }
         };
 
-        let blurs: Vec<Option<BlurTargets>> = frames
-            .iter()
-            .zip(buffers.iter_mut())
-            .map(|(frame, buffers)| {
-                self.prepare_blur(&frame.flat, buffers, frame.width, frame.height)
-            })
-            .collect();
-        let mut layer_binds = Vec::with_capacity(frames.len());
-        let mut layer_views = Vec::with_capacity(frames.len());
-        for frame in frames.iter() {
-            let Some(texture) = &frame.layer else {
-                layer_binds.push(None);
-                layer_views.push(None);
-                continue;
-            };
-            layer_binds.push(Some(self.texture_pool.bind_group(
-                &self.device,
-                &self.texture_bind_group_layout,
-                &self.sampler,
-                texture,
-            )));
-            layer_views.push(Some(self.texture_pool.view(texture).clone()));
+        for frame in frames.iter_mut() {
+            frame.blur =
+                self.prepare_blur(&frame.flat, &mut frame.buffers, frame.width, frame.height);
+            frame.layer_bind = frame.layer.as_ref().map(|texture| {
+                self.texture_pool.bind_group(
+                    &self.device,
+                    &self.texture_bind_group_layout,
+                    &self.sampler,
+                    texture,
+                )
+            });
         }
 
         // A layer's target number is above its parent's, so encoding from
         // the last target down draws every layer before its composite.
         let mut result = Ok(());
         for index in (0..frames.len()).rev() {
-            let (view, clear) = match &layer_views[index] {
-                Some(view) => (view, wgpu::Color::TRANSPARENT),
+            let frame = &frames[index];
+            let (view, clear) = match &frame.layer {
+                Some(texture) => (self.texture_pool.view(texture), wgpu::Color::TRANSPARENT),
                 None => (output, wgpu::Color::BLACK),
             };
             let target = EncodeTarget {
-                frame: &frames[index],
-                buffers: &buffers[index],
-                blur: blurs[index].as_ref(),
+                frame,
                 uniform: match index {
                     0 => &self.viewport_bind_group,
                     i => &self.layer_uniforms[i - 1].1,
@@ -1551,7 +1538,7 @@ impl Renderer {
                     0 => &self.viewport,
                     i => &self.layer_viewports[i - 1],
                 },
-                layer_binds: &layer_binds,
+                frames,
                 segments: segments.as_ref(),
                 clear,
             };
@@ -1560,10 +1547,14 @@ impl Renderer {
                 break;
             }
         }
-        for targets in blurs.into_iter().flatten() {
-            self.texture_pool.release(targets.scene);
-            self.texture_pool.release(targets.h);
-            self.texture_pool.release(targets.v);
+        for frame in frames.iter_mut() {
+            frame.buffers = FrameBuffers::default();
+            frame.layer_bind = None;
+            if let Some(targets) = frame.blur.take() {
+                self.texture_pool.release(targets.scene);
+                self.texture_pool.release(targets.h);
+                self.texture_pool.release(targets.v);
+            }
         }
         let mut images = lock_images(&self.images);
         let frame = images.frame;
@@ -1856,8 +1847,8 @@ impl Renderer {
     ) -> Result<(), RenderError> {
         let flat = &t.frame.flat;
         let (width, height) = (t.frame.width, t.frame.height);
-        let blur = t.blur;
-        let buffers = t.buffers;
+        let blur = t.frame.blur.as_ref();
+        let buffers = &t.frame.buffers;
         let draw_view = blur.map_or(view, |b| &b.scene_view);
         // Pooled textures (layers, blur scratch) can be larger than the
         // target; draw into its corner.
@@ -1949,7 +1940,7 @@ impl Renderer {
         };
         let (width, height) = (t.frame.width, t.frame.height);
         let batches = &t.frame.batches;
-        let buffers = t.buffers;
+        let buffers = &t.frame.buffers;
         let cmds = cmds.start as usize..cmds.end as usize;
         let (pipeline, buffer) = match kind {
             PrimKind::Shadow => (&self.shadow_pipeline, &buffers.shadow),
@@ -1964,7 +1955,10 @@ impl Renderer {
                 pass.set_bind_group(0, t.uniform, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 for command in &batches.layer_cmds[cmds] {
-                    let Some(bind) = t.layer_binds.get(command.target).and_then(Option::as_ref)
+                    let Some(bind) = t
+                        .frames
+                        .get(command.target)
+                        .and_then(|frame| frame.layer_bind.as_ref())
                     else {
                         continue;
                     };
@@ -2145,17 +2139,20 @@ struct TargetFrame {
     layer: Option<OffscreenTarget>,
     /// Text renderer of this target's first text step.
     text_base: usize,
+    // Held only while the frame is recorded:
+    buffers: FrameBuffers,
+    blur: Option<BlurTargets>,
+    /// Bind group sampling `layer`, for its composite in the parent.
+    layer_bind: Option<wgpu::BindGroup>,
 }
 
 /// What encoding one target needs.
 struct EncodeTarget<'a> {
     frame: &'a TargetFrame,
-    buffers: &'a FrameBuffers,
-    blur: Option<&'a BlurTargets>,
     uniform: &'a wgpu::BindGroup,
     glyph_viewport: &'a Viewport,
-    /// Texture bind groups of the frame's layer targets, by target number.
-    layer_binds: &'a [Option<wgpu::BindGroup>],
+    /// Every target of the frame, for the layers this one composites.
+    frames: &'a [TargetFrame],
     segments: Option<&'a wgpu::BindGroup>,
     clear: wgpu::Color,
 }
