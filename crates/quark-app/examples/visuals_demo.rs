@@ -109,7 +109,7 @@ impl UiApp for Visuals {
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
-        let colors = cx.theme.colors.clone();
+        let colors = cx.theme.colors;
         let card = button("visuals.fade", "Fade", Msg::ToggleFade)
             .key("visuals.fade")
             .w(180.0)
