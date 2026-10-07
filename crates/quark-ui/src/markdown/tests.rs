@@ -270,3 +270,21 @@ fn table_cells_wrap_within_the_view_width() {
     let wrapped = cells.iter().filter(|c| c.layout.line_count() > 1).count();
     assert_eq!(wrapped, 2, "both long cells wrap, short ones do not");
 }
+
+// Regression: span weights override SelectableText's base weight, so
+// headings and table headers rendered at normal weight.
+#[test]
+fn heading_and_header_weights_reach_the_glyphs() {
+    let mut h = Harness::new();
+    let md = "# Title\n\n| head |\n|---|\n| body |\n\nplain";
+    let frame = h.frame(markdown_view(md).width(400.0), None);
+
+    let weights: Vec<(String, u16)> = frame
+        .regions
+        .iter()
+        .map(|r| (r.text.to_string(), r.layout.glyphs().font_weight[0].0))
+        .collect();
+    let expected = [("Title", 700), ("head", 600), ("body", 450), ("plain", 450)];
+    let expected: Vec<(String, u16)> = expected.iter().map(|(t, w)| (t.to_string(), *w)).collect();
+    assert_eq!(weights, expected);
+}

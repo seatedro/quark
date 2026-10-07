@@ -97,7 +97,9 @@ impl MarkdownView {
             .map(|(_, range)| *range)
     }
 
-    fn styled(&self, spans: Range<usize>, theme: &Theme) -> Vec<StyledSpan> {
+    /// Span weights override the block's base weight in SelectableText, so
+    /// the base (heading, table header) is folded into every span here.
+    fn styled(&self, spans: Range<usize>, base: FontWeight, theme: &Theme) -> Vec<StyledSpan> {
         spans
             .map(|s| {
                 let (text, flags, url) = self.doc.span(s);
@@ -108,7 +110,7 @@ impl MarkdownView {
                     font_weight: if flags.contains(SpanFlags::BOLD) {
                         FontWeight::Bold
                     } else {
-                        FontWeight::Normal
+                        base
                     },
                     italic: flags.contains(SpanFlags::ITALIC) || image,
                     color: image.then_some(theme.colors.text_muted),
@@ -164,7 +166,7 @@ impl MarkdownView {
                     BlockKind::Heading(_) => (fs, FontWeight::Semibold),
                     _ => (fs, FontWeight::Normal),
                 };
-                let mut el = selectable_rich_text(self.styled(doc.spans(block), theme))
+                let mut el = selectable_rich_text(self.styled(doc.spans(block), weight, theme))
                     .width(inner_w)
                     .size(size)
                     .weight(weight)
@@ -288,7 +290,11 @@ impl MarkdownView {
             .cells(block)
             .map(|cell| {
                 let (row, col) = doc.cell_position(cell);
-                (row, col, self.styled(doc.cell_spans(cell), theme))
+                (
+                    row,
+                    col,
+                    self.styled(doc.cell_spans(cell), weight(row), theme),
+                )
             })
             .collect();
         let mut natural = vec![2.0 * pad; columns];
