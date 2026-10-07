@@ -21,6 +21,7 @@ pub mod search_field;
 pub mod segmented;
 pub mod sidebar_skeleton;
 pub mod stat_summary;
+pub mod table;
 pub mod tabs;
 pub mod toast;
 pub mod toolbar;
@@ -44,6 +45,10 @@ pub use search_field::*;
 pub use segmented::{SegmentedControl, SegmentedItem};
 pub use sidebar_skeleton::sidebar_skeleton;
 pub use stat_summary::*;
+pub use table::{
+    CellStyle, TableData, TableEvent, TableIntegrityError, TableKey, TableOutcome, TableState,
+    table_view,
+};
 pub use tabs::*;
 pub use toast::{
     Toast, ToastKind, ToastLayout, ToastStack, animate_toast_fan, animate_toast_in,
