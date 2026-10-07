@@ -28,3 +28,13 @@ zig-build = []
 
 [dev-dependencies]
 proptest.workspace = true
+# The terminal_demo example's window and its headless test harness. The demo
+# lives here so quark-app's other examples build without Zig.
+quark-app = { workspace = true, features = ["ui", "headless-render"] }
+quark-ui = { workspace = true, features = ["test-alloc"] }
+
+[[example]]
+name = "terminal_demo"
+# Its test module drives the terminal through `quark_app::testing`, with a
+# real shell on Linux and macOS.
+test = true
