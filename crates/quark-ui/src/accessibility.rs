@@ -854,11 +854,25 @@ impl AccessibilityFrame {
         nodes.push((ROOT_ID, root));
 
         let mut focused = ROOT_ID;
+        // Nodes inside a live region. Platforms announce every named node
+        // that inherits a region's politeness, so a toast would be spoken
+        // once for itself and again for each label and button in it; the
+        // region's own name is the whole announcement.
+        let mut in_live_region: HashSet<NodeId> = HashSet::new();
         for node in &self.nodes {
             if focus.is_some() && node.focus_target() == focus {
                 focused = node.id;
             }
             let mut ax_node = node.to_accesskit_node();
+            let parent_live = node
+                .parent
+                .is_some_and(|parent| in_live_region.contains(&parent));
+            if parent_live && node.live.is_none() {
+                ax_node.set_live(Live::Off);
+            }
+            if parent_live || node.live.is_some() {
+                in_live_region.insert(node.id);
+            }
             let runs = node.text_run_nodes(&mut ax_node);
             let mut kids = children.remove(&node.id).unwrap_or_default();
             // Runs first: they are the node's own text, before any
@@ -1470,7 +1484,8 @@ mod tests {
         }
 
         // A live div is spoken when it appears and when its label changes,
-        // and not on frames that leave it alone.
+        // once (not again for its contents), and not on frames that leave
+        // it alone.
         #[test]
         fn live_region_speaks_on_appearance_and_change() {
             use crate::element::div;
@@ -1484,6 +1499,17 @@ mod tests {
                         .accessibility_role(Role::Status)
                         .accessibility_label(label)
                         .live(Politeness::Polite)
+                        // Named content inside the region is not spoken
+                        // on its own.
+                        .child(crate::element::text(label))
+                        .child(
+                            div()
+                                .w(20.0)
+                                .h(20.0)
+                                .accessibility_id("status.close")
+                                .accessibility_role(Role::Button)
+                                .accessibility_label("Dismiss"),
+                        )
                 }))
             };
             let tree = |status| painted(view(status)).tree_update("Test", None);
