@@ -1,6 +1,7 @@
 use quark::{SemanticRole, view};
 
 use quark_ui::Action;
+use quark_ui::animation::{Curve, Motion, Prop};
 use quark_ui::design::{Shadow, Sp, Sz};
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, svg_icon, text,
@@ -102,15 +103,18 @@ impl RenderOnce for Checkbox {
     }
 }
 
-pub struct Toggle {
+/// An on/off switch. Space or Enter flips it when focused, and screen
+/// readers hear a switch with its on or off state. The thumb slides between
+/// the ends.
+pub struct Switch {
     on: bool,
     label: Option<String>,
     on_toggle: Option<Action>,
     disabled: bool,
 }
 
-pub fn toggle(on: bool) -> Toggle {
-    Toggle {
+pub fn switch(on: bool) -> Switch {
+    Switch {
         on,
         label: None,
         on_toggle: None,
@@ -118,7 +122,15 @@ pub fn toggle(on: bool) -> Toggle {
     }
 }
 
-impl Toggle {
+/// The switch's earlier name.
+pub type Toggle = Switch;
+
+/// [`switch`] by its earlier name.
+pub fn toggle(on: bool) -> Switch {
+    switch(on)
+}
+
+impl Switch {
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
@@ -135,22 +147,17 @@ impl Toggle {
     }
 }
 
-impl RenderOnce for Toggle {
+impl RenderOnce for Switch {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let m = &cx.theme.metrics;
         let scale = m.ui_scale();
         let thumb_inset = Sp::XXS * scale;
-        let xs_scaled = Sp::XS * scale;
 
         let track_w = (m.ui_font_size * 2.25).round();
         let track_h = (m.ui_font_size * 1.25).round();
-        let thumb_size = track_h - xs_scaled;
-        let thumb_left = if self.on {
-            track_w - thumb_size - thumb_inset
-        } else {
-            thumb_inset
-        };
+        let thumb_size = track_h - Sp::XS * scale;
+        let travel = track_w - thumb_size - 2.0 * thumb_inset;
 
         let (track_bg, thumb_bg) = if self.disabled {
             (tc.element_background, tc.text_muted)
@@ -159,58 +166,63 @@ impl RenderOnce for Toggle {
         } else {
             (tc.element_background, tc.icon)
         };
-
         let hover_bg = if self.on {
             tc.accent_strong
         } else {
             tc.element_hover
         };
 
-        let enabled = !self.disabled;
-
-        let thumb = view! {
-            <div absolute top={thumb_inset} left={thumb_left}
-                 w={thumb_size} h={thumb_size}
-                 bg={thumb_bg} rounded={thumb_size / 2.0}
-                 shadow_preset={Shadow::SUBTLE} />
-        };
-
-        let track = view! {
-            <div flex_shrink_0
-                 w={track_w} h={track_h}
-                 bg={track_bg} rounded={track_h / 2.0}
-                 @when {enabled} { hover_bg={hover_bg} }>
-                {thumb}
-            </div>
-        };
-
         let label_text = self.label;
-        let accessibility_label = label_text.clone().unwrap_or_else(|| "Toggle".to_owned());
+        let accessibility_label = label_text.clone().unwrap_or_else(|| "Switch".to_owned());
         let click_action = self.on_toggle.filter(|_| !self.disabled);
-        let accessibility_id = format!("toggle:{:?}:{accessibility_label}", click_action);
+        let accessibility_id = format!("switch:{:?}:{accessibility_label}", click_action);
+
+        // Keyed by the switch, so the slide animates across frames.
+        let thumb = div()
+            .absolute()
+            .top(thumb_inset)
+            .left(thumb_inset)
+            .w(thumb_size)
+            .h(thumb_size)
+            .rounded(thumb_size / 2.0)
+            .bg(thumb_bg)
+            .shadow_preset(Shadow::SUBTLE)
+            .key(format!("{accessibility_id}:thumb"))
+            .translate(if self.on { travel } else { 0.0 }, 0.0)
+            .transition(Prop::Transform, Motion::tween(140, Curve::EaseOutCubic));
+        let track = div()
+            .flex_shrink_0()
+            .w(track_w)
+            .h(track_h)
+            .bg(track_bg)
+            .rounded(track_h / 2.0)
+            .when(!self.disabled, |t| t.hover_bg(hover_bg))
+            .child(thumb);
+
         let label_color = if self.disabled {
             tc.text_muted
         } else {
             tc.text
         };
-
-        view! {
-            <div class="flex-row items-center" gap={m.spacing_sm}
-                 id={accessibility_id.clone()}
-                 key={accessibility_label.clone()}
-                 test_id={"toggle"}
-                 semantic_role={SemanticRole::Switch}
-                 accessibility_role={accesskit::Role::Switch}
-                 accessibility_id={accessibility_id}
-                 accessibility_label={accessibility_label}
-                 accessibility_toggled={self.on}
-                 accessibility_disabled={self.disabled}
-                 @when {click_action.is_some()} { on_click={click_action.unwrap()} }>
-                {track}
-                if let Some(label_text) = label_text {
-                    <text class="text-sm" color={label_color}>{label_text}</text>
-                }
-            </div>
+        let mut row = div()
+            .flex_row()
+            .items_center()
+            .gap(m.spacing_sm)
+            .rounded(track_h / 2.0)
+            .id(accessibility_id.clone())
+            .key(accessibility_label.clone())
+            .test_id("switch")
+            .semantic_role(SemanticRole::Switch)
+            .accessibility_role(accesskit::Role::Switch)
+            .accessibility_id(accessibility_id)
+            .accessibility_label(accessibility_label)
+            .accessibility_toggled(self.on)
+            .accessibility_disabled(self.disabled)
+            .child(track)
+            .optional_child(label_text.map(|label| text(label).text_sm().color(label_color)));
+        if let Some(action) = click_action {
+            row = row.on_click(action);
         }
+        row.into_any()
     }
 }

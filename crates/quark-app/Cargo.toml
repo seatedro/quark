@@ -65,7 +65,7 @@ interprocess = { version = "2.2", default-features = false }
 [dev-dependencies]
 quark-ui = { workspace = true, features = ["test-alloc"] }
 quark-render = { workspace = true, features = ["headless-render"] }
-# The a11y_demo example's checkbox, switch, and toasts.
+# The a11y_demo and controls_demo examples' components.
 quark-components.workspace = true
 image.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }
@@ -119,6 +119,12 @@ required-features = ["ui"]
 [[example]]
 name = "a11y_demo"
 required-features = ["ui"]
+
+[[example]]
+name = "controls_demo"
+required-features = ["ui"]
+# Its test module drives the controls through `quark_app::testing`.
+test = true
 
 [[example]]
 name = "transcript_demo"

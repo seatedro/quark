@@ -10,19 +10,24 @@ pub mod behavior;
 pub mod breadcrumb;
 pub mod button;
 pub mod checkbox;
+pub mod combobox;
 pub mod context_menu;
 pub mod dock;
 pub mod dropdown;
 pub mod hover_card;
 pub mod kbd;
+mod list_nav;
 pub mod modal;
 pub mod palette;
 pub mod picker;
 pub mod popover;
 pub mod progress;
+pub mod radio;
 pub mod search_field;
 pub mod segmented;
+pub mod select;
 pub mod sidebar_skeleton;
+pub mod slider;
 pub mod split;
 pub mod stat_summary;
 pub mod tabs;
@@ -36,6 +41,7 @@ pub use behavior::*;
 pub use breadcrumb::*;
 pub use button::{Button, ButtonSize, ButtonStyle};
 pub use checkbox::*;
+pub use combobox::*;
 pub use context_menu::*;
 pub use dock::{
     Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockSplit, DockState, PanelId,
@@ -44,6 +50,7 @@ pub use dock::{
 pub use dropdown::*;
 pub use hover_card::*;
 pub use kbd::*;
+pub use list_nav::TypeAhead;
 pub use modal::{Modal, ModalAlign};
 pub use palette::{
     CommandPalette, FuzzyMatcher, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome,
@@ -52,9 +59,12 @@ pub use palette::{
 pub use picker::{PickerItem, PickerLabelStyle, picker_list};
 pub use popover::*;
 pub use progress::*;
+pub use radio::*;
 pub use search_field::*;
-pub use segmented::{SegmentedControl, SegmentedItem};
+pub use segmented::{SegmentedControl, SegmentedItem, segmented_focus_id};
+pub use select::*;
 pub use sidebar_skeleton::sidebar_skeleton;
+pub use slider::*;
 pub use split::{
     Axis, Pane, PaneSizes, Split, SplitEvent, SplitIntegrityError, SplitSnapshot, SplitState,
 };

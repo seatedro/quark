@@ -36,6 +36,7 @@ ROLE = {
     "list": 31,
     "list item": 32,
     "check box": 7,
+    "radio button": 44,
     "toggle button": 62,
     "status bar": 54,
     "notification": 101,
