@@ -12,7 +12,7 @@ use winit::{dpi::PhysicalSize, window::Window};
 use crate::scene::{ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive};
 
 use crate::shaders::{BLIT_SHADER, BLUR_SHADER, EFFECT_SHADER, QUAD_SHADER, SHADOW_SHADER};
-use crate::text::{color_to_linear, measure_mono_char_width, prepare_text_areas};
+use crate::text::{RecoloredBuffers, color_to_linear, measure_mono_char_width, prepare_text_areas};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextMetrics {
@@ -751,6 +751,7 @@ pub struct Renderer {
     /// False when this frame's glyphs did not fit the atlas; its text
     /// segments are skipped.
     text_ready: bool,
+    recolored: RecoloredBuffers,
     /// `(font size, TextSystem generation, width)` of the last measurement.
     cached_mono_char_width: Option<(f32, u64, f32)>,
     flattener: Flattener,
@@ -913,6 +914,7 @@ impl Renderer {
             atlas,
             text_renderers: vec![text_renderer],
             text_ready: true,
+            recolored: RecoloredBuffers::default(),
             cached_mono_char_width: None,
             flattener: Flattener::default(),
             flat: FlattenedScene::default(),
@@ -1308,6 +1310,7 @@ impl Renderer {
 
         // Prepare every text segment before recording any pass.
         self.fit_text_renderers(batches.text_steps);
+        self.recolored.prepare(&flat.rich_texts, text);
         self.text_ready = match self.prepare_text(flat, text) {
             Ok(()) => true,
             Err(_) => {
@@ -1390,6 +1393,7 @@ impl Renderer {
             let text_areas = prepare_text_areas(
                 &flat.texts[items.start as usize..items.end as usize],
                 &flat.rich_texts[rich.start as usize..rich.end as usize],
+                &self.recolored,
             );
             self.text_renderers[text_index].prepare(
                 &self.device,
@@ -3203,8 +3207,9 @@ mod tests {
         assert!(lit > 20, "emoji drew nothing ({lit} lit pixels)");
     }
 
-    // The renderer splits a rich layout into per-color areas; each span must
-    // keep its own color and the other span's glyphs must not bleed over.
+    // The renderer bakes span colors into a copy of the layout's buffer; each
+    // span must keep its own color and the other span's glyphs must not
+    // bleed over.
     #[test]
     fn render_rich_text_paints_each_span_in_its_color() {
         let text = "WWWWWWMMMMMM";
@@ -3249,6 +3254,39 @@ mod tests {
         );
         assert_eq!(count_pixels(&image, left, green), 0, "green left of split");
         assert_eq!(count_pixels(&image, right, red), 0, "red right of split");
+    }
+
+    // Regression: rich text drew one glyphon area per same-colored stretch of
+    // each line, and glyphon walks the buffer's lines for every area, so
+    // highlighted code cost grew with the square of its line count.
+    #[test]
+    fn multi_line_rich_text_prepares_one_text_area() {
+        let source = "let a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;";
+        let spans = source
+            .match_indices("let")
+            .map(|(start, _)| quark_text::TextSpan {
+                range: start..start + 3,
+                weight: None,
+                style: None,
+                kind: None,
+            })
+            .collect::<Vec<_>>();
+        let mut text = test_text();
+        let params = TextParams::new(source, TextStyle::new(14.0)).spans(spans);
+        let layout = text.layout(&params).expect("layout");
+        assert_eq!(layout.line_count(), 4);
+        let mut scene = Scene::default();
+        scene.rich_text(RichTextPrimitive {
+            rect: rect(0.0, 0.0, 200.0, 100.0),
+            layout: ShapedText::new(Arc::new(layout)),
+            default_color: quark::Color::rgba(255, 255, 255, 255),
+            span_colors: Arc::from([quark::Color::rgba(255, 0, 0, 255); 4]),
+        });
+        let flat = flatten_scene(&scene, rect(0.0, 0.0, 200.0, 100.0), &ImageCache::new());
+        let mut recolored = RecoloredBuffers::default();
+        recolored.prepare(&flat.rich_texts, &mut text);
+        let areas = prepare_text_areas(&flat.texts, &flat.rich_texts, &recolored);
+        assert_eq!(areas.len(), 1);
     }
 
     // Splitting at every kind transition would cost one draw and one text

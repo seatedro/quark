@@ -1,4 +1,10 @@
-use glyphon::{Color as GlyphonColor, TextArea, TextBounds};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use glyphon::{
+    Attrs, AttrsList, AttrsOwned, Buffer, Color as GlyphonColor, FontSystem, TextArea, TextBounds,
+};
+use quark::scene::ShapedText;
 use quark::{Color, FontKind};
 use quark_text::{TextLayout, TextParams, TextStyle, TextSystem};
 
@@ -11,6 +17,7 @@ use crate::scene::{Rect, RectPrimitive, Scene, TextDecoration, TextDecorationKin
 pub(super) fn prepare_text_areas<'a>(
     texts: &'a [ClippedText],
     rich_texts: &'a [ClippedRichText],
+    recolored: &'a RecoloredBuffers,
 ) -> Vec<TextArea<'a>> {
     let mut areas = Vec::with_capacity(texts.len() + rich_texts.len());
     for text in texts {
@@ -30,14 +37,14 @@ pub(super) fn prepare_text_areas<'a>(
         let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
             continue;
         };
-        push_rich_text_areas(
-            &mut areas,
+        areas.push(rich_text_area(
             layout,
             primitive.rect,
             text.clip,
             primitive.default_color,
             &primitive.span_colors,
-        );
+            recolored,
+        ));
     }
     areas
 }
@@ -79,87 +86,151 @@ fn span_color(span: u32, default_color: Color, span_colors: &[Color]) -> Color {
     }
 }
 
-/// glyphon colors a whole area with one default color, and the layout's
-/// buffer is shared and immutable, so per-span colors are drawn as one area
-/// per same-colored stretch of a line, each clipped to that stretch. Bounds
-/// clip partial glyphs, so neighbouring stretches tile without gaps or
-/// double drawing.
-fn push_rich_text_areas<'a>(
-    areas: &mut Vec<TextArea<'a>>,
+/// The one color every glyph of `layout` draws in, or `None` when its spans
+/// use more than one.
+fn uniform_color(
+    layout: &TextLayout,
+    default_color: Color,
+    span_colors: &[Color],
+) -> Option<Color> {
+    let mut runs = layout.glyph_runs();
+    let first = runs.next().map_or(default_color, |run| {
+        span_color(run.span, default_color, span_colors)
+    });
+    runs.all(|run| span_color(run.span, default_color, span_colors) == first)
+        .then_some(first)
+}
+
+/// Copies of multi-colored layouts' buffers with each glyph's color baked
+/// in, so a rich text primitive draws as one glyphon area whatever its line
+/// and color count. glyphon colors glyphs from the buffer, and the layout's
+/// own buffer is shared and immutable; drawing one area per same-colored
+/// stretch of each line instead made glyphon walk the buffer's lines once
+/// per stretch, quadratic in the line count.
+///
+/// Building a copy reshapes the layout once, since cosmic-text bakes colors
+/// in while shaping. Colors do not change shaping, so the copy's glyphs sit
+/// exactly where the layout's do. Copies live while drawn and a few frames
+/// after.
+#[derive(Default)]
+pub(super) struct RecoloredBuffers {
+    entries: HashMap<usize, Recolored>,
+    frame: u64,
+}
+
+struct Recolored {
+    /// Keeps the layout alive, so its address keys no other layout.
+    _layout: ShapedText,
+    default_color: Color,
+    span_colors: Arc<[Color]>,
+    buffer: Buffer,
+    last_used: u64,
+}
+
+/// Frames a recolored copy may go undrawn before it is dropped.
+const KEEP_UNUSED_RECOLORED_FRAMES: u64 = 120;
+
+impl RecoloredBuffers {
+    /// Build or reuse a copy for every multi-colored primitive in `rich_texts`.
+    pub(super) fn prepare(&mut self, rich_texts: &[ClippedRichText], text: &mut TextSystem) {
+        self.frame += 1;
+        for text_run in rich_texts {
+            let primitive = &text_run.primitive;
+            let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
+                continue;
+            };
+            let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+            if uniform_color(layout, default_color, span_colors).is_some() {
+                continue;
+            }
+            let key = std::ptr::from_ref(layout) as usize;
+            if let Some(entry) = self.entries.get_mut(&key)
+                && entry.default_color == default_color
+                && (Arc::ptr_eq(&entry.span_colors, span_colors)
+                    || entry.span_colors == *span_colors)
+            {
+                entry.last_used = self.frame;
+                continue;
+            }
+            let buffer = recolor(layout, text.font_system_mut(), default_color, span_colors);
+            self.entries.insert(
+                key,
+                Recolored {
+                    _layout: primitive.layout.clone(),
+                    default_color,
+                    span_colors: span_colors.clone(),
+                    buffer,
+                    last_used: self.frame,
+                },
+            );
+        }
+        let frame = self.frame;
+        self.entries
+            .retain(|_, entry| frame - entry.last_used <= KEEP_UNUSED_RECOLORED_FRAMES);
+    }
+
+    fn get(&self, layout: &TextLayout) -> Option<&Buffer> {
+        let key = std::ptr::from_ref(layout) as usize;
+        self.entries.get(&key).map(|entry| &entry.buffer)
+    }
+}
+
+/// A copy of `layout`'s buffer, reshaped with every glyph colored by its span.
+fn recolor(
+    layout: &TextLayout,
+    font_system: &mut FontSystem,
+    default_color: Color,
+    span_colors: &[Color],
+) -> Buffer {
+    let source = layout.buffer();
+    let mut buffer = Buffer::new_empty(source.metrics());
+    buffer.set_wrap(font_system, source.wrap());
+    let (width, height) = source.size();
+    buffer.set_size(font_system, width, height);
+    buffer.set_tab_width(font_system, source.tab_width());
+    buffer.set_monospace_width(font_system, source.monospace_width());
+    let colored = |attrs: Attrs<'_>| {
+        let color = span_color(attrs.metadata as u32, default_color, span_colors);
+        AttrsOwned::new(&attrs.color(glyphon_color(color)))
+    };
+    buffer.lines = source
+        .lines
+        .iter()
+        .map(|line| {
+            let source_attrs = line.attrs_list();
+            let mut attrs = AttrsList::new(&colored(source_attrs.defaults()).as_attrs());
+            for (range, span) in source_attrs.spans_iter() {
+                attrs.add_span(range.clone(), &colored(span.as_attrs()).as_attrs());
+            }
+            let mut line = line.clone();
+            line.set_attrs_list(attrs);
+            line
+        })
+        .collect();
+    for line in 0..buffer.lines.len() {
+        buffer.line_layout(font_system, line);
+    }
+    buffer
+}
+
+fn rich_text_area<'a>(
     layout: &'a TextLayout,
     origin: Rect,
     clip: Rect,
     default_color: Color,
     span_colors: &[Color],
-) {
-    let mut runs = layout.glyph_runs();
-    let first = runs.next().map_or(default_color, |run| {
-        span_color(run.span, default_color, span_colors)
-    });
-    if runs.all(|run| span_color(run.span, default_color, span_colors) == first) {
-        areas.push(text_area(layout, origin, clip, first));
-        return;
+    recolored: &'a RecoloredBuffers,
+) -> TextArea<'a> {
+    if let Some(color) = uniform_color(layout, default_color, span_colors) {
+        return text_area(layout, origin, clip, color);
     }
-
-    let glyphs = layout.glyphs();
-    let scale = layout.scale_factor();
-    let line_count = layout.line_count();
-    // (x0, x1, color) per run of the current line, in logical pixels.
-    let mut stretches: Vec<(f32, f32, Color)> = Vec::new();
-    let mut runs = layout.glyph_runs().peekable();
-    while let Some(line) = runs.peek().map(|run| run.line) {
-        stretches.clear();
-        while let Some(run) = runs.next_if(|run| run.line == line) {
-            let (x0, x1) = run
-                .glyphs
-                .clone()
-                .fold((f32::MAX, f32::MIN), |(lo, hi), i| {
-                    (lo.min(glyphs.x[i]), hi.max(glyphs.x[i] + glyphs.advance[i]))
-                });
-            stretches.push((x0, x1, span_color(run.span, default_color, span_colors)));
-        }
-        stretches.sort_by(|a, b| a.0.total_cmp(&b.0));
-        stretches.dedup_by(|next, prev| {
-            let same = next.2 == prev.2;
-            if same {
-                prev.1 = prev.1.max(next.1);
-            }
-            same
-        });
-        let Some(info) = layout.line(line) else {
-            continue;
-        };
-        // Outer edges extend to the clip so overhanging ink is not cut.
-        let top = if line == 0 {
-            clip.y
-        } else {
-            origin.y + info.top * scale
-        };
-        let bottom = if line + 1 == line_count {
-            clip.bottom()
-        } else {
-            origin.y + (info.top + info.height) * scale
-        };
-        for (k, &(x0, _, color)) in stretches.iter().enumerate() {
-            let left = if k == 0 {
-                clip.x
-            } else {
-                origin.x + x0 * scale
-            };
-            let right = stretches
-                .get(k + 1)
-                .map_or(clip.right(), |next| origin.x + next.0 * scale);
-            let stretch = Rect {
-                x: left,
-                y: top,
-                width: right - left,
-                height: bottom - top,
-            };
-            if let Some(bounds) = stretch.intersection(clip) {
-                areas.push(text_area(layout, origin, bounds, color));
-            }
-        }
+    let mut area = text_area(layout, origin, clip, default_color);
+    // `RecoloredBuffers::prepare` ran over this frame's rich texts, so the
+    // copy exists; without it the text still draws, in one color.
+    if let Some(buffer) = recolored.get(layout) {
+        area.buffer = buffer;
     }
+    area
 }
 
 /// Quads (scene pixels, layout at `origin`) for one decoration: one per
