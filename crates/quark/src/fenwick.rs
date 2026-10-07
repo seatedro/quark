@@ -213,3 +213,82 @@ mod verification {
         assert!(found == N || !fits(found + 1));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Push(i64),
+        /// Index and new value, applied as a delta so values stay
+        /// non-negative as `search` requires.
+        Set(usize, i64),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (0..1_000i64).prop_map(Op::Push),
+            (0..64usize, 0..1_000i64).prop_map(|(i, v)| Op::Set(i, v)),
+        ]
+    }
+
+    /// Largest `count` with `sum(model[..count]) <= target` (`<` if strict).
+    fn model_search(model: &[i64], target: i64, strict: bool) -> usize {
+        let mut sum = 0;
+        let mut found = 0;
+        for (i, v) in model.iter().enumerate() {
+            sum += v;
+            if (strict && sum < target) || (!strict && sum <= target) {
+                found = i + 1;
+            } else {
+                break;
+            }
+        }
+        found
+    }
+
+    proptest! {
+        // Catches lowbit slips in `push`, `add`, `prefix`, and the binary
+        // lifting in `search`, which would misplace rows in virtual lists.
+        #[test]
+        fn fenwick_agrees_with_vec_model(
+            ops in prop::collection::vec(op(), 0..40),
+            targets in prop::collection::vec(-1..20_000i64, 4),
+        ) {
+            let mut tree = Fenwick::default();
+            let mut model: Vec<i64> = Vec::new();
+            for op in ops {
+                match op {
+                    Op::Push(v) => {
+                        tree.push(v);
+                        model.push(v);
+                    }
+                    Op::Set(i, v) if !model.is_empty() => {
+                        let i = i % model.len();
+                        tree.add(i, v - model[i]);
+                        model[i] = v;
+                    }
+                    Op::Set(..) => {}
+                }
+                prop_assert_eq!(&tree, &Fenwick::build(model.iter().copied()));
+            }
+            prop_assert_eq!(tree.len(), model.len());
+            for count in 0..=model.len() + 1 {
+                let sum: i64 = model.iter().take(count).sum();
+                prop_assert_eq!(tree.prefix(count), sum, "prefix({})", count);
+            }
+            for target in targets {
+                for strict in [false, true] {
+                    prop_assert_eq!(
+                        tree.search(target, strict),
+                        model_search(&model, target, strict),
+                        "search({}, {})", target, strict
+                    );
+                }
+            }
+        }
+    }
+}
