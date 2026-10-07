@@ -214,8 +214,13 @@ impl DiffDocument {
     pub fn gap_after(&self, file: u32) -> u32 {
         let f = file as usize;
         let range = &self.files.hunks[f];
-        if self.files.partial[f] || range.is_empty() {
+        if self.files.partial[f] {
             return 0;
+        }
+        // A file with full text but no hunks is unchanged: all of it is one
+        // gap, so expanding it shows the whole file.
+        if range.is_empty() {
+            return self.files.new_text[f].line_count();
         }
         let h = range.end as usize - 1;
         let end =

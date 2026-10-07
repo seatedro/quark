@@ -322,7 +322,7 @@ impl Projection {
                 old_next = old_before + h.old_len[hi];
                 new_next = new_before + h.new_len[hi];
             }
-            if !partial && !files.hunks[f].is_empty() {
+            if !partial {
                 let id = GapId { file, hunk: None };
                 let len = doc.gap_after(file);
                 self.push_gap(id, (old_next, new_next), len, expansion);

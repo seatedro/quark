@@ -436,3 +436,25 @@ fn report_diff_times() {
         );
     }
 }
+
+// Regression: a file with full text but no hunks (identical sides) skipped
+// its trailing gap, so expanding it showed none of its lines.
+#[test]
+fn an_unchanged_file_expands_to_all_of_its_lines() {
+    let doc = diff_texts(Some("f"), Some("f"), Some("a\nb\n"), Some("a\nb\n"), 1);
+    let mut expansion = Expansion::new(&doc);
+    expansion.reveal(
+        &doc,
+        GapId {
+            file: 0,
+            hunk: None,
+        },
+        Reveal::All,
+        0,
+    );
+    let p = Projection::new(&doc, Mode::Unified, &expansion);
+    let shown = (0..p.len())
+        .filter(|&r| p.line(r, Side::New).is_some())
+        .count();
+    assert_eq!(shown, 2);
+}
