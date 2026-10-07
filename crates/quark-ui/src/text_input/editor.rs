@@ -1,8 +1,15 @@
+use std::ops::Range;
 use std::sync::Arc;
 
-use glyphon::{Attrs, Buffer, Family, Metrics, Shaping, Wrap};
+use quark_render::scene::{FontKind, FontStyle, FontWeight};
+use quark_text::{TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 
-use super::text_edit::{TextEditCommand, TextEditOutcome};
+use super::ime::{Composition, Preedit, compose, floor_char_boundary};
+use super::text_edit::{
+    TextEditCommand, TextEditOutcome, next_grapheme_boundary, next_word_end,
+    prev_grapheme_boundary, prev_word_boundary, word_range_at,
+};
+use super::undo::{Edit, EditKind, EditLog};
 
 const LINE_HEIGHT_FACTOR: f32 = 1.35;
 const SYNTAX_HIGHLIGHT_MAX_BYTES: usize = 256 * 1024;
@@ -62,22 +69,16 @@ impl EditorMode {
         matches!(self, Self::CodeInput | Self::DiffReadOnly)
     }
 
-    fn family(self) -> Family<'static> {
+    pub(super) fn font_kind(self) -> FontKind {
         if self.is_code() {
-            Family::Monospace
+            FontKind::Mono
         } else {
-            Family::SansSerif
+            FontKind::Ui
         }
-    }
-
-    // Matches quark-text, which paints this text: Basic shaping skips font
-    // fallback and ligatures, so the caret would drift from the glyphs.
-    fn shaping(self) -> Shaping {
-        Shaping::Advanced
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectionRect {
     pub x: f32,
     pub y: f32,
@@ -91,18 +92,39 @@ pub struct CursorState {
     pub y: f32,
 }
 
+/// Multiline editor model.
+///
+/// Caret, selection, hit-testing, and vertical movement all read the same
+/// quark-text [`TextLayout`] that [`super::TextEditorElement`] paints (see
+/// [`Editor::paint_layout`]), so they cannot drift from the glyphs. The
+/// layout is rebuilt by [`Editor::flush`]; call it once per frame before
+/// building the element.
+#[derive(Clone)]
 pub struct Editor {
     mode: EditorMode,
     text: String,
     cursor: usize,
     anchor: usize,
-    buffer: Option<Buffer>,
+    /// Layout of `text`, as of the last flush.
+    layout: Option<Arc<TextLayout>>,
+    /// Layout of `text` with the preedit spliced in, while composing.
+    display: Option<Arc<TextLayout>>,
+    composition: Option<Composition>,
+    preedit: Option<Preedit>,
+    /// `text` (or the wrap width, font, or syntax) changed since the last flush.
     dirty: bool,
+    preedit_dirty: bool,
     syntax_dirty: bool,
     syntax_highlighter: Option<SyntaxHighlighter>,
     syntax_spans: Vec<SyntaxSpan>,
+    /// Token kind of each span of `layout`, for paint colors.
+    span_kinds: Vec<SyntaxTokenKind>,
+    history: EditLog,
+    /// The app's clock, from [`Editor::apply_at`] or [`Editor::set_clock`].
+    now_ms: u64,
     desired_x: Option<f32>,
     reveal_cursor_on_flush: bool,
+    caret_hidden: bool,
     pub scroll_y: f32,
     pub cursor_pos: CursorState,
     pub cursor_moved_at_ms: u64,
@@ -118,13 +140,21 @@ impl Default for Editor {
             text: String::new(),
             cursor: 0,
             anchor: 0,
-            buffer: None,
+            layout: None,
+            display: None,
+            composition: None,
+            preedit: None,
             dirty: true,
+            preedit_dirty: false,
             syntax_dirty: true,
             syntax_highlighter: None,
             syntax_spans: Vec::new(),
+            span_kinds: Vec::new(),
+            history: EditLog::default(),
+            now_ms: 0,
             desired_x: None,
             reveal_cursor_on_flush: false,
+            caret_hidden: false,
             scroll_y: 0.0,
             cursor_pos: CursorState::default(),
             cursor_moved_at_ms: 0,
@@ -135,34 +165,10 @@ impl Default for Editor {
     }
 }
 
-impl Clone for Editor {
-    fn clone(&self) -> Self {
-        Self {
-            mode: self.mode,
-            text: self.text.clone(),
-            cursor: self.cursor,
-            anchor: self.anchor,
-            buffer: None,
-            dirty: true,
-            syntax_dirty: true,
-            syntax_highlighter: self.syntax_highlighter.clone(),
-            syntax_spans: self.syntax_spans.clone(),
-            desired_x: self.desired_x,
-            reveal_cursor_on_flush: self.reveal_cursor_on_flush,
-            scroll_y: self.scroll_y,
-            cursor_pos: self.cursor_pos,
-            cursor_moved_at_ms: self.cursor_moved_at_ms,
-            font_size: self.font_size,
-            last_width: self.last_width,
-            last_height: self.last_height,
-        }
-    }
-}
-
 impl std::fmt::Debug for Editor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Editor")
-            .field("initialized", &self.buffer.is_some())
+            .field("initialized", &self.layout.is_some())
             .field("mode", &self.mode)
             .field("cursor", &self.cursor)
             .field("anchor", &self.anchor)
@@ -171,76 +177,70 @@ impl std::fmt::Debug for Editor {
     }
 }
 
-fn next_char_boundary(text: &str, offset: usize) -> usize {
-    let mut i = offset + 1;
-    while i < text.len() && !text.is_char_boundary(i) {
-        i += 1;
-    }
-    i.min(text.len())
-}
-
-fn prev_char_boundary(text: &str, offset: usize) -> usize {
-    if offset == 0 {
-        return 0;
-    }
-    let mut i = offset - 1;
-    while i > 0 && !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
-}
-
-fn prev_word_boundary(text: &str, offset: usize) -> usize {
-    if offset == 0 {
-        return 0;
-    }
-    let before = &text[..offset];
-    let mut chars = before.char_indices().rev();
-    while let Some((i, ch)) = chars.next() {
-        if is_word_char(ch) {
-            let mut result = i;
-            for (j, c) in chars.by_ref() {
-                if !is_word_char(c) {
-                    result = j + c.len_utf8();
-                    break;
-                }
-                result = j;
-            }
-            return result;
+/// Layout spans (weight and slant only) for the valid syntax spans, plus
+/// each kept span's kind so paint can color `GlyphRun::span` indices.
+pub(super) fn syntax_layout_spans(
+    text: &str,
+    syntax_spans: &[SyntaxSpan],
+) -> (Vec<TextSpan>, Vec<SyntaxTokenKind>) {
+    let mut spans = Vec::with_capacity(syntax_spans.len());
+    let mut kinds = Vec::with_capacity(syntax_spans.len());
+    for span in syntax_spans {
+        let start = span.offset as usize;
+        let end = start.saturating_add(span.length as usize).min(text.len());
+        let valid = start < end && text.is_char_boundary(start) && text.is_char_boundary(end);
+        if !valid {
+            continue;
         }
+        let (weight, style) = syntax_font(span.kind);
+        spans.push(TextSpan {
+            range: start..end,
+            weight,
+            style,
+            kind: None,
+        });
+        kinds.push(span.kind);
     }
-    0
+    (spans, kinds)
 }
 
-fn next_word_boundary(text: &str, offset: usize) -> usize {
-    if offset >= text.len() {
-        return text.len();
+fn syntax_font(kind: SyntaxTokenKind) -> (Option<FontWeight>, Option<FontStyle>) {
+    use SyntaxTokenKind::*;
+    match kind {
+        Comment => (None, Some(FontStyle::Italic)),
+        Keyword | Builtin => (Some(FontWeight::Semibold), None),
+        Type | Function | Constant | Attribute | Tag | Property | Namespace | Label
+        | Preprocessor => (Some(FontWeight::Medium), None),
+        Normal | String | Number | Operator | Punctuation | Variable => (None, None),
     }
-    let after = &text[offset..];
-    let mut chars = after.char_indices().peekable();
-    if chars.peek().is_some_and(|(_, ch)| is_word_char(*ch)) {
-        for (i, ch) in chars.by_ref() {
-            if !is_word_char(ch) {
-                return offset + i;
-            }
-        }
-        return text.len();
+}
+
+/// Spans of `text` moved to match `composition`, which replaced
+/// `replaced` with the preedit. Spans touching the replaced range drop out.
+fn shift_spans(
+    spans: &[TextSpan],
+    kinds: &[SyntaxTokenKind],
+    replaced: Range<usize>,
+    inserted_len: usize,
+) -> (Vec<TextSpan>, Vec<SyntaxTokenKind>) {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut out_kinds = Vec::with_capacity(spans.len());
+    for (span, kind) in spans.iter().zip(kinds) {
+        let range = if span.range.end <= replaced.start {
+            span.range.clone()
+        } else if span.range.start >= replaced.end {
+            let shift = |o: usize| o - replaced.len() + inserted_len;
+            shift(span.range.start)..shift(span.range.end)
+        } else {
+            continue;
+        };
+        out.push(TextSpan {
+            range,
+            ..span.clone()
+        });
+        out_kinds.push(*kind);
     }
-    for (_i, ch) in chars.by_ref() {
-        if is_word_char(ch) {
-            for (j, c) in chars {
-                if !is_word_char(c) {
-                    return offset + j;
-                }
-            }
-            return text.len();
-        }
-    }
-    text.len()
+    (out, out_kinds)
 }
 
 impl Editor {
@@ -259,13 +259,9 @@ impl Editor {
         if self.mode == mode {
             return;
         }
-        let family_changed = self.mode.is_code() != mode.is_code();
         self.mode = mode;
         self.dirty = true;
         self.syntax_dirty = true;
-        if family_changed {
-            self.buffer = None;
-        }
     }
 
     pub fn set_syntax_highlighter(&mut self, highlighter: SyntaxHighlighter) {
@@ -280,78 +276,48 @@ impl Editor {
         self.syntax_highlighter = None;
         self.syntax_spans.clear();
         self.syntax_dirty = false;
+        self.dirty = true;
+    }
+
+    /// Set the app clock used for caret blink and undo coalescing.
+    pub fn set_clock(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
     }
 
     fn line_height(&self) -> f32 {
         self.font_size * LINE_HEIGHT_FACTOR
     }
 
-    fn metrics(&self) -> Metrics {
-        Metrics::new(self.font_size, self.line_height())
-    }
-
-    fn mark_cursor_moved(&mut self) {
-        self.cursor_moved_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-    }
-
     fn note_cursor_activity(&mut self) {
         self.reveal_cursor_on_flush = true;
-        self.mark_cursor_moved();
+        self.cursor_moved_at_ms = self.now_ms;
     }
 
     fn global_to_line_col(&self, offset: usize) -> (usize, usize) {
-        let mut line = 0;
-        let mut line_start = 0;
-        for (i, ch) in self.text.char_indices() {
-            if i >= offset {
-                break;
-            }
-            if ch == '\n' {
-                line += 1;
-                line_start = i + 1;
-            }
-        }
-        if offset > self.text.len() {
-            let last_newline = self.text.rfind('\n');
-            match last_newline {
-                Some(pos) => (line, self.text.len() - pos - 1),
-                None => (0, self.text.len()),
-            }
-        } else {
-            (line, offset - line_start)
-        }
+        let offset = offset.min(self.text.len());
+        let line = self.text.as_bytes()[..offset]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        let line_start = self.text[..offset].rfind('\n').map_or(0, |i| i + 1);
+        (line, offset - line_start)
     }
 
     fn line_start(&self, target_line: usize) -> usize {
         if target_line == 0 {
             return 0;
         }
-        let mut line = 0;
-        for (i, ch) in self.text.char_indices() {
-            if ch == '\n' {
-                line += 1;
-                if line == target_line {
-                    return i + 1;
-                }
-            }
-        }
-        self.text.len()
+        self.text
+            .match_indices('\n')
+            .nth(target_line - 1)
+            .map_or(self.text.len(), |(i, _)| i + 1)
     }
 
     fn line_end(&self, target_line: usize) -> usize {
-        let mut line = 0;
-        for (i, ch) in self.text.char_indices() {
-            if ch == '\n' {
-                if line == target_line {
-                    return i;
-                }
-                line += 1;
-            }
-        }
-        self.text.len()
+        self.text
+            .match_indices('\n')
+            .nth(target_line)
+            .map_or(self.text.len(), |(i, _)| i)
     }
 
     fn has_selection(&self) -> bool {
@@ -362,179 +328,73 @@ impl Editor {
         (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
     }
 
-    fn delete_selection(&mut self) -> bool {
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn anchor(&self) -> usize {
+        self.anchor
+    }
+
+    /// Replace `range` with `inserted`, record it for undo, and collapse
+    /// the caret after it. The single place the text is edited by the user.
+    fn replace(&mut self, range: Range<usize>, inserted: &str, kind: EditKind) -> bool {
         if !self.mode.is_editable() {
             return false;
         }
+        self.clear_preedit();
+        if range.is_empty() && inserted.is_empty() {
+            return false;
+        }
+        let Some(removed) = self.text.get(range.clone()).map(str::to_owned) else {
+            return false;
+        };
+        let before = (self.anchor, self.cursor);
+        self.text.replace_range(range.clone(), inserted);
+        self.cursor = range.start + inserted.len();
+        self.anchor = self.cursor;
+        let edit = Edit {
+            at: range.start,
+            removed,
+            inserted: inserted.to_owned(),
+            before,
+            after: (self.anchor, self.cursor),
+        };
+        self.history.record(edit, kind, self.now_ms);
+        self.text_changed();
+        true
+    }
+
+    fn text_changed(&mut self) {
+        self.dirty = true;
+        self.syntax_dirty = true;
+        self.desired_x = None;
+        self.note_cursor_activity();
+    }
+
+    fn delete_selection(&mut self) -> bool {
         if !self.has_selection() {
             return false;
         }
         let (start, end) = self.selection_range();
-        self.text.drain(start..end);
-        self.cursor = start;
-        self.anchor = start;
-        self.dirty = true;
-        self.syntax_dirty = true;
-        true
+        self.replace(start..end, "", EditKind::Other)
+    }
+
+    /// Layout to use for geometry, or `None` before the first flush.
+    fn geometry(&self) -> Option<&TextLayout> {
+        self.layout.as_deref()
     }
 
     fn offset_to_point(&self, offset: usize) -> (f32, f32) {
-        let buffer = match &self.buffer {
-            Some(b) => b,
-            None => return (0.0, 0.0),
-        };
-        let (target_line, target_col) = self.global_to_line_col(offset);
-        let line_height = self.line_height();
-        let mut y = 0.0_f32;
-
-        for (line_idx, line) in buffer.lines.iter().enumerate() {
-            if let Some(layout_lines) = line.layout_opt() {
-                let num_layouts = layout_lines.len();
-                for (layout_idx, layout_line) in layout_lines.iter().enumerate() {
-                    if line_idx == target_line {
-                        let first_start = layout_line.glyphs.first().map(|g| g.start).unwrap_or(0);
-                        let last_end = layout_line.glyphs.last().map(|g| g.end).unwrap_or(0);
-                        let is_last_layout = layout_idx == num_layouts - 1;
-                        let on_this_layout = layout_line.glyphs.is_empty()
-                            || (target_col >= first_start
-                                && (target_col <= last_end || is_last_layout));
-
-                        if on_this_layout {
-                            let mut x = 0.0_f32;
-                            for glyph in layout_line.glyphs.iter() {
-                                if target_col <= glyph.start {
-                                    x = glyph.x;
-                                    return (x, y);
-                                }
-                                x = glyph.x + glyph.w;
-                            }
-                            return (x, y);
-                        }
-                    }
-                    y += line_height;
-                }
-            } else {
-                if line_idx == target_line {
-                    return (0.0, y);
-                }
-                y += line_height;
-            }
-        }
-        (0.0, y)
+        self.geometry().map_or((0.0, 0.0), |layout| {
+            let caret = layout.caret(offset);
+            (caret.x, caret.y)
+        })
     }
 
     fn point_to_offset(&self, px: f32, py: f32) -> usize {
-        let buffer = match &self.buffer {
-            Some(b) => b,
-            None => return 0,
-        };
-        let line_height = self.line_height();
-        let mut y = 0.0_f32;
-        let mut global_offset = 0_usize;
-
-        for (line_idx, line) in buffer.lines.iter().enumerate() {
-            let line_text = line.text();
-            if let Some(layout_lines) = line.layout_opt() {
-                let last_layout_idx = layout_lines.len().saturating_sub(1);
-                for (layout_idx, layout_line) in layout_lines.iter().enumerate() {
-                    let next_y = y + line_height;
-                    let is_last_visual_line =
-                        line_idx == buffer.lines.len() - 1 && layout_idx == last_layout_idx;
-                    if py < next_y || (is_last_visual_line && py >= y) {
-                        if layout_line.glyphs.is_empty() {
-                            let first_start = 0;
-                            return global_offset + first_start;
-                        }
-                        for glyph in layout_line.glyphs.iter() {
-                            let mid = glyph.x + glyph.w * 0.5;
-                            if px < mid {
-                                return global_offset + glyph.start;
-                            }
-                        }
-                        if let Some(last) = layout_line.glyphs.last() {
-                            return global_offset + last.end;
-                        }
-                        return global_offset;
-                    }
-                    y = next_y;
-                }
-            } else {
-                let next_y = y + line_height;
-                let is_last_visual_line = line_idx == buffer.lines.len() - 1;
-                if py < next_y || (is_last_visual_line && py >= y) {
-                    return global_offset;
-                }
-                y = next_y;
-            }
-            global_offset += line_text.len() + line.ending().as_str().len();
-        }
-        self.text.len()
-    }
-
-    fn offset_at_visual_line_x(&self, target_y: f32, target_x: f32) -> usize {
-        let buffer = match &self.buffer {
-            Some(b) => b,
-            None => return 0,
-        };
-        let line_height = self.line_height();
-        let mut y = 0.0_f32;
-        let mut global_offset = 0_usize;
-
-        for (_line_idx, line) in buffer.lines.iter().enumerate() {
-            let line_text = line.text();
-            if let Some(layout_lines) = line.layout_opt() {
-                for layout_line in layout_lines.iter() {
-                    if (y - target_y).abs() < 0.5 {
-                        if layout_line.glyphs.is_empty() {
-                            return global_offset;
-                        }
-                        for glyph in layout_line.glyphs.iter() {
-                            let mid = glyph.x + glyph.w * 0.5;
-                            if target_x < mid {
-                                return global_offset + glyph.start;
-                            }
-                        }
-                        if let Some(last) = layout_line.glyphs.last() {
-                            return global_offset + last.end;
-                        }
-                        return global_offset;
-                    }
-                    y += line_height;
-                }
-            } else {
-                if (y - target_y).abs() < 0.5 {
-                    return global_offset;
-                }
-                y += line_height;
-            }
-            global_offset += line_text.len() + line.ending().as_str().len();
-        }
-        self.text.len()
-    }
-
-    fn collect_visual_line_ys(&self) -> Vec<f32> {
-        let buffer = match &self.buffer {
-            Some(b) => b,
-            None => return vec![0.0],
-        };
-        let line_height = self.line_height();
-        let mut ys = Vec::new();
-        let mut y = 0.0_f32;
-        for line in buffer.lines.iter() {
-            if let Some(layout_lines) = line.layout_opt() {
-                for _ in layout_lines.iter() {
-                    ys.push(y);
-                    y += line_height;
-                }
-            } else {
-                ys.push(y);
-                y += line_height;
-            }
-        }
-        if ys.is_empty() {
-            ys.push(0.0);
-        }
-        ys
+        let hit = self.geometry().map_or(0, |layout| layout.hit(px, py));
+        floor_char_boundary(&self.text, hit)
     }
 
     fn refresh_syntax(&mut self) {
@@ -542,64 +402,51 @@ impl Editor {
             return;
         }
         self.syntax_dirty = false;
+        let had_spans = !self.syntax_spans.is_empty();
         self.syntax_spans.clear();
-        if !self.mode.is_code() || self.text.len() > SYNTAX_HIGHLIGHT_MAX_BYTES {
-            return;
+        if self.mode.is_code()
+            && self.text.len() <= SYNTAX_HIGHLIGHT_MAX_BYTES
+            && let Some(highlighter) = &self.syntax_highlighter
+        {
+            self.syntax_spans = highlighter(&self.text);
         }
-        let Some(highlighter) = &self.syntax_highlighter else {
-            return;
-        };
-        self.syntax_spans = highlighter(&self.text);
-    }
-
-    pub fn set_font_size(&mut self, font_system: &mut glyphon::FontSystem, font_size: f32) {
-        if (self.font_size - font_size).abs() < 0.01 {
-            return;
-        }
-        self.font_size = font_size;
-        if let Some(buffer) = &mut self.buffer {
-            let metrics = Metrics::new(font_size, font_size * LINE_HEIGHT_FACTOR);
-            buffer.set_metrics(font_system, metrics);
-        }
-    }
-
-    pub fn invalidate_font(&mut self) {
-        self.buffer = None;
-        self.dirty = true;
-    }
-
-    fn ensure_init(&mut self, font_system: &mut glyphon::FontSystem) {
-        if self.buffer.is_none() {
-            let mut buffer = Buffer::new(font_system, self.metrics());
-            buffer.set_wrap(font_system, Wrap::WordOrGlyph);
-            self.buffer = Some(buffer);
+        if had_spans || !self.syntax_spans.is_empty() {
             self.dirty = true;
         }
     }
 
-    pub fn request_clear(&mut self) {
-        self.text.clear();
-        self.cursor = 0;
-        self.anchor = 0;
-        self.scroll_y = 0.0;
-        self.desired_x = None;
+    pub fn set_font_size(&mut self, font_size: f32) {
+        if (self.font_size - font_size).abs() < 0.01 {
+            return;
+        }
+        self.font_size = font_size;
         self.dirty = true;
-        self.syntax_dirty = true;
-        self.note_cursor_activity();
     }
 
+    pub fn invalidate_font(&mut self) {
+        self.layout = None;
+        self.display = None;
+        self.dirty = true;
+    }
+
+    pub fn request_clear(&mut self) {
+        self.set_text("");
+    }
+
+    /// Replace the text programmatically. Clears undo history.
     pub fn set_text(&mut self, value: &str) {
         self.text.clear();
         self.text.push_str(value);
         self.cursor = self.text.len();
         self.anchor = self.cursor;
         self.scroll_y = 0.0;
-        self.desired_x = None;
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.note_cursor_activity();
+        self.history.clear();
+        self.clear_preedit();
+        self.text_changed();
     }
 
+    /// Append text programmatically (streaming). Earlier undo steps stay
+    /// valid because their offsets are untouched.
     pub fn append(&mut self, value: &str) {
         let at_end = self.cursor == self.text.len() && self.anchor == self.cursor;
         self.text.push_str(value);
@@ -607,43 +454,63 @@ impl Editor {
             self.cursor = self.text.len();
             self.anchor = self.cursor;
         }
+        self.history.break_coalescing();
         self.reveal_cursor_on_flush = true;
         self.dirty = true;
         self.syntax_dirty = true;
         self.desired_x = None;
     }
 
-    pub fn sync_size(&mut self, font_system: &mut glyphon::FontSystem, width: f32, height: f32) {
-        let size_changed =
-            (self.last_width - width).abs() > 0.5 || (self.last_height - height).abs() > 0.5;
-        if !size_changed {
-            return;
+    /// Viewport size in pixels; the width is the wrap width.
+    pub fn sync_size(&mut self, width: f32, height: f32) {
+        if (self.last_width - width).abs() > 0.5 {
+            self.dirty = true;
         }
         self.last_width = width;
         self.last_height = height;
-        self.set_size(font_system, width, height);
     }
 
-    pub fn flush(&mut self, font_system: &mut glyphon::FontSystem) {
-        self.ensure_init(font_system);
-        if self.last_width > 0.0 {
-            self.set_size(font_system, self.last_width, self.last_height);
-        }
+    fn layout_params(&self, text: &str, spans: Vec<TextSpan>) -> TextParams {
+        let style = TextStyle::new(self.font_size)
+            .kind(self.mode.font_kind())
+            .line_height(self.line_height());
+        let wrap = (self.last_width > 0.0).then_some(self.last_width.max(1.0));
+        TextParams::new(text, style).spans(spans).wrap_width(wrap)
+    }
+
+    /// Rebuild the layout after changes, place the caret, and scroll it
+    /// into view if it moved.
+    pub fn flush(&mut self, text_system: &mut TextSystem) {
         self.refresh_syntax();
-        let buffer = self.buffer.as_mut().unwrap();
-        if self.dirty {
+        let relayout = self.dirty || self.layout.is_none();
+        if relayout {
             self.dirty = false;
-            let attrs = Attrs::new().family(self.mode.family());
-            buffer.set_text(font_system, &self.text, &attrs, self.mode.shaping(), None);
+            let (spans, kinds) = syntax_layout_spans(&self.text, &self.syntax_spans);
+            let params = self.layout_params(&self.text, spans);
+            self.layout = text_system.layout(&params).ok().map(Arc::new);
+            self.span_kinds = kinds;
         }
-        buffer.shape_until_scroll(font_system, false);
-        let (x, y) = self.offset_to_point(self.cursor);
+        if relayout || self.preedit_dirty {
+            self.preedit_dirty = false;
+            self.rebuild_composition(text_system);
+        }
+
+        let (x, y) = match (&self.composition, &self.display) {
+            (Some(composition), Some(display)) => {
+                self.caret_hidden = composition.caret.is_none();
+                let caret = display.caret(composition.caret.unwrap_or(composition.preedit.end));
+                (caret.x, caret.y)
+            }
+            _ => {
+                self.caret_hidden = false;
+                self.offset_to_point(self.cursor)
+            }
+        };
         self.cursor_pos = CursorState { x, y };
         let max_scroll = (self.content_height() - self.last_height).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
         if std::mem::take(&mut self.reveal_cursor_on_flush) && self.last_height > 0.0 {
-            let line_height = self.line_height();
-            let cursor_bottom = y + line_height;
+            let cursor_bottom = y + self.line_height();
             if cursor_bottom > self.scroll_y + self.last_height {
                 self.scroll_y = cursor_bottom - self.last_height;
             } else if y < self.scroll_y {
@@ -653,14 +520,24 @@ impl Editor {
         }
     }
 
-    pub fn set_size(&mut self, font_system: &mut glyphon::FontSystem, width: f32, height: f32) {
-        self.ensure_init(font_system);
-        let buffer = self.buffer.as_mut().unwrap();
-        let _ = height;
-        // Leave buffer height unconstrained so cosmic-text lays out the full
-        // document. The viewport height is tracked separately in `last_height`
-        // for our own scrolling logic.
-        buffer.set_size(font_system, Some(width.max(1.0)), None);
+    fn rebuild_composition(&mut self, text_system: &mut TextSystem) {
+        self.composition = None;
+        self.display = None;
+        let Some(preedit) = &self.preedit else {
+            return;
+        };
+        let (start, end) = self.selection_range();
+        let composition = compose(&self.text, (start, end), preedit);
+        let (spans, _) = syntax_layout_spans(&self.text, &self.syntax_spans);
+        let (spans, _) = shift_spans(
+            &spans,
+            &self.span_kinds,
+            start..end,
+            composition.preedit.len(),
+        );
+        let params = self.layout_params(&composition.text, spans);
+        self.display = text_system.layout(&params).ok().map(Arc::new);
+        self.composition = Some(composition);
     }
 
     pub fn text(&self) -> String {
@@ -679,6 +556,29 @@ impl Editor {
         &self.syntax_spans
     }
 
+    /// The layout the element should paint: the committed text, or the
+    /// composed text while an IME preedit is active.
+    pub fn paint_layout(&self) -> Option<Arc<TextLayout>> {
+        self.display.clone().or_else(|| self.layout.clone())
+    }
+
+    /// Syntax kind of each span of [`Editor::paint_layout`].
+    pub fn paint_span_kinds(&self) -> Vec<SyntaxTokenKind> {
+        match (&self.display, &self.composition) {
+            (Some(_), Some(composition)) => {
+                let (start, end) = self.selection_range();
+                let (spans, kinds) = syntax_layout_spans(&self.text, &self.syntax_spans);
+                shift_spans(&spans, &kinds, start..end, composition.preedit.len()).1
+            }
+            _ => self.span_kinds.clone(),
+        }
+    }
+
+    /// The committed-text layout from the last flush.
+    pub fn layout(&self) -> Option<&Arc<TextLayout>> {
+        self.layout.as_ref()
+    }
+
     pub fn byte_len(&self) -> usize {
         self.text.len()
     }
@@ -693,48 +593,38 @@ impl Editor {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.text.is_empty() && self.preedit.is_none()
     }
 
     pub fn content_height(&self) -> f32 {
         let line_height = self.line_height();
-        let Some(buffer) = &self.buffer else {
-            return line_height;
-        };
-        let mut total = 0.0_f32;
-        for line in buffer.lines.iter() {
-            if let Some(layout) = line.layout_opt() {
-                total += layout.len() as f32 * line_height;
-            } else {
-                total += line_height;
-            }
-        }
-        total.max(line_height)
+        let layout = self.display.as_deref().or(self.geometry());
+        layout
+            .map_or(line_height, |layout| layout.size().1)
+            .max(line_height)
     }
 
     pub fn scroll_line_height_px(&self) -> f32 {
         self.line_height()
     }
 
+    /// `(1-based logical line, top)` for each logical line.
     pub fn logical_line_tops(&self) -> Vec<(usize, f32)> {
-        let Some(buffer) = &self.buffer else {
+        let Some(layout) = self.geometry() else {
             return if self.text.is_empty() {
                 Vec::new()
             } else {
                 vec![(1, 0.0)]
             };
         };
-        let line_height = self.line_height();
+        let text = layout.text();
         let mut out = Vec::new();
-        let mut y = 0.0_f32;
-        for (line_idx, line) in buffer.lines.iter().enumerate() {
-            out.push((line_idx + 1, y));
-            let visual_lines = line
-                .layout_opt()
-                .map(|lines| lines.len())
-                .unwrap_or(1)
-                .max(1);
-            y += visual_lines as f32 * line_height;
+        for line in layout.lines() {
+            let start = line.byte_range.start;
+            let paragraph_start = start == 0 || text.as_bytes().get(start - 1) == Some(&b'\n');
+            if paragraph_start {
+                out.push((out.len() + 1, line.top));
+            }
         }
         out
     }
@@ -744,495 +634,355 @@ impl Editor {
             return None;
         }
         let (start, end) = self.selection_range();
-        let s = &self.text[start..end];
-        if s.is_empty() {
-            None
-        } else {
-            Some(s.to_string())
-        }
+        self.text
+            .get(start..end)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
     }
 
+    /// Selection highlight rects in layout coordinates. Empty while composing.
     pub fn selection_rects(&self) -> Vec<SelectionRect> {
-        if !self.has_selection() {
+        if !self.has_selection() || self.preedit.is_some() {
             return Vec::new();
         }
-        let Some(buffer) = &self.buffer else {
+        let Some(layout) = self.geometry() else {
             return Vec::new();
         };
-        let (sel_start, sel_end) = self.selection_range();
-        let (start_line, start_col) = self.global_to_line_col(sel_start);
-        let (end_line, end_col) = self.global_to_line_col(sel_end);
-        let line_height = self.line_height();
-        let mut rects = Vec::new();
-        let mut y = 0.0_f32;
-
-        for (line_idx, line) in buffer.lines.iter().enumerate() {
-            if let Some(layout_lines) = line.layout_opt() {
-                for layout_line in layout_lines.iter() {
-                    let first_start = layout_line.glyphs.first().map(|g| g.start).unwrap_or(0);
-                    let last_end = layout_line.glyphs.last().map(|g| g.end).unwrap_or(0);
-
-                    let in_selection = if start_line == end_line && start_line == line_idx {
-                        last_end > 0 && first_start < end_col && last_end > start_col
-                    } else if line_idx == start_line {
-                        last_end > start_col
-                    } else if line_idx == end_line {
-                        first_start < end_col
-                    } else {
-                        line_idx > start_line && line_idx < end_line
-                    };
-
-                    if in_selection {
-                        let local_sel_start = if line_idx == start_line { start_col } else { 0 };
-                        let local_sel_end = if line_idx == end_line {
-                            end_col
-                        } else {
-                            usize::MAX
-                        };
-
-                        let mut x_start = 0.0_f32;
-                        let mut x_end = 0.0_f32;
-                        let mut found_start = false;
-
-                        for glyph in layout_line.glyphs.iter() {
-                            if !found_start && glyph.end > local_sel_start {
-                                x_start = glyph.x;
-                                found_start = true;
-                            }
-                            if glyph.start < local_sel_end {
-                                x_end = glyph.x + glyph.w;
-                            }
-                        }
-
-                        if !found_start && layout_line.glyphs.is_empty() {
-                            x_start = 0.0;
-                            x_end = line_height * 0.3;
-                        }
-
-                        if x_end > x_start || layout_line.glyphs.is_empty() {
-                            rects.push(SelectionRect {
-                                x: x_start,
-                                y,
-                                w: x_end - x_start,
-                                h: line_height,
-                            });
-                        }
-                    }
-
-                    y += line_height;
-                }
-            } else {
-                y += line_height;
-            }
-        }
-
-        rects
+        let (start, end) = self.selection_range();
+        layout
+            .selection_rects(start..end)
+            .map(|r| SelectionRect {
+                x: r.x,
+                y: r.y,
+                w: r.width,
+                h: r.height,
+            })
+            .collect()
     }
 
-    pub fn buffer(&self) -> Option<&Buffer> {
-        self.buffer.as_ref()
+    /// Rects under the preedit (to underline) and under the IME's
+    /// highlighted clause, in paint-layout coordinates.
+    pub fn preedit_rects(&self) -> (Vec<SelectionRect>, Vec<SelectionRect>) {
+        let (Some(display), Some(composition)) = (&self.display, &self.composition) else {
+            return (Vec::new(), Vec::new());
+        };
+        let rects = |range: Range<usize>| {
+            display
+                .selection_rects(range)
+                .map(|r| SelectionRect {
+                    x: r.x,
+                    y: r.y,
+                    w: r.width,
+                    h: r.height,
+                })
+                .collect::<Vec<_>>()
+        };
+        let clause = composition.clause.clone().map(rects).unwrap_or_default();
+        (rects(composition.preedit.clone()), clause)
     }
 
-    pub fn insert_char(&mut self, ch: char) {
-        if !self.mode.is_editable() {
-            return;
-        }
-        self.delete_selection();
-        self.text.insert(self.cursor, ch);
-        self.cursor += ch.len_utf8();
-        self.anchor = self.cursor;
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
+    /// Whether the caret is drawn (the IME may hide it while composing).
+    pub fn caret_visible(&self) -> bool {
+        !self.caret_hidden
     }
 
-    pub fn insert_newline(&mut self) {
-        self.insert_char('\n');
-    }
-
-    pub fn insert_text(&mut self, s: &str) {
-        if !self.mode.is_editable() {
-            return;
-        }
-        self.delete_selection();
-        self.text.insert_str(self.cursor, s);
-        self.cursor += s.len();
-        self.anchor = self.cursor;
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
-    }
-
-    pub fn delete_backward(&mut self) {
-        if !self.mode.is_editable() {
-            return;
-        }
-        if self.delete_selection() {
-            self.desired_x = None;
+    pub fn set_preedit(&mut self, text: impl Into<String>, cursor: Option<(usize, usize)>) {
+        let preedit = Preedit::new(text, cursor);
+        if preedit != self.preedit {
+            self.preedit = preedit;
+            self.preedit_dirty = true;
             self.note_cursor_activity();
-            return;
         }
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = prev_char_boundary(&self.text, self.cursor);
-        self.text.drain(prev..self.cursor);
-        self.cursor = prev;
-        self.anchor = prev;
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
     }
 
-    pub fn delete_forward(&mut self) {
-        if !self.mode.is_editable() {
-            return;
-        }
-        if self.delete_selection() {
-            self.desired_x = None;
-            self.note_cursor_activity();
-            return;
-        }
-        if self.cursor >= self.text.len() {
-            return;
-        }
-        let next = next_char_boundary(&self.text, self.cursor);
-        self.text.drain(self.cursor..next);
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
+    pub fn preedit(&self) -> Option<&Preedit> {
+        self.preedit.as_ref()
     }
 
-    pub fn delete_backward_word(&mut self) {
-        if !self.mode.is_editable() {
-            return;
+    fn clear_preedit(&mut self) {
+        if self.preedit.take().is_some() {
+            self.preedit_dirty = true;
         }
+    }
+
+    /// Commit composed IME text over the selection. Each commit is one undo step.
+    pub fn commit_ime(&mut self, value: &str) -> bool {
+        self.history.break_coalescing();
+        let changed = self.insert_text(value);
+        self.history.break_coalescing();
+        changed
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if !self.mode.is_editable() {
+            return false;
+        }
+        self.clear_preedit();
+        let Some((anchor, cursor)) = self.history.undo(&mut self.text) else {
+            return false;
+        };
+        self.anchor = floor_char_boundary(&self.text, anchor);
+        self.cursor = floor_char_boundary(&self.text, cursor);
+        self.text_changed();
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if !self.mode.is_editable() {
+            return false;
+        }
+        self.clear_preedit();
+        let Some((anchor, cursor)) = self.history.redo(&mut self.text) else {
+            return false;
+        };
+        self.anchor = floor_char_boundary(&self.text, anchor);
+        self.cursor = floor_char_boundary(&self.text, cursor);
+        self.text_changed();
+        true
+    }
+
+    pub fn insert_char(&mut self, ch: char) -> bool {
+        self.insert_text(ch.encode_utf8(&mut [0; 4]))
+    }
+
+    pub fn insert_newline(&mut self) -> bool {
+        self.insert_char('\n')
+    }
+
+    pub fn insert_text(&mut self, s: &str) -> bool {
+        let (start, end) = self.selection_range();
+        self.replace(start..end, s, EditKind::Typing)
+    }
+
+    /// Insert clipboard text over the selection as one undo step.
+    pub fn paste(&mut self, s: &str) -> bool {
+        let (start, end) = self.selection_range();
+        self.replace(start..end, s, EditKind::Other)
+    }
+
+    pub fn delete_backward(&mut self) -> bool {
         if self.delete_selection() {
-            self.desired_x = None;
-            self.note_cursor_activity();
-            return;
+            return true;
+        }
+        let prev = prev_grapheme_boundary(&self.text, self.cursor);
+        self.replace(prev..self.cursor, "", EditKind::Deleting)
+    }
+
+    pub fn delete_forward(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        let next = next_grapheme_boundary(&self.text, self.cursor);
+        self.replace(self.cursor..next, "", EditKind::Deleting)
+    }
+
+    pub fn delete_backward_word(&mut self) -> bool {
+        if self.delete_selection() {
+            return true;
         }
         let target = prev_word_boundary(&self.text, self.cursor);
-        if target == self.cursor {
-            return;
-        }
-        self.text.drain(target..self.cursor);
-        self.cursor = target;
-        self.anchor = target;
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
+        self.replace(target..self.cursor, "", EditKind::Other)
     }
 
-    pub fn delete_forward_word(&mut self) {
-        if !self.mode.is_editable() {
-            return;
-        }
+    pub fn delete_forward_word(&mut self) -> bool {
         if self.delete_selection() {
-            self.desired_x = None;
-            self.note_cursor_activity();
-            return;
+            return true;
         }
-        let target = next_word_boundary(&self.text, self.cursor);
-        if target == self.cursor {
-            return;
-        }
-        self.text.drain(self.cursor..target);
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
+        let target = next_word_end(&self.text, self.cursor);
+        self.replace(self.cursor..target, "", EditKind::Other)
     }
 
-    pub fn delete_backward_line(&mut self) {
-        if !self.mode.is_editable() {
-            return;
-        }
+    pub fn delete_backward_line(&mut self) -> bool {
         if self.delete_selection() {
-            self.desired_x = None;
-            self.note_cursor_activity();
-            return;
+            return true;
         }
         let (line, _col) = self.global_to_line_col(self.cursor);
         let start = self.line_start(line);
-        if start == self.cursor {
-            return;
-        }
-        self.text.drain(start..self.cursor);
-        self.cursor = start;
-        self.anchor = start;
-        self.dirty = true;
-        self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
+        self.replace(start..self.cursor, "", EditKind::Other)
     }
 
-    pub fn move_left(&mut self, selecting: bool) {
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        if !selecting && self.has_selection() {
-            let (start, _end) = self.selection_range();
-            self.cursor = start;
-            self.anchor = self.cursor;
-            self.desired_x = None;
-            if self.cursor != previous_cursor || self.anchor != previous_anchor {
-                self.note_cursor_activity();
-            }
-            return;
-        }
-        if self.cursor > 0 {
-            self.cursor = prev_char_boundary(&self.text, self.cursor);
-        }
+    /// Move the caret to `offset` (anchor too unless `selecting`), resetting
+    /// the remembered column.
+    fn move_to(&mut self, offset: usize, selecting: bool) {
+        let previous = (self.cursor, self.anchor);
+        self.cursor = floor_char_boundary(&self.text, offset);
         if !selecting {
             self.anchor = self.cursor;
         }
         self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
+        self.after_move(previous);
+    }
+
+    fn after_move(&mut self, previous: (usize, usize)) {
+        if (self.cursor, self.anchor) != previous {
+            self.history.break_coalescing();
+            self.clear_preedit();
             self.note_cursor_activity();
+        }
+    }
+
+    /// Collapse a selection to its start or end; returns true if there was one.
+    fn collapse(&mut self, to_end: bool, selecting: bool) -> bool {
+        if selecting || !self.has_selection() {
+            return false;
+        }
+        let (start, end) = self.selection_range();
+        self.move_to(if to_end { end } else { start }, false);
+        true
+    }
+
+    pub fn move_left(&mut self, selecting: bool) {
+        if !self.collapse(false, selecting) {
+            self.move_to(prev_grapheme_boundary(&self.text, self.cursor), selecting);
         }
     }
 
     pub fn move_right(&mut self, selecting: bool) {
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        if !selecting && self.has_selection() {
-            let (_start, end) = self.selection_range();
-            self.cursor = end;
-            self.anchor = self.cursor;
-            self.desired_x = None;
-            if self.cursor != previous_cursor || self.anchor != previous_anchor {
-                self.note_cursor_activity();
-            }
-            return;
-        }
-        if self.cursor < self.text.len() {
-            self.cursor = next_char_boundary(&self.text, self.cursor);
-        }
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
+        if !self.collapse(true, selecting) {
+            self.move_to(next_grapheme_boundary(&self.text, self.cursor), selecting);
         }
     }
 
     pub fn move_word_left(&mut self, selecting: bool) {
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        if !selecting && self.has_selection() {
-            let (start, _end) = self.selection_range();
-            self.cursor = start;
-            self.anchor = self.cursor;
-            self.desired_x = None;
-            if self.cursor != previous_cursor || self.anchor != previous_anchor {
-                self.note_cursor_activity();
-            }
-            return;
-        }
-        self.cursor = prev_word_boundary(&self.text, self.cursor);
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
+        if !self.collapse(false, selecting) {
+            self.move_to(prev_word_boundary(&self.text, self.cursor), selecting);
         }
     }
 
     pub fn move_word_right(&mut self, selecting: bool) {
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        if !selecting && self.has_selection() {
-            let (_start, end) = self.selection_range();
-            self.cursor = end;
-            self.anchor = self.cursor;
-            self.desired_x = None;
-            if self.cursor != previous_cursor || self.anchor != previous_anchor {
-                self.note_cursor_activity();
-            }
-            return;
-        }
-        self.cursor = next_word_boundary(&self.text, self.cursor);
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
+        if !self.collapse(true, selecting) {
+            self.move_to(next_word_end(&self.text, self.cursor), selecting);
         }
     }
 
     pub fn move_home(&mut self, selecting: bool) {
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
         let (line, _col) = self.global_to_line_col(self.cursor);
-        self.cursor = self.line_start(line);
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
-        }
+        self.move_to(self.line_start(line), selecting);
     }
 
     pub fn move_end(&mut self, selecting: bool) {
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
         let (line, _col) = self.global_to_line_col(self.cursor);
-        self.cursor = self.line_end(line);
-        if !selecting {
-            self.anchor = self.cursor;
+        self.move_to(self.line_end(line), selecting);
+    }
+
+    /// Byte range of the visual line holding the caret. The end of a
+    /// soft-wrapped line steps back over its trailing space so the caret
+    /// stays on that line.
+    fn visual_line_range(&self) -> Option<Range<usize>> {
+        let layout = self.geometry()?;
+        let caret = layout.caret(self.cursor);
+        let line = layout.line(caret.line)?;
+        let mut range = line.byte_range.clone();
+        let wrapped = layout
+            .line(caret.line + 1)
+            .is_some_and(|next| next.byte_range.start == range.end);
+        if wrapped && range.end > range.start {
+            range.end = prev_grapheme_boundary(&self.text, range.end).max(range.start);
         }
-        self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
-        }
+        Some(range)
     }
 
     pub fn move_soft_home(&mut self, selecting: bool) {
-        if self.buffer.is_none() {
-            self.move_home(selecting);
-            return;
-        }
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        let (cur_x, cur_y) = self.offset_to_point(self.cursor);
-        let _ = cur_x;
-        let ys = self.collect_visual_line_ys();
-        let mut target_y = 0.0_f32;
-        for &vy in &ys {
-            if (vy - cur_y).abs() < 0.5 {
-                target_y = vy;
-                break;
-            }
-        }
-        self.cursor = self.offset_at_visual_line_x(target_y, 0.0);
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
+        match self.visual_line_range() {
+            Some(range) => self.move_to(range.start, selecting),
+            None => self.move_home(selecting),
         }
     }
 
     pub fn move_soft_end(&mut self, selecting: bool) {
-        if self.buffer.is_none() {
-            self.move_end(selecting);
-            return;
+        match self.visual_line_range() {
+            Some(range) => self.move_to(range.end, selecting),
+            None => self.move_end(selecting),
         }
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        let (_cur_x, cur_y) = self.offset_to_point(self.cursor);
-        self.cursor = self.offset_at_visual_line_x(cur_y, f32::MAX);
+    }
+
+    fn move_vertical(&mut self, down: bool, selecting: bool) {
+        let Some(layout) = self.layout.clone() else {
+            return;
+        };
+        let previous = (self.cursor, self.anchor);
+        let caret = layout.caret(self.cursor);
+        let x = self.desired_x.unwrap_or(caret.x);
+        let target = if down {
+            caret.line.checked_add(1)
+        } else {
+            caret.line.checked_sub(1)
+        };
+        match target.and_then(|i| layout.line(i)) {
+            Some(line) => {
+                let hit = layout.hit(x, line.top + line.height * 0.5);
+                self.cursor = floor_char_boundary(&self.text, hit);
+                self.desired_x = Some(x);
+            }
+            None => {
+                self.cursor = if down { self.text.len() } else { 0 };
+                self.desired_x = None;
+            }
+        }
         if !selecting {
             self.anchor = self.cursor;
         }
-        self.desired_x = None;
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
-        }
+        self.after_move(previous);
     }
 
     pub fn move_up(&mut self, selecting: bool) {
-        if self.buffer.is_none() {
-            return;
-        }
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        let (cur_x, cur_y) = self.offset_to_point(self.cursor);
-        let target_x = self.desired_x.unwrap_or(cur_x);
-        let ys = self.collect_visual_line_ys();
-        let mut prev_y: Option<f32> = None;
-        for &vy in &ys {
-            if (vy - cur_y).abs() < 0.5 {
-                break;
-            }
-            prev_y = Some(vy);
-        }
-        if let Some(py) = prev_y {
-            self.cursor = self.offset_at_visual_line_x(py, target_x);
-            if self.desired_x.is_none() {
-                self.desired_x = Some(target_x);
-            }
-        } else if !selecting {
-            self.cursor = 0;
-            self.desired_x = None;
-        }
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
-        }
+        self.move_vertical(false, selecting);
     }
 
     pub fn move_down(&mut self, selecting: bool) {
-        if self.buffer.is_none() {
-            return;
-        }
-        let previous_cursor = self.cursor;
-        let previous_anchor = self.anchor;
-        let (cur_x, cur_y) = self.offset_to_point(self.cursor);
-        let target_x = self.desired_x.unwrap_or(cur_x);
-        let ys = self.collect_visual_line_ys();
-        let mut found_current = false;
-        let mut next_y: Option<f32> = None;
-        for &vy in &ys {
-            if found_current {
-                next_y = Some(vy);
-                break;
-            }
-            if (vy - cur_y).abs() < 0.5 {
-                found_current = true;
-            }
-        }
-        if let Some(ny) = next_y {
-            self.cursor = self.offset_at_visual_line_x(ny, target_x);
-            if self.desired_x.is_none() {
-                self.desired_x = Some(target_x);
-            }
-        } else if !selecting {
-            self.cursor = self.text.len();
-            self.desired_x = None;
-        }
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        if self.cursor != previous_cursor || self.anchor != previous_anchor {
-            self.note_cursor_activity();
-        }
+        self.move_vertical(true, selecting);
     }
 
     pub fn select_all(&mut self) {
-        self.anchor = 0;
-        self.cursor = self.text.len();
-        self.desired_x = None;
-        self.note_cursor_activity();
+        self.move_to(0, false);
+        self.move_to(self.text.len(), true);
+    }
+
+    /// Select the word run around `offset`.
+    pub fn select_word_at(&mut self, offset: usize) {
+        let range = word_range_at(&self.text, offset);
+        self.move_to(range.start, false);
+        self.move_to(range.end, true);
+    }
+
+    /// Select the logical line around `offset`, including its newline.
+    pub fn select_line_at(&mut self, offset: usize) {
+        let (line, _col) = self.global_to_line_col(offset);
+        let start = self.line_start(line);
+        let end = self.line_start(line + 1);
+        self.move_to(start, false);
+        self.move_to(end, true);
     }
 
     pub fn click(&mut self, x: i32, y: i32) {
-        let layout_y = y as f32 + self.scroll_y;
-        let offset = self.point_to_offset(x as f32, layout_y);
-        self.cursor = offset.min(self.text.len());
-        self.anchor = self.cursor;
-        self.desired_x = None;
-        self.note_cursor_activity();
+        self.multi_click(x, y, 1);
     }
 
+    /// A press in viewport coordinates: 1 places the caret, 2 selects the
+    /// word under it, 3 the line (see [`super::ClickCounter`]).
+    pub fn multi_click(&mut self, x: i32, y: i32, count: u8) {
+        let offset = self.point_to_offset(x as f32, y as f32 + self.scroll_y);
+        match count {
+            2 => self.select_word_at(offset),
+            3 => self.select_line_at(offset),
+            _ => self.move_to(offset, false),
+        }
+    }
+
+    /// Extend the selection to the pointer. Past the bottom or top edge
+    /// the caret lands outside the viewport, and the next flush scrolls
+    /// it into view.
     pub fn drag(&mut self, x: i32, y: i32) {
-        let layout_y = y as f32 + self.scroll_y;
-        let offset = self.point_to_offset(x as f32, layout_y);
-        self.cursor = offset.min(self.text.len());
-        self.desired_x = None;
-        self.note_cursor_activity();
+        let offset = self.point_to_offset(x as f32, y as f32 + self.scroll_y);
+        self.move_to(offset, true);
     }
 
     pub fn scroll(&mut self, delta_px: f32) {
@@ -1240,75 +990,67 @@ impl Editor {
         self.scroll_y = (self.scroll_y + delta_px).clamp(0.0, max_scroll);
     }
 
-    /// Apply a text editing command. Pointer-driven caret placement
-    /// (`SetTextCursor`, `ExtendTextSelection`) goes through `click`/`drag`
-    /// instead and is ignored here.
+    /// [`Editor::apply`] at the app's time `now_ms`.
+    pub fn apply_at(&mut self, cmd: TextEditCommand, now_ms: u64) -> TextEditOutcome {
+        self.now_ms = now_ms;
+        self.apply(cmd)
+    }
+
+    /// Apply a text editing command.
     pub fn apply(&mut self, cmd: TextEditCommand) -> TextEditOutcome {
         use TextEditCommand::*;
-        let before = (self.text.len(), self.cursor, self.anchor);
+        let before = (self.cursor, self.anchor);
         let mut outcome = TextEditOutcome::default();
-        let mut mutated = false;
-        match cmd {
-            InsertText(value) | Paste(value) => {
-                self.insert_text(&value);
-                outcome.text_changed = !value.is_empty();
-            }
-            Backspace => {
-                self.delete_backward();
-                mutated = true;
-            }
-            BackspaceWord => {
-                self.delete_backward_word();
-                mutated = true;
-            }
-            BackspaceLine => {
-                self.delete_backward_line();
-                mutated = true;
-            }
-            DeleteForward => {
-                self.delete_forward();
-                mutated = true;
-            }
-            DeleteForwardWord => {
-                self.delete_forward_word();
-                mutated = true;
-            }
-            CursorLeft => self.move_left(false),
-            CursorRight => self.move_right(false),
-            CursorUp => self.move_up(false),
-            CursorDown => self.move_down(false),
-            CursorWordLeft => self.move_word_left(false),
-            CursorWordRight => self.move_word_right(false),
-            CursorHome => self.move_home(false),
-            CursorEnd => self.move_end(false),
-            CursorSoftHome => self.move_soft_home(false),
-            CursorSoftEnd => self.move_soft_end(false),
-            SelectLeft => self.move_left(true),
-            SelectRight => self.move_right(true),
-            SelectUp => self.move_up(true),
-            SelectDown => self.move_down(true),
-            SelectWordLeft => self.move_word_left(true),
-            SelectWordRight => self.move_word_right(true),
-            SelectHome => self.move_home(true),
-            SelectEnd => self.move_end(true),
-            SelectSoftHome => self.move_soft_home(true),
-            SelectSoftEnd => self.move_soft_end(true),
-            SelectAll => self.select_all(),
-            Copy => outcome.clipboard_write = self.selected_text(),
+        let changed = match cmd {
+            InsertText(value) => self.insert_text(&value),
+            Paste(value) => self.paste(&value),
+            Backspace => self.delete_backward(),
+            BackspaceWord => self.delete_backward_word(),
+            BackspaceLine => self.delete_backward_line(),
+            DeleteForward => self.delete_forward(),
+            DeleteForwardWord => self.delete_forward_word(),
+            Undo => self.undo(),
+            Redo => self.redo(),
             Cut => {
                 outcome.clipboard_write = self.selected_text();
-                if outcome.clipboard_write.is_some() {
-                    self.delete_backward();
-                    outcome.text_changed = true;
-                }
+                outcome.clipboard_write.is_some() && self.delete_selection()
             }
-            SetTextCursor(_) | ExtendTextSelection(_) => {}
-        }
-        // Deletions never keep the length, so a length check detects whether they did anything.
-        if mutated {
-            outcome.text_changed = self.text.len() != before.0;
-        }
-        outcome.selection_changed = (self.cursor, self.anchor) != (before.1, before.2);
+            other => {
+                match other {
+                    CursorLeft => self.move_left(false),
+                    CursorRight => self.move_right(false),
+                    CursorUp => self.move_up(false),
+                    CursorDown => self.move_down(false),
+                    CursorWordLeft => self.move_word_left(false),
+                    CursorWordRight => self.move_word_right(false),
+                    CursorHome => self.move_home(false),
+                    CursorEnd => self.move_end(false),
+                    CursorSoftHome => self.move_soft_home(false),
+                    CursorSoftEnd => self.move_soft_end(false),
+                    SelectLeft => self.move_left(true),
+                    SelectRight => self.move_right(true),
+                    SelectUp => self.move_up(true),
+                    SelectDown => self.move_down(true),
+                    SelectWordLeft => self.move_word_left(true),
+                    SelectWordRight => self.move_word_right(true),
+                    SelectHome => self.move_home(true),
+                    SelectEnd => self.move_end(true),
+                    SelectSoftHome => self.move_soft_home(true),
+                    SelectSoftEnd => self.move_soft_end(true),
+                    SelectAll => self.select_all(),
+                    SelectWordAt(offset) => self.select_word_at(offset),
+                    SelectLineAt(offset) => self.select_line_at(offset),
+                    SetTextCursor(offset) => self.move_to(offset, false),
+                    ExtendTextSelection(offset) => self.move_to(offset, true),
+                    Copy => outcome.clipboard_write = self.selected_text(),
+                    InsertText(_) | Paste(_) | Backspace | BackspaceWord | BackspaceLine
+                    | DeleteForward | DeleteForwardWord | Undo | Redo | Cut => {}
+                }
+                false
+            }
+        };
+        outcome.text_changed = changed;
+        outcome.selection_changed = (self.cursor, self.anchor) != before;
         outcome
     }
 }
@@ -1318,10 +1060,10 @@ mod tests {
     use super::*;
 
     fn make_editor(width: f32, height: f32) -> (quark_text::TextSystem, Editor) {
-        let mut font_system = quark_text::TextSystem::vendored_only(&Default::default());
+        let font_system = quark_text::TextSystem::vendored_only(&Default::default());
 
         let mut editor = Editor::default();
-        editor.sync_size(font_system.font_system_mut(), width, height);
+        editor.sync_size(width, height);
 
         (font_system, editor)
     }
@@ -1347,13 +1089,13 @@ mod tests {
         let (mut font_system, mut editor) = make_editor(220.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
 
         editor.insert_text("line0\nline1\nline2\nline3");
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
         let line_height = editor.scroll_line_height_px();
         assert!((editor.scroll_y - line_height * 2.0).abs() < 0.5);
 
         editor.scroll(-line_height);
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
         assert!(
             (editor.scroll_y - line_height).abs() < 0.5,
@@ -1367,14 +1109,14 @@ mod tests {
         let (mut font_system, mut editor) = make_editor(220.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
 
         editor.insert_text("line0\nline1\nline2\nline3");
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
         let line_height = editor.scroll_line_height_px();
         editor.scroll(-line_height);
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
         editor.click(0, 0);
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
         assert_eq!(editor.cursor, "line0\n".len());
         assert_eq!(editor.anchor, "line0\n".len());
@@ -1385,7 +1127,7 @@ mod tests {
         let (mut font_system, mut editor) = make_editor(160.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
 
         editor.insert_text("first line\nsecond line\n");
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
         let line_height = editor.scroll_line_height_px();
         let cursor_bottom = editor.cursor_pos.y + line_height;
@@ -1408,7 +1150,7 @@ mod tests {
              asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf \
              sdaf asdf asdf asdf asd fasdf asdf asdf asdf asdf",
         );
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
         let line_height = editor.scroll_line_height_px();
         let cursor_bottom = editor.cursor_pos.y + line_height;
@@ -1440,25 +1182,16 @@ mod tests {
             "asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf \
              sdaf asdf asdf asdf asd fasdf asdf asdf asdf asdf",
         );
-        editor.flush(font_system.font_system_mut());
+        editor.flush(&mut font_system);
 
-        let line_height = editor.scroll_line_height_px();
-        let buffer = editor.buffer().expect("buffer");
-        let layout_lines = buffer.lines[0].layout_opt().expect("layout lines");
-        assert!(layout_lines.len() >= 2, "expected wrapped text");
-        let first_glyph = layout_lines[1]
-            .glyphs
-            .first()
-            .expect("glyph on wrapped line");
-        let target_offset = first_glyph.start;
-        let (_target_x, target_y) = editor.offset_to_point(target_offset);
-        let click_x = (first_glyph.x + first_glyph.w * 0.25) as i32;
-        let click_y = (target_y - editor.scroll_y + line_height * 0.5) as i32;
+        let layout = editor.layout().expect("layout").clone();
+        let second = layout.line(1).expect("wrapped text");
+        let click_y = (second.top - editor.scroll_y + second.height * 0.5) as i32;
 
-        editor.click(click_x, click_y);
-        editor.flush(font_system.font_system_mut());
+        editor.click(1, click_y);
+        editor.flush(&mut font_system);
 
-        assert_eq!(editor.cursor, target_offset);
+        assert_eq!(editor.cursor, second.byte_range.start);
     }
 
     #[test]

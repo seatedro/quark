@@ -1,0 +1,74 @@
+use super::TextEditCommand;
+
+/// Editing command for a key binding in the keymap format (`"ctrl+z"`,
+/// `"cmd+shift+arrowleft"`). `cmd` takes macOS meanings (line start/end on
+/// arrows, line delete on backspace); `ctrl` and `alt` move by words.
+/// Paste is absent because it needs the clipboard, which the app reads.
+pub fn command_for_binding(binding: &str) -> Option<TextEditCommand> {
+    use TextEditCommand::*;
+    let mut parts: Vec<&str> = binding.split('+').collect();
+    let key = parts.pop()?;
+    let (mut cmd, mut ctrl, mut alt, mut shift) = (false, false, false, false);
+    for modifier in parts {
+        match modifier {
+            "cmd" => cmd = true,
+            "ctrl" => ctrl = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            _ => return None,
+        }
+    }
+    let primary = cmd || ctrl;
+    let word = (ctrl || alt) && !cmd;
+    let pick = |plain, select| if shift { select } else { plain };
+    Some(match key {
+        "z" if primary && !alt => pick(Undo, Redo),
+        "y" if ctrl && !shift && !alt => Redo,
+        "a" if primary && !shift && !alt => SelectAll,
+        "c" if primary && !shift && !alt => Copy,
+        "x" if primary && !shift && !alt => Cut,
+        "arrowleft" if cmd => pick(CursorHome, SelectHome),
+        "arrowright" if cmd => pick(CursorEnd, SelectEnd),
+        "arrowleft" if word => pick(CursorWordLeft, SelectWordLeft),
+        "arrowright" if word => pick(CursorWordRight, SelectWordRight),
+        "arrowleft" if !primary && !alt => pick(CursorLeft, SelectLeft),
+        "arrowright" if !primary && !alt => pick(CursorRight, SelectRight),
+        "arrowup" if !primary && !alt => pick(CursorUp, SelectUp),
+        "arrowdown" if !primary && !alt => pick(CursorDown, SelectDown),
+        "home" if !alt => pick(CursorHome, SelectHome),
+        "end" if !alt => pick(CursorEnd, SelectEnd),
+        "backspace" if cmd => BackspaceLine,
+        "backspace" if word => BackspaceWord,
+        "backspace" => Backspace,
+        "delete" if word => DeleteForwardWord,
+        "delete" if !cmd => DeleteForward,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use TextEditCommand::*;
+
+    #[test]
+    fn undo_redo_and_word_bindings() {
+        let cases = [
+            ("ctrl+z", Some(Undo)),
+            ("cmd+z", Some(Undo)),
+            ("ctrl+shift+z", Some(Redo)),
+            ("cmd+shift+z", Some(Redo)),
+            ("ctrl+y", Some(Redo)),
+            ("alt+z", None),
+            ("ctrl+arrowleft", Some(CursorWordLeft)),
+            ("alt+shift+arrowright", Some(SelectWordRight)),
+            ("cmd+arrowleft", Some(CursorHome)),
+            ("ctrl+backspace", Some(BackspaceWord)),
+            ("cmd+backspace", Some(BackspaceLine)),
+            ("shift+arrowleft", Some(SelectLeft)),
+        ];
+        for (binding, expected) in cases {
+            assert_eq!(command_for_binding(binding), expected, "{binding}");
+        }
+    }
+}
