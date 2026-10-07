@@ -344,7 +344,7 @@ enum Attr {
     /// Requires `cx` to be in scope at the view! call site.
     ReactiveKeyValue(Ident, Expr),
     Class(LitStr),
-    IfAttr(Ident, ExprIf),
+    If(Ident, ExprIf),
     When(Expr, Vec<Attr>),
 }
 
@@ -354,7 +354,7 @@ impl Attr {
             Attr::Flag(name)
             | Attr::KeyValue(name, _)
             | Attr::ReactiveKeyValue(name, _)
-            | Attr::IfAttr(name, _) => name.span(),
+            | Attr::If(name, _) => name.span(),
             Attr::Class(lit) => lit.span(),
             Attr::When(cond, _) => cond.span(),
         }
@@ -598,7 +598,7 @@ impl Parse for Attr {
                 braced!(content in input);
                 if content.peek(Token![if]) {
                     let if_expr: ExprIf = content.parse()?;
-                    Ok(Attr::IfAttr(name, if_expr))
+                    Ok(Attr::If(name, if_expr))
                 } else if content.peek(Token![@]) {
                     content.parse::<Token![@]>()?;
                     let expr: Expr = content.parse()?;
@@ -1097,7 +1097,7 @@ impl EmitCtx {
                 let calls = self.class_to_calls(lit);
                 quote! { #chain #(#calls)* }
             }
-            Attr::IfAttr(name, if_expr) => self.emit_if_attr(chain, name, if_expr),
+            Attr::If(name, if_expr) => self.emit_if_attr(chain, name, if_expr),
             Attr::When(cond, attrs) => {
                 let mut inner = quote! { __w };
                 for a in attrs {

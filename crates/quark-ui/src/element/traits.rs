@@ -272,7 +272,7 @@ impl<C: RenderOnce> Element for ComponentElement<C> {
         _layout_state: &mut (),
         engine: &LayoutEngine,
         cx: &mut ElementContext,
-    ) -> () {
+    ) {
         if let Some(ref mut rendered) = self.rendered {
             rendered.prepaint(engine, cx);
         }

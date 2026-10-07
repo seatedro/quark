@@ -1,7 +1,7 @@
 //! Scene — immediate-mode primitive container emitted by the paint phase.
 //!
 //! Pure data: a `Vec<Primitive>` plus convenience builders. The renderer
-//! consumes the scene; halogen itself does not render.
+//! consumes the scene; quark itself does not render.
 
 use std::any::Any;
 use std::fmt;
@@ -105,6 +105,10 @@ impl Scene {
 
     pub fn len(&self) -> usize {
         self.primitives.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primitives.is_empty()
     }
 }
 

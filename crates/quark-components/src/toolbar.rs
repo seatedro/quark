@@ -9,6 +9,12 @@ pub struct Toolbar {
     right: Vec<AnyElement>,
 }
 
+impl Default for Toolbar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Toolbar {
     pub fn new() -> Self {
         Self {

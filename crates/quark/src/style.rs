@@ -1,7 +1,7 @@
 //! Style primitives — layout (Taffy) + visual (color, border, corner, shadow).
 //!
-//! Pure data. The fluent `Styled` trait built on top of these lives in diffy
-//! because it depends on diffy's design-token system (`Sp`, `Rad`, `ShadowLayer`).
+//! Pure data. The fluent `Styled` trait built on top of these lives in
+//! quark-ui because it depends on its design tokens (`Sp`, `Rad`, `ShadowLayer`).
 
 use crate::color::Color;
 
@@ -24,6 +24,10 @@ pub struct ElementStyle {
     pub opacity: f32,
     pub z_index: i32,
     pub shadows: Vec<ShadowStyle>,
+    /// Text and icon colors this element hands down to its descendants.
+    /// `None` inherits from the enclosing element.
+    pub text_color: Option<Color>,
+    pub icon_color: Option<Color>,
 }
 
 impl Default for ElementStyle {
@@ -40,6 +44,8 @@ impl Default for ElementStyle {
             opacity: 1.0,
             z_index: 0,
             shadows: Vec::new(),
+            text_color: None,
+            icon_color: None,
         }
     }
 }
@@ -106,6 +112,12 @@ pub fn apply_override(base: &mut ElementStyle, ov: &StyleOverride) {
     }
     if let Some(op) = ov.opacity {
         base.opacity = op;
+    }
+    if let Some(tc) = ov.text_color {
+        base.text_color = Some(tc);
+    }
+    if let Some(ic) = ov.icon_color {
+        base.icon_color = Some(ic);
     }
 }
 
@@ -176,4 +188,28 @@ pub fn vignette(color: Color, intensity: f32) -> BackgroundEffect {
 
 pub fn color_tint(color: Color) -> BackgroundEffect {
     BackgroundEffect::ColorTint { color }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn override_sets_text_and_icon_colors_and_keeps_unset_ones() {
+        let red = Color::rgba(255, 0, 0, 255);
+        let blue = Color::rgba(0, 0, 255, 255);
+        let mut style = ElementStyle {
+            text_color: Some(blue),
+            ..Default::default()
+        };
+
+        apply_override(&mut style, &StyleOverride::default().icon_color(red));
+        assert_eq!(
+            (style.text_color, style.icon_color),
+            (Some(blue), Some(red))
+        );
+
+        apply_override(&mut style, &StyleOverride::default().text_color(red));
+        assert_eq!((style.text_color, style.icon_color), (Some(red), Some(red)));
+    }
 }

@@ -11,11 +11,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Actions are pinned to commit SHAs; the comment names the release.
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install system dependencies
         run: |
@@ -25,21 +26,27 @@ jobs:
             libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev \
             mesa-vulkan-drivers libegl1 libgl1-mesa-dri
 
-      # rustup reads rust-toolchain.toml (nightly, default profile) here.
+      # rustup reads the dated nightly from rust-toolchain.toml here.
       - name: Install toolchain
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup component add rustfmt clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Format
         run: cargo fmt --all --check
 
-      # TODO: switch to `cargo clippy --workspace --all-targets -- -D warnings`
-      # once the existing warnings in crates/ are fixed.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Every optional feature at once, so feature-gated code keeps
+      # compiling. profile-tracy is left out: it and profile-puffin each
+      # install a global profiler backend and cannot be enabled together.
+      - name: Check all features
+        run: >-
+          cargo check --workspace --all-targets --features
+          quark-app/hot-reload,quark-app/syntax,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-render/headless-render,quark-syntax/common,quark-ui/syntax,quark-ui/devtools,quark-ui/profile,quark-text/profile
 
       - name: Test
         env:
@@ -50,20 +57,67 @@ jobs:
           # (InstanceDescriptor::from_env_or_default); default backends already
           # include Vulkan.
           WGPU_BACKEND: vulkan
-        run: cargo test --workspace
+        # Full O(n) integrity checks after every mutation (quark-ui's feature
+        # turns on quark's too); cheap debug checks run without it.
+        run: cargo test --workspace --features quark-ui/integrity-checks
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+
+      - name: Build fuzz targets
+        run: cargo fuzz build
+
+      # -runs=0 executes each committed input once and stops: a regression
+      # check over the corpus, not a fuzzing session.
+      - name: Replay corpora
+        run: |
+          for target in text_layout markdown; do
+            cargo fuzz run "$target" "$PWD/fuzz/corpus/$target" -- -runs=0
+          done
+
+      # Report only. Feeds every CommonMark 0.31.2 spec example through
+      # MarkdownDoc::parse and verify_integrity via the markdown target. It
+      # does not compare against the spec's expected HTML.
+      - name: CommonMark spec examples (report only)
+        continue-on-error: true
+        run: |
+          dir=$(mktemp -d)
+          curl -fsSL --retry 3 -o "$dir/spec.txt" \
+            https://raw.githubusercontent.com/commonmark/commonmark-spec/0.31.2/spec.txt
+          echo "257c41ad946f7a1414a499aca402a1aa8fdac3678532266611348c1cf54f4b80  $dir/spec.txt" | sha256sum -c -
+          python3 -I fuzz/commonmark_corpus.py "$dir/spec.txt" "$dir/corpus"
+          cargo fuzz run markdown "$dir/corpus" -- -runs=0
 
   miri:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install toolchain
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup component add miri rust-src
-          cargo +nightly miri setup
+          cargo miri setup
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # quark only: quark-text has no unsafe of its own, and shaping the
       # vendored fonts under Miri takes ~16 s per layout (its properties take
@@ -75,7 +129,7 @@ jobs:
           # zerocopy 0.8.60 (via proptest's rand_chacha) calls
           # align_of_val_raw under cfg(miri) without enabling its feature.
           RUSTFLAGS: "-Zcrate-attr=feature(layout_for_ptr)"
-        run: cargo +nightly miri test -p quark
+        run: cargo miri test -p quark
 
   kani:
     runs-on: ubuntu-latest
@@ -83,8 +137,9 @@ jobs:
     # search blow up (an earlier BlockOrder harness ran 87 minutes).
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: model-checking/kani-github-action@v1
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
+          kani-version: "0.68.0"
           args: -p quark

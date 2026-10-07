@@ -2,7 +2,7 @@
 //!
 //! `view!` is duck-typed: it emits calls to whatever `div()`, `text()`,
 //! `spacer()`, component constructors, and builder methods are in scope at
-//! the call site (in Diffy those live in `src/ui/element.rs`). The `dsl`
+//! the call site (quark-ui provides them in `element`). The `dsl`
 //! module below provides a minimal recording implementation of that contract
 //! so each lowering rule can be asserted at runtime. Rejected inputs are
 //! covered by the trybuild cases in `tests/ui/`.
@@ -408,7 +408,7 @@ fn multi_child_if_spreads_into_parent_without_wrapper() {
 
 #[test]
 fn for_loop_flattens_each_iteration() {
-    let items = vec!["a", "b", "c"];
+    let items = ["a", "b", "c"];
 
     let el = view! {
         <div>

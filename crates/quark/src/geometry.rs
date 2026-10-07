@@ -1,4 +1,4 @@
-//! Pure geometry primitives used by halogen hit-testing and scene emission.
+//! Pure geometry primitives used by quark hit-testing and scene emission.
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {

@@ -8,10 +8,10 @@
 #
 # A spec lives at e2e/specs/<example>/<behavior>.py and runs against
 # <example>. Build the examples first:
-#   cargo build --release -p quark-app --examples --features ui,notifications
+#   cargo build -p quark-app --examples --features ui,notifications
 #
 # Environment:
-#   QUARK_E2E_BIN_DIR  example binaries (default target/release/examples)
+#   QUARK_E2E_BIN_DIR  example binaries (default target/debug/examples)
 #   CUA_DRIVER         cua-driver binary (default: PATH, then e2e/install-cua.sh's)
 #   QUARK_E2E_OUT      artifacts root (default target/e2e/artifacts)
 #
@@ -21,7 +21,7 @@ set -euo pipefail
 
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(dirname "$E2E_DIR")
-export QUARK_E2E_BIN_DIR=${QUARK_E2E_BIN_DIR:-$ROOT/target/release/examples}
+export QUARK_E2E_BIN_DIR=${QUARK_E2E_BIN_DIR:-$ROOT/target/debug/examples}
 export QUARK_E2E_OUT=${QUARK_E2E_OUT:-$ROOT/target/e2e/artifacts}
 if [[ -z ${CUA_DRIVER:-} ]]; then
   CUA_DRIVER=$(command -v cua-driver || echo "$ROOT/target/e2e/cua-driver/cua-driver")

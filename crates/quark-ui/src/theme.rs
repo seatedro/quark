@@ -218,6 +218,8 @@ fn default_metrics() -> ThemeMetrics {
 ///
 /// Mapping convention — `n` is the 12-step neutral, `b` blue accent,
 /// `r` red, `g` green, `y` yellow. Indexed via `Step` enum.
+// One scale per hue; a struct would only rename the same eight arguments.
+#[allow(clippy::too_many_arguments)]
 fn dark_colors(
     n: &Scale,
     b: &Scale,
@@ -319,6 +321,7 @@ fn dark_colors(
 }
 
 /// Build light-mode theme colors from perceptual scales.
+#[allow(clippy::too_many_arguments)]
 fn light_colors(
     n: &Scale,
     b: &Scale,

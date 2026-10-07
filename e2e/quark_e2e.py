@@ -58,6 +58,14 @@ class Node:
                 return node
         return None
 
+    def require(self, role, name=None):
+        """Like `find`, but a missing node fails the spec with the tree."""
+        node = self.find(role, name)
+        if node is None:
+            what = f"{role} {name!r}" if name is not None else role
+            raise AssertionError(f"no {what} under {ROLE_NAME.get(self.role, self.role)} {self.name!r}:\n{self.dump()}")
+        return node
+
     def find_all(self, role):
         return [n for n in self.walk() if n.role == ROLE[role]]
 
@@ -127,7 +135,11 @@ def atspi_tree(app_name):
 
 
 def wait_for(what, probe, timeout=15.0, interval=0.1):
-    """Poll `probe` until it returns a truthy value; fail with `what` on timeout."""
+    """Poll `probe` until it returns a truthy value; fail with `what` on timeout.
+
+    Any exception from `probe` counts as "not yet": the tree is rebuilt
+    between polls, so a node can be missing or half-published mid-update.
+    The last one is reported if the deadline passes."""
     deadline = time.monotonic() + timeout
     last_error = None
     while time.monotonic() < deadline:
@@ -135,10 +147,11 @@ def wait_for(what, probe, timeout=15.0, interval=0.1):
             value = probe()
             if value:
                 return value
-        except dbus.DBusException as error:
+        except Exception as error:
             last_error = error
         time.sleep(interval)
-    raise AssertionError(f"timed out waiting for {what}" + (f": {last_error}" if last_error else ""))
+    detail = f": {type(last_error).__name__}: {last_error}" if last_error else ""
+    raise AssertionError(f"timed out waiting for {what}{detail}")
 
 
 def app_tree(content=True):
@@ -256,15 +269,21 @@ def example_binary(name):
 
 
 def main(spec):
-    """Run `spec(cua)`; exit 0 on success, 1 with the assertion on failure."""
-    cua = Cua()
+    """Run `spec(cua)`; exit 0 on success, 1 with a one-line FAIL on any error."""
+    cua = None
     try:
+        cua = Cua()
         spec(cua)
-    except AssertionError as error:
-        print(f"FAIL: {error}", file=sys.stderr)
+    except Exception as error:
+        kind = "" if isinstance(error, AssertionError) else f"{type(error).__name__}: "
+        print(f"FAIL: {kind}{error}", file=sys.stderr)
         sys.exit(1)
     finally:
-        cua.close()
+        if cua:
+            try:
+                cua.close()
+            except Exception as error:
+                print(f"cua-driver did not exit cleanly: {error}", file=sys.stderr)
     print("PASS")
 
 

@@ -6,9 +6,11 @@ use super::*;
 
 /// A leaf element that delegates painting to a caller-provided closure.
 /// Participates in layout via its Taffy style.
+type PaintFn = Box<dyn FnOnce(Bounds, &mut Scene, &mut ElementContext)>;
+
 pub struct Canvas {
     style: taffy::Style,
-    paint_fn: Option<Box<dyn FnOnce(Bounds, &mut Scene, &mut ElementContext)>>,
+    paint_fn: Option<PaintFn>,
 }
 
 /// Create a canvas element that calls `paint` with its resolved bounds.
@@ -57,7 +59,7 @@ impl Element for Canvas {
         _layout_state: &mut (),
         _engine: &LayoutEngine,
         _cx: &mut ElementContext,
-    ) -> () {
+    ) {
     }
 
     fn paint(

@@ -17,7 +17,7 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install system dependencies
         run: |
@@ -31,17 +31,14 @@ jobs:
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: e2e
 
-      # Release codegen without the slow parts of the release profile (thin
-      # LTO, one codegen unit): optimized enough to behave like a shipped app.
+      # Debug builds (opt-level 1): quicker to build, and debug assertions
+      # turn integrity violations into spec failures.
       - name: Build examples
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-        run: cargo build --release -p quark-app --examples --features ui,notifications
+        run: cargo build -p quark-app --examples --features ui,notifications
 
       - name: Install cua driver
         run: e2e/install-cua.sh
@@ -54,7 +51,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-artifacts
           path: |

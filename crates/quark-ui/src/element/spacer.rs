@@ -35,7 +35,7 @@ impl Element for Spacer {
         _layout_state: &mut (),
         _engine: &LayoutEngine,
         _cx: &mut ElementContext,
-    ) -> () {
+    ) {
     }
 
     fn paint(
