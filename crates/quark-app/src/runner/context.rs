@@ -8,7 +8,7 @@ pub struct Waker(WakeTarget);
 enum WakeTarget {
     EventLoop(EventLoopProxy<()>),
     /// No event loop: unit tests drive apps without one.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "ui"))]
     Detached,
 }
 
@@ -17,7 +17,7 @@ impl Waker {
         Self(WakeTarget::EventLoop(proxy))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "ui"))]
     pub(crate) fn detached() -> Self {
         Self(WakeTarget::Detached)
     }
@@ -27,7 +27,7 @@ impl Waker {
             WakeTarget::EventLoop(proxy) => {
                 let _ = proxy.send_event(());
             }
-            #[cfg(test)]
+            #[cfg(all(test, feature = "ui"))]
             WakeTarget::Detached => {}
         }
     }
@@ -36,7 +36,7 @@ impl Waker {
     pub fn proxy(&self) -> &EventLoopProxy<()> {
         match &self.0 {
             WakeTarget::EventLoop(proxy) => proxy,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "ui"))]
             WakeTarget::Detached => panic!("a detached test waker has no event loop"),
         }
     }

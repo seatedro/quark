@@ -320,7 +320,7 @@ impl<A: App> Runner<A> {
         }
         // Trimming walks the whole cache, and entries live for many frames
         // anyway, so a periodic sweep evicts the same entries for less.
-        if self.text.layouts.frame() % TRIM_LAYOUTS_EVERY == 0 {
+        if self.text.layouts.frame().is_multiple_of(TRIM_LAYOUTS_EVERY) {
             self.text.layouts.trim();
         }
         #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
