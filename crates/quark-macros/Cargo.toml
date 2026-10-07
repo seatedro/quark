@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/quark-macros"
+keywords = ["gui", "ui", "macro", "reactive"]
+categories = ["gui", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true
