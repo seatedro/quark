@@ -7,49 +7,48 @@ use super::*;
 pub type Bounds = Rect;
 
 // ---------------------------------------------------------------------------
-// HitRegion / ClickHandler — generic hit-testing specialized on ClickResult
+// ClickHandler / DragStart — pointer callbacks registered per semantic node
 // ---------------------------------------------------------------------------
 
-/// Hit region specialized on `ClickResult`.
-pub type HitRegion = quark::hit::HitRegion<ClickResult>;
+/// Click callback. Stored as `Rc<Fn>` so it can be cloned and invoked
+/// repeatedly.
+#[derive(Clone)]
+pub struct ClickHandler(Rc<dyn Fn(ClickEvent) -> Vec<Action>>);
 
-/// Click handler producing `ClickResult`.
-pub type ClickHandler = quark::hit::ClickHandler<ClickResult>;
-
-/// Helpers that make sense only when the handler's output is
-/// `ClickResult`. Extension trait so we can add methods without owning the
-/// underlying `quark::hit` type.
-pub trait ClickHandlerActionExt {
-    /// Build a handler that emits `action` on click. Action is captured by
-    /// value and cloned per invocation.
-    fn from_action(action: Action) -> Self;
-
-    /// Actions this handler would emit, for test introspection. Drag
-    /// captures yield an empty vec.
-    fn peek_actions(&self) -> Vec<Action>;
-}
-
-impl ClickHandlerActionExt for ClickHandler {
-    fn from_action(action: Action) -> Self {
-        quark::hit::ClickHandler::new(move |_| ClickResult::Actions(vec![action.clone()]))
+impl ClickHandler {
+    pub fn new(f: impl Fn(ClickEvent) -> Vec<Action> + 'static) -> Self {
+        Self(Rc::new(f))
     }
 
-    fn peek_actions(&self) -> Vec<Action> {
-        match self.invoke(ClickEvent { x: 0.0, y: 0.0 }) {
-            ClickResult::Actions(actions) => actions,
-            ClickResult::Handled | ClickResult::CaptureDrag(_) => Vec::new(),
-        }
+    /// Emit `action` on every click.
+    pub fn from_action(action: Action) -> Self {
+        Self::new(move |_| vec![action.clone()])
+    }
+
+    pub fn invoke(&self, event: ClickEvent) -> Vec<Action> {
+        (self.0)(event)
     }
 }
 
-// ---------------------------------------------------------------------------
-// ClickResult / DragHandler — click payload types
-// ---------------------------------------------------------------------------
+impl std::fmt::Debug for ClickHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClickHandler(..)")
+    }
+}
 
-pub enum ClickResult {
-    Handled,
-    Actions(Vec<Action>),
-    CaptureDrag(Box<dyn DragHandler>),
+/// Starts a drag on pointer down. The returned handler captures the
+/// pointer: it receives every move and the release, wherever they land.
+#[derive(Clone)]
+pub struct DragStart(Rc<dyn Fn(ClickEvent) -> Box<dyn DragHandler>>);
+
+impl DragStart {
+    pub fn new(f: impl Fn(ClickEvent) -> Box<dyn DragHandler> + 'static) -> Self {
+        Self(Rc::new(f))
+    }
+
+    pub fn start(&self, event: ClickEvent) -> Box<dyn DragHandler> {
+        (self.0)(event)
+    }
 }
 
 pub trait DragHandler {
@@ -128,16 +127,6 @@ impl DragHandler for ScrollbarDragHandler {
             actions: self.action_builder.on_drag_end.iter().cloned().collect(),
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// ScrollRegion — registered during prepaint for scroll wheel dispatch
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct ScrollRegion {
-    pub bounds: Bounds,
-    pub action_builder: ScrollActionBuilder,
 }
 
 /// A scrollbar track region — registered during paint for click-to-scroll and drag.

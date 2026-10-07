@@ -6,6 +6,7 @@ use crate::accessibility::{AccessibilityAction, AccessibilityNode};
 use crate::design::{Alpha, Sz};
 use crate::element::*;
 use crate::style::{ElementStyle, Styled};
+use quark::{SemanticActions, SemanticNode, SemanticRole};
 use quark_render::scene::{
     FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, ShapedText, TextPrimitive,
 };
@@ -162,7 +163,7 @@ impl Styled for TextEditorElement {
 
 impl Element for TextEditorElement {
     type LayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = HitId;
 
     fn request_layout(
         &mut self,
@@ -179,19 +180,15 @@ impl Element for TextEditorElement {
         _layout_state: &mut (),
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
-    ) {
-        cx.insert_hitbox(bounds, HitboxBehavior::Normal);
-        cx.scroll_regions.push(ScrollRegion {
-            bounds,
-            action_builder: self.on_scroll.clone(),
-        });
+    ) -> HitId {
+        cx.insert_hit(bounds, HitFlags::TEXT | HitFlags::SCROLL, CursorHint::Text)
     }
 
     fn paint(
         &mut self,
         bounds: Bounds,
         _layout_state: &mut (),
-        _prepaint_state: &mut (),
+        prepaint_state: &mut HitId,
         _engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
@@ -354,6 +351,22 @@ impl Element for TextEditorElement {
         scene.pop_clip();
 
         let target = self.focus_target;
+        let mut semantic_node = SemanticNode::new(bounds)
+            .id(format!("text-editor:{target:?}"))
+            .role(SemanticRole::TextInput);
+        semantic_node.parent = cx.current_semantic_parent();
+        semantic_node.actions = SemanticActions::default().text_value().scrollable();
+        semantic_node.focus = Some(target);
+        let node = cx.semantic.push(semantic_node);
+        cx.bind_hit(*prepaint_state, node);
+        cx.handlers.on_scroll(
+            node,
+            ScrollTarget {
+                builder: self.on_scroll.clone(),
+                offset: self.scroll_y,
+                max: Some((self.content_height - bounds.height).max(0.0)),
+            },
+        );
         cx.push_accessibility(
             AccessibilityNode::new(
                 format!("text-editor:{target:?}"),

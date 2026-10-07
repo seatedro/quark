@@ -1,15 +1,16 @@
 //! Components emit the app actions their caller supplies.
 
+use quark::StyleState;
 use quark::reactive::SignalStore;
 use quark_components::{Modal, PickerItem, Toast, ToastKind, ToastStack, picker_list};
 use quark_render::Scene;
 use quark_ui::Action;
 use quark_ui::animation::AnimationState;
 use quark_ui::element::{
-    AnyElement, ClickHandlerActionExt, ElementContext, IntoAnyElement, ScrollActionBuilder,
-    render_element,
+    AnyElement, ElementContext, InputRouter, IntoAnyElement, ScrollActionBuilder, render_element,
 };
 use quark_ui::icons::lucide;
+use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,29 +38,65 @@ impl PickerItem for Item {
     }
 }
 
-fn hit_actions(mut root: AnyElement) -> (Vec<Action>, Vec<Action>) {
+/// Paint `root` at 800x600 with the pointer at `pointer`; return the router
+/// for the frame and the test ids of nodes painted hovered.
+fn paint(mut root: AnyElement, pointer: Option<(f32, f32)>) -> (InputRouter, Vec<String>) {
     let mut text = quark_text::TextSystem::vendored_only(&Default::default());
     let mut layouts = quark_text::LayoutCache::default();
-    let mut store = SignalStore::new();
-    let theme = Box::leak(Box::new(Theme::default_dark()));
-    let mut cx = ElementContext::new(theme, 1.0, &mut text, &mut layouts, None, &mut store);
-    let mut scene = Scene::default();
-    render_element(&mut root, &mut scene, &mut cx, 800.0, 600.0);
-    let clicks = cx
-        .hits
+    let store = SignalStore::new();
+    let theme = Theme::default_dark();
+    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, pointer, &store);
+    render_element(&mut root, &mut Scene::default(), &mut cx, 800.0, 600.0);
+    let hovered = cx
+        .semantic
+        .nodes()
         .iter()
-        .flat_map(|hit| hit.on_click.peek_actions())
+        .filter(|node| node.state.style_state.contains(StyleState::HOVER))
+        .filter_map(|node| node.test_id.as_ref().map(|id| id.as_str().to_owned()))
         .collect();
-    let scrolls = cx
-        .scroll_regions
-        .iter()
-        .map(|region| region.action_builder.build(2))
+    let mut router = InputRouter::default();
+    router.set_frame(cx.take_input_frame());
+    (router, hovered)
+}
+
+/// Actions from clicking the center of every clickable node, and from a
+/// two-line wheel over every scrollable node.
+fn hit_actions(root: AnyElement) -> (Vec<Action>, Vec<Action>) {
+    let (mut router, _) = paint(root, None);
+    let centers = |want: fn(&quark::SemanticActions) -> bool| -> Vec<(f32, f32)> {
+        router
+            .frame()
+            .semantic
+            .nodes()
+            .iter()
+            .filter(|node| want(&node.actions))
+            .map(|node| {
+                let b = node.bounds;
+                (b.x + b.width / 2.0, b.y + b.height / 2.0)
+            })
+            .collect()
+    };
+    let click_points = centers(|actions| actions.click);
+    let scroll_points = centers(|actions| actions.scroll);
+    let clicks = click_points
+        .into_iter()
+        .flat_map(|(x, y)| router.pointer_down(x, y, &mut None).actions)
+        .collect();
+    let scrolls = scroll_points
+        .into_iter()
+        .flat_map(|(x, y)| router.wheel(x, y, 2).actions)
         .collect();
     (clicks, scrolls)
 }
 
 #[test]
-fn modal_backdrop_emits_on_dismiss() {
+fn modal_scrim_blocks_hover_and_click_beneath() {
+    let under = quark_ui::element::div()
+        .w(100.0)
+        .h(100.0)
+        .test_id("under")
+        .hover_bg(quark_ui::theme::Color::rgba(255, 0, 0, 255))
+        .on_click(Demo::Select(0));
     let modal = Modal::new(
         "Title",
         "",
@@ -69,8 +106,17 @@ fn modal_backdrop_emits_on_dismiss() {
         600.0,
         Demo::Dismiss,
     );
-    let (clicks, _) = hit_actions(modal.into_any());
-    assert!(clicks.contains(&Demo::Dismiss.into()));
+    let root = quark_ui::element::div()
+        .w(800.0)
+        .h(600.0)
+        .child(under)
+        .child(modal.into_any());
+
+    let (mut router, hovered) = paint(root.into_any(), Some((50.0, 50.0)));
+    let clicked = router.pointer_down(50.0, 50.0, &mut None).actions;
+
+    assert_eq!(hovered, ["modal-backdrop"]);
+    assert_eq!(clicked, [Action::from(Demo::Dismiss)]);
 }
 
 #[test]

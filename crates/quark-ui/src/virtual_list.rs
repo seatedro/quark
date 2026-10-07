@@ -1,5 +1,12 @@
 use std::ops::Range;
 
+mod fenwick;
+mod variable;
+
+pub use variable::{
+    RowError, RowIntegrityError, RowKey, RowTable, STICK_EPSILON_PX, ScrollAlign, VariableList,
+};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VirtualListWindow {
     pub range: Range<usize>,

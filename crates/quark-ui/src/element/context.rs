@@ -12,8 +12,10 @@ pub struct ElementContext<'a> {
     /// Layouts shared by measurement, paint, hit-testing, and selection.
     pub layouts: &'a mut LayoutCache,
     pub mouse_position: Option<(f32, f32)>,
-    pub hits: Vec<HitRegion>,
-    pub scroll_regions: Vec<ScrollRegion>,
+    /// Pointer hit entries in paint order; built in prepaint.
+    pub hit_table: HitTable,
+    /// Event handlers keyed by semantic node; registered in paint.
+    pub handlers: InputHandlers,
     pub focus: Option<FocusId>,
     pub signal_store: &'a SignalStore,
     pub clock_ms: u64,
@@ -24,9 +26,9 @@ pub struct ElementContext<'a> {
     pub tooltip_regions: Vec<TooltipRegion>,
     pub accessibility: AccessibilityFrame,
     pub semantic: SemanticFrame,
-    hitboxes: Vec<Hitbox>,
-    hovered_hitboxes: Vec<HitboxId>,
-    next_hitbox_id: usize,
+    hovered: Vec<HitId>,
+    /// Intersections of the clips pushed so far; the last one is current.
+    clip_stack: Vec<Rect>,
     z_index_stack: Vec<i32>,
     element_offset_stack: Vec<(f32, f32)>,
     text_color_stack: Vec<Color>,
@@ -50,8 +52,8 @@ impl<'a> ElementContext<'a> {
             text,
             layouts,
             mouse_position,
-            hits: Vec::new(),
-            scroll_regions: Vec::new(),
+            hit_table: HitTable::default(),
+            handlers: InputHandlers::default(),
             focus: None,
             signal_store,
             clock_ms: 0,
@@ -62,9 +64,8 @@ impl<'a> ElementContext<'a> {
             tooltip_regions: Vec::new(),
             accessibility: AccessibilityFrame::default(),
             semantic: SemanticFrame::default(),
-            hitboxes: Vec::new(),
-            hovered_hitboxes: Vec::new(),
-            next_hitbox_id: 0,
+            hovered: Vec::new(),
+            clip_stack: Vec::new(),
             z_index_stack: vec![0],
             element_offset_stack: vec![(0.0, 0.0)],
             text_color_stack: Vec::new(),
@@ -262,32 +263,56 @@ impl<'a> ElementContext<'a> {
         }
     }
 
-    pub fn push_click_handler(
-        &mut self,
-        bounds: Bounds,
-        cursor: CursorHint,
-        handler: ClickHandler,
-    ) {
-        self.hits.push(HitRegion::new(bounds, cursor, handler));
+    pub fn current_clip(&self) -> Rect {
+        self.clip_stack
+            .last()
+            .copied()
+            .unwrap_or(quark::hit::UNCLIPPED)
     }
 
-    pub fn insert_hitbox(&mut self, bounds: Bounds, behavior: HitboxBehavior) -> HitboxId {
-        let id = HitboxId::new(self.next_hitbox_id);
-        self.next_hitbox_id += 1;
-        self.hitboxes.push(Hitbox {
-            id,
-            bounds,
-            behavior,
-            z_index: self.current_z_index(),
-        });
-        id
+    /// Clip later hit entries to `rect`, intersected with the current clip,
+    /// mirroring `Scene::clip` for hit testing.
+    pub fn push_clip(&mut self, rect: Rect) {
+        let clip = self
+            .current_clip()
+            .intersection(rect)
+            .unwrap_or(quark::hit::EMPTY_CLIP);
+        self.clip_stack.push(clip);
     }
 
-    pub fn is_hovered(&self, id: HitboxId) -> bool {
-        self.hovered_hitboxes.contains(&id)
+    pub fn pop_clip(&mut self) {
+        self.clip_stack.pop();
+    }
+
+    /// Register a hit entry at the current z and clip. Bind it to its
+    /// semantic node with [`Self::bind_hit`] once that node exists.
+    pub fn insert_hit(&mut self, bounds: Bounds, flags: HitFlags, cursor: CursorHint) -> HitId {
+        let (z, clip) = (self.current_z_index(), self.current_clip());
+        self.hit_table.push(bounds, clip, z, flags, cursor)
+    }
+
+    pub fn bind_hit(&mut self, id: HitId, node: usize) {
+        self.hit_table.set_node(id, node);
+    }
+
+    pub fn is_hovered(&self, id: HitId) -> bool {
+        self.hovered.contains(&id)
     }
 
     pub fn run_hit_test(&mut self) {
-        self.hovered_hitboxes = quark::hit::resolve_hovered(&self.hitboxes, self.mouse_position);
+        self.hovered = match self.mouse_position {
+            Some((x, y)) => self.hit_table.stack_at(x, y),
+            None => Vec::new(),
+        };
+    }
+
+    /// Move this frame's hit table, handlers, and semantic tree out for an
+    /// [`InputRouter`].
+    pub fn take_input_frame(&mut self) -> InputFrame {
+        InputFrame {
+            hits: std::mem::take(&mut self.hit_table),
+            handlers: std::mem::take(&mut self.handlers),
+            semantic: std::mem::take(&mut self.semantic),
+        }
     }
 }

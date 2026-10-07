@@ -117,7 +117,7 @@ pub struct TextInputHitArea {
 
 impl Element for TextInput {
     type LayoutState = ();
-    type PrepaintState = Option<HitboxId>;
+    type PrepaintState = Option<HitId>;
 
     fn request_layout(
         &mut self,
@@ -134,19 +134,22 @@ impl Element for TextInput {
         _layout_state: &mut (),
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
-    ) -> Option<HitboxId> {
-        if self.on_click.is_some() || self.focus_target.is_some() {
-            Some(cx.insert_hitbox(bounds, HitboxBehavior::Normal))
-        } else {
-            None
+    ) -> Option<HitId> {
+        let mut flags = HitFlags::NONE;
+        if self.focus_target.is_some() {
+            flags |= HitFlags::TEXT;
         }
+        if self.on_click.is_some() {
+            flags |= HitFlags::CLICK;
+        }
+        (!flags.is_empty()).then(|| cx.insert_hit(bounds, flags, CursorHint::Text))
     }
 
     fn paint(
         &mut self,
         bounds: Bounds,
         _layout_state: &mut (),
-        _prepaint_state: &mut Option<HitboxId>,
+        prepaint_state: &mut Option<HitId>,
         _engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
@@ -307,13 +310,8 @@ impl Element for TextInput {
             }
         }
 
-        if let Some(action) = self.on_click.take() {
-            cx.hits.push(HitRegion::new(
-                bounds,
-                CursorHint::Text,
-                ClickHandler::from_action(action),
-            ));
-        }
+        let on_click = self.on_click.take();
+        let mut semantic_index = None;
 
         // Register hit area for click-to-position (stored in cx for app.rs to use)
         if let Some(target) = self.focus_target {
@@ -344,18 +342,22 @@ impl Element for TextInput {
                 .value(accessible_value.clone());
             semantic_node.parent = cx.current_semantic_parent();
             semantic_node.actions = SemanticActions::default().text_value().hit_test();
+            if on_click.is_some() {
+                semantic_node.actions = semantic_node.actions.clickable();
+            }
             semantic_node.focus = Some(target);
             semantic_node.state = SemanticNodeState {
                 style_state,
                 ..SemanticNodeState::default()
             };
-            let semantic_index = cx.semantic.push(semantic_node);
+            let index = cx.semantic.push(semantic_node);
+            semantic_index = Some(index);
             cx.push_accessibility_for_semantic(
                 AccessibilityNode::new(semantic_id, role, bounds)
                     .label(accessibility_label)
                     .value(accessible_value)
                     .action(AccessibilityAction::TextValue(target)),
-                semantic_index,
+                index,
             );
             cx.text_input_hit_areas.push(TextInputHitArea {
                 bounds,
@@ -369,6 +371,23 @@ impl Element for TextInput {
                 multiline: false,
                 layout: value_layout.cloned(),
             });
+        } else if on_click.is_some() {
+            let mut semantic_node = SemanticNode::new(bounds)
+                .role(SemanticRole::TextInput)
+                .label(accessibility_label);
+            semantic_node.parent = cx.current_semantic_parent();
+            semantic_node.actions = SemanticActions::default().clickable();
+            semantic_index = Some(cx.semantic.push(semantic_node));
+        }
+
+        if let Some(node) = semantic_index {
+            if let Some(hit) = *prepaint_state {
+                cx.bind_hit(hit, node);
+            }
+            if let Some(action) = on_click {
+                cx.handlers
+                    .on_click(node, ClickHandler::from_action(action));
+            }
         }
     }
 }

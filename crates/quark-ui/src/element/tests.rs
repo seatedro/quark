@@ -7,7 +7,6 @@ enum TestAction {
     Bootstrap,
     StartDeviceFlow,
     SelectFile(usize),
-    ScrollList(i32),
     OpenRefPicker,
 }
 
@@ -196,30 +195,6 @@ fn text_element_has_intrinsic_width() {
 }
 
 #[test]
-fn on_click_registers_hit_region() {
-    let mut ts = TestText::new();
-    let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut ts, &mut store);
-    let mut scene = Scene::default();
-
-    let mut root = div()
-        .w(200.0)
-        .h(50.0)
-        .on_click(TestAction::OpenRepoPicker)
-        .into_any();
-
-    render_element(&mut root, &mut scene, &mut cx, 200.0, 50.0);
-
-    assert_eq!(cx.hits.len(), 1);
-    assert_eq!(
-        cx.hits[0].on_click.peek_actions(),
-        vec![TestAction::OpenRepoPicker.into()]
-    );
-    assert_eq!(cx.hits[0].cursor, CursorHint::Pointer);
-    assert!(cx.hits[0].rect.width > 0.0);
-}
-
-#[test]
 fn hover_bg_applies_when_mouse_inside() {
     let mut ts = TestText::new();
     let mut store = SignalStore::new();
@@ -283,9 +258,10 @@ fn hover_bg_applies_when_rendered_at_offset() {
         assert_eq!(rr.rect.x, 400.0, "rect x should be globally offset");
         assert_eq!(rr.rect.y, 300.0, "rect y should be globally offset");
     }
-    let hit = cx.hits.last().expect("click handler registered");
-    assert_eq!(hit.rect.x, 400.0, "hit rect x should be globally offset");
-    assert_eq!(hit.rect.y, 300.0, "hit rect y should be globally offset");
+    let mut router = InputRouter::default();
+    router.set_frame(cx.take_input_frame());
+    let clicked = router.pointer_down(401.0, 301.0, &mut None).actions;
+    assert_eq!(clicked, vec![Action::from(TestAction::Bootstrap)]);
 }
 
 #[test]
@@ -377,17 +353,6 @@ fn realistic_title_bar_layout() {
         .filter(|p| matches!(p, quark_render::Primitive::TextRun(_)))
         .count();
     assert_eq!(text_count, 3, "should have 3 text labels");
-
-    // Should have 2 hit regions (Compare + PR buttons)
-    assert_eq!(cx.hits.len(), 2);
-    assert_eq!(
-        cx.hits[0].on_click.peek_actions(),
-        vec![TestAction::OpenRepoPicker.into()]
-    );
-    assert_eq!(
-        cx.hits[1].on_click.peek_actions(),
-        vec![TestAction::StartDeviceFlow.into()]
-    );
 }
 
 #[test]
@@ -514,13 +479,6 @@ fn realistic_file_list_with_scroll() {
             .into_any();
 
     render_element(&mut root, &mut scene, &mut cx, 260.0, 400.0);
-
-    // 4 file items should generate 4 hit regions
-    assert_eq!(cx.hits.len(), 4);
-    assert_eq!(
-        cx.hits[2].on_click.peek_actions(),
-        vec![TestAction::SelectFile(2).into()]
-    );
 
     // Should have text for header + 4 files = 5 text primitives
     let text_count = scene
@@ -741,56 +699,6 @@ fn canvas_element_emits_custom_primitives() {
 }
 
 #[test]
-fn hitbox_blocking_modal_prevents_hover_behind() {
-    // Scenario: a background div and a modal div that blocks mouse events.
-    // The mouse is at a position inside both. The background div should NOT
-    // be hovered because the modal's BlockMouse hitbox blocks it.
-    let mut ts = TestText::new();
-    let mut store = SignalStore::new();
-    let theme = Box::leak(Box::new(Theme::default_dark()));
-    let mut cx = ElementContext::new(
-        theme,
-        1.0,
-        &mut ts.system,
-        &mut ts.layouts,
-        Some((100.0, 100.0)),
-        &mut store,
-    );
-
-    // Register a "background" hitbox at (0,0)-(200,200).
-    let bg_id = cx.insert_hitbox(
-        Bounds {
-            x: 0.0,
-            y: 0.0,
-            width: 200.0,
-            height: 200.0,
-        },
-        HitboxBehavior::Normal,
-    );
-
-    // Register a "modal" hitbox at (50,50)-(150,150) that blocks mouse.
-    let modal_id = cx.insert_hitbox(
-        Bounds {
-            x: 50.0,
-            y: 50.0,
-            width: 100.0,
-            height: 100.0,
-        },
-        HitboxBehavior::BlockMouse,
-    );
-
-    cx.run_hit_test();
-
-    // The modal should be hovered (mouse at 100,100 is inside it).
-    assert!(cx.is_hovered(modal_id), "modal should be hovered");
-    // The background should NOT be hovered because the modal blocks it.
-    assert!(
-        !cx.is_hovered(bg_id),
-        "background should be blocked by modal"
-    );
-}
-
-#[test]
 fn render_once_component_renders_correctly() {
     // Define a simple component that produces a div with text.
     struct MyButton {
@@ -929,30 +837,6 @@ fn when_conditional_applies() {
 }
 
 #[test]
-fn on_scroll_registers_scroll_region() {
-    let mut ts = TestText::new();
-    let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut ts, &mut store);
-    let mut scene = Scene::default();
-
-    let mut root = div()
-        .w(260.0)
-        .h(400.0)
-        .scroll_y(0.0)
-        .on_scroll(ScrollActionBuilder::new(|d| {
-            TestAction::ScrollList(d).into()
-        }))
-        .child(div().w_full().h(1000.0))
-        .into_any();
-
-    render_element(&mut root, &mut scene, &mut cx, 260.0, 400.0);
-
-    assert_eq!(cx.scroll_regions.len(), 1);
-    let action = cx.scroll_regions[0].action_builder.build(3);
-    assert_eq!(action, TestAction::ScrollList(3).into());
-}
-
-#[test]
 fn focus_tracking_query() {
     let mut ts = TestText::new();
     let mut store = SignalStore::new();
@@ -993,9 +877,9 @@ fn text_input_renders_label_and_value() {
         .count();
     assert_eq!(text_count, 2, "should have label + value text");
 
-    // Should have a hit region
-    assert_eq!(cx.hits.len(), 1);
-    assert_eq!(cx.hits[0].cursor, CursorHint::Text);
+    let mut router = InputRouter::default();
+    router.set_frame(cx.take_input_frame());
+    assert_eq!(router.cursor_at(100.0, 28.0), CursorHint::Text);
 }
 
 #[test]
@@ -1374,52 +1258,6 @@ fn z_index_zero_emits_no_push_pop() {
         .iter()
         .any(|p| matches!(p, quark_render::Primitive::ZIndexPush(_)));
     assert!(!has_push, "z_index 0 should not emit ZIndexPush");
-}
-
-#[test]
-fn z_index_hitbox_priority() {
-    let mut ts = TestText::new();
-    let mut store = SignalStore::new();
-    let theme = Box::leak(Box::new(Theme::default_dark()));
-    let mut cx = ElementContext::new(
-        theme,
-        1.0,
-        &mut ts.system,
-        &mut ts.layouts,
-        Some((50.0, 50.0)),
-        &mut store,
-    );
-
-    // Register a z=0 hitbox covering (0,0)-(100,100).
-    cx.push_z_index(0);
-    let low_id = cx.insert_hitbox(
-        Bounds {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-        },
-        HitboxBehavior::Normal,
-    );
-    cx.pop_z_index();
-
-    // Register a z=10 BlockMouse hitbox covering (0,0)-(100,100).
-    cx.push_z_index(10);
-    let high_id = cx.insert_hitbox(
-        Bounds {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-        },
-        HitboxBehavior::BlockMouse,
-    );
-    cx.pop_z_index();
-
-    cx.run_hit_test();
-
-    assert!(cx.is_hovered(high_id), "z=10 should be hovered");
-    assert!(!cx.is_hovered(low_id), "z=0 should be blocked by z=10");
 }
 
 #[test]

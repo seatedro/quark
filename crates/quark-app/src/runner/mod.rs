@@ -1,6 +1,6 @@
-//! A single-window app runner: owns the winit event loop, the wgpu renderer,
-//! and the accesskit adapter, and asks an [`App`] for a [`Scene`] whenever the
-//! window needs repainting.
+//! The app runner: owns the winit event loop and a table of windows, each
+//! with its own wgpu renderer and accesskit adapter, and asks an [`App`] for a
+//! [`Scene`] whenever a window needs repainting.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -22,14 +22,17 @@ use winit::error::{EventLoopError, OsError};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{CursorIcon, Icon, Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Icon, Theme, Window, WindowAttributes, WindowId};
 
 use crate::input::{InputEvent, InputNormalizer};
+use crate::platform::window_state::{MonitorArea, WindowGeometry, state_path};
 
 mod accessibility;
 mod app;
 mod context;
 mod event_loop;
+mod events;
+mod table;
 mod text;
 mod window;
 
@@ -37,5 +40,8 @@ use accessibility::*;
 pub use app::*;
 pub use context::*;
 pub use event_loop::*;
+pub use events::*;
+pub use table::WindowHandle;
+use table::WindowTable;
 pub use text::AppText;
 use window::*;

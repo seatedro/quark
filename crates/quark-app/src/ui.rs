@@ -10,13 +10,12 @@
 use std::any::Any;
 
 use accesskit::{Action as AxAction, ActionData, ActionRequest, TreeUpdate};
+use quark::SemanticFrame;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
-use quark::{FocusTree, SemanticFrame};
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame};
 use quark_ui::element::{
-    AnyElement, ClickEvent, ClickResult, CursorHint, DragHandler, ElementContext, HitRegion,
-    ScrollRegion, TextInputHitArea, render_element,
+    AnyElement, CursorHint, Delivery, ElementContext, InputRouter, render_element,
 };
 use quark_ui::theme::Theme;
 use quark_ui::{Action, FocusId};
@@ -105,19 +104,9 @@ pub struct UiAdapter<U: UiApp> {
     signals: SignalStore,
     focus: Option<FocusId>,
     pointer: Option<(f32, f32)>,
-    drag: Option<Box<dyn DragHandler>>,
-    last: FrameOutput,
-}
-
-/// What the last painted frame registered, used to route input until the
-/// next frame replaces it.
-#[derive(Default)]
-struct FrameOutput {
-    hits: Vec<HitRegion>,
-    scroll_regions: Vec<ScrollRegion>,
-    text_inputs: Vec<TextInputHitArea>,
+    /// Routes input through the last painted frame until the next replaces it.
+    router: InputRouter,
     accessibility: AccessibilityFrame,
-    focus_tree: FocusTree,
 }
 
 /// Open a window titled by `options` and run `app` in it.
@@ -136,8 +125,8 @@ impl<U: UiApp> UiAdapter<U> {
             signals: SignalStore::new(),
             focus: None,
             pointer: None,
-            drag: None,
-            last: FrameOutput::default(),
+            router: InputRouter::default(),
+            accessibility: AccessibilityFrame::default(),
         }
     }
 
@@ -165,30 +154,26 @@ impl<U: UiApp> UiAdapter<U> {
         cx.request_redraw();
     }
 
+    fn deliver(&mut self, delivery: Delivery, cx: &mut EventContext) {
+        if delivery.actions.is_empty() {
+            if delivery.node.is_some() {
+                cx.request_redraw();
+            }
+        } else {
+            self.dispatch(delivery.actions, cx);
+        }
+    }
+
     fn pointer_pressed(&mut self, cx: &mut EventContext) {
         let Some((x, y)) = self.pointer else {
             return;
         };
-        let focus = self
-            .last
-            .text_inputs
-            .iter()
-            .rev()
-            .find(|area| area.bounds.contains(x, y))
-            .map(|area| area.focus_target);
-        if self.focus != focus {
-            self.focus = focus;
+        let before = self.focus;
+        let delivery = self.router.pointer_down(x, y, &mut self.focus);
+        if self.focus != before {
             cx.request_redraw();
         }
-        // Later regions belong to elements painted on top.
-        let Some(region) = self.last.hits.iter().rev().find(|r| r.rect.contains(x, y)) else {
-            return;
-        };
-        match region.on_click.invoke(ClickEvent { x, y }) {
-            ClickResult::Actions(actions) => self.dispatch(actions, cx),
-            ClickResult::CaptureDrag(drag) => self.drag = Some(drag),
-            ClickResult::Handled => cx.request_redraw(),
-        }
+        self.deliver(delivery, cx);
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta, cx: &mut EventContext) {
@@ -206,58 +191,33 @@ impl<U: UiApp> UiAdapter<U> {
         if lines == 0 {
             return;
         }
-        let Some(region) = self
-            .last
-            .scroll_regions
-            .iter()
-            .rev()
-            .find(|r| r.bounds.contains(x, y))
-        else {
-            return;
-        };
-        let action = region.action_builder.build(lines);
-        self.dispatch(vec![action], cx);
-    }
-
-    /// Move focus along the frame's tab order, wrapping at either end.
-    fn traverse_focus(&mut self, backwards: bool, cx: &mut EventContext) {
-        let order: Vec<FocusId> = self
-            .last
-            .focus_tree
-            .tab_order(None)
-            .into_iter()
-            .map(|node| node.id)
-            .collect();
-        if order.is_empty() {
-            return;
-        }
-        let current = self
-            .focus
-            .and_then(|focus| order.iter().position(|id| *id == focus));
-        let next = match (current, backwards) {
-            (None, false) => 0,
-            (None, true) => order.len() - 1,
-            (Some(i), false) => (i + 1) % order.len(),
-            (Some(i), true) => (i + order.len() - 1) % order.len(),
-        };
-        self.focus = Some(order[next]);
-        cx.request_redraw();
+        let delivery = self.router.wheel(x, y, lines);
+        self.deliver(delivery, cx);
     }
 
     fn update_cursor(&self, cx: &mut EventContext) {
-        let hint = self.pointer.and_then(|(x, y)| {
-            self.last
-                .hits
-                .iter()
-                .rev()
-                .find(|r| r.rect.contains(x, y))
-                .map(|r| r.cursor)
-        });
-        cx.set_cursor(match hint.unwrap_or_default() {
+        let hint = self
+            .pointer
+            .map(|(x, y)| self.router.cursor_at(x, y))
+            .unwrap_or_default();
+        cx.set_cursor(match hint {
             CursorHint::Default => CursorIcon::Default,
             CursorHint::Pointer => CursorIcon::Pointer,
             CursorHint::Text => CursorIcon::Text,
             CursorHint::ResizeCol => CursorIcon::ColResize,
+            CursorHint::ResizeRow => CursorIcon::RowResize,
+            CursorHint::ResizeNs => CursorIcon::NsResize,
+            CursorHint::ResizeEw => CursorIcon::EwResize,
+            CursorHint::ResizeNesw => CursorIcon::NeswResize,
+            CursorHint::ResizeNwse => CursorIcon::NwseResize,
+            CursorHint::Move => CursorIcon::Move,
+            CursorHint::Grab => CursorIcon::Grab,
+            CursorHint::Grabbing => CursorIcon::Grabbing,
+            CursorHint::NotAllowed => CursorIcon::NotAllowed,
+            CursorHint::Wait => CursorIcon::Wait,
+            CursorHint::Progress => CursorIcon::Progress,
+            CursorHint::Crosshair => CursorIcon::Crosshair,
+            CursorHint::Help => CursorIcon::Help,
         });
     }
 }
@@ -337,13 +297,8 @@ impl<U: UiApp> App for UiAdapter<U> {
         ecx.semantic = SemanticFrame::new(width, height);
         render_element(&mut root, &mut scene, &mut ecx, width, height);
 
-        self.last = FrameOutput {
-            hits: std::mem::take(&mut ecx.hits),
-            scroll_regions: std::mem::take(&mut ecx.scroll_regions),
-            text_inputs: std::mem::take(&mut ecx.text_input_hit_areas),
-            focus_tree: ecx.semantic.focus_tree(),
-            accessibility: std::mem::take(&mut ecx.accessibility),
-        };
+        self.router.set_frame(ecx.take_input_frame());
+        self.accessibility = std::mem::take(&mut ecx.accessibility);
         scene
     }
 
@@ -358,10 +313,8 @@ impl<U: UiApp> App for UiAdapter<U> {
         match event {
             InputEvent::PointerMoved { x, y } => {
                 self.pointer = Some((x, y));
-                let actions = self.drag.as_mut().map(|drag| drag.on_move(x, y));
-                if let Some(actions) = actions {
-                    self.dispatch(actions, cx);
-                }
+                let delivery = self.router.pointer_move(x, y);
+                self.deliver(delivery, cx);
                 self.update_cursor(cx);
                 // Hover styles depend on the pointer.
                 cx.request_redraw();
@@ -378,14 +331,22 @@ impl<U: UiApp> App for UiAdapter<U> {
                 button: MouseButton::Left,
                 state: ElementState::Released,
             } => {
-                if let Some(mut drag) = self.drag.take() {
-                    let actions = drag.on_release().actions;
-                    self.dispatch(actions, cx);
-                }
+                let delivery = self.router.pointer_up();
+                self.deliver(delivery, cx);
             }
             InputEvent::Wheel { delta, .. } => self.wheel(delta, cx),
             InputEvent::KeyPress(chord) if chord.named() == Some(NamedKey::Tab) => {
-                self.traverse_focus(chord.shift(), cx);
+                let next = self.router.traverse_focus(self.focus, chord.shift());
+                if next != self.focus {
+                    self.focus = next;
+                    cx.request_redraw();
+                }
+            }
+            InputEvent::KeyPress(chord) => {
+                if let Some(binding) = chord.binding_string() {
+                    let delivery = self.router.key_down(&binding, self.focus);
+                    self.deliver(delivery, cx);
+                }
             }
             _ => {}
         }
@@ -401,11 +362,11 @@ impl<U: UiApp> App for UiAdapter<U> {
 
     fn accessibility(&mut self) -> Option<TreeUpdate> {
         // A full tree every frame; accesskit diffs it against the last one.
-        Some(self.last.accessibility.tree_update(&self.name, self.focus))
+        Some(self.accessibility.tree_update(&self.name, self.focus))
     }
 
     fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
-        match route_accessibility(&self.last.accessibility, &request) {
+        match route_accessibility(&self.accessibility, &request) {
             Some(Routed::Dispatch(action)) => self.dispatch(vec![action], cx),
             Some(Routed::Focus(focus)) => {
                 self.focus = Some(focus);
