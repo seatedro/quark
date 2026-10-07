@@ -235,8 +235,8 @@ impl UiApp for Demo {
     }
 
     fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
-        use quark_app::quark_ui::element::IntoAnyElement;
-        quark_app::quark_ui::element::div().into_any()
+        use quark_app::quark_ui::element::{IntoAnyElement, div};
+        quark::view! { <div /> }
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut UiContext) {
