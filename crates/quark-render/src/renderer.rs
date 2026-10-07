@@ -878,15 +878,15 @@ impl Renderer {
         }
     }
 
+    /// Adopt a new window size. A zero dimension (a minimized window) leaves
+    /// the surface configured at its last size and makes [`Self::render`] a
+    /// no-op until a real size arrives.
     pub fn resize(&mut self, width: u32, height: u32, scale_factor: f64) {
-        if width == 0 || height == 0 {
-            self.size = PhysicalSize::new(width, height);
-            self.scale_factor = scale_factor;
-            return;
-        }
-
         self.size = PhysicalSize::new(width, height);
         self.scale_factor = scale_factor;
+        if width == 0 || height == 0 {
+            return;
+        }
         self.surface_config.width = width;
         self.surface_config.height = height;
         if let Some(surface) = &self.surface {
@@ -1112,7 +1112,11 @@ impl Renderer {
         text: &mut TextSystem,
         time_seconds: f32,
     ) -> Result<FrameStats, RenderError> {
-        if self.surface_config.width == 0 || self.surface_config.height == 0 {
+        // A minimized window reports a zero size while `surface_config` keeps
+        // the last real one. Acquiring then fails as outdated on some
+        // platforms, and reconfiguring and asking for another redraw would
+        // spin the event loop for as long as the window stays minimized.
+        if self.size.width == 0 || self.size.height == 0 {
             return Ok(FrameStats::default());
         }
         let render_started_at = Instant::now();
@@ -1586,6 +1590,22 @@ impl Renderer {
             return;
         }
         if key == 0 || image.rgba.is_empty() || image.width == 0 || image.height == 0 {
+            return;
+        }
+        // The primitive's fields are public, so a short buffer or a size past
+        // the device limit is caller error that must cost one missing image,
+        // not a wgpu panic for the whole app.
+        let expected = u64::from(image.width) * u64::from(image.height) * 4;
+        let max_side = self.device.limits().max_texture_dimension_2d;
+        if image.rgba.len() as u64 != expected || image.width > max_side || image.height > max_side
+        {
+            // Debug level: this runs every frame the image stays in the scene.
+            tracing::debug!(
+                "skipping image {key:#x}: {}x{} needs {expected} RGBA bytes (max side {max_side}), got {}",
+                image.width,
+                image.height,
+                image.rgba.len()
+            );
             return;
         }
         let texture = self.device.create_texture_with_data(
@@ -3269,6 +3289,43 @@ mod tests {
             return;
         };
         assert!(image.get_pixel(16, 16).0[0] > 200, "image missing");
+    }
+
+    // Regression: a minimized window (size 0) kept acquiring and
+    // reconfiguring its stale surface, and the runner redrew on every
+    // `SurfaceReconfigured`, spinning a core while minimized.
+    #[test]
+    fn render_at_zero_size_skips_the_surface() {
+        let Some(mut renderer) = gpu_renderer(16, 16) else {
+            return;
+        };
+        let scene = Scene::default();
+        renderer.resize(0, 0, 1.0);
+        let skipped = renderer.render(&scene, &mut test_text(), 0.0);
+        assert_eq!(skipped.expect("zero-size frame"), FrameStats::default());
+        // At a real size the same renderer reaches for its (absent) surface.
+        renderer.resize(16, 16, 1.0);
+        let drawn = renderer.render(&scene, &mut test_text(), 0.0);
+        assert!(matches!(drawn, Err(RenderError::NoSurface)), "{drawn:?}");
+    }
+
+    // Regression: the upload trusted `rgba.len()`, so a buffer shorter than
+    // width * height * 4 panicked inside wgpu.
+    #[test]
+    fn render_image_with_short_pixel_buffer_draws_nothing() {
+        let mut scene = Scene::default();
+        scene.push(solid(rect(0.0, 0.0, 16.0, 16.0), 0, 0, 255));
+        scene.push(Primitive::Image(crate::scene::ImagePrimitive {
+            rect: rect(0.0, 0.0, 16.0, 16.0),
+            width: 4,
+            height: 4,
+            rgba: Arc::from(vec![255u8; 16]),
+            cache_key: 9,
+        }));
+        let Some(image) = render_pixels(&scene, 16, 16) else {
+            return;
+        };
+        assert_eq!(image.get_pixel(8, 8).0, [0, 0, 255, 255]);
     }
 
     // Two windows share one device: an image uploaded while drawing one
