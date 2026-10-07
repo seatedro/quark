@@ -217,6 +217,36 @@ impl Emit {
         }}
     }
 
+    /// A `#[derive(Props)]` component's children, converted with `Into` to
+    /// whatever its `children` prop holds. Text stays text until then, so a
+    /// component whose child type keeps strings can read them (a button
+    /// names itself from its text); `Vec<AnyElement>` works too.
+    fn prop_children_vec(&self, children: &[&Node]) -> TokenStream2 {
+        let into = quote!(::core::convert::Into::into);
+        let stmts = children.iter().map(|child| match child {
+            Node::Text(lit) => {
+                let text = self.text_value(&[lit]);
+                quote!(__quark_children.push(#into(#text));)
+            }
+            other => match self.node(other) {
+                Mode::Child(t) => quote!(__quark_children.push(#into((#t).into_any()));),
+                Mode::Optional(t) => quote! {
+                    if let ::core::option::Option::Some(__quark_child) = (#t) {
+                        __quark_children.push(#into(__quark_child.into_any()));
+                    }
+                },
+                Mode::Spread(t) => quote! {
+                    __quark_children.extend((#t).into_iter().map(|__quark_child| #into(__quark_child)));
+                },
+            },
+        });
+        quote! {{
+            let mut __quark_children = ::std::vec::Vec::new();
+            #(#stmts)*
+            __quark_children
+        }}
+    }
+
     fn append_child(&self, chain: TokenStream2, child: &Node) -> TokenStream2 {
         match self.node(child) {
             Mode::Child(t) => quote!(#chain.child(#t)),
@@ -676,7 +706,7 @@ impl Emit {
         }
         if props {
             if !rest.is_empty() {
-                let vec = self.children_vec(rest.iter().copied());
+                let vec = self.prop_children_vec(&rest);
                 let m = Ident::new("children", node_span(rest[0]));
                 chain = quote!(#chain.#m(#vec));
             }

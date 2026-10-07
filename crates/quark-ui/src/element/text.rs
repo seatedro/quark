@@ -318,6 +318,20 @@ impl IntoAnyElement for &str {
     }
 }
 
+/// Text as a child: lets `view!` pass text to a component's `children`
+/// prop through `Into`.
+impl From<&str> for AnyElement {
+    fn from(text: &str) -> Self {
+        text.into_any()
+    }
+}
+
+impl From<String> for AnyElement {
+    fn from(text: String) -> Self {
+        text.into_any()
+    }
+}
+
 impl IntoAnyElement for String {
     fn into_any(self) -> AnyElement {
         element_into_any(text(self))

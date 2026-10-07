@@ -67,6 +67,18 @@ mod dsl {
         }
     }
 
+    impl From<&str> for AnyElement {
+        fn from(s: &str) -> Self {
+            s.into_any()
+        }
+    }
+
+    impl From<String> for AnyElement {
+        fn from(s: String) -> Self {
+            s.into_any()
+        }
+    }
+
     /// One builder type stands in for div, text, icon, and spacer: every
     /// method records its name and arguments.
     pub struct El {

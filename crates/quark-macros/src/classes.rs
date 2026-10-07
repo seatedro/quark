@@ -568,18 +568,24 @@ fn parse_value(
                 None => Err(None),
             },
         },
+        // Unsuffixed, so the builder's parameter picks the integer type.
         Value::Int => match (value.parse::<i32>(), &bracket) {
-            (Ok(n), _) => Ok(quote_spanned!(span=> #n)),
+            (Ok(n), _) => Ok(int_lit(n.into(), span)),
             (_, Some(inner)) => expr(inner, &class, span),
             _ => Err(None),
         },
         Value::Count => match (value.parse::<u16>(), &bracket) {
-            (Ok(n), _) if n > 0 => Ok(quote_spanned!(span=> #n)),
+            (Ok(n), _) if n > 0 => Ok(int_lit(n.into(), span)),
             (_, Some(inner)) => expr(inner, &class, span),
             _ => Err(None),
         },
         Value::Degrees => match parse_number(value) {
-            Some(deg) if bracket.is_none() => Ok(f32_lit(deg.to_radians(), span)),
+            // Converted at runtime: a precomputed literal can trip clippy's
+            // `approx_constant` in the caller's crate (45 degrees is π/4).
+            Some(deg) if bracket.is_none() => {
+                let deg = f32_lit(deg, span);
+                Ok(quote_spanned!(span=> #deg.to_radians()))
+            }
             _ => match &bracket {
                 Some(inner) => {
                     let deg = expr(inner, &class, span)?;
@@ -591,7 +597,10 @@ fn parse_value(
         Value::Ratio => match &bracket {
             Some(inner) => match inner.split_once('/') {
                 Some((a, b)) => match (parse_number(a.trim()), parse_number(b.trim())) {
-                    (Some(a), Some(b)) if b != 0.0 => Ok(f32_lit(a / b, span)),
+                    (Some(a), Some(b)) if b != 0.0 => {
+                        let (a, b) = (f32_lit(a, span), f32_lit(b, span));
+                        Ok(quote_spanned!(span=> #a / #b))
+                    }
                     _ => Err(Some(format!(
                         "class `{class}`: expected `[w/h]`, as in `aspect-[16/9]`"
                     ))),
@@ -651,6 +660,12 @@ fn parse_number(s: &str) -> Option<f32> {
 fn f32_lit(n: f32, span: Span) -> TokenStream2 {
     let lit = proc_macro2::Literal::f32_suffixed(n);
     let mut lit = lit;
+    lit.set_span(span);
+    quote!(#lit)
+}
+
+fn int_lit(n: i64, span: Span) -> TokenStream2 {
+    let mut lit = proc_macro2::Literal::i64_unsuffixed(n);
     lit.set_span(span);
     quote!(#lit)
 }
@@ -839,14 +854,14 @@ mod tests {
             (
                 "opacity-50 z-10 grid-cols-3",
                 On::Box,
-                ".opacity(0.5f32).z_index(10i32).grid_cols_n(3u16)",
+                ".opacity(0.5f32).z_index(10).grid_cols_n(3)",
             ),
             (
                 "text-sm text-[14px] text-[c.text]",
                 On::Text,
                 ".text_sm().size(14f32).color((c.text))",
             ),
-            ("aspect-[16/9]", On::Box, ".aspect_ratio(1.7777778f32)"),
+            ("aspect-[16/9] rotate-45", On::Box, ".aspect_ratio(16f32/9f32).rotate(45f32.to_radians())"),
             (
                 "hover:bg-[c] hover:opacity-80",
                 On::Box,

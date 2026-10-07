@@ -1,4 +1,4 @@
-error: unknown role "buton"; did you mean "button"? roles are alert, alertdialog, button, cell, checkbox, combobox, dialog, document, grid, gridcell, group, heading, img, label, link, list, listbox, listitem, menu, menubar, menuitem, option, progressbar, radio, radiogroup, row, scrollarea, separator, slider, spinbutton, status, switch, tab, table, tablist, tabpanel, textbox, toolbar, tooltip, tree, treeitem
+error: unknown role "buton"; did you mean "button"? roles are alert, button, cell, checkbox, combobox, dialog, document, grid, gridcell, group, heading, img, label, link, list, listbox, listitem, menu, menubar, menuitem, option, progressbar, radio, radiogroup, row, scrollarea, separator, slider, spinbutton, status, switch, tab, table, tablist, tabpanel, textbox, toolbar, tooltip, tree, treeitem
  --> tests/ui/unknown_role_and_modifier.rs:4:31
   |
 4 |     let _ = view! { <div role="buton" on:key:ctl+s={()} aria-lable="x" /> };
