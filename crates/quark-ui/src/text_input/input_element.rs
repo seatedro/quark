@@ -525,6 +525,7 @@ mod tests {
     use super::*;
     use crate::Action;
     use crate::text_input::TextEditCommand::*;
+    use crate::text_input::TextOffset;
     use crate::theme::Theme;
     use quark::reactive::SignalStore;
     use quark_render::Primitive;
@@ -665,5 +666,56 @@ mod tests {
             "line {widest} wider than {}",
             area.width
         );
+    }
+
+    // Catches atoms painting without their pill, or the pill drifting off
+    // the label's glyphs.
+    #[test]
+    fn an_atom_paints_a_pill_spanning_its_label() {
+        use crate::text_input::{AtomId, InlineAtom, RichText};
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut editor = Editor::new(EditorMode::ProseInput);
+        editor.sync_size(300.0, 60.0);
+        let rich = RichText {
+            text: "see @main.rs now".into(),
+            atoms: vec![InlineAtom {
+                range: 4..12,
+                id: AtomId::new(1, 0),
+                export: "[main.rs](main.rs)".into(),
+            }],
+        };
+        editor.set_rich_text(&rich);
+        editor.flush(&mut text);
+
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+        let mut root = text_editor_element(
+            FocusId::from_key("e"),
+            ScrollActionBuilder::new(Action::new),
+        )
+        .editor_snapshot(&editor)
+        .w(300.0)
+        .h(60.0)
+        .into_any();
+        let mut scene = Scene::default();
+        render_element(&mut root, &mut scene, &mut cx, 300.0, 60.0);
+
+        let layout = editor.layout().expect("layout");
+        let (start, end) = (
+            layout.caret(TextOffset::snap(editor.text(), 4)).x,
+            layout.caret(TextOffset::snap(editor.text(), 12)).x,
+        );
+        let pills: Vec<_> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::RoundedRect(r) => Some(r.rect),
+                _ => None,
+            })
+            .filter(|r| r.x <= start && r.x + r.width >= end && r.width < end - start + 8.0)
+            .collect();
+        assert_eq!(pills.len(), 1, "start {start} end {end}");
     }
 }
