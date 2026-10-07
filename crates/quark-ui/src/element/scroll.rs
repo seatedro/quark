@@ -304,8 +304,9 @@ struct ScrollState {
 /// state. Keep one per scrolling container in app state and pass it to
 /// [`Div::track_scroll`] every frame.
 ///
-/// A handle read inside a [`cached`](super::cached) boundary goes stale on
-/// replay: include [`Self::offset`] in that boundary's inputs hash.
+/// A [`cached`](super::cached) boundary watches the handles its subtree
+/// paints and rebuilds when one moves or has motion pending, so its inputs
+/// hash need not cover the offset.
 #[derive(Clone)]
 pub struct ScrollHandle(Rc<RefCell<ScrollState>>);
 
@@ -407,7 +408,6 @@ impl ScrollHandle {
 
     /// Whether the offset is final until new input: no request waits for
     /// the next frame and no smooth scroll or fling is moving the content.
-    /// A cached subtree holding the handle must rebuild while it is not.
     pub fn is_settled(&self) -> bool {
         let s = self.0.borrow();
         s.request.is_none() && s.smooth.is_none() && s.fling.is_none()
@@ -653,6 +653,12 @@ impl ScrollHandle {
             s.changed_ms = Some(now);
         }
         s.recording.clear();
+        cx.watch_scroll(|| ScrollWatch {
+            handle: self.clone(),
+            offset: s.offset,
+            dragging: s.dragging,
+            viewport,
+        });
         (s.offset[0], s.offset[1])
     }
 
@@ -682,6 +688,47 @@ impl ScrollHandle {
                 s.request = None;
             }
         }
+    }
+}
+
+/// A handle as a cache boundary's subtree painted it. The boundary's
+/// recording may replay only while every handle it watched is
+/// [`unchanged`](Self::unchanged): replay skips the container's
+/// [`ScrollHandle::begin_frame`], which resolves requests and motion.
+#[derive(Clone)]
+pub(crate) struct ScrollWatch {
+    handle: ScrollHandle,
+    offset: [f32; 2],
+    dragging: Option<Axis>,
+    /// The container's bounds, in the coordinates of whoever holds the
+    /// watch (window points, or relative to a boundary's origin).
+    viewport: Rect,
+}
+
+impl ScrollWatch {
+    /// Whether the container would paint as watched: same offset and thumb
+    /// drag, nothing pending, nothing moving.
+    pub(crate) fn unchanged(&self) -> bool {
+        let s = self.handle.0.borrow();
+        s.offset == self.offset
+            && s.dragging == self.dragging
+            && s.request.is_none()
+            && s.smooth.is_none()
+            && s.fling.is_none()
+    }
+
+    /// The watch with its viewport moved by `(dx, dy)`.
+    pub(crate) fn offset(&self, dx: f32, dy: f32) -> Self {
+        Self {
+            viewport: self.viewport.offset(dx, dy),
+            ..self.clone()
+        }
+    }
+
+    /// A replay painted the container at the watched viewport: keep the
+    /// handle's viewport (page size, item positions) current.
+    pub(crate) fn replayed(&self) {
+        self.handle.0.borrow_mut().viewport = self.viewport;
     }
 }
 

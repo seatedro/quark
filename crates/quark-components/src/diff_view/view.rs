@@ -24,7 +24,10 @@ use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
 use quark_ui::theme::{Color, Theme};
 
-use super::{DiffEvent, DiffKey, DiffViewState, FrameRow, Metrics, REVEAL_STEP, ViewFrame};
+use super::{
+    AUTOSCROLL_FRAME_MS, DiffEvent, DiffKey, DiffViewState, FrameRow, Metrics, REVEAL_STEP,
+    ViewFrame,
+};
 use crate::tree::CollectionEnv;
 
 const KEYS: &[(&str, DiffKey)] = &[
@@ -145,17 +148,15 @@ pub fn diff_view(
         return div().w(width).h(height).into_any();
     };
     let colors = DiffColors::of(theme);
-    let offsets = state.hscroll.each_ref().map(|h| {
-        let (x, y) = h.offset();
-        (x.to_bits(), y.to_bits())
-    });
-    let hash = inputs_hash(&(state.frame_id, state.nonce, offsets, env, on_event as usize));
+    // The cache watches the sideways scroll handles itself.
+    let hash = inputs_hash(&(state.frame_id, env, on_event as usize));
     BoundsProbe {
         child: cached(state.id, hash, move || build(&frame, colors, env, on_event))
             .w(width)
             .h(height)
             .into_any(),
         bounds: state.bounds.clone(),
+        autoscrolling: state.wants_frame(),
     }
     .into_any()
 }
@@ -706,6 +707,8 @@ impl DragHandler for SelectDrag {
 struct BoundsProbe {
     child: AnyElement,
     bounds: Rc<Cell<Rect>>,
+    /// A drag autoscrolls: ask for the next frame.
+    autoscrolling: bool,
 }
 
 impl Element for BoundsProbe {
@@ -740,6 +743,9 @@ impl Element for BoundsProbe {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        if self.autoscrolling {
+            cx.request_frame_at_ms(cx.clock_ms + AUTOSCROLL_FRAME_MS);
+        }
         self.child.paint(engine, scene, cx);
     }
 }

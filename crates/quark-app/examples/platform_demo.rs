@@ -9,6 +9,11 @@
 //!
 //! Launch it twice: the second launch forwards its arguments to the first and
 //! exits. `QUARK_DEMO_EXIT_AFTER_MS=3000` quits on its own, for smoke tests.
+//!
+//! The opt-in features add more: `autostart` a "Launch at Login" menu
+//! toggle, `global-shortcut` a mod+shift+space shortcut that works from any
+//! app, and `telemetry` a local event log at `$QUARK_DEMO_TELEMETRY` when
+//! that is set. Panics write a crash report with the demo's version.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +41,10 @@ struct Demo {
     badge: u32,
     on_top: bool,
     attention_due: Arc<AtomicBool>,
+    #[cfg(feature = "global-shortcut")]
+    shortcuts: Option<quark_app::platform::global_shortcut::GlobalShortcuts>,
+    #[cfg(feature = "telemetry")]
+    telemetry: quark_app::platform::telemetry::Telemetry,
 }
 
 /// (menu item id, label, shortcut)
@@ -59,6 +68,12 @@ impl Demo {
                 .into()
             })
             .collect();
+        #[cfg(feature = "autostart")]
+        file.push(
+            MenuAction::new("autostart", "Launch at Login")
+                .checked(autostart().is_ok_and(|a| a.is_enabled()))
+                .into(),
+        );
         file.push(MenuItem::Separator);
         file.push(MenuRole::CloseWindow.into());
         vec![
@@ -96,8 +111,24 @@ impl Demo {
                     waker.wake();
                 });
             }
+            #[cfg(feature = "autostart")]
+            "autostart" => {
+                let result = autostart().and_then(|entry| {
+                    if entry.is_enabled() {
+                        entry.disable()
+                    } else {
+                        entry.enable()
+                    }
+                });
+                if let Err(error) = result {
+                    self.log(format!("launch at login failed: {error}"), cx);
+                }
+                cx.set_menus(self.menus());
+            }
             _ => return,
         }
+        #[cfg(feature = "telemetry")]
+        self.telemetry.event("command").prop("id", id).record();
         self.log(format!("command {id}"), cx);
     }
 
@@ -137,6 +168,18 @@ impl App for Demo {
                 fired.store(true, Ordering::Release);
                 waker.wake();
             });
+        }
+        #[cfg(feature = "global-shortcut")]
+        {
+            use quark_app::platform::global_shortcut::GlobalShortcuts;
+            let shortcuts = GlobalShortcuts::new(cx.waker().clone()).and_then(|mut shortcuts| {
+                shortcuts.register("summon", "mod+shift+space")?;
+                Ok(shortcuts)
+            });
+            match shortcuts {
+                Ok(shortcuts) => self.shortcuts = Some(shortcuts),
+                Err(error) => self.log(format!("global shortcut unavailable: {error}"), cx),
+            }
         }
         self.log("started".into(), cx);
     }
@@ -237,13 +280,32 @@ impl App for Demo {
         if self.attention_due.swap(false, Ordering::AcqRel) {
             cx.request_attention(false);
         }
+        #[cfg(feature = "global-shortcut")]
+        let pressed = self
+            .shortcuts
+            .as_ref()
+            .map(|s| s.drain())
+            .unwrap_or_default();
+        #[cfg(feature = "global-shortcut")]
+        for name in pressed {
+            self.log(format!("global shortcut {name}"), cx);
+        }
         if self.timer_fired.load(Ordering::Acquire) {
             cx.exit();
         }
     }
 }
 
+#[cfg(feature = "autostart")]
+fn autostart() -> std::io::Result<quark_app::platform::autostart::Autostart> {
+    quark_app::platform::autostart::Autostart::current(
+        "dev.quark.platform-demo",
+        "Quark platform demo",
+    )
+}
+
 fn main() -> Result<(), quark_app::RunError> {
+    quark_app::platform::crash::set_app_info("Quark platform demo", env!("CARGO_PKG_VERSION"));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let primary = match single_instance::acquire("dev.quark.platform-demo", &args) {
         Ok(Instance::Primary(primary)) => Some(primary),
@@ -272,6 +334,15 @@ fn main() -> Result<(), quark_app::RunError> {
             badge: 0,
             on_top: false,
             attention_due: Arc::default(),
+            #[cfg(feature = "global-shortcut")]
+            shortcuts: None,
+            #[cfg(feature = "telemetry")]
+            telemetry: match std::env::var_os("QUARK_DEMO_TELEMETRY") {
+                Some(path) => quark_app::platform::telemetry::JsonLinesSink::open(path)
+                    .map(quark_app::platform::telemetry::Telemetry::with_sink)
+                    .unwrap_or_default(),
+                None => quark_app::platform::telemetry::Telemetry::disabled(),
+            },
         },
         WindowOptions {
             title: "Quark platform demo".into(),

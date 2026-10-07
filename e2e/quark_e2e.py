@@ -11,8 +11,10 @@ Two clients, both talking to the real desktop session run.sh set up:
   report: states other than checked (focused, pressed), object attributes
   (`id`, `posinset`, `setsize`), the Text interface, and SetSelection.
 
-cua indexes only nodes with an AT-SPI action, so a text entry has no
-element_token; specs focus one with a pixel click (`Cua.click_node`).
+cua indexes only nodes with an AT-SPI action. Every control quark
+publishes has one (text entries take Click to focus), so specs click by
+element_token and never by pixel. cua fires the AT-SPI action, except on
+a text entry, where it presses the pointer on the element it resolved.
 
 Waiting is by polling observable state against a deadline, never a fixed
 sleep.
@@ -107,10 +109,6 @@ class Node:
 
     def has_state(self, state):
         return bool(self.states[state // 32] & (1 << (state % 32)))
-
-    def center(self):
-        x, y, w, h = self.extents
-        return x + w // 2, y + h // 2
 
     def dump(self, depth=0):
         role = ROLE_NAME.get(self.role, f"role{self.role}")
@@ -427,7 +425,11 @@ class Cua:
         )
 
     def click_element(self, pid, element):
-        """Click an indexed element by its token, through its AT-SPI action."""
+        """Click an indexed element by its token, through its AT-SPI action.
+        cua clicks a text entry with the real pointer instead, which needs
+        the window in front."""
+        if element.get("role") == "entry":
+            return self.call("click", pid=pid, element_token=element["element_token"], delivery_mode="foreground")
         result = self.call("click", pid=pid, element_token=element["element_token"])
         if result.get("route") != "accessibility":
             raise CuaError(f"click on {element.get('label')!r} did not use the AT-SPI action: {result}")
@@ -440,28 +442,6 @@ class Cua:
     def press_id(self, pid, test_id):
         """Click the element whose AT-SPI `id` attribute is `test_id`."""
         return self.click_element(pid, self.snapshot(pid).element_by_id(test_id))
-
-    def click_node(self, pid, node, delivery_mode="background"):
-        """Click the center of an AT-SPI node in window-local pixels, for
-        nodes cua does not index (text entries).
-
-        A pixel click needs a screenshot from this session first; the fresh
-        get_window_state also supplies the window origin for the conversion.
-        """
-        window = self.window(pid)
-        state = self.call(
-            "get_window_state", pid=pid, window_id=window["window_id"], max_image_dimension=0
-        )
-        origin = state["window_bounds"]
-        x, y = node.center()
-        return self.call(
-            "click",
-            pid=pid,
-            window_id=window["window_id"],
-            x=x - origin["x"],
-            y=y - origin["y"],
-            delivery_mode=delivery_mode,
-        )
 
     def screenshot(self, path):
         """Save the full display as a PNG."""

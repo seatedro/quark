@@ -1,5 +1,14 @@
 //! One text layout shared by measurement, hit-testing, selection, and
 //! painting.
+//!
+//! [`TextSystem`] wraps cosmic-text's font system with Quark's bundled and
+//! system fonts ([`fonts`]). A [`TextLayout`] is shaped once per frame and
+//! shared through the [`LayoutCache`], so the size layout measures is the
+//! layout paint draws and pointer hits map onto. Positions are
+//! [`TextOffset`]s, byte offsets kept on grapheme boundaries.
+//!
+//! The `emoji-font` and `cjk-font` features (on by default) bundle Noto
+//! Color Emoji (10.7 MB) and a 3.7 MB Noto Sans CJK subset as fallbacks.
 // Byte slicing of strings lives in `offset`, which snaps every index
 // onto a grapheme boundary first.
 #![deny(clippy::string_slice)]

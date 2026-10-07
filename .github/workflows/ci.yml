@@ -51,7 +51,7 @@ jobs:
       - name: Check all features
         run: >-
           cargo check --workspace --all-targets --features
-          quark-app/hot-reload,quark-app/syntax,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-render/headless-render,quark-syntax/common,quark-ui/syntax,quark-ui/devtools,quark-ui/profile,quark-text/profile
+          quark-app/hot-reload,quark-app/syntax,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-app/autostart,quark-app/global-shortcut,quark-app/telemetry,quark-render/headless-render,quark-syntax/common,quark-ui/syntax,quark-ui/devtools,quark-ui/profile,quark-text/profile
 
       - name: Test
         env:
