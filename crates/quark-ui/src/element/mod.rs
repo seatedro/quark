@@ -36,7 +36,10 @@ pub use quark::style::{
     vignette,
 };
 
-use quark_render::scene::{FontStyle, RichTextPrimitive, ShapedText};
+use quark_render::push_text_decorations;
+use quark_render::scene::{
+    FontStyle, RichTextPrimitive, ShapedText, TextDecoration, TextDecorationKind,
+};
 use quark_render::{FontKind, TextPrimitive};
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 

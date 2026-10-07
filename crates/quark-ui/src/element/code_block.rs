@@ -164,7 +164,7 @@ impl Element for CodeBlock {
             },
             layout: ShapedText::new(layout.clone()),
             default_color,
-            span_colors: span_colors(&state.spans, default_color),
+            span_colors: span_colors(&state.spans, default_color, cx.theme.colors.text_accent),
         });
         scene.pop_clip();
 

@@ -3,7 +3,7 @@ use quark::{Color, FontKind};
 use quark_text::{TextLayout, TextParams, TextStyle, TextSystem};
 
 use crate::renderer::{ClippedRichText, ClippedText};
-use crate::scene::Rect;
+use crate::scene::{Rect, RectPrimitive, Scene, TextDecoration, TextDecorationKind};
 
 /// Builds glyphon areas straight from the shaped layouts; nothing is shaped
 /// here. Layouts must come from the `TextSystem` passed to glyphon's prepare,
@@ -153,6 +153,75 @@ fn push_rich_text_areas<'a>(
     }
 }
 
+/// Quads (scene pixels, layout at `origin`) for one decoration: one per
+/// visual line segment its range covers, spanning the glyphs of the range on
+/// that line. Trailing whitespace on a line is skipped so a wrapped underline
+/// does not run past the last word. Positions come from the line baseline and
+/// the font size, since the layout does not carry the font's own
+/// underline metrics.
+pub fn text_decoration_rects(
+    layout: &TextLayout,
+    origin: (f32, f32),
+    decoration: &TextDecoration,
+) -> Vec<Rect> {
+    let text = layout.text();
+    let size = layout.style().font_size;
+    let thickness = (size * 0.07).max(1.0);
+    let offset = match decoration.kind {
+        // Top of the quad relative to the baseline.
+        TextDecorationKind::Underline => size * 0.12,
+        TextDecorationKind::Strikethrough => -size * 0.28 - thickness * 0.5,
+    };
+    let (a, b) = (decoration.range.start, decoration.range.end.min(text.len()));
+    let mut out = Vec::new();
+    for line in layout.lines() {
+        let start = a.max(line.byte_range.start);
+        let mut end = b.min(line.byte_range.end);
+        if start >= end {
+            continue;
+        }
+        if let Some(trimmed) = text.get(start..end) {
+            end = start + trimmed.trim_end().len();
+        }
+        if start >= end {
+            continue;
+        }
+        let y = origin.1 + line.baseline + offset;
+        for r in layout.selection_rects(start..end) {
+            // selection_rects can return rects of neighbouring lines when the
+            // range touches a line break; keep only this line's.
+            if (r.y - line.top).abs() > 0.01 {
+                continue;
+            }
+            out.push(Rect {
+                x: origin.0 + r.x,
+                y,
+                width: r.width,
+                height: thickness,
+            });
+        }
+    }
+    out
+}
+
+/// Paints `decorations` as solid quads. Call right after pushing the text
+/// primitive so the lines draw over the glyphs in paint order.
+pub fn push_text_decorations(
+    scene: &mut Scene,
+    layout: &TextLayout,
+    origin: (f32, f32),
+    decorations: &[TextDecoration],
+) {
+    for decoration in decorations {
+        for rect in text_decoration_rects(layout, origin, decoration) {
+            scene.rect(RectPrimitive {
+                rect,
+                color: decoration.color,
+            });
+        }
+    }
+}
+
 /// Average advance of a digit in the monospace face, in physical pixels.
 pub(super) fn measure_mono_char_width(text: &mut TextSystem, font_size: f32) -> f32 {
     let params = TextParams::new("0000000000", TextStyle::new(font_size).kind(FontKind::Mono));
@@ -185,5 +254,112 @@ fn srgb_to_linear(channel: u8) -> f32 {
         value / 12.92
     } else {
         ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quark_text::FontSettings;
+
+    /// Lowest and highest x of the glyphs whose bytes fall in `range` on `line`.
+    fn glyph_span(layout: &TextLayout, line: usize, range: std::ops::Range<usize>) -> (f32, f32) {
+        let g = layout.glyphs();
+        (0..g.len())
+            .filter(|&i| g.line[i] as usize == line)
+            .filter(|&i| range.contains(&(g.byte_start[i] as usize)))
+            .fold((f32::MAX, f32::MIN), |(lo, hi), i| {
+                (lo.min(g.x[i]), hi.max(g.x[i] + g.advance[i]))
+            })
+    }
+
+    // Regression guard for decoration geometry: each quad must lie inside the
+    // decorated glyphs of its own line (not the whole line, not the next line),
+    // underline below the baseline and strikethrough above it.
+    #[test]
+    fn decoration_quads_sit_within_their_glyph_runs() {
+        let mut system = TextSystem::vendored_only(&FontSettings::default());
+        let text = "plain words then a decorated stretch that wraps onto the next line";
+        let start = text.find("decorated").unwrap_or(0);
+        let end = text.find(" line").unwrap_or(text.len());
+        let params = TextParams::new(text, TextStyle::new(16.0)).wrap_width(Some(220.0));
+        let layout = system.layout(&params).expect("layout");
+        let origin = (10.0, 20.0);
+
+        for kind in [
+            TextDecorationKind::Underline,
+            TextDecorationKind::Strikethrough,
+        ] {
+            let decoration = TextDecoration {
+                range: start..end,
+                kind,
+                color: Color::rgba(255, 0, 0, 255),
+            };
+            let rects = text_decoration_rects(&layout, origin, &decoration);
+            let covered: Vec<usize> = layout
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.byte_range.start < end && l.byte_range.end > start)
+                .map(|(i, _)| i)
+                .collect();
+            assert!(covered.len() > 1, "fixture must wrap");
+            assert_eq!(rects.len(), covered.len(), "{kind:?}: one quad per line");
+            for (rect, &line_i) in rects.iter().zip(&covered) {
+                let line = layout.line(line_i).expect("line");
+                let (lo, hi) = glyph_span(&layout, line_i, start..end);
+                let (x0, x1) = (rect.x - origin.0, rect.right() - origin.0);
+                assert!(
+                    x0 >= lo - 0.01 && x1 <= hi + 0.01,
+                    "{kind:?} line {line_i}: {x0}..{x1} outside glyphs {lo}..{hi}"
+                );
+                let (y0, y1) = (rect.y - origin.1, rect.bottom() - origin.1);
+                assert!(
+                    y0 >= line.top && y1 <= line.top + line.height,
+                    "{kind:?} outside line box"
+                );
+                match kind {
+                    TextDecorationKind::Underline => assert!(y0 > line.baseline),
+                    TextDecorationKind::Strikethrough => assert!(y1 < line.baseline),
+                }
+            }
+        }
+    }
+
+    // Regression: the default vendored faces (Geist, Geist Mono) have no
+    // italic, so italic spans painted upright. They must be slanted
+    // synthetically, while a family that ships an italic face (JetBrains
+    // Mono) uses it instead of being slanted twice.
+    #[test]
+    fn italic_spans_without_an_italic_face_are_slanted() {
+        use quark::scene::FontStyle;
+        use quark_text::TextSpan;
+        use quark_text::cosmic_text::CacheKeyFlags;
+
+        let jetbrains = FontSettings {
+            mono_family: "JetBrains Mono".to_owned(),
+            ..FontSettings::default()
+        };
+        let cases = [
+            (FontSettings::default(), FontKind::Ui, true),
+            (FontSettings::default(), FontKind::Mono, true),
+            (jetbrains, FontKind::Mono, false),
+        ];
+        for (settings, kind, expected) in cases {
+            let mut system = TextSystem::vendored_only(&settings);
+            let span = TextSpan {
+                range: 0..6,
+                weight: None,
+                style: Some(FontStyle::Italic),
+                kind: Some(kind),
+            };
+            let params = TextParams::new("italic", TextStyle::new(14.0)).spans(vec![span]);
+            let layout = system.layout(&params).expect("layout");
+            let slanted = layout
+                .glyphs()
+                .flags
+                .iter()
+                .all(|f| f.contains(CacheKeyFlags::FAKE_ITALIC));
+            assert_eq!(slanted, expected, "{} {kind:?}", settings.mono_family);
+        }
     }
 }
