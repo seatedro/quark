@@ -34,6 +34,9 @@ pub struct AccessibilityNode {
     selected: Option<bool>,
     toggled: Option<bool>,
     expanded: Option<bool>,
+    /// 1-based position among siblings and the set size, for list items
+    /// whose set is larger than the materialized rows.
+    position_in_set: Option<(usize, usize)>,
     action: Option<AccessibilityAction>,
     author_id: String,
     parent: Option<NodeId>,
@@ -53,6 +56,7 @@ impl AccessibilityNode {
             selected: None,
             toggled: None,
             expanded: None,
+            position_in_set: None,
             action: None,
             author_id: key.to_owned(),
             parent: None,
@@ -105,6 +109,13 @@ impl AccessibilityNode {
         self
     }
 
+    /// `position` is 1-based; `size` is the whole set, including items that
+    /// are not in the tree (virtualized rows).
+    pub fn position_in_set(mut self, position: usize, size: usize) -> Self {
+        self.position_in_set = Some((position, size));
+        self
+    }
+
     pub fn action(mut self, action: AccessibilityAction) -> Self {
         self.action = Some(action);
         self
@@ -138,6 +149,10 @@ impl AccessibilityNode {
         }
         if let Some(expanded) = self.expanded {
             node.set_expanded(expanded);
+        }
+        if let Some((position, size)) = self.position_in_set {
+            node.set_position_in_set(position);
+            node.set_size_of_set(size);
         }
         match &self.action {
             Some(AccessibilityAction::Click(_)) => node.add_action(AxAction::Click),

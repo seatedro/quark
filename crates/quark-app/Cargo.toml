@@ -86,5 +86,9 @@ name = "hello_ui"
 required-features = ["ui"]
 
 [[example]]
+name = "transcript_demo"
+required-features = ["ui"]
+
+[[example]]
 name = "platform_demo"
 required-features = ["notifications"]
