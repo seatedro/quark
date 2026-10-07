@@ -1,9 +1,156 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::str::FromStr;
+
 use super::*;
 
 // ---------------------------------------------------------------------------
 // Input routing: one hit table, handlers keyed by semantic node, and
 // capture/bubble dispatch along SemanticFrame routes.
 // ---------------------------------------------------------------------------
+
+/// Points of wheel motion per scroll line. Scroll handlers take whole
+/// lines; [`InputRouter::wheel`] converts pixel deltas with this.
+pub const WHEEL_LINE_PX: f32 = 20.0;
+
+/// Modifier keys of a [`Binding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Mods {
+    pub cmd: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    /// `mod` in binding strings: either Cmd or Ctrl. Only patterns set it;
+    /// a pressed key reports the concrete modifier.
+    pub primary: bool,
+}
+
+/// One key with its modifiers, such as `mod+shift+p` or `escape`. Parse
+/// one from the keymap format with [`str::parse`]; it prints back in that
+/// format, modifiers first in a fixed order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Binding {
+    pub mods: Mods,
+    /// Lowercase key name: a character (`"s"`, `"/"`) or a named key
+    /// (`"enter"`, `"arrowup"`).
+    pub key: String,
+}
+
+impl Binding {
+    pub fn new(mods: Mods, key: &str) -> Self {
+        Self {
+            mods,
+            key: normalize_key(key),
+        }
+    }
+
+    /// Whether some key press satisfies both bindings. For a pattern and a
+    /// pressed key this is "the press triggers the pattern"; for two
+    /// patterns it is "they conflict".
+    pub fn matches(&self, other: &Binding) -> bool {
+        self.key == other.key
+            && self.mods.alt == other.mods.alt
+            && self.mods.shift == other.mods.shift
+            && [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .any(|(cmd, ctrl)| self.accepts(cmd, ctrl) && other.accepts(cmd, ctrl))
+    }
+
+    /// Whether a press with Cmd and Ctrl held as given satisfies this
+    /// binding's Cmd and Ctrl part.
+    fn accepts(&self, cmd: bool, ctrl: bool) -> bool {
+        let m = self.mods;
+        if m.primary {
+            (cmd || ctrl) && (cmd || !m.cmd) && (ctrl || !m.ctrl)
+        } else {
+            cmd == m.cmd && ctrl == m.ctrl
+        }
+    }
+}
+
+/// A binding string that does not parse; see [`Binding`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingError(String);
+
+impl fmt::Display for BindingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid key binding {:?}", self.0)
+    }
+}
+
+impl std::error::Error for BindingError {}
+
+impl FromStr for Binding {
+    type Err = BindingError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let error = || BindingError(text.to_owned());
+        if text.is_empty() || text.contains(char::is_whitespace) {
+            return Err(error());
+        }
+        // A trailing "+" after a separator names the plus key: "ctrl++".
+        let (mods_text, key) = match text.strip_suffix("++") {
+            Some(mods) => (mods, "+"),
+            None if text == "+" => ("", "+"),
+            None => text.rsplit_once('+').unwrap_or(("", text)),
+        };
+        if key.is_empty() {
+            return Err(error());
+        }
+        let mut mods = Mods::default();
+        if !mods_text.is_empty() {
+            for part in mods_text.split('+') {
+                let flag = match part.to_ascii_lowercase().as_str() {
+                    "mod" | "primary" => &mut mods.primary,
+                    "cmd" | "command" | "super" | "meta" => &mut mods.cmd,
+                    "ctrl" | "control" => &mut mods.ctrl,
+                    "alt" | "option" | "opt" => &mut mods.alt,
+                    "shift" => &mut mods.shift,
+                    _ => return Err(error()),
+                };
+                *flag = true;
+            }
+        }
+        Ok(Self::new(mods, key))
+    }
+}
+
+impl fmt::Display for Binding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let m = self.mods;
+        for (held, name) in [
+            (m.primary, "mod"),
+            (m.cmd, "cmd"),
+            (m.ctrl, "ctrl"),
+            (m.alt, "alt"),
+            (m.shift, "shift"),
+        ] {
+            if held {
+                write!(f, "{name}+")?;
+            }
+        }
+        f.write_str(&self.key)
+    }
+}
+
+fn normalize_key(key: &str) -> String {
+    let key = key.to_lowercase();
+    let canonical = match key.as_str() {
+        "esc" => "escape",
+        "return" => "enter",
+        "up" => "arrowup",
+        "down" => "arrowdown",
+        "left" => "arrowleft",
+        "right" => "arrowright",
+        "del" => "delete",
+        "pgup" => "pageup",
+        "pgdn" => "pagedown",
+        " " => "space",
+        _ => return key,
+    };
+    canonical.to_owned()
+}
 
 /// A node's wheel handler plus its position in the scroll range, so wheel
 /// input can chain to the parent once this node is at its limit.
@@ -37,7 +184,7 @@ pub struct InputHandlers {
     scroll_node: Vec<usize>,
     scroll: Vec<ScrollTarget>,
     key_node: Vec<usize>,
-    key_binding: Vec<String>,
+    key_binding: Vec<Binding>,
     key_action: Vec<Action>,
 }
 
@@ -57,11 +204,19 @@ impl InputHandlers {
         self.scroll.push(target);
     }
 
-    /// `binding` uses the keymap format, e.g. `"enter"` or `"cmd+s"`.
+    /// `binding` uses the keymap format, e.g. `"enter"` or `"mod+s"`. A
+    /// binding that does not parse is a programming error: it panics in
+    /// debug builds and never fires in release builds.
     pub fn on_key(&mut self, node: usize, binding: impl Into<String>, action: Action) {
-        self.key_node.push(node);
-        self.key_binding.push(binding.into());
-        self.key_action.push(action);
+        let binding = binding.into();
+        match binding.parse::<Binding>() {
+            Ok(parsed) => {
+                self.key_node.push(node);
+                self.key_binding.push(parsed);
+                self.key_action.push(action);
+            }
+            Err(error) => debug_assert!(false, "{error}"),
+        }
     }
 
     fn click(&self, node: usize) -> Option<&ClickHandler> {
@@ -79,10 +234,9 @@ impl InputHandlers {
         self.scroll.get(i)
     }
 
-    fn key(&self, node: usize, binding: &str) -> Option<&Action> {
-        let i = (0..self.key_node.len()).find(|&i| {
-            self.key_node[i] == node && self.key_binding[i].eq_ignore_ascii_case(binding)
-        })?;
+    fn key(&self, node: usize, pressed: &Binding) -> Option<&Action> {
+        let i = (0..self.key_node.len())
+            .find(|&i| self.key_node[i] == node && self.key_binding[i].matches(pressed))?;
         self.key_action.get(i)
     }
 }
@@ -103,8 +257,12 @@ pub struct Delivery {
     pub actions: Vec<Action>,
 }
 
+/// The drag holding the pointer. Frames come and go during a drag, so it
+/// remembers its node by identity and finds it again in each new frame.
 struct Capture {
-    node: usize,
+    identity: u64,
+    /// The node in the current frame, if it is still there.
+    node: Option<usize>,
     drag: Box<dyn DragHandler>,
 }
 
@@ -114,12 +272,19 @@ pub struct InputRouter {
     frame: InputFrame,
     focus_tree: FocusTree,
     capture: Option<Capture>,
+    /// Wheel motion in lines not yet delivered, so slow trackpad motion
+    /// adds up instead of rounding away.
+    wheel_lines: f32,
 }
 
 impl InputRouter {
     pub fn set_frame(&mut self, frame: InputFrame) {
         self.focus_tree = frame.semantic.focus_tree();
         self.frame = frame;
+        if let Some(capture) = &mut self.capture {
+            let identities = node_identities(&self.frame.semantic);
+            capture.node = identities.iter().position(|id| *id == capture.identity);
+        }
     }
 
     pub fn frame(&self) -> &InputFrame {
@@ -175,7 +340,11 @@ impl InputRouter {
         {
             let mut drag = start.start(ClickEvent { x, y });
             let actions = drag.on_press();
-            self.capture = Some(Capture { node, drag });
+            self.capture = Some(Capture {
+                identity: node_identities(&self.frame.semantic)[node],
+                node: Some(node),
+                drag,
+            });
             return Delivery {
                 node: Some(node),
                 actions,
@@ -192,7 +361,7 @@ impl InputRouter {
     pub fn pointer_move(&mut self, x: f32, y: f32) -> Delivery {
         match &mut self.capture {
             Some(capture) => Delivery {
-                node: Some(capture.node),
+                node: capture.node,
                 actions: capture.drag.on_move(x, y),
             },
             None => Delivery::default(),
@@ -203,21 +372,44 @@ impl InputRouter {
     pub fn pointer_up(&mut self) -> Delivery {
         match self.capture.take() {
             Some(mut capture) => Delivery {
-                node: Some(capture.node),
+                node: capture.node,
                 actions: capture.drag.on_release().actions,
             },
             None => Delivery::default(),
         }
     }
 
-    /// Wheel goes to the innermost scrollable under the pointer. A node at
+    /// End pointer capture without a release from the platform, which will
+    /// not send one once the window has lost focus. The drag still gets its
+    /// release, so handlers that act while the button is held (selection
+    /// autoscroll) stop.
+    pub fn cancel_pointer(&mut self) -> Delivery {
+        self.wheel_lines = 0.0;
+        self.pointer_up()
+    }
+
+    /// Wheel goes to the innermost scrollable under the pointer, in whole
+    /// lines of [`WHEEL_LINE_PX`]; positive `delta_px` scrolls down. The
+    /// fraction of a line left over carries into the next call. A node at
     /// its limit in the wheel's direction passes the input to the next
     /// scrollable ancestor; when every one is at its limit, the innermost
     /// still gets it so the app can clamp or rubber-band.
-    pub fn wheel(&self, x: f32, y: f32, lines: i32) -> Delivery {
+    pub fn wheel(&mut self, x: f32, y: f32, delta_px: f32) -> Delivery {
         let Some(target) = self.target_at(x, y) else {
+            self.wheel_lines = 0.0;
             return Delivery::default();
         };
+        // A reversal starts over rather than first paying off the old
+        // direction's fraction.
+        if self.wheel_lines * delta_px < 0.0 {
+            self.wheel_lines = 0.0;
+        }
+        self.wheel_lines += delta_px / WHEEL_LINE_PX;
+        let lines = self.wheel_lines.trunc() as i32;
+        if lines == 0 {
+            return Delivery::default();
+        }
+        self.wheel_lines -= lines as f32;
         let handlers = &self.frame.handlers;
         let mut innermost = None;
         let delivery = self.walk(target, UiEventKind::Wheel, |node| {
@@ -237,17 +429,26 @@ impl InputRouter {
         }
     }
 
-    /// Key press: the focused node first, then its ancestors.
-    pub fn key_down(&self, binding: &str, focus: Option<FocusId>) -> Delivery {
-        let Some(target) = focus.and_then(|focus| self.frame.semantic.node_for_focus(focus)) else {
-            return Delivery::default();
-        };
+    /// Key press: the focused node first, then its ancestors. With nothing
+    /// focused, the top-level nodes get it, as a page's body would.
+    pub fn key_down(&self, pressed: &Binding, focus: Option<FocusId>) -> Delivery {
+        let semantic = &self.frame.semantic;
         let handlers = &self.frame.handlers;
-        self.walk(target, UiEventKind::KeyDown, |node| {
-            handlers
-                .key(node, binding)
-                .map(|action| vec![action.clone()])
-        })
+        let route = |target| {
+            self.walk(target, UiEventKind::KeyDown, |node| {
+                handlers
+                    .key(node, pressed)
+                    .map(|action| vec![action.clone()])
+            })
+        };
+        if let Some(target) = focus.and_then(|focus| semantic.node_for_focus(focus)) {
+            return route(target);
+        }
+        (0..semantic.nodes().len())
+            .filter(|&node| semantic.nodes()[node].parent.is_none())
+            .map(route)
+            .find(|delivery| delivery.node.is_some())
+            .unwrap_or_default()
     }
 
     /// Next focus along the tab order, wrapping at either end. Inside a
@@ -272,8 +473,12 @@ impl InputRouter {
         Some(order[next])
     }
 
-    /// Focus after a press on `target`: the nearest text field on its path,
-    /// or none. `None` means focus stays, which is the case for presses
+    /// Focus after a press on `target`: the nearest node on its path that
+    /// asks for focus (a text field, a tab stop, or an explicit focus
+    /// target). Every clickable node is focusable for assistive tech, but a
+    /// press on one that does not ask (a Send button) leaves focus where it
+    /// is, so a composer stays focused; a press on inert background clears
+    /// it. `None` means focus stays, which is also the case for presses
     /// outside an open modal.
     fn focus_after_press(&self, target: Option<usize>) -> Option<Option<FocusId>> {
         let semantic = &self.frame.semantic;
@@ -282,13 +487,29 @@ impl InputRouter {
         {
             return None;
         }
-        let focus = target.and_then(|target| {
-            semantic
-                .ancestors_inclusive(target)
-                .filter(|i| semantic.nodes()[*i].actions.text_value)
-                .find_map(|i| semantic.focus_id(i))
+        let Some(target) = target else {
+            return Some(None);
+        };
+        let nodes = semantic.nodes();
+        if let Some(focus) = semantic
+            .ancestors_inclusive(target)
+            .filter(|&i| {
+                let node = &nodes[i];
+                node.focus.is_some() || node.actions.text_value || node.tab_stop.is_some()
+            })
+            .find_map(|i| semantic.focus_id(i))
+        {
+            return Some(Some(focus));
+        }
+        let handlers = &self.frame.handlers;
+        let interactive = semantic.ancestors_inclusive(target).any(|i| {
+            let actions = &nodes[i].actions;
+            actions.click
+                || actions.drag
+                || handlers.click(i).is_some()
+                || handlers.drag(i).is_some()
         });
-        Some(focus)
+        (!interactive).then_some(None)
     }
 
     /// Capture then bubble along `target`'s route. `handle` runs at the
@@ -334,6 +555,37 @@ impl InputRouter {
                     && !binding.default_result.should_continue()
             })
     }
+}
+
+/// Each node's identity across frames: its stable id or test id when it
+/// has one, else its key, focus target, or position among its parent's
+/// children, chained to its parent's identity.
+fn node_identities(semantic: &SemanticFrame) -> Vec<u64> {
+    let nodes = semantic.nodes();
+    let mut identities: Vec<u64> = Vec::with_capacity(nodes.len());
+    let mut children: HashMap<Option<usize>, u32> = HashMap::new();
+    for (index, node) in nodes.iter().enumerate() {
+        let ordinal = children.entry(node.parent).or_default();
+        let position = *ordinal;
+        *ordinal += 1;
+        let mut hasher = DefaultHasher::new();
+        if let Some(id) = &node.id {
+            (0u8, id).hash(&mut hasher);
+        } else if let Some(test_id) = &node.test_id {
+            (1u8, test_id).hash(&mut hasher);
+        } else {
+            // Parents precede children in a well-formed frame.
+            let parent = node.parent.filter(|p| *p < index).map(|p| identities[p]);
+            parent.hash(&mut hasher);
+            match (&node.key, node.focus) {
+                (Some(key), _) => (2u8, key).hash(&mut hasher),
+                (None, Some(focus)) => (3u8, focus).hash(&mut hasher),
+                (None, None) => (4u8, position).hash(&mut hasher),
+            }
+        }
+        identities.push(hasher.finish());
+    }
+    identities
 }
 
 #[cfg(test)]
@@ -472,9 +724,12 @@ mod tests {
                 Msg::Scroll("outer", lines).into()
             }))
             .child(inner);
-        let router = routed(outer, 200.0, 200.0);
+        let mut router = routed(outer, 200.0, 200.0);
 
-        let got = [3, -3].map(|lines| dump(&router, router.wheel(50.0, 50.0, lines)));
+        let got = [3.0, -3.0].map(|lines| {
+            let delivery = router.wheel(50.0, 50.0, lines * WHEEL_LINE_PX);
+            dump(&router, delivery)
+        });
 
         assert_eq!(
             got,
@@ -520,6 +775,159 @@ mod tests {
             [moved, released],
             ["handle [Move(300, 300)]", "handle [Release]"]
         );
+    }
+
+    // Regression: trackpad pixel deltas were rounded to lines one event at
+    // a time, so slow two-finger scrolling never moved anything.
+    #[test]
+    fn slow_trackpad_deltas_accumulate_into_lines() {
+        let list = div()
+            .w(200.0)
+            .h(200.0)
+            .test_id("list")
+            .on_scroll(ScrollActionBuilder::new(|lines| {
+                Msg::Scroll("list", lines).into()
+            }));
+        let mut router = routed(list, 200.0, 200.0);
+
+        // 25 events of 2px are 50px: two whole 20px lines, in order.
+        let mut delivered = Vec::new();
+        for _ in 0..25 {
+            let delivery = router.wheel(50.0, 50.0, 2.0);
+            if delivery.node.is_some() {
+                delivered.push(dump(&router, delivery));
+            }
+        }
+
+        assert_eq!(
+            delivered,
+            [r#"list [Scroll("list", 1)]"#, r#"list [Scroll("list", 1)]"#]
+        );
+    }
+
+    // Regression: a drag interrupted by the window losing focus never got a
+    // release, so it kept the pointer captured forever.
+    #[test]
+    fn cancel_pointer_releases_the_drag_and_ends_capture() {
+        let root = div().w(400.0).h(400.0).child(
+            div()
+                .w(50.0)
+                .h(50.0)
+                .test_id("handle")
+                .on_drag(|_| Box::new(RecordDrag)),
+        );
+        let mut router = routed(root, 400.0, 400.0);
+
+        router.pointer_down(10.0, 10.0, &mut None);
+        let cancelled = router.cancel_pointer();
+        let cancelled = dump(&router, cancelled);
+        let moved = router.pointer_move(300.0, 300.0);
+        let moved = dump(&router, moved);
+
+        assert_eq!([cancelled, moved], ["handle [Release]", "-"]);
+    }
+
+    // Regression: capture kept the pressed node's index, so once a new frame
+    // inserted a node before it, drag deliveries named some other node.
+    #[test]
+    fn capture_follows_its_node_into_a_reordered_frame() {
+        let frame = |banner: bool| {
+            let mut root = div().w(400.0).h(400.0).flex_col();
+            if banner {
+                root = root.child(button("banner", 400.0, 20.0));
+            }
+            root.child(
+                div()
+                    .w(50.0)
+                    .h(50.0)
+                    .test_id("handle")
+                    .on_drag(|_| Box::new(RecordDrag)),
+            )
+        };
+        let mut router = routed(frame(false), 400.0, 400.0);
+        router.pointer_down(10.0, 10.0, &mut None);
+
+        let next = routed(frame(true), 400.0, 400.0);
+        router.set_frame(next.frame);
+        let moved = router.pointer_move(300.0, 300.0);
+
+        assert_eq!(dump(&router, moved), "handle [Move(300, 300)]");
+    }
+
+    // Regression: `.on_key("mod+s")` was compared as text against the
+    // pressed "ctrl+s", and keys with nothing focused went nowhere.
+    #[test]
+    fn mod_binding_fires_for_cmd_or_ctrl_with_nothing_focused() {
+        let root = div()
+            .w(100.0)
+            .h(100.0)
+            .test_id("root")
+            .on_key("mod+s", Msg::Click("save"));
+        let router = routed(root, 100.0, 100.0);
+
+        let cases = [
+            ("ctrl+s", r#"root [Click("save")]"#),
+            ("cmd+s", r#"root [Click("save")]"#),
+            ("s", "-"),
+            ("ctrl+shift+s", "-"),
+        ];
+        for (pressed, expected) in cases {
+            let pressed: Binding = pressed.parse().unwrap();
+            let delivery = router.key_down(&pressed, None);
+            assert_eq!(dump(&router, delivery), expected, "{pressed}");
+        }
+    }
+
+    #[test]
+    fn binding_strings_parse_to_canonical_form() {
+        let cases = [
+            ("mod+s", Some("mod+s")),
+            ("Shift+Ctrl+P", Some("ctrl+shift+p")),
+            ("cmd+alt+esc", Some("cmd+alt+escape")),
+            ("ctrl++", Some("ctrl++")),
+            ("option+up", Some("alt+arrowup")),
+            ("hyper+s", None),
+            ("ctrl+", None),
+            ("g g", None),
+        ];
+        for (text, expected) in cases {
+            let parsed = text.parse::<Binding>().ok().map(|b| b.to_string());
+            assert_eq!(parsed.as_deref(), expected, "{text}");
+        }
+    }
+
+    // Regression: any press outside a text field cleared focus, so clicking
+    // Send blurred the composer it was sending from.
+    #[test]
+    fn press_moves_focus_only_to_focusable_nodes() {
+        let field = FocusId::from_key("field");
+        let root = div()
+            .w(400.0)
+            .h(300.0)
+            .flex_col()
+            .child(
+                text_input("Message", "")
+                    .focus_target(field)
+                    .w(200.0)
+                    .h(40.0),
+            )
+            .child(button("send", 80.0, 30.0))
+            .child(focusable("toggle").on_click(Msg::Click("toggle")))
+            .child(div().w(400.0).h(100.0));
+        let mut router = routed(root, 400.0, 300.0);
+
+        // (press, focus after): the field is focused before each press.
+        let cases = [
+            ("send button", (10.0, 50.0), Some(field)),
+            ("focusable", (10.0, 80.0), Some(FocusId::from_key("toggle"))),
+            ("background", (10.0, 200.0), None),
+        ];
+        for (name, (x, y), expected) in cases {
+            let mut focus = Some(field);
+            router.pointer_down(x, y, &mut focus);
+            router.pointer_up();
+            assert_eq!(focus, expected, "{name}");
+        }
     }
 
     mod streaming {
