@@ -37,6 +37,7 @@ mod app;
 mod context;
 mod event_loop;
 mod events;
+mod platform;
 mod scale;
 mod table;
 #[cfg(feature = "test-support")]
@@ -49,6 +50,7 @@ pub use app::*;
 pub use context::*;
 pub use event_loop::*;
 pub use events::*;
+use platform::PlatformState;
 pub use scale::scene_to_physical;
 pub use table::WindowHandle;
 use table::WindowTable;

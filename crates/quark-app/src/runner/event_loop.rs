@@ -7,13 +7,19 @@ pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
     }
     #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
     crate::profile::start();
-    let event_loop = EventLoop::new()?;
+    let event_loop = event_loop()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let waker = Waker::new(event_loop.create_proxy());
 
     let mut runner = Runner::new(app, options, waker);
     #[cfg(target_os = "linux")]
     crate::platform::theme::watch(runner.events.clone());
+    // Before the app finishes launching, so the URL or notification click
+    // that launched it is caught.
+    #[cfg(target_os = "macos")]
+    crate::platform::deep_link::listen(&runner.events);
+    #[cfg(all(target_os = "macos", feature = "notifications"))]
+    crate::platform::notification::install(&runner.events);
 
     #[cfg(feature = "hot-reload")]
     {
@@ -29,6 +35,19 @@ pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
     }
 }
 
+fn event_loop() -> Result<EventLoop<()>, EventLoopError> {
+    #[cfg_attr(not(all(windows, feature = "ui")), allow(unused_mut))]
+    let mut builder = EventLoop::builder();
+    // Win32 menu accelerators need TranslateAcceleratorW in the message
+    // loop, which winit runs; this hook is its way in.
+    #[cfg(all(windows, feature = "ui"))]
+    {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        builder.with_msg_hook(crate::platform::native_menu::translate_accelerator);
+    }
+    builder.build()
+}
+
 struct Runner<A> {
     app: A,
     /// The first window's options until `resumed` opens it.
@@ -42,10 +61,11 @@ struct Runner<A> {
     text: AppText,
     waker: Waker,
     events: EventSink,
-    app_events: Receiver<AppEvent>,
+    app_events: Receiver<Posted>,
     clipboard: Clipboard,
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
+    platform: PlatformState,
     flags: Flags,
     launch_at: Instant,
     startup_failure: Option<RunError>,
@@ -80,6 +100,7 @@ impl<A: App> Runner<A> {
             clipboard: Clipboard::System(None),
             #[cfg(feature = "tray")]
             tray: None,
+            platform: PlatformState::default(),
             flags: Flags::default(),
             launch_at: Instant::now(),
             startup_failure: None,
@@ -186,6 +207,7 @@ impl<A: App> Runner<A> {
             elapsed: self.launch_at.elapsed(),
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
+            platform: &mut self.platform,
         };
         f(&mut self.app, &mut cx);
         self.apply_window_changes(event_loop);
@@ -239,6 +261,7 @@ impl<A: App> Runner<A> {
     ) {
         let error = match self.create_window(event_loop, options) {
             Ok(state) => {
+                self.platform.window_opened(&state.window);
                 if let Some(entry) = self.windows.get_mut(handle) {
                     *entry = WindowEntry::Open(Box::new(state));
                 }
@@ -389,13 +412,87 @@ impl<A: App> Runner<A> {
         });
     }
 
+    /// Ask the app whether `handle` may close, and queue the close if so.
+    fn ask_to_close(&mut self, event_loop: &ActiveEventLoop, handle: WindowHandle) -> bool {
+        let mut close = false;
+        self.with_event_cx(event_loop, Some(handle), |app, cx| {
+            close = app.close_requested(cx);
+        });
+        if close {
+            self.flags.close.push(handle);
+        }
+        close
+    }
+
+    /// Carry out a standard menu item on the focused window.
+    #[cfg(feature = "ui")]
+    fn perform_role(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        role: crate::platform::menu::MenuRole,
+    ) {
+        use crate::platform::menu::MenuRole;
+
+        if role == MenuRole::Quit {
+            let open: Vec<WindowHandle> = self
+                .windows
+                .iter()
+                .filter(|(_, entry)| entry.open().is_some())
+                .map(|(handle, _)| handle)
+                .collect();
+            let mut all = true;
+            for handle in open {
+                all &= self.ask_to_close(event_loop, handle);
+            }
+            if all {
+                self.flags.exit_requested = true;
+            }
+            self.apply_window_changes(event_loop);
+            return;
+        }
+        let Some(handle) = self.default_window() else {
+            return;
+        };
+        if let Some((key, shift)) = role.edit_key() {
+            let chord = platform::edit_chord(key, shift);
+            self.with_event_cx(event_loop, Some(handle), |app, cx| {
+                app.event(InputEvent::KeyPress(chord.clone()), cx);
+                app.event(InputEvent::KeyRelease(chord), cx);
+            });
+            return;
+        }
+        if role == MenuRole::CloseWindow {
+            if self.ask_to_close(event_loop, handle) {
+                self.apply_window_changes(event_loop);
+            }
+            return;
+        }
+        let Some(state) = self.windows.get(handle).and_then(WindowEntry::open) else {
+            return;
+        };
+        match role {
+            MenuRole::Minimize => state.window.set_minimized(true),
+            MenuRole::Zoom => platform::toggle_maximized(&state.window),
+            MenuRole::ToggleFullscreen => platform::toggle_fullscreen(&state.window),
+            _ => {}
+        }
+    }
+
     fn process_app_events(&mut self, event_loop: &ActiveEventLoop) {
         // Hold events that beat the first window until `init` has run.
         if !self.started {
             return;
         }
-        let events: Vec<_> = self.app_events.try_iter().collect();
-        for event in events {
+        let posted: Vec<_> = self.app_events.try_iter().collect();
+        for posted in posted {
+            let event = match posted {
+                Posted::App(event) => event,
+                #[cfg(feature = "ui")]
+                Posted::Role(role) => {
+                    self.perform_role(event_loop, role);
+                    continue;
+                }
+            };
             if let AppEvent::ThemeChanged(theme) = event {
                 self.theme_changed(event_loop, None, theme);
                 continue;
@@ -423,6 +520,9 @@ impl<A: App> ApplicationHandler for Runner<A> {
         let Some(options) = self.first_window.take() else {
             return;
         };
+        // Again now that AppKit has installed its own Apple Event handlers.
+        #[cfg(target_os = "macos")]
+        crate::platform::deep_link::listen(&self.events);
         let handle = self.windows.insert(WindowEntry::Pending(Box::new(options)));
         self.apply_window_changes(event_loop);
         if self.startup_failure.is_some() {
@@ -460,12 +560,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
 
         match event {
             WindowEvent::CloseRequested => {
-                let mut close = false;
-                self.with_event_cx(event_loop, Some(handle), |app, cx| {
-                    close = app.close_requested(cx);
-                });
-                if close {
-                    self.flags.close.push(handle);
+                if self.ask_to_close(event_loop, handle) {
                     self.apply_window_changes(event_loop);
                 }
             }

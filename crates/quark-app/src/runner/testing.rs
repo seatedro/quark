@@ -25,7 +25,7 @@ pub(crate) struct HeadlessRunner {
     clipboard: Clipboard,
     waker: Waker,
     events: EventSink,
-    app_events: Receiver<AppEvent>,
+    app_events: Receiver<Posted>,
     theme: Option<Theme>,
     /// The base the fake clock's milliseconds count from. Frame contexts
     /// hand out `Instant`s, so it has to be a real one; nothing reads the
@@ -45,6 +45,7 @@ pub(crate) struct HeadlessRunner {
     frames_drawn: u64,
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
+    platform: PlatformState,
 }
 
 impl HeadlessRunner {
@@ -82,6 +83,7 @@ impl HeadlessRunner {
             frames_drawn: 0,
             #[cfg(feature = "tray")]
             tray: None,
+            platform: PlatformState::default(),
         }
     }
 
@@ -151,6 +153,7 @@ impl HeadlessRunner {
             elapsed: Duration::from_millis(self.now_ms),
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
+            platform: &mut self.platform,
         }
     }
 
@@ -249,9 +252,25 @@ impl HeadlessRunner {
         if !self.waker.take_detached_wake() {
             return false;
         }
-        let events: Vec<_> = self.app_events.try_iter().collect();
-        for event in events {
-            self.app_event(app, event);
+        let posted: Vec<_> = self.app_events.try_iter().collect();
+        for posted in posted {
+            match posted {
+                Posted::App(event) => self.app_event(app, event),
+                // The one window cannot minimize or close; edit roles type
+                // their keys as on the desktop.
+                #[cfg(feature = "ui")]
+                Posted::Role(role) => {
+                    if let Some((key, shift)) = role.edit_key() {
+                        let chord = platform::edit_chord(key, shift);
+                        self.callback(app, |app, cx| {
+                            app.event(InputEvent::KeyPress(chord.clone()), cx);
+                            app.event(InputEvent::KeyRelease(chord), cx);
+                        });
+                    } else if role == crate::platform::menu::MenuRole::Quit {
+                        self.flags.exit_requested = true;
+                    }
+                }
+            }
         }
         self.callback(app, |app, cx| app.wake(cx));
         true

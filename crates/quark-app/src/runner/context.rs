@@ -275,6 +275,7 @@ pub struct EventContext<'a> {
     pub(super) elapsed: Duration,
     #[cfg(feature = "tray")]
     pub(super) tray: &'a mut Option<tray_icon::TrayIcon>,
+    pub(super) platform: &'a mut PlatformState,
 }
 
 impl EventContext<'_> {
@@ -475,7 +476,7 @@ impl EventContext<'_> {
     }
 
     /// The context's native window, for operations the context doesn't wrap
-    /// (drag, resize, minimize, maximize).
+    /// (drag, resize).
     pub fn window(&self) -> Option<&Window> {
         self.native()
     }
@@ -532,7 +533,7 @@ impl EventContext<'_> {
         self.windows.get(self.window?)?.open()
     }
 
-    fn native(&self) -> Option<&Window> {
+    pub(super) fn native(&self) -> Option<&Window> {
         self.state().map(|state| &*state.window)
     }
 
