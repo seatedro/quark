@@ -663,7 +663,11 @@ impl AccessibilityNode {
         match &self.action {
             Some(AccessibilityAction::Click(_)) => node.add_action(AxAction::Click),
             Some(AccessibilityAction::Focus(_)) => node.add_action(AxAction::Focus),
+            // Text fields take Click as well as Focus: AT-SPI exposes only
+            // Click as an action, so tools that drive controls through it
+            // (cua) can reach the field. Clicking focuses it.
             Some(AccessibilityAction::TextValue(_)) => {
+                node.add_action(AxAction::Click);
                 node.add_action(AxAction::Focus);
                 node.add_action(AxAction::SetValue);
                 node.add_action(AxAction::ReplaceSelectedText);
@@ -674,6 +678,7 @@ impl AccessibilityNode {
                 node.add_action(AxAction::ScrollDown);
             }
             Some(AccessibilityAction::EditorViewport { .. }) => {
+                node.add_action(AxAction::Click);
                 node.add_action(AxAction::Focus);
                 node.add_action(AxAction::ScrollUp);
                 node.add_action(AxAction::ScrollDown);

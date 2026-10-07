@@ -30,7 +30,7 @@ use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
-    ScrollbarTrack, TextInputHitArea, WheelEvent, render_element,
+    ScrollbarTrack, TextInputHitArea, TooltipRegion, WheelEvent, render_element,
 };
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
@@ -303,6 +303,7 @@ pub struct UiAdapter<U: UiApp> {
     spare_text_areas: Vec<TextInputHitArea>,
     /// Last frame's scrollbar track buffer, reused by the next frame.
     spare_scrollbar_tracks: Vec<ScrollbarTrack>,
+    spare_tooltip_regions: Vec<TooltipRegion>,
     sender: UiSender<U::Message>,
     messages: Receiver<U::Message>,
     #[cfg(feature = "devtools")]
@@ -349,6 +350,7 @@ impl<U: UiApp> UiAdapter<U> {
             spare_input: Default::default(),
             spare_text_areas: Vec::new(),
             spare_scrollbar_tracks: Vec::new(),
+            spare_tooltip_regions: Vec::new(),
             sender: UiSender {
                 sender,
                 waker: Arc::new(OnceLock::new()),
@@ -753,6 +755,11 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
         (AxAction::Click, AccessibilityAction::Click(action)) => {
             Some(Routed::Dispatch(action.clone()))
         }
+        (
+            AxAction::Click,
+            AccessibilityAction::TextValue(focus)
+            | AccessibilityAction::EditorViewport { focus, .. },
+        ) => Some(Routed::Focus(*focus)),
         (AxAction::SetValue, AccessibilityAction::TextValue(focus)) => match &request.data {
             Some(ActionData::Value(value)) => Some(Routed::SetValue(*focus, value.to_string())),
             _ => None,
@@ -837,11 +844,14 @@ impl<U: UiApp> App for UiAdapter<U> {
         ecx.accessibility = std::mem::take(&mut self.spare_accessibility);
         ecx.scrollbar_tracks = std::mem::take(&mut self.spare_scrollbar_tracks);
         ecx.scrollbar_tracks.clear();
+        ecx.tooltip_regions = std::mem::take(&mut self.spare_tooltip_regions);
+        ecx.tooltip_regions.clear();
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let scene = std::mem::take(&mut self.spare_scene);
         let painted = paint(&mut root, &mut ecx, scene, width, height);
         self.spare_scrollbar_tracks = std::mem::take(&mut ecx.scrollbar_tracks);
+        self.spare_tooltip_regions = std::mem::take(&mut ecx.tooltip_regions);
         #[cfg(feature = "devtools")]
         let phases = self.devtools.end_frame(&mut ecx.devtools);
         self.scale_factor = scale;
@@ -1589,5 +1599,28 @@ mod tests {
             ActionData::Value("there".into()),
         ));
         assert_eq!(ui.app().field.text(), "hello there");
+    }
+
+    // AT-SPI offers only Click as an action, so a tool driving the field
+    // through it must be able to focus the field that way.
+    #[test]
+    fn a_click_from_assistive_tech_focuses_the_field() {
+        use accesskit::{Action as AxAction, ActionRequest, TreeId};
+        let mut ui = composer("");
+        let field = ui
+            .accessibility_update()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::TextInput)
+            .map(|(id, _)| *id)
+            .expect("text field");
+        ui.accessibility_action(ActionRequest {
+            action: AxAction::Click,
+            target_tree: TreeId::ROOT,
+            target_node: field,
+            data: None,
+        });
+        ui.type_text("hi");
+        assert_eq!(ui.app().field.text(), "hi");
     }
 }
