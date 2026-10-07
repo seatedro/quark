@@ -9,6 +9,7 @@ use super::atoms::{InlineAtom, RichClipboard, RichText};
 use super::buffer::{TextBuffer, WordForward};
 use super::hooks::{InputHooks, Insertion, NoHooks};
 use super::ime::{Composition, Preedit};
+use super::spell::{SpellChecker, SpellResult};
 use super::styles::{InlineStyle, RichExport, StyleSpan, TextFormat};
 use super::text_edit::{TextEditCommand, TextEditOutcome};
 use super::trigger::{TriggerMatch, TriggerRule, find_trigger};
@@ -145,6 +146,31 @@ pub struct Editor {
     /// The text system's font generation the layout was shaped with; the
     /// next flush reshapes when the fonts change.
     font_generation: Option<u64>,
+    spelling: Spelling,
+}
+
+/// The editor's side of spell checking: what was sent, what came back.
+#[derive(Debug, Default)]
+struct Spelling {
+    checker: Option<SpellChecker>,
+    /// Bumped on every text change.
+    rev: u64,
+    /// The revision last sent to the checker.
+    sent: Option<u64>,
+    /// Misspelled words of revision `checked`; kept, slightly stale, until
+    /// the current revision's result arrives.
+    misspelled: Vec<Range<usize>>,
+    checked: Option<u64>,
+}
+
+impl Clone for Spelling {
+    /// A clone checks with its own clone of the checker and starts over.
+    fn clone(&self) -> Self {
+        Self {
+            checker: self.checker.clone(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Editor {
@@ -245,6 +271,16 @@ pub(super) fn style_layout_spans(styles: &[StyleSpan]) -> (Vec<TextSpan>, Vec<Sy
     (spans, kinds)
 }
 
+/// A misspelled word, for a context menu of corrections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpellingIssue {
+    /// Bytes of the word in the editor's text.
+    pub range: Range<usize>,
+    pub word: String,
+    /// Likely corrections, best first.
+    pub suggestions: Vec<String>,
+}
+
 /// A line or box painted with formatted or checked text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextDecoration {
@@ -313,6 +349,7 @@ impl Editor {
             last_width: 0.0,
             last_height: 0.0,
             font_generation: None,
+            spelling: Spelling::default(),
         }
     }
 
@@ -362,6 +399,85 @@ impl Editor {
     fn text_changed(&mut self) {
         self.dirty = true;
         self.syntax_dirty = true;
+        self.spelling.rev += 1;
+    }
+
+    /// Check this field's spelling with `checker` (a clone of one other
+    /// fields use shares their worker and dictionary), or stop with `None`.
+    /// Off by default.
+    pub fn set_spellcheck(&mut self, checker: Option<SpellChecker>) {
+        self.spelling = Spelling {
+            checker,
+            rev: self.spelling.rev,
+            ..Spelling::default()
+        };
+        self.dirty = true;
+    }
+
+    /// Send the text to the checker if it changed, and take any result.
+    fn refresh_spelling(&mut self) {
+        let Some(checker) = self.spelling.checker.as_ref() else {
+            return;
+        };
+        if self.spelling.sent != Some(self.spelling.rev) {
+            self.spelling.sent = Some(self.spelling.rev);
+            checker.request(self.spelling.rev, Arc::from(self.buffer.text()));
+        }
+        if let Some(result) = checker.poll() {
+            self.accept_spelling(result);
+        }
+    }
+
+    fn accept_spelling(&mut self, result: SpellResult) {
+        if result.rev == self.spelling.rev {
+            self.spelling.misspelled = result.misspelled;
+            self.spelling.checked = Some(result.rev);
+        }
+    }
+
+    /// Block until the checker has checked the current text (tests, or an
+    /// app that wants marks before the first paint). Returns at once
+    /// without a checker.
+    pub fn wait_for_spelling(&mut self) {
+        self.refresh_spelling();
+        while self.spelling.checked != Some(self.spelling.rev) {
+            let Some(result) = self.spelling.checker.as_ref().and_then(SpellChecker::wait) else {
+                return;
+            };
+            self.accept_spelling(result);
+        }
+    }
+
+    /// The misspelled words as of the last check, as byte ranges.
+    pub fn misspellings(&self) -> &[Range<usize>] {
+        &self.spelling.misspelled
+    }
+
+    /// The misspelled word at byte `at` (a right click), with corrections.
+    pub fn spelling_at(&self, at: usize) -> Option<SpellingIssue> {
+        let checker = self.spelling.checker.as_ref()?;
+        let text = self.buffer.text();
+        let range = self
+            .spelling
+            .misspelled
+            .iter()
+            .find(|r| r.start <= at && at <= r.end)?
+            .clone();
+        let word = text.get(range.clone())?.to_owned();
+        Some(SpellingIssue {
+            suggestions: checker.dictionary().suggest(&word),
+            range,
+            word,
+        })
+    }
+
+    /// Accept `word` in every field sharing this checker's dictionary
+    /// (calling its add hook), and check this field again.
+    pub fn learn_word(&mut self, word: &str) {
+        if let Some(checker) = &self.spelling.checker {
+            checker.dictionary().learn(word);
+            self.spelling.rev += 1;
+        }
     }
 
     pub fn cursor(&self) -> TextOffset {
@@ -479,6 +595,7 @@ impl Editor {
             self.font_generation = Some(text_system.generation());
             self.dirty = true;
         }
+        self.refresh_spelling();
         let relayout = self.dirty || self.layout.is_none();
         if relayout {
             self.dirty = false;
@@ -897,6 +1014,17 @@ impl Editor {
                     .map(|r| (kind, SelectionRect::from(r))),
             );
         };
+        // The word being typed at the caret is not marked until it is done.
+        let caret = self.buffer.cursor().get();
+        let typing = self.buffer.selection().is_empty();
+        for range in &self.spelling.misspelled {
+            let valid = range.end <= text.len()
+                && text.is_char_boundary(range.start)
+                && text.is_char_boundary(range.end);
+            if valid && !(typing && range.end == caret) {
+                push(TextDecoration::Misspelled, range.clone());
+            }
+        }
         if !self.mode.is_code() {
             for span in self.buffer.styles() {
                 let style = span.format.style;

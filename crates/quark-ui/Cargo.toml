@@ -19,6 +19,7 @@ serde_json = "1.0"
 taffy.workspace = true
 unicode-segmentation.workspace = true
 unicode-width = "0.2"
+spellbook = "0.4"
 quark-syntax = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 profiling = { workspace = true, optional = true }

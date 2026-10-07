@@ -32,6 +32,7 @@ mod ime;
 mod input_element;
 mod keys;
 mod pointer;
+mod spell;
 mod styles;
 mod text_edit;
 mod trigger;
@@ -48,8 +49,8 @@ pub use hooks::{InputHooks, Insertion, NoHooks};
 pub use trigger::{TriggerBoundary, TriggerMatch, TriggerRule, find_trigger};
 
 pub use editor::{
-    CursorState, Editor, EditorMode, SelectionRect, SyntaxHighlighter, SyntaxSpan, SyntaxTokenKind,
-    TextDecoration,
+    CursorState, Editor, EditorMode, SelectionRect, SpellingIssue, SyntaxHighlighter, SyntaxSpan,
+    SyntaxTokenKind, TextDecoration,
 };
 pub use ime::{Composition, Preedit, compose};
 pub use input_element::{CursorSnapshot, TextEditorElement, text_editor_element};
@@ -57,6 +58,7 @@ pub use keys::{AsBinding, command_for_binding};
 pub(crate) use pointer::text_pointer_drag;
 pub use pointer::{AUTOSCROLL_STEP_MS, TextPointer, TextPointerEvent};
 pub use quark_text::TextOffset;
+pub use spell::{SpellChecker, SpellDictionary, SpellError, SpellResult};
 pub use styles::{InlineStyle, RichExport, StyleIntegrityError, StyleSpan, TextFormat};
 pub use text_edit::{TextEditCommand, TextEditOutcome, TextField};
 pub use undo::COALESCE_PAUSE_MS;
