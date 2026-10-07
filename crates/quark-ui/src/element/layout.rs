@@ -12,8 +12,6 @@ pub(super) type MeasureFn = Box<
 >;
 
 pub(super) enum NodeMeasure {
-    /// Leaf with no measure — sized by Taffy style alone.
-    None,
     /// Leaf with an intrinsic measure function (e.g. text).
     Measure(MeasureFn),
     /// A cache boundary whose content is laid out in `subtrees[index]`.
@@ -141,11 +139,19 @@ fn slot(id: LayoutId) -> usize {
 // LayoutEngine — wraps TaffyTree
 // ---------------------------------------------------------------------------
 
-/// One frame's layout. Hosts keep one per window and [`clear`](Self::clear)
-/// it between frames, so node storage, cache-boundary subtrees, and the
-/// scratch vectors keep their capacity.
+/// Layout of a window, retained across frames. Hosts keep one per window
+/// and [`clear`](Self::clear) it before each frame's layout pass.
+///
+/// Nodes are reused by position: the `n`th node requested in a frame is
+/// the `n`th node of the last frame, restyled or re-parented only where it
+/// differs. Taffy keeps each node's cached layout until a change dirties
+/// it, so an unchanged frame computes nothing and allocates nothing, and a
+/// changed one recomputes only the changed nodes' ancestors.
 pub struct LayoutEngine {
     pub(super) tree: taffy::TaffyTree<NodeMeasure>,
+    /// Nodes in request order; this frame has requested `nodes[..cursor]`.
+    nodes: Vec<LayoutId>,
+    cursor: usize,
     /// Absolute origin of every node reachable from the computed root, by
     /// slot; NaN for nodes the last pass did not reach.
     origins: Vec<(f32, f32)>,
@@ -174,6 +180,8 @@ impl LayoutEngine {
     pub fn new() -> Self {
         Self {
             tree: taffy::TaffyTree::new(),
+            nodes: Vec::new(),
+            cursor: 0,
             origins: Vec::new(),
             walk: Vec::new(),
             child_ids: Vec::new(),
@@ -186,15 +194,61 @@ impl LayoutEngine {
 
     /// Create a layout node with the given style and children.
     pub fn request_layout(&mut self, style: taffy::Style, children: &[LayoutId]) -> LayoutId {
-        if children.is_empty() {
-            self.tree
-                .new_leaf_with_context(style, NodeMeasure::None)
-                .expect("taffy new_leaf failed")
-        } else {
-            self.tree
-                .new_with_children(style, children)
-                .expect("taffy new_with_children failed")
+        self.node(&style, Children::Slice(children), Context::None)
+    }
+
+    /// The next node in request order, made to match `style`, `children`,
+    /// and `context`. Only what differs from last frame's node at this
+    /// position is set, since every set dirties the node's cached layout.
+    fn node(&mut self, style: &taffy::Style, children: Children, context: Context) -> LayoutId {
+        let children = match children {
+            Children::Slice(ids) => ids,
+            Children::Stack(mark) => &self.child_ids[mark..],
+        };
+        let Some(&node) = self.nodes.get(self.cursor) else {
+            let node = self
+                .tree
+                .new_with_children(style.clone(), children)
+                .expect("taffy new_with_children failed");
+            if let Some(context) = context.into_measure() {
+                self.tree
+                    .set_node_context(node, Some(context))
+                    .expect("valid node");
+            }
+            self.nodes.push(node);
+            self.cursor += 1;
+            return node;
+        };
+        self.cursor += 1;
+        let tree = &mut self.tree;
+        if tree.style(node).expect("valid node") != style {
+            tree.set_style(node, style.clone()).expect("valid node");
         }
+        let same_children = tree.child_count(node) == children.len()
+            && children
+                .iter()
+                .enumerate()
+                .all(|(i, child)| tree.child_at_index(node, i).ok() == Some(*child));
+        if !same_children {
+            tree.set_children(node, children).expect("valid node");
+        }
+        match (context, tree.get_node_context_mut(node)) {
+            (Context::None, None) => {}
+            // The same replayed entry answers from the same memo; only its
+            // place in this frame's memo buffer moved.
+            (
+                Context::Replay { memo, slot },
+                Some(NodeMeasure::Replay {
+                    memo: old,
+                    slot: old_slot,
+                }),
+            ) if *old_slot == slot => *old = memo,
+            (context, _) => {
+                tree.set_node_context(node, context.into_measure())
+                    .expect("valid node");
+            }
+        }
+        node
     }
 
     /// Start collecting a container's children: push each with
@@ -209,16 +263,8 @@ impl LayoutEngine {
     }
 
     /// Create a container from the children pushed since `mark`.
-    pub(super) fn finish_children(&mut self, style: taffy::Style, mark: usize) -> LayoutId {
-        let id = if self.child_ids.len() == mark {
-            self.tree
-                .new_leaf_with_context(style, NodeMeasure::None)
-                .expect("taffy new_leaf failed")
-        } else {
-            self.tree
-                .new_with_children(style, &self.child_ids[mark..])
-                .expect("taffy new_with_children failed")
-        };
+    pub(super) fn finish_children(&mut self, style: &taffy::Style, mark: usize) -> LayoutId {
+        let id = self.node(style, Children::Stack(mark), Context::None);
         self.child_ids.truncate(mark);
         id
     }
@@ -235,9 +281,8 @@ impl LayoutEngine {
         + Sync
         + 'static,
     ) -> LayoutId {
-        self.tree
-            .new_leaf_with_context(style, NodeMeasure::Measure(Box::new(measure)))
-            .expect("taffy new_leaf_with_context failed")
+        let measure = NodeMeasure::Measure(Box::new(measure));
+        self.node(&style, Children::Slice(&[]), Context::Measure(measure))
     }
 
     /// Claim a cleared subtree for a cache boundary's content. Lay the
@@ -269,10 +314,8 @@ impl LayoutEngine {
     ) -> LayoutId {
         let sub = &mut self.subtrees[index];
         sub.root = Some(sub.engine.request_layout(boundary_root_style(), &[content]));
-        let host = self
-            .tree
-            .new_leaf_with_context(style, NodeMeasure::Subtree(index))
-            .expect("taffy new_leaf_with_context failed");
+        // Always set, so the host is dirtied: its content may have changed.
+        let host = self.node(&style, Children::Slice(&[]), Context::Subtree(index));
         self.subtrees[index].host = Some(host);
         host
     }
@@ -292,9 +335,7 @@ impl LayoutEngine {
         let start = self.replay_memo.len();
         self.replay_memo.extend_from_slice(memo);
         let memo = start..self.replay_memo.len();
-        self.tree
-            .new_leaf_with_context(style, NodeMeasure::Replay { memo, slot })
-            .expect("taffy new_leaf_with_context failed")
+        self.node(&style, Children::Slice(&[]), Context::Replay { memo, slot })
     }
 
     /// Lay out a detached boundary root (a rebuilt cached subtree) at its
@@ -345,7 +386,7 @@ impl LayoutEngine {
                         taffy::Size::ZERO
                     })
                 }
-                Some(NodeMeasure::None) | None => taffy::Size::ZERO,
+                None => taffy::Size::ZERO,
             },
         )
         .expect("taffy compute_layout failed");
@@ -354,6 +395,10 @@ impl LayoutEngine {
     /// After the pass: lay every subtree out at its host's final size, and
     /// record absolute origins so [`Self::layout_bounds`] is a lookup.
     fn finish(&mut self, root: LayoutId) {
+        // Nodes past the cursor belong to a larger earlier frame.
+        for node in self.nodes.drain(self.cursor..) {
+            self.tree.remove(node).expect("valid node");
+        }
         for sub in &mut self.subtrees[..self.live_subtrees] {
             let (Some(host), Some(sub_root)) = (sub.host, sub.root) else {
                 continue;
@@ -414,9 +459,10 @@ impl LayoutEngine {
         }
     }
 
-    /// Clear all nodes for the next frame, keeping capacity.
+    /// Start the next layout pass. Nodes stay and are reused in request
+    /// order; see the type docs.
     pub fn clear(&mut self) {
-        self.tree.clear();
+        self.cursor = 0;
         for sub in &mut self.subtrees[..self.live_subtrees] {
             sub.clear();
         }
@@ -430,11 +476,37 @@ impl LayoutEngine {
     /// asked for.
     #[cfg(test)]
     pub(super) fn node_count(&self) -> usize {
-        self.tree.total_node_count()
+        self.cursor
             + self.subtrees[..self.live_subtrees]
                 .iter()
                 .map(|sub| sub.engine.node_count())
                 .sum::<usize>()
+    }
+}
+
+/// Children of a requested node: a slice, or the engine's child stack
+/// from a mark.
+enum Children<'a> {
+    Slice(&'a [LayoutId]),
+    Stack(usize),
+}
+
+/// What a requested node measures with.
+enum Context {
+    None,
+    Measure(NodeMeasure),
+    Subtree(usize),
+    Replay { memo: Range<usize>, slot: u32 },
+}
+
+impl Context {
+    fn into_measure(self) -> Option<NodeMeasure> {
+        match self {
+            Self::None => None,
+            Self::Measure(measure) => Some(measure),
+            Self::Subtree(index) => Some(NodeMeasure::Subtree(index)),
+            Self::Replay { memo, slot } => Some(NodeMeasure::Replay { memo, slot }),
+        }
     }
 }
 

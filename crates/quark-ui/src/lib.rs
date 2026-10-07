@@ -29,4 +29,7 @@ pub mod theme;
 pub mod transcript;
 pub mod virtual_list;
 
+#[cfg(test)]
+mod test_alloc;
+
 pub use action::{Action, ActionPayload, FocusId};

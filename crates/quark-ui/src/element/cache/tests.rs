@@ -1,59 +1,10 @@
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::rc::Rc;
 
 use super::*;
 use crate::accessibility::{AccessibilityFrame, dump_accessibility};
+use crate::test_alloc;
 use crate::theme::Theme;
-
-// ---------------------------------------------------------------------------
-// Counting allocator: allocations made by the current thread, so parallel
-// tests do not disturb each other's counts.
-// ---------------------------------------------------------------------------
-
-struct Counting;
-
-thread_local! {
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-fn count() {
-    let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
-}
-
-// SAFETY: forwards to the system allocator unchanged; counting touches only
-// a const-initialized thread local, which never allocates.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count();
-        // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count();
-        // SAFETY: as above.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: as above.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count();
-        // SAFETY: as above.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
-fn allocations() -> u64 {
-    ALLOCATIONS.with(Cell::get)
-}
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -76,6 +27,8 @@ struct Window {
     theme: Theme,
     scale: f32,
     pointer: Option<(f32, f32)>,
+    /// Assistive tech listens.
+    accessibility: bool,
     cache: ElementCache,
 }
 
@@ -94,6 +47,7 @@ impl Window {
             theme: Theme::default_dark(),
             scale: 1.0,
             pointer: None,
+            accessibility: true,
             cache: ElementCache::new(),
         }
     }
@@ -109,7 +63,8 @@ impl Window {
             &mut self.layouts,
             self.pointer,
             &self.signals,
-        );
+        )
+        .with_accessibility(self.accessibility);
         if cache {
             cx = cx.with_element_cache(&mut self.cache);
         }
@@ -269,6 +224,20 @@ fn replayed_hits_answer_clicks_only_inside_the_new_bounds() {
 }
 
 #[test]
+fn assistive_tech_connecting_rebuilds_with_accessibility() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    window.accessibility = false;
+    window.paint(screen(0.0, 1, &builds));
+    window.accessibility = true;
+    let connected = window.paint(screen(0.0, 1, &builds));
+    assert_eq!(
+        dump_accessibility(&connected.accessibility),
+        dump_accessibility(&window.paint_with(reference(0.0), false).accessibility)
+    );
+}
+
+#[test]
 fn hover_inside_a_cached_subtree_updates() {
     let mut window = Window::new();
     let builds = Rc::new(Cell::new(0));
@@ -351,13 +320,12 @@ fn list(builds: &Rc<Cell<u32>>, theme: &Theme) -> AnyElement {
 #[test]
 fn a_repeated_frame_of_cached_rows_stays_within_budget() {
     let mut window = Window::new();
+    window.accessibility = false;
     let builds = Rc::new(Cell::new(0));
     let theme = window.theme.clone();
     window.paint(list(&builds, &theme));
 
-    let before = allocations();
-    let frame = window.paint(list(&builds, &theme));
-    let allocated = allocations() - before;
+    let (frame, allocated) = test_alloc::count(|| window.paint(list(&builds, &theme)));
     drop(frame);
 
     assert_eq!(builds.get(), ROWS as u32, "no row rebuilt");
@@ -372,4 +340,64 @@ fn a_repeated_frame_of_cached_rows_stays_within_budget() {
         allocated <= budget,
         "{allocated} allocations, budget {budget}"
     );
+}
+
+/// The list without cache boundaries.
+fn plain_list(rows: usize, theme: &Theme) -> AnyElement {
+    let surface = theme.colors.surface;
+    div()
+        .w(400.0)
+        .h(300.0)
+        .flex_col()
+        .scroll_y(0.0)
+        .children((0..rows).map(|i| {
+            div()
+                .w_full()
+                .flex_col()
+                .p(4.0)
+                .bg(surface)
+                .child(text(format!("Author {i}")).size(12.0))
+                .child(text(format!("Message {i}")).size(14.0))
+                .into_any()
+        }))
+        .into_any()
+}
+
+/// Prints allocations per frame and the top call sites of a repeated
+/// frame, cached and not. Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement, prints a report"]
+fn report_frame_allocations() {
+    let mut window = Window::new();
+    let theme = window.theme.clone();
+    let builds = Rc::new(Cell::new(0));
+    let modes = [
+        ("plain", false, false),
+        ("plain+a11y", false, true),
+        ("cached", true, false),
+        ("cached+a11y", true, true),
+    ];
+    for (name, cached, accessibility) in modes {
+        window.accessibility = accessibility;
+        let build = |cached: bool| {
+            if cached {
+                list(&builds, &theme)
+            } else {
+                plain_list(ROWS, &theme)
+            }
+        };
+        for frame in 0..3 {
+            let started = std::time::Instant::now();
+            let (_, n) = test_alloc::count(|| window.paint(build(cached)));
+            eprintln!(
+                "{name} frame {frame}: {n} allocations, {:?}",
+                started.elapsed()
+            );
+        }
+        let (_, sites) = test_alloc::profile(|| window.paint(build(cached)));
+        eprintln!("{name} top sites:");
+        for (site, n) in sites.iter().take(25) {
+            eprintln!("  {n:6}  {site}");
+        }
+    }
 }

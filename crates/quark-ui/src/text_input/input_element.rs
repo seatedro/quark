@@ -433,15 +433,17 @@ impl Element for TextEditorElement {
                 max: Some((self.content_height - bounds.height).max(0.0)),
             },
         );
-        cx.push_accessibility(
-            AccessibilityNode::new(
-                format!("text-editor:{target:?}"),
-                accesskit::Role::MultilineTextInput,
-                bounds,
-            )
-            .label(accessibility_label)
-            .action(AccessibilityAction::Focus(target)),
-        );
+        if cx.accessibility_enabled() {
+            cx.push_accessibility(
+                AccessibilityNode::new(
+                    format!("text-editor:{target:?}"),
+                    accesskit::Role::MultilineTextInput,
+                    bounds,
+                )
+                .label(accessibility_label)
+                .action(AccessibilityAction::Focus(target)),
+            );
+        }
         cx.text_input_hit_areas.push(TextInputHitArea {
             bounds,
             focus_target: target,

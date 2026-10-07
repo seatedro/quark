@@ -338,13 +338,15 @@ impl Recording {
             _ => false,
         };
         let focus = (self.focus_reads > 0).then_some(cx.focus);
-        let (scale, row) = (cx.scale_factor, self.row as usize);
+        let (scale, accessibility) = (cx.scale_factor, cx.accessibility_enabled());
+        let row = self.row as usize;
         put_record(cx, self.row, record);
         let cache = cx.cache.as_deref_mut().expect("recording needs a cache");
         cache.inputs[row] = EntryInputs {
             hash: self.hash,
             scale,
             theme: cache.theme_generation,
+            accessibility,
             focus,
             reusable: complete && self.volatile == 0 && !pointer_inside,
         };

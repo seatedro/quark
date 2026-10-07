@@ -246,6 +246,7 @@ impl Element for TextElement {
         }
 
         if !content.is_empty()
+            && cx.accessibility_enabled()
             && !cx.accessibility_text_hidden()
             && bounds.width > 0.0
             && bounds.height > 0.0

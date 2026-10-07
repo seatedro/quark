@@ -224,7 +224,7 @@ pub(super) fn register_link_input(
         }
         cx.handlers
             .on_click(index, ClickHandler::from_action(action.clone()));
-        if !cx.accessibility_text_hidden() {
+        if cx.accessibility_enabled() && !cx.accessibility_text_hidden() {
             cx.push_accessibility(
                 AccessibilityNode::new(
                     format!("link:{source_key}:{}:{}", link.range.start, link.url),
@@ -583,6 +583,7 @@ impl Element for SelectableText {
 
         let text = layout.text().clone();
         if !text.is_empty()
+            && cx.accessibility_enabled()
             && !cx.accessibility_text_hidden()
             && bounds.width > 0.0
             && bounds.height > 0.0

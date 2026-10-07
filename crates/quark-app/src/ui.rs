@@ -725,6 +725,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         #[cfg(feature = "devtools")]
         let build_us = view_started.elapsed().as_micros() as u64;
 
+        let accessibility = cx.accessibility_active();
         let text = cx.text();
         let mut ecx = ElementContext::new(
             &self.theme,
@@ -737,7 +738,8 @@ impl<U: UiApp> App for UiAdapter<U> {
         .with_focus(self.focus)
         .with_clock(clock_ms)
         .with_animations(&mut self.animations)
-        .with_element_cache(&mut self.element_cache);
+        .with_element_cache(&mut self.element_cache)
+        .with_accessibility(accessibility);
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let painted = paint(&mut root, &mut ecx, width, height);

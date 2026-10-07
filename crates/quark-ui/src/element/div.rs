@@ -552,7 +552,7 @@ impl Element for Div {
             let id = child.request_layout(engine, cx);
             engine.push_child(id);
         }
-        let id = engine.finish_children(self.base_style.layout.clone(), mark);
+        let id = engine.finish_children(&self.base_style.layout, mark);
         (id, ())
     }
 
@@ -861,7 +861,7 @@ impl Element for Div {
             None
         };
 
-        if let Some(role) = accessibility_role {
+        if let Some(role) = accessibility_role.filter(|_| cx.accessibility_enabled()) {
             let key = self.accessibility_key(role, accessibility_label.as_deref());
             let mut node =
                 AccessibilityNode::new(key, role, bounds).disabled(self.accessibility_disabled);

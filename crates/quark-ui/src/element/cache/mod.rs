@@ -124,6 +124,8 @@ struct EntryInputs {
     hash: u64,
     scale: f32,
     theme: u32,
+    /// Whether accessibility nodes were built.
+    accessibility: bool,
     /// The focus the output read, when it read any.
     focus: Option<Option<FocusId>>,
     /// The entry holds a complete recording that may replay.
@@ -159,6 +161,14 @@ pub struct ElementCache {
     spare_engines: Vec<Box<LayoutEngine>>,
 }
 
+/// Per-frame state every entry depends on.
+#[derive(Clone, Copy)]
+struct FrameInputs {
+    scale: f32,
+    accessibility: bool,
+    focus: Option<FocusId>,
+}
+
 /// How a boundary may use its row this pass.
 enum Claim {
     /// No cache, or another boundary claimed the key this pass.
@@ -190,7 +200,12 @@ impl ElementCache {
         }
     }
 
-    fn claim(&mut self, key: CacheKey, hash: u64, scale: f32, focus: Option<FocusId>) -> Claim {
+    fn claim(&mut self, key: CacheKey, hash: u64, frame: FrameInputs) -> Claim {
+        let FrameInputs {
+            scale,
+            accessibility,
+            focus,
+        } = frame;
         let Some(&row) = self.rows.get(&key) else {
             let row = self.key.len() as u32;
             self.rows.insert(key, row);
@@ -200,6 +215,7 @@ impl ElementCache {
                 hash,
                 scale,
                 theme: self.theme_generation,
+                accessibility,
                 focus: None,
                 reusable: false,
             });
@@ -221,6 +237,7 @@ impl ElementCache {
             && inputs.hash == hash
             && inputs.scale == scale
             && inputs.theme == self.theme_generation
+            && inputs.accessibility == accessibility
             && inputs.focus.is_none_or(|read| read == focus);
         if replay {
             Claim::Replay(row)
@@ -504,9 +521,13 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, ()) {
-        let (scale, focus) = (cx.scale_factor, cx.focus);
+        let frame = FrameInputs {
+            scale: cx.scale_factor,
+            accessibility: cx.accessibility_enabled(),
+            focus: cx.focus,
+        };
         let claim = match cx.cache.as_deref_mut() {
-            Some(cache) => cache.claim(self.key, self.hash, scale, focus),
+            Some(cache) => cache.claim(self.key, self.hash, frame),
             None => Claim::Uncached,
         };
         let entry = match claim {

@@ -66,6 +66,9 @@ pub struct ElementContext<'a> {
     icon_color_stack: Vec<Color>,
     accessibility_text_hidden_stack: Vec<bool>,
     semantic_parent_stack: Vec<usize>,
+    /// Whether to build accessibility nodes: off while no assistive tech
+    /// listens, so frames do not build labels nobody reads.
+    accessibility_enabled: bool,
 }
 
 impl<'a> ElementContext<'a> {
@@ -115,6 +118,7 @@ impl<'a> ElementContext<'a> {
             icon_color_stack: Vec::new(),
             accessibility_text_hidden_stack: Vec::new(),
             semantic_parent_stack: Vec::new(),
+            accessibility_enabled: true,
         }
     }
 
@@ -208,6 +212,18 @@ impl<'a> ElementContext<'a> {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+
+    /// Build accessibility nodes this frame, or skip them (the default is
+    /// to build). Hosts turn it off while no assistive tech listens.
+    pub fn with_accessibility(mut self, enabled: bool) -> Self {
+        self.accessibility_enabled = enabled;
+        self
+    }
+
+    /// Whether elements should build accessibility nodes this frame.
+    pub fn accessibility_enabled(&self) -> bool {
+        self.accessibility_enabled
     }
 
     /// Attach the window's element cache so [`cached`] boundaries reuse
@@ -361,6 +377,9 @@ impl<'a> ElementContext<'a> {
     /// Push an accessibility node under the nearest semantic ancestor that has
     /// an accessibility node, or under the window when none does.
     pub fn push_accessibility(&mut self, node: AccessibilityNode) -> accesskit::NodeId {
+        if !self.accessibility_enabled {
+            return crate::accessibility::ROOT_ID;
+        }
         let parent = self.accessible_semantic_ancestor();
         self.accessibility.push_child(node, parent)
     }
@@ -373,7 +392,9 @@ impl<'a> ElementContext<'a> {
         semantic_index: usize,
     ) -> accesskit::NodeId {
         let id = self.push_accessibility(node);
-        self.accessibility.bind_semantic(semantic_index, id);
+        if self.accessibility_enabled {
+            self.accessibility.bind_semantic(semantic_index, id);
+        }
         id
     }
 

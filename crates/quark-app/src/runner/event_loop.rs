@@ -270,6 +270,7 @@ impl<A: App> Runner<A> {
             flags: &mut self.flags,
             waker: &self.waker,
             ime: FrameIme::default(),
+            accessibility_active: state.accessibility_state.is_active(),
             #[cfg(feature = "devtools")]
             last_render: state.last_render,
         };

@@ -530,13 +530,15 @@ impl Element for TextInput {
             };
             let index = cx.semantic.push(semantic_node);
             semantic_index = Some(index);
-            cx.push_accessibility_for_semantic(
-                AccessibilityNode::new(semantic_id, role, bounds)
-                    .label(accessibility_label)
-                    .value(accessible_value)
-                    .action(AccessibilityAction::TextValue(target)),
-                index,
-            );
+            if cx.accessibility_enabled() {
+                cx.push_accessibility_for_semantic(
+                    AccessibilityNode::new(semantic_id, role, bounds)
+                        .label(accessibility_label)
+                        .value(accessible_value)
+                        .action(AccessibilityAction::TextValue(target)),
+                    index,
+                );
+            }
             cx.text_input_hit_areas.push(TextInputHitArea {
                 bounds,
                 focus_target: target,

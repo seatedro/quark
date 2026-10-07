@@ -74,6 +74,8 @@ impl TestRunner {
             flags: &mut self.flags,
             waker: &self.waker,
             ime: FrameIme::default(),
+            // Tests read the tree the frame built.
+            accessibility_active: true,
             #[cfg(feature = "devtools")]
             last_render: Default::default(),
         };
