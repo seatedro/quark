@@ -408,7 +408,7 @@ fn multi_child_if_spreads_into_parent_without_wrapper() {
 
 #[test]
 fn for_loop_flattens_each_iteration() {
-    let items = vec!["a", "b", "c"];
+    let items = ["a", "b", "c"];
 
     let el = view! {
         <div>

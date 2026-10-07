@@ -335,6 +335,9 @@ pub struct ToastStack<'a> {
 }
 
 impl<'a> ToastStack<'a> {
+    // Positional to match the struct's pub fields; callers that prefer names
+    // can build the struct literally.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         toasts: &'a [Toast],
         animation: &'a AnimationTable,
