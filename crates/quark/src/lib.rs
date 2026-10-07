@@ -51,7 +51,9 @@
 //! assert_eq!(copy_text(&selection, &order, &text, "\n"), "world\nSecond");
 //! ```
 
-pub use quark_macros::{Store, view};
+#[doc(hidden)]
+pub use quark_macros::__class_vocabulary;
+pub use quark_macros::{Props, Store, view};
 
 pub mod animation;
 pub mod color;

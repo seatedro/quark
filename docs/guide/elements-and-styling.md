@@ -129,25 +129,9 @@ the app-owned alternative.
 
 ## The `view!` macro
 
-`quark::view!` writes the same builder calls from markup (a fragment;
-the names are placeholders):
-
-```rust
-view! {
-    <div class="flex-row" gap={Sp::SM} bg={colors.surface}>
-        <text color={colors.text}>{label}</text>
-        if let Some(x) = opt { <div>...</div> }
-        for item in items { <div>{item.name}</div> }
-    </div>
-}
-```
-
-It expands at compile time to calls to whatever `div()`, `text()`, and
-builder methods are in scope. The syntax is summarized in
-[crates/quark/ARCHITECTURE.md](../../crates/quark/ARCHITECTURE.md) and each
-rule is tested in
-[crates/quark-macros/tests/view_macro.rs](../../crates/quark-macros/tests/view_macro.rs).
-The examples use the builder API directly.
+`quark::view!` writes the same builder calls as HTML-like markup, with
+Tailwind-style classes and typed component props. [Writing views](writing-views.md)
+covers the syntax side by side with the builders.
 
 ## Developer tools
 

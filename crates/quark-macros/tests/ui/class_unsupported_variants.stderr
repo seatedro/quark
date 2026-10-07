@@ -1,0 +1,11 @@
+error: class `focus:opacity-50`: `focus:` is not supported: div has no focus style state; use `@when {cx.is_focused(id)} { .. }`
+ --> tests/ui/class_unsupported_variants.rs:4:32
+  |
+4 |     let _ = view! { <div class="focus:opacity-50 md:flex-row" /> };
+  |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: class `md:flex-row`: responsive breakpoints (`md:`) are not supported; quark has no viewport media queries. Branch on the window size in the view instead, as in `@when {width >= 768.0} { class=".." }`
+ --> tests/ui/class_unsupported_variants.rs:4:32
+  |
+4 |     let _ = view! { <div class="focus:opacity-50 md:flex-row" /> };
+  |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -4,7 +4,7 @@ error: slot tags take no attributes; put builder calls on the component
 4 |     let _ = view! { <Button><.icon size={2.0}></.icon></Button> };
   |                                    ^^^^
 
-error: slot `<.icon>` has no children
+error: slot <.icon> has no children
  --> tests/ui/slot_attrs_and_empty.rs:4:31
   |
 4 |     let _ = view! { <Button><.icon size={2.0}></.icon></Button> };

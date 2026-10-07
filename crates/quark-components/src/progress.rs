@@ -1,4 +1,4 @@
-use quark::view;
+use quark::{Props, view};
 
 use quark_ui::accessibility::NumericValue;
 use quark_ui::design::{Sp, Sz};
@@ -6,22 +6,24 @@ use quark_ui::element::{AnyElement, ElementContext, IntoAnyElement, RenderOnce, 
 use quark_ui::style::Styled;
 use quark_ui::theme::Color;
 
+/// A horizontal bar filled to `value` (0 to 1): `progress_bar(0.4)`, or in
+/// `view!` `<ProgressBar value={0.4} show_label />`.
+#[derive(Props)]
 pub struct ProgressBar {
+    /// Clamped to 0..=1 when drawn.
     value: f32,
+    #[prop(optional)]
     color: Option<Color>,
+    #[prop(optional)]
     track_color: Option<Color>,
+    #[prop(default = Sz::PROGRESS_H)]
     height: f32,
+    #[prop(default)]
     show_label: bool,
 }
 
 pub fn progress_bar(value: f32) -> ProgressBar {
-    ProgressBar {
-        value: value.clamp(0.0, 1.0),
-        color: None,
-        track_color: None,
-        height: Sz::PROGRESS_H,
-        show_label: false,
-    }
+    ProgressBar::builder().value(value).build()
 }
 
 impl ProgressBar {
@@ -52,7 +54,7 @@ impl RenderOnce for ProgressBar {
         let fill_color = self.color.unwrap_or(tc.accent);
         let bg_color = self.track_color.unwrap_or(tc.element_background);
         let h = self.height;
-        let v = self.value;
+        let v = self.value.clamp(0.0, 1.0);
 
         let fill = div()
             .h_full()

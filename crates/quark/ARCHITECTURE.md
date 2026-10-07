@@ -71,20 +71,8 @@ fine-grained signals without hand-writing every field.
 
 ## View macro
 
-See `quark_macros::view` for full syntax. In brief:
-
-```rust
-view! { scale,                                   // optional auto-scale factor
-    <div class="flex-row" gap={Sp::SM} bg={tc.surface}>
-        <text color={tc.text}>{label}</text>
-        if let Some(x) = opt { <div>...</div> }  // conditional children
-        for item in items { <div>{item.name}</div> }
-        {raw_expr}                               // inline expression
-        {?option_expr}                           // optional child
-        {...vec_expr}                            // spread children
-    </div>
-}
-```
+`view!` lowers HTML-like markup to builder calls at compile time; the
+syntax reference is [docs/guide/writing-views.md](../../docs/guide/writing-views.md).
 
 ### `{@sig}` reactive attribute
 

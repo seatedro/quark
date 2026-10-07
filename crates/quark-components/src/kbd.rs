@@ -17,7 +17,7 @@ pub fn kbd(label: impl Into<String>, theme: &Theme) -> AnyElement {
              border={tc.border_variant}
              rounded={Rad::MD}
              shadow={(1.0, 1.0, tc.border_variant.with_alpha(Alpha::MEDIUM))}>
-            <text class="text-xs mono text-center" color={tc.text}>{&label}</text>
+            <text class="text-xs font-mono text-center" color={tc.text}>{&label}</text>
         </div>
     }
 }

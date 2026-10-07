@@ -8,6 +8,7 @@ and each names the file that compiles it.
 |---|---|
 | [Getting started](getting-started.md) | Adding Quark to a project, the first `UiApp`, running the examples |
 | [Elements and styling](elements-and-styling.md) | Element constructors, `Styled`, design tokens, themes, transitions, scrolling, `view!` |
+| [Writing views](writing-views.md) | `view!` markup next to the builders it expands to, typed component props, the class reference |
 | [State, actions, and messages](state-actions-messages.md) | `UiApp` state, typed actions, `UiSender`, focus, redraws, signals |
 | [Text and input](text-and-input.md) | `TextField`, `Editor`, IME, undo, and the composer pieces |
 | [Lists and documents](lists-and-documents.md) | Virtual lists, the block document, selection, find, trees, tables, diffs |

@@ -1,4 +1,4 @@
-use quark::{SemanticRole, view};
+use quark::{Props, SemanticRole, view};
 
 use quark_ui::Action;
 use quark_ui::animation::{Curve, Motion, Prop};
@@ -10,20 +10,21 @@ use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
 use quark_ui::theme::Color;
 
+/// A checkbox: `checkbox(true).label("Wrap")`, or in `view!`
+/// `<Checkbox checked={wrap} label="Wrap" on:toggle={Msg::ToggleWrap} />`.
+#[derive(Props)]
 pub struct Checkbox {
     checked: bool,
+    #[prop(optional, into)]
     label: Option<String>,
+    #[prop(optional, into)]
     on_toggle: Option<Action>,
+    #[prop(default)]
     disabled: bool,
 }
 
 pub fn checkbox(checked: bool) -> Checkbox {
-    Checkbox {
-        checked,
-        label: None,
-        on_toggle: None,
-        disabled: false,
-    }
+    Checkbox::builder().checked(checked).build()
 }
 
 impl Checkbox {
@@ -86,14 +87,13 @@ impl RenderOnce for Checkbox {
             <div class="flex-row items-center" gap={m.spacing_sm}
                  id={accessibility_id.clone()}
                  key={accessibility_label.clone()}
-                 test_id={"checkbox"}
-                 semantic_role={SemanticRole::CheckBox}
-                 accessibility_role={accesskit::Role::CheckBox}
+                 test-id="checkbox"
+                 role="checkbox"
                  accessibility_id={accessibility_id}
-                 accessibility_label={accessibility_label}
-                 accessibility_toggled={self.checked}
-                 accessibility_disabled={self.disabled}
-                 @when {click_action.is_some()} { on_click={click_action.unwrap()} }>
+                 aria-label={accessibility_label}
+                 aria-checked={self.checked}
+                 aria-disabled={self.disabled}
+                 @when {click_action.is_some()} { on:click={click_action.unwrap()} }>
                 {check_box}
                 if let Some(label_text) = label_text {
                     <text class="text-sm" color={label_color}>{label_text}</text>
@@ -106,20 +106,19 @@ impl RenderOnce for Checkbox {
 /// An on/off switch. Space or Enter flips it when focused, and screen
 /// readers hear a switch with its on or off state. The thumb slides between
 /// the ends.
+#[derive(Props)]
 pub struct Switch {
     on: bool,
+    #[prop(optional, into)]
     label: Option<String>,
+    #[prop(optional, into)]
     on_toggle: Option<Action>,
+    #[prop(default)]
     disabled: bool,
 }
 
 pub fn switch(on: bool) -> Switch {
-    Switch {
-        on,
-        label: None,
-        on_toggle: None,
-        disabled: false,
-    }
+    Switch::builder().on(on).build()
 }
 
 /// The switch's earlier name.

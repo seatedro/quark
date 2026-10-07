@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use quark::view;
+use quark::{Props, view};
 
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, raster_image, text,
@@ -17,20 +17,24 @@ pub struct AvatarImage {
     pub cache_key: u64,
 }
 
+/// A round avatar with the name's initials, or an image:
+/// `avatar("Ada Lovelace")`, or in `view!` `<Avatar name="Ada Lovelace" size={40.0} />`.
+#[derive(Props)]
 pub struct Avatar {
+    #[prop(into)]
     name: String,
+    /// Unscaled diameter.
+    #[prop(default = 32.0)]
     size: f32,
-    bg_color: Option<Color>,
+    /// Background behind the initials; by default a color picked from the name.
+    #[prop(optional)]
+    bg: Option<Color>,
+    #[prop(default)]
     image: Option<AvatarImage>,
 }
 
 pub fn avatar(name: impl Into<String>) -> Avatar {
-    Avatar {
-        name: name.into(),
-        size: 32.0,
-        bg_color: None,
-        image: None,
-    }
+    Avatar::builder().name(name).build()
 }
 
 impl Avatar {
@@ -40,7 +44,7 @@ impl Avatar {
     }
 
     pub fn bg(mut self, c: Color) -> Self {
-        self.bg_color = Some(c);
+        self.bg = Some(c);
         self
     }
 
@@ -89,7 +93,7 @@ impl RenderOnce for Avatar {
         }
 
         let px = self.size * scale;
-        let bg = self.bg_color.unwrap_or_else(|| name_to_color(&self.name));
+        let bg = self.bg.unwrap_or_else(|| name_to_color(&self.name));
         let inits = initials(&self.name);
         let font_size = (px * 0.4).round();
 
@@ -97,7 +101,7 @@ impl RenderOnce for Avatar {
             <div class="shrink-0 items-center justify-center"
                  w={px} h={px}
                  bg={bg} rounded={px / 2.0}>
-                <text class="bold text-center" size={font_size}
+                <text class="font-bold text-center" size={font_size}
                       color={Color::rgba(255, 255, 255, 255)}>{inits}</text>
             </div>
         }

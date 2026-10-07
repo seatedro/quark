@@ -10,6 +10,7 @@ pub mod behavior;
 pub mod breadcrumb;
 pub mod button;
 pub mod checkbox;
+pub mod child;
 pub mod combobox;
 pub mod context_menu;
 pub mod diff_view;
@@ -42,8 +43,9 @@ pub use avatar::*;
 pub use badge::*;
 pub use behavior::*;
 pub use breadcrumb::*;
-pub use button::{Button, ButtonSize, ButtonStyle};
+pub use button::{Button, ButtonBuilder, ButtonSize, ButtonStyle};
 pub use checkbox::*;
+pub use child::Child;
 pub use combobox::*;
 pub use context_menu::*;
 pub use diff_view::{

@@ -1,5 +1,0 @@
-error: `<text>` takes one child; join the pieces with format!()
- --> tests/ui/text_extra_children.rs:4:31
-  |
-4 |     let _ = view! { <text>"a" "b"</text> };
-  |                               ^^^

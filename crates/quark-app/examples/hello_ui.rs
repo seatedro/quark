@@ -1,9 +1,12 @@
-//! A small form built from quark-ui elements through the `UiApp` adapter.
+//! A small form built from quark-ui elements through the `UiApp` adapter,
+//! written with `view!` (docs/guide/writing-views.md).
 //! The published accessibility tree has a named dialog containing a
 //! heading, a text field, and two buttons. The adapter routes typing,
 //! editing keys, IME, and the clipboard to the field; Escape quits.
 
+#[cfg(test)]
 use accesskit::Role;
+use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text, text_input};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
@@ -43,20 +46,13 @@ impl HelloUi {
 
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
-        div()
-            .accessibility_id(id)
-            .accessibility_role(Role::Button)
-            .accessibility_label(label)
-            .on_click(msg)
-            .px(16.0)
-            .h(36.0)
-            .items_center()
-            .justify_center()
-            .rounded(8.0)
-            .bg(colors.accent)
-            .hover_bg(colors.accent_strong)
-            .child(text(label).color(colors.text_strong).semibold())
-            .into_any()
+        view! {
+            <div accessibility_id={id} role="button" aria-label={label} on:click={msg}
+                 class="px-4 h-9 items-center justify-center rounded-[8]
+                        bg-[colors.accent] hover:bg-[colors.accent_strong]">
+                <text class="font-semibold" color={colors.text_strong}>{label}</text>
+            </div>
+        }
     }
 }
 
@@ -72,49 +68,29 @@ impl UiApp for HelloUi {
         } else {
             self.greeting.clone()
         };
-        div()
-            .w(width)
-            .h(height)
-            .bg(colors.background)
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .accessibility_id("hello.dialog")
-                    .accessibility_role(Role::Dialog)
-                    .accessibility_label("Hello Quark")
-                    .w(420.0)
-                    .p(24.0)
-                    .gap(16.0)
-                    .flex_col()
-                    .rounded(16.0)
-                    .bg(colors.surface)
-                    .child(
-                        div()
-                            .accessibility_id("hello.heading")
-                            .accessibility_role(Role::Heading)
-                            .accessibility_label("Hello from Quark")
-                            .child(text("Hello from Quark").text_lg().bold()),
-                    )
-                    .child(
-                        text_input("Name", "")
-                            .field(&self.name)
-                            .placeholder("Your name")
-                            .focus_target(NAME_FIELD)
-                            .focused(cx.is_focused(NAME_FIELD))
-                            .w_full()
-                            .h(52.0),
-                    )
-                    .child(text(greeting).color(colors.text))
-                    .child(
-                        div()
-                            .flex_row()
-                            .gap(8.0)
-                            .child(Self::button("hello.greet", "Greet", Msg::Greet, cx))
-                            .child(Self::button("hello.clear", "Clear", Msg::Clear, cx)),
-                    ),
-            )
-            .into_any()
+        let name = text_input("Name", "")
+            .field(&self.name)
+            .placeholder("Your name")
+            .focus_target(NAME_FIELD)
+            .focused(cx.is_focused(NAME_FIELD))
+            .w_full()
+            .h(52.0);
+        view! {
+            <div w={width} h={height} class="items-center justify-center bg-[colors.background]">
+                <div accessibility_id="hello.dialog" role="dialog" aria-label="Hello Quark"
+                     class="w-[420px] p-6 gap-4 flex-col rounded-[16] bg-[colors.surface]">
+                    <div accessibility_id="hello.heading" role="heading" aria-label="Hello from Quark">
+                        <text class="text-lg font-bold">"Hello from Quark"</text>
+                    </div>
+                    {name}
+                    <text color={colors.text}>{greeting}</text>
+                    <div class="flex-row gap-2">
+                        {Self::button("hello.greet", "Greet", Msg::Greet, cx)}
+                        {Self::button("hello.clear", "Clear", Msg::Clear, cx)}
+                    </div>
+                </div>
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut UiContext) {
