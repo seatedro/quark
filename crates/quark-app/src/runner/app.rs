@@ -2,11 +2,15 @@ use super::*;
 
 /// An application driven by [`run`]. Scene and pointer coordinates are
 /// physical pixels; use [`FrameContext::scale_factor`] to size content.
+///
+/// Every window shares the one app. Each context names the window it is for
+/// ([`FrameContext::window_handle`], [`EventContext::window_handle`]); an app
+/// with one window can ignore it.
 pub trait App: 'static {
-    /// Called once after the window and renderer exist.
+    /// Called once after the first window and its renderer exist.
     fn init(&mut self, _cx: &mut EventContext) {}
 
-    /// Build the scene for the next frame.
+    /// Build the scene for the next frame of the context's window.
     fn frame(&mut self, cx: &mut FrameContext) -> Scene;
 
     fn event(&mut self, _event: InputEvent, _cx: &mut EventContext) {}
@@ -14,7 +18,18 @@ pub trait App: 'static {
     /// Called after any [`Waker::wake`]. Wakes coalesce and may be spurious.
     fn wake(&mut self, _cx: &mut EventContext) {}
 
-    /// The accessibility tree to publish after each frame, if it changed.
+    /// Events about the app and its windows; see [`AppEvent`]. The context is
+    /// bound to the window the event concerns, or else to the focused window.
+    fn app_event(&mut self, _event: AppEvent, _cx: &mut EventContext) {}
+
+    /// The user asked to close the context's window. Return false to keep it
+    /// open (for example, to ask about unsaved changes first).
+    fn close_requested(&mut self, _cx: &mut EventContext) -> bool {
+        true
+    }
+
+    /// The accessibility tree to publish, if it changed. Called right after
+    /// [`App::frame`] for the same window.
     fn accessibility(&mut self) -> Option<TreeUpdate> {
         None
     }
@@ -54,6 +69,10 @@ pub struct WindowOptions {
     /// crash log in the platform state directory, then run the previous
     /// hook. Installed once per process by [`run`].
     pub panic_hook: bool,
+    /// Save this window's size and position under this key when it closes
+    /// and restore them when a window with the same key opens. See
+    /// [`crate::platform::window_state`].
+    pub persist_key: Option<String>,
 }
 
 impl Default for WindowOptions {
@@ -67,6 +86,7 @@ impl Default for WindowOptions {
             fonts: FontSettings::default(),
             traffic_lights: None,
             panic_hook: true,
+            persist_key: None,
         }
     }
 }
