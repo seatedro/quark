@@ -9,6 +9,8 @@ members = [
   "crates/quark-ui",
   "crates/quark-components",
   "crates/quark-app",
+  # A member so CI's fmt, clippy, and tests cover the patch.
+  "vendor/accesskit_unix",
 ]
 # cargo-fuzz targets build on their own with nightly sanitizers.
 exclude = ["fuzz"]

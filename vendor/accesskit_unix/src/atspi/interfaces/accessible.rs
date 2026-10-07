@@ -122,8 +122,12 @@ impl NodeAccessibleInterface {
         self.node.role().map_err(self.map_error())
     }
 
+    fn get_role_name(&self) -> fdo::Result<&'static str> {
+        role_name(&self.node).map_err(self.map_error())
+    }
+
     fn get_localized_role_name(&self) -> fdo::Result<String> {
-        self.node.localized_role_name().map_err(self.map_error())
+        localized_role_name(&self.node).map_err(self.map_error())
     }
 
     fn get_state(&self) -> StateSet {
@@ -131,7 +135,7 @@ impl NodeAccessibleInterface {
     }
 
     fn get_attributes(&self) -> fdo::Result<HashMap<&str, String>> {
-        self.node.attributes().map_err(self.map_error())
+        attributes(&self.node).map_err(self.map_error())
     }
 
     fn get_application(&self) -> (OwnedObjectAddress,) {
@@ -141,6 +145,46 @@ impl NodeAccessibleInterface {
     fn get_interfaces(&self) -> fdo::Result<InterfaceSet> {
         self.node.interfaces().map_err(self.map_error())
     }
+}
+
+/// The English name of the node's role, as libatspi's
+/// `atspi_role_get_name` gives it: "push button", "check box", ...
+fn role_name(node: &PlatformNode) -> accesskit_atspi_common::Result<&'static str> {
+    node.role().map(atspi_role_name)
+}
+
+fn atspi_role_name(role: Role) -> &'static str {
+    match role {
+        // atspi's table says "button"; libatspi derives names from the
+        // AtspiRole enum nicks, where this one is ATSPI_ROLE_PUSH_BUTTON.
+        Role::Button => "push button",
+        role => role.name(),
+    }
+}
+
+/// The author's role description when there is one, else the role name.
+/// AccessKit has no translations, so the name stays in English.
+fn localized_role_name(node: &PlatformNode) -> accesskit_atspi_common::Result<String> {
+    let description = node.localized_role_name()?;
+    if description.is_empty() {
+        role_name(node).map(str::to_string)
+    } else {
+        Ok(description)
+    }
+}
+
+/// The node's object attributes, plus `id` for its author id. Chromium and
+/// Gecko expose the DOM `id` the same way, which is what tools that only
+/// read attributes (and not the newer `AccessibleId` property) look for.
+fn attributes(
+    node: &PlatformNode,
+) -> accesskit_atspi_common::Result<HashMap<&'static str, String>> {
+    let mut attributes = node.attributes()?;
+    let id = node.accessible_id()?;
+    if !id.is_empty() {
+        attributes.insert("id", id);
+    }
+    Ok(attributes)
 }
 
 pub(crate) struct RootAccessibleInterface {
@@ -232,6 +276,18 @@ impl RootAccessibleInterface {
         self.root.role()
     }
 
+    fn get_role_name(&self) -> &'static str {
+        atspi_role_name(self.root.role())
+    }
+
+    fn get_localized_role_name(&self) -> &'static str {
+        atspi_role_name(self.root.role())
+    }
+
+    fn get_attributes(&self) -> HashMap<&str, String> {
+        HashMap::new()
+    }
+
     fn get_state(&self) -> StateSet {
         self.root.state()
     }
@@ -242,5 +298,123 @@ impl RootAccessibleInterface {
 
     fn get_interfaces(&self) -> InterfaceSet {
         self.root.interfaces()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NodeAccessibleInterface;
+    use accesskit::{
+        ActionHandler, ActionRequest, Node, NodeId as LocalNodeId, Role, Tree, TreeId, TreeUpdate,
+    };
+    use accesskit_atspi_common::{
+        Adapter, AdapterCallback, AppContext, Event, NodeId, NodeIdOrRoot, WindowBounds,
+    };
+    use std::sync::{Arc, Mutex};
+    use zbus::names::OwnedUniqueName;
+
+    struct NoOpActionHandler;
+    impl ActionHandler for NoOpActionHandler {
+        fn do_action(&mut self, _request: ActionRequest) {}
+    }
+
+    /// Records the nodes the adapter registers, the way the real adapter
+    /// learns which objects to serve on the bus.
+    #[derive(Default)]
+    struct Registered(Arc<Mutex<Vec<NodeId>>>);
+    impl AdapterCallback for Registered {
+        fn register_interfaces(&self, _: &Adapter, id: NodeId, _: atspi::InterfaceSet) {
+            self.0.lock().unwrap().push(id);
+        }
+        fn unregister_interfaces(&self, _: &Adapter, _: NodeId, _: atspi::InterfaceSet) {}
+        fn emit_event(&self, _: &Adapter, _: Event) {}
+    }
+
+    /// A window holding `children`; returns the adapter and the Accessible
+    /// interface of each child, in order.
+    fn window_with(children: Vec<Node>) -> (Adapter, Vec<NodeAccessibleInterface>) {
+        let ids: Vec<_> = (1..=children.len() as u64).map(LocalNodeId).collect();
+        let mut window = Node::new(Role::Window);
+        window.set_children(ids.clone());
+        let mut nodes = vec![(LocalNodeId(0), window)];
+        nodes.extend(ids.iter().copied().zip(children));
+        let update = TreeUpdate {
+            nodes,
+            tree: Some(Tree::new(LocalNodeId(0))),
+            tree_id: TreeId::ROOT,
+            focus: LocalNodeId(0),
+        };
+        let registered = Registered::default();
+        let seen = Arc::clone(&registered.0);
+        let adapter = Adapter::new(
+            &AppContext::new(None),
+            registered,
+            update,
+            true,
+            WindowBounds::default(),
+            NoOpActionHandler,
+        );
+        let mut children: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|&id| adapter.platform_node(id))
+            .filter(|node| matches!(node.parent(), Ok(NodeIdOrRoot::Node(_))))
+            .collect();
+        children.sort_by_key(|node| node.index_in_parent().unwrap());
+        let bus_name = OwnedUniqueName::try_from(":1.0").unwrap();
+        let interfaces = children
+            .into_iter()
+            .map(|node| NodeAccessibleInterface::new(bus_name.clone(), node))
+            .collect();
+        (adapter, interfaces)
+    }
+
+    #[test]
+    fn role_names_follow_libatspi() {
+        let cases = [
+            (Role::Button, "push button"),
+            (Role::CheckBox, "check box"),
+            (Role::TextInput, "entry"),
+            (Role::Heading, "heading"),
+            (Role::ListItem, "list item"),
+        ];
+        let (_adapter, nodes) =
+            window_with(cases.iter().map(|(role, _)| Node::new(*role)).collect());
+        assert_eq!(nodes.len(), cases.len());
+        for ((role, expected), node) in cases.iter().zip(&nodes) {
+            assert_eq!(node.get_role_name().unwrap(), *expected, "{role:?}");
+            assert_eq!(
+                node.get_localized_role_name().unwrap(),
+                *expected,
+                "{role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn localized_role_name_prefers_role_description() {
+        let mut node = Node::new(Role::Button);
+        node.set_role_description("toolbar toggle");
+        let (_adapter, nodes) = window_with(vec![node]);
+        assert_eq!(
+            nodes[0].get_localized_role_name().unwrap(),
+            "toolbar toggle"
+        );
+    }
+
+    #[test]
+    fn attributes_carry_author_id_beside_object_attributes() {
+        let mut with_id = Node::new(Role::ListItem);
+        with_id.set_author_id("row-7");
+        // AccessKit counts from 0; AT-SPI's posinset from 1.
+        with_id.set_position_in_set(6);
+        let (_adapter, nodes) = window_with(vec![with_id, Node::new(Role::Button)]);
+
+        let attributes = nodes[0].get_attributes().unwrap();
+        let mut pairs: Vec<_> = attributes.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        pairs.sort();
+        assert_eq!(pairs, ["id=row-7", "posinset=7"]);
+        assert!(!nodes[1].get_attributes().unwrap().contains_key("id"));
     }
 }
