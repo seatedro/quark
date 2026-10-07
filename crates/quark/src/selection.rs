@@ -409,7 +409,9 @@ mod tests {
         let cases = std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(default_cases);
+            // Miri hides host env vars under isolation, so it gets its own
+            // small default.
+            .unwrap_or(if cfg!(miri) { 4 } else { default_cases });
         let mut config = ProptestConfig::with_cases(cases);
         if cfg!(miri) {
             // Miri's isolation forbids the regression file lookups.

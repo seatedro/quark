@@ -666,7 +666,9 @@ mod tests {
         let cases = std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(default_cases);
+            // Miri hides host env vars under isolation, so it gets its own
+            // small default.
+            .unwrap_or(if cfg!(miri) { 4 } else { default_cases });
         let mut config = ProptestConfig::with_cases(cases);
         if cfg!(miri) {
             // Miri's isolation forbids the regression file lookups.
@@ -927,7 +929,8 @@ mod tests {
         t.animate_to(K, OPACITY, 1.0, motion, 0);
         assert_eq!(t.next_deadline(), Some(200));
         assert!(t.tick(100));
-        assert_eq!(t.get(K, OPACITY), Some(0.0));
+        // Not exact: Miri perturbs `powi` by an ulp, so eval(0) is ~1e-8.
+        assert!(close(t.get(K, OPACITY).unwrap_or(f32::NAN), 0.0, 1e-6));
     }
 
     #[test]

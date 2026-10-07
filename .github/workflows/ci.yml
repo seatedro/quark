@@ -66,9 +66,8 @@ jobs:
       # own (the font parsing it would exercise is third-party).
       - name: Miri
         env:
-          # Properties run a handful of cases under Miri; the Test job runs
-          # the full counts.
-          PROPTEST_CASES: "8"
+          # Properties drop to 4 cases under cfg(miri); the Test job runs the
+          # full counts.
           # zerocopy 0.8.60 (via proptest's rand_chacha) calls
           # align_of_val_raw under cfg(miri) without enabling its feature.
           RUSTFLAGS: "-Zcrate-attr=feature(layout_for_ptr)"
