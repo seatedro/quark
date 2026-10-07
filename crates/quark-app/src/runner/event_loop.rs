@@ -9,7 +9,7 @@ pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
     crate::profile::start();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let waker = Waker(event_loop.create_proxy());
+    let waker = Waker::new(event_loop.create_proxy());
 
     let mut runner = Runner::new(app, options, waker);
     #[cfg(target_os = "linux")]
@@ -18,7 +18,7 @@ pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
     #[cfg(feature = "hot-reload")]
     {
         let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        crate::hot_reload::connect(runner.waker.0.clone(), pending.clone());
+        crate::hot_reload::connect(runner.waker.proxy().clone(), pending.clone());
         runner.hot_reload_pending = Some(pending);
     }
 
@@ -93,19 +93,22 @@ impl<A: App> Runner<A> {
         let window = Arc::new(event_loop.create_window(window_attributes(options, event_loop))?);
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
-        let accessibility_tree = Arc::new(Mutex::new(empty_tree_update()));
+        let accessibility_state = Arc::new(AccessibilityState::default());
         let accessibility = AccessibilityAdapter::with_direct_handlers(
             event_loop,
             &window,
             AccessibilityActivation {
-                latest_tree: Arc::clone(&accessibility_tree),
+                state: Arc::clone(&accessibility_state),
+                waker: self.waker.clone(),
             },
             AccessibilityActions {
                 window: window.id(),
                 sender: self.accessibility_action_sender.clone(),
                 waker: self.waker.clone(),
             },
-            AccessibilityDeactivation,
+            AccessibilityDeactivation {
+                state: Arc::clone(&accessibility_state),
+            },
         );
         let mut renderer = match &self.gpu {
             Some(gpu) => Renderer::with_gpu(gpu, window.clone())?,
@@ -121,7 +124,7 @@ impl<A: App> Runner<A> {
         Ok(WindowState {
             renderer,
             accessibility,
-            accessibility_tree,
+            accessibility_state,
             window,
             input: InputNormalizer::new(scale_factor),
             scale_factor,
@@ -169,6 +172,7 @@ impl<A: App> Runner<A> {
             waker: &self.waker,
             events: &self.events,
             theme: self.theme,
+            elapsed: self.launch_at.elapsed(),
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
         };
@@ -314,14 +318,16 @@ impl<A: App> Runner<A> {
             }
             Err(error) => tracing::error!("render failed: {error}"),
         }
-        self.text.layouts.trim();
+        // Trimming walks the whole cache, and entries live for many frames
+        // anyway, so a periodic sweep evicts the same entries for less.
+        if self.text.layouts.frame() % TRIM_LAYOUTS_EVERY == 0 {
+            self.text.layouts.trim();
+        }
         #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
         crate::profile::finish_frame();
 
-        if let Some(update) = self.app.accessibility() {
-            if let Ok(mut latest) = state.accessibility_tree.lock() {
-                *latest = update.clone();
-            }
+        let app = &mut self.app;
+        if let Some(update) = state.accessibility_state.publish(|| app.accessibility()) {
             state.accessibility.update_if_active(|| update);
         }
     }
@@ -377,6 +383,11 @@ impl<A: App> ApplicationHandler for Runner<A> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
         self.process_accessibility_actions(event_loop);
         self.process_app_events(event_loop);
+        // A worker thread can wake the loop before the first window exists;
+        // the app has not seen `init` yet, so it is not told.
+        if !self.started {
+            return;
+        }
         let window = self.default_window();
         self.with_event_cx(event_loop, window, |app, cx| app.wake(cx));
     }
@@ -480,6 +491,15 @@ impl<A: App> ApplicationHandler for Runner<A> {
             return;
         }
 
+        // Assistive tech just connected: draw so the frame publishes a tree.
+        for (_, entry) in self.windows.iter() {
+            if let Some(state) = entry.open()
+                && state.accessibility_state.take_activation()
+            {
+                state.window.request_redraw();
+            }
+        }
+
         for (target, at) in std::mem::take(&mut self.flags.frame_at) {
             for (handle, entry) in self.windows.iter_mut() {
                 if let WindowEntry::Open(state) = entry
@@ -522,6 +542,9 @@ impl<A: App> ApplicationHandler for Runner<A> {
         }
     }
 }
+
+/// Frames between sweeps of idle text layouts out of the cache.
+const TRIM_LAYOUTS_EVERY: u64 = 32;
 
 /// The renderer measures in physical pixels; apps size text in points.
 fn logical_metrics(metrics: TextMetrics, scale: f32) -> TextMetrics {

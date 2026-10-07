@@ -2,16 +2,43 @@ use super::*;
 
 /// Wakes the event loop from any thread and calls [`App::wake`].
 #[derive(Debug, Clone)]
-pub struct Waker(pub(super) EventLoopProxy<()>);
+pub struct Waker(WakeTarget);
+
+#[derive(Debug, Clone)]
+enum WakeTarget {
+    EventLoop(EventLoopProxy<()>),
+    /// No event loop: unit tests drive apps without one.
+    #[cfg(test)]
+    Detached,
+}
 
 impl Waker {
+    pub(super) fn new(proxy: EventLoopProxy<()>) -> Self {
+        Self(WakeTarget::EventLoop(proxy))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self(WakeTarget::Detached)
+    }
+
     pub fn wake(&self) {
-        let _ = self.0.send_event(());
+        match &self.0 {
+            WakeTarget::EventLoop(proxy) => {
+                let _ = proxy.send_event(());
+            }
+            #[cfg(test)]
+            WakeTarget::Detached => {}
+        }
     }
 
     /// The raw proxy, for code that speaks winit directly.
     pub fn proxy(&self) -> &EventLoopProxy<()> {
-        &self.0
+        match &self.0 {
+            WakeTarget::EventLoop(proxy) => proxy,
+            #[cfg(test)]
+            WakeTarget::Detached => panic!("a detached test waker has no event loop"),
+        }
     }
 }
 
@@ -193,11 +220,20 @@ pub struct EventContext<'a> {
     pub(super) waker: &'a Waker,
     pub(super) events: &'a EventSink,
     pub(super) theme: Option<Theme>,
+    /// When the callback started, measured from the runner's start.
+    pub(super) elapsed: Duration,
     #[cfg(feature = "tray")]
     pub(super) tray: &'a mut Option<tray_icon::TrayIcon>,
 }
 
 impl EventContext<'_> {
+    /// When this callback started, measured from when the runner started:
+    /// the same clock as [`FrameContext::elapsed`], so event and frame
+    /// times compare directly.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+
     /// Redraw the context's window, or every window when the context has none.
     pub fn request_redraw(&mut self) {
         self.flags.request_redraw(self.window);

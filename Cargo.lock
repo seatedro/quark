@@ -2727,6 +2727,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pollster",
  "profiling",
+ "proptest",
  "puffin_http",
  "quark",
  "quark-render",
