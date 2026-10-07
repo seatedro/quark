@@ -61,6 +61,14 @@ pub struct LayoutCache {
     frame: u64,
     max_idle_frames: u64,
     font_generation: u64,
+    stats: LayoutCacheStats,
+}
+
+/// Lifetime lookup counters. A miss is a lookup that shaped a new layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayoutCacheStats {
+    pub hits: u64,
+    pub misses: u64,
 }
 
 impl LayoutCache {
@@ -70,6 +78,7 @@ impl LayoutCache {
             frame: 0,
             max_idle_frames,
             font_generation: 0,
+            stats: LayoutCacheStats::default(),
         }
     }
 
@@ -102,6 +111,10 @@ impl LayoutCache {
         self.entries.is_empty()
     }
 
+    pub fn stats(&self) -> LayoutCacheStats {
+        self.stats
+    }
+
     pub fn layout(
         &mut self,
         system: &mut TextSystem,
@@ -116,9 +129,11 @@ impl LayoutCache {
             // Guard against 64-bit hash collisions before trusting the hit.
             if same_inputs(&entry.layout, params) {
                 entry.last_used = self.frame;
+                self.stats.hits += 1;
                 return Ok(entry.layout.clone());
             }
         }
+        self.stats.misses += 1;
         let layout = Arc::new(system.layout(params)?);
         self.entries.insert(
             key,

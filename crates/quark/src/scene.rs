@@ -5,6 +5,7 @@
 
 use std::any::Any;
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::color::Color;
@@ -254,6 +255,23 @@ pub struct RichTextPrimitive {
     pub layout: ShapedText,
     pub default_color: Color,
     pub span_colors: Arc<[Color]>,
+}
+
+/// Which line a [`TextDecoration`] draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDecorationKind {
+    Underline,
+    Strikethrough,
+}
+
+/// A line drawn along a byte range of a text layout. Decorations never
+/// affect shaping; they are painted as solid quads right after the text they
+/// decorate, so they keep the text's paint order and clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextDecoration {
+    pub range: Range<usize>,
+    pub kind: TextDecorationKind,
+    pub color: Color,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

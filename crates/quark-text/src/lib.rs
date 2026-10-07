@@ -7,7 +7,7 @@ mod layout;
 mod row;
 mod system;
 
-pub use cache::{LayoutCache, LayoutKey};
+pub use cache::{LayoutCache, LayoutCacheStats, LayoutKey};
 pub use cosmic_text;
 pub use fonts::{FontRole, FontSettings, MONO_FAMILY, UI_FAMILY};
 pub use layout::{
