@@ -35,6 +35,9 @@ pub enum TranscriptEvent {
     JumpToLatest,
 }
 
+/// Frame interval requested while a drag autoscrolls.
+const AUTOSCROLL_FRAME_MS: u64 = 16;
+
 type EventMap = Rc<dyn Fn(TranscriptEvent) -> Action>;
 
 struct Placed {
@@ -65,6 +68,8 @@ pub struct TranscriptElement {
     jump: Option<Placed>,
     on_event: EventMap,
     label: String,
+    /// A drag is autoscrolling; ask for the next frame.
+    animating: bool,
 }
 
 impl<G: BlockGeometry> Transcript<G> {
@@ -185,6 +190,7 @@ impl<G: BlockGeometry> Transcript<G> {
             jump,
             on_event,
             label: "Transcript".to_owned(),
+            animating: self.wants_frame(),
         }
     }
 }
@@ -293,6 +299,9 @@ impl Element for TranscriptElement {
         cx: &mut ElementContext,
     ) {
         scene.clip(bounds);
+        if self.animating {
+            cx.request_frame_at_ms(cx.clock_ms + AUTOSCROLL_FRAME_MS);
+        }
 
         // The list: one hit entry and semantic node owning drag and wheel.
         let mut node = SemanticNode::new(bounds);

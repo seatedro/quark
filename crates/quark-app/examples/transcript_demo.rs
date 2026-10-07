@@ -203,7 +203,6 @@ struct Demo {
     last_tick: Option<Duration>,
     timing: Timing,
     log: bool,
-    style_scale: f32,
 }
 
 impl Demo {
@@ -227,7 +226,6 @@ impl Demo {
             last_tick: None,
             timing: Timing::default(),
             log: std::env::var_os("QUARK_TRANSCRIPT_LOG").is_some(),
-            style_scale: 0.0,
         }
     }
 
@@ -312,19 +310,6 @@ impl UiApp for Demo {
         let scale = cx.frame.scale_factor();
         let now = cx.frame.elapsed();
 
-        if self.style_scale != scale {
-            // Physical pixels: the style scales with the display.
-            self.style_scale = scale;
-            let style = TranscriptStyle::for_font_size(FONT_SIZE * scale);
-            let mut fresh = Transcript::new(style);
-            let mut keys: Vec<RowKey> = self.messages.keys().copied().collect();
-            keys.sort();
-            if let Err(e) = fresh.extend(keys.iter().filter_map(|k| self.messages.get(k))) {
-                eprintln!("{e:?}");
-            }
-            self.transcript = fresh;
-        }
-
         let due = self.last_tick.is_none_or(|last| now >= last + STREAM_TICK);
         if due {
             self.last_tick = Some(now);
@@ -332,11 +317,12 @@ impl UiApp for Demo {
         }
 
         let started = Instant::now();
-        let header_h = (36.0 * scale).round();
+        let header_h = 36.0;
         let body_h = (height - header_h).max(0.0);
         let font_size = self.transcript.style().font_size;
         let text_cx = cx.frame.text();
-        let mut measurer = TextMeasurer::new(&mut text_cx.system, &mut text_cx.layouts, font_size);
+        let mut measurer =
+            TextMeasurer::new(&mut text_cx.system, &mut text_cx.layouts, font_size, scale);
         self.transcript.prepare(
             width,
             body_h,
@@ -352,11 +338,8 @@ impl UiApp for Demo {
             .label("Conversation");
         self.record(started.elapsed());
 
-        if self.transcript.wants_frame() {
-            cx.frame.request_frame();
-        } else {
-            cx.frame.request_frame_at(Instant::now() + STREAM_TICK);
-        }
+        // The element schedules its own frames while a drag autoscrolls.
+        cx.frame.request_frame_in(STREAM_TICK);
 
         let colors = &cx.theme.colors;
         let status = format!(
@@ -388,10 +371,10 @@ impl UiApp for Demo {
                     .w(width)
                     .h(header_h)
                     .flex_shrink_0()
-                    .px(12.0 * scale)
+                    .px(12.0)
                     .items_center()
                     .bg(colors.panel)
-                    .child(text(status).size(12.0 * scale).color(colors.text_muted)),
+                    .child(text(status).size(12.0).color(colors.text_muted)),
             )
             .child(element)
             .into_any()

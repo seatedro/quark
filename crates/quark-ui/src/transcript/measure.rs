@@ -23,19 +23,34 @@ const CODE_PAD_X: f32 = 0.6;
 const CODE_PAD_Y: f32 = 0.5;
 
 /// Measures blocks with the frame's text system and layout cache.
+/// `font_size` is in logical points; `scale_factor` must be the one the
+/// frame's `ElementContext` shapes at, or the painted layout misses the
+/// cache and is shaped a second time.
 pub struct TextMeasurer<'a> {
     pub text: &'a mut TextSystem,
     pub layouts: &'a mut LayoutCache,
     pub font_size: f32,
+    pub scale_factor: f32,
 }
 
 impl<'a> TextMeasurer<'a> {
-    pub fn new(text: &'a mut TextSystem, layouts: &'a mut LayoutCache, font_size: f32) -> Self {
+    pub fn new(
+        text: &'a mut TextSystem,
+        layouts: &'a mut LayoutCache,
+        font_size: f32,
+        scale_factor: f32,
+    ) -> Self {
         Self {
             text,
             layouts,
             font_size,
+            scale_factor,
         }
+    }
+
+    fn layout(&mut self, params: TextParams) -> Option<Arc<TextLayout>> {
+        let params = params.scale_factor(self.scale_factor);
+        self.layouts.layout(self.text, &params).ok()
     }
 }
 
@@ -71,8 +86,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     .kind(FontKind::Ui)
                     .weight(FontWeight::Normal)
                     .line_height(line_height);
-                let params = span_params(spans, style, Some(width.max(1.0)));
-                let layout = self.layouts.layout(self.text, &params).ok();
+                let layout = self.layout(span_params(spans, style, Some(width.max(1.0))));
                 let text_height = layout.as_ref().map_or(line_height, |l| l.size().1);
                 TextGeometry {
                     layout,
@@ -96,8 +110,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                 let style = TextStyle::new(font_size)
                     .kind(FontKind::Mono)
                     .line_height(line_height);
-                let params = span_params(&spans, style, None);
-                let layout = self.layouts.layout(self.text, &params).ok();
+                let layout = self.layout(span_params(&spans, style, None));
                 let rows = lines.len().max(1) as f32;
                 TextGeometry {
                     layout,

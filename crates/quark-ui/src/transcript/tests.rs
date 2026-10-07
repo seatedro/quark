@@ -563,7 +563,7 @@ fn paint(
         size.1,
         0,
         messages,
-        &mut TextMeasurer::new(&mut text, &mut layouts, font_size),
+        &mut TextMeasurer::new(&mut text, &mut layouts, font_size, 1.0),
     );
     let theme = Theme::default_dark();
     let element = transcript.element(messages, &theme, |ev| Ev(ev).into());
