@@ -316,7 +316,8 @@ impl<A: App> Runner<A> {
         {
             *left = left.saturating_sub(1);
             if *left == 0 {
-                tracing::info!("QUARK_EXIT_AFTER_FRAMES reached; exiting");
+                // stderr rather than tracing: smoke runs install no subscriber.
+                eprintln!("QUARK_EXIT_AFTER_FRAMES reached; exiting");
                 self.flags.exit_requested = true;
             }
         }

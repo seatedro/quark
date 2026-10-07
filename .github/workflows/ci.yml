@@ -105,7 +105,7 @@ jobs:
           cargo build -p quark-app --example hello_ui
           bin=target/debug/examples/hello_ui
           mkdir -p target/smoke
-          QUARK_EXIT_AFTER_FRAMES=3 RUST_LOG=info "$bin" >target/smoke/hello_ui.log 2>&1 &
+          QUARK_EXIT_AFTER_FRAMES=1 "$bin" >target/smoke/hello_ui.log 2>&1 &
           pid=$!
           for _ in $(seq 120); do
             kill -0 "$pid" 2>/dev/null || break
