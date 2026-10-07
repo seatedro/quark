@@ -32,6 +32,11 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup component add rustfmt clippy
 
+      # quark-terminal builds libghostty-vt from Ghostty's source with Zig.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Format
@@ -89,6 +94,13 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup component add clippy
+
+      # quark-terminal builds libghostty-vt with Zig on macOS; on Windows it
+      # builds without the terminal and needs no Zig.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: runner.os != 'Windows'
+        with:
+          version: 0.16.0
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
