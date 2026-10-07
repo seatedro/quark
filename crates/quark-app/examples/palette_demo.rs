@@ -11,6 +11,7 @@
 use std::time::Duration;
 
 use accesskit::Role;
+use quark::view;
 use quark_app::quark_ui::element::{AnyElement, Binding, IntoAnyElement, div, text, text_input};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
@@ -208,20 +209,15 @@ impl PaletteDemo {
 
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
-        div()
-            .accessibility_id(id)
-            .accessibility_role(Role::Button)
-            .accessibility_label(label)
-            .on_click(msg)
-            .px(14.0)
-            .h(32.0)
-            .items_center()
-            .justify_center()
-            .rounded(8.0)
-            .bg(colors.element_background)
-            .hover_bg(colors.element_hover)
-            .child(text(label).color(colors.text))
-            .into_any()
+        view! {
+            <div accessibility_id={id} accessibility_role={Role::Button} aria-label={label}
+                 on:click={msg}
+                 class="px-[14] h-8 items-center justify-center rounded-[8]
+                        bg-[colors.element_background]"
+                 hover_bg={colors.element_hover}>
+                <text color={colors.text}>{label}</text>
+            </div>
+        }
     }
 
     fn pointer_moved(&mut self, pointer: Option<(f32, f32)>, cx: &mut UiContext) {
@@ -299,85 +295,48 @@ impl UiApp for PaletteDemo {
         let theme = cx.theme;
         let colors = &theme.colors;
         let note = self.note.clone().unwrap_or_else(|| "No note".to_owned());
-        let card_content = div()
-            .flex_col()
-            .gap(8.0)
-            .child(text("Ada Lovelace").semibold().color(colors.text_strong))
-            .child(Self::button(
-                "demo.profile",
-                "Open profile",
-                Msg::OpenProfile,
-                cx,
-            ));
-
-        let mut root = div()
-            .w(window.0)
-            .h(window.1)
-            .bg(colors.background)
-            .flex_col()
-            .p(40.0)
-            .gap(12.0)
-            .child(
-                text(
+        let card_content = view! {
+            <div class="flex-col gap-2">
+                <text class="font-semibold" color={colors.text_strong}>"Ada Lovelace"</text>
+                {Self::button("demo.profile", "Open profile", Msg::OpenProfile, cx)}
+            </div>
+        };
+        let focused = cx.is_focused(PALETTE_INPUT);
+        view! {
+            <div w={window.0} h={window.1} class="bg-[colors.background] flex-col p-10 gap-3">
+                <text class="text-sm" wrap_width={window.0 - 80.0} color={colors.text_muted}>
                     "Ctrl+K opens the command palette. Delete note shows an undo toast. \
                      Options (or Ctrl+Shift+O) opens a menu with a submenu. Rest the \
-                     pointer on Hover me for a hover card.",
-                )
-                .text_sm()
-                .wrap_width(window.0 - 80.0)
-                .color(colors.text_muted),
-            )
-            .child(
-                text_input("Notes", "")
-                    .field(&self.notes)
-                    .placeholder("Type a note")
-                    .focus_target(NOTES_FIELD)
-                    .focused(cx.is_focused(NOTES_FIELD))
-                    .w(360.0)
-                    .h(44.0),
-            )
-            .child(text(self.status.clone()).color(colors.text))
-            .child(text(note).color(colors.text_muted))
-            .child(
-                div()
-                    .flex_row()
-                    .gap(8.0)
-                    .child(Self::button(
-                        "demo.delete",
-                        "Delete note",
-                        Msg::DeleteNote,
-                        cx,
-                    ))
-                    .child(Self::button("demo.options", "Options", Msg::OpenMenu, cx)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(HOVER_ANCHOR.x)
-                    .top(HOVER_ANCHOR.y)
-                    .w(HOVER_ANCHOR.width)
-                    .h(HOVER_ANCHOR.height)
-                    .items_center()
-                    .justify_center()
-                    .rounded(6.0)
-                    .border(colors.border)
-                    .child(text("Hover me").color(colors.text)),
-            )
-            .child(toasts);
-        if let Some(menu) = self.menu.render(window, theme) {
-            root = root.child(menu);
+                     pointer on Hover me for a hover card."
+                </text>
+                <text_input("Notes", "") field={&self.notes} placeholder="Type a note"
+                            focus_target={NOTES_FIELD} focused={cx.is_focused(NOTES_FIELD)}
+                            w={360.0} h={44.0} />
+                <text color={colors.text}>{self.status.clone()}</text>
+                <text color={colors.text_muted}>{note}</text>
+                <div class="flex-row gap-2">
+                    {Self::button("demo.delete", "Delete note", Msg::DeleteNote, cx)}
+                    {Self::button("demo.options", "Options", Msg::OpenMenu, cx)}
+                </div>
+                <div class="absolute" left={HOVER_ANCHOR.x} top={HOVER_ANCHOR.y}
+                     w={HOVER_ANCHOR.width} h={HOVER_ANCHOR.height}
+                     class="items-center justify-center rounded-[6] border-[colors.border]">
+                    <text color={colors.text}>"Hover me"</text>
+                </div>
+                {toasts}
+                if let Some(menu) = self.menu.render(window, theme) {
+                    {menu}
+                }
+                if let Some(card) = self.card.render(card_content, window, theme) {
+                    {card}
+                }
+                if let Some(palette) =
+                    self.palette.render(window, theme, focused, |event| Msg::Palette(event).into())
+                {
+                    {palette}
+                }
+            </div>
         }
-        if let Some(card) = self.card.render(card_content, window, theme) {
-            root = root.child(card);
-        }
-        let focused = cx.is_focused(PALETTE_INPUT);
-        if let Some(palette) = self
-            .palette
-            .render(window, theme, focused, |event| Msg::Palette(event).into())
-        {
-            root = root.child(palette);
-        }
-        root.into_any()
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
