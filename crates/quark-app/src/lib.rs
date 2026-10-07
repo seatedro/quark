@@ -22,6 +22,8 @@ mod devtools;
 pub mod hot_reload;
 pub mod input;
 // Bindings are quark-ui's `Binding`, which the router matches too.
+#[cfg(all(test, feature = "ui"))]
+mod frame_budget;
 #[cfg(feature = "ui")]
 pub mod keymap;
 #[cfg(target_os = "macos")]

@@ -12,6 +12,9 @@ pub(crate) struct TestRunner {
     events: EventSink,
     _app_events: Receiver<AppEvent>,
     launch: Instant,
+    /// Whether frames see assistive tech listening; on by default, since
+    /// most tests read the tree a frame builds.
+    pub(crate) accessibility_active: bool,
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
 }
@@ -33,6 +36,7 @@ impl TestRunner {
             events,
             _app_events: app_events,
             launch: Instant::now(),
+            accessibility_active: true,
             #[cfg(feature = "tray")]
             tray: None,
         }
@@ -74,8 +78,7 @@ impl TestRunner {
             flags: &mut self.flags,
             waker: &self.waker,
             ime: FrameIme::default(),
-            // Tests read the tree the frame built.
-            accessibility_active: true,
+            accessibility_active: self.accessibility_active,
             #[cfg(feature = "devtools")]
             last_render: Default::default(),
         };

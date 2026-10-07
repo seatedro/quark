@@ -15,6 +15,10 @@ pub trait App: 'static {
     /// Build the scene for the next frame of the context's window.
     fn frame(&mut self, cx: &mut FrameContext) -> Scene;
 
+    /// The runner hands each scene back once it is rendered, so the app can
+    /// build the next one in the same buffer instead of allocating it.
+    fn recycle_scene(&mut self, _scene: Scene) {}
+
     fn event(&mut self, _event: InputEvent, _cx: &mut EventContext) {}
 
     /// Called after any [`Waker::wake`]. Wakes coalesce and may be spurious.

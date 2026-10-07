@@ -1,12 +1,13 @@
-//! Test-only global allocator that counts this thread's allocations, so
-//! frame-budget tests can assert how much a frame allocates, and can
-//! attribute allocations to their call sites while profiling.
+//! A global allocator that counts this thread's allocations, so
+//! frame-budget tests can assert how much a frame allocates and attribute
+//! allocations to their call sites. A test binary installs it with
+//! `#[global_allocator] static A: Counting = Counting;`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-struct Counting;
+pub struct Counting;
 
 thread_local! {
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
@@ -70,16 +71,13 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
 /// Allocations this thread has made so far.
-pub(crate) fn allocations() -> u64 {
+pub fn allocations() -> u64 {
     ALLOCATIONS.with(Cell::get)
 }
 
 /// Allocations `f` makes on this thread.
-pub(crate) fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
+pub fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
     let before = allocations();
     let result = f();
     (result, allocations() - before)
@@ -88,7 +86,7 @@ pub(crate) fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
 /// Run `f` and return its allocations by call site, most first. Slow:
 /// every allocation captures a backtrace.
 #[allow(dead_code)]
-pub(crate) fn profile<R>(f: impl FnOnce() -> R) -> (R, Vec<(String, u64)>) {
+pub fn profile<R>(f: impl FnOnce() -> R) -> (R, Vec<(String, u64)>) {
     SITES.with(|sites| sites.borrow_mut().clear());
     PROFILING.with(|p| p.set(true));
     let result = f();

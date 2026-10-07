@@ -112,12 +112,12 @@ impl TextElement {
         self
     }
 
-    fn params(&self, content: &str, font_size: f32) -> TextParams {
+    fn query<'s>(&self, content: &'s str, font_size: f32) -> TextQuery<'s> {
         let style = TextStyle::new(font_size)
             .kind(self.font_kind)
             .weight(self.font_weight)
             .line_height(font_size * self.line_height_factor);
-        TextParams::new(content, style).wrap_width(self.wrap_width)
+        TextQuery::new(content, style).wrap_width(self.wrap_width)
     }
 
     fn resolve_font_size(&self, theme: &Theme) -> f32 {
@@ -150,7 +150,7 @@ impl Element for TextElement {
     ) -> (LayoutId, Self::LayoutState) {
         let font_size = self.resolve_font_size(cx.theme);
         let line_height = font_size * self.line_height_factor;
-        let layout = cx.layout_text(&self.params(&self.content, font_size));
+        let layout = cx.layout_text_query(&self.query(&self.content, font_size));
         let (layout_width, layout_height) = layout.as_ref().map_or((0.0, 0.0), |l| l.size());
         let text_width = layout_width.ceil();
         let (width, height) = match self.wrap_width {
@@ -222,7 +222,7 @@ impl Element for TextElement {
                 natural_width,
                 bounds.width,
             );
-            layout = cx.layout_text(&self.params(&truncated, font_size));
+            layout = cx.layout_text_query(&self.query(&truncated, font_size));
             content = truncated;
             text_width = truncated_width;
         }

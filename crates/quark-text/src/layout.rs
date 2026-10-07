@@ -145,11 +145,79 @@ pub struct TextParams {
     pub scale_factor: f32,
 }
 
+/// The empty span list every [`TextParams::new`] shares, so building
+/// params allocates nothing for spans.
+fn no_spans() -> Arc<[TextSpan]> {
+    static EMPTY: std::sync::LazyLock<Arc<[TextSpan]>> =
+        std::sync::LazyLock::new(|| Arc::from(Vec::new()));
+    EMPTY.clone()
+}
+
+/// [`TextParams`] borrowed: what a cache lookup needs, so a hit costs no
+/// allocation. The cache builds owned params only on a miss.
+#[derive(Debug, Clone, Copy)]
+pub struct TextQuery<'a> {
+    pub text: &'a str,
+    pub spans: &'a [TextSpan],
+    pub style: TextStyle,
+    pub wrap_width: Option<f32>,
+    pub scale_factor: f32,
+}
+
+impl<'a> TextQuery<'a> {
+    pub fn new(text: &'a str, style: TextStyle) -> Self {
+        Self {
+            text,
+            spans: &[],
+            style,
+            wrap_width: None,
+            scale_factor: 1.0,
+        }
+    }
+
+    pub fn wrap_width(mut self, wrap_width: Option<f32>) -> Self {
+        self.wrap_width = wrap_width;
+        self
+    }
+
+    pub fn scale_factor(mut self, scale_factor: f32) -> Self {
+        self.scale_factor = scale_factor;
+        self
+    }
+
+    /// Owned params with copies of the text and spans.
+    pub fn to_params(&self) -> TextParams {
+        let spans = if self.spans.is_empty() {
+            no_spans()
+        } else {
+            Arc::from(self.spans)
+        };
+        TextParams {
+            text: Arc::from(self.text),
+            spans,
+            style: self.style,
+            wrap_width: self.wrap_width,
+            scale_factor: self.scale_factor,
+        }
+    }
+}
+
 impl TextParams {
+    /// The borrowed form of these params.
+    pub fn query(&self) -> TextQuery<'_> {
+        TextQuery {
+            text: &self.text,
+            spans: &self.spans,
+            style: self.style,
+            wrap_width: self.wrap_width,
+            scale_factor: self.scale_factor,
+        }
+    }
+
     pub fn new(text: impl Into<Arc<str>>, style: TextStyle) -> Self {
         Self {
             text: text.into(),
-            spans: Arc::from(Vec::new()),
+            spans: no_spans(),
             style,
             wrap_width: None,
             scale_factor: 1.0,

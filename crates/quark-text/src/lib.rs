@@ -28,7 +28,7 @@ pub use cosmic_text;
 pub use fonts::{FontRole, FontSettings, MONO_FAMILY, UI_FAMILY};
 pub use layout::{
     Caret, DEFAULT_LINE_HEIGHT_FACTOR, GlyphColumns, GlyphRun, IntegrityError, LineInfo, TextError,
-    TextLayout, TextParams, TextSpan, TextStyle,
+    TextLayout, TextParams, TextQuery, TextSpan, TextStyle,
 };
 pub use offset::{TextOffset, ToTextOffset};
 pub use row::{RowHeights, RowMeasure};

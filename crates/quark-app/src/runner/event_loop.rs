@@ -302,6 +302,7 @@ impl<A: App> Runner<A> {
             profile_scope!("render");
             renderer.render(&scene, &mut self.text.system, time)
         };
+        self.app.recycle_scene(scene);
         match rendered {
             #[cfg(feature = "devtools")]
             Ok(stats) => state.last_render = stats,

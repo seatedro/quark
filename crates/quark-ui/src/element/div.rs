@@ -16,7 +16,7 @@ pub struct Div {
     translate: (f32, f32),
     bg_effect: Option<BackgroundEffect>,
     blur_radius: Option<f32>,
-    children: Vec<AnyElement>,
+    children: pool::ChildList,
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
     on_drag: Option<DragStart>,
@@ -59,7 +59,7 @@ pub fn div() -> Div {
         translate: (0.0, 0.0),
         bg_effect: None,
         blur_radius: None,
-        children: Vec::new(),
+        children: pool::ChildList::new(),
         on_click: None,
         on_click_handler: None,
         on_drag: None,
@@ -548,7 +548,7 @@ impl Element for Div {
     ) -> (LayoutId, Self::LayoutState) {
         // Layout children first, collecting their IDs on the engine's stack.
         let mark = engine.begin_children();
-        for child in &mut self.children {
+        for child in self.children.iter_mut() {
             let id = child.request_layout(engine, cx);
             engine.push_child(id);
         }
@@ -600,11 +600,11 @@ impl Element for Div {
         }
 
         if (child_dx, child_dy) != (0.0, 0.0) {
-            for child in &mut self.children {
+            for child in self.children.iter_mut() {
                 child.prepaint_with_offset(engine, cx, child_dx, child_dy);
             }
         } else {
-            for child in &mut self.children {
+            for child in self.children.iter_mut() {
                 child.prepaint(engine, cx);
             }
         }
@@ -759,7 +759,7 @@ impl Element for Div {
             .is_some_and(|action| !action.is::<NoopAction>());
         let accessibility_label = self
             .accessibility_label
-            .clone()
+            .take()
             .or_else(|| self.tooltip.clone());
         let accessibility_role = self.accessibility_role.or_else(|| {
             (click_action.is_some() && accessibility_label.is_some())
@@ -814,10 +814,48 @@ impl Element for Div {
             style_state.insert(StyleState::EXPANDED);
         }
 
+        // The accessibility node copies what it shares with the semantic
+        // node; the semantic node then takes the div's strings, since paint
+        // runs once per frame.
+        let accessibility = accessibility_role
+            .filter(|_| cx.accessibility_enabled())
+            .map(|role| {
+                let key = self.accessibility_key(role, accessibility_label.as_deref());
+                let mut node =
+                    AccessibilityNode::new(key, role, bounds).disabled(self.accessibility_disabled);
+                if let Some(label) = &accessibility_label {
+                    node = node.label(label.clone());
+                }
+                if let Some(value) = &self.accessibility_value {
+                    node = node.value(value.clone());
+                }
+                if let Some(description) = &self.accessibility_description {
+                    node = node.description(description.clone());
+                }
+                if let Some(selected) = self.accessibility_selected {
+                    node = node.selected(selected);
+                }
+                if let Some(toggled) = self.accessibility_toggled {
+                    node = node.toggled(toggled);
+                }
+                if let Some(expanded) = self.accessibility_expanded {
+                    node = node.expanded(expanded);
+                }
+                if !self.accessibility_disabled
+                    && let Some(action) = click_action
+                    && !action.is::<NoopAction>()
+                {
+                    node = node.action(AccessibilityAction::Click(action));
+                } else if let Some(builder) = self.on_scroll.clone() {
+                    node = node.action(AccessibilityAction::Scroll(builder));
+                }
+                node
+            });
+
         let semantic_id = self
             .semantic_id
-            .clone()
-            .or_else(|| self.accessibility_id.clone().map(UiNodeId::from));
+            .take()
+            .or_else(|| self.accessibility_id.take().map(UiNodeId::from));
         let should_emit_semantic = semantic_id.is_some()
             || self.semantic_key.is_some()
             || self.test_id.is_some()
@@ -834,13 +872,13 @@ impl Element for Div {
         let semantic_parent = if should_emit_semantic {
             let mut node = SemanticNode::new(bounds);
             node.id = semantic_id;
-            node.key = self.semantic_key.clone();
-            node.test_id = self.test_id.clone();
+            node.key = self.semantic_key.take();
+            node.test_id = self.test_id.take();
             node.parent = cx.current_semantic_parent();
             node.role = semantic_role;
-            node.label = accessibility_label.clone();
-            node.value = self.accessibility_value.clone();
-            node.description = self.accessibility_description.clone();
+            node.label = accessibility_label;
+            node.value = self.accessibility_value.take();
+            node.description = self.accessibility_description.take();
             node.tooltip = self.tooltip.clone();
             node.actions = semantic_actions;
             node.state = SemanticNodeState {
@@ -851,46 +889,17 @@ impl Element for Div {
                 style_state,
             };
             node.focus = self.focus_target;
-            node.focus_scope = self.focus_scope.clone();
+            node.focus_scope = self.focus_scope.take();
             node.modal = self.trap_focus;
             node.tab_stop = self.tab_stop;
-            node.key_context = self.key_context.clone();
-            node.event_bindings = self.event_bindings.clone();
+            node.key_context = self.key_context.take();
+            node.event_bindings = std::mem::take(&mut self.event_bindings);
             Some(cx.semantic.push(node))
         } else {
             None
         };
 
-        if let Some(role) = accessibility_role.filter(|_| cx.accessibility_enabled()) {
-            let key = self.accessibility_key(role, accessibility_label.as_deref());
-            let mut node =
-                AccessibilityNode::new(key, role, bounds).disabled(self.accessibility_disabled);
-            if let Some(label) = accessibility_label {
-                node = node.label(label);
-            }
-            if let Some(value) = self.accessibility_value.clone() {
-                node = node.value(value);
-            }
-            if let Some(description) = self.accessibility_description.clone() {
-                node = node.description(description);
-            }
-            if let Some(selected) = self.accessibility_selected {
-                node = node.selected(selected);
-            }
-            if let Some(toggled) = self.accessibility_toggled {
-                node = node.toggled(toggled);
-            }
-            if let Some(expanded) = self.accessibility_expanded {
-                node = node.expanded(expanded);
-            }
-            if !self.accessibility_disabled
-                && let Some(action) = click_action
-                && !action.is::<NoopAction>()
-            {
-                node = node.action(AccessibilityAction::Click(action));
-            } else if let Some(builder) = self.on_scroll.clone() {
-                node = node.action(AccessibilityAction::Scroll(builder));
-            }
+        if let Some(node) = accessibility {
             match semantic_parent {
                 Some(index) => cx.push_accessibility_for_semantic(node, index),
                 None => cx.push_accessibility(node),
@@ -935,11 +944,11 @@ impl Element for Div {
         }
 
         if (child_dx, child_dy) != (0.0, 0.0) {
-            for child in &mut self.children {
+            for child in self.children.iter_mut() {
                 child.paint_with_offset(engine, scene, cx, child_dx, child_dy);
             }
         } else {
-            for child in &mut self.children {
+            for child in self.children.iter_mut() {
                 child.paint(engine, scene, cx);
             }
         }

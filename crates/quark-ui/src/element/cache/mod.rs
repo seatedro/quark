@@ -155,6 +155,8 @@ pub struct ElementCache {
     /// Buffers of evicted rows, reused by new ones.
     spare_paint: Vec<PaintRecord>,
     engine: Option<LayoutEngine>,
+    /// The context's working buffers between frames.
+    pub(super) buffers: super::context::FrameBuffers,
     /// Engines of subtrees rebuilt after layout. Boxed because they move
     /// between this pool and elements; a box moves without reallocating.
     #[expect(clippy::vec_box, reason = "pooled boxes move in and out")]
@@ -325,6 +327,7 @@ pub enum CacheIntegrityError {
 
 /// The window's layout engine, cleared, and the cache's frame state.
 pub(super) fn begin_frame(cx: &mut ElementContext) -> LayoutEngine {
+    cx.load_buffers();
     let theme = cx.theme;
     let Some(cache) = cx.cache.as_deref_mut() else {
         return LayoutEngine::new();
@@ -355,6 +358,7 @@ pub(super) fn invalidate(cx: &mut ElementContext, rows: &[u32]) {
 }
 
 pub(super) fn end_frame(cx: &mut ElementContext, engine: LayoutEngine) {
+    cx.store_buffers();
     if let Some(cache) = cx.cache.as_deref_mut() {
         cache.engine = Some(engine);
         cache.evict();

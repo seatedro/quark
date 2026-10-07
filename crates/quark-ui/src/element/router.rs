@@ -219,6 +219,18 @@ impl InputHandlers {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.click_node.clear();
+        self.click.clear();
+        self.drag_node.clear();
+        self.drag.clear();
+        self.scroll_node.clear();
+        self.scroll.clear();
+        self.key_node.clear();
+        self.key_binding.clear();
+        self.key_action.clear();
+    }
+
     pub(super) fn marks(&self) -> HandlerMarks {
         HandlerMarks {
             click: self.click.len(),
@@ -357,6 +369,15 @@ impl InputRouter {
             let identities = node_identities(&self.frame.semantic);
             capture.node = identities.iter().position(|id| *id == capture.identity);
         }
+    }
+
+    /// [`Self::set_frame`], returning the previous frame so its buffers
+    /// can be reused for the next one (see
+    /// [`ElementContext::with_input_frame`]).
+    pub fn replace_frame(&mut self, frame: InputFrame) -> InputFrame {
+        let previous = std::mem::take(&mut self.frame);
+        self.set_frame(frame);
+        previous
     }
 
     pub fn frame(&self) -> &InputFrame {

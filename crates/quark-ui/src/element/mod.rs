@@ -43,7 +43,7 @@ use quark_render::scene::{
     FontStyle, RichTextPrimitive, ShapedText, TextDecoration, TextDecorationKind,
 };
 use quark_render::{FontKind, TextPrimitive};
-use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
+use quark_text::{LayoutCache, TextLayout, TextParams, TextQuery, TextSpan, TextStyle, TextSystem};
 
 mod cache;
 mod canvas;
@@ -54,6 +54,7 @@ mod hit;
 mod image;
 mod layout;
 mod measure;
+mod pool;
 mod render;
 mod router;
 mod selectable_text;
