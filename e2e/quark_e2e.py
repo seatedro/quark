@@ -17,8 +17,10 @@ sleep.
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 
 import dbus
@@ -33,19 +35,40 @@ ROLE = {
     "push button": 43,
     "list": 31,
     "list item": 32,
+    "check box": 7,
+    "toggle button": 62,
+    "status bar": 54,
+    "notification": 101,
 }
 ROLE_NAME = {v: k for k, v in ROLE.items()}
+STATE_CHECKED = 4
 STATE_FOCUSED = 12
+STATE_PRESSED = 20
+
+
+class Text:
+    """What AT-SPI's Text interface reports. Offsets count characters
+    (Unicode scalar values); `selection` is None when nothing is selected."""
+
+    def __init__(self, text, caret, selection):
+        self.text = text
+        self.caret = caret
+        self.selection = selection
+
+    def __repr__(self):
+        return f"Text({self.text!r}, caret={self.caret}, selection={self.selection})"
 
 
 class Node:
-    def __init__(self, role, name, extents, attributes, states, children):
+    def __init__(self, role, name, extents, attributes, states, children, text=None, path=None):
         self.role = role
         self.name = name
         self.extents = extents  # (x, y, w, h) in screen pixels, or None
         self.attributes = attributes
         self.states = states
         self.children = children
+        self.text = text  # Text, for nodes with the Text interface
+        self.path = path  # (bus name, object path), for calling the node
 
     def walk(self):
         yield self
@@ -79,7 +102,8 @@ class Node:
     def dump(self, depth=0):
         role = ROLE_NAME.get(self.role, f"role{self.role}")
         attrs = "".join(f" {k}={v}" for k, v in sorted(self.attributes.items()))
-        line = f"{'  ' * depth}{role} {self.name!r} {self.extents}{attrs}\n"
+        text = f" {self.text!r}" if self.text else ""
+        line = f"{'  ' * depth}{role} {self.name!r} {self.extents}{attrs}{text}\n"
         return line + "".join(c.dump(depth + 1) for c in self.children)
 
 
@@ -93,10 +117,21 @@ def _read(bus, name, path, depth):
     obj = bus.get_object(name, path)
     acc = dbus.Interface(obj, "org.a11y.atspi.Accessible")
     props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+    interfaces = acc.GetInterfaces()
     extents = None
-    if "org.a11y.atspi.Component" in acc.GetInterfaces():
+    if "org.a11y.atspi.Component" in interfaces:
         comp = dbus.Interface(obj, "org.a11y.atspi.Component")
         extents = tuple(int(v) for v in comp.GetExtents(dbus.UInt32(0)))
+    text = None
+    if "org.a11y.atspi.Text" in interfaces:
+        iface = dbus.Interface(obj, "org.a11y.atspi.Text")
+        count = int(props.Get("org.a11y.atspi.Text", "CharacterCount"))
+        start, end = (int(v) for v in iface.GetSelection(0))
+        text = Text(
+            str(iface.GetText(0, count)),
+            int(props.Get("org.a11y.atspi.Text", "CaretOffset")),
+            (start, end) if start >= 0 else None,
+        )
     try:
         attributes = {str(k): str(v) for k, v in acc.GetAttributes().items()}
     except dbus.DBusException:
@@ -111,6 +146,8 @@ def _read(bus, name, path, depth):
         attributes=attributes,
         states=[int(s) for s in acc.GetState()],
         children=children,
+        text=text,
+        path=(name, path),
     )
 
 
@@ -132,6 +169,64 @@ def atspi_tree(app_name):
         if app == app_name:
             return _read(bus, name, path, 0)
     return None
+
+
+def set_text_selection(node, start, end):
+    """Select characters `start..end` of `node` through AT-SPI, as a screen
+    reader's "select text" command does."""
+    name, path = node.path
+    iface = dbus.Interface(_a11y_bus().get_object(name, path), "org.a11y.atspi.Text")
+    return bool(iface.SetSelection(0, start, end))
+
+
+class Announcements:
+    """Records the AT-SPI `Announcement` events apps emit (live regions and
+    explicit announcements) by running dbus-monitor on the AT-SPI bus.
+    Start it before the action that should announce."""
+
+    def __init__(self):
+        address = dbus.SessionBus().get_object("org.a11y.Bus", "/org/a11y/bus").GetAddress(
+            dbus_interface="org.a11y.Bus"
+        )
+        self.proc = subprocess.Popen(
+            [
+                "dbus-monitor",
+                "--address",
+                str(address),
+                "type='signal',interface='org.a11y.atspi.Event.Object',member='Announcement'",
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.messages = []
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        threading.Thread(target=self._read, daemon=True).start()
+        # dbus-monitor prints its own NameAcquired/NameLost signals once the
+        # match is installed; wait for that so no announcement is missed.
+        if not self._ready.wait(10):
+            raise AssertionError("dbus-monitor did not start on the AT-SPI bus")
+
+    def _read(self):
+        in_announcement = False
+        for line in self.proc.stdout:
+            self._ready.set()
+            if line.startswith("signal "):
+                in_announcement = "member=Announcement" in line
+                continue
+            match = re.match(r'\s*variant\s+string "(.*)"$', line)
+            if in_announcement and match:
+                with self._lock:
+                    self.messages.append(match.group(1))
+                in_announcement = False
+
+    def count(self, message):
+        with self._lock:
+            return self.messages.count(message)
+
+    def close(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
 
 
 def wait_for(what, probe, timeout=15.0, interval=0.1):

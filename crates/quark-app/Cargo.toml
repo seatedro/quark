@@ -64,6 +64,8 @@ interprocess = { version = "2.2", default-features = false }
 
 [dev-dependencies]
 quark-render = { workspace = true, features = ["headless-render"] }
+# The a11y_demo example's checkbox, switch, and toasts.
+quark-components.workspace = true
 image.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }
 
@@ -102,6 +104,10 @@ required-features = ["ui"]
 
 [[example]]
 name = "animation_demo"
+required-features = ["ui"]
+
+[[example]]
+name = "a11y_demo"
 required-features = ["ui"]
 
 [[example]]

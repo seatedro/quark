@@ -2734,6 +2734,7 @@ dependencies = [
  "proptest",
  "puffin_http",
  "quark",
+ "quark-components",
  "quark-render",
  "quark-text",
  "quark-ui",
