@@ -44,6 +44,9 @@ pub use segmented::{SegmentedControl, SegmentedItem};
 pub use sidebar_skeleton::sidebar_skeleton;
 pub use stat_summary::*;
 pub use tabs::*;
-pub use toast::{Toast, ToastKind, ToastLayout, ToastStack};
+pub use toast::{
+    Toast, ToastKind, ToastLayout, ToastStack, animate_toast_fan, animate_toast_in,
+    animate_toast_out, animate_toast_progress, retire_toast,
+};
 pub use toolbar::Toolbar;
 pub use tooltip::*;
