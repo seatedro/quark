@@ -205,5 +205,9 @@ required-features = ["ui"]
 test = true
 
 [[example]]
+name = "layout_demo"
+required-features = ["components"]
+
+[[example]]
 name = "platform_demo"
 required-features = ["notifications"]
