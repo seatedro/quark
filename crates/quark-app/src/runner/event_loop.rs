@@ -595,6 +595,11 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 state.persist();
             }
         }
+        // Release the windows and the GPU while the display connection is
+        // still open: `run_app` closes it on return, and wgpu's GL backend
+        // then segfaults in eglTerminate talking to the closed wl_display.
+        self.windows = WindowTable::default();
+        self.gpu = None;
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
