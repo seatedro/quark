@@ -787,6 +787,115 @@ mod tests {
         assert_eq!((pinned, scrolled_up, after), (false, true, (false, true)));
     }
 
+    /// The document spans y=36..400 under the header; its vertical track
+    /// runs 6 points in from either end.
+    const TRACK_MIDDLE: f32 = (36.0 + 400.0) / 2.0;
+
+    /// Center of the painted scrollbar thumb, at the window's right edge.
+    fn thumb_center(ui: &UiTestHarness<Demo>) -> (f32, f32) {
+        ui.scene()
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                // The track is the faint one.
+                quark::scene::Primitive::RoundedRect(r) if r.rect.x > 590.0 && r.color.a != 10 => {
+                    Some((
+                        r.rect.x + r.rect.width / 2.0,
+                        r.rect.y + r.rect.height / 2.0,
+                    ))
+                }
+                _ => None,
+            })
+            .expect("a scrollbar thumb")
+    }
+
+    /// Message numbers (`#n:`) painted on screen.
+    fn messages_on_screen(ui: &UiTestHarness<Demo>) -> Vec<u64> {
+        let mut shown: Vec<u64> = ui
+            .painted_texts()
+            .iter()
+            .filter_map(|t| t.text.strip_prefix('#')?.split(':').next()?.parse().ok())
+            .collect();
+        shown.sort_unstable();
+        shown.dedup();
+        shown
+    }
+
+    fn offset_fraction(ui: &UiTestHarness<Demo>) -> f32 {
+        let doc = ui.app().chat.document();
+        doc.scroll_offset() / doc.max_scroll_offset()
+    }
+
+    // Catches the transcript's thumb not dragging: grabbing it at the
+    // bottom and moving its center to the track's middle scrolls to the
+    // middle of the history, unpinning the view.
+    #[test]
+    fn dragging_the_thumb_to_the_middle_shows_the_middle_of_the_history() {
+        let mut ui = chat(40);
+        let before = messages_on_screen(&ui);
+        let grab = thumb_center(&ui);
+        ui.drag(grab, (grab.0, TRACK_MIDDLE));
+
+        let after = messages_on_screen(&ui);
+        let fraction = offset_fraction(&ui);
+        // Rows measured on arrival replace estimated heights, which moves
+        // the fraction a little after the drag lands.
+        assert!((fraction - 0.5).abs() < 0.05, "scrolled to {fraction}");
+        assert!(!ui.app().chat.document().is_stuck_to_bottom());
+        assert!(before.contains(&39), "starts at the newest: {before:?}");
+        assert!(
+            !after.is_empty() && after.iter().all(|&n| (8..32).contains(&n)),
+            "middle messages: {after:?}"
+        );
+    }
+
+    // Catches track presses on the transcript's bar doing nothing or
+    // moving by wheel lines: each press pages toward it, by the viewport
+    // less two lines (364 - 40 points).
+    #[test]
+    fn pressing_the_transcript_track_pages_toward_the_press() {
+        let mut ui = chat(40);
+        ui.app_mut().chat.document_mut().set_scroll_offset(0.0);
+        ui.frame();
+        let got: Vec<f32> = [380.0, 380.0, 60.0]
+            .into_iter()
+            .map(|y| {
+                ui.click((596.0, y));
+                ui.app().chat.document().scroll_offset().round()
+            })
+            .collect();
+        assert_eq!(got, [324.0, 648.0, 324.0]);
+    }
+
+    // Catches a thumb drag to the bottom leaving the view unpinned while
+    // an answer streams: the content grows during the drag, and releasing
+    // at the bottom still follows the stream afterwards.
+    #[test]
+    fn dragging_the_thumb_to_the_bottom_while_streaming_pins_the_view() {
+        let mut ui = chat(40);
+        ui.app_mut().chat.document_mut().set_scroll_offset(0.0);
+        ui.send_message(StreamTick);
+        ui.frame();
+        let grab = thumb_center(&ui);
+        ui.pointer_down(grab);
+        ui.pointer_move((grab.0, TRACK_MIDDLE));
+        for _ in 0..20 {
+            ui.send_message(StreamTick);
+        }
+        ui.frame();
+        ui.pointer_move((grab.0, 420.0));
+        ui.pointer_up((grab.0, 420.0));
+        let released = ui.app().chat.document().is_stuck_to_bottom();
+
+        for _ in 0..20 {
+            ui.send_message(StreamTick);
+        }
+        ui.frame();
+        let doc = ui.app().chat.document();
+        let following = (doc.max_scroll_offset() - doc.scroll_offset()).round();
+        assert_eq!((released, following), (true, 0.0));
+    }
+
     // Catches the chat chrome not reaching the screen: every message gets
     // its author line drawn above its first block.
     #[test]
