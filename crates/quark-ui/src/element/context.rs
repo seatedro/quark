@@ -1,4 +1,5 @@
 use super::*;
+use crate::animation::{AnimKey, AnimationTable, Motion, PropId};
 
 // ---------------------------------------------------------------------------
 // ElementContext
@@ -24,6 +25,10 @@ pub struct ElementContext<'a> {
     pub clock_ms: u64,
     /// Earliest clock time (ms) an element asked to be painted again at.
     next_frame_ms: Option<u64>,
+    /// The window's animation table, when the host keeps one.
+    animations: Option<&'a mut AnimationTable>,
+    /// Keys that animated a style transition this frame.
+    transition_keys: Vec<AnimKey>,
     pub debug_wireframe: bool,
     pub text_input_hit_areas: Vec<TextInputHitArea>,
     pub selectable_text_runs: Vec<SelectableTextRegion>,
@@ -66,6 +71,8 @@ impl<'a> ElementContext<'a> {
             signal_store,
             clock_ms: 0,
             next_frame_ms: None,
+            animations: None,
+            transition_keys: Vec::new(),
             debug_wireframe: false,
             text_input_hit_areas: Vec::new(),
             selectable_text_runs: Vec::new(),
@@ -162,9 +169,63 @@ impl<'a> ElementContext<'a> {
         self.next_frame_ms = Some(self.next_frame_ms.map_or(at_ms, |next| next.min(at_ms)));
     }
 
-    /// The earliest repaint an element asked for this frame, if any.
+    /// The earliest repaint an element asked for this frame, if any,
+    /// including the animation table's next deadline (never before the
+    /// frame's clock). `None` when nothing is pending.
     pub fn next_frame_ms(&self) -> Option<u64> {
-        self.next_frame_ms
+        let animation = self
+            .animations
+            .as_deref()
+            .and_then(AnimationTable::next_deadline)
+            .map(|at| at.max(self.clock_ms));
+        match (self.next_frame_ms, animation) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Attach the window's animation table so divs can run transitions.
+    /// The table persists across frames; the context only borrows it.
+    pub fn with_animations(mut self, table: &'a mut AnimationTable) -> Self {
+        self.animations = Some(table);
+        self
+    }
+
+    /// End the frame for animations: drop transition rows of keyed elements
+    /// this frame did not paint, so removed elements do not keep rows. Call
+    /// once after painting every root of the frame.
+    pub fn finish_frame(&mut self) {
+        if let Some(table) = self.animations.as_deref_mut() {
+            crate::animation::sweep_transitions(table, &mut self.transition_keys);
+        }
+        self.transition_keys.clear();
+    }
+
+    pub fn animations(&self) -> Option<&AnimationTable> {
+        self.animations.as_deref()
+    }
+
+    /// Move `(key, prop)` toward `target` with `motion`, starting from its
+    /// current value, and return `(value now, still moving)`. A row seen for
+    /// the first time snaps to `target`. Without a table, returns the target.
+    pub(crate) fn transition(
+        &mut self,
+        key: AnimKey,
+        prop: PropId,
+        target: f32,
+        motion: Motion,
+    ) -> (f32, bool) {
+        let Some(table) = self.animations.as_deref_mut() else {
+            return (target, false);
+        };
+        if self.transition_keys.last() != Some(&key) {
+            self.transition_keys.push(key);
+        }
+        table.animate_to(key, prop, target, motion, self.clock_ms);
+        (
+            table.get(key, prop).unwrap_or(target),
+            table.is_animating(key, prop),
+        )
     }
 
     pub fn is_focused(&self, target: FocusId) -> bool {

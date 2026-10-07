@@ -46,6 +46,8 @@ pub struct PropId(pub u16);
 pub enum Curve {
     Linear,
     EaseOutCubic,
+    /// `1 - (1 - t)^5`: a fast start that lands softly. Toasts use it.
+    EaseOutQuint,
     EaseInOutCubic,
     /// CSS-style `cubic-bezier(x1, y1, x2, y2)`. `x1` and `x2` are clamped to
     /// `[0, 1]` so the curve is a function of time.
@@ -64,6 +66,7 @@ impl Curve {
         match self {
             Curve::Linear => t,
             Curve::EaseOutCubic => 1.0 - (1.0 - t).powi(3),
+            Curve::EaseOutQuint => 1.0 - (1.0 - t).powi(5),
             Curve::EaseInOutCubic => {
                 if t < 0.5 {
                     4.0 * t * t * t
@@ -444,6 +447,23 @@ impl AnimationTable {
         removed
     }
 
+    /// Keeps only the rows for which `keep(key, prop)` is true. Returns how
+    /// many rows were removed.
+    pub fn retain(&mut self, mut keep: impl FnMut(AnimKey, PropId) -> bool) -> usize {
+        let mut removed = 0;
+        let mut row = 0;
+        while row < self.keys.len() {
+            if keep(self.keys[row], self.props[row]) {
+                row += 1;
+            } else {
+                self.swap_remove_row(row);
+                removed += 1;
+            }
+        }
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        removed
+    }
+
     pub fn remove(&mut self, key: AnimKey, prop: PropId) -> bool {
         match self.row(key, prop) {
             Some(row) => {
@@ -682,6 +702,7 @@ mod tests {
         prop_oneof![
             Just(Curve::Linear),
             Just(Curve::EaseOutCubic),
+            Just(Curve::EaseOutQuint),
             Just(Curve::EaseInOutCubic),
             (unit.clone(), unit.clone(), unit.clone(), unit)
                 .prop_map(|(x1, y1, x2, y2)| { Curve::CubicBezier { x1, y1, x2, y2 } }),
@@ -811,7 +832,7 @@ mod tests {
         // when the model says so and retiring never drops a moving row.
         #[test]
         fn animation_table_arbitrary_ops_keep_rows_and_index(
-            ops in prop::collection::vec((0u8..7, 0u64..3, 0u16..3, -10.0f32..10.0, 0u64..120), 0..40),
+            ops in prop::collection::vec((0u8..8, 0u64..3, 0u16..3, -10.0f32..10.0, 0u64..120), 0..40),
         ) {
             let mut t = AnimationTable::new();
             let mut model: HashSet<(AnimKey, PropId)> = HashSet::new();
@@ -847,6 +868,11 @@ mod tests {
                         let before = model.len();
                         model.retain(|(k, _)| *k != key);
                         prop_assert_eq!(t.remove_key(key), before - model.len());
+                    }
+                    6 => {
+                        let before = model.len();
+                        model.retain(|(_, p)| *p != prop);
+                        prop_assert_eq!(t.retain(|_, p| p != prop), before - model.len());
                     }
                     _ => {
                         let moving: Vec<_> =

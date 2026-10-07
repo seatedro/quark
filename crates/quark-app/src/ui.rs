@@ -18,6 +18,7 @@ use quark::SemanticFrame;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame};
+use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, CursorHint, Delivery, ElementContext, InputRouter, TextInputHitArea, render_element,
 };
@@ -78,9 +79,16 @@ pub struct ViewContext<'a, 'f> {
     pub frame: &'a mut FrameContext<'f>,
     pub theme: &'a Theme,
     focus: Option<FocusId>,
+    animations: &'a mut AnimationTable,
 }
 
 impl ViewContext<'_, '_> {
+    /// The window's animation table, ticked to this frame's clock. Rows
+    /// still moving after paint schedule the next frame.
+    pub fn animations(&mut self) -> &mut AnimationTable {
+        self.animations
+    }
+
     pub fn focus(&self) -> Option<FocusId> {
         self.focus
     }
@@ -133,6 +141,7 @@ pub struct UiAdapter<U: UiApp> {
     ime_area: Option<Rect>,
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
+    animations: AnimationTable,
     #[cfg(feature = "devtools")]
     devtools: quark_ui::inspector::Devtools,
 }
@@ -162,6 +171,7 @@ impl<U: UiApp> UiAdapter<U> {
             ime_allowed: false,
             ime_area: None,
             scale_factor: 1.0,
+            animations: AnimationTable::new(),
             #[cfg(feature = "devtools")]
             devtools: quark_ui::inspector::Devtools::from_env(),
         }
@@ -338,6 +348,7 @@ fn paint(root: &mut AnyElement, ecx: &mut ElementContext, width: f32, height: f3
     ecx.accessibility = AccessibilityFrame::new(width, height);
     ecx.semantic = SemanticFrame::new(width, height);
     render_element(root, &mut scene, ecx, width, height);
+    ecx.finish_frame();
     Painted {
         scene,
         input: ecx.take_input_frame(),
@@ -423,12 +434,14 @@ impl<U: UiApp> App for UiAdapter<U> {
         if let Some((target, command)) = self.text_pointer.autoscroll(&self.text_areas, now_ms) {
             self.app.edit_text(target, command);
         }
+        self.animations.tick(clock_ms);
         #[cfg(feature = "devtools")]
         let view_started = std::time::Instant::now();
         let mut root = self.app.view(&mut ViewContext {
             frame: cx,
             theme: &self.theme,
             focus: self.focus,
+            animations: &mut self.animations,
         });
         #[cfg(feature = "devtools")]
         let build_us = view_started.elapsed().as_micros() as u64;
@@ -443,7 +456,8 @@ impl<U: UiApp> App for UiAdapter<U> {
             &self.signals,
         )
         .with_focus(self.focus)
-        .with_clock(clock_ms);
+        .with_clock(clock_ms)
+        .with_animations(&mut self.animations);
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let painted = paint(&mut root, &mut ecx, width, height);

@@ -5,7 +5,7 @@ use quark::reactive::SignalStore;
 use quark_components::{Modal, PickerItem, Toast, ToastKind, ToastStack, picker_list};
 use quark_render::Scene;
 use quark_ui::Action;
-use quark_ui::animation::AnimationState;
+use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, ElementContext, InputRouter, IntoAnyElement, ScrollActionBuilder, render_element,
 };
@@ -149,7 +149,7 @@ fn toast_emits_on_dismiss_with_index() {
         hovered: false,
         progress: None,
     }];
-    let animation = AnimationState::default();
+    let animation = AnimationTable::new();
     let stack = ToastStack::new(&toasts, &animation, 800.0, 600.0, 1.0, 0.0, 0, &[], |i| {
         Demo::DismissToast(i).into()
     });

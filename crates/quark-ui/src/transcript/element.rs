@@ -11,14 +11,17 @@ use quark::{SemanticActions, SemanticNode, SemanticRole};
 use quark_render::scene::Rect;
 use quark_render::{RoundedRectPrimitive, Scene};
 
-use super::{BlockContent, BlockGeometry, Transcript, TranscriptRole, TranscriptSource};
+use super::{
+    BlockContent, BlockGeometry, LIST_STEP, QUOTE_STEP, Transcript, TranscriptBlock,
+    TranscriptRole, TranscriptSource,
+};
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
 use crate::action::Action;
 use crate::design::Alpha;
 use crate::element::{
     AnyElement, Bounds, ClickEvent, DragHandler, DragReleaseResult, DragStart, Element,
     ElementContext, IntoAnyElement, LayoutEngine, LayoutId, ScrollActionBuilder, ScrollTarget,
-    code_block, div, selectable_rich_text, text,
+    SelectableText, code_block, div, selectable_rich_text, text,
 };
 use crate::style::Styled;
 use crate::theme::Theme;
@@ -110,25 +113,14 @@ impl<G: BlockGeometry> Transcript<G> {
                     continue;
                 };
                 let selection = self.block_selection(block.key, visible.text_len);
-                let block_width = visible.rect.width;
-                let element = match &block.content {
-                    BlockContent::Prose(spans) => selectable_rich_text(spans.to_vec())
-                        .width(block_width)
-                        .size(style.font_size)
-                        .source(block.key.0)
-                        .selection(selection)
-                        .into_any(),
-                    BlockContent::Code(lines) => code_block(lines.to_vec())
-                        .width(block_width)
-                        .size(style.font_size)
-                        .source(block.key.0)
-                        .selection(selection)
-                        .into_any(),
-                };
-                placed.push(Placed {
-                    rect: visible.rect,
-                    element,
-                });
+                block_elements(
+                    block,
+                    visible.rect,
+                    style.font_size,
+                    selection,
+                    theme,
+                    &mut placed,
+                );
             }
             rows.push(RowPaint {
                 key: row.key,
@@ -193,6 +185,102 @@ impl<G: BlockGeometry> Transcript<G> {
             animating: self.wants_frame(),
         }
     }
+}
+
+/// The elements of one block at `rect`: quote bars and the list marker in
+/// the inset, then the content to the right of it.
+fn block_elements(
+    block: &TranscriptBlock,
+    rect: Rect,
+    base_font_size: f32,
+    selection: Option<(usize, usize)>,
+    theme: &Theme,
+    placed: &mut Vec<Placed>,
+) {
+    let style = &block.style;
+    let font_size = base_font_size * style.scale;
+    let inset = style.inset(base_font_size);
+    let muted = theme.colors.text_muted;
+    for level in 0..style.quote_depth {
+        let bar = Rect {
+            x: rect.x + level as f32 * QUOTE_STEP * base_font_size,
+            width: 3.0,
+            ..rect
+        };
+        placed.push(Placed {
+            rect: bar,
+            element: div()
+                .w(bar.width)
+                .h(bar.height)
+                .bg(theme.colors.border)
+                .into_any(),
+        });
+    }
+    if let Some(marker) = &style.marker {
+        let gutter = LIST_STEP * base_font_size;
+        let line = SelectableText::line_height_for(font_size);
+        let cell = Rect {
+            x: rect.x + inset - gutter,
+            y: rect.y,
+            width: gutter,
+            height: line,
+        };
+        placed.push(Placed {
+            rect: cell,
+            element: div()
+                .w(cell.width)
+                .h(cell.height)
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .pr((base_font_size * 0.5).round())
+                .child(text(marker.to_string()).size(font_size).color(muted))
+                .into_any(),
+        });
+    }
+
+    let content = Rect {
+        x: rect.x + inset,
+        width: (rect.width - inset).max(1.0),
+        ..rect
+    };
+    let element = match &block.content {
+        BlockContent::Prose(spans) => {
+            let mut el = selectable_rich_text(spans.to_vec())
+                .width(content.width)
+                .size(font_size)
+                .weight(style.weight)
+                .source(block.key.0)
+                .selection(selection);
+            if style.muted {
+                el = el.color(muted);
+            }
+            el.into_any()
+        }
+        BlockContent::Code { lines, label } => code_block(lines.to_vec())
+            .label(label.clone())
+            .width(content.width)
+            .size(font_size)
+            .source(block.key.0)
+            .selection(selection)
+            .into_any(),
+        BlockContent::Rule => {
+            let mut el = div()
+                .w(content.width)
+                .h(content.height)
+                .flex_col()
+                .justify_center()
+                .child(div().w(content.width).h(1.0).bg(theme.colors.border));
+            if selection.is_some() {
+                el = el.bg(theme.colors.accent.with_alpha(Alpha::SOFT));
+            }
+            el.into_any()
+        }
+    };
+    placed.push(Placed {
+        rect: content,
+        element,
+    });
 }
 
 impl TranscriptElement {
@@ -338,6 +426,7 @@ impl Element for TranscriptElement {
         cx.push_accessibility_for_semantic(
             AccessibilityNode::new("transcript", AccessibilityRole::List, bounds)
                 .label(self.label.clone())
+                .set_size(self.row_count)
                 .action(AccessibilityAction::Scroll(builder)),
             list,
         );

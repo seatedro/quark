@@ -16,10 +16,16 @@ pulldown-cmark.workspace = true
 serde.workspace = true
 taffy.workspace = true
 unicode-segmentation.workspace = true
+quark-syntax = { workspace = true, optional = true }
 profiling = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
 [features]
+default = []
+# Syntax highlighting of transcript code blocks with the built-in grammars
+# (Rust, JS, TS, Python, Bash, JSON, Go). Off by default: the grammars add
+# several MB to the binary. Without it code blocks render plain.
+syntax = ["dep:quark-syntax", "quark-syntax/common"]
 # The inspector overlay, the HUD view, and live style overrides
 # (`quark_ui::inspector`). Every hook into the element tree compiles out
 # without it.

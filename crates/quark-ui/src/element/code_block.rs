@@ -4,21 +4,43 @@ use super::*;
 // CodeBlock — fenced syntax-highlighted code (no wrapping)
 // ---------------------------------------------------------------------------
 
+/// Line height factor of code text.
+const CODE_LINE_HEIGHT: f32 = 1.4;
+/// Panel padding factors. Padding scales with the font so the panel reads
+/// the same at any ui_scale.
+const CODE_PAD_X: f32 = 0.6;
+const CODE_PAD_Y: f32 = 0.5;
+/// Label text size and the height of the label row above the code.
+const LABEL_SIZE: f32 = 0.8;
+const LABEL_ROW: f32 = 1.4;
+
 /// A rounded panel of monospace code. Each inner `Vec<StyledSpan>` is one source
 /// line; lines are never wrapped, so height is exact (`n*line_height + padding`).
 /// The lines are laid out as one text joined with `\n`, which is the string
-/// selection offsets index and copy reads.
+/// selection offsets index and copy reads. An optional label (the fence
+/// language) sits in a row above the code and is not part of that string.
 pub struct CodeBlock {
     lines: Vec<Vec<StyledSpan>>,
+    label: Option<Arc<str>>,
     width: f32,
     font_size: f32,
     source_key: u64,
     selection: Option<(usize, usize)>,
 }
 
+/// Where a code block's text sits and how tall the block is, for a font
+/// size, line count, and whether it shows a label.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CodeBlockMetrics {
+    pub height: f32,
+    /// Top left of the code text relative to the block's top left.
+    pub text_origin: (f32, f32),
+}
+
 pub fn code_block(lines: Vec<Vec<StyledSpan>>) -> CodeBlock {
     CodeBlock {
         lines,
+        label: None,
         width: 0.0,
         font_size: 0.0,
         source_key: 0,
@@ -45,37 +67,53 @@ impl CodeBlock {
         self.selection = selection;
         self
     }
-
-    fn line_height(&self) -> f32 {
-        self.font_size * 1.4
-    }
-    // Padding scales with the font so the panel reads the same at any ui_scale.
-    fn pad_x(&self) -> f32 {
-        self.font_size * 0.6
-    }
-    fn pad_y(&self) -> f32 {
-        self.font_size * 0.5
+    /// A label above the code, normally the fence language. Empty labels
+    /// are not shown.
+    pub fn label(mut self, label: Option<Arc<str>>) -> Self {
+        self.label = label.filter(|l| !l.is_empty());
+        self
     }
 
-    /// The lines flattened into spans, with a plain `\n` span between lines.
-    fn joined_spans(&self) -> Vec<StyledSpan> {
-        let mut spans = Vec::new();
-        for (i, line) in self.lines.iter().enumerate() {
-            if i > 0 {
-                spans.push(StyledSpan {
-                    font_kind: FontKind::Mono,
-                    ..StyledSpan::plain("\n")
-                });
-            }
-            spans.extend(line.iter().cloned());
+    /// The text params `request_layout` shapes for `lines`: one unwrapped
+    /// monospace text with the lines joined by `\n`.
+    pub fn layout_params(lines: &[Vec<StyledSpan>], font_size: f32) -> TextParams {
+        let style = TextStyle::new(font_size)
+            .kind(FontKind::Mono)
+            .line_height(font_size * CODE_LINE_HEIGHT);
+        styled_params(&joined_spans(lines), style, None)
+    }
+
+    /// Height and text origin of a block of `line_count` lines.
+    pub fn metrics(font_size: f32, line_count: usize, labeled: bool) -> CodeBlockMetrics {
+        let pad_y = font_size * CODE_PAD_Y;
+        let label = if labeled { font_size * LABEL_ROW } else { 0.0 };
+        let rows = line_count.max(1) as f32;
+        CodeBlockMetrics {
+            height: (rows * font_size * CODE_LINE_HEIGHT + pad_y * 2.0 + label).ceil(),
+            text_origin: (font_size * CODE_PAD_X, pad_y + label),
         }
-        spans
     }
+}
+
+/// The lines flattened into spans, with a plain `\n` span between lines.
+fn joined_spans(lines: &[Vec<StyledSpan>]) -> Vec<StyledSpan> {
+    let mut spans = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            spans.push(StyledSpan {
+                font_kind: FontKind::Mono,
+                ..StyledSpan::plain("\n")
+            });
+        }
+        spans.extend(line.iter().cloned());
+    }
+    spans
 }
 
 /// The layout and the spans it was built from (span colors index into them).
 pub struct CodeBlockState {
     layout: Option<Arc<TextLayout>>,
+    label: Option<Arc<TextLayout>>,
     spans: Vec<StyledSpan>,
 }
 
@@ -88,14 +126,19 @@ impl Element for CodeBlock {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
-        let line_height = self.line_height();
-        let spans = self.joined_spans();
-        let style = TextStyle::new(self.font_size)
-            .kind(FontKind::Mono)
-            .line_height(line_height);
-        let layout = cx.layout_text(&styled_params(&spans, style, None));
-        let n = self.lines.len().max(1);
-        let height = (n as f32 * line_height + self.pad_y() * 2.0).ceil();
+        let params = Self::layout_params(&self.lines, self.font_size);
+        let layout = cx.layout_text(&params);
+        let spans = joined_spans(&self.lines);
+        let label = self.label.as_ref().and_then(|label| {
+            let size = self.font_size * LABEL_SIZE;
+            cx.layout_text(&TextParams::new(
+                label.to_string(),
+                TextStyle::new(size)
+                    .kind(FontKind::Ui)
+                    .line_height(size * 1.2),
+            ))
+        });
+        let height = Self::metrics(self.font_size, self.lines.len(), self.label.is_some()).height;
         let id = engine.request_layout(
             taffy::Style {
                 size: taffy::Size {
@@ -107,7 +150,14 @@ impl Element for CodeBlock {
             },
             &[],
         );
-        (id, CodeBlockState { layout, spans })
+        (
+            id,
+            CodeBlockState {
+                layout,
+                label,
+                spans,
+            },
+        )
     }
 
     fn prepaint(
@@ -130,7 +180,11 @@ impl Element for CodeBlock {
     ) {
         let default_color = cx.text_color_override().unwrap_or(cx.theme.colors.text);
         let radius = (self.font_size * 0.35).min(8.0);
-        let origin = (bounds.x + self.pad_x(), bounds.y + self.pad_y());
+        let metrics = Self::metrics(self.font_size, self.lines.len(), self.label.is_some());
+        let origin = (
+            bounds.x + metrics.text_origin.0,
+            bounds.y + metrics.text_origin.1,
+        );
 
         // Inset panel: darker than the card with a hairline border so it reads as
         // a code block, and clipped so long lines truncate at its edge rather than
@@ -147,6 +201,22 @@ impl Element for CodeBlock {
             cx.theme.colors.border,
         ));
         scene.clip_rounded(bounds, [radius; 4]);
+
+        if let Some(label) = state.label.take() {
+            let (w, h) = label.size();
+            let row = self.font_size * LABEL_ROW;
+            scene.rich_text(RichTextPrimitive {
+                rect: Rect {
+                    x: origin.0,
+                    y: bounds.y + self.font_size * CODE_PAD_Y + (row - h) * 0.5,
+                    width: w + self.font_size,
+                    height: h.max(1.0),
+                },
+                layout: ShapedText::new(label),
+                default_color: cx.theme.colors.text_muted,
+                span_colors: Arc::from([]),
+            });
+        }
 
         let Some(layout) = state.layout.take() else {
             scene.pop_clip();

@@ -8,6 +8,9 @@ use super::*;
 pub struct Div {
     base_style: ElementStyle,
     hover_style: Option<StyleOverride>,
+    transitions: Transitions,
+    /// Paint-time offset of the div and its subtree; layout ignores it.
+    translate: (f32, f32),
     bg_effect: Option<BackgroundEffect>,
     blur_radius: Option<f32>,
     children: Vec<AnyElement>,
@@ -49,6 +52,8 @@ pub fn div() -> Div {
     Div {
         base_style: ElementStyle::default(),
         hover_style: None,
+        transitions: Transitions::default(),
+        translate: (0.0, 0.0),
         bg_effect: None,
         blur_radius: None,
         children: Vec::new(),
@@ -293,6 +298,22 @@ impl Div {
         self.hover(|s| s.icon_color(color))
     }
 
+    /// Animate changes to `props` of the resolved style (hover included)
+    /// with `motion`, starting from the value on screen. Needs a stable
+    /// [`key`](Self::key) and a context with an animation table; without
+    /// either the div paints its target values directly.
+    pub fn transition(mut self, props: impl Into<PropSet>, motion: Motion) -> Self {
+        self.transitions.push(props.into(), motion);
+        self
+    }
+
+    /// Offset the div and everything in it at paint time, for slides and
+    /// nudges that should not reflow layout. Hit testing follows the offset.
+    pub fn translate(mut self, x: f32, y: f32) -> Self {
+        self.translate = (x, y);
+        self
+    }
+
     /// Conditionally apply style/config changes.
     pub fn when(self, condition: bool, f: impl FnOnce(Self) -> Self) -> Self {
         if condition { f(self) } else { self }
@@ -490,6 +511,7 @@ impl Div {
 /// Div's prepaint state: its hit entry, when it responds to the pointer.
 pub struct DivPrepaintState {
     hit: Option<HitId>,
+    translate: (f32, f32),
 }
 
 impl Element for Div {
@@ -519,6 +541,11 @@ impl Element for Div {
         engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> DivPrepaintState {
+        let translate = self
+            .transitions
+            .translate(self.semantic_key.as_ref(), self.translate, cx);
+        let bounds = offset_bounds(bounds, translate);
+        let (child_dx, child_dy) = (translate.0, translate.1 - self.scroll_y);
         let z = self.base_style.z_index;
         if z != 0 {
             cx.push_z_index(z);
@@ -550,9 +577,9 @@ impl Element for Div {
             cx.push_clip(bounds);
         }
 
-        if self.scroll_y != 0.0 {
+        if (child_dx, child_dy) != (0.0, 0.0) {
             for child in &mut self.children {
-                child.prepaint_with_offset(engine, cx, 0.0, -self.scroll_y);
+                child.prepaint_with_offset(engine, cx, child_dx, child_dy);
             }
         } else {
             for child in &mut self.children {
@@ -567,7 +594,7 @@ impl Element for Div {
             cx.pop_z_index();
         }
 
-        DivPrepaintState { hit }
+        DivPrepaintState { hit, translate }
     }
 
     fn paint(
@@ -579,8 +606,13 @@ impl Element for Div {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        let translate = prepaint_state.translate;
+        let bounds = offset_bounds(bounds, translate);
+        let (child_dx, child_dy) = (translate.0, translate.1 - self.scroll_y);
         let hovered = prepaint_state.hit.is_some_and(|id| cx.is_hovered(id));
         let mut style = self.resolve_style(hovered);
+        self.transitions
+            .apply(self.semantic_key.as_ref(), &mut style, cx);
         let radii = style.corner_radii;
         let r = style.max_corner_radius();
         let z = style.z_index;
@@ -887,9 +919,9 @@ impl Element for Div {
             cx.push_semantic_parent(index);
         }
 
-        if self.scroll_y != 0.0 {
+        if (child_dx, child_dy) != (0.0, 0.0) {
             for child in &mut self.children {
-                child.paint_with_offset(engine, scene, cx, 0.0, -self.scroll_y);
+                child.paint_with_offset(engine, scene, cx, child_dx, child_dy);
             }
         } else {
             for child in &mut self.children {
@@ -1020,6 +1052,14 @@ impl Div {
                 .map(|id| UiKey::new(id.as_str()))
                 .or_else(|| self.accessibility_id.as_deref().map(UiKey::from))
         })
+    }
+}
+
+fn offset_bounds(bounds: Bounds, (dx, dy): (f32, f32)) -> Bounds {
+    Bounds {
+        x: bounds.x + dx,
+        y: bounds.y + dy,
+        ..bounds
     }
 }
 

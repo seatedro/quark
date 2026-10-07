@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
 use crate::action::{Action, FocusId};
+use crate::animation::{Motion, PropSet};
 use crate::design::{Alpha, Sz};
 use crate::theme::Theme;
 use accesskit::Role as AccessibilityRole;
@@ -58,6 +59,7 @@ mod spacer;
 mod text;
 mod text_input;
 mod traits;
+mod transition;
 
 #[cfg(test)]
 mod tests;
@@ -77,3 +79,4 @@ pub use spacer::*;
 pub use text::*;
 pub use text_input::*;
 pub use traits::*;
+use transition::Transitions;

@@ -1,0 +1,38 @@
+[package]
+name = "quark-syntax"
+description = "Tree-sitter syntax highlighting for Quark code blocks, with compiled-in grammars."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Every grammar is optional and off by default: each one compiles a C parser
+# into the binary (from about 30 KB for JSON to over 1 MB for TypeScript and
+# Bash). Without any language feature this crate has no dependencies and
+# every lookup falls back to plain text.
+[dependencies]
+tree-sitter = { version = "0.26", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-bash = { version = "0.25", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+
+[features]
+default = []
+# The tree-sitter runtime; every language turns it on.
+engine = ["dep:tree-sitter"]
+rust = ["engine", "dep:tree-sitter-rust"]
+javascript = ["engine", "dep:tree-sitter-javascript"]
+# TypeScript's highlight query extends JavaScript's, so it pulls in the
+# JavaScript crate for the query text; the JavaScript parser itself is only
+# linked when the `javascript` feature uses it.
+typescript = ["engine", "dep:tree-sitter-typescript", "dep:tree-sitter-javascript"]
+python = ["engine", "dep:tree-sitter-python"]
+bash = ["engine", "dep:tree-sitter-bash"]
+json = ["engine", "dep:tree-sitter-json"]
+go = ["engine", "dep:tree-sitter-go"]
+# The built-in set.
+common = ["rust", "javascript", "typescript", "python", "bash", "json", "go"]

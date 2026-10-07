@@ -73,6 +73,8 @@ default = ["ui"]
 # depend on the windowing runner.
 ui = ["dep:quark-ui"]
 hot-reload = ["dep:subsecond", "dep:tungstenite"]
+# Syntax highlighting in transcript code blocks; see quark-ui's `syntax`.
+syntax = ["ui", "quark-ui/syntax"]
 # Desktop notifications through `EventContext::notify`.
 notifications = ["dep:notify-rust"]
 # A system tray icon and menu through `EventContext::set_tray`. Off by
@@ -95,6 +97,10 @@ profile-tracy = ["dep:profiling", "profiling/profile-with-tracy", "quark-ui?/pro
 
 [[example]]
 name = "hello_ui"
+required-features = ["ui"]
+
+[[example]]
+name = "animation_demo"
 required-features = ["ui"]
 
 [[example]]
