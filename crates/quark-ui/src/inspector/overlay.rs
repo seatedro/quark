@@ -10,7 +10,9 @@ use quark_text::{LayoutCache, TextSystem};
 
 use super::{Devtools, DevtoolsMsg, ElementRecord};
 use crate::FocusId;
-use crate::element::{AnyElement, ElementContext, IntoAnyElement, div, render_element, text};
+use crate::element::{
+    AnyElement, ElementContext, IntoAnyElement, ScrollHandle, div, render_element, text,
+};
 use crate::hud::{BUDGET_60_US, BUDGET_120_US, HudState};
 use crate::style::Styled;
 use crate::theme::Theme;
@@ -151,7 +153,7 @@ impl Devtools {
         let pinned_node = pinned.and_then(|i| self.frame.records()[i].semantic);
         panel
             .child(label("Semantic tree", TEXT))
-            .child(semantic_tree(ocx.semantic, pinned_node))
+            .child(semantic_tree(ocx.semantic, pinned_node, &self.tree_scroll))
             .into_any()
     }
 
@@ -294,7 +296,11 @@ fn details(record: &ElementRecord, semantic: &SemanticFrame) -> AnyElement {
         .into_any()
 }
 
-fn semantic_tree(frame: &SemanticFrame, pinned: Option<usize>) -> AnyElement {
+fn semantic_tree(
+    frame: &SemanticFrame,
+    pinned: Option<usize>,
+    scroll: &ScrollHandle,
+) -> AnyElement {
     let rows = frame.nodes().iter().enumerate().map(|(index, node)| {
         let depth = frame.ancestors_inclusive(index).count().saturating_sub(1);
         let role = node
@@ -320,7 +326,8 @@ fn semantic_tree(frame: &SemanticFrame, pinned: Option<usize>) -> AnyElement {
     div()
         .flex_col()
         .flex_1()
-        .overflow_hidden()
+        .track_scroll(scroll)
+        .overflow_y_scroll()
         .children_from(rows)
         .into_any()
 }
