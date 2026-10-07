@@ -3,20 +3,50 @@ use crate::{
     UiEventBinding, UiEventPhase, UiKey, UiNodeId,
 };
 
+/// What a node is, for routing, focus, devtools, and test queries. The
+/// accessibility tree carries the exact platform role (any
+/// `accesskit::Role`); this is the toolkit-level view of it, so related
+/// platform roles share a variant (every single-line text field is
+/// `TextInput`, a menu checkbox is a `CheckBox`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SemanticRole {
     Button,
+    Link,
     Dialog,
+    Alert,
+    Status,
     CheckBox,
     Switch,
     RadioButton,
+    RadioGroup,
     Tab,
+    TabList,
+    TabPanel,
+    Tree,
     TreeItem,
+    List,
     ListItem,
+    ListBox,
     ListBoxOption,
+    Menu,
+    MenuBar,
     MenuItem,
     ComboBox,
     TextInput,
+    Slider,
+    SpinButton,
+    ProgressIndicator,
+    Heading,
+    Image,
+    Toolbar,
+    Tooltip,
+    Separator,
+    Table,
+    Grid,
+    Row,
+    Cell,
+    Document,
     ScrollArea,
     Group,
     Label,
@@ -90,6 +120,10 @@ pub struct SemanticNodeState {
     pub selected: Option<bool>,
     pub toggled: Option<bool>,
     pub expanded: Option<bool>,
+    /// The value fails validation (a form field with an error).
+    pub invalid: bool,
+    /// The form cannot be submitted without a value here.
+    pub required: bool,
     pub style_state: StyleState,
 }
 

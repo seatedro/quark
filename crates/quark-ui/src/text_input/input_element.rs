@@ -5,7 +5,7 @@ use super::text_pointer_drag;
 use super::view::{FrameScale, caret_blink};
 use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind};
 use crate::FocusId;
-use crate::accessibility::{AccessibilityAction, AccessibilityNode};
+use crate::accessibility::{AccessibilityAction, AccessibilityNode, AccessibleText};
 use crate::design::{Alpha, Sz};
 use crate::element::*;
 use crate::style::{ElementStyle, Styled};
@@ -32,6 +32,8 @@ pub struct TextEditorElement {
     text_color: crate::theme::Color,
     mode: EditorMode,
     text: Arc<str>,
+    /// `(anchor, caret)` byte offsets into `text`, for assistive tech.
+    text_selection: Option<(usize, usize)>,
     syntax_spans: Arc<[SyntaxSpan]>,
     /// The editor's own layout; painted as is so caret and selection math
     /// match the glyphs. Without one the element lays `text` out itself.
@@ -68,6 +70,7 @@ pub fn text_editor_element(
         text_color: crate::theme::Color::rgba(255, 255, 255, 255),
         mode: EditorMode::ProseInput,
         text: Arc::from(""),
+        text_selection: None,
         syntax_spans: Arc::from([]),
         layout: None,
         span_kinds: Arc::from([]),
@@ -164,6 +167,7 @@ impl TextEditorElement {
         self.mode = editor.mode();
         // Shared, not copied: this runs every frame.
         self.text = editor.text_arc();
+        self.text_selection = Some((editor.anchor().get(), editor.cursor().get()));
         self.syntax_spans = editor.syntax_spans().clone();
         self.line_tops = editor.logical_line_tops().clone();
         self.gutter_width = Some(editor.gutter_width());
@@ -440,7 +444,16 @@ impl Element for TextEditorElement {
                 bounds,
             )
             .label(accessibility_label)
-            .action(AccessibilityAction::Focus(target)),
+            .text(match self.text_selection {
+                Some((anchor, caret)) => {
+                    AccessibleText::new(self.text.clone()).selection(anchor, caret)
+                }
+                None => AccessibleText::new(self.text.clone()),
+            })
+            .action(AccessibilityAction::EditorViewport {
+                focus: target,
+                scroll: self.on_scroll.clone(),
+            }),
         );
         cx.text_input_hit_areas.push(TextInputHitArea {
             bounds,

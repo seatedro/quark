@@ -2822,6 +2822,7 @@ name = "quark-ui"
 version = "0.1.0"
 dependencies = [
  "accesskit",
+ "accesskit_atspi_common",
  "glyphon",
  "profiling",
  "proptest",

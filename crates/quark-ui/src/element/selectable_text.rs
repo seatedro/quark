@@ -596,7 +596,12 @@ impl Element for SelectableText {
                     AccessibilityRole::Label,
                     bounds,
                 )
-                .label(text.to_string()),
+                .label(text.to_string())
+                .read_only(true)
+                .text(match self.selection {
+                    Some((start, end)) => AccessibleText::new(text.clone()).selection(start, end),
+                    None => AccessibleText::new(text.clone()),
+                }),
             );
         }
 
