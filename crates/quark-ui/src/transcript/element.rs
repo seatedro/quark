@@ -332,10 +332,10 @@ impl<G: BlockGeometry> Transcript<G> {
                     .hover_bg(theme.colors.accent_strong)
                     .accessibility_id("transcript.jump-to-latest")
                     .accessibility_role(AccessibilityRole::Button)
-                    .accessibility_label("Jump to latest")
+                    .accessibility_label(quark_i18n::tr("quark-jump-to-latest"))
                     .on_click(action)
                     .child(
-                        text("Jump to latest")
+                        text(quark_i18n::tr("quark-jump-to-latest"))
                             .size(style.font_size * 0.9)
                             .semibold()
                             .color(theme.colors.text_strong),

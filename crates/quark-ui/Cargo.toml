@@ -10,6 +10,7 @@ repository.workspace = true
 quark.workspace = true
 quark-render.workspace = true
 quark-text.workspace = true
+quark-i18n.workspace = true
 accesskit.workspace = true
 glyphon.workspace = true
 pulldown-cmark.workspace = true

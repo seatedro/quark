@@ -482,17 +482,17 @@ impl RenderOnce for Combobox {
                     )
                 }))
                 .when(self.loading || self.matches.options.is_empty(), |list| {
-                    let note = if self.loading {
-                        "Loading…"
+                    let note = quark_ui::i18n::tr(if self.loading {
+                        "quark-loading"
                     } else {
-                        "No matches"
-                    };
+                        "quark-find-no-matches"
+                    });
                     list.child(
                         div()
                             .px(m.spacing_md)
                             .py(m.spacing_xs + (Sp::XXS * scale).round())
                             .accessibility_role(accesskit::Role::Label)
-                            .accessibility_label(note)
+                            .accessibility_label(note.clone())
                             .child(text(note).text_sm().color(theme.colors.text_muted)),
                     )
                 });

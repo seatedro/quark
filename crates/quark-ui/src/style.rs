@@ -8,6 +8,29 @@ use crate::design::{Rad, ShadowLayer, Sp};
 use crate::theme::Color;
 
 pub use quark::style::{ElementStyle, ShadowStyle, StyleOverride, apply_override};
+pub use quark_i18n::Direction;
+
+use std::cell::Cell;
+
+thread_local! {
+    // Per thread: views are built on the UI thread, and tests running in
+    // parallel each keep their own.
+    static DIRECTION: Cell<Direction> = const { Cell::new(Direction::LeftToRight) };
+}
+
+/// Lay out rows for a locale written `direction`: right to left mirrors
+/// every [`Styled::flex_row`] (first child at the right). Set it on the UI
+/// thread from `quark_i18n::Localizer::direction` before building views;
+/// subtrees the element cache already holds keep the old direction until
+/// rebuilt.
+pub fn set_layout_direction(direction: Direction) {
+    DIRECTION.with(|d| d.set(direction));
+}
+
+/// The direction [`set_layout_direction`] set on this thread.
+pub fn layout_direction() -> Direction {
+    DIRECTION.with(Cell::get)
+}
 
 // ---------------------------------------------------------------------------
 // Styled trait — fluent setters shared across element types
@@ -18,8 +41,13 @@ pub trait Styled: Sized {
 
     // -- Layout --
 
+    /// Children side by side in reading order: left to right, or right
+    /// to left under [`set_layout_direction`].
     fn flex_row(mut self) -> Self {
-        self.element_style_mut().layout.flex_direction = taffy::FlexDirection::Row;
+        self.element_style_mut().layout.flex_direction = match layout_direction() {
+            Direction::LeftToRight => taffy::FlexDirection::Row,
+            Direction::RightToLeft => taffy::FlexDirection::RowReverse,
+        };
         self
     }
 
@@ -632,5 +660,51 @@ pub trait Styled: Sized {
             bottom: width,
         };
         self
+    }
+}
+
+#[cfg(test)]
+mod direction_tests {
+    use super::*;
+    use crate::element::{ElementContext, IntoAnyElement, div, render_element};
+    use crate::theme::Theme;
+    use quark::reactive::SignalStore;
+    use quark_render::{Primitive, Scene};
+
+    // Catches the locale's direction not reaching layout: under right to
+    // left the first child of a row sits at the right edge.
+    #[test]
+    fn right_to_left_mirrors_rows() {
+        let first = Color::rgba(255, 0, 0, 255);
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut layouts = quark_text::LayoutCache::default();
+        let signals = SignalStore::new();
+        let theme = Theme::default_dark();
+        let mut first_x = |direction| {
+            set_layout_direction(direction);
+            let mut root = div()
+                .w(400.0)
+                .h(20.0)
+                .flex_row()
+                .child(div().w(100.0).h(20.0).bg(first))
+                .child(div().w(50.0).h(20.0).bg(Color::rgba(0, 0, 255, 255)))
+                .into_any();
+            set_layout_direction(Direction::LeftToRight);
+            let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+            let mut scene = Scene::default();
+            render_element(&mut root, &mut scene, &mut cx, 400.0, 20.0);
+            scene.primitives.iter().find_map(|p| match p {
+                Primitive::RoundedRect(r) if r.color == first => Some(r.rect.x),
+                Primitive::Rect(r) if r.color == first => Some(r.rect.x),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            [
+                first_x(Direction::LeftToRight),
+                first_x(Direction::RightToLeft)
+            ],
+            [Some(0.0), Some(300.0)]
+        );
     }
 }

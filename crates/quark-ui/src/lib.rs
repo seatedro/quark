@@ -38,3 +38,5 @@ pub mod test_alloc;
 static ALLOCATOR: test_alloc::Counting = test_alloc::Counting;
 
 pub use action::{Action, ActionPayload, FocusId};
+/// Localized messages and formats; see [`quark_i18n`].
+pub use quark_i18n as i18n;

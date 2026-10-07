@@ -234,8 +234,14 @@ impl FindState {
     pub fn status(&self) -> String {
         match (self.query.is_empty(), self.current) {
             (true, _) => String::new(),
-            (false, Some(i)) => format!("{} of {}", i + 1, self.matches.len()),
-            (false, None) => "No matches".to_owned(),
+            (false, Some(i)) => quark_i18n::tr_args(
+                "quark-find-status",
+                [
+                    ("current", (i + 1).into()),
+                    ("total", self.matches.len().into()),
+                ],
+            ),
+            (false, None) => quark_i18n::tr("quark-find-no-matches"),
         }
     }
 }
@@ -335,7 +341,7 @@ pub fn find_bar(
     div()
         .accessibility_id("find.bar")
         .accessibility_role(accesskit::Role::Search)
-        .accessibility_label("Find")
+        .accessibility_label(quark_i18n::tr("quark-find"))
         .flex_row()
         .items_center()
         .gap(size * 0.5)
@@ -343,9 +349,9 @@ pub fn find_bar(
         .rounded(size * 0.5)
         .bg(colors.panel)
         .child(
-            text_input("Find", "")
+            text_input(quark_i18n::tr("quark-find"), "")
                 .field(field)
-                .placeholder("Find")
+                .placeholder(quark_i18n::tr("quark-find"))
                 .search(true)
                 .focus_target(focus)
                 .focused(focused)
@@ -362,14 +368,19 @@ pub fn find_bar(
         )
         .child(button(
             "find.prev",
-            "Previous match",
+            &quark_i18n::tr("quark-find-previous"),
             "\u{2191}",
             actions.prev,
         ))
-        .child(button("find.next", "Next match", "\u{2193}", actions.next))
+        .child(button(
+            "find.next",
+            &quark_i18n::tr("quark-find-next"),
+            "\u{2193}",
+            actions.next,
+        ))
         .child(button(
             "find.close",
-            "Close find",
+            &quark_i18n::tr("quark-find-close"),
             "\u{2715}",
             actions.close,
         ))

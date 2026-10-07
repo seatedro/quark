@@ -627,7 +627,10 @@ impl<'a> Dock<'a> {
                 .hover_bg(colors.ghost_element_hover)
                 .accessibility_id(format!("dock:{}:close:{}", region.name(), panel.0))
                 .accessibility_role(Role::Button)
-                .accessibility_label(format!("Close {name}"))
+                .accessibility_label(quark_ui::i18n::tr_args(
+                    "quark-close-named",
+                    [("name", quark_ui::i18n::Arg::Text(&name))],
+                ))
                 .on_click((self.map)(DockEvent::Close { region, index }))
                 .child(svg_icon(lucide::X, m.ui_small_font_size).color(colors.text_muted));
             tab = tab

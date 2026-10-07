@@ -633,7 +633,10 @@ fn divider(
         .accessibility_id(format!("{id}:divider:{index}"))
         .accessibility_role(Role::Splitter)
         .semantic_role(SemanticRole::Separator)
-        .accessibility_label(format!("Resize {}", p.label))
+        .accessibility_label(quark_ui::i18n::tr_args(
+            "quark-resize-named",
+            [("name", p.label.into())],
+        ))
         .accessibility_value(format!("{size:.0}"))
         .accessibility_numeric(NumericValue {
             value: f64::from(size),

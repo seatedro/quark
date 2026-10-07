@@ -2949,6 +2949,7 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "quark",
+ "quark-i18n",
  "quark-render",
  "quark-syntax",
  "quark-text",
