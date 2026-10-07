@@ -77,6 +77,19 @@ impl Sz {
     pub const PICKER_MAX_ROWS: usize = 8;
 }
 
+/// Scrollbar geometry, in unscaled points.
+pub struct ScrollbarSz;
+
+impl ScrollbarSz {
+    /// Track thickness.
+    pub const WIDTH: f32 = 8.0;
+    /// Gap between the track's ends and the container's edges.
+    pub const INSET: f32 = 6.0;
+    pub const MIN_THUMB: f32 = 32.0;
+    /// Extra grab area on the inner side of the track.
+    pub const HIT_PAD: f32 = 6.0;
+}
+
 pub struct Ico;
 
 impl Ico {

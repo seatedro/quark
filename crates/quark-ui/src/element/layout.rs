@@ -459,6 +459,18 @@ impl LayoutEngine {
         }
     }
 
+    /// Width and height of what a scroll container at `id` scrolls over:
+    /// the far edges of its laid-out children plus its end padding, at
+    /// least its own size.
+    pub fn scroll_content_size(&self, id: LayoutId) -> (f32, f32) {
+        let layout = self.tree.layout(id).expect("invalid layout id");
+        let content = layout.content_size;
+        (
+            (content.width + layout.padding.right).max(layout.size.width),
+            (content.height + layout.padding.bottom).max(layout.size.height),
+        )
+    }
+
     /// Start the next layout pass. Nodes stay and are reused in request
     /// order; see the type docs.
     pub fn clear(&mut self) {

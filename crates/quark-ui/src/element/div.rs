@@ -25,7 +25,13 @@ pub struct Div {
     cursor: CursorHint,
     scroll_y: f32,
     scroll_total_height: f32,
+    scroll_x: f32,
+    scroll_total_width: f32,
+    on_scroll_x: Option<ScrollActionBuilder>,
+    scroll_handle: Option<ScrollHandle>,
+    scroll_axes: ScrollAxes,
     hide_scrollbar: bool,
+    scrollbar_auto_hide: bool,
     clips: bool,
     block_mouse: bool,
     focus_target: Option<FocusId>,
@@ -69,7 +75,13 @@ pub fn div() -> Div {
         cursor: CursorHint::Default,
         scroll_y: 0.0,
         scroll_total_height: 0.0,
+        scroll_x: 0.0,
+        scroll_total_width: 0.0,
+        on_scroll_x: None,
+        scroll_handle: None,
+        scroll_axes: ScrollAxes::default(),
         hide_scrollbar: false,
+        scrollbar_auto_hide: false,
         clips: false,
         block_mouse: false,
         focus_target: None,
@@ -289,8 +301,73 @@ impl Div {
         self
     }
 
+    /// Horizontal [`Self::scroll_y`]: paint children `offset` points to the
+    /// left, clipped, with the width constrained like a scroll container.
+    pub fn scroll_x(mut self, offset: f32) -> Self {
+        self.scroll_x = offset;
+        self.clips = true;
+        self.base_style.layout.overflow.x = taffy::Overflow::Hidden;
+        self
+    }
+
+    /// Content width for the horizontal scrollbar and wheel limit, like
+    /// [`Self::scroll_total`].
+    pub fn scroll_total_x(mut self, total_width: f32) -> Self {
+        self.scroll_total_width = total_width;
+        self
+    }
+
+    /// Horizontal [`Self::on_scroll`]: horizontal wheel motion (and
+    /// Shift+wheel) becomes lines for `builder`; its `to_px` gets
+    /// horizontal thumb drags.
+    pub fn on_scroll_x(mut self, builder: ScrollActionBuilder) -> Self {
+        self.on_scroll_x = Some(builder);
+        self
+    }
+
+    /// Keep this container's scroll offset in `handle`, which wheel,
+    /// scrollbar, and key input move without going through the app. Pair
+    /// with [`Self::overflow_x_scroll`], [`Self::overflow_y_scroll`], or
+    /// [`Self::overflow_scroll`] to pick the axes. The content size is
+    /// measured from the children unless `scroll_total`/`scroll_total_x`
+    /// give it.
+    pub fn track_scroll(mut self, handle: &ScrollHandle) -> Self {
+        self.scroll_handle = Some(handle.clone());
+        self.clips = true;
+        self
+    }
+
+    /// Scroll horizontally with the [`Self::track_scroll`] handle.
+    pub fn overflow_x_scroll(mut self) -> Self {
+        self.scroll_axes.x = true;
+        self.clips = true;
+        self.base_style.layout.overflow.x = taffy::Overflow::Hidden;
+        self
+    }
+
+    /// Scroll vertically with the [`Self::track_scroll`] handle.
+    pub fn overflow_y_scroll(mut self) -> Self {
+        self.scroll_axes.y = true;
+        self.clips = true;
+        self.base_style.layout.overflow.y = taffy::Overflow::Hidden;
+        self
+    }
+
+    /// Scroll on both axes with the [`Self::track_scroll`] handle.
+    pub fn overflow_scroll(self) -> Self {
+        self.overflow_x_scroll().overflow_y_scroll()
+    }
+
     pub fn hide_scrollbar(mut self) -> Self {
         self.hide_scrollbar = true;
+        self
+    }
+
+    /// Show scrollbars only while the pointer is over the container, a
+    /// thumb is held, or for [`SCROLLBAR_LINGER_MS`] after a tracked
+    /// container scrolls.
+    pub fn scrollbar_auto_hide(mut self) -> Self {
+        self.scrollbar_auto_hide = true;
         self
     }
 
@@ -444,6 +521,22 @@ impl Div {
                 },
             );
         }
+        if let Some(builder) = self.on_scroll_x.clone() {
+            let max = (self.scroll_total_width > 0.0)
+                .then(|| (self.scroll_total_width - bounds.width).max(0.0));
+            cx.handlers.on_scroll_x(
+                node,
+                ScrollTarget {
+                    builder,
+                    offset: self.scroll_x,
+                    max,
+                },
+            );
+        }
+        if let Some(handle) = &self.scroll_handle {
+            cx.handlers
+                .on_scroll_handle(node, handle.clone(), self.scroll_axes);
+        }
         for (binding, action) in self.key_bindings.drain(..) {
             cx.handlers.on_key(node, binding, action);
         }
@@ -461,6 +554,88 @@ impl Div {
             }
             _ => Cow::Borrowed(&self.base_style),
         }
+    }
+
+    // -- Internal: scrolling --
+
+    fn scrolls(&self) -> bool {
+        self.on_scroll.is_some() || self.on_scroll_x.is_some() || self.scroll_handle.is_some()
+    }
+
+    /// Size of what the div scrolls over: `scroll_total`/`scroll_total_x`
+    /// when given, else measured for a tracked container.
+    fn scroll_content(&self, engine: &LayoutEngine, id: LayoutId) -> (f32, f32) {
+        let measured = match self.scroll_handle {
+            Some(_) => engine.scroll_content_size(id),
+            None => (0.0, 0.0),
+        };
+        let given = |total: f32, measured: f32| if total > 0.0 { total } else { measured };
+        (
+            given(self.scroll_total_width, measured.0),
+            given(self.scroll_total_height, measured.1),
+        )
+    }
+
+    /// Lay out this frame's scrollbars and give the visible, interactive
+    /// ones hit entries (under the current clip, above the children).
+    fn prepaint_scrollbars(
+        &self,
+        bounds: Bounds,
+        content: (f32, f32),
+        scroll: (f32, f32),
+        cx: &mut ElementContext,
+    ) -> [Option<(Scrollbar, Option<HitId>)>; 2] {
+        let axes = match self.scroll_handle {
+            _ if self.hide_scrollbar => return [None, None],
+            Some(_) => self.scroll_axes,
+            None => ScrollAxes {
+                x: self.scroll_total_width > 0.0,
+                y: self.scroll_total_height > 0.0,
+            },
+        };
+        let bars = scrollbars(bounds, content, scroll, axes);
+        if bars.iter().all(Option::is_none) {
+            return [None, None];
+        }
+        if self.scrollbar_auto_hide {
+            let pointer_inside = cx
+                .mouse_position
+                .is_some_and(|(x, y)| bounds.contains(x, y) && cx.current_clip().contains(x, y));
+            let visible = pointer_inside
+                || self.scroll_handle.as_ref().is_some_and(|handle| {
+                    handle.dragging().is_some() || handle.recently_scrolled(cx)
+                });
+            if !visible {
+                return [None, None];
+            }
+        }
+        bars.map(|bar| {
+            bar.map(|bar| {
+                let hit = self.scrollbar_sink(bar.axis).is_some().then(|| {
+                    cx.insert_hit(
+                        bar.hit,
+                        HitFlags::DRAG | HitFlags::HOVER,
+                        CursorHint::Default,
+                    )
+                });
+                (bar, hit)
+            })
+        })
+    }
+
+    /// Where input on the scrollbar of `axis` goes, if anywhere.
+    fn scrollbar_sink(&self, axis: Axis) -> Option<ScrollSink> {
+        if let Some(handle) = &self.scroll_handle {
+            return self
+                .scroll_axes
+                .has(axis)
+                .then(|| ScrollSink::Handle(handle.clone()));
+        }
+        let builder = match axis {
+            Axis::X => &self.on_scroll_x,
+            Axis::Y => &self.on_scroll,
+        };
+        builder.clone().map(ScrollSink::Builder)
     }
 
     /// Author id of the div's accessibility node: its stable id or key
@@ -482,14 +657,18 @@ impl Div {
     }
 }
 
-/// Div's prepaint state: its hit entry, when it responds to the pointer.
+/// Div's prepaint state: its hit entry, when it responds to the pointer,
+/// and its scroll offset and scrollbars.
 pub struct DivPrepaintState {
     hit: Option<HitId>,
     translate: (f32, f32),
+    scroll: (f32, f32),
+    scrollbars: [Option<(Scrollbar, Option<HitId>)>; 2],
 }
 
 impl Element for Div {
-    type LayoutState = ();
+    /// The div's layout node, for measuring scroll content.
+    type LayoutState = LayoutId;
     type PrepaintState = DivPrepaintState;
 
     fn request_layout(
@@ -504,13 +683,13 @@ impl Element for Div {
             engine.push_child(id);
         }
         let id = engine.finish_children(&self.base_style.layout, mark);
-        (id, ())
+        (id, id)
     }
 
     fn prepaint(
         &mut self,
         bounds: Bounds,
-        _layout_state: &mut Self::LayoutState,
+        layout_id: &mut Self::LayoutState,
         engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> DivPrepaintState {
@@ -518,7 +697,15 @@ impl Element for Div {
             .transitions
             .translate(self.semantic_key.as_ref(), self.translate, cx);
         let bounds = offset_bounds(bounds, translate);
-        let (child_dx, child_dy) = (translate.0, translate.1 - self.scroll_y);
+        if let Some(key) = &self.semantic_key {
+            cx.record_scroll_item(key, bounds);
+        }
+        let content = self.scroll_content(engine, *layout_id);
+        let scroll = match &self.scroll_handle {
+            Some(handle) => handle.begin_frame(bounds, content, self.scroll_axes, cx),
+            None => (self.scroll_x, self.scroll_y),
+        };
+        let (child_dx, child_dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
         let z = self.base_style.z_index;
         if z != 0 {
             cx.push_z_index(z);
@@ -537,7 +724,7 @@ impl Element for Div {
         if self.on_drag.is_some() {
             flags |= HitFlags::DRAG;
         }
-        if self.on_scroll.is_some() {
+        if self.scrolls() {
             flags |= HitFlags::SCROLL;
         }
         let hit = (!flags.is_empty() || self.hit_identity.is_some())
@@ -548,6 +735,9 @@ impl Element for Div {
             || self.base_style.layout.overflow.y != taffy::Overflow::Visible;
         if clips {
             cx.push_clip(bounds);
+        }
+        if let Some(handle) = &self.scroll_handle {
+            cx.push_scroll_handle(handle);
         }
 
         if (child_dx, child_dy) != (0.0, 0.0) {
@@ -560,6 +750,11 @@ impl Element for Div {
             }
         }
 
+        if let Some(handle) = &self.scroll_handle {
+            cx.pop_scroll_handle();
+            handle.end_frame(cx);
+        }
+        let scrollbars = self.prepaint_scrollbars(bounds, content, scroll, cx);
         if clips {
             cx.pop_clip();
         }
@@ -567,7 +762,12 @@ impl Element for Div {
             cx.pop_z_index();
         }
 
-        DivPrepaintState { hit, translate }
+        DivPrepaintState {
+            hit,
+            translate,
+            scroll,
+            scrollbars,
+        }
     }
 
     fn paint(
@@ -581,7 +781,8 @@ impl Element for Div {
     ) {
         let translate = prepaint_state.translate;
         let bounds = offset_bounds(bounds, translate);
-        let (child_dx, child_dy) = (translate.0, translate.1 - self.scroll_y);
+        let scroll = prepaint_state.scroll;
+        let (child_dx, child_dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
         let hovered = prepaint_state.hit.is_some_and(|id| cx.is_hovered(id));
         let mut style = self.resolve_style(hovered);
         if !self.transitions.is_empty() {
@@ -736,7 +937,7 @@ impl Element for Div {
         let semantic_role = self
             .semantic_role
             .or_else(|| accessibility_role.and_then(semantic_role_for))
-            .or_else(|| self.on_scroll.is_some().then_some(SemanticRole::ScrollArea));
+            .or_else(|| self.scrolls().then_some(SemanticRole::ScrollArea));
         let suppress_descendant_accessibility_text =
             accessibility_role.is_some_and(role_labels_descendant_text);
 
@@ -747,7 +948,7 @@ impl Element for Div {
         if self.focus_target.is_some() {
             semantic_actions = semantic_actions.focusable();
         }
-        if self.on_scroll.is_some() {
+        if self.scrolls() {
             semantic_actions = semantic_actions.scrollable();
         }
         if self.tooltip.is_some() {
@@ -916,6 +1117,18 @@ impl Element for Div {
         cx.push_accessibility_text_hidden(suppress_descendant_accessibility_text);
         if let Some(index) = semantic_parent {
             cx.push_semantic_parent(index);
+            // Before the children, so each bar's node keeps its position
+            // (and so its identity for drag capture) as children change.
+            for (bar, hit) in prepaint_state.scrollbars.iter().flatten() {
+                if let (Some(hit), Some(sink)) = (hit, self.scrollbar_sink(bar.axis)) {
+                    let mut node = SemanticNode::new(bar.hit);
+                    node.parent = Some(index);
+                    node.actions = SemanticActions::default().draggable();
+                    let node = cx.semantic.push(node);
+                    cx.bind_hit(*hit, node);
+                    cx.handlers.on_scrollbar(node, *bar, sink);
+                }
+            }
         }
 
         if (child_dx, child_dy) != (0.0, 0.0) {
@@ -939,60 +1152,10 @@ impl Element for Div {
             cx.pop_text_color();
         }
 
-        if self.scroll_total_height > bounds.height && !self.hide_scrollbar {
-            let content_h = self.scroll_total_height;
-            let max_scroll = content_h - bounds.height;
-            let sb_width = 8.0;
-            let sb_margin = 6.0;
-            let track = Rect {
-                x: bounds.right() - sb_width,
-                y: bounds.y + sb_margin,
-                width: sb_width,
-                height: (bounds.height - sb_margin * 2.0).max(0.0),
-            };
-            let thumb_h = (track.height / content_h * bounds.height)
-                .max(32.0)
-                .min(track.height);
-            let thumb_y = if max_scroll > 0.0 {
-                (self.scroll_y / max_scroll) * (track.height - thumb_h)
-            } else {
-                0.0
-            };
-
-            scene.rounded_rect(RoundedRectPrimitive::uniform(
-                track,
-                4.0,
-                Color::rgba(128, 128, 128, 10),
-            ));
-
-            scene.rounded_rect(RoundedRectPrimitive::uniform(
-                Rect {
-                    x: track.x + 1.0,
-                    y: track.y + thumb_y + 1.0,
-                    width: track.width - 2.0,
-                    height: thumb_h - 2.0,
-                },
-                3.0,
-                cx.theme.colors.scrollbar_thumb,
-            ));
-
-            if let Some(ref builder) = self.on_scroll {
-                let hit_w = sb_width + 12.0;
-                let track_rect = Rect {
-                    x: track.x - 6.0,
-                    y: bounds.y,
-                    width: hit_w,
-                    height: bounds.height,
-                };
-                cx.scrollbar_tracks.push(ScrollbarTrack {
-                    track_rect,
-                    thumb_top: track.y + thumb_y,
-                    thumb_height: thumb_h,
-                    content_height: content_h,
-                    viewport_height: bounds.height,
-                    action_builder: builder.clone(),
-                });
-            }
+        let dragging = self.scroll_handle.as_ref().and_then(ScrollHandle::dragging);
+        for (bar, hit) in prepaint_state.scrollbars.iter().flatten() {
+            let hovered = hit.is_some_and(|hit| cx.is_hovered(hit));
+            bar.paint(scene, cx.theme, hovered, dragging == Some(bar.axis));
         }
 
         if should_clip {
