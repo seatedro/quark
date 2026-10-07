@@ -10,6 +10,7 @@
 use std::any::Any;
 
 use accesskit::{Action as AxAction, ActionData, ActionRequest, TreeUpdate};
+use quark::Rect;
 use quark::SemanticFrame;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
@@ -107,6 +108,10 @@ pub struct UiAdapter<U: UiApp> {
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
     accessibility: AccessibilityFrame,
+    /// Text fields of the last frame with their caret rects, for IME.
+    text_targets: Vec<(FocusId, Option<Rect>)>,
+    ime_allowed: bool,
+    ime_area: Option<Rect>,
 }
 
 /// Open a window titled by `options` and run `app` in it.
@@ -127,6 +132,9 @@ impl<U: UiApp> UiAdapter<U> {
             pointer: None,
             router: InputRouter::default(),
             accessibility: AccessibilityFrame::default(),
+            text_targets: Vec::new(),
+            ime_allowed: false,
+            ime_area: None,
         }
     }
 
@@ -193,6 +201,27 @@ impl<U: UiApp> UiAdapter<U> {
         }
         let delivery = self.router.wheel(x, y, lines);
         self.deliver(delivery, cx);
+    }
+
+    /// Allow IME only while a text field has focus, and point the
+    /// candidate window at its caret. Frames cannot reach the window, so
+    /// this runs after events with the last frame's caret.
+    fn sync_ime(&mut self, cx: &mut EventContext) {
+        let target = self
+            .focus
+            .and_then(|focus| self.text_targets.iter().find(|(t, _)| *t == focus));
+        let allowed = target.is_some();
+        if allowed != self.ime_allowed {
+            cx.set_ime_allowed(allowed);
+            self.ime_allowed = allowed;
+            self.ime_area = None;
+        }
+        if let Some(caret) = target.and_then(|(_, caret)| *caret)
+            && self.ime_area != Some(caret)
+        {
+            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
+            self.ime_area = Some(caret);
+        }
     }
 
     fn update_cursor(&self, cx: &mut EventContext) {
@@ -299,10 +328,41 @@ impl<U: UiApp> App for UiAdapter<U> {
 
         self.router.set_frame(ecx.take_input_frame());
         self.accessibility = std::mem::take(&mut ecx.accessibility);
+        self.text_targets = ecx
+            .text_input_hit_areas
+            .iter()
+            .map(|area| (area.focus_target, area.caret))
+            .collect();
         scene
     }
 
     fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
+        self.handle_event(event, cx);
+        self.sync_ime(cx);
+    }
+
+    fn wake(&mut self, cx: &mut EventContext) {
+        let mut ucx = UiContext {
+            window: cx,
+            focus: &mut self.focus,
+        };
+        self.app.wake(&mut ucx);
+        self.sync_ime(cx);
+    }
+
+    fn accessibility(&mut self) -> Option<TreeUpdate> {
+        // A full tree every frame; accesskit diffs it against the last one.
+        Some(self.accessibility.tree_update(&self.name, self.focus))
+    }
+
+    fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
+        self.handle_accessibility_action(request, cx);
+        self.sync_ime(cx);
+    }
+}
+
+impl<U: UiApp> UiAdapter<U> {
+    fn handle_event(&mut self, event: InputEvent, cx: &mut EventContext) {
         let mut ucx = UiContext {
             window: cx,
             focus: &mut self.focus,
@@ -352,20 +412,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         }
     }
 
-    fn wake(&mut self, cx: &mut EventContext) {
-        let mut ucx = UiContext {
-            window: cx,
-            focus: &mut self.focus,
-        };
-        self.app.wake(&mut ucx);
-    }
-
-    fn accessibility(&mut self) -> Option<TreeUpdate> {
-        // A full tree every frame; accesskit diffs it against the last one.
-        Some(self.accessibility.tree_update(&self.name, self.focus))
-    }
-
-    fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
+    fn handle_accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
         match route_accessibility(&self.accessibility, &request) {
             Some(Routed::Dispatch(action)) => self.dispatch(vec![action], cx),
             Some(Routed::Focus(focus)) => {
