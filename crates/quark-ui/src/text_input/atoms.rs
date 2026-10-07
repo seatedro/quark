@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use quark_text::offset;
 
+use super::styles::{self, RichExport, StyleIntegrityError, StyleSpan};
+
 /// The app's key for an atom's payload: `kind` says which of its tables
 /// (files, skills, ...) and `key` the entry there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,19 +48,21 @@ impl InlineAtom {
     }
 }
 
-/// Text with atoms in it: what copy, history, and drafts carry. Atom ranges
-/// are relative to `text`.
+/// Text with atoms and formatting in it: what copy, history, and drafts
+/// carry. Atom and style ranges are relative to `text`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RichText {
     pub text: String,
     pub atoms: Vec<InlineAtom>,
+    /// Formatting runs, sorted and disjoint; see [`StyleSpan`].
+    pub styles: Vec<StyleSpan>,
 }
 
 impl RichText {
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            atoms: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -72,27 +76,28 @@ impl RichText {
                 id,
                 export: export.into(),
             }],
+            styles: Vec::new(),
         }
     }
 
-    /// The text with every atom's label replaced by its export, as written
-    /// to the system clipboard.
+    /// [`Self::export_as`] Markdown.
     pub fn export(&self) -> String {
-        let mut out = String::with_capacity(self.text.len());
-        let mut at = 0;
-        for atom in &self.atoms {
-            out.push_str(offset::slice(&self.text, at..atom.range.start));
-            out.push_str(&atom.export);
-            at = atom.range.end;
-        }
-        out.push_str(offset::suffix(&self.text, at));
-        out
+        self.export_as(RichExport::Markdown)
+    }
+
+    /// The text as written to the system clipboard: every atom's label
+    /// replaced by its export, and formatting as `format` markup. Without
+    /// formatting, Markdown export escapes nothing.
+    pub fn export_as(&self, format: RichExport) -> String {
+        styles::export(&self.text, &self.atoms, &self.styles, format)
     }
 
     /// Checks that the atoms are sorted, disjoint, non-empty, and on
-    /// grapheme boundaries of `text`.
+    /// grapheme boundaries of `text`, and that the style runs are
+    /// canonical.
     pub fn verify_integrity(&self) -> Result<(), AtomIntegrityError> {
-        verify(&self.text, &self.atoms)
+        verify(&self.text, &self.atoms)?;
+        styles::verify(&self.text, &self.styles).map_err(AtomIntegrityError::Style)
     }
 }
 
@@ -105,6 +110,8 @@ pub enum AtomIntegrityError {
     OffBoundary { index: usize },
     /// Atom `index` starts before atom `index - 1` ends.
     Overlap { index: usize },
+    /// The style runs are broken.
+    Style(StyleIntegrityError),
 }
 
 impl std::fmt::Display for AtomIntegrityError {
@@ -113,6 +120,7 @@ impl std::fmt::Display for AtomIntegrityError {
             Self::OutOfBounds { index } => write!(f, "atom {index} is empty or out of bounds"),
             Self::OffBoundary { index } => write!(f, "atom {index} is off a grapheme boundary"),
             Self::Overlap { index } => write!(f, "atom {index} overlaps the one before it"),
+            Self::Style(error) => error.fmt(f),
         }
     }
 }
@@ -232,23 +240,25 @@ impl AtomList {
 /// that same text back gets the atoms again, while other apps see only the
 /// export. Clones share the slot, so give every editor that should paste
 /// another's atoms the same one ([`super::Editor::set_rich_clipboard`]).
+/// Formatting travels the same way.
 #[derive(Debug, Clone, Default)]
-pub struct RichClipboard(Arc<Mutex<Option<RichText>>>);
+pub struct RichClipboard(Arc<Mutex<Option<(RichText, String)>>>);
 
 impl RichClipboard {
-    /// Remember `rich` as the source of the exported text just copied.
-    pub(super) fn store(&self, rich: Option<RichText>) {
+    /// Remember `rich` as the source of `exported`, the text just copied.
+    pub(super) fn store(&self, copied: Option<(RichText, String)>) {
         if let Ok(mut slot) = self.0.lock() {
-            *slot = rich;
+            *slot = copied;
         }
     }
 
-    /// The atoms behind `pasted`, if it is the text last copied here.
+    /// The atoms and formatting behind `pasted`, if it is the text last
+    /// copied here.
     pub fn resolve(&self, pasted: &str) -> Option<RichText> {
         let slot = self.0.lock().ok()?;
         slot.as_ref()
-            .filter(|rich| rich.export() == pasted)
-            .cloned()
+            .filter(|(_, exported)| exported == pasted)
+            .map(|(rich, _)| rich.clone())
     }
 }
 

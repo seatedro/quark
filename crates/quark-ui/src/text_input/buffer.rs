@@ -8,6 +8,7 @@
 //! onto the current text before it is used.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use quark_text::TextOffset;
 use quark_text::offset;
@@ -15,8 +16,19 @@ use quark_text::offset;
 use super::atoms::{AtomList, InlineAtom, RichClipboard, RichText};
 use super::hooks::{InputHooks, Insertion, NoHooks};
 use super::ime::{Composition, Preedit, compose};
+use super::styles::{InlineStyle, RichExport, StyleList, StyleSpan, TextFormat, restyled};
 use super::text_edit::{TextEditCommand, TextEditOutcome};
-use super::undo::{Edit, EditKind, EditLog};
+use super::undo::{Doc, Edit, EditKind, EditLog};
+
+/// Where an edit's inserted text gets its formatting.
+#[derive(Debug, Clone, Copy)]
+enum Styling<'a> {
+    /// Typed or plain pasted text: the format toggled at the caret, else
+    /// the format of the text before it (links only from inside one).
+    Inherit,
+    /// Runs relative to the inserted text.
+    Given(&'a [StyleSpan]),
+}
 
 /// Where word-wise forward movement and deletion stop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -33,6 +45,13 @@ pub(super) struct TextBuffer {
     text: String,
     /// Atomic spans of `text`; the caret never rests inside one.
     atoms: AtomList,
+    /// Formatting runs over `text`.
+    styles: StyleList,
+    /// The format the next typed text gets, set by toggling a style with
+    /// nothing selected; cleared when the caret moves.
+    typing_format: Option<TextFormat>,
+    /// How copies with formatting are written for other apps.
+    export_format: RichExport,
     /// Where copies of text with atoms keep them for pasting back.
     rich_clipboard: RichClipboard,
     cursor: TextOffset,
@@ -58,12 +77,14 @@ impl PartialEq for TextBuffer {
         (
             &self.text,
             &self.atoms,
+            &self.styles,
             self.cursor,
             self.anchor,
             &self.preedit,
         ) == (
             &other.text,
             &other.atoms,
+            &other.styles,
             other.cursor,
             other.anchor,
             &other.preedit,
@@ -107,12 +128,27 @@ impl TextBuffer {
         self.atoms.as_slice()
     }
 
-    /// `range` of the text with the atoms wholly inside it.
+    pub(super) fn styles(&self) -> &[StyleSpan] {
+        self.styles.as_slice()
+    }
+
+    /// The format typed text would get at the caret now.
+    pub(super) fn typing_format(&self) -> TextFormat {
+        self.inherited_format(self.selection())
+    }
+
+    pub(super) fn set_export_format(&mut self, format: RichExport) {
+        self.export_format = format;
+    }
+
+    /// `range` of the text with the atoms wholly inside it and the
+    /// formatting clipped to it.
     pub(super) fn rich_slice(&self, range: Range<TextOffset>) -> RichText {
         let range = range.start.get()..range.end.get();
         RichText {
             text: offset::slice(&self.text, range.clone()).to_owned(),
-            atoms: self.atoms.slice(range),
+            atoms: self.atoms.slice(range.clone()),
+            styles: self.styles.slice(range),
         }
     }
 
@@ -120,17 +156,20 @@ impl TextBuffer {
         self.rich_clipboard = clipboard;
     }
 
-    /// Replace the text and atoms programmatically, caret at the end. Atoms
-    /// that do not fit `rich.text` are dropped. Clears undo history.
+    /// Replace the text, atoms, and formatting programmatically, caret at
+    /// the end. Atoms and formatting that do not fit `rich.text` are
+    /// dropped. Clears undo history.
     pub(super) fn set_rich_text(&mut self, rich: &RichText) {
         self.set_text(&rich.text);
         if rich.verify_integrity().is_ok() {
             self.atoms.set(&rich.atoms);
+            self.styles.set(&rich.styles);
         }
     }
 
     fn debug_check_atoms(&self) {
         debug_assert_eq!(self.atoms.verify_integrity(&self.text), Ok(()));
+        debug_assert_eq!(self.styles.verify_integrity(&self.text), Ok(()));
     }
 
     pub(super) fn now_ms(&self) -> u64 {
@@ -151,6 +190,8 @@ impl TextBuffer {
         self.text.clear();
         self.text.push_str(text);
         self.atoms.clear();
+        self.styles.clear();
+        self.typing_format = None;
         self.cursor = TextOffset::end(&self.text);
         self.anchor = self.cursor;
         self.history.clear();
@@ -225,7 +266,13 @@ impl TextBuffer {
     /// undo step.
     pub(super) fn commit_ime(&mut self, value: &str) -> bool {
         self.history.break_coalescing();
-        let changed = self.replace(self.selection(), value, &[], EditKind::Typing);
+        let changed = self.replace(
+            self.selection(),
+            value,
+            &[],
+            Styling::Inherit,
+            EditKind::Typing,
+        );
         self.history.break_coalescing();
         changed
     }
@@ -240,6 +287,7 @@ impl TextBuffer {
         range: Range<TextOffset>,
         inserted: &str,
         inserted_atoms: &[InlineAtom],
+        styling: Styling,
         kind: EditKind,
     ) -> bool {
         if self.read_only {
@@ -254,11 +302,31 @@ impl TextBuffer {
             return false;
         }
         let before = (self.anchor, self.cursor);
+        let inserted_styles = match styling {
+            Styling::Given(styles) => styles.to_vec(),
+            Styling::Inherit => {
+                let format = match self.typing_format.take() {
+                    Some(format) => format,
+                    None => self.inherited_format(range.clone()),
+                };
+                let run = StyleSpan {
+                    range: 0..inserted.len(),
+                    format,
+                };
+                (!run.format.is_plain() && !inserted.is_empty())
+                    .then_some(run)
+                    .into_iter()
+                    .collect()
+            }
+        };
         let removed = offset::replace(&mut self.text, range.clone(), inserted);
         let at = range.start.get();
         let removed_atoms = self
             .atoms
             .splice(at, removed.len(), inserted_atoms, inserted.len());
+        let removed_styles =
+            self.styles
+                .splice(at, removed.len(), &inserted_styles, inserted.len());
         self.debug_check_atoms();
         // Rounding up keeps the caret after inserted text that merges into
         // the grapheme after it (a combining mark typed before another).
@@ -270,6 +338,8 @@ impl TextBuffer {
             inserted: inserted.to_owned(),
             removed_atoms,
             inserted_atoms: inserted_atoms.to_vec(),
+            removed_styles,
+            inserted_styles,
             before,
             after: (self.anchor, self.cursor),
         };
@@ -277,15 +347,103 @@ impl TextBuffer {
         true
     }
 
+    /// The format text typed over `range` gets: that of the char before
+    /// it, keeping a link only when the text after it is the same link
+    /// (typing at a link's end does not extend it).
+    fn inherited_format(&self, range: Range<TextOffset>) -> TextFormat {
+        if range.start == TextOffset::ZERO {
+            // At the very start, typing takes the style of the text after
+            // it (but not its link).
+            let style = self.styles.format_at(range.end.get()).style;
+            return TextFormat { style, link: None };
+        }
+        let before = offset::prev_grapheme(&self.text, range.start);
+        let mut format = self.styles.format_at(before.get());
+        if format.link.is_some() && self.styles.format_at(range.end.get()).link != format.link {
+            format.link = None;
+        }
+        format
+    }
+
+    /// Apply `change` to the format of the selection as one undo step, or,
+    /// with nothing selected, to the format the next typed text gets.
+    fn restyle(&mut self, change: impl Fn(&mut TextFormat)) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let selection = self.selection();
+        if selection.is_empty() {
+            let mut format = self.typing_format();
+            change(&mut format);
+            self.typing_format = Some(format);
+            return false;
+        }
+        let range = selection.start.get()..selection.end.get();
+        let current = self.styles.slice(range.clone());
+        let updated = restyled(&current, range.len(), change);
+        if updated == current {
+            return false;
+        }
+        self.clear_preedit();
+        self.history.break_coalescing();
+        let text = offset::slice(&self.text, selection).to_owned();
+        let atoms = self.atoms.slice(range.clone());
+        self.styles
+            .splice(range.start, range.len(), &updated, range.len());
+        self.debug_check_atoms();
+        let edit = Edit {
+            at: range.start,
+            removed: text.clone(),
+            inserted: text,
+            removed_atoms: atoms.clone(),
+            inserted_atoms: atoms,
+            removed_styles: current,
+            inserted_styles: updated,
+            before: (self.anchor, self.cursor),
+            after: (self.anchor, self.cursor),
+        };
+        self.history.record(edit, EditKind::Other, self.now_ms);
+        true
+    }
+
+    /// Turn `flag` off over the selection if all of it has it, else on.
+    fn toggle_style(&mut self, flag: InlineStyle) -> bool {
+        let selection = self.selection();
+        let has_all = if selection.is_empty() {
+            self.typing_format().style.contains(flag)
+        } else {
+            let range = selection.start.get()..selection.end.get();
+            let mut at = range.start;
+            for span in self.styles.slice(range.clone()) {
+                if span.range.start + range.start != at || !span.format.style.contains(flag) {
+                    break;
+                }
+                at = range.start + span.range.end;
+            }
+            at == range.end
+        };
+        self.restyle(|format| {
+            format.style = if has_all {
+                format.style.difference(flag)
+            } else {
+                format.style.union(flag)
+            };
+        })
+    }
+
     /// Replace `range` with `insertion`; each is its own undo step.
     fn insert(&mut self, range: Range<TextOffset>, insertion: &Insertion) -> bool {
         self.history.break_coalescing();
+        let other = EditKind::Other;
         match insertion {
-            Insertion::Text(text) => self.replace(range, text, &[], EditKind::Other),
+            Insertion::Text(text) => self.replace(range, text, &[], Styling::Inherit, other),
             Insertion::Rich(rich) if rich.verify_integrity().is_ok() => {
-                self.replace(range, &rich.text, &rich.atoms, EditKind::Other)
+                let styling = Styling::Given(&rich.styles);
+                self.replace(range, &rich.text, &rich.atoms, styling, other)
             }
-            Insertion::Rich(rich) => self.replace(range, &rich.text, &[], EditKind::Other),
+            Insertion::Rich(rich) => {
+                self.replace(range, &rich.text, &[], Styling::Given(&[]), other)
+            }
             Insertion::Nothing => false,
         }
     }
@@ -323,23 +481,25 @@ impl TextBuffer {
             return None;
         }
         let rich = self.rich_slice(selection);
-        if rich.atoms.is_empty() {
+        if rich.atoms.is_empty() && rich.styles.is_empty() {
             self.rich_clipboard.store(None);
             return Some(rich.text);
         }
-        let exported = rich.export();
-        self.rich_clipboard.store(Some(rich));
+        let exported = rich.export_as(self.export_format);
+        self.rich_clipboard.store(Some((rich, exported.clone())));
         Some(exported)
     }
 
     fn delete_selection(&mut self) -> bool {
         let selection = self.selection();
-        !selection.is_empty() && self.replace(selection, "", &[], EditKind::Other)
+        !selection.is_empty()
+            && self.replace(selection, "", &[], Styling::Given(&[]), EditKind::Other)
     }
 
     /// Delete the selection, or from the caret to `target`.
     fn delete_to(&mut self, target: TextOffset, kind: EditKind) -> bool {
-        self.delete_selection() || self.replace(self.cursor..target, "", &[], kind)
+        self.delete_selection()
+            || self.replace(self.cursor..target, "", &[], Styling::Given(&[]), kind)
     }
 
     /// Move the caret to `at`, keeping the anchor when `extend`. A target
@@ -372,6 +532,7 @@ impl TextBuffer {
     fn place(&mut self, at: TextOffset, extend: bool) {
         self.history.break_coalescing();
         self.clear_preedit();
+        self.typing_format = None;
         self.cursor = at;
         if !extend {
             self.anchor = self.cursor;
@@ -423,7 +584,11 @@ impl TextBuffer {
             return false;
         }
         self.clear_preedit();
-        let restored = self.history.undo(&mut self.text, &mut self.atoms);
+        let restored = self.history.undo(Doc {
+            text: &mut self.text,
+            atoms: &mut self.atoms,
+            styles: &mut self.styles,
+        });
         self.debug_check_atoms();
         self.restore(restored)
     }
@@ -433,7 +598,11 @@ impl TextBuffer {
             return false;
         }
         self.clear_preedit();
-        let restored = self.history.redo(&mut self.text, &mut self.atoms);
+        let restored = self.history.redo(Doc {
+            text: &mut self.text,
+            atoms: &mut self.atoms,
+            styles: &mut self.styles,
+        });
         self.debug_check_atoms();
         self.restore(restored)
     }
@@ -464,7 +633,13 @@ impl TextBuffer {
         let cursor = self.cursor;
         let mut outcome = TextEditOutcome::default();
         let text_changed = match cmd {
-            InsertText(value) => self.replace(self.selection(), &value, &[], EditKind::Typing),
+            InsertText(value) => self.replace(
+                self.selection(),
+                &value,
+                &[],
+                Styling::Inherit,
+                EditKind::Typing,
+            ),
             Paste(value) => {
                 let pasted = match self.rich_clipboard.resolve(&value) {
                     Some(rich) => Insertion::Rich(rich),
@@ -493,6 +668,11 @@ impl TextBuffer {
             }
             Undo => self.undo(),
             Redo => self.redo(),
+            ToggleStyle(flag) => self.toggle_style(flag),
+            SetLink(target) => {
+                let target: Option<Arc<str>> = target.map(Arc::from);
+                self.restyle(|format| format.link = target.clone())
+            }
             SetPreedit { text, cursor } => {
                 self.set_preedit(text, cursor);
                 false
@@ -558,6 +738,8 @@ impl TextBuffer {
             | Redo
             | Cut
             | Copy
+            | ToggleStyle(_)
+            | SetLink(_)
             | SetPreedit { .. } => {}
         }
     }

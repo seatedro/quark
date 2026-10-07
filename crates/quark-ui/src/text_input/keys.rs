@@ -1,4 +1,4 @@
-use super::TextEditCommand;
+use super::{InlineStyle, TextEditCommand};
 use crate::element::Binding;
 
 /// Something [`command_for_binding`] can read as a [`Binding`]: a binding,
@@ -28,7 +28,9 @@ impl AsBinding for String {
 /// Editing command for a key binding (`ctrl+z`, `cmd+shift+arrowleft`).
 /// `cmd` takes macOS meanings (line start/end on arrows, line delete on
 /// backspace); `ctrl` and `alt` move by words; `mod` counts as either for
-/// undo, select all, copy, and cut. Paste is absent because it needs the
+/// undo, select all, copy, cut, and the inline style toggles (`mod+b`
+/// bold, `mod+i` italic, `mod+u` underline, `mod+shift+x` strikethrough,
+/// `mod+e` code). Paste is absent because it needs the
 /// clipboard, which the app reads.
 pub fn command_for_binding(binding: &(impl AsBinding + ?Sized)) -> Option<TextEditCommand> {
     use TextEditCommand::*;
@@ -45,6 +47,11 @@ pub fn command_for_binding(binding: &(impl AsBinding + ?Sized)) -> Option<TextEd
         "a" if primary && !shift && !alt => SelectAll,
         "c" if primary && !shift && !alt => Copy,
         "x" if primary && !shift && !alt => Cut,
+        "b" if primary && !shift && !alt => ToggleStyle(InlineStyle::BOLD),
+        "i" if primary && !shift && !alt => ToggleStyle(InlineStyle::ITALIC),
+        "u" if primary && !shift && !alt => ToggleStyle(InlineStyle::UNDERLINE),
+        "x" if primary && shift && !alt => ToggleStyle(InlineStyle::STRIKE),
+        "e" if primary && !shift && !alt => ToggleStyle(InlineStyle::CODE),
         "arrowleft" if cmd => pick(CursorHome, SelectHome),
         "arrowright" if cmd => pick(CursorEnd, SelectEnd),
         "arrowleft" if word => pick(CursorWordLeft, SelectWordLeft),

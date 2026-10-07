@@ -9,6 +9,7 @@ use super::atoms::{InlineAtom, RichClipboard, RichText};
 use super::buffer::{TextBuffer, WordForward};
 use super::hooks::{InputHooks, Insertion, NoHooks};
 use super::ime::{Composition, Preedit};
+use super::styles::{InlineStyle, RichExport, StyleSpan, TextFormat};
 use super::text_edit::{TextEditCommand, TextEditOutcome};
 use super::trigger::{TriggerMatch, TriggerRule, find_trigger};
 use super::view::FrameScale;
@@ -40,6 +41,8 @@ pub enum SyntaxTokenKind {
     Namespace,
     Label,
     Preprocessor,
+    /// A link in formatted prose.
+    Link,
 }
 
 /// A highlighted byte range of the editor text.
@@ -210,8 +213,44 @@ fn syntax_font(kind: SyntaxTokenKind) -> (Option<FontWeight>, Option<FontStyle>)
         Keyword | Builtin => (Some(FontWeight::Semibold), None),
         Type | Function | Constant | Attribute | Tag | Property | Namespace | Label
         | Preprocessor => (Some(FontWeight::Medium), None),
-        Normal | String | Number | Operator | Punctuation | Variable => (None, None),
+        Normal | String | Number | Operator | Punctuation | Variable | Link => (None, None),
     }
+}
+
+/// Layout spans for formatted prose: weight, slant, and the mono family
+/// for code, plus each span's kind (links are colored).
+pub(super) fn style_layout_spans(styles: &[StyleSpan]) -> (Vec<TextSpan>, Vec<SyntaxTokenKind>) {
+    let mut spans = Vec::with_capacity(styles.len());
+    let mut kinds = Vec::with_capacity(styles.len());
+    for span in styles {
+        let style = span.format.style;
+        spans.push(TextSpan {
+            range: span.range.clone(),
+            weight: style
+                .contains(InlineStyle::BOLD)
+                .then_some(FontWeight::Bold),
+            style: style
+                .contains(InlineStyle::ITALIC)
+                .then_some(FontStyle::Italic),
+            kind: style.contains(InlineStyle::CODE).then_some(FontKind::Mono),
+        });
+        kinds.push(match span.format.link {
+            Some(_) => SyntaxTokenKind::Link,
+            None => SyntaxTokenKind::Normal,
+        });
+    }
+    (spans, kinds)
+}
+
+/// A line or box painted with formatted or checked text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDecoration {
+    Underline,
+    Strikethrough,
+    /// The box behind inline code.
+    CodeBackground,
+    /// The wavy line under a misspelled word.
+    Misspelled,
 }
 
 /// Spans of `text` moved to match `composition`, which replaced
@@ -435,7 +474,11 @@ impl Editor {
         let relayout = self.dirty || self.layout.is_none();
         if relayout {
             self.dirty = false;
-            let (spans, kinds) = syntax_layout_spans(self.buffer.text(), &self.syntax_spans);
+            let (spans, kinds) = if self.mode.is_code() {
+                syntax_layout_spans(self.buffer.text(), &self.syntax_spans)
+            } else {
+                style_layout_spans(self.buffer.styles())
+            };
             let params = self.layout_params(Arc::from(self.buffer.text()), spans);
             self.layout = text_system.layout(&params).ok().map(Arc::new);
             self.span_kinds = kinds.into();
@@ -753,6 +796,8 @@ impl Editor {
             SelectSoftHome => self.move_soft(false, true),
             CursorSoftEnd => self.move_soft(true, false),
             SelectSoftEnd => self.move_soft(true, true),
+            // Code is highlighted, not formatted.
+            ToggleStyle(_) | SetLink(_) if self.mode.is_code() => {}
             other => outcome = self.buffer.apply_with(other, hooks),
         }
         outcome.selection_changed = (self.buffer.cursor(), self.buffer.anchor()) != before;
@@ -806,6 +851,59 @@ impl Editor {
     /// The atoms in the text, in order.
     pub fn atoms(&self) -> &[InlineAtom] {
         self.buffer.atoms()
+    }
+
+    /// The formatting runs, in order. Formatting is a prose feature: code
+    /// modes keep the runs but neither change nor paint them.
+    pub fn styles(&self) -> &[StyleSpan] {
+        self.buffer.styles()
+    }
+
+    /// The format text typed at the caret would get.
+    pub fn typing_format(&self) -> TextFormat {
+        self.buffer.typing_format()
+    }
+
+    /// How copies of formatted text are written for other apps
+    /// (Markdown by default).
+    pub fn set_rich_export(&mut self, format: RichExport) {
+        self.buffer.set_export_format(format);
+    }
+
+    /// Underline, strikethrough, and code boxes for the formatting (and
+    /// wavy lines under misspellings) in layout coordinates, as of the
+    /// last flush. Empty while composing.
+    pub fn decoration_rects(&self) -> Vec<(TextDecoration, SelectionRect)> {
+        let (Some(layout), false, None) =
+            (self.layout.as_deref(), self.dirty, self.buffer.preedit())
+        else {
+            return Vec::new();
+        };
+        let text = self.buffer.text();
+        let mut out = Vec::new();
+        let mut push = |kind, range: Range<usize>| {
+            let range = offset::ordered(text, range);
+            out.extend(
+                layout
+                    .selection_rects(range)
+                    .map(|r| (kind, SelectionRect::from(r))),
+            );
+        };
+        if !self.mode.is_code() {
+            for span in self.buffer.styles() {
+                let style = span.format.style;
+                if style.contains(InlineStyle::CODE) {
+                    push(TextDecoration::CodeBackground, span.range.clone());
+                }
+                if style.contains(InlineStyle::UNDERLINE) || span.format.link.is_some() {
+                    push(TextDecoration::Underline, span.range.clone());
+                }
+                if style.contains(InlineStyle::STRIKE) {
+                    push(TextDecoration::Strikethrough, span.range.clone());
+                }
+            }
+        }
+        out
     }
 
     /// The whole text with its atoms, for sending, history, or a draft.

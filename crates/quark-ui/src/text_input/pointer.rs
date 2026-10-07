@@ -185,7 +185,7 @@ mod tests {
 
     /// The text model behind the field under test.
     enum Model {
-        Field(TextField),
+        Field(Box<TextField>),
         Editor(Box<Editor>),
     }
 
@@ -244,7 +244,7 @@ mod tests {
         fn field(text: &str) -> Self {
             let mut field = TextField::new(text);
             field.apply(TextEditCommand::SetTextCursor(0));
-            Self::new(Model::Field(field))
+            Self::new(Model::Field(Box::new(field)))
         }
 
         fn editor(text: &str) -> Self {
