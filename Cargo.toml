@@ -68,3 +68,8 @@ codegen-units = 1
 strip = "debuginfo"
 # Keep the default panic = "unwind" so the panic hook can log before exit.
 panic = "unwind"
+
+# accesskit_unix 0.22.1 plus the AT-SPI methods cua-driver needs
+# (GetRoleName, an `id` attribute). See vendor/accesskit_unix/VENDORED.md.
+[patch.crates-io]
+accesskit_unix = { path = "vendor/accesskit_unix" }
