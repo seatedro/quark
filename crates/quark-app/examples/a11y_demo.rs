@@ -144,6 +144,7 @@ impl UiApp for A11yDemo {
                     created_at_ms: 0,
                     hovered: false,
                     progress: None,
+                    ..Default::default()
                 });
             }
             Msg::Check => cx.announce("All checks passed", Politeness::Polite),

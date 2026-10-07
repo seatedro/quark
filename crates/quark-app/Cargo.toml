@@ -131,5 +131,11 @@ required-features = ["ui"]
 test = true
 
 [[example]]
+name = "palette_demo"
+required-features = ["ui"]
+# Its test module drives the components through `quark_app::testing`.
+test = true
+
+[[example]]
 name = "platform_demo"
 required-features = ["notifications"]

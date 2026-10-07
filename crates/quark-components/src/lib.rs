@@ -13,8 +13,10 @@ pub mod checkbox;
 pub mod context_menu;
 pub mod dock;
 pub mod dropdown;
+pub mod hover_card;
 pub mod kbd;
 pub mod modal;
+pub mod palette;
 pub mod picker;
 pub mod popover;
 pub mod progress;
@@ -40,8 +42,13 @@ pub use dock::{
     RegionSnapshot,
 };
 pub use dropdown::*;
+pub use hover_card::*;
 pub use kbd::*;
 pub use modal::{Modal, ModalAlign};
+pub use palette::{
+    CommandPalette, FuzzyMatcher, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome,
+    PaletteProvider, binding_label,
+};
 pub use picker::{PickerItem, PickerLabelStyle, picker_list};
 pub use popover::*;
 pub use progress::*;
@@ -54,8 +61,8 @@ pub use split::{
 pub use stat_summary::*;
 pub use tabs::*;
 pub use toast::{
-    Toast, ToastKind, ToastLayout, ToastStack, animate_toast_fan, animate_toast_in,
-    animate_toast_out, animate_toast_progress, retire_toast,
+    Toast, ToastAction, ToastKind, ToastLayout, ToastQueue, ToastStack, animate_toast_fan,
+    animate_toast_in, animate_toast_out, animate_toast_progress, retire_toast,
 };
 pub use toolbar::Toolbar;
 pub use tooltip::*;
