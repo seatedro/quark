@@ -32,6 +32,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 pub use accesskit::Role as AccessibilityRole;
+pub use accesskit::SortDirection;
 use accesskit::{
     Action as AxAction, Invalid, Live, Node, NodeId, Rect as AxRect, Role, TextPosition,
     TextSelection, Toggled, Tree, TreeId, TreeUpdate,
@@ -61,6 +62,25 @@ impl From<Politeness> for Live {
             Politeness::Assertive => Live::Assertive,
         }
     }
+}
+
+/// Where a node sits in a tree or table. Virtualized collections publish
+/// only their visible rows, so the full extent and each row's place in it
+/// come from these rather than from counting nodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollectionInfo {
+    /// Depth of a tree item, 1 for top-level items.
+    pub level: Option<usize>,
+    /// Rows and columns of a whole table, on the table node.
+    pub row_count: Option<usize>,
+    pub column_count: Option<usize>,
+    /// 0-based row of a table row or cell, and column of a cell or header.
+    pub row_index: Option<usize>,
+    pub column_index: Option<usize>,
+    /// Sort state of a column header.
+    pub sort: Option<SortDirection>,
+    /// The container lets more than one item be selected.
+    pub multiselectable: bool,
 }
 
 /// A range value (slider, progress bar, spin button).
@@ -375,6 +395,7 @@ pub struct AccessibilityNode {
     /// Item count of a container (list), for adapters that read the set
     /// size from the container rather than the items (AT-SPI).
     set_size: Option<usize>,
+    collection: CollectionInfo,
     action: Option<AccessibilityAction>,
     author_id: String,
     parent: Option<NodeId>,
@@ -404,6 +425,7 @@ impl AccessibilityNode {
             focus: None,
             position_in_set: None,
             set_size: None,
+            collection: CollectionInfo::default(),
             action: None,
             author_id: key.to_owned(),
             parent: None,
@@ -517,6 +539,13 @@ impl AccessibilityNode {
         self
     }
 
+    /// Tree level, table extent and indices, sort state, and whether the
+    /// container is multiselectable.
+    pub fn collection(mut self, info: CollectionInfo) -> Self {
+        self.collection = info;
+        self
+    }
+
     /// The keyboard focus target this node stands for, so assistive tech
     /// sees focus land on it and can move focus to it.
     pub fn focus(mut self, focus: FocusId) -> Self {
@@ -601,6 +630,28 @@ impl AccessibilityNode {
         }
         if let Some(size) = self.set_size {
             node.set_size_of_set(size);
+        }
+        let info = &self.collection;
+        if let Some(level) = info.level {
+            node.set_level(level);
+        }
+        if let Some(rows) = info.row_count {
+            node.set_row_count(rows);
+        }
+        if let Some(columns) = info.column_count {
+            node.set_column_count(columns);
+        }
+        if let Some(row) = info.row_index {
+            node.set_row_index(row);
+        }
+        if let Some(column) = info.column_index {
+            node.set_column_index(column);
+        }
+        if let Some(sort) = info.sort {
+            node.set_sort_direction(sort);
+        }
+        if info.multiselectable {
+            node.set_multiselectable();
         }
         match &self.action {
             Some(AccessibilityAction::Click(_)) => node.add_action(AxAction::Click),
@@ -704,6 +755,8 @@ pub(crate) struct AccessibilityExtra {
     read_only: bool,
     live: Option<Politeness>,
     numeric: Option<NumericValue>,
+    position_in_set: Option<(usize, usize)>,
+    collection: CollectionInfo,
 }
 
 impl AccessibilityExtra {
@@ -729,7 +782,10 @@ impl AccessibilityExtra {
         if let Some(numeric) = self.numeric {
             node = node.numeric(numeric);
         }
-        node
+        if let Some((position, size)) = self.position_in_set {
+            node = node.position_in_set(position, size);
+        }
+        node.collection(self.collection)
     }
 }
 
@@ -769,6 +825,50 @@ impl Div {
     /// The range value of a slider, progress bar, or spin button.
     pub fn accessibility_numeric(mut self, value: NumericValue) -> Self {
         self.accessibility_extra.numeric = Some(value);
+        self
+    }
+
+    /// 1-based `position` of an item in a set of `size` items, counting
+    /// items that are not painted (virtualized rows).
+    pub fn accessibility_position_in_set(mut self, position: usize, size: usize) -> Self {
+        self.accessibility_extra.position_in_set = Some((position, size));
+        self
+    }
+
+    /// Depth of a tree item, 1 for top-level items.
+    pub fn accessibility_level(mut self, level: usize) -> Self {
+        self.accessibility_extra.collection.level = Some(level);
+        self
+    }
+
+    /// Rows and columns of a whole table, including ones not painted.
+    pub fn accessibility_table_size(mut self, rows: usize, columns: usize) -> Self {
+        self.accessibility_extra.collection.row_count = Some(rows);
+        self.accessibility_extra.collection.column_count = Some(columns);
+        self
+    }
+
+    /// 0-based row of a table row or cell.
+    pub fn accessibility_row_index(mut self, row: usize) -> Self {
+        self.accessibility_extra.collection.row_index = Some(row);
+        self
+    }
+
+    /// 0-based column of a table cell or column header.
+    pub fn accessibility_column_index(mut self, column: usize) -> Self {
+        self.accessibility_extra.collection.column_index = Some(column);
+        self
+    }
+
+    /// Sort state of a column header.
+    pub fn accessibility_sort(mut self, sort: SortDirection) -> Self {
+        self.accessibility_extra.collection.sort = Some(sort);
+        self
+    }
+
+    /// The tree, list, or table lets more than one item be selected.
+    pub fn accessibility_multiselectable(mut self, multiselectable: bool) -> Self {
+        self.accessibility_extra.collection.multiselectable = multiselectable;
         self
     }
 }

@@ -86,6 +86,12 @@ pub struct FocusTree {
 }
 
 impl FocusTree {
+    /// Remove every node and the modal trap, keeping the memory.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.modal_trap = None;
+    }
+
     pub fn register(&mut self, node: FocusNode) {
         self.nodes.push(node);
     }

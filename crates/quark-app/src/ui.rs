@@ -30,7 +30,7 @@ use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
-    TextInputHitArea, render_element,
+    ScrollbarTrack, TextInputHitArea, render_element,
 };
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
@@ -294,6 +294,8 @@ pub struct UiAdapter<U: UiApp> {
     spare_scene: Scene,
     spare_input: quark_ui::element::InputFrame,
     spare_text_areas: Vec<TextInputHitArea>,
+    /// Last frame's scrollbar track buffer, reused by the next frame.
+    spare_scrollbar_tracks: Vec<ScrollbarTrack>,
     sender: UiSender<U::Message>,
     messages: Receiver<U::Message>,
     #[cfg(feature = "devtools")]
@@ -338,6 +340,7 @@ impl<U: UiApp> UiAdapter<U> {
             spare_scene: Scene::default(),
             spare_input: Default::default(),
             spare_text_areas: Vec::new(),
+            spare_scrollbar_tracks: Vec::new(),
             sender: UiSender {
                 sender,
                 waker: Arc::new(OnceLock::new()),
@@ -805,10 +808,13 @@ impl<U: UiApp> App for UiAdapter<U> {
         .with_input_frame(std::mem::take(&mut self.spare_input));
         ecx.text_input_hit_areas = std::mem::take(&mut self.spare_text_areas);
         ecx.text_input_hit_areas.clear();
+        ecx.scrollbar_tracks = std::mem::take(&mut self.spare_scrollbar_tracks);
+        ecx.scrollbar_tracks.clear();
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let scene = std::mem::take(&mut self.spare_scene);
         let painted = paint(&mut root, &mut ecx, scene, width, height);
+        self.spare_scrollbar_tracks = std::mem::take(&mut ecx.scrollbar_tracks);
         #[cfg(feature = "devtools")]
         let phases = self.devtools.end_frame(&mut ecx.devtools);
         self.scale_factor = scale;

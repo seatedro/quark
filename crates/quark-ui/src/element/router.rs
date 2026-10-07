@@ -184,7 +184,9 @@ pub struct InputHandlers {
     scroll_node: Vec<usize>,
     scroll: Vec<ScrollTarget>,
     key_node: Vec<usize>,
-    key_binding: Vec<Binding>,
+    /// Shared so a replayed cache boundary re-registers its bindings
+    /// without copying their key strings.
+    key_binding: Vec<Rc<Binding>>,
     key_action: Vec<Action>,
 }
 
@@ -212,7 +214,7 @@ impl InputHandlers {
         match binding.parse::<Binding>() {
             Ok(parsed) => {
                 self.key_node.push(node);
-                self.key_binding.push(parsed);
+                self.key_binding.push(Rc::new(parsed));
                 self.key_action.push(action);
             }
             Err(error) => debug_assert!(false, "{error}"),
@@ -363,7 +365,7 @@ pub struct InputRouter {
 
 impl InputRouter {
     pub fn set_frame(&mut self, frame: InputFrame) {
-        self.focus_tree = frame.semantic.focus_tree();
+        frame.semantic.fill_focus_tree(&mut self.focus_tree);
         self.frame = frame;
         if let Some(capture) = &mut self.capture {
             let identities = node_identities(&self.frame.semantic);

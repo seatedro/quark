@@ -152,5 +152,11 @@ required-features = ["ui"]
 test = true
 
 [[example]]
+name = "tree_table_demo"
+required-features = ["ui"]
+# Its test module drives the tree and table through `quark_app::testing`.
+test = true
+
+[[example]]
 name = "platform_demo"
 required-features = ["notifications"]

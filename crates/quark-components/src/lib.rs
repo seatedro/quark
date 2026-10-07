@@ -30,10 +30,12 @@ pub mod sidebar_skeleton;
 pub mod slider;
 pub mod split;
 pub mod stat_summary;
+pub mod table;
 pub mod tabs;
 pub mod toast;
 pub mod toolbar;
 pub mod tooltip;
+pub mod tree;
 
 pub use avatar::*;
 pub use badge::*;
@@ -69,6 +71,10 @@ pub use split::{
     Axis, Pane, PaneSizes, Split, SplitEvent, SplitIntegrityError, SplitSnapshot, SplitState,
 };
 pub use stat_summary::*;
+pub use table::{
+    CellStyle, TableData, TableEvent, TableIntegrityError, TableKey, TableOutcome, TableState,
+    table_view,
+};
 pub use tabs::*;
 pub use toast::{
     Toast, ToastAction, ToastKind, ToastLayout, ToastQueue, ToastStack, animate_toast_fan,
@@ -76,3 +82,7 @@ pub use toast::{
 };
 pub use toolbar::Toolbar;
 pub use tooltip::*;
+pub use tree::{
+    CollectionEnv, DropPosition, DropTarget, NodeId, SelectMods, SelectionMode, TreeEvent,
+    TreeIntegrityError, TreeKey, TreeNav, TreeOutcome, TreeState, tree_view,
+};

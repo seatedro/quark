@@ -347,6 +347,13 @@ impl SemanticFrame {
 
     pub fn focus_tree(&self) -> FocusTree {
         let mut tree = FocusTree::default();
+        self.fill_focus_tree(&mut tree);
+        tree
+    }
+
+    /// [`Self::focus_tree`] into `tree`, reusing its memory.
+    pub fn fill_focus_tree(&self, tree: &mut FocusTree) {
+        tree.clear();
         for (index, node) in self.nodes.iter().enumerate() {
             let Some(id) = self.focus_id(index) else {
                 continue;
@@ -364,7 +371,6 @@ impl SemanticFrame {
         {
             tree.trap_modal_scope(scope);
         }
-        tree
     }
 
     fn stable_node_id(&self, index: usize) -> Option<UiNodeId> {
