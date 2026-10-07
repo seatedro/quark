@@ -36,6 +36,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use quark::view;
 use quark_app::quark_ui::accessibility::Politeness;
 use quark_app::quark_ui::design::Alpha;
 use quark_app::quark_ui::document::{
@@ -185,40 +186,27 @@ impl RowDecorator for ChatChrome {
 
     fn header(&self, chrome: &RowChrome, _width: f32, _theme: &Theme) -> Option<AnyElement> {
         let author = chrome.label.as_deref()?;
-        Some(
-            text(author.to_owned())
-                .size(FONT_SIZE * 0.85)
-                .semibold()
-                .into_any(),
-        )
+        Some(view! {
+            <text size={FONT_SIZE * 0.85} class="font-semibold">{author.to_owned()}</text>
+        })
     }
 }
 
 /// The overlay shown while new content arrived below the view.
 fn jump_to_latest(theme: &Theme, width: f32, height: f32) -> AnyElement {
     let (w, h) = (FONT_SIZE * 10.0, FONT_SIZE * 2.4);
-    div()
-        .absolute()
-        .left(((width - w) * 0.5).max(0.0))
-        .top((height - h - FONT_SIZE).max(0.0))
-        .w(w)
-        .h(h)
-        .rounded(h * 0.5)
-        .items_center()
-        .justify_center()
-        .bg(theme.colors.accent)
-        .hover_bg(theme.colors.accent_strong)
-        .accessibility_id("chat.jump-to-latest")
-        .accessibility_role(accesskit::Role::Button)
-        .accessibility_label("Jump to latest")
-        .on_click(Msg::JumpToLatest)
-        .child(
-            text("Jump to latest")
-                .size(FONT_SIZE * 0.9)
-                .semibold()
-                .color(theme.colors.text_strong),
-        )
-        .into_any()
+    view! {
+        <div class="absolute" left={((width - w) * 0.5).max(0.0)}
+             top={(height - h - FONT_SIZE).max(0.0)}
+             class="w-[w] h-[h] rounded-[h * 0.5] items-center justify-center bg-[theme.colors.accent]"
+             hover_bg={theme.colors.accent_strong}
+             accessibility_id="chat.jump-to-latest" accessibility_role={accesskit::Role::Button}
+             aria-label="Jump to latest" on:click={Msg::JumpToLatest}>
+            <text size={FONT_SIZE * 0.9} class="font-semibold" color={theme.colors.text_strong}>
+                "Jump to latest"
+            </text>
+        </div>
+    }
 }
 
 /// Deterministic xorshift so every run shows the same chat.
@@ -630,33 +618,19 @@ impl UiApp for Demo {
                 ""
             },
         );
-        div()
-            .w(width)
-            .h(height)
-            .flex_col()
-            .bg(colors.background)
-            .child(
-                div()
-                    .w(width)
-                    .h(header_h)
-                    .flex_shrink_0()
-                    .px(12.0)
-                    .items_center()
-                    .bg(colors.panel)
-                    .flex_row()
-                    .justify_between()
-                    .child(text(status).size(12.0).color(colors.text_muted))
-                    .children(find),
-            )
-            .child(
-                div()
-                    .w(width)
-                    .h(body_h)
-                    .flex_shrink_0()
-                    .child(element)
-                    .children(jump),
-            )
-            .into_any()
+        view! {
+            <div w={width} h={height} class="flex-col bg-[colors.background]">
+                <div w={width} h={header_h}
+                     class="shrink-0 px-3 items-center bg-[colors.panel] flex-row justify-between">
+                    <text size={12.0} color={colors.text_muted}>{status}</text>
+                    {?find}
+                </div>
+                <div w={width} h={body_h} class="shrink-0">
+                    {element}
+                    {?jump}
+                </div>
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
