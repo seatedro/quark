@@ -746,3 +746,196 @@ fn routed_drag_selects_from_one_message_into_another() {
          Message 2 wraps across a few lines when the column is narrow enough."
     );
 }
+
+// ---------------------------------------------------------------------------
+// Markdown messages
+// ---------------------------------------------------------------------------
+
+fn markdown_message(
+    row: u64,
+    markdown: &mut MarkdownMessage,
+    source: &str,
+    syntax: &mut SyntaxHighlighter,
+) -> TranscriptMessage {
+    TranscriptMessage {
+        key: RowKey(row),
+        role: TranscriptRole::Assistant,
+        author: "assistant".into(),
+        blocks: markdown.blocks(
+            &crate::markdown::MarkdownDoc::parse(source),
+            &Theme::default_dark(),
+            syntax,
+        ),
+    }
+}
+
+/// One line per block: key, content kind and label, list and quote depth,
+/// gutter marker, copy prefix, then the selectable text.
+fn dump_blocks(message: &TranscriptMessage) -> String {
+    message
+        .blocks
+        .iter()
+        .map(|block| {
+            let kind = match &block.content {
+                BlockContent::Prose(_) => "prose".to_owned(),
+                BlockContent::Code { label, .. } => {
+                    format!("code({})", label.as_deref().unwrap_or(""))
+                }
+                BlockContent::Rule => "rule".to_owned(),
+            };
+            let s = &block.style;
+            format!(
+                "{:x} {kind} l{} q{} [{}] {:?} {:?}",
+                block.key.0,
+                s.list_depth,
+                s.quote_depth,
+                s.marker.as_deref().unwrap_or(""),
+                &*s.copy_prefix,
+                block.text(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Texts of the code spans that carry a color.
+fn colored_runs(block: &TranscriptBlock) -> Vec<String> {
+    match &block.content {
+        BlockContent::Code { lines, .. } => lines
+            .iter()
+            .flatten()
+            .filter(|span| span.color.is_some())
+            .map(|span| span.text.clone())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn markdown_blocks_become_separate_keyed_blocks_with_markers_and_prefixes() {
+    let source = "## Setup\n\n- one\n  - nested\n1. first\n\n> quoted\n\n\
+                  | a | bb |\n|---|---|\n| 1 | 2 |\n\n```rust\nfn main() {}\n```\n\n---";
+
+    let message = markdown_message(
+        7,
+        &mut MarkdownMessage::new(RowKey(7)),
+        source,
+        &mut SyntaxHighlighter::new(),
+    );
+
+    assert_eq!(
+        dump_blocks(&message),
+        [
+            r###"70000 prose l0 q0 [] "## " "Setup""###,
+            r###"70001 prose l1 q0 [•] "- " "one""###,
+            r###"70002 prose l2 q0 [•] "  - " "nested""###,
+            r###"70003 prose l1 q0 [1.] "1. " "first""###,
+            r###"70004 prose l0 q1 [] "> " "quoted""###,
+            r###"70005 code() l0 q0 [] "" "| a   | bb  |\n| --- | --- |\n| 1   | 2   |""###,
+            r###"70006 code(rust) l0 q0 [] "" "fn main() {}""###,
+            r###"70007 rule l0 q0 [] "" "---""###,
+        ]
+        .join("\n")
+    );
+}
+
+#[test]
+fn drag_from_a_heading_across_a_list_into_code_copies_markers_and_source() {
+    let mut syntax = SyntaxHighlighter::new();
+    let source = "## Setup\n\n- one\n- two\n\n```rust\nfn main() {\n    run();\n}\n```";
+    let message = markdown_message(0, &mut MarkdownMessage::new(RowKey(0)), source, &mut syntax);
+    let code = markdown_block_key(RowKey(0), 3).0;
+    let mut doc = Doc::new([message]);
+
+    doc.press(doc.point(markdown_block_key(RowKey(0), 0).0, 0));
+    doc.drag(doc.point(code, 5));
+    doc.release();
+
+    assert_eq!(doc.copy(), "## Setup\n\n- one\n- two\n\nfn ma");
+}
+
+#[test]
+fn streaming_markdown_reshapes_only_the_last_block() {
+    let mut text = TextSystem::vendored_only(&Default::default());
+    let mut layouts = LayoutCache::default();
+    let mut syntax = SyntaxHighlighter::new();
+    let mut markdown = MarkdownMessage::new(RowKey(0));
+    let mut source = String::from("# Title\n\nFirst paragraph.\n\n- a\n- b\n\nStreaming");
+    let mut messages = HashMap::new();
+    let mut transcript = Transcript::new(TranscriptStyle::for_font_size(14.0));
+    let message = markdown_message(0, &mut markdown, &source, &mut syntax);
+    transcript.push(&message).unwrap();
+    messages.insert(message.key, message);
+    let mut frame = |transcript: &mut Transcript, messages: &HashMap<_, _>| {
+        let mut measurer = TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0);
+        transcript.prepare(400.0, 600.0, 0, messages, &mut measurer);
+        transcript
+            .visible_blocks()
+            .iter()
+            .map(|b| b.geometry.layout.clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let mut before = frame(&mut transcript, &messages);
+
+    let mut reshaped = Vec::new();
+    for word in [" more", " words", " arrive"] {
+        source.push_str(word);
+        let message = markdown_message(0, &mut markdown, &source, &mut syntax);
+        transcript.update(&message).unwrap();
+        messages.insert(message.key, message);
+        let after = frame(&mut transcript, &messages);
+        let changed: Vec<usize> = (0..after.len())
+            .filter(|&i| !before.get(i).is_some_and(|b| Arc::ptr_eq(b, &after[i])))
+            .collect();
+        reshaped.push(changed);
+        before = after;
+    }
+
+    assert_eq!(reshaped, [[4], [4], [4]]);
+}
+
+#[test]
+fn unknown_fence_language_renders_plain_with_its_label() {
+    let mut syntax = SyntaxHighlighter::new();
+    let mut markdown = MarkdownMessage::new(RowKey(0));
+    let source = "```klingon\nqapla' \"batlh\" fn\n```";
+    markdown_message(0, &mut markdown, source, &mut syntax);
+    syntax.finish_pending();
+
+    let message = markdown_message(0, &mut markdown, source, &mut syntax);
+
+    let block = &message.blocks[0];
+    let label = match &block.content {
+        BlockContent::Code { label, .. } => label.as_deref().map(str::to_owned),
+        _ => None,
+    };
+    assert_eq!(
+        (label, colored_runs(block)),
+        (Some("klingon".to_owned()), Vec::<String>::new())
+    );
+}
+
+#[cfg(feature = "syntax")]
+#[test]
+fn rust_code_block_is_colored_once_its_highlight_arrives() {
+    let mut syntax = SyntaxHighlighter::new();
+    let mut markdown = MarkdownMessage::new(RowKey(0));
+    let source = "```rust\nfn main() { let s = \"hi\"; }\n```";
+    let first = markdown_message(0, &mut markdown, source, &mut syntax);
+
+    let arrived = syntax.finish_pending();
+    let second = markdown_message(0, &mut markdown, source, &mut syntax);
+
+    assert_eq!(
+        (
+            colored_runs(&first.blocks[0]),
+            arrived,
+            colored_runs(&second.blocks[0])
+        ),
+        (
+            vec![],
+            true,
+            vec!["fn".into(), "main".into(), "let".into(), "\"hi\"".into()]
+        )
+    );
+}

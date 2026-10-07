@@ -18,12 +18,16 @@
 //! and text streaming into the last message.
 
 mod element;
+mod markdown;
 mod measure;
+mod syntax;
 #[cfg(test)]
 mod tests;
 
 pub use element::{TranscriptElement, TranscriptEvent};
+pub use markdown::{MarkdownMessage, markdown_block_key};
 pub use measure::{TextGeometry, TextMeasurer};
+pub use syntax::SyntaxHighlighter;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,6 +41,8 @@ use crate::virtual_list::{RowError, RowIntegrityError, RowKey, VariableList};
 
 /// What separates blocks in copied text.
 pub const BLOCK_SEPARATOR: &str = "\n\n";
+/// What separates a [`BlockStyle::tight`] block from the one before it.
+pub const TIGHT_SEPARATOR: &str = "\n";
 
 /// Autoscroll speed per pixel of pointer travel past the edge zone, in
 /// pixels per millisecond.
@@ -88,7 +94,8 @@ pub struct BlockStyle {
     pub marker: Option<Arc<str>>,
     /// Paints prose in the muted text color (block quotes).
     pub muted: bool,
-    /// Half the block gap above, for consecutive list items.
+    /// Half the block gap above and a single line break before it in
+    /// copied text, for consecutive list items.
     pub tight: bool,
     /// Copied before the block's first line when the selection covers the
     /// block's start, as `"- "`, `"> 1. "`, or `"## "`.
@@ -640,7 +647,11 @@ impl<G: BlockGeometry> Transcript<G> {
                 text.len()
             };
             if i > 0 {
-                out.push_str(BLOCK_SEPARATOR);
+                out.push_str(if block.style.tight {
+                    TIGHT_SEPARATOR
+                } else {
+                    BLOCK_SEPARATOR
+                });
             }
             if from >= to {
                 continue;

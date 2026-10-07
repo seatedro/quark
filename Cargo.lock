@@ -2692,6 +2692,7 @@ dependencies = [
  "pulldown-cmark",
  "quark",
  "quark-render",
+ "quark-syntax",
  "quark-text",
  "serde",
  "taffy",
