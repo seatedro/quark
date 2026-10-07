@@ -31,6 +31,17 @@ pub struct FindMatch {
     pub range: Range<TextOffset>,
 }
 
+/// What [`FindState::verify_integrity`] found wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FindIntegrityError {
+    /// A block's matches disagree with the match list, or the list holds
+    /// matches no block has (`BlockKey(u64::MAX)`).
+    MatchList {
+        block: BlockKey,
+    },
+    Current,
+}
+
 /// The matches of one block at one revision.
 #[derive(Debug, Clone)]
 struct BlockScan {
@@ -121,7 +132,36 @@ impl FindState {
             None => Some(0),
             Some(at) => self.locate(&at, &old),
         };
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         changed
+    }
+
+    /// Every block's matches sit at its `first` index in the match list,
+    /// the blocks' matches tile the list, and the current match exists.
+    pub fn verify_integrity(&self) -> Result<(), FindIntegrityError> {
+        let mut covered = 0;
+        for (key, scan) in &self.scans {
+            for (i, range) in scan.ranges.iter().enumerate() {
+                let found = self.matches.get(scan.first + i);
+                if found.is_none_or(|m| {
+                    m.block != *key
+                        || m.range.start.get() != range.start
+                        || m.range.end.get() != range.end
+                }) {
+                    return Err(FindIntegrityError::MatchList { block: *key });
+                }
+            }
+            covered += scan.ranges.len();
+        }
+        if covered != self.matches.len() {
+            return Err(FindIntegrityError::MatchList {
+                block: BlockKey(u64::MAX),
+            });
+        }
+        if self.current.is_some_and(|i| i >= self.matches.len()) {
+            return Err(FindIntegrityError::Current);
+        }
+        Ok(())
     }
 
     /// Index of `at` in the new matches, or of the first match after where

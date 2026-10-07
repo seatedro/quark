@@ -35,7 +35,7 @@ mod tests;
 pub use background::MeasureSpec;
 pub use element::{TranscriptElement, TranscriptEvent};
 pub use facade::{MarkdownEntry, MarkdownTranscript};
-pub use find::{FindBarActions, FindMatch, FindState, find_bar};
+pub use find::{FindBarActions, FindIntegrityError, FindMatch, FindState, find_bar};
 pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage};
 pub use markdown::{BlockKeys, CODE_SCALE, MarkdownMessage, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
