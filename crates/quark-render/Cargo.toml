@@ -11,16 +11,23 @@ quark.workspace = true
 quark-text.workspace = true
 bytemuck.workspace = true
 glyphon.workspace = true
-image.workspace = true
+image = { workspace = true, optional = true }
 pollster.workspace = true
-profiling.workspace = true
 resvg.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 
+# GL is the Linux fallback when no Vulkan driver is installed (older GPUs,
+# some VMs). Windows always has DX12 or WARP, macOS always has Metal.
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { workspace = true, features = ["gles"] }
+
+[dev-dependencies]
+image.workspace = true
+
 [features]
-# Enables the no-surface offscreen render path used by fixture renders.
-headless-render = []
+# Enables the no-surface offscreen render path used by fixture renders, and
+# PNG output for it.
+headless-render = ["dep:image"]

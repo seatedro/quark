@@ -7,21 +7,21 @@
 //!
 //! Build with `--features syntax` for highlighted code blocks.
 //!
+//! The app keeps only markdown strings: `MarkdownTranscript` parses them
+//! (incrementally while streaming), converts them to blocks, allocates the
+//! block keys, and routes arriving highlights back to their messages.
+//!
 //! Set `QUARK_TRANSCRIPT_LOG=1` to print view build times (prepare plus
 //! element construction) every 120 frames.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use quark_app::quark_ui::Action;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
-use quark_app::quark_ui::markdown::MarkdownDoc;
 use quark_app::quark_ui::style::Styled;
-use quark_app::quark_ui::theme::Theme;
 use quark_app::quark_ui::transcript::{
-    MarkdownMessage, SyntaxHighlighter, TextMeasurer, Transcript, TranscriptCommand,
-    TranscriptEvent, TranscriptMessage, TranscriptRole, TranscriptStyle, key_command,
-    markdown_block_row,
+    MarkdownEntry, MarkdownTranscript, TextMeasurer, TranscriptCommand, TranscriptEvent,
+    TranscriptRole, TranscriptStyle, key_command,
 };
 use quark_app::quark_ui::virtual_list::RowKey;
 use quark_app::winit::keyboard::NamedKey;
@@ -202,13 +202,8 @@ fn answer_markdown(n: usize, rng: &mut Rng) -> String {
     )
 }
 
-/// A message's markdown source and its converted blocks.
-struct Source {
-    role: TranscriptRole,
-    author: &'static str,
-    markdown: String,
-    blocks: MarkdownMessage,
-}
+/// Sent by the timer thread every [`STREAM_TICK`].
+struct StreamTick;
 
 /// The answer currently streaming in.
 struct Stream {
@@ -225,15 +220,11 @@ struct Timing {
 }
 
 struct Demo {
-    sources: HashMap<RowKey, Source>,
-    messages: HashMap<RowKey, TranscriptMessage>,
-    transcript: Transcript,
-    syntax: SyntaxHighlighter,
+    transcript: MarkdownTranscript,
     rng: Rng,
     stream: Option<Stream>,
     answers: usize,
     next_key: u64,
-    last_tick: Option<Duration>,
     timing: Timing,
     log: bool,
 }
@@ -241,80 +232,39 @@ struct Demo {
 impl Demo {
     fn new() -> Self {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-        let sources = (0..HISTORY)
+        let history: Vec<MarkdownEntry> = (0..HISTORY)
             .map(|i| {
-                let key = RowKey(i);
                 let user = i.is_multiple_of(2);
-                let source = Source {
+                MarkdownEntry {
+                    row: RowKey(i),
                     role: if user {
                         TranscriptRole::User
                     } else {
                         TranscriptRole::Assistant
                     },
-                    author: if user { "You" } else { "Assistant" },
+                    author: if user { "You" } else { "Assistant" }.into(),
                     markdown: history_markdown(i, &mut rng),
-                    blocks: MarkdownMessage::new(key),
-                };
-                (key, source)
+                }
             })
             .collect();
+        let mut transcript = MarkdownTranscript::new(TranscriptStyle::for_font_size(FONT_SIZE));
+        transcript
+            .extend(history)
+            .unwrap_or_else(|e| eprintln!("{e:?}"));
         Self {
-            sources,
-            messages: HashMap::new(),
-            transcript: Transcript::new(TranscriptStyle::for_font_size(FONT_SIZE)),
-            syntax: SyntaxHighlighter::new(),
+            transcript,
             rng,
             stream: None,
             answers: 0,
             next_key: HISTORY,
-            last_tick: None,
             timing: Timing::default(),
             log: std::env::var_os("QUARK_TRANSCRIPT_LOG").is_some(),
         }
     }
 
-    /// Converts a message's markdown into transcript blocks.
-    fn convert(&mut self, key: RowKey, theme: &Theme) -> Option<TranscriptMessage> {
-        let source = self.sources.get_mut(&key)?;
-        let doc = MarkdownDoc::parse(&source.markdown);
-        Some(TranscriptMessage {
-            key,
-            role: source.role,
-            author: source.author.into(),
-            blocks: source.blocks.blocks(&doc, theme, &mut self.syntax),
-        })
-    }
-
-    /// Builds the history on the first frame, when the theme is known.
-    fn load_history(&mut self, theme: &Theme) {
-        let history: Vec<TranscriptMessage> = (0..HISTORY)
-            .filter_map(|i| self.convert(RowKey(i), theme))
-            .collect();
-        self.transcript
-            .extend(&history)
-            .unwrap_or_else(|e| eprintln!("{e:?}"));
-        self.messages = history.into_iter().map(|m| (m.key, m)).collect();
-    }
-
-    /// Re-converts a message after its markdown or highlights changed.
-    fn refresh(&mut self, key: RowKey, theme: &Theme) {
-        let Some(message) = self.convert(key, theme) else {
-            return;
-        };
-        let result = if self.messages.contains_key(&key) {
-            self.transcript.update(&message)
-        } else {
-            self.transcript.push(&message)
-        };
-        if let Err(e) = result {
-            eprintln!("{e:?}");
-        }
-        self.messages.insert(key, message);
-    }
-
     /// Reveals the next chunk of the streaming answer; a finished answer
     /// is followed by a new one.
-    fn tick(&mut self, theme: &Theme) {
+    fn tick(&mut self) {
         if self
             .stream
             .as_ref()
@@ -324,15 +274,15 @@ impl Demo {
             self.next_key += 1;
             let script = answer_markdown(self.answers, &mut self.rng);
             self.answers += 1;
-            self.sources.insert(
-                key,
-                Source {
-                    role: TranscriptRole::Assistant,
-                    author: "Assistant (streaming)",
-                    markdown: String::new(),
-                    blocks: MarkdownMessage::new(key),
-                },
-            );
+            let pushed = self.transcript.push(MarkdownEntry {
+                row: key,
+                role: TranscriptRole::Assistant,
+                author: "Assistant (streaming)".into(),
+                markdown: String::new(),
+            });
+            if let Err(e) = pushed {
+                eprintln!("{e:?}");
+            }
             self.stream = Some(Stream {
                 key,
                 script,
@@ -347,11 +297,12 @@ impl Demo {
             end += 1;
         }
         stream.shown = end;
-        let key = stream.key;
-        if let Some(source) = self.sources.get_mut(&key) {
-            source.markdown = stream.script[..end].to_owned();
+        if let Err(e) = self
+            .transcript
+            .set_markdown(stream.key, &stream.script[..end])
+        {
+            eprintln!("{e:?}");
         }
-        self.refresh(key, theme);
     }
 
     fn record(&mut self, elapsed: Duration) {
@@ -366,7 +317,7 @@ impl Demo {
                 t.max.as_secs_f64() * 1e3,
                 t.frames,
                 self.transcript.len(),
-                self.transcript.visible_rows().len(),
+                self.transcript.transcript().visible_rows().len(),
             );
             *t = Timing::default();
         }
@@ -375,72 +326,63 @@ impl Demo {
 
 impl UiApp for Demo {
     type Action = Msg;
+    /// A stream tick from the timer thread.
+    type Message = StreamTick;
+
+    fn init(&mut self, cx: &mut UiContext) {
+        // The scripted answer arrives on a timer thread, the way a real
+        // model's chunks arrive from a socket reader.
+        let sender = cx.sender::<StreamTick>();
+        std::thread::spawn(move || {
+            while sender.send(StreamTick) {
+                std::thread::sleep(STREAM_TICK);
+            }
+        });
+    }
+
+    fn message(&mut self, _tick: StreamTick, cx: &mut UiContext) {
+        self.tick();
+        cx.window.request_redraw();
+    }
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
         let scale = cx.frame.scale_factor();
         let now = cx.frame.elapsed();
 
-        if self.messages.is_empty() {
-            self.load_history(cx.theme);
-        }
-        let due = self.last_tick.is_none_or(|last| now >= last + STREAM_TICK);
-        if due {
-            self.last_tick = Some(now);
-            self.tick(cx.theme);
-        }
-        // Rebuild the messages whose code highlights arrived.
-        let mut rows: Vec<RowKey> = self
-            .syntax
-            .poll()
-            .into_iter()
-            .map(markdown_block_row)
-            .collect();
-        rows.dedup();
-        for row in rows {
-            self.refresh(row, cx.theme);
-        }
+        // Rebuild the messages whose code highlights arrived. Ticks redraw
+        // often enough to pick them up while streaming.
+        self.transcript.poll_highlights();
 
         let started = Instant::now();
         let header_h = 36.0;
         let body_h = (height - header_h).max(0.0);
-        let font_size = self.transcript.style().font_size;
+        let font_size = self.transcript.transcript().style().font_size;
         let text_cx = cx.frame.text();
         let mut measurer =
             TextMeasurer::new(&mut text_cx.system, &mut text_cx.layouts, font_size, scale);
-        self.transcript.prepare(
-            width,
-            body_h,
-            now.as_millis() as u64,
-            &self.messages,
-            &mut measurer,
-        );
+        self.transcript
+            .prepare(width, body_h, now.as_millis() as u64, &mut measurer);
         let element = self
             .transcript
-            .element(&self.messages, cx.theme, |event| {
-                Msg::Transcript(event).into()
-            })
+            .element(cx.theme, |event| Msg::Transcript(event).into())
             .label("Conversation");
         self.record(started.elapsed());
 
         // The element schedules its own frames while a drag autoscrolls.
-        cx.frame.request_frame_in(STREAM_TICK);
 
         let colors = &cx.theme.colors;
+        let view = self.transcript.transcript();
         let status = format!(
             "{} messages, {} materialized, {}{}",
-            self.transcript.len(),
-            self.transcript.visible_rows().len(),
-            if self.transcript.is_stuck_to_bottom() {
+            view.len(),
+            view.visible_rows().len(),
+            if view.is_stuck_to_bottom() {
                 "pinned"
             } else {
                 "scrolled up"
             },
-            if self
-                .transcript
-                .selection()
-                .is_some_and(|s| !s.is_collapsed())
-            {
+            if view.selection().is_some_and(|s| !s.is_collapsed()) {
                 ", selection active (Ctrl+C copies)"
             } else {
                 ""
@@ -480,9 +422,9 @@ impl UiApp for Demo {
             cx.window.exit();
             return true;
         }
-        match chord.binding_string().as_deref().and_then(key_command) {
+        match chord.binding().as_ref().and_then(key_command) {
             Some(TranscriptCommand::Copy) => {
-                let copied = self.transcript.selected_text(&self.messages);
+                let copied = self.transcript.selected_text();
                 if !copied.is_empty() {
                     cx.window.set_clipboard_text(&copied);
                     if self.log {
@@ -492,7 +434,7 @@ impl UiApp for Demo {
                 true
             }
             Some(TranscriptCommand::SelectAll) => {
-                self.transcript.select_all();
+                self.transcript.transcript_mut().select_all();
                 cx.window.request_redraw();
                 true
             }

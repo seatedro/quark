@@ -16,6 +16,7 @@ pulldown-cmark.workspace = true
 serde.workspace = true
 taffy.workspace = true
 unicode-segmentation.workspace = true
+unicode-width = "0.2"
 quark-syntax = { workspace = true, optional = true }
 profiling = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
@@ -30,6 +31,10 @@ syntax = ["dep:quark-syntax", "quark-syntax/common"]
 # (`quark_ui::inspector`). Every hook into the element tree compiles out
 # without it.
 devtools = []
+# Debug builds run full O(n) integrity checks of the row table and the
+# transcript (and quark's BlockOrder and AnimationTable) after every
+# mutation. Quadratic on large transcripts; CI's test job turns it on.
+integrity-checks = ["quark/integrity-checks"]
 # Profiler scopes and tracing spans around layout and paint. quark-app's
 # profile-puffin and profile-tracy features pick the backend.
 profile = ["dep:profiling", "dep:tracing"]

@@ -11,6 +11,12 @@ quark-macros.workspace = true
 serde.workspace = true
 taffy.workspace = true
 
+[features]
+# Debug builds run the full O(n) integrity check of BlockOrder and
+# AnimationTable after every mutation instead of checking only the entries a
+# mutation touched. Quadratic on large documents; CI's test job turns it on.
+integrity-checks = []
+
 [dev-dependencies]
 proptest.workspace = true
 

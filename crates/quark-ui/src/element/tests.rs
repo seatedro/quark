@@ -1402,7 +1402,7 @@ fn selectable_text_lays_out_every_line_of_long_text() {
     assert_eq!(region.layout.line_count(), 100);
     let bottom = region.bounds.y + region.bounds.height - 1.0;
     let hit = region.hit(region.bounds.x + 1.0, bottom);
-    assert_eq!(&body[hit..], "line 99");
+    assert_eq!(&body[hit.get()..], "line 99");
 }
 
 // Regression: pointer hit-testing re-shaped selectable text as plain sans, so

@@ -2,14 +2,12 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use quark_render::scene::{FontKind, FontStyle, FontWeight};
-use quark_text::{TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
+use quark_text::offset;
+use quark_text::{TextLayout, TextOffset, TextParams, TextSpan, TextStyle, TextSystem};
 
-use super::ime::{Composition, Preedit, compose, floor_char_boundary};
-use super::text_edit::{
-    TextEditCommand, TextEditOutcome, next_grapheme_boundary, next_word_end,
-    prev_grapheme_boundary, prev_word_boundary, word_range_at,
-};
-use super::undo::{Edit, EditKind, EditLog};
+use super::buffer::{TextBuffer, WordForward};
+use super::ime::{Composition, Preedit};
+use super::text_edit::{TextEditCommand, TextEditOutcome};
 use super::view::FrameScale;
 
 const LINE_HEIGHT_FACTOR: f32 = 1.35;
@@ -95,34 +93,34 @@ pub struct CursorState {
 
 /// Multiline editor model.
 ///
-/// Caret, selection, hit-testing, and vertical movement all read the same
-/// quark-text [`TextLayout`] that [`super::TextEditorElement`] paints (see
+/// Text, caret, selection, IME preedit, and undo live in the same
+/// [`TextBuffer`] a [`super::TextField`] uses; the editor adds a layout,
+/// vertical movement, scrolling, and syntax spans. Caret, selection,
+/// hit-testing, and vertical movement all read the quark-text
+/// [`TextLayout`] that [`super::TextEditorElement`] paints (see
 /// [`Editor::paint_layout`]), so they cannot drift from the glyphs. The
 /// layout is rebuilt by [`Editor::flush`]; call it once per frame before
 /// building the element.
 #[derive(Clone)]
 pub struct Editor {
     mode: EditorMode,
-    text: String,
-    cursor: usize,
-    anchor: usize,
-    /// Layout of `text`, as of the last flush.
+    buffer: TextBuffer,
+    /// Layout of the text, as of the last flush.
     layout: Option<Arc<TextLayout>>,
-    /// Layout of `text` with the preedit spliced in, while composing.
+    /// Layout of the text with the preedit spliced in, while composing.
     display: Option<Arc<TextLayout>>,
     composition: Option<Composition>,
-    preedit: Option<Preedit>,
-    /// `text` (or the wrap width, font, or syntax) changed since the last flush.
+    /// The text (or the wrap width, font, or syntax) changed since the last flush.
     dirty: bool,
-    preedit_dirty: bool,
     syntax_dirty: bool,
     syntax_highlighter: Option<SyntaxHighlighter>,
-    syntax_spans: Vec<SyntaxSpan>,
+    syntax_spans: Arc<[SyntaxSpan]>,
     /// Token kind of each span of `layout`, for paint colors.
-    span_kinds: Vec<SyntaxTokenKind>,
-    history: EditLog,
-    /// The app's clock, from [`Editor::apply_at`] or [`Editor::set_clock`].
-    now_ms: u64,
+    span_kinds: Arc<[SyntaxTokenKind]>,
+    /// Token kind of each span of `display`.
+    display_span_kinds: Arc<[SyntaxTokenKind]>,
+    /// `(1-based logical line, top)` of each logical line of `layout`.
+    line_tops: Arc<[(usize, f32)]>,
     desired_x: Option<f32>,
     reveal_cursor_on_flush: bool,
     caret_hidden: bool,
@@ -142,35 +140,7 @@ pub struct Editor {
 
 impl Default for Editor {
     fn default() -> Self {
-        Self {
-            mode: EditorMode::default(),
-            text: String::new(),
-            cursor: 0,
-            anchor: 0,
-            layout: None,
-            display: None,
-            composition: None,
-            preedit: None,
-            dirty: true,
-            preedit_dirty: false,
-            syntax_dirty: true,
-            syntax_highlighter: None,
-            syntax_spans: Vec::new(),
-            span_kinds: Vec::new(),
-            history: EditLog::default(),
-            now_ms: 0,
-            desired_x: None,
-            reveal_cursor_on_flush: false,
-            caret_hidden: false,
-            scroll_y: 0.0,
-            cursor_pos: CursorState::default(),
-            cursor_moved_at_ms: 0,
-            font_size: 14.0,
-            scale_factor: 1.0,
-            frame_scale: FrameScale::default(),
-            last_width: 0.0,
-            last_height: 0.0,
-        }
+        Self::new(EditorMode::default())
     }
 }
 
@@ -179,11 +149,28 @@ impl std::fmt::Debug for Editor {
         f.debug_struct("Editor")
             .field("initialized", &self.layout.is_some())
             .field("mode", &self.mode)
-            .field("cursor", &self.cursor)
-            .field("anchor", &self.anchor)
+            .field("cursor", &self.buffer.cursor())
+            .field("anchor", &self.buffer.anchor())
             .field("scroll_y", &self.scroll_y)
             .finish()
     }
+}
+
+/// Width of the line-number gutter for `lines` logical lines.
+pub(super) fn code_gutter_width(font_size: f32, lines: usize) -> f32 {
+    let digits = gutter_digits(lines);
+    let char_w = (font_size * 0.62).max(1.0);
+    (digits as f32 * char_w + 18.0).ceil()
+}
+
+pub(super) fn gutter_digits(lines: usize) -> usize {
+    lines.max(1).ilog10() as usize + 1
+}
+
+/// The gutter for `lines` logical lines in a view `width` wide; it never
+/// takes more than about a third of the view.
+pub(super) fn gutter_width_in(font_size: f32, lines: usize, width: f32) -> f32 {
+    code_gutter_width(font_size, lines).min((width * 0.35).max(0.0))
 }
 
 /// Layout spans (weight and slant only) for the valid syntax spans, plus
@@ -231,7 +218,7 @@ fn shift_spans(
     kinds: &[SyntaxTokenKind],
     replaced: Range<usize>,
     inserted_len: usize,
-) -> (Vec<TextSpan>, Vec<SyntaxTokenKind>) {
+) -> (Vec<TextSpan>, Arc<[SyntaxTokenKind]>) {
     let mut out = Vec::with_capacity(spans.len());
     let mut out_kinds = Vec::with_capacity(spans.len());
     for (span, kind) in spans.iter().zip(kinds) {
@@ -249,14 +236,37 @@ fn shift_spans(
         });
         out_kinds.push(*kind);
     }
-    (out, out_kinds)
+    (out, out_kinds.into())
 }
 
 impl Editor {
     pub fn new(mode: EditorMode) -> Self {
+        let mut buffer = TextBuffer::new(true, WordForward::NextEnd);
+        buffer.set_read_only(!mode.is_editable());
         Self {
             mode,
-            ..Self::default()
+            buffer,
+            layout: None,
+            display: None,
+            composition: None,
+            dirty: true,
+            syntax_dirty: true,
+            syntax_highlighter: None,
+            syntax_spans: Arc::from([]),
+            span_kinds: Arc::from([]),
+            display_span_kinds: Arc::from([]),
+            line_tops: Arc::from([]),
+            desired_x: None,
+            reveal_cursor_on_flush: false,
+            caret_hidden: false,
+            scroll_y: 0.0,
+            cursor_pos: CursorState::default(),
+            cursor_moved_at_ms: 0,
+            font_size: 14.0,
+            scale_factor: 1.0,
+            frame_scale: FrameScale::default(),
+            last_width: 0.0,
+            last_height: 0.0,
         }
     }
 
@@ -269,6 +279,7 @@ impl Editor {
             return;
         }
         self.mode = mode;
+        self.buffer.set_read_only(!mode.is_editable());
         self.dirty = true;
         self.syntax_dirty = true;
     }
@@ -283,14 +294,14 @@ impl Editor {
             return;
         }
         self.syntax_highlighter = None;
-        self.syntax_spans.clear();
+        self.syntax_spans = Arc::from([]);
         self.syntax_dirty = false;
         self.dirty = true;
     }
 
     /// Set the app clock used for caret blink and undo coalescing.
     pub fn set_clock(&mut self, now_ms: u64) {
-        self.now_ms = now_ms;
+        self.buffer.set_now(now_ms);
     }
 
     fn line_height(&self) -> f32 {
@@ -299,111 +310,20 @@ impl Editor {
 
     fn note_cursor_activity(&mut self) {
         self.reveal_cursor_on_flush = true;
-        self.cursor_moved_at_ms = self.now_ms;
-    }
-
-    fn global_to_line_col(&self, offset: usize) -> (usize, usize) {
-        let offset = offset.min(self.text.len());
-        let line = self.text.as_bytes()[..offset]
-            .iter()
-            .filter(|&&b| b == b'\n')
-            .count();
-        let line_start = self.text[..offset].rfind('\n').map_or(0, |i| i + 1);
-        (line, offset - line_start)
-    }
-
-    fn line_start(&self, target_line: usize) -> usize {
-        if target_line == 0 {
-            return 0;
-        }
-        self.text
-            .match_indices('\n')
-            .nth(target_line - 1)
-            .map_or(self.text.len(), |(i, _)| i + 1)
-    }
-
-    fn line_end(&self, target_line: usize) -> usize {
-        self.text
-            .match_indices('\n')
-            .nth(target_line)
-            .map_or(self.text.len(), |(i, _)| i)
-    }
-
-    fn has_selection(&self) -> bool {
-        self.anchor != self.cursor
-    }
-
-    fn selection_range(&self) -> (usize, usize) {
-        (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
-    }
-
-    pub fn cursor(&self) -> usize {
-        self.cursor
-    }
-
-    pub fn anchor(&self) -> usize {
-        self.anchor
-    }
-
-    /// Replace `range` with `inserted`, record it for undo, and collapse
-    /// the caret after it. The single place the text is edited by the user.
-    fn replace(&mut self, range: Range<usize>, inserted: &str, kind: EditKind) -> bool {
-        if !self.mode.is_editable() {
-            return false;
-        }
-        self.clear_preedit();
-        if range.is_empty() && inserted.is_empty() {
-            return false;
-        }
-        let Some(removed) = self.text.get(range.clone()).map(str::to_owned) else {
-            return false;
-        };
-        let before = (self.anchor, self.cursor);
-        self.text.replace_range(range.clone(), inserted);
-        self.cursor = range.start + inserted.len();
-        self.anchor = self.cursor;
-        let edit = Edit {
-            at: range.start,
-            removed,
-            inserted: inserted.to_owned(),
-            before,
-            after: (self.anchor, self.cursor),
-        };
-        self.history.record(edit, kind, self.now_ms);
-        self.text_changed();
-        true
+        self.cursor_moved_at_ms = self.buffer.now_ms();
     }
 
     fn text_changed(&mut self) {
         self.dirty = true;
         self.syntax_dirty = true;
-        self.desired_x = None;
-        self.note_cursor_activity();
     }
 
-    fn delete_selection(&mut self) -> bool {
-        if !self.has_selection() {
-            return false;
-        }
-        let (start, end) = self.selection_range();
-        self.replace(start..end, "", EditKind::Other)
+    pub fn cursor(&self) -> TextOffset {
+        self.buffer.cursor()
     }
 
-    /// Layout to use for geometry, or `None` before the first flush.
-    fn geometry(&self) -> Option<&TextLayout> {
-        self.layout.as_deref()
-    }
-
-    fn offset_to_point(&self, offset: usize) -> (f32, f32) {
-        self.geometry().map_or((0.0, 0.0), |layout| {
-            let caret = layout.caret(offset);
-            (caret.x, caret.y)
-        })
-    }
-
-    fn point_to_offset(&self, px: f32, py: f32) -> usize {
-        let hit = self.geometry().map_or(0, |layout| layout.hit(px, py));
-        floor_char_boundary(&self.text, hit)
+    pub fn anchor(&self) -> TextOffset {
+        self.buffer.anchor()
     }
 
     fn refresh_syntax(&mut self) {
@@ -412,12 +332,12 @@ impl Editor {
         }
         self.syntax_dirty = false;
         let had_spans = !self.syntax_spans.is_empty();
-        self.syntax_spans.clear();
+        self.syntax_spans = Arc::from([]);
         if self.mode.is_code()
-            && self.text.len() <= SYNTAX_HIGHLIGHT_MAX_BYTES
+            && self.buffer.text().len() <= SYNTAX_HIGHLIGHT_MAX_BYTES
             && let Some(highlighter) = &self.syntax_highlighter
         {
-            self.syntax_spans = highlighter(&self.text);
+            self.syntax_spans = highlighter(self.buffer.text()).into();
         }
         if had_spans || !self.syntax_spans.is_empty() {
             self.dirty = true;
@@ -453,33 +373,24 @@ impl Editor {
 
     /// Replace the text programmatically. Clears undo history.
     pub fn set_text(&mut self, value: &str) {
-        self.text.clear();
-        self.text.push_str(value);
-        self.cursor = self.text.len();
-        self.anchor = self.cursor;
+        self.buffer.set_text(value);
         self.scroll_y = 0.0;
-        self.history.clear();
-        self.clear_preedit();
+        self.desired_x = None;
         self.text_changed();
+        self.note_cursor_activity();
     }
 
     /// Append text programmatically (streaming). Earlier undo steps stay
     /// valid because their offsets are untouched.
     pub fn append(&mut self, value: &str) {
-        let at_end = self.cursor == self.text.len() && self.anchor == self.cursor;
-        self.text.push_str(value);
-        if at_end {
-            self.cursor = self.text.len();
-            self.anchor = self.cursor;
-        }
-        self.history.break_coalescing();
+        self.buffer.append(value);
         self.reveal_cursor_on_flush = true;
-        self.dirty = true;
-        self.syntax_dirty = true;
         self.desired_x = None;
+        self.text_changed();
     }
 
-    /// Viewport size in pixels; the width is the wrap width.
+    /// Viewport size in pixels. The width less the code gutter is the wrap
+    /// width.
     pub fn sync_size(&mut self, width: f32, height: f32) {
         if (self.last_width - width).abs() > 0.5 {
             self.dirty = true;
@@ -488,11 +399,23 @@ impl Editor {
         self.last_height = height;
     }
 
-    fn layout_params(&self, text: &str, spans: Vec<TextSpan>) -> TextParams {
+    /// Width of the line-number gutter the element paints left of the text
+    /// in code modes; 0 in prose.
+    pub fn gutter_width(&self) -> f32 {
+        if !self.mode.is_code() {
+            return 0.0;
+        }
+        let lines = self.buffer.text().bytes().filter(|&b| b == b'\n').count() + 1;
+        gutter_width_in(self.font_size, lines, self.last_width)
+    }
+
+    fn layout_params(&self, text: Arc<str>, spans: Vec<TextSpan>) -> TextParams {
         let style = TextStyle::new(self.font_size)
             .kind(self.mode.font_kind())
             .line_height(self.line_height());
-        let wrap = (self.last_width > 0.0).then_some(self.last_width.max(1.0));
+        // The element paints text right of the gutter, so wrap there too.
+        let wrap =
+            (self.last_width > 0.0).then(|| (self.last_width - self.gutter_width()).max(1.0));
         TextParams::new(text, style)
             .spans(spans)
             .wrap_width(wrap)
@@ -509,13 +432,13 @@ impl Editor {
         let relayout = self.dirty || self.layout.is_none();
         if relayout {
             self.dirty = false;
-            let (spans, kinds) = syntax_layout_spans(&self.text, &self.syntax_spans);
-            let params = self.layout_params(&self.text, spans);
+            let (spans, kinds) = syntax_layout_spans(self.buffer.text(), &self.syntax_spans);
+            let params = self.layout_params(Arc::from(self.buffer.text()), spans);
             self.layout = text_system.layout(&params).ok().map(Arc::new);
-            self.span_kinds = kinds;
+            self.span_kinds = kinds.into();
+            self.line_tops = self.compute_line_tops().into();
         }
-        if relayout || self.preedit_dirty {
-            self.preedit_dirty = false;
+        if self.buffer.take_preedit_dirty() || relayout {
             self.rebuild_composition(text_system);
         }
 
@@ -527,7 +450,10 @@ impl Editor {
             }
             _ => {
                 self.caret_hidden = false;
-                self.offset_to_point(self.cursor)
+                self.layout.as_deref().map_or((0.0, 0.0), |layout| {
+                    let caret = layout.caret(self.buffer.cursor());
+                    (caret.x, caret.y)
+                })
             }
         };
         self.cursor_pos = CursorState { x, y };
@@ -544,39 +470,43 @@ impl Editor {
         }
     }
 
+    /// Lay out the committed text with the preedit spliced in, reusing the
+    /// committed layout's spans shifted around it.
     fn rebuild_composition(&mut self, text_system: &mut TextSystem) {
         self.composition = None;
         self.display = None;
-        let Some(preedit) = &self.preedit else {
+        self.display_span_kinds = Arc::from([]);
+        let Some(composition) = self.buffer.composition() else {
             return;
         };
-        let (start, end) = self.selection_range();
-        let composition = compose(&self.text, (start, end), preedit);
-        let (spans, _) = syntax_layout_spans(&self.text, &self.syntax_spans);
-        let (spans, _) = shift_spans(
-            &spans,
+        let selection = self.buffer.selection();
+        let spans = self.layout.as_ref().map(|l| l.spans().clone());
+        let (spans, kinds) = shift_spans(
+            spans.as_deref().unwrap_or_default(),
             &self.span_kinds,
-            start..end,
-            composition.preedit.len(),
+            selection.start.get()..selection.end.get(),
+            composition.preedit.end.get() - composition.preedit.start.get(),
         );
-        let params = self.layout_params(&composition.text, spans);
+        let params = self.layout_params(Arc::from(composition.text.as_str()), spans);
         self.display = text_system.layout(&params).ok().map(Arc::new);
+        self.display_span_kinds = kinds;
         self.composition = Some(composition);
     }
 
-    pub fn text(&self) -> String {
-        self.text.clone()
+    pub fn text(&self) -> &str {
+        self.buffer.text()
     }
 
-    pub fn text_str(&self) -> &str {
-        &self.text
-    }
-
+    /// The text as shared with the layout, without copying it when the
+    /// layout is current.
     pub fn text_arc(&self) -> Arc<str> {
-        Arc::from(self.text.as_str())
+        match &self.layout {
+            Some(layout) if !self.dirty => layout.text().clone(),
+            _ => Arc::from(self.buffer.text()),
+        }
     }
 
-    pub fn syntax_spans(&self) -> &[SyntaxSpan] {
+    pub fn syntax_spans(&self) -> &Arc<[SyntaxSpan]> {
         &self.syntax_spans
     }
 
@@ -587,14 +517,10 @@ impl Editor {
     }
 
     /// Syntax kind of each span of [`Editor::paint_layout`].
-    pub fn paint_span_kinds(&self) -> Vec<SyntaxTokenKind> {
-        match (&self.display, &self.composition) {
-            (Some(_), Some(composition)) => {
-                let (start, end) = self.selection_range();
-                let (spans, kinds) = syntax_layout_spans(&self.text, &self.syntax_spans);
-                shift_spans(&spans, &kinds, start..end, composition.preedit.len()).1
-            }
-            _ => self.span_kinds.clone(),
+    pub fn paint_span_kinds(&self) -> Arc<[SyntaxTokenKind]> {
+        match &self.display {
+            Some(_) => self.display_span_kinds.clone(),
+            None => self.span_kinds.clone(),
         }
     }
 
@@ -604,25 +530,25 @@ impl Editor {
     }
 
     pub fn byte_len(&self) -> usize {
-        self.text.len()
+        self.buffer.text().len()
     }
 
     pub fn line_count(&self) -> usize {
-        if self.text.is_empty() {
+        let text = self.buffer.text();
+        if text.is_empty() {
             0
         } else {
-            self.text.as_bytes().iter().filter(|&&b| b == b'\n').count()
-                + usize::from(!self.text.ends_with('\n'))
+            text.bytes().filter(|&b| b == b'\n').count() + usize::from(!text.ends_with('\n'))
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty() && self.preedit.is_none()
+        self.buffer.text().is_empty() && self.buffer.preedit().is_none()
     }
 
     pub fn content_height(&self) -> f32 {
         let line_height = self.line_height();
-        let layout = self.display.as_deref().or(self.geometry());
+        let layout = self.display.as_deref().or(self.layout.as_deref());
         layout
             .map_or(line_height, |layout| layout.size().1)
             .max(line_height)
@@ -632,20 +558,25 @@ impl Editor {
         self.line_height()
     }
 
-    /// `(1-based logical line, top)` for each logical line.
-    pub fn logical_line_tops(&self) -> Vec<(usize, f32)> {
-        let Some(layout) = self.geometry() else {
-            return if self.text.is_empty() {
+    /// `(1-based logical line, top)` for each logical line, as of the last
+    /// flush.
+    pub fn logical_line_tops(&self) -> &Arc<[(usize, f32)]> {
+        &self.line_tops
+    }
+
+    fn compute_line_tops(&self) -> Vec<(usize, f32)> {
+        let Some(layout) = self.layout.as_deref() else {
+            return if self.buffer.text().is_empty() {
                 Vec::new()
             } else {
                 vec![(1, 0.0)]
             };
         };
-        let text = layout.text();
+        let text = layout.text().as_bytes();
         let mut out = Vec::new();
         for line in layout.lines() {
             let start = line.byte_range.start;
-            let paragraph_start = start == 0 || text.as_bytes().get(start - 1) == Some(&b'\n');
+            let paragraph_start = start == 0 || text.get(start - 1) == Some(&b'\n');
             if paragraph_start {
                 out.push((out.len() + 1, line.top));
             }
@@ -653,34 +584,22 @@ impl Editor {
         out
     }
 
-    pub fn selected_text(&self) -> Option<String> {
-        if !self.has_selection() {
-            return None;
-        }
-        let (start, end) = self.selection_range();
-        self.text
-            .get(start..end)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
+    pub fn selected_text(&self) -> Option<&str> {
+        self.buffer.selected_text()
     }
 
     /// Selection highlight rects in layout coordinates. Empty while composing.
     pub fn selection_rects(&self) -> Vec<SelectionRect> {
-        if !self.has_selection() || self.preedit.is_some() {
+        let selection = self.buffer.selection();
+        if selection.is_empty() || self.buffer.preedit().is_some() {
             return Vec::new();
         }
-        let Some(layout) = self.geometry() else {
+        let Some(layout) = self.layout.as_deref() else {
             return Vec::new();
         };
-        let (start, end) = self.selection_range();
         layout
-            .selection_rects(start..end)
-            .map(|r| SelectionRect {
-                x: r.x,
-                y: r.y,
-                w: r.width,
-                h: r.height,
-            })
+            .selection_rects(selection)
+            .map(SelectionRect::from)
             .collect()
     }
 
@@ -690,15 +609,10 @@ impl Editor {
         let (Some(display), Some(composition)) = (&self.display, &self.composition) else {
             return (Vec::new(), Vec::new());
         };
-        let rects = |range: Range<usize>| {
+        let rects = |range: Range<TextOffset>| {
             display
                 .selection_rects(range)
-                .map(|r| SelectionRect {
-                    x: r.x,
-                    y: r.y,
-                    w: r.width,
-                    h: r.height,
-                })
+                .map(SelectionRect::from)
                 .collect::<Vec<_>>()
         };
         let clause = composition.clause.clone().map(rects).unwrap_or_default();
@@ -711,302 +625,92 @@ impl Editor {
     }
 
     pub fn set_preedit(&mut self, text: impl Into<String>, cursor: Option<(usize, usize)>) {
-        let preedit = Preedit::new(text, cursor);
-        if preedit != self.preedit {
-            self.preedit = preedit;
-            self.preedit_dirty = true;
+        if self.buffer.set_preedit(text, cursor) {
             self.note_cursor_activity();
         }
     }
 
     pub fn preedit(&self) -> Option<&Preedit> {
-        self.preedit.as_ref()
-    }
-
-    fn clear_preedit(&mut self) {
-        if self.preedit.take().is_some() {
-            self.preedit_dirty = true;
-        }
+        self.buffer.preedit()
     }
 
     /// Commit composed IME text over the selection. Each commit is one undo step.
     pub fn commit_ime(&mut self, value: &str) -> bool {
-        self.history.break_coalescing();
-        let changed = self.insert_text(value);
-        self.history.break_coalescing();
+        let changed = self.buffer.commit_ime(value);
+        if changed {
+            self.text_changed();
+            self.desired_x = None;
+            self.note_cursor_activity();
+        }
         changed
     }
 
     pub fn can_undo(&self) -> bool {
-        self.history.can_undo()
+        self.buffer.can_undo()
     }
 
     pub fn can_redo(&self) -> bool {
-        self.history.can_redo()
+        self.buffer.can_redo()
     }
 
-    pub fn undo(&mut self) -> bool {
-        if !self.mode.is_editable() {
-            return false;
-        }
-        self.clear_preedit();
-        let Some((anchor, cursor)) = self.history.undo(&mut self.text) else {
-            return false;
-        };
-        self.anchor = floor_char_boundary(&self.text, anchor);
-        self.cursor = floor_char_boundary(&self.text, cursor);
-        self.text_changed();
-        true
-    }
-
-    pub fn redo(&mut self) -> bool {
-        if !self.mode.is_editable() {
-            return false;
-        }
-        self.clear_preedit();
-        let Some((anchor, cursor)) = self.history.redo(&mut self.text) else {
-            return false;
-        };
-        self.anchor = floor_char_boundary(&self.text, anchor);
-        self.cursor = floor_char_boundary(&self.text, cursor);
-        self.text_changed();
-        true
-    }
-
-    pub fn insert_char(&mut self, ch: char) -> bool {
-        self.insert_text(ch.encode_utf8(&mut [0; 4]))
-    }
-
-    pub fn insert_newline(&mut self) -> bool {
-        self.insert_char('\n')
-    }
-
-    pub fn insert_text(&mut self, s: &str) -> bool {
-        let (start, end) = self.selection_range();
-        self.replace(start..end, s, EditKind::Typing)
-    }
-
-    /// Insert clipboard text over the selection as one undo step.
-    pub fn paste(&mut self, s: &str) -> bool {
-        let (start, end) = self.selection_range();
-        self.replace(start..end, s, EditKind::Other)
-    }
-
-    pub fn delete_backward(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
-        let prev = prev_grapheme_boundary(&self.text, self.cursor);
-        self.replace(prev..self.cursor, "", EditKind::Deleting)
-    }
-
-    pub fn delete_forward(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
-        let next = next_grapheme_boundary(&self.text, self.cursor);
-        self.replace(self.cursor..next, "", EditKind::Deleting)
-    }
-
-    pub fn delete_backward_word(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
-        let target = prev_word_boundary(&self.text, self.cursor);
-        self.replace(target..self.cursor, "", EditKind::Other)
-    }
-
-    pub fn delete_forward_word(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
-        let target = next_word_end(&self.text, self.cursor);
-        self.replace(self.cursor..target, "", EditKind::Other)
-    }
-
-    pub fn delete_backward_line(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
-        let (line, _col) = self.global_to_line_col(self.cursor);
-        let start = self.line_start(line);
-        self.replace(start..self.cursor, "", EditKind::Other)
-    }
-
-    /// Move the caret to `offset` (anchor too unless `selecting`), resetting
-    /// the remembered column.
-    fn move_to(&mut self, offset: usize, selecting: bool) {
-        let previous = (self.cursor, self.anchor);
-        self.cursor = floor_char_boundary(&self.text, offset);
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        self.desired_x = None;
-        self.after_move(previous);
-    }
-
-    fn after_move(&mut self, previous: (usize, usize)) {
-        if (self.cursor, self.anchor) != previous {
-            self.history.break_coalescing();
-            self.clear_preedit();
-            self.note_cursor_activity();
-        }
-    }
-
-    /// Collapse a selection to its start or end; returns true if there was one.
-    fn collapse(&mut self, to_end: bool, selecting: bool) -> bool {
-        if selecting || !self.has_selection() {
-            return false;
-        }
-        let (start, end) = self.selection_range();
-        self.move_to(if to_end { end } else { start }, false);
-        true
-    }
-
-    pub fn move_left(&mut self, selecting: bool) {
-        if !self.collapse(false, selecting) {
-            self.move_to(prev_grapheme_boundary(&self.text, self.cursor), selecting);
-        }
-    }
-
-    pub fn move_right(&mut self, selecting: bool) {
-        if !self.collapse(true, selecting) {
-            self.move_to(next_grapheme_boundary(&self.text, self.cursor), selecting);
-        }
-    }
-
-    pub fn move_word_left(&mut self, selecting: bool) {
-        if !self.collapse(false, selecting) {
-            self.move_to(prev_word_boundary(&self.text, self.cursor), selecting);
-        }
-    }
-
-    pub fn move_word_right(&mut self, selecting: bool) {
-        if !self.collapse(true, selecting) {
-            self.move_to(next_word_end(&self.text, self.cursor), selecting);
-        }
-    }
-
-    pub fn move_home(&mut self, selecting: bool) {
-        let (line, _col) = self.global_to_line_col(self.cursor);
-        self.move_to(self.line_start(line), selecting);
-    }
-
-    pub fn move_end(&mut self, selecting: bool) {
-        let (line, _col) = self.global_to_line_col(self.cursor);
-        self.move_to(self.line_end(line), selecting);
-    }
-
-    /// Byte range of the visual line holding the caret. The end of a
-    /// soft-wrapped line steps back over its trailing space so the caret
-    /// stays on that line.
-    fn visual_line_range(&self) -> Option<Range<usize>> {
-        let layout = self.geometry()?;
-        let caret = layout.caret(self.cursor);
+    /// The visual line holding the caret. The end of a soft-wrapped line
+    /// steps back over its trailing space so the caret stays on that line.
+    fn visual_line_range(&self) -> Option<Range<TextOffset>> {
+        let layout = self.layout.as_deref()?;
+        let text = self.buffer.text();
+        let caret = layout.caret(self.buffer.cursor());
         let line = layout.line(caret.line)?;
-        let mut range = line.byte_range.clone();
+        let start = TextOffset::snap(text, line.byte_range.start);
+        let mut end = TextOffset::snap(text, line.byte_range.end);
         let wrapped = layout
             .line(caret.line + 1)
-            .is_some_and(|next| next.byte_range.start == range.end);
-        if wrapped && range.end > range.start {
-            range.end = prev_grapheme_boundary(&self.text, range.end).max(range.start);
+            .is_some_and(|next| next.byte_range.start == line.byte_range.end);
+        if wrapped && end > start {
+            end = offset::prev_grapheme(text, end).max(start);
         }
-        Some(range)
+        Some(start..end)
     }
 
-    pub fn move_soft_home(&mut self, selecting: bool) {
+    /// Soft Home or End: the edge of the visual line, or of the logical
+    /// line before the first flush.
+    fn move_soft(&mut self, to_end: bool, extend: bool) {
+        use TextEditCommand::*;
         match self.visual_line_range() {
-            Some(range) => self.move_to(range.start, selecting),
-            None => self.move_home(selecting),
+            Some(range) => self
+                .buffer
+                .move_to(if to_end { range.end } else { range.start }, extend),
+            None => {
+                let cmd = match (to_end, extend) {
+                    (false, false) => CursorHome,
+                    (false, true) => SelectHome,
+                    (true, false) => CursorEnd,
+                    (true, true) => SelectEnd,
+                };
+                self.buffer.apply(cmd);
+            }
         }
     }
 
-    pub fn move_soft_end(&mut self, selecting: bool) {
-        match self.visual_line_range() {
-            Some(range) => self.move_to(range.end, selecting),
-            None => self.move_end(selecting),
-        }
-    }
-
-    fn move_vertical(&mut self, down: bool, selecting: bool) {
+    /// Move to the line above or below at the remembered column. Past the
+    /// first or last line the caret goes to the start or end of the text.
+    fn move_vertical(&mut self, down: bool, extend: bool) {
         let Some(layout) = self.layout.clone() else {
             return;
         };
-        let previous = (self.cursor, self.anchor);
-        let caret = layout.caret(self.cursor);
+        let caret = layout.caret(self.buffer.cursor());
         let x = self.desired_x.unwrap_or(caret.x);
         let target = if down {
             caret.line.checked_add(1)
         } else {
             caret.line.checked_sub(1)
         };
-        match target.and_then(|i| layout.line(i)) {
-            Some(line) => {
-                let hit = layout.hit(x, line.top + line.height * 0.5);
-                self.cursor = floor_char_boundary(&self.text, hit);
-                self.desired_x = Some(x);
-            }
-            None => {
-                self.cursor = if down { self.text.len() } else { 0 };
-                self.desired_x = None;
-            }
-        }
-        if !selecting {
-            self.anchor = self.cursor;
-        }
-        self.after_move(previous);
-    }
-
-    pub fn move_up(&mut self, selecting: bool) {
-        self.move_vertical(false, selecting);
-    }
-
-    pub fn move_down(&mut self, selecting: bool) {
-        self.move_vertical(true, selecting);
-    }
-
-    pub fn select_all(&mut self) {
-        self.move_to(0, false);
-        self.move_to(self.text.len(), true);
-    }
-
-    /// Select the word run around `offset`.
-    pub fn select_word_at(&mut self, offset: usize) {
-        let range = word_range_at(&self.text, offset);
-        self.move_to(range.start, false);
-        self.move_to(range.end, true);
-    }
-
-    /// Select the logical line around `offset`, including its newline.
-    pub fn select_line_at(&mut self, offset: usize) {
-        let (line, _col) = self.global_to_line_col(offset);
-        let start = self.line_start(line);
-        let end = self.line_start(line + 1);
-        self.move_to(start, false);
-        self.move_to(end, true);
-    }
-
-    pub fn click(&mut self, x: i32, y: i32) {
-        self.multi_click(x, y, 1);
-    }
-
-    /// A press in viewport coordinates: 1 places the caret, 2 selects the
-    /// word under it, 3 the line (see [`super::ClickCounter`]).
-    pub fn multi_click(&mut self, x: i32, y: i32, count: u8) {
-        let offset = self.point_to_offset(x as f32, y as f32 + self.scroll_y);
-        match count {
-            2 => self.select_word_at(offset),
-            3 => self.select_line_at(offset),
-            _ => self.move_to(offset, false),
-        }
-    }
-
-    /// Extend the selection to the pointer. Past the bottom or top edge
-    /// the caret lands outside the viewport, and the next flush scrolls
-    /// it into view.
-    pub fn drag(&mut self, x: i32, y: i32) {
-        let offset = self.point_to_offset(x as f32, y as f32 + self.scroll_y);
-        self.move_to(offset, true);
+        let (to, desired_x) = match target.and_then(|i| layout.line(i)) {
+            Some(line) => (layout.hit(x, line.top + line.height * 0.5), Some(x)),
+            None if down => (TextOffset::end(self.buffer.text()), None),
+            None => (TextOffset::ZERO, None),
+        };
+        self.buffer.move_to(to, extend);
+        self.desired_x = desired_x;
     }
 
     pub fn scroll(&mut self, delta_px: f32) {
@@ -1016,111 +720,79 @@ impl Editor {
 
     /// [`Editor::apply`] at the app's time `now_ms`.
     pub fn apply_at(&mut self, cmd: TextEditCommand, now_ms: u64) -> TextEditOutcome {
-        self.now_ms = now_ms;
+        self.buffer.set_now(now_ms);
         self.apply(cmd)
     }
 
-    /// Apply a text editing command.
+    /// Apply a text editing command. Up and Down move by visual line, and
+    /// soft Home and End to the edges of the visual line; the rest is the
+    /// same as in a [`super::TextField`], on logical lines.
     pub fn apply(&mut self, cmd: TextEditCommand) -> TextEditOutcome {
         use TextEditCommand::*;
-        let before = (self.cursor, self.anchor);
+        let before = (self.buffer.cursor(), self.buffer.anchor());
+        let vertical = matches!(cmd, CursorUp | CursorDown | SelectUp | SelectDown);
         let mut outcome = TextEditOutcome::default();
-        let changed = match cmd {
-            InsertText(value) => self.insert_text(&value),
-            Paste(value) => self.paste(&value),
-            Backspace => self.delete_backward(),
-            BackspaceWord => self.delete_backward_word(),
-            BackspaceLine => self.delete_backward_line(),
-            DeleteForward => self.delete_forward(),
-            DeleteForwardWord => self.delete_forward_word(),
-            Undo => self.undo(),
-            Redo => self.redo(),
-            Cut => {
-                outcome.clipboard_write = self.selected_text();
-                outcome.clipboard_write.is_some() && self.delete_selection()
-            }
-            other => {
-                match other {
-                    CursorLeft => self.move_left(false),
-                    CursorRight => self.move_right(false),
-                    CursorUp => self.move_up(false),
-                    CursorDown => self.move_down(false),
-                    CursorWordLeft => self.move_word_left(false),
-                    CursorWordRight => self.move_word_right(false),
-                    CursorHome => self.move_home(false),
-                    CursorEnd => self.move_end(false),
-                    CursorSoftHome => self.move_soft_home(false),
-                    CursorSoftEnd => self.move_soft_end(false),
-                    SelectLeft => self.move_left(true),
-                    SelectRight => self.move_right(true),
-                    SelectUp => self.move_up(true),
-                    SelectDown => self.move_down(true),
-                    SelectWordLeft => self.move_word_left(true),
-                    SelectWordRight => self.move_word_right(true),
-                    SelectHome => self.move_home(true),
-                    SelectEnd => self.move_end(true),
-                    SelectSoftHome => self.move_soft_home(true),
-                    SelectSoftEnd => self.move_soft_end(true),
-                    SelectAll => self.select_all(),
-                    SelectWordAt(offset) => self.select_word_at(offset),
-                    SelectLineAt(offset) => self.select_line_at(offset),
-                    SetTextCursor(offset) => self.move_to(offset, false),
-                    ExtendTextSelection(offset) => self.move_to(offset, true),
-                    Copy => outcome.clipboard_write = self.selected_text(),
-                    CancelPreedit => self.clear_preedit(),
-                    InsertText(_) | Paste(_) | Backspace | BackspaceWord | BackspaceLine
-                    | DeleteForward | DeleteForwardWord | Undo | Redo | Cut => {}
-                }
-                false
-            }
-        };
-        outcome.text_changed = changed;
-        outcome.selection_changed = (self.cursor, self.anchor) != before;
+        match cmd {
+            CursorUp => self.move_vertical(false, false),
+            CursorDown => self.move_vertical(true, false),
+            SelectUp => self.move_vertical(false, true),
+            SelectDown => self.move_vertical(true, true),
+            CursorSoftHome => self.move_soft(false, false),
+            SelectSoftHome => self.move_soft(false, true),
+            CursorSoftEnd => self.move_soft(true, false),
+            SelectSoftEnd => self.move_soft(true, true),
+            other => outcome = self.buffer.apply(other),
+        }
+        outcome.selection_changed = (self.buffer.cursor(), self.buffer.anchor()) != before;
+        if outcome.text_changed {
+            self.text_changed();
+        }
+        let moved = outcome.text_changed || outcome.selection_changed;
+        if moved || outcome.preedit_changed {
+            self.note_cursor_activity();
+        }
+        if moved && !vertical {
+            self.desired_x = None;
+        }
         outcome
+    }
+}
+
+impl From<quark::Rect> for SelectionRect {
+    fn from(r: quark::Rect) -> Self {
+        Self {
+            x: r.x,
+            y: r.y,
+            w: r.width,
+            h: r.height,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use TextEditCommand::*;
 
-    fn make_editor(width: f32, height: f32) -> (quark_text::TextSystem, Editor) {
-        let font_system = quark_text::TextSystem::vendored_only(&Default::default());
-
+    fn make_editor(width: f32, height: f32) -> (TextSystem, Editor) {
+        let text_system = TextSystem::vendored_only(&Default::default());
         let mut editor = Editor::default();
         editor.sync_size(width, height);
-
-        (font_system, editor)
+        (text_system, editor)
     }
 
-    #[test]
-    fn apply_reports_text_selection_and_clipboard_changes() {
-        use TextEditCommand::*;
-        let mut editor = Editor::default();
-        let out = editor.apply(InsertText("hello world".into()));
-        assert!(out.text_changed);
-        let out = editor.apply(SelectWordLeft);
-        assert!(out.selection_changed && !out.text_changed);
-        let out = editor.apply(Cut);
-        assert_eq!(out.clipboard_write.as_deref(), Some("world"));
-        assert!(out.text_changed);
-        assert_eq!(editor.text_str(), "hello ");
-        editor.apply(CursorHome);
-        assert_eq!(editor.apply(Backspace), TextEditOutcome::default());
-    }
+    const TWO_LINES: f32 = 2.0 * 14.0 * LINE_HEIGHT_FACTOR;
 
     #[test]
     fn manual_scroll_persists_across_flush() {
-        let (mut font_system, mut editor) = make_editor(220.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
-
-        editor.insert_text("line0\nline1\nline2\nline3");
-        editor.flush(&mut font_system);
-
+        let (mut text_system, mut editor) = make_editor(220.0, TWO_LINES);
+        editor.apply(InsertText("line0\nline1\nline2\nline3".into()));
+        editor.flush(&mut text_system);
         let line_height = editor.scroll_line_height_px();
         assert!((editor.scroll_y - line_height * 2.0).abs() < 0.5);
 
         editor.scroll(-line_height);
-        editor.flush(&mut font_system);
+        editor.flush(&mut text_system);
 
         assert!(
             (editor.scroll_y - line_height).abs() < 0.5,
@@ -1129,126 +801,51 @@ mod tests {
         );
     }
 
+    // Catches the content height (and so the scroll range) stopping short
+    // of the caret's line, which left the caret unreachable.
     #[test]
-    fn click_uses_visible_coordinates_after_manual_scroll() {
-        let (mut font_system, mut editor) = make_editor(220.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
+    fn typing_scrolls_the_caret_line_into_a_content_height_that_covers_it() {
+        let words = "asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf ".repeat(4);
+        let cases = [
+            ("trailing newline", "first line\nsecond line\n", 160.0),
+            ("wrapped past the viewport", words.as_str(), 120.0),
+        ];
+        for (name, text, width) in cases {
+            let (mut text_system, mut editor) = make_editor(width, TWO_LINES);
+            editor.apply(InsertText(text.into()));
+            editor.flush(&mut text_system);
 
-        editor.insert_text("line0\nline1\nline2\nline3");
-        editor.flush(&mut font_system);
-
-        let line_height = editor.scroll_line_height_px();
-        editor.scroll(-line_height);
-        editor.flush(&mut font_system);
-
-        editor.click(0, 0);
-        editor.flush(&mut font_system);
-
-        assert_eq!(editor.cursor, "line0\n".len());
-        assert_eq!(editor.anchor, "line0\n".len());
-    }
-
-    #[test]
-    fn content_height_covers_cursor_line_for_trailing_newline() {
-        let (mut font_system, mut editor) = make_editor(160.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
-
-        editor.insert_text("first line\nsecond line\n");
-        editor.flush(&mut font_system);
-
-        let line_height = editor.scroll_line_height_px();
-        let cursor_bottom = editor.cursor_pos.y + line_height;
-
-        assert!(
-            editor.content_height() + 0.5 >= cursor_bottom,
-            "content height {} did not cover cursor bottom {}",
-            editor.content_height(),
-            cursor_bottom
-        );
-    }
-
-    #[test]
-    fn wrapped_content_beyond_viewport_height_is_fully_counted() {
-        let (mut font_system, mut editor) = make_editor(120.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
-
-        editor.insert_text(
-            "asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf \
-             sdaf asdf asdf asdf asd fasdf asdf asdf asdf asdf \
-             asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf \
-             sdaf asdf asdf asdf asd fasdf asdf asdf asdf asdf",
-        );
-        editor.flush(&mut font_system);
-
-        let line_height = editor.scroll_line_height_px();
-        let cursor_bottom = editor.cursor_pos.y + line_height;
-        let viewport_height = 2.0 * 14.0 * LINE_HEIGHT_FACTOR;
-
-        assert!(
-            cursor_bottom > viewport_height + 0.5,
-            "test text did not extend beyond the viewport: cursor_bottom={cursor_bottom} viewport_height={viewport_height}"
-        );
-        assert!(
-            editor.content_height() + 0.5 >= cursor_bottom,
-            "wrapped content height {} did not cover offscreen cursor bottom {}",
-            editor.content_height(),
-            cursor_bottom
-        );
-        assert!(
-            (editor.scroll_y - (cursor_bottom - viewport_height)).abs() < line_height + 0.5,
-            "expected scroll to reveal bottom line, got scroll_y={} cursor_bottom={} viewport_height={viewport_height}",
-            editor.scroll_y,
-            cursor_bottom
-        );
-    }
-
-    #[test]
-    fn click_can_target_lower_wrapped_visual_line() {
-        let (mut font_system, mut editor) = make_editor(120.0, 10.0 * 14.0 * LINE_HEIGHT_FACTOR);
-
-        editor.insert_text(
-            "asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf \
-             sdaf asdf asdf asdf asd fasdf asdf asdf asdf asdf",
-        );
-        editor.flush(&mut font_system);
-
-        let layout = editor.layout().expect("layout").clone();
-        let second = layout.line(1).expect("wrapped text");
-        let click_y = (second.top - editor.scroll_y + second.height * 0.5) as i32;
-
-        editor.click(1, click_y);
-        editor.flush(&mut font_system);
-
-        assert_eq!(editor.cursor, second.byte_range.start);
-    }
-
-    #[test]
-    fn default_editor_uses_prose_mode() {
-        let editor = Editor::default();
-
-        assert_eq!(editor.mode(), EditorMode::ProseInput);
-        assert!(!editor.mode().is_code());
-    }
-
-    #[test]
-    fn code_input_mode_keeps_editing_enabled() {
-        let (_font_system, mut editor) = make_editor(220.0, 80.0);
-        editor.set_mode(EditorMode::CodeInput);
-
-        editor.insert_text("fn main() {}\n");
-
-        assert_eq!(editor.mode(), EditorMode::CodeInput);
-        assert_eq!(editor.text(), "fn main() {}\n");
-        assert_eq!(editor.line_count(), 1);
+            let top = editor.cursor_pos.y;
+            let bottom = top + editor.scroll_line_height_px();
+            assert!(
+                editor.content_height() + 0.5 >= bottom,
+                "{name}: content height"
+            );
+            let visible = editor.scroll_y - 0.5..editor.scroll_y + TWO_LINES + 0.5;
+            assert!(
+                visible.contains(&top) && visible.contains(&bottom),
+                "{name}: caret {top}..{bottom} outside {visible:?}"
+            );
+        }
     }
 
     #[test]
     fn diff_read_only_mode_blocks_user_mutations() {
-        let (_font_system, mut editor) = make_editor(220.0, 80.0);
-        editor.set_mode(EditorMode::DiffReadOnly);
+        let mut editor = Editor::new(EditorMode::DiffReadOnly);
         editor.set_text("unchanged");
-
-        editor.insert_text(" edited");
-        editor.delete_backward();
-
+        editor.apply(InsertText(" edited".into()));
+        editor.apply(Backspace);
+        editor.apply(Undo);
         assert_eq!(editor.text(), "unchanged");
-        assert_eq!(editor.mode(), EditorMode::DiffReadOnly);
+    }
+
+    // Regression: select_line_at sliced the text at the raw offset, so a
+    // triple click inside a multibyte char panicked.
+    #[test]
+    fn select_line_at_inside_a_multibyte_char_selects_its_line() {
+        let mut editor = Editor::default();
+        editor.set_text("\u{e9}\nb");
+        editor.apply(SelectLineAt(1));
+        assert_eq!(editor.selected_text(), Some("\u{e9}\n"));
     }
 }

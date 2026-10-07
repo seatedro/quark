@@ -11,7 +11,6 @@
 use quark::ClickEvent;
 
 use super::TextEditCommand;
-use super::ime::floor_char_boundary;
 use super::view::ClickCounter;
 use crate::element::{CursorHint, DragHandler, DragReleaseResult, DragStart, TextInputHitArea};
 use crate::{Action, FocusId};
@@ -77,34 +76,6 @@ impl DragHandler for TextDrag {
     }
 }
 
-impl TextInputHitArea {
-    /// Byte offset under a window point. Single-line fields read only `x`
-    /// (see [`Self::offset_at`]); editors hit-test their wrapped layout,
-    /// so a point above or below the viewport maps to text scrolled out
-    /// of view there.
-    pub fn offset_at_point(&self, x: f32, y: f32) -> Option<usize> {
-        if !self.multiline {
-            return self.offset_at(x);
-        }
-        let layout = self.layout.as_ref()?;
-        let byte = layout.hit(
-            x - self.text_x + self.scroll_x,
-            y - self.text_y + self.scroll_y,
-        );
-        Some(floor_char_boundary(layout.text(), byte))
-    }
-
-    /// Whether a point is past the edge the field scrolls along: left or
-    /// right for single-line fields, above or below for editors.
-    fn is_past_edge(&self, x: f32, y: f32) -> bool {
-        if self.multiline {
-            y < self.text_y || y > self.text_y + self.text_height
-        } else {
-            x < self.text_x || x > self.text_x + self.text_width
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Held {
     target: FocusId,
@@ -147,7 +118,7 @@ impl TextPointer {
             y,
             next_step_ms: now_ms + AUTOSCROLL_STEP_MS,
         });
-        let offset = area(areas, target)?.offset_at_point(x, y)?;
+        let offset = area(areas, target)?.offset_at_point(x, y)?.get();
         let command = match event {
             TextPointerEvent::Press { .. } => match self.clicks.press(x, y, now_ms) {
                 1 if extend => TextEditCommand::ExtendTextSelection(offset),
@@ -175,7 +146,7 @@ impl TextPointer {
             return None;
         }
         held.next_step_ms = now_ms + AUTOSCROLL_STEP_MS;
-        let offset = area.offset_at_point(held.x, held.y)?;
+        let offset = area.offset_at_point(held.x, held.y)?.get();
         Some((held.target, TextEditCommand::ExtendTextSelection(offset)))
     }
 
@@ -198,6 +169,7 @@ mod tests {
     use quark::SemanticFrame;
     use quark::reactive::SignalStore;
     use quark_render::Scene;
+    use quark_text::{TextOffset, offset};
 
     use super::*;
     use crate::element::{
@@ -225,7 +197,7 @@ mod tests {
             }
         }
 
-        fn selection(&self) -> (usize, usize) {
+        fn selection(&self) -> (TextOffset, TextOffset) {
             match self {
                 Model::Field(field) => (field.anchor(), field.cursor()),
                 Model::Editor(editor) => (editor.anchor(), editor.cursor()),
@@ -327,8 +299,8 @@ mod tests {
         /// Window x of byte `offset` in the painted single-line text.
         fn x_of(&self, offset: usize) -> f32 {
             let area = self.area();
-            let layout = area.layout.as_ref().expect("value layout");
-            area.text_x - area.scroll_x + layout.caret(offset).x
+            let layout = area.layout().expect("value layout");
+            area.origin().0 + layout.caret(offset).x
         }
 
         fn deliver(&mut self, delivery: Delivery) {
@@ -371,7 +343,7 @@ mod tests {
 
         fn selected(&self, text: &str) -> String {
             let (a, b) = self.model.selection();
-            text[a.min(b)..a.max(b)].to_owned()
+            offset::slice(text, a..b).to_owned()
         }
     }
 
@@ -381,7 +353,7 @@ mod tests {
     fn consecutive_clicks_on_a_routed_text_input_select_caret_word_then_line() {
         let text = "hello brave world";
         let mut harness = Harness::field(text);
-        let (x, y) = (harness.x_of(8), harness.area().text_y + 5.0);
+        let (x, y) = (harness.x_of(8), harness.area().text_rect.y + 5.0);
 
         let selected: Vec<String> = (0..3)
             .map(|_| {
@@ -406,13 +378,11 @@ mod tests {
         ];
         for (name, mut harness, (dx, dy)) in cases {
             let area = harness.area().clone();
-            let (x, y) = (area.text_x + 4.0, area.text_y + 8.0);
+            let r = area.text_rect;
+            let (x, y) = (r.x + 4.0, r.y + 8.0);
             harness.press(x, y);
             // One move past the far edge (right, or below), then hold still.
-            let (right, bottom) = (
-                area.text_x + area.text_width,
-                area.text_y + area.text_height,
-            );
+            let (right, bottom) = (r.right(), r.bottom());
             harness.move_to(
                 if dx > 0.0 { right + 15.0 } else { x },
                 if dy > 0.0 { bottom + 15.0 } else { y },
@@ -433,6 +403,33 @@ mod tests {
                 "{name}: scroll offsets {scrolls:?}"
             );
             assert_eq!(after_release, *scrolls.last().unwrap(), "{name}");
+        }
+    }
+
+    // Catches presses mapped through unscrolled or unwrapped coordinates:
+    // a press lands on the line painted under it.
+    #[test]
+    fn press_in_a_scrolled_or_wrapped_editor_lands_on_the_painted_line() {
+        let cases = [
+            ("scrolled", "line0\nline1\nline2\nline3", 1.0),
+            (
+                "wrapped",
+                "asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf",
+                0.0,
+            ),
+        ];
+        for (name, text, scroll_lines) in cases {
+            let mut harness = Harness::editor(text);
+            if let Model::Editor(editor) = &mut harness.model {
+                editor.scroll(editor.scroll_line_height_px() * scroll_lines);
+            }
+            harness.paint();
+            let area = harness.area().clone();
+            let line = area.layout().and_then(|l| l.line(1)).expect("second line");
+            let (_, top) = area.origin();
+            harness.press(area.text_rect.x + 1.0, top + line.top + line.height * 0.5);
+            let start = TextOffset::snap(text, line.byte_range.start);
+            assert_eq!(harness.model.selection(), (start, start), "{name}");
         }
     }
 }

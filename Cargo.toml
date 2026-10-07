@@ -51,7 +51,9 @@ thiserror = "2"
 tracing = "0.1.44"
 tungstenite = "0.29"
 unicode-segmentation = "1.12"
-wgpu = "28.0.0"
+# Native backends only: no WebGPU/WebGL. quark-render adds GLES on Linux as
+# the fallback for machines without a Vulkan driver.
+wgpu = { version = "28.0.0", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan", "metal", "dx12"] }
 winit = "0.30"
 
 [profile.dev]

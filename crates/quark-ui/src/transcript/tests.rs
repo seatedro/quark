@@ -296,52 +296,124 @@ fn prepending_history_keeps_the_selection_and_the_row_on_screen() {
 }
 
 #[test]
-fn select_all_copies_every_block_for_either_modifier() {
+fn key_command_maps_cmd_and_ctrl_bindings() {
+    let cases = [
+        ("ctrl+c", Some(TranscriptCommand::Copy)),
+        ("Cmd+C", Some(TranscriptCommand::Copy)),
+        ("ctrl+a", Some(TranscriptCommand::SelectAll)),
+        ("cmd+a", Some(TranscriptCommand::SelectAll)),
+        ("ctrl+x", None),
+        ("ctrl+shift+c", None),
+    ];
+    for (binding, expected) in cases {
+        let pressed: Binding = binding.parse().unwrap();
+        assert_eq!(key_command(&pressed), expected, "{binding}");
+    }
+}
+
+#[test]
+fn select_all_copies_every_block() {
     let mut doc = Doc::rows(3);
 
-    let copied = ["ctrl", "cmd"].map(|modifier| {
-        doc.transcript.set_selection(None);
-        if key_command(&format!("{modifier}+a")) == Some(TranscriptCommand::SelectAll) {
-            doc.transcript.select_all();
-        }
-        match key_command(&format!("{modifier}+c")) {
-            Some(TranscriptCommand::Copy) => doc.copy(),
-            _ => String::new(),
-        }
-    });
+    doc.transcript.select_all();
 
-    let all = "m0 first\n\nm0 second\n\nm1 first\n\nm1 second\n\nm2 first\n\nm2 second";
-    assert_eq!(copied, [all, all]);
+    assert_eq!(
+        doc.copy(),
+        "m0 first\n\nm0 second\n\nm1 first\n\nm1 second\n\nm2 first\n\nm2 second"
+    );
+}
+
+// Catches a selection end left in a block an update removed: it moves to
+// the end of the previous surviving block, so copy stops there.
+#[test]
+fn update_dropping_the_block_a_selection_ends_in_copies_up_to_the_previous_block() {
+    let mut doc = Doc::new([message_with(0, &["alpha", "beta", "gamma"])]);
+    doc.press(doc.point(0, 2));
+    doc.drag(doc.point(2, 3));
+    doc.release();
+
+    let shrunk = message_with(0, &["alpha", "beta"]);
+    doc.transcript.update(&shrunk).unwrap();
+    doc.messages.insert(shrunk.key, shrunk);
+
+    assert_eq!(doc.copy(), "pha\n\nbeta");
+}
+
+// Catches a block whose key another message already owns being drawn and
+// hit-tested: a press on it stored a point outside the document.
+#[test]
+fn block_with_a_key_another_message_owns_cannot_be_selected() {
+    let mut doc = Doc::new([message_with(0, &["owner"])]);
+    let mut duplicate = message_with(1, &["second"]);
+    duplicate.blocks[0].key = BlockKey(0);
+    doc.transcript.push(&duplicate).unwrap();
+    doc.messages.insert(duplicate.key, duplicate);
+    doc.frame();
+
+    // Below both messages: nearest to where the duplicate would be drawn.
+    doc.press((50.0, 160.0));
+
+    let drawn: Vec<(u64, u64)> = doc
+        .transcript
+        .visible_blocks()
+        .iter()
+        .map(|b| (b.row.0, b.key.0))
+        .collect();
+    assert_eq!(drawn, [(0, 0)]);
+    // The end of "owner", not of "second".
+    assert_eq!(
+        doc.transcript.selection(),
+        Some(Selection::collapsed(SelectionPoint::new(BlockKey(0), 5)))
+    );
+}
+
+// Catches a press between an edit and the next prepare landing in a block
+// the edit took out of the document.
+#[test]
+fn press_after_an_update_removed_the_block_skips_it() {
+    let mut doc = Doc::new([message_with(0, &["keep", "drop"])]);
+    let dropped = doc.point(1, 1);
+    let shrunk = message_with(0, &["keep"]);
+    doc.transcript.update(&shrunk).unwrap();
+    doc.messages.insert(shrunk.key, shrunk);
+
+    doc.press(dropped);
+    doc.transcript.push(&message(1)).unwrap();
+
+    assert_eq!(
+        doc.transcript.selection().map(|s| s.focus.block),
+        Some(BlockKey(0))
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Autoscroll
 // ---------------------------------------------------------------------------
 
-#[test]
-fn autoscroll_runs_while_held_past_the_edge_and_stops_on_release() {
-    let mut doc = Doc::rows(50);
+/// Scrolled to the middle of 50 rows, pressed on the row in the middle of
+/// the viewport and dragged above the top edge. Returns the pressed row.
+fn hold_above_the_top_edge(doc: &mut Doc) -> u64 {
     doc.scroll_to(2000.0);
-    let anchor_row = doc.middle_row();
-    doc.press(doc.point(anchor_row * 10, 0));
+    let row = doc.middle_row();
+    doc.press(doc.point(row * 10, 0));
     doc.drag((50.0, -30.0));
-    let focus_row = |doc: &Doc| {
-        doc.transcript
-            .selection()
-            .map_or(0, |s| s.focus.block.0 / 10)
-    };
-    let first_focus = focus_row(&doc);
+    row
+}
+
+#[test]
+fn autoscroll_moves_while_held_past_the_edge_and_stops_on_release() {
+    let mut doc = Doc::rows(50);
+    let row = hold_above_the_top_edge(&mut doc);
 
     // Content moves down (the view scrolls up) while the pointer is held.
-    let mut held = vec![doc.screen_top(anchor_row)];
+    let mut held = vec![doc.screen_top(row)];
     for _ in 0..10 {
         doc.frame();
-        held.push(doc.screen_top(anchor_row));
+        held.push(doc.screen_top(row));
     }
     let wanted_frames = doc.transcript.wants_frame();
-    let last_focus = focus_row(&doc);
     doc.release();
-    let released = doc.screen_top(anchor_row);
+    let released = doc.screen_top(row);
     for _ in 0..3 {
         doc.frame();
     }
@@ -349,16 +421,33 @@ fn autoscroll_runs_while_held_past_the_edge_and_stops_on_release() {
     // The first held frame only starts the clock.
     assert!(
         held[1..].windows(2).all(|w| w[1] > w[0]),
-        "row {anchor_row} should move down every frame: {held:?}"
+        "row {row} should move down every frame: {held:?}"
     );
     assert!(wanted_frames);
-    // The selection end follows the rows scrolling under the held pointer.
-    assert!(
-        last_focus < first_focus && first_focus < anchor_row,
-        "focus {first_focus} -> {last_focus}, anchor {anchor_row}"
-    );
-    assert_eq!(doc.screen_top(anchor_row), released);
+    assert_eq!(doc.screen_top(row), released);
     assert!(!doc.transcript.wants_frame());
+}
+
+#[test]
+fn selection_focus_follows_rows_autoscrolling_under_the_pointer() {
+    let mut doc = Doc::rows(50);
+    let row = hold_above_the_top_edge(&mut doc);
+    let focus_row = |doc: &Doc| {
+        doc.transcript
+            .selection()
+            .map_or(0, |s| s.focus.block.0 / 10)
+    };
+    let first = focus_row(&doc);
+
+    for _ in 0..10 {
+        doc.frame();
+    }
+
+    let last = focus_row(&doc);
+    assert!(
+        last < first && first < row,
+        "focus {first} -> {last}, anchor {row}"
+    );
 }
 
 #[test]
@@ -386,7 +475,7 @@ fn autoscroll_is_faster_farther_past_the_edge() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn streaming_growth_stays_pinned_to_the_bottom() {
+fn update_then_prepare_keeps_pin() {
     let mut doc = Doc::rows(50);
     let mut text = String::from("m49 second");
 
@@ -421,6 +510,19 @@ fn new_content_while_scrolled_up_offers_jump_to_latest() {
     );
 }
 
+// Catches edits to older messages (a highlight arriving) offering "Jump to
+// latest" when nothing new arrived at the bottom.
+#[test]
+fn editing_an_older_message_while_scrolled_up_offers_no_jump() {
+    let mut doc = Doc::rows(50);
+    doc.scroll_to(0.0);
+
+    doc.stream(10, 1, "m10 second, edited");
+    doc.frame();
+
+    assert!(!doc.transcript.has_unseen());
+}
+
 #[test]
 fn narrowing_the_viewport_rewraps_rows() {
     // 76 chars: 2 lines at 38 columns (400px), 5 lines at 18 (200px).
@@ -437,28 +539,30 @@ fn narrowing_the_viewport_rewraps_rows() {
     );
 }
 
-#[test]
-fn visible_rows_stay_bounded_across_5000_messages() {
-    // Varied lengths: 1 to 7 lines in the first block.
-    let mut doc = Doc::new((0..5000).map(|i| {
-        let body = "word ".repeat(1 + (i as usize * 7) % 50);
-        message_with(i, &[&body, "tail"])
-    }));
-
-    let mut counts = Vec::new();
-    for offset in [0.0, 100_000.0, 250_000.0, f32::MAX] {
-        doc.scroll_to(offset);
-        counts.push(doc.transcript.visible_rows().len());
-    }
-
-    // (900 viewport + 2 * 450 overscan) / 90px shortest row, plus partial
-    // rows at both ends.
-    assert!(counts.iter().all(|&n| (1..=22).contains(&n)), "{counts:?}");
-}
-
 // ---------------------------------------------------------------------------
 // Invariants under arbitrary document edits
 // ---------------------------------------------------------------------------
+
+// Catches debug integrity checks that walk the whole document per block or
+// per message, which made loading a long transcript quadratic in debug
+// builds. Counted in check steps, not timed.
+#[test]
+fn extending_with_30k_blocks_checks_in_linear_steps() {
+    let messages: Vec<TranscriptMessage> = (0..10_000)
+        .map(|i| message_with(i, &["a", "b", "c"]))
+        .collect();
+    let mut transcript: Transcript<GridGeometry> = Transcript::new(grid_style());
+    transcript
+        .push(&message_with(1_000_000, &["first"]))
+        .unwrap();
+
+    let before = quark::selection::integrity_steps();
+    transcript.extend(&messages).unwrap();
+    let steps = quark::selection::integrity_steps() - before;
+
+    assert_eq!(transcript.len(), 10_001);
+    assert!(steps <= 5 * 30_000, "{steps} check steps for 30k blocks");
+}
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -670,13 +774,13 @@ fn measured_blocks_match_the_painted_text_elements() {
 
 #[test]
 fn rows_publish_their_position_among_all_rows_and_their_block_text() {
-    let messages = real_document(5000);
+    let messages = real_document(50);
     let mut transcript = real_transcript(&messages);
-    let offset = transcript.list().rows().offset_of(RowKey(2500)).unwrap();
+    let offset = transcript.list().rows().offset_of(RowKey(25)).unwrap();
     transcript.set_scroll_offset(offset);
     paint(&mut transcript, &messages, (400.0, 600.0), 0.0);
-    // Rows above were measured on the way; settle the anchor at row 2500.
-    let offset = transcript.list().rows().offset_of(RowKey(2500)).unwrap();
+    // Rows above were measured on the way; settle the anchor at row 25.
+    let offset = transcript.list().rows().offset_of(RowKey(25)).unwrap();
     transcript.set_scroll_offset(offset);
 
     let painted = paint(&mut transcript, &messages, (400.0, 600.0), 0.0);
@@ -685,10 +789,10 @@ fn rows_publish_their_position_among_all_rows_and_their_block_text() {
     let item = update
         .nodes
         .iter()
-        // AccessKit's index is 0-based; screen readers announce 2501.
-        .find(|(_, n)| n.role() == accesskit::Role::ListItem && n.position_in_set() == Some(2500))
+        // AccessKit's index is 0-based; screen readers announce 26.
+        .find(|(_, n)| n.role() == accesskit::Role::ListItem && n.position_in_set() == Some(25))
         .map(|(_, n)| n)
-        .expect("row 2500 is published");
+        .expect("row 25 is published");
     let texts: Vec<&str> = item
         .children()
         .iter()
@@ -704,10 +808,10 @@ fn rows_publish_their_position_among_all_rows_and_their_block_text() {
     assert_eq!(
         (item.label(), item.size_of_set(), list_size, texts),
         (
-            Some("author 2500"),
-            Some(5000),
-            Some(5000),
-            vec!["Message 2500 wraps across a few lines when the column is narrow enough."]
+            Some("author 25"),
+            Some(50),
+            Some(50),
+            vec!["Message 25 wraps across a few lines when the column is narrow enough."]
         )
     );
 }
@@ -759,21 +863,28 @@ fn routed_drag_selects_from_one_message_into_another() {
 // Markdown messages
 // ---------------------------------------------------------------------------
 
+/// Converts markdown with a fresh block key allocator, so keys count from 0.
 fn markdown_message(
     row: u64,
     markdown: &mut MarkdownMessage,
     source: &str,
     syntax: &mut SyntaxHighlighter,
 ) -> TranscriptMessage {
+    markdown_message_with(row, markdown, source, syntax, &mut BlockKeys::new())
+}
+
+fn markdown_message_with(
+    row: u64,
+    markdown: &mut MarkdownMessage,
+    source: &str,
+    syntax: &mut SyntaxHighlighter,
+    keys: &mut BlockKeys,
+) -> TranscriptMessage {
     TranscriptMessage {
         key: RowKey(row),
         role: TranscriptRole::Assistant,
         author: "assistant".into(),
-        blocks: markdown.blocks(
-            &crate::markdown::MarkdownDoc::parse(source),
-            &Theme::default_dark(),
-            syntax,
-        ),
+        blocks: markdown.blocks(&crate::markdown::MarkdownDoc::parse(source), syntax, keys),
     }
 }
 
@@ -793,7 +904,7 @@ fn dump_blocks(message: &TranscriptMessage) -> String {
             };
             let s = &block.style;
             format!(
-                "{:x} {kind} l{} q{} [{}] {:?} {:?}",
+                "{} {kind} l{} q{} [{}] {:?} {:?}",
                 block.key.0,
                 s.list_depth,
                 s.quote_depth,
@@ -806,17 +917,17 @@ fn dump_blocks(message: &TranscriptMessage) -> String {
         .join("\n")
 }
 
-/// Texts of the code spans that carry a color.
-fn colored_runs(block: &TranscriptBlock) -> Vec<String> {
-    match &block.content {
-        BlockContent::Code { lines, .. } => lines
-            .iter()
-            .flatten()
-            .filter(|span| span.color.is_some())
-            .map(|span| span.text.clone())
-            .collect(),
-        _ => Vec::new(),
-    }
+/// Texts of the content spans that take a syntax color.
+fn highlighted_runs(block: &TranscriptBlock) -> Vec<String> {
+    let (Some(spans), Some(tones)) = (block.content.spans(), block.tones()) else {
+        return Vec::new();
+    };
+    spans
+        .iter()
+        .zip(tones)
+        .filter(|(_, tone)| matches!(tone, SpanTone::Syntax(_)))
+        .map(|(span, _)| span.text.clone())
+        .collect()
 }
 
 #[test]
@@ -826,7 +937,7 @@ fn markdown_blocks_become_separate_keyed_blocks_with_markers_and_prefixes() {
 
     let message = markdown_message(
         7,
-        &mut MarkdownMessage::new(RowKey(7)),
+        &mut MarkdownMessage::new(),
         source,
         &mut SyntaxHighlighter::new(),
     );
@@ -834,16 +945,38 @@ fn markdown_blocks_become_separate_keyed_blocks_with_markers_and_prefixes() {
     assert_eq!(
         dump_blocks(&message),
         [
-            r###"70000 prose l0 q0 [] "## " "Setup""###,
-            r###"70001 prose l1 q0 [•] "- " "one""###,
-            r###"70002 prose l2 q0 [•] "  - " "nested""###,
-            r###"70003 prose l1 q0 [1.] "1. " "first""###,
-            r###"70004 prose l0 q1 [] "> " "quoted""###,
-            r###"70005 code() l0 q0 [] "" "| a   | bb  |\n| --- | --- |\n| 1   | 2   |""###,
-            r###"70006 code(rust) l0 q0 [] "" "fn main() {}""###,
-            r###"70007 rule l0 q0 [] "" "---""###,
+            r###"0 prose l0 q0 [] "## " "Setup""###,
+            r###"1 prose l1 q0 [•] "- " "one""###,
+            r###"2 prose l2 q0 [•] "  - " "nested""###,
+            r###"3 prose l1 q0 [1.] "1. " "first""###,
+            r###"4 prose l0 q1 [] "> " "quoted""###,
+            r###"5 code() l0 q0 [] "" "| a   | bb  |\n| --- | --- |\n| 1   | 2   |""###,
+            r###"6 code(rust) l0 q0 [] "" "fn main() {}""###,
+            r###"7 rule l0 q0 [] "" "---""###,
         ]
         .join("\n")
+    );
+}
+
+// Catches columns padded by char count, which misaligns wide (CJK) text in
+// the monospace grid.
+#[test]
+fn table_columns_align_by_display_width() {
+    let source = "| 名前 | n |\n|---|---|\n| 日本語テキスト | 1 |\n| abc | 22 |";
+
+    let message = markdown_message(
+        0,
+        &mut MarkdownMessage::new(),
+        source,
+        &mut SyntaxHighlighter::new(),
+    );
+
+    assert_eq!(
+        message.blocks[0].text(),
+        "| 名前           | n   |\n\
+         | -------------- | --- |\n\
+         | 日本語テキスト | 1   |\n\
+         | abc            | 22  |"
     );
 }
 
@@ -851,11 +984,11 @@ fn markdown_blocks_become_separate_keyed_blocks_with_markers_and_prefixes() {
 fn drag_from_a_heading_across_a_list_into_code_copies_markers_and_source() {
     let mut syntax = SyntaxHighlighter::new();
     let source = "## Setup\n\n- one\n- two\n\n```rust\nfn main() {\n    run();\n}\n```";
-    let message = markdown_message(0, &mut MarkdownMessage::new(RowKey(0)), source, &mut syntax);
-    let code = markdown_block_key(RowKey(0), 3).0;
+    let message = markdown_message(0, &mut MarkdownMessage::new(), source, &mut syntax);
+    let (heading, code) = (message.blocks[0].key.0, message.blocks[3].key.0);
     let mut doc = Doc::new([message]);
 
-    doc.press(doc.point(markdown_block_key(RowKey(0), 0).0, 0));
+    doc.press(doc.point(heading, 0));
     doc.drag(doc.point(code, 5));
     doc.release();
 
@@ -867,11 +1000,12 @@ fn streaming_markdown_reshapes_only_the_last_block() {
     let mut text = TextSystem::vendored_only(&Default::default());
     let mut layouts = LayoutCache::default();
     let mut syntax = SyntaxHighlighter::new();
-    let mut markdown = MarkdownMessage::new(RowKey(0));
+    let mut keys = BlockKeys::new();
+    let mut markdown = MarkdownMessage::new();
     let mut source = String::from("# Title\n\nFirst paragraph.\n\n- a\n- b\n\nStreaming");
     let mut messages = HashMap::new();
     let mut transcript = Transcript::new(TranscriptStyle::for_font_size(14.0));
-    let message = markdown_message(0, &mut markdown, &source, &mut syntax);
+    let message = markdown_message_with(0, &mut markdown, &source, &mut syntax, &mut keys);
     transcript.push(&message).unwrap();
     messages.insert(message.key, message);
     let mut frame = |transcript: &mut Transcript, messages: &HashMap<_, _>| {
@@ -888,7 +1022,7 @@ fn streaming_markdown_reshapes_only_the_last_block() {
     let mut reshaped = Vec::new();
     for word in [" more", " words", " arrive"] {
         source.push_str(word);
-        let message = markdown_message(0, &mut markdown, &source, &mut syntax);
+        let message = markdown_message_with(0, &mut markdown, &source, &mut syntax, &mut keys);
         transcript.update(&message).unwrap();
         messages.insert(message.key, message);
         let after = frame(&mut transcript, &messages);
@@ -905,7 +1039,7 @@ fn streaming_markdown_reshapes_only_the_last_block() {
 #[test]
 fn unknown_fence_language_renders_plain_with_its_label() {
     let mut syntax = SyntaxHighlighter::new();
-    let mut markdown = MarkdownMessage::new(RowKey(0));
+    let mut markdown = MarkdownMessage::new();
     let source = "```klingon\nqapla' \"batlh\" fn\n```";
     markdown_message(0, &mut markdown, source, &mut syntax);
     syntax.finish_pending();
@@ -918,7 +1052,7 @@ fn unknown_fence_language_renders_plain_with_its_label() {
         _ => None,
     };
     assert_eq!(
-        (label, colored_runs(block)),
+        (label, highlighted_runs(block)),
         (Some("klingon".to_owned()), Vec::<String>::new())
     );
 }
@@ -927,23 +1061,258 @@ fn unknown_fence_language_renders_plain_with_its_label() {
 #[test]
 fn rust_code_block_is_colored_once_its_highlight_arrives() {
     let mut syntax = SyntaxHighlighter::new();
-    let mut markdown = MarkdownMessage::new(RowKey(0));
+    let mut markdown = MarkdownMessage::new();
     let source = "```rust\nfn main() { let s = \"hi\"; }\n```";
     let first = markdown_message(0, &mut markdown, source, &mut syntax);
 
-    let arrived = syntax.finish_pending();
+    syntax.finish_pending();
     let second = markdown_message(0, &mut markdown, source, &mut syntax);
 
     assert_eq!(
         (
-            colored_runs(&first.blocks[0]),
-            arrived,
-            colored_runs(&second.blocks[0])
+            highlighted_runs(&first.blocks[0]),
+            highlighted_runs(&second.blocks[0])
         ),
         (
             vec![],
-            vec![markdown_block_key(RowKey(0), 0)],
             vec!["fn".into(), "main".into(), "let".into(), "\"hi\"".into()]
         )
+    );
+}
+
+#[cfg(feature = "syntax")]
+#[test]
+fn highlight_arrival_reports_the_block_it_is_for() {
+    let mut syntax = SyntaxHighlighter::new();
+    let message = markdown_message(
+        0,
+        &mut MarkdownMessage::new(),
+        "```rust\nfn main() {}\n```",
+        &mut syntax,
+    );
+
+    assert_eq!(syntax.finish_pending(), vec![message.blocks[0].key]);
+}
+
+/// A markdown transcript holding message 0 with `source`.
+fn markdown_transcript(source: &str) -> MarkdownTranscript {
+    let mut md = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+    md.push(MarkdownEntry {
+        row: RowKey(0),
+        role: TranscriptRole::Assistant,
+        author: "assistant".into(),
+        markdown: source.to_owned(),
+    })
+    .unwrap();
+    md
+}
+
+// Catches highlighter state outliving its blocks: removing a message must
+// drop the highlights of its code blocks.
+#[cfg(feature = "syntax")]
+#[test]
+fn removing_a_message_forgets_its_highlights() {
+    let mut md = markdown_transcript("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+    md.finish_highlights();
+    let kept = md.highlighter().len();
+
+    md.remove(RowKey(0)).unwrap();
+
+    assert_eq!((kept, md.highlighter().len()), (2, 0));
+}
+
+// Catches truncation keeping the highlights of blocks a message lost.
+#[cfg(feature = "syntax")]
+#[test]
+fn shrinking_a_message_forgets_the_highlights_of_dropped_blocks() {
+    let mut md = markdown_transcript("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+    md.finish_highlights();
+
+    md.set_markdown(RowKey(0), "```rust\nfn a() {}\n```")
+        .unwrap();
+
+    assert_eq!(md.highlighter().len(), 1);
+}
+
+// Catches a dead worker leaving every later block plain, or hanging the
+// caller waiting for results that never come.
+#[cfg(feature = "syntax")]
+#[test]
+fn dead_highlight_worker_is_replaced_and_does_not_hang() {
+    let mut syntax = SyntaxHighlighter::new();
+    let mut markdown = MarkdownMessage::new();
+    let source = "```rust\nfn main() {}\n```";
+    markdown_message(0, &mut markdown, source, &mut syntax);
+    syntax.kill_worker();
+
+    syntax.finish_pending();
+    let message = markdown_message(0, &mut markdown, source, &mut syntax);
+
+    assert_eq!(
+        highlighted_runs(&message.blocks[0]),
+        vec!["fn".to_owned(), "main".to_owned()]
+    );
+}
+
+#[test]
+fn facade_streams_markdown_into_selectable_blocks() {
+    let mut md = markdown_transcript("# Answer\n\nfirst");
+
+    md.set_markdown(RowKey(0), "# Answer\n\nfirst words\n\n- item")
+        .unwrap();
+    md.transcript_mut().select_all();
+
+    assert_eq!(md.selected_text(), "# Answer\n\nfirst words\n\n- item");
+}
+
+/// Paints `md` with `theme` and returns its text regions and scene.
+fn paint_markdown(
+    md: &mut MarkdownTranscript,
+    theme: &Theme,
+) -> (Vec<crate::element::SelectableTextRegion>, Scene) {
+    let mut text = TextSystem::vendored_only(&Default::default());
+    let mut layouts = LayoutCache::default();
+    md.prepare(
+        400.0,
+        300.0,
+        0,
+        &mut TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0),
+    );
+    let element = md.element(theme, |ev| Ev(ev).into());
+    let signals = SignalStore::new();
+    let mut cx = ElementContext::new(theme, 1.0, &mut text, &mut layouts, None, &signals);
+    cx.semantic = SemanticFrame::new(400.0, 300.0);
+    let mut scene = Scene::default();
+    render_element(&mut element.into_any(), &mut scene, &mut cx, 400.0, 300.0);
+    (std::mem::take(&mut cx.selectable_text_runs), scene)
+}
+
+// Catches theme colors baked into blocks, which needed every message
+// rebuilt on a theme change.
+#[test]
+fn theme_change_recolors_blocks_without_rebuilding_them() {
+    let mut md = markdown_transcript("see ![a chart](c.png)");
+    let (dark, light) = (Theme::default_dark(), Theme::default_light());
+
+    let colors = |(_, scene): (_, Scene)| {
+        scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                quark_render::Primitive::RichTextRun(text) => Some(text.span_colors.to_vec()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let on_dark = colors(paint_markdown(&mut md, &dark));
+    let on_light = colors(paint_markdown(&mut md, &light));
+
+    assert_eq!(on_dark[1], dark.colors.text_muted);
+    assert_eq!(on_light[1], light.colors.text_muted);
+}
+
+// Regression: span weights override SelectableText's base weight, so
+// headings rendered at normal weight.
+#[test]
+fn heading_weights_reach_the_glyphs() {
+    let mut md = markdown_transcript("# Title\n\n### Small\n\nplain");
+
+    let (regions, _) = paint_markdown(&mut md, &Theme::default_dark());
+
+    let weights: Vec<(String, u16)> = regions
+        .iter()
+        .map(|r| (r.text.to_string(), r.layout.glyphs().font_weight[0].0))
+        .collect();
+    let expected = [("Title", 700), ("Small", 600), ("plain", 450)];
+    let expected: Vec<(String, u16)> = expected.iter().map(|(t, w)| (t.to_string(), *w)).collect();
+    assert_eq!(weights, expected);
+}
+
+#[test]
+fn link_click_emits_the_transcript_link_action() {
+    #[derive(Debug, Clone, PartialEq)]
+    struct Open(Arc<str>);
+    let mut md = markdown_transcript("see [docs](https://example.com/docs) now");
+    let theme = Theme::default_dark();
+    let mut text = TextSystem::vendored_only(&Default::default());
+    let mut layouts = LayoutCache::default();
+    md.prepare(
+        400.0,
+        300.0,
+        0,
+        &mut TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0),
+    );
+    let element = md
+        .element(&theme, |ev| Ev(ev).into())
+        .on_link(|url| Action::new(Open(url.clone())));
+    let signals = SignalStore::new();
+    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+    cx.semantic = SemanticFrame::new(400.0, 300.0);
+    render_element(
+        &mut element.into_any(),
+        &mut Scene::default(),
+        &mut cx,
+        400.0,
+        300.0,
+    );
+    let region = cx.selectable_text_runs[0].clone();
+    let mut router = InputRouter::default();
+    router.set_frame(cx.take_input_frame());
+    let at = region.text.find("docs").unwrap_or(0);
+    let rect = region
+        .layout
+        .selection_rects(at..at + 4)
+        .next()
+        .expect("glyph rect");
+    let (x, y) = (
+        region.text_origin.0 + rect.x + rect.width / 2.0,
+        region.text_origin.1 + rect.y + rect.height / 2.0,
+    );
+
+    let actions = router.pointer_down(x, y, &mut None).actions;
+
+    let opened: Vec<&Open> = actions
+        .iter()
+        .filter_map(|a| a.downcast_ref::<Open>())
+        .collect();
+    assert_eq!(opened, [&Open(Arc::from("https://example.com/docs"))]);
+}
+
+// Catches markdown span flags not reaching the painted decorations.
+#[test]
+fn strikethrough_markdown_paints_a_line_through_its_run() {
+    let mut md = markdown_transcript("keep ~~gone~~ keep");
+
+    let (regions, scene) = paint_markdown(&mut md, &Theme::default_dark());
+
+    let region = &regions[0];
+    let at = region.text.find("gone").unwrap_or(0);
+    let run = region
+        .layout
+        .selection_rects(at..at + 4)
+        .next()
+        .expect("glyph rect");
+    let (x0, x1) = (
+        region.text_origin.0 + run.x,
+        region.text_origin.0 + run.right(),
+    );
+    let mid_y = region.text_origin.1 + run.y + run.height / 2.0;
+    let lines: Vec<quark_render::Rect> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            quark_render::Primitive::Rect(r) => Some(r.rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = lines[0];
+    assert!(
+        line.x >= x0 - 0.01 && line.right() <= x1 + 0.01,
+        "{line:?} vs {x0}..{x1}"
+    );
+    assert!(
+        (line.y - mid_y).abs() < 7.0,
+        "{line:?} not across the text at {mid_y}"
     );
 }

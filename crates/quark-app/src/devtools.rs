@@ -10,36 +10,24 @@ use quark_ui::element::InputRouter;
 use quark_ui::hud::HudSample;
 use quark_ui::inspector::{Devtools, DevtoolsInput, OverlayContext, PhaseTimings};
 use quark_ui::theme::Theme;
-use winit::event::{ElementState, MouseButton};
 
-use crate::{EventContext, FrameContext, InputEvent};
+use crate::input::{PointerButton, UiInput};
+use crate::{EventContext, FrameContext};
 
-/// Offer `event` to devtools first. Returns `true` when the app must not
+/// Offer `input` to devtools first. Returns `true` when the app must not
 /// see it.
-pub(crate) fn intercept(
-    devtools: &mut Devtools,
-    event: &InputEvent,
-    cx: &mut EventContext,
-) -> bool {
+pub(crate) fn intercept(devtools: &mut Devtools, input: &UiInput, cx: &mut EventContext) -> bool {
     let binding;
-    let input = match event {
-        InputEvent::PointerMoved { x, y } => DevtoolsInput::PointerMoved { x: *x, y: *y },
-        InputEvent::PointerLeft => DevtoolsInput::PointerLeft,
-        InputEvent::PointerButton {
-            button: MouseButton::Left,
-            state,
-        } => match state {
-            ElementState::Pressed => DevtoolsInput::PointerDown,
-            ElementState::Released => DevtoolsInput::PointerUp,
-        },
-        InputEvent::Wheel { .. } => DevtoolsInput::Wheel,
-        InputEvent::KeyPress(chord) => match chord.binding_string() {
-            Some(text) => {
-                binding = text;
-                DevtoolsInput::Key(&binding)
-            }
-            None => return false,
-        },
+    let input = match input {
+        UiInput::PointerMove { x, y } => DevtoolsInput::PointerMoved { x: *x, y: *y },
+        UiInput::PointerLeave => DevtoolsInput::PointerLeft,
+        UiInput::PointerDown(PointerButton::Primary) => DevtoolsInput::PointerDown,
+        UiInput::PointerUp(PointerButton::Primary) => DevtoolsInput::PointerUp,
+        UiInput::Wheel { .. } => DevtoolsInput::Wheel,
+        UiInput::Key(key) => {
+            binding = key.to_string();
+            DevtoolsInput::Key(&binding)
+        }
         _ => return false,
     };
     let response = devtools.handle(input);

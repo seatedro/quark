@@ -625,8 +625,6 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
- "serde",
- "termcolor",
  "unicode-width",
 ]
 
@@ -2733,6 +2731,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pollster",
  "profiling",
+ "proptest",
  "puffin_http",
  "quark",
  "quark-render",
@@ -2781,11 +2780,9 @@ dependencies = [
  "glyphon",
  "image",
  "pollster",
- "profiling",
  "quark",
  "quark-text",
  "resvg",
- "serde",
  "thiserror 2.0.21",
  "tracing",
  "wgpu",
@@ -2837,6 +2834,7 @@ dependencies = [
  "taffy",
  "tracing",
  "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -4302,18 +4300,13 @@ dependencies = [
  "cfg_aliases",
  "document-features",
  "hashbrown 0.16.1",
- "js-sys",
  "log",
- "naga",
  "parking_lot",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
  "smallvec",
  "static_assertions",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
  "wgpu-core",
  "wgpu-hal",
  "wgpu-types",

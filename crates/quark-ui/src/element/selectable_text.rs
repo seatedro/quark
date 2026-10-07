@@ -1,4 +1,8 @@
+// Byte slicing of strings lives in `quark_text::offset`.
+#![deny(clippy::string_slice, clippy::indexing_slicing)]
+
 use super::*;
+use quark_text::{TextOffset, ToTextOffset};
 
 // ---------------------------------------------------------------------------
 // SelectableText — multi-line, mouse-selectable static text
@@ -251,8 +255,8 @@ pub struct SelectableTextRegion {
 }
 
 impl SelectableTextRegion {
-    /// Byte offset (grapheme boundary) nearest to a scene-space point.
-    pub fn hit(&self, x: f32, y: f32) -> usize {
+    /// Grapheme boundary nearest to a scene-space point.
+    pub fn hit(&self, x: f32, y: f32) -> TextOffset {
         self.layout
             .hit(x - self.text_origin.0, y - self.text_origin.1)
     }
@@ -263,7 +267,9 @@ impl SelectableTextRegion {
 /// string, which survive re-wrap); the element renders the highlight from a
 /// resolved `selection` range and registers a `SelectableTextRegion` for input.
 pub struct SelectableText {
-    spans: Vec<StyledSpan>,
+    /// Shared so a caller that keeps its spans (a transcript block) builds
+    /// the element every frame without copying their text.
+    spans: Arc<[StyledSpan]>,
     width: f32,
     font_size: f32,
     /// Base font for text outside any span's overrides.
@@ -283,9 +289,9 @@ pub fn selectable_text(text: impl Into<String>) -> SelectableText {
 /// Selectable text whose runs carry inline styles (code/bold/italic/link). The
 /// concatenation of the span texts is the plain body; selection/copy/a11y all
 /// operate on that string, so styling never changes what gets copied.
-pub fn selectable_rich_text(spans: Vec<StyledSpan>) -> SelectableText {
+pub fn selectable_rich_text(spans: impl Into<Arc<[StyledSpan]>>) -> SelectableText {
     SelectableText {
-        spans,
+        spans: spans.into(),
         width: 0.0,
         font_size: 0.0,
         font_kind: FontKind::Ui,
@@ -325,9 +331,11 @@ impl SelectableText {
         self.source_key = key;
         self
     }
-    /// Resolved (normalized) byte range to highlight, or `None` when this block
-    /// is not the selected one. Highlight is painted behind the text, so passing
-    /// a selection never alters layout (measure == render).
+    /// Resolved (normalized) byte range to highlight, or `None` when this
+    /// block is not the selected one. The bytes are snapped onto grapheme
+    /// boundaries of the laid-out text when painted. Highlight is painted
+    /// behind the text, so passing a selection never alters layout
+    /// (measure == render).
     pub fn selection(mut self, selection: Option<(usize, usize)>) -> Self {
         self.selection = selection;
         self
@@ -438,14 +446,20 @@ pub(super) fn paint_pills(
     }
 }
 
-pub(super) fn paint_selection(
+/// Paints a normalized `selection` (start before end; anything else paints
+/// nothing), snapped onto `layout`'s text.
+pub(super) fn paint_selection<O: ToTextOffset>(
     scene: &mut Scene,
     layout: &TextLayout,
-    selection: Option<(usize, usize)>,
+    selection: Option<(O, O)>,
     origin: (f32, f32),
     color: Color,
 ) {
-    let Some((lo, hi)) = selection.filter(|(a, b)| a < b) else {
+    let text = layout.text();
+    let Some((lo, hi)) = selection
+        .map(|(a, b)| (a.to_offset(text), b.to_offset(text)))
+        .filter(|(a, b)| a < b)
+    else {
         return;
     };
     for r in layout.selection_rects(lo..hi) {

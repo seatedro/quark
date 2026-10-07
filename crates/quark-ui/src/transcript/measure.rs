@@ -67,7 +67,7 @@ impl BlockGeometry for TextGeometry {
     fn hit(&self, x: f32, y: f32) -> usize {
         let (ox, oy) = self.text_origin;
         match &self.layout {
-            Some(layout) => layout.hit(x - ox, y - oy),
+            Some(layout) => layout.hit(x - ox, y - oy).get(),
             None if x - ox >= self.width * 0.5 => self.text_len,
             None => 0,
         }
@@ -76,6 +76,10 @@ impl BlockGeometry for TextGeometry {
 
 impl BlockMeasurer for TextMeasurer<'_> {
     type Geometry = TextGeometry;
+
+    fn settings_key(&self) -> u64 {
+        (u64::from(self.font_size.to_bits()) << 32) | u64::from(self.scale_factor.to_bits())
+    }
 
     fn measure(&mut self, block: &TranscriptBlock, width: f32) -> TextGeometry {
         let style = &block.style;
@@ -101,9 +105,13 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     text_len,
                 }
             }
-            BlockContent::Code { lines, label } => {
-                let layout = self.layout(CodeBlock::layout_params(lines, font_size));
-                let metrics = CodeBlock::metrics(font_size, lines.len(), label.is_some());
+            BlockContent::Code {
+                spans,
+                line_count,
+                label,
+            } => {
+                let layout = self.layout(CodeBlock::joined_layout_params(spans, font_size));
+                let metrics = CodeBlock::metrics(font_size, *line_count, label.is_some());
                 TextGeometry {
                     layout,
                     text_origin: (inset + metrics.text_origin.0, metrics.text_origin.1),

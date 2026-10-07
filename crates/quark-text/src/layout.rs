@@ -7,7 +7,9 @@ use cosmic_text::{
 };
 use quark::scene::FontStyle;
 use quark::{FontKind, FontWeight, Rect};
-use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::offset::{TextOffset, ToTextOffset};
 
 /// Line height multiplier quark has always used for text.
 pub const DEFAULT_LINE_HEIGHT_FACTOR: f32 = 1.35;
@@ -312,7 +314,22 @@ pub struct TextLayout {
 }
 
 impl TextLayout {
-    pub(crate) fn build(fs: &mut FontSystem, params: &TextParams) -> Result<Self, TextError> {
+    pub(crate) fn build(
+        fs: &mut FontSystem,
+        params: &TextParams,
+        synth: SyntheticItalic,
+    ) -> Result<Self, TextError> {
+        Self::build_with(fs, params, synth, |_| true)
+    }
+
+    /// [`Self::build`] keeping only the shaped runs `keep` accepts, so tests
+    /// can reproduce a shaper that yields no lines.
+    fn build_with(
+        fs: &mut FontSystem,
+        params: &TextParams,
+        synth: SyntheticItalic,
+        keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
+    ) -> Result<Self, TextError> {
         params.validate()?;
         let text = params.text.as_ref();
         let style = params.style;
@@ -327,20 +344,6 @@ impl TextLayout {
 
         let paragraphs = split_paragraphs(text);
         let base = base_attrs(&style);
-        // Scanning the font database costs a pass over every face; skip it
-        // for the common case of text without italic spans.
-        let synth = if params
-            .spans
-            .iter()
-            .any(|s| s.style == Some(FontStyle::Italic))
-        {
-            SyntheticItalic::new(fs)
-        } else {
-            SyntheticItalic {
-                ui: false,
-                mono: false,
-            }
-        };
         buffer.lines = paragraphs
             .iter()
             .map(|(range, ending)| {
@@ -353,7 +356,8 @@ impl TextLayout {
                         attrs.add_span(start - range.start..end - range.start, &span_attrs);
                     }
                 }
-                BufferLine::new(&text[range.clone()], *ending, attrs, Shaping::Advanced)
+                let paragraph = text.get(range.clone()).unwrap_or_default();
+                BufferLine::new(paragraph, *ending, attrs, Shaping::Advanced)
             })
             .collect();
         for line_i in 0..buffer.lines.len() {
@@ -367,7 +371,7 @@ impl TextLayout {
         let mut width = 0.0_f32;
         let mut height = 0.0_f32;
 
-        for run in buffer.layout_runs() {
+        for run in buffer.layout_runs().filter(|run| keep(run)) {
             let para_start = paragraphs[run.line_i].0.start;
             let min_start = run
                 .glyphs
@@ -432,6 +436,23 @@ impl TextLayout {
             lines.glyph_end.push(glyphs.len() as u32);
             lines.rtl.push(run.rtl);
             line_paragraph.push(run.line_i);
+        }
+
+        // cosmic-text yields a run for every laid-out paragraph, but `hit`,
+        // `caret`, and `line_at_y` read the last line, so one line is made
+        // structural here instead of trusted.
+        if lines.top.is_empty() {
+            lines.byte_start.push(0);
+            lines.byte_end.push(0);
+            lines.top.push(0.0);
+            lines.height.push(style.line_height);
+            lines.baseline.push(style.line_height.min(style.font_size));
+            lines.width.push(0.0);
+            lines.glyph_start.push(0);
+            lines.glyph_end.push(glyphs.len() as u32);
+            lines.rtl.push(false);
+            line_paragraph.push(0);
+            height = height.max(style.line_height);
         }
 
         for i in 0..line_paragraph.len() {
@@ -700,16 +721,16 @@ impl TextLayout {
         &self.buffer
     }
 
-    /// Byte offset (grapheme boundary) nearest to the logical point. Points
-    /// outside the text clamp to the nearest line and line edge.
-    pub fn hit(&self, x: f32, y: f32) -> usize {
+    /// Grapheme boundary nearest to the logical point. Points outside the
+    /// text clamp to the nearest line and line edge.
+    pub fn hit(&self, x: f32, y: f32) -> TextOffset {
         let line = self.line_at_y(y);
         let g = &self.glyphs;
         let range = self.glyph_range(line);
         if range.is_empty() {
             // An empty line can start inside a grapheme ("\n\r\n" is "\n\r"
             // plus "\n" to the layout but "\n" plus "\r\n" as graphemes).
-            return self.snap_grapheme(self.lines.byte_start[line] as usize);
+            return TextOffset::snap(&self.text, self.lines.byte_start[line] as usize);
         }
         // Glyph storage order is not visual (RTL runs are stored logically),
         // so scan for the containing glyph and the visual extremes.
@@ -748,13 +769,14 @@ impl TextLayout {
         };
         let start = self.lines.byte_start[line] as usize;
         let end = self.lines.byte_end[line] as usize;
-        self.snap_grapheme(byte.clamp(start, end))
+        TextOffset::snap(&self.text, byte.clamp(start, end))
     }
 
-    /// Caret position for a byte offset (clamped, snapped down to a grapheme
-    /// boundary). At a soft wrap the caret goes to the start of the next line.
-    pub fn caret(&self, byte: usize) -> Caret {
-        let byte = self.snap_grapheme(byte.min(self.text.len()));
+    /// Caret position for an offset (a raw index is clamped and snapped down
+    /// to a grapheme boundary). At a soft wrap the caret goes to the start
+    /// of the next line.
+    pub fn caret(&self, offset: impl ToTextOffset) -> Caret {
+        let byte = offset.to_offset(&self.text).get();
         let line = self.line_for_byte(byte);
         Caret {
             x: self.x_for_byte(line, byte),
@@ -764,21 +786,25 @@ impl TextLayout {
         }
     }
 
-    /// Highlight rectangles (logical pixels) covering `range`, one or more per
-    /// line; RTL/mixed runs may produce several per line.
-    pub fn selection_rects(&self, range: Range<usize>) -> impl Iterator<Item = Rect> + use<> {
+    /// Highlight rectangles (logical pixels) covering `range` (either
+    /// order), one or more per line; RTL/mixed runs may produce several per
+    /// line. Visits only the lines the range touches.
+    pub fn selection_rects(&self, range: Range<impl ToTextOffset>) -> std::vec::IntoIter<Rect> {
         let len = self.text.len();
         // Snap like `caret` so arbitrary offsets never slice inside a char
         // and rect edges line up with carets.
-        let a = self.snap_grapheme(range.start.min(range.end).min(len));
-        let b = self.snap_grapheme(range.end.max(range.start).min(len));
+        let range = crate::offset::ordered(&self.text, range);
+        let (a, b) = (range.start.get(), range.end.get());
         let mut rects = Vec::new();
         if a == b {
             return rects.into_iter();
         }
         let g = &self.glyphs;
-        for line in 0..self.line_count() {
+        for line in self.line_for_byte(a)..self.line_count() {
             let start = self.lines.byte_start[line] as usize;
+            if start >= b {
+                break;
+            }
             // Include the line ending so an empty line inside the selection shows.
             let end_with_break = self
                 .lines
@@ -842,10 +868,12 @@ impl TextLayout {
     }
 
     fn line_at_y(&self, y: f32) -> usize {
-        let l = &self.lines;
-        let count = self.line_count();
-        let i = (0..count).position(|i| y < l.top[i] + l.height[i]);
-        i.unwrap_or(count - 1)
+        // Line tops increase, so the last line starting at or above `y`
+        // holds it; `build` guarantees at least one line.
+        self.lines
+            .top
+            .partition_point(|&top| top <= y)
+            .saturating_sub(1)
     }
 
     fn line_for_byte(&self, byte: usize) -> usize {
@@ -938,9 +966,12 @@ impl TextLayout {
     fn x_in_cluster(&self, i: usize, byte: usize) -> f32 {
         let g = &self.glyphs;
         let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
-        let cluster = &self.text[gs..ge];
+        let cluster = self.text.get(gs..ge).unwrap_or_default();
         let total = cluster.graphemes(true).count().max(1);
-        let before = self.text[gs..byte.clamp(gs, ge)].graphemes(true).count();
+        let before = self
+            .text
+            .get(gs..byte.clamp(gs, ge))
+            .map_or(0, |s| s.graphemes(true).count());
         let mut frac = before as f32 / total as f32;
         if g.rtl(i) {
             frac = 1.0 - frac;
@@ -954,7 +985,7 @@ impl TextLayout {
     fn cluster_byte_at(&self, i: usize, frac: f32) -> usize {
         let g = &self.glyphs;
         let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
-        let cluster = &self.text[gs..ge];
+        let cluster = self.text.get(gs..ge).unwrap_or_default();
         let total = cluster.graphemes(true).count().max(1);
         let k = (frac * total as f32).round() as usize;
         if k >= total {
@@ -964,18 +995,6 @@ impl TextLayout {
             .grapheme_indices(true)
             .nth(k)
             .map_or(ge, |(offset, _)| gs + offset)
-    }
-
-    fn snap_grapheme(&self, mut byte: usize) -> usize {
-        let text = self.text.as_ref();
-        while !text.is_char_boundary(byte) {
-            byte -= 1;
-        }
-        let mut cursor = GraphemeCursor::new(byte, text.len(), true);
-        match cursor.is_boundary(text, 0) {
-            Ok(true) => byte,
-            _ => cursor.prev_boundary(text, 0).ok().flatten().unwrap_or(0),
-        }
     }
 }
 
@@ -1024,11 +1043,12 @@ fn split_paragraphs(text: &str) -> Vec<(Range<usize>, LineEnding)> {
     const OTHER_SEPARATORS: [char; 5] = ['\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2029}'];
     let mut out = Vec::new();
     let mut start = 0;
+    let rest = |at: usize| text.get(at..).unwrap_or_default();
     while let Some(i) =
-        text[start..].find(|c| c == '\r' || c == '\n' || OTHER_SEPARATORS.contains(&c))
+        rest(start).find(|c| c == '\r' || c == '\n' || OTHER_SEPARATORS.contains(&c))
     {
         let end = start + i;
-        let after = &text[end..];
+        let after = rest(end);
         let (ending, len) = if after.starts_with("\r\n") {
             (LineEnding::CrLf, 2)
         } else if after.starts_with("\n\r") {
@@ -1080,13 +1100,13 @@ fn base_attrs(style: &TextStyle) -> Attrs<'static> {
 /// slanted by the rasterizer instead (cosmic-text only does that when asked),
 /// so italic stays visible with fonts such as Geist that ship no italic.
 #[derive(Debug, Clone, Copy)]
-struct SyntheticItalic {
+pub(crate) struct SyntheticItalic {
     ui: bool,
     mono: bool,
 }
 
 impl SyntheticItalic {
-    fn new(fs: &FontSystem) -> Self {
+    pub(crate) fn new(fs: &FontSystem) -> Self {
         let db = fs.db();
         let lacks_italic = |generic: Family| {
             let name = db.family_name(&generic);
@@ -1293,7 +1313,7 @@ mod tests {
             let boundaries = grapheme_boundaries(&text);
             for (x, y) in points {
                 let b = layout.hit(x, y);
-                prop_assert!(boundaries.contains(&b), "hit({x}, {y}) = {b} in {:?}", text);
+                prop_assert!(boundaries.contains(&b.get()), "hit({x}, {y}) = {b} in {:?}", text);
                 let caret = layout.caret(b);
                 prop_assert!(caret.x.is_finite() && caret.line < layout.line_count());
             }
@@ -1312,14 +1332,6 @@ mod tests {
             let layout = layout(&text, wrap);
             assert_rects_within_bounds(&layout, a..b)?;
         }
-    }
-
-    #[test]
-    fn text_system_vendored_sans_resolves_to_geist() {
-        let layout = layout("Hello", None);
-        let sys = test_system();
-        let face = sys.font_system().db().face(layout.glyphs().font_id[0]);
-        assert!(face.is_some_and(|f| f.families.iter().any(|(name, _)| name == "Geist")));
     }
 
     #[test]
@@ -1369,7 +1381,7 @@ mod tests {
         let layout = layout(text, None);
         let g = layout.glyphs();
         let w = (0..g.len())
-            .find(|&i| &text[g.byte_start[i] as usize..g.byte_end[i] as usize] == "w")
+            .find(|&i| text.get(g.byte_start[i] as usize..g.byte_end[i] as usize) == Some("w"))
             .expect("w glyph");
         assert_eq!((g.byte_start[w], g.line[w]), (6, 1));
     }
@@ -1526,6 +1538,21 @@ mod tests {
             let ranges: Vec<_> = layout.lines().map(|l| l.byte_range).collect();
             assert_eq!(ranges, *expected, "{text:?}");
         }
+    }
+
+    // Regression: `hit` indexed line `count - 1`, guarded only by a
+    // `debug_assert`, so a layout without shaped lines underflowed.
+    #[test]
+    fn layout_with_no_shaped_runs_still_hits_and_places_carets() {
+        let params = TextParams::new("ab", TextStyle::new(14.0));
+        let mut system = test_system();
+        let fs = system.font_system_mut();
+        let synth = SyntheticItalic::new(fs);
+        let layout = TextLayout::build_with(fs, &params, synth, |_| false).expect("layout");
+        assert_eq!(layout.line_count(), 1);
+        assert_eq!(layout.hit(50.0, 50.0), 0);
+        let caret = layout.caret(2);
+        assert_eq!((caret.line, caret.x, caret.y), (0, 0.0, 0.0));
     }
 
     #[test]

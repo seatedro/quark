@@ -1,7 +1,7 @@
 use cosmic_text::{FontSystem, fontdb};
 
 use crate::fonts::{FontSettings, configure_generic_families, vendored_font_sources};
-use crate::layout::{TextError, TextLayout, TextParams};
+use crate::layout::{SyntheticItalic, TextError, TextLayout, TextParams};
 
 /// Owns the cosmic-text [`FontSystem`]: vendored fonts, system fonts (for
 /// fallback), and the generic sans/mono family mapping.
@@ -9,6 +9,10 @@ pub struct TextSystem {
     font_system: FontSystem,
     settings: FontSettings,
     generation: u64,
+    /// Which generic families need slanted glyphs for italic spans. Finding
+    /// out scans every face, so it runs when the fonts change rather than on
+    /// every layout.
+    synthetic_italic: SyntheticItalic,
 }
 
 impl TextSystem {
@@ -21,11 +25,7 @@ impl TextSystem {
     pub fn with_settings(settings: &FontSettings) -> Self {
         let mut font_system = FontSystem::new_with_fonts(vendored_font_sources());
         configure_generic_families(font_system.db_mut(), settings);
-        Self {
-            font_system,
-            settings: settings.normalized(),
-            generation: 0,
-        }
+        Self::from_parts(font_system, settings)
     }
 
     /// Loads only the vendored fonts, with a fixed locale, so shaping does
@@ -37,8 +37,14 @@ impl TextSystem {
             db.load_font_source(source);
         }
         configure_generic_families(&mut db, settings);
+        let font_system = FontSystem::new_with_locale_and_db("en-US".to_owned(), db);
+        Self::from_parts(font_system, settings)
+    }
+
+    fn from_parts(font_system: FontSystem, settings: &FontSettings) -> Self {
         Self {
-            font_system: FontSystem::new_with_locale_and_db("en-US".to_owned(), db),
+            synthetic_italic: SyntheticItalic::new(&font_system),
+            font_system,
             settings: settings.normalized(),
             generation: 0,
         }
@@ -56,6 +62,7 @@ impl TextSystem {
             return;
         }
         configure_generic_families(self.font_system.db_mut(), &settings);
+        self.synthetic_italic = SyntheticItalic::new(&self.font_system);
         self.settings = settings;
         self.generation = self.generation.wrapping_add(1);
     }
@@ -70,7 +77,8 @@ impl TextSystem {
     }
 
     /// Needed by rasterizers (glyphon prepare, SwashCache). Changing the font
-    /// database through this does not bump [`Self::generation`].
+    /// database through this does not bump [`Self::generation`] or recheck
+    /// which families lack an italic face.
     pub fn font_system_mut(&mut self) -> &mut FontSystem {
         &mut self.font_system
     }
@@ -79,7 +87,7 @@ impl TextSystem {
     /// [`crate::LayoutCache::layout`] for per-frame use.
     pub fn layout(&mut self, params: &TextParams) -> Result<TextLayout, TextError> {
         profile_scope!("text_shape");
-        TextLayout::build(&mut self.font_system, params)
+        TextLayout::build(&mut self.font_system, params, self.synthetic_italic)
     }
 }
 

@@ -116,13 +116,51 @@ fn len_u32(n: usize) -> u32 {
 
 impl MarkdownDoc {
     pub fn parse(source: &str) -> Self {
-        let options =
-            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-        let mut builder = Builder::default();
-        for event in Parser::new_ext(source, options) {
-            builder.event(event);
-        }
-        builder.finish()
+        parse_source(source).doc
+    }
+
+    /// Appends `other`'s blocks after this document's, as if their sources
+    /// had been parsed as one. Valid only where nothing crosses the seam:
+    /// see [`super::IncrementalMarkdown`].
+    pub(crate) fn append(&mut self, other: &MarkdownDoc) {
+        let text = len_u32(self.text.len());
+        let spans = len_u32(self.span_range.len());
+        let cells = len_u32(self.cell_row.len());
+        let links = len_u32(self.link_url.len());
+        let shift = |r: &Range<u32>, by: u32| r.start + by..r.end + by;
+        self.text.push_str(&other.text);
+        self.block_kind.extend_from_slice(&other.block_kind);
+        self.block_text
+            .extend(other.block_text.iter().map(|r| shift(r, text)));
+        self.block_spans
+            .extend(other.block_spans.iter().map(|r| shift(r, spans)));
+        self.block_quote.extend_from_slice(&other.block_quote);
+        self.block_indent.extend_from_slice(&other.block_indent);
+        self.block_marker.extend_from_slice(&other.block_marker);
+        self.block_lang
+            .extend(other.block_lang.iter().map(|r| shift(r, text)));
+        self.block_cells
+            .extend(other.block_cells.iter().map(|r| shift(r, cells)));
+        self.block_columns.extend_from_slice(&other.block_columns);
+        // Hashes use offsets relative to each block, so they carry over.
+        self.block_hash.extend_from_slice(&other.block_hash);
+        self.span_range
+            .extend(other.span_range.iter().map(|r| shift(r, text)));
+        self.span_flags.extend_from_slice(&other.span_flags);
+        self.span_link.extend(
+            other
+                .span_link
+                .iter()
+                .map(|&l| if l == NO_LINK { l } else { l + links }),
+        );
+        self.link_url.extend(other.link_url.iter().cloned());
+        self.cell_row.extend_from_slice(&other.cell_row);
+        self.cell_col.extend_from_slice(&other.cell_col);
+        self.cell_text
+            .extend(other.cell_text.iter().map(|r| shift(r, text)));
+        self.cell_spans
+            .extend(other.cell_spans.iter().map(|r| shift(r, spans)));
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
 
     pub fn len(&self) -> usize {
@@ -345,6 +383,70 @@ impl MarkdownDoc {
     }
 }
 
+/// A parse with what incremental parsing needs to know about it.
+pub(crate) struct Parsed {
+    pub(crate) doc: MarkdownDoc,
+    /// Link reference definitions apply document-wide, so a source with any
+    /// cannot be parsed in pieces.
+    pub(crate) has_definitions: bool,
+    /// End of the last place the source can be split: after a closed,
+    /// top-level fenced code block and the blank line following it.
+    pub(crate) boundary: Option<usize>,
+}
+
+pub(crate) fn parse_source(source: &str) -> Parsed {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let mut builder = Builder::default();
+    let mut events = Parser::new_ext(source, options).into_offset_iter();
+    let mut depth = 0usize;
+    let mut boundary = None;
+    for (event, range) in events.by_ref() {
+        match &event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) if depth == 0 => {
+                boundary = fence_boundary(source, range).or(boundary);
+                depth += 1;
+            }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        builder.event(event);
+    }
+    let has_definitions = events.reference_definitions().iter().next().is_some();
+    Parsed {
+        doc: builder.finish(),
+        has_definitions,
+        boundary,
+    }
+}
+
+/// Where the source can be split after the fenced code block at `range`:
+/// past its closing fence and the blank line after it. `None` when the
+/// block is unclosed or no blank line follows yet.
+fn fence_boundary(source: &str, range: Range<usize>) -> Option<usize> {
+    let block = source.get(range.clone())?;
+    let body = block.strip_suffix('\n').unwrap_or(block);
+    let opening = body.trim_start_matches(' ');
+    let fence_char = opening.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let fence_len = opening.chars().take_while(|c| *c == fence_char).count();
+    let (_, last_line) = body.rsplit_once('\n')?;
+    let closing = last_line.trim_start_matches(' ');
+    let closing_len = closing.chars().take_while(|c| *c == fence_char).count();
+    let closed = body.len() - opening.len() <= 3
+        && last_line.len() - closing.len() <= 3
+        && closing_len >= fence_len
+        && closing[closing_len..].trim_matches([' ', '\t']).is_empty();
+    if !closed {
+        return None;
+    }
+    let fence_end = range.start + body.len();
+    let rest = source[fence_end..].strip_prefix('\n')?;
+    let blank = rest.trim_start_matches([' ', '\t']);
+    let blank = blank.strip_prefix('\n')?;
+    Some(source.len() - blank.len())
+}
+
 /// An open leaf block or table cell collecting text.
 #[derive(Debug, Clone, Copy)]
 struct Open {
@@ -463,6 +565,11 @@ impl Builder {
             }
             Tag::List(start) => {
                 self.close_open();
+                // An item that opens with a sublist still shows its marker.
+                if self.pending_marker.is_some() {
+                    self.open_block(BlockKind::Paragraph);
+                    self.close_open();
+                }
                 self.lists.push(start);
             }
             Tag::Item => {
