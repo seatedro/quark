@@ -747,11 +747,12 @@ impl Editor {
         if outcome.text_changed {
             self.text_changed();
         }
-        if outcome.text_changed || outcome.selection_changed {
+        let moved = outcome.text_changed || outcome.selection_changed;
+        if moved || outcome.preedit_changed {
             self.note_cursor_activity();
-            if !vertical {
-                self.desired_x = None;
-            }
+        }
+        if moved && !vertical {
+            self.desired_x = None;
         }
         outcome
     }

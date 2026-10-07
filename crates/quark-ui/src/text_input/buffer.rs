@@ -34,6 +34,8 @@ pub(super) struct TextBuffer {
     preedit: Option<Preedit>,
     /// Set whenever `preedit` changes, until taken.
     preedit_dirty: bool,
+    /// Bumped whenever `preedit` changes.
+    preedit_rev: u32,
     history: EditLog,
     /// Last `now_ms` from the app; edits are stamped with it for undo
     /// coalescing.
@@ -145,14 +147,19 @@ impl TextBuffer {
             return false;
         }
         self.preedit = preedit;
-        self.preedit_dirty = true;
+        self.preedit_changed();
         true
     }
 
     fn clear_preedit(&mut self) {
         if self.preedit.take().is_some() {
-            self.preedit_dirty = true;
+            self.preedit_changed();
         }
+    }
+
+    fn preedit_changed(&mut self) {
+        self.preedit_dirty = true;
+        self.preedit_rev = self.preedit_rev.wrapping_add(1);
     }
 
     /// Whether the preedit changed since the last call.
@@ -294,7 +301,7 @@ impl TextBuffer {
     /// here; [`super::Editor`] handles it (and visual line ends) itself.
     pub(super) fn apply(&mut self, cmd: TextEditCommand) -> TextEditOutcome {
         use TextEditCommand::*;
-        let before = (self.cursor, self.anchor);
+        let before = (self.cursor, self.anchor, self.preedit_rev);
         let cursor = self.cursor;
         let mut outcome = TextEditOutcome::default();
         let text_changed = match cmd {
@@ -320,6 +327,10 @@ impl TextBuffer {
             }
             Undo => self.undo(),
             Redo => self.redo(),
+            SetPreedit { text, cursor } => {
+                self.set_preedit(text, cursor);
+                false
+            }
             Copy => {
                 outcome.clipboard_write = self.selected_text().map(str::to_owned);
                 false
@@ -330,7 +341,8 @@ impl TextBuffer {
             }
         };
         outcome.text_changed = text_changed;
-        outcome.selection_changed = (self.cursor, self.anchor) != before;
+        outcome.selection_changed = (self.cursor, self.anchor) != (before.0, before.1);
+        outcome.preedit_changed = self.preedit_rev != before.2;
         outcome
     }
 
@@ -371,8 +383,18 @@ impl TextBuffer {
             }
             CancelPreedit => self.clear_preedit(),
             CursorUp | CursorDown | SelectUp | SelectDown => {}
-            InsertText(_) | Paste(_) | Backspace | BackspaceWord | BackspaceLine
-            | DeleteForward | DeleteForwardWord | Undo | Redo | Cut | Copy => {}
+            InsertText(_)
+            | Paste(_)
+            | Backspace
+            | BackspaceWord
+            | BackspaceLine
+            | DeleteForward
+            | DeleteForwardWord
+            | Undo
+            | Redo
+            | Cut
+            | Copy
+            | SetPreedit { .. } => {}
         }
     }
 }

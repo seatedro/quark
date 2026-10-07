@@ -53,6 +53,13 @@ pub enum TextEditCommand {
     SelectLineAt(usize),
     Undo,
     Redo,
+    /// Show `text` as the IME composition at the caret without touching
+    /// the committed text; empty text cancels it. `cursor` is the IME's raw
+    /// byte range inside `text`.
+    SetPreedit {
+        text: String,
+        cursor: Option<(usize, usize)>,
+    },
     /// Drop any IME composition without committing it (focus left the
     /// field, or the IME was turned off mid-composition).
     CancelPreedit,
@@ -67,6 +74,8 @@ pub struct TextEditOutcome {
     pub selection_changed: bool,
     /// Text the app should write to the system clipboard (copy or cut).
     pub clipboard_write: Option<String>,
+    /// The IME composition shown at the caret changed.
+    pub preedit_changed: bool,
 }
 
 /// Single-line text field model: a [`TextBuffer`] (text, caret, anchor,
@@ -414,7 +423,11 @@ mod tests {
     #[test]
     fn preedit_leaves_text_alone_until_commit() {
         let mut f = field("ab", 1, 1);
-        f.set_preedit("にほ", Some((6, 6)));
+        let preedit = |text: &str, cursor| SetPreedit {
+            text: text.into(),
+            cursor,
+        };
+        assert!(f.apply(preedit("にほ", Some((6, 6)))).preedit_changed);
         assert_eq!(f.text(), "ab");
         let composition = f.composition().expect("composing");
         assert_eq!(composition.text, "aにほb");
@@ -423,7 +436,7 @@ mod tests {
             Some(1 + "にほ".len())
         );
 
-        f.set_preedit("", None);
+        assert!(f.apply(preedit("", None)).preedit_changed);
         assert_eq!((f.text(), f.composition()), ("ab", None));
 
         f.set_preedit("にほん", None);
