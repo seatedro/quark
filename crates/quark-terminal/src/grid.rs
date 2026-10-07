@@ -103,6 +103,35 @@ impl GridRow {
         self.hash = h.finish();
     }
 
+    /// Checks that runs tile the row from column 0 without gaps, cover the
+    /// text in order, and that a run is either one byte per cell (ASCII) or
+    /// a single grapheme of at most two cells.
+    pub fn verify_integrity(&self) -> Result<(), String> {
+        let mut col = 0u16;
+        let mut byte = 0u32;
+        for (i, run) in self.runs.iter().enumerate() {
+            if run.col != col || run.cols == 0 {
+                return Err(format!(
+                    "run {i} at column {} does not follow {col}",
+                    run.col
+                ));
+            }
+            if run.text.start != byte || run.text.end as usize > self.text.len() {
+                return Err(format!("run {i} bytes {:?} do not follow {byte}", run.text));
+            }
+            let len = run.text.len() as u16;
+            if len != run.cols && run.cols > 2 {
+                return Err(format!("run {i} has {len} bytes over {} cells", run.cols));
+            }
+            col = run.col + run.cols;
+            byte = run.text.end;
+        }
+        if byte as usize != self.text.len() {
+            return Err(format!("runs end at byte {byte} of {}", self.text.len()));
+        }
+        Ok(())
+    }
+
     /// The run covering column `col`, if any.
     pub fn run_at(&self, col: u16) -> Option<&Run> {
         self.runs

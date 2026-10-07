@@ -705,6 +705,7 @@ impl Terminal {
             last.text.end -= cut;
             last.cols -= cut as u16;
         }
+        debug_assert_eq!(row.verify_integrity(), Ok(()));
     }
 
     /// The UTF-8 grapheme of the cells iterator's current cell (empty for
