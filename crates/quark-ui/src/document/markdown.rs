@@ -1,14 +1,14 @@
-//! Markdown messages as transcript blocks.
+//! Markdown rows as document blocks.
 //!
-//! [`MarkdownMessage`] turns each [`MarkdownDoc`] block into one
-//! [`TranscriptBlock`], so every heading, paragraph, list item, quote,
+//! [`MarkdownBlocks`] turns each [`MarkdownDoc`] block into one
+//! [`Block`], so every heading, paragraph, list item, quote,
 //! table, code block, and rule is its own selectable block and selection
-//! runs across messages. Converted blocks are kept between calls and reused
-//! while their markdown and highlight are unchanged, so a streaming message
+//! runs across rows. Converted blocks are kept between calls and reused
+//! while their markdown and highlight are unchanged, so a streaming row
 //! rebuilds only its growing tail and the leading blocks keep the layouts
 //! already shaped for them.
 //!
-//! Blocks carry [`SpanTone`]s instead of theme colors; the transcript
+//! Blocks carry [`SpanTone`]s instead of theme colors; the document
 //! element resolves them, so a theme change needs no reconversion.
 
 use std::ops::Range;
@@ -19,7 +19,7 @@ use quark_render::{FontKind, FontWeight};
 use unicode_width::UnicodeWidthStr;
 
 use super::syntax::{CodeLine, SyntaxHighlighter};
-use super::{BlockStyle, ImageState, ImageStore, SpanTone, TranscriptBlock};
+use super::{Block, BlockStyle, ImageState, ImageStore, SpanTone};
 use crate::element::StyledSpan;
 use crate::markdown::{BlockKind, ListMarker, MarkdownDoc, SpanFlags};
 
@@ -37,7 +37,7 @@ pub fn heading_style(level: u8) -> (f32, FontWeight) {
 }
 
 /// Hands out block keys that are never reused, so blocks of different
-/// messages, or of one message before and after an edit, cannot collide.
+/// rows, or of one row before and after an edit, cannot collide.
 #[derive(Debug, Clone, Default)]
 pub struct BlockKeys {
     next: u64,
@@ -64,19 +64,19 @@ impl BlockKeys {
 struct Converted {
     hash: u64,
     highlight: u64,
-    block: TranscriptBlock,
+    block: Block,
 }
 
-/// One message's markdown converted to transcript blocks, with the
-/// conversions kept for reuse. Block `i` keeps its key for as long as the
-/// message has an `i`-th block.
+/// One row's markdown converted to document blocks, with the conversions
+/// kept for reuse. Block `i` keeps its key for as long as the row has an
+/// `i`-th block.
 #[derive(Default)]
-pub struct MarkdownMessage {
+pub struct MarkdownBlocks {
     keys: Vec<BlockKey>,
     converted: Vec<Converted>,
 }
 
-impl MarkdownMessage {
+impl MarkdownBlocks {
     pub fn new() -> Self {
         Self::default()
     }
@@ -87,7 +87,7 @@ impl MarkdownMessage {
     }
 
     /// Forgets every conversion and the highlights of every block, as when
-    /// the message is removed.
+    /// the row is removed.
     pub fn clear(&mut self, syntax: &mut SyntaxHighlighter) {
         for key in self.keys.drain(..) {
             syntax.forget(key);
@@ -109,7 +109,7 @@ impl MarkdownMessage {
         syntax: &mut SyntaxHighlighter,
         images: &mut ImageStore,
         keys: &mut BlockKeys,
-    ) -> Vec<TranscriptBlock> {
+    ) -> Vec<Block> {
         for key in self.keys.drain(doc.len().min(self.keys.len())..) {
             syntax.forget(key);
         }
@@ -157,19 +157,17 @@ fn convert(
     key: BlockKey,
     syntax: &SyntaxHighlighter,
     image: Option<ImageState>,
-) -> TranscriptBlock {
+) -> Block {
     let style = block_style(doc, index);
     let block = match doc.kind(index) {
         BlockKind::Paragraph | BlockKind::Heading(_) => {
-            TranscriptBlock::toned_prose(key, styled_spans(doc, doc.spans(index), style.weight))
+            Block::toned_prose(key, styled_spans(doc, doc.spans(index), style.weight))
         }
-        BlockKind::CodeBlock => {
-            TranscriptBlock::toned_code(key, syntax.lines(key, doc.text(index)))
-                .with_label(Some(Arc::from(doc.lang(index))))
-        }
-        BlockKind::Table => TranscriptBlock::toned_code(key, table_lines(doc, index)),
-        BlockKind::Rule => TranscriptBlock::rule(key),
-        BlockKind::Image => TranscriptBlock::image(
+        BlockKind::CodeBlock => Block::toned_code(key, syntax.lines(key, doc.text(index)))
+            .with_label(Some(Arc::from(doc.lang(index)))),
+        BlockKind::Table => Block::toned_code(key, table_lines(doc, index)),
+        BlockKind::Rule => Block::rule(key),
+        BlockKind::Image => Block::image(
             key,
             Arc::from(doc.image_src(index)),
             doc.text(index),

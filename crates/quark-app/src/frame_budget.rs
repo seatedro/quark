@@ -6,12 +6,13 @@
 
 use std::sync::Arc;
 
+use quark_ui::document::{
+    DocumentStyle, MarkdownDocument, MarkdownEntry, RowChrome, RowDecorator, TextMeasurer,
+};
 use quark_ui::element::{AnyElement, IntoAnyElement, NoopAction, ScrollHandle, cached, div, text};
 use quark_ui::style::Styled;
 use quark_ui::test_alloc::{self, Counting};
-use quark_ui::transcript::{
-    MarkdownEntry, MarkdownTranscript, TextMeasurer, TranscriptRole, TranscriptStyle,
-};
+use quark_ui::theme::Theme;
 use quark_ui::virtual_list::RowKey;
 
 use crate::testing::UiTestHarness;
@@ -196,7 +197,17 @@ const MESSAGES: u64 = 2_000;
 
 /// A markdown transcript filling the window, as a chat view shows one.
 struct Chat {
-    transcript: MarkdownTranscript,
+    transcript: MarkdownDocument,
+}
+
+/// Chat chrome: the row's label as an author line above its blocks.
+struct AuthorLine;
+
+impl RowDecorator for AuthorLine {
+    fn header(&self, chrome: &RowChrome, _width: f32, _theme: &Theme) -> Option<AnyElement> {
+        let label = chrome.label.as_deref()?;
+        Some(text(label.to_owned()).semibold().into_any())
+    }
 }
 
 impl UiApp for Chat {
@@ -206,7 +217,7 @@ impl UiApp for Chat {
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
         let scale = cx.frame.scale_factor();
-        let font_size = self.transcript.transcript().style().font_size;
+        let font_size = self.transcript.document().style().font_size;
         let text = cx.frame.text();
         let mut measurer = TextMeasurer::new(&mut text.system, &mut text.layouts, font_size, scale);
         self.transcript.prepare(width, height, 0, &mut measurer);
@@ -229,12 +240,16 @@ fn chat_markdown(i: u64) -> String {
 /// The transcript in a harness past its warm-up frames, every row's
 /// height measured.
 fn chat(accessibility: bool) -> UiTestHarness<Chat> {
-    let mut transcript = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+    let mut transcript = MarkdownDocument::new(DocumentStyle::for_font_size(14.0));
+    transcript.set_decorator(AuthorLine);
     transcript
         .extend((0..MESSAGES).map(|i| MarkdownEntry {
             row: RowKey(i),
-            role: TranscriptRole::Assistant,
-            author: "Assistant".into(),
+            chrome: RowChrome {
+                header_height: 22.0,
+                label: Some("Assistant".into()),
+                kind: 0,
+            },
             markdown: chat_markdown(i),
         }))
         .unwrap();

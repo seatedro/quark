@@ -305,7 +305,7 @@ pub struct FindBarActions {
 
 /// A find bar: the query field, the match count, and previous, next, and
 /// close buttons. The app owns `field` and routes its edits to the
-/// document's query (see `Transcript::set_find_query`); Enter and
+/// document's query (see `Document::set_find_query`); Enter and
 /// Shift+Enter in the field are the app's to bind to next and previous.
 pub fn find_bar(
     find: Option<&FindState>,

@@ -1,25 +1,32 @@
-//! A virtualized chat transcript with document-wide text selection.
+//! A virtualized document of rows of text blocks, with document-wide text
+//! selection, find, images, and background measuring. Chat transcripts,
+//! logs, and long markdown views are all built on it.
 //!
-//! [`Transcript`] is app-owned state: the row heights and scroll model
+//! [`Document`] is app-owned state: the row heights and scroll model
 //! ([`VariableList`]), the document order of every text block
 //! ([`BlockOrder`]), the selection, and the geometry of the rows currently
-//! materialized. The message text itself stays in the app's model and is
-//! read through [`TranscriptSource`].
+//! materialized. The row content itself stays in the app's model and is
+//! read through [`DocumentSource`].
 //!
-//! Each frame the app calls [`Transcript::prepare`] with a
+//! The document draws only blocks. Anything around them (a chat message's
+//! author line, a tinted background per role) is row chrome: each row's
+//! [`RowChrome`] reserves a header band and carries app data, and the
+//! app's [`RowDecorator`] draws the header and background from it.
+//!
+//! Each frame the app calls [`Document::prepare`] with a
 //! [`BlockMeasurer`] (normally [`TextMeasurer`] over the frame's shared
 //! `LayoutCache`), which measures only the rows in the overscanned window,
-//! then builds [`Transcript::element`] from the result. Pointer and wheel
-//! input comes back as [`TranscriptEvent`]s in the element's local
-//! coordinates, which the app passes to [`Transcript::handle`].
+//! then builds [`Document::element`] from the result. Pointer and wheel
+//! input comes back as [`DocumentEvent`]s in the element's local
+//! coordinates, which the app passes to [`Document::handle`].
 //!
 //! Rows outside the window are measured on a background thread when the
-//! measurer offers a [`MeasureSpec`] ([`MarkdownTranscript`] does this by
+//! measurer offers a [`MeasureSpec`] ([`MarkdownDocument`] does this by
 //! default), so their heights become exact without costing the UI thread.
 //!
 //! Selection endpoints are `(BlockKey, byte)` pairs, so a selection
 //! survives its rows scrolling out of the window, history being prepended,
-//! and text streaming into the last message.
+//! and text streaming into the last row.
 
 mod background;
 mod element;
@@ -33,15 +40,17 @@ mod syntax;
 mod tests;
 
 pub use background::MeasureSpec;
-pub use element::{TranscriptElement, TranscriptEvent};
-pub use facade::{MarkdownEntry, MarkdownTranscript};
+pub use element::{DocumentElement, DocumentEvent};
+pub use facade::{MarkdownDocument, MarkdownEntry};
 pub use find::{FindBarActions, FindIntegrityError, FindMatch, FindState, find_bar};
 pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage};
-pub use markdown::{BlockKeys, CODE_SCALE, MarkdownMessage, heading_style};
+pub use markdown::{BlockKeys, CODE_SCALE, MarkdownBlocks, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -52,7 +61,7 @@ use quark::selection::{
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
-use crate::element::{Binding, ScrollHandle, StyledSpan, join_code_lines};
+use crate::element::{AnyElement, Binding, ScrollHandle, StyledSpan, join_code_lines};
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
 use quark::Color;
@@ -187,12 +196,12 @@ impl Palette {
     }
 }
 
-/// How a block sits in its message: size, indent, list marker, quote bars,
+/// How a block sits in its row: size, indent, list marker, quote bars,
 /// and the markdown prefixes copy restores. Display never draws the
 /// prefixes; the marker is painted in a gutter outside the selectable text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockStyle {
-    /// Font size relative to the transcript's.
+    /// Font size relative to the document's.
     pub scale: f32,
     /// Base weight of prose.
     pub weight: FontWeight,
@@ -244,8 +253,8 @@ fn next_revision() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// One selectable text block of a message. Markdown rendering produces a
-/// list of these per message.
+/// One selectable text block of a row. Markdown rendering produces a list
+/// of these per row.
 ///
 /// Every constructor and `with_` method gives the block a new
 /// [`revision`](Self::revision), and clones share it; the element caches a
@@ -253,7 +262,7 @@ fn next_revision() -> u64 {
 /// building a new one (or through a `with_` method), not by assigning its
 /// fields.
 #[derive(Debug, Clone)]
-pub struct TranscriptBlock {
+pub struct Block {
     pub key: BlockKey,
     pub content: BlockContent,
     pub style: BlockStyle,
@@ -263,7 +272,7 @@ pub struct TranscriptBlock {
     revision: u64,
 }
 
-impl TranscriptBlock {
+impl Block {
     pub fn plain(key: BlockKey, text: impl Into<String>) -> Self {
         Self::prose(key, vec![StyledSpan::plain(text)])
     }
@@ -397,7 +406,7 @@ impl TranscriptBlock {
 
     /// Whether `other` lays out exactly like this block: the same shared
     /// content and the same style. Colors do not affect layout.
-    fn same_layout(&self, other: &TranscriptBlock) -> bool {
+    fn same_layout(&self, other: &Block) -> bool {
         let content = match (&self.content, &other.content) {
             (BlockContent::Prose(a), BlockContent::Prose(b)) => Arc::ptr_eq(a, b),
             (
@@ -441,42 +450,83 @@ fn image_height_class(state: &ImageState) -> (Option<(u32, u32)>, bool) {
     (state.size(), matches!(state, ImageState::Failed))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TranscriptRole {
-    User,
-    Assistant,
-    System,
-}
-
-/// One row of the transcript.
+/// One row of the document.
 #[derive(Debug, Clone)]
-pub struct TranscriptMessage {
+pub struct DocumentRow {
     pub key: RowKey,
-    pub role: TranscriptRole,
-    pub author: Arc<str>,
-    pub blocks: Vec<TranscriptBlock>,
+    pub chrome: RowChrome,
+    pub blocks: Vec<Block>,
 }
 
-/// The app's message store, read by key.
-pub trait TranscriptSource {
-    fn message(&self, key: RowKey) -> Option<&TranscriptMessage>;
+/// App data for the chrome around one row's blocks. The document reserves
+/// the header band and hands the rest to the [`RowDecorator`], which draws
+/// the header and background from it. The default is no chrome.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RowChrome {
+    /// Height of the band above the blocks the header is drawn in; zero
+    /// for none. It counts toward the row's height.
+    pub header_height: f32,
+    /// The row's accessible name. The header is hidden from assistive tech
+    /// while it is set, so the name is not read twice.
+    pub label: Option<Arc<str>>,
+    /// App-defined kind the decorator branches on, as a chat message's
+    /// role.
+    pub kind: u32,
 }
 
-impl TranscriptSource for HashMap<RowKey, TranscriptMessage> {
-    fn message(&self, key: RowKey) -> Option<&TranscriptMessage> {
+impl Hash for RowChrome {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.header_height.to_bits(), &self.label, self.kind).hash(state);
+    }
+}
+
+/// Draws row chrome; set one with [`Document::set_decorator`]. Rows are
+/// cached, so what a decorator draws must depend only on the chrome, the
+/// row width, and the theme.
+pub trait RowDecorator {
+    /// Painted behind the whole row.
+    fn background(&self, chrome: &RowChrome, theme: &Theme) -> Option<Color> {
+        let _ = (chrome, theme);
+        None
+    }
+
+    /// The element filling the header band, `width` wide and
+    /// `chrome.header_height` tall. Called only when the row is rebuilt.
+    fn header(&self, chrome: &RowChrome, width: f32, theme: &Theme) -> Option<AnyElement> {
+        let _ = (chrome, width, theme);
+        None
+    }
+}
+
+/// A shared [`RowDecorator`], compared by identity.
+#[derive(Clone)]
+struct Decorator(Rc<dyn RowDecorator>);
+
+impl std::fmt::Debug for Decorator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Decorator")
+    }
+}
+
+/// The app's row store, read by key.
+pub trait DocumentSource {
+    fn row(&self, key: RowKey) -> Option<&DocumentRow>;
+}
+
+impl DocumentSource for HashMap<RowKey, DocumentRow> {
+    fn row(&self, key: RowKey) -> Option<&DocumentRow> {
         self.get(&key)
     }
 }
 
-/// Layout of a row: `pad_y`, a header line of `header_height` for the
-/// author, the blocks separated by `block_gap`, and `pad_y` again. Blocks
-/// are inset `pad_x` on both sides.
+/// Layout of a row: `pad_y`, the row's [`RowChrome::header_height`], the
+/// blocks separated by `block_gap`, and `pad_y` again. Blocks are inset
+/// `pad_x` on both sides.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TranscriptStyle {
+pub struct DocumentStyle {
     pub font_size: f32,
     pub pad_x: f32,
     pub pad_y: f32,
-    pub header_height: f32,
     pub block_gap: f32,
     /// Pixels per wheel line.
     pub line_scroll: f32,
@@ -487,14 +537,13 @@ pub struct TranscriptStyle {
     pub overscan: f32,
 }
 
-impl TranscriptStyle {
+impl DocumentStyle {
     /// Proportions for a body font of `font_size` physical pixels.
     pub fn for_font_size(font_size: f32) -> Self {
         Self {
             font_size,
             pad_x: (font_size * 1.2).round(),
             pad_y: (font_size * 0.6).round(),
-            header_height: (font_size * 1.6).round(),
             block_gap: (font_size * 0.6).round(),
             line_scroll: (font_size * 3.0).round(),
             edge: (font_size * 2.0).round(),
@@ -503,7 +552,7 @@ impl TranscriptStyle {
     }
 }
 
-impl Default for TranscriptStyle {
+impl Default for DocumentStyle {
     fn default() -> Self {
         Self::for_font_size(14.0)
     }
@@ -535,7 +584,7 @@ pub trait BlockGeometry: Clone {
 /// the block elements paint.
 pub trait BlockMeasurer {
     type Geometry: BlockGeometry;
-    fn measure(&mut self, block: &TranscriptBlock, width: f32) -> Self::Geometry;
+    fn measure(&mut self, block: &Block, width: f32) -> Self::Geometry;
 
     /// Identifies the settings geometry depends on besides the block and
     /// width (font size, scale factor). Geometry measured under another key
@@ -555,7 +604,7 @@ pub trait BlockMeasurer {
 /// Geometry of a block as measured, with what it was measured from.
 #[derive(Debug, Clone)]
 struct Measured<G> {
-    block: TranscriptBlock,
+    block: Block,
     width: u32,
     settings: u64,
     geometry: G,
@@ -567,7 +616,7 @@ struct Measured<G> {
 fn measure_cached<G: BlockGeometry, M: BlockMeasurer<Geometry = G>>(
     cache: &mut HashMap<BlockKey, Measured<G>>,
     measurer: &mut M,
-    block: &TranscriptBlock,
+    block: &Block,
     width: f32,
 ) -> G {
     let settings = measurer.settings_key();
@@ -597,10 +646,9 @@ pub struct VisibleRow {
     pub key: RowKey,
     /// Position among all rows.
     pub index: usize,
-    pub role: TranscriptRole,
     pub top: f32,
     pub height: f32,
-    /// This row's entries in [`Transcript::visible_blocks`].
+    /// This row's entries in [`Document::visible_blocks`].
     pub blocks: std::ops::Range<usize>,
 }
 
@@ -609,7 +657,7 @@ pub struct VisibleRow {
 pub struct VisibleBlock<G> {
     pub key: BlockKey,
     pub row: RowKey,
-    /// Position of the block in its message's `blocks`.
+    /// Position of the block in its row's `blocks`.
     pub index: usize,
     pub rect: Rect,
     /// Top of the block below its row's top; `rect.y` is the row's top
@@ -628,7 +676,7 @@ struct Drag {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TranscriptIntegrityError {
+pub enum DocumentIntegrityError {
     Rows(RowIntegrityError),
     /// The blocks of the rows, in row order, are not the block order.
     BlockOrder,
@@ -641,39 +689,40 @@ pub enum TranscriptIntegrityError {
     SelectionOutsideDocument,
 }
 
-/// Keyboard commands a transcript responds to.
+/// Keyboard commands a document responds to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TranscriptCommand {
+pub enum DocumentCommand {
     Copy,
     SelectAll,
-    /// Open find (see [`Transcript::set_find_query`] and [`find_bar`]).
+    /// Open find (see [`Document::set_find_query`] and [`find_bar`]).
     Find,
 }
 
 /// The command a pressed key triggers. Bound to `mod+c`, `mod+a`, and
 /// `mod+f`, so Cmd and Ctrl both work and one table serves every platform.
-pub fn key_command(pressed: &Binding) -> Option<TranscriptCommand> {
+pub fn key_command(pressed: &Binding) -> Option<DocumentCommand> {
     [
-        ("mod+c", TranscriptCommand::Copy),
-        ("mod+a", TranscriptCommand::SelectAll),
-        ("mod+f", TranscriptCommand::Find),
+        ("mod+c", DocumentCommand::Copy),
+        ("mod+a", DocumentCommand::SelectAll),
+        ("mod+f", DocumentCommand::Find),
     ]
     .into_iter()
     .find(|(pattern, _)| pattern.parse::<Binding>().is_ok_and(|p| p.matches(pressed)))
     .map(|(_, command)| command)
 }
 
-/// Transcript state. `G` is the block geometry the measurer produces.
+/// Document state. `G` is the block geometry the measurer produces.
 #[derive(Debug, Clone)]
-pub struct Transcript<G = TextGeometry> {
+pub struct Document<G = TextGeometry> {
     list: VariableList,
     order: BlockOrder,
     block_row: HashMap<BlockKey, RowKey>,
     row_blocks: HashMap<RowKey, Vec<BlockKey>>,
     selection: Option<Selection>,
     drag: Option<Drag>,
-    unseen: bool,
-    style: TranscriptStyle,
+    content_below: bool,
+    decorator: Option<Decorator>,
+    style: DocumentStyle,
     size: (f32, f32),
     rows: Vec<VisibleRow>,
     blocks: Vec<VisibleBlock<G>>,
@@ -714,9 +763,9 @@ struct Reveal {
     align_always: bool,
 }
 
-impl<G: BlockGeometry> Transcript<G> {
-    pub fn new(style: TranscriptStyle) -> Self {
-        let estimate = style.pad_y * 2.0 + style.header_height + style.font_size * 2.0;
+impl<G: BlockGeometry> Document<G> {
+    pub fn new(style: DocumentStyle) -> Self {
+        let estimate = style.pad_y * 2.0 + style.font_size * 2.0;
         Self {
             list: VariableList::new(estimate, 0.0),
             order: BlockOrder::new(),
@@ -724,7 +773,8 @@ impl<G: BlockGeometry> Transcript<G> {
             row_blocks: HashMap::new(),
             selection: None,
             drag: None,
-            unseen: false,
+            content_below: false,
+            decorator: None,
             style,
             size: (0.0, 0.0),
             rows: Vec::new(),
@@ -743,7 +793,7 @@ impl<G: BlockGeometry> Transcript<G> {
         }
     }
 
-    pub fn style(&self) -> &TranscriptStyle {
+    pub fn style(&self) -> &DocumentStyle {
         &self.style
     }
 
@@ -759,42 +809,47 @@ impl<G: BlockGeometry> Transcript<G> {
         &self.list
     }
 
+    /// Draws every row's chrome from now on; see [`RowDecorator`].
+    pub fn set_decorator(&mut self, decorator: impl RowDecorator + 'static) {
+        self.decorator = Some(Decorator(Rc::new(decorator)));
+    }
+
     // -- Document changes --
 
-    /// Appends a message at the end.
-    pub fn push(&mut self, message: &TranscriptMessage) -> Result<(), RowError> {
-        self.list.append(message.key)?;
-        let blocks = message
+    /// Appends a row at the end.
+    pub fn push(&mut self, row: &DocumentRow) -> Result<(), RowError> {
+        self.list.append(row.key)?;
+        let blocks = row
             .blocks
             .iter()
             .map(|block| block.key)
             .filter(|key| self.order.append(*key))
             .collect();
-        self.adopt(message.key, blocks);
+        self.adopt(row.key, blocks);
         self.mark_new_content();
-        self.debug_check_row(message.key);
+        self.debug_check_row(row.key);
         Ok(())
     }
 
-    /// Appends many messages as one batch, checking integrity once.
+    /// Appends many rows as one batch, checking integrity once.
     pub fn extend<'a>(
         &mut self,
-        messages: impl IntoIterator<Item = &'a TranscriptMessage>,
+        rows: impl IntoIterator<Item = &'a DocumentRow>,
     ) -> Result<(), RowError> {
-        let messages: Vec<&TranscriptMessage> = messages.into_iter().collect();
-        let keys: Vec<RowKey> = messages.iter().map(|m| m.key).collect();
+        let rows: Vec<&DocumentRow> = rows.into_iter().collect();
+        let keys: Vec<RowKey> = rows.iter().map(|m| m.key).collect();
         self.list.extend(&keys)?;
         let mut fresh = Vec::new();
         let mut seen = HashSet::new();
-        for message in messages {
-            let blocks: Vec<BlockKey> = message
+        for row in rows {
+            let blocks: Vec<BlockKey> = row
                 .blocks
                 .iter()
                 .map(|block| block.key)
                 .filter(|key| !self.order.contains(*key) && seen.insert(*key))
                 .collect();
             fresh.extend_from_slice(&blocks);
-            self.adopt(message.key, blocks);
+            self.adopt(row.key, blocks);
         }
         self.order.extend(fresh);
         self.mark_new_content();
@@ -802,47 +857,47 @@ impl<G: BlockGeometry> Transcript<G> {
         Ok(())
     }
 
-    /// Inserts older messages before the first one. The rows on screen and
+    /// Inserts older rows before the first one. The rows on screen and
     /// the selection stay where they are.
     pub fn prepend<'a>(
         &mut self,
-        messages: impl IntoIterator<Item = &'a TranscriptMessage>,
+        rows: impl IntoIterator<Item = &'a DocumentRow>,
     ) -> Result<(), RowError> {
-        let messages: Vec<&TranscriptMessage> = messages.into_iter().collect();
-        let keys: Vec<RowKey> = messages.iter().map(|m| m.key).collect();
+        let rows: Vec<&DocumentRow> = rows.into_iter().collect();
+        let keys: Vec<RowKey> = rows.iter().map(|m| m.key).collect();
         self.list.prepend(&keys)?;
         let mut fresh = Vec::new();
         let mut seen = HashSet::new();
-        for message in &messages {
-            let blocks: Vec<BlockKey> = message
+        for row in &rows {
+            let blocks: Vec<BlockKey> = row
                 .blocks
                 .iter()
                 .map(|block| block.key)
                 .filter(|key| !self.order.contains(*key) && seen.insert(*key))
                 .collect();
             fresh.extend_from_slice(&blocks);
-            self.adopt(message.key, blocks);
+            self.adopt(row.key, blocks);
         }
         self.order.prepend(fresh);
         self.debug_check();
         Ok(())
     }
 
-    /// The message's blocks or text changed, as while streaming. New
+    /// The row's blocks or text changed, as while streaming. New
     /// blocks join the document order, removed ones leave it (shrinking the
     /// selection inward), and the row is remeasured on the next prepare.
-    pub fn update(&mut self, message: &TranscriptMessage) -> Result<(), RowError> {
-        let key = message.key;
+    pub fn update(&mut self, row: &DocumentRow) -> Result<(), RowError> {
+        let key = row.key;
         let old = self
             .row_blocks
             .remove(&key)
             .ok_or(RowError::UnknownKey(key))?;
-        let wanted: HashSet<BlockKey> = message.blocks.iter().map(|b| b.key).collect();
+        let wanted: HashSet<BlockKey> = row.blocks.iter().map(|b| b.key).collect();
         for block in old.iter().filter(|b| !wanted.contains(b)) {
             self.forget_block(*block);
         }
-        let mut kept: Vec<BlockKey> = Vec::with_capacity(message.blocks.len());
-        for block in message.blocks.iter().map(|b| b.key) {
+        let mut kept: Vec<BlockKey> = Vec::with_capacity(row.blocks.len());
+        for block in row.blocks.iter().map(|b| b.key) {
             if self.block_row.get(&block) == Some(&key) {
                 kept.push(block);
                 continue;
@@ -861,7 +916,7 @@ impl<G: BlockGeometry> Transcript<G> {
         }
         self.adopt(key, kept);
         self.list.invalidate(key)?;
-        // Edits to older messages (a highlight arriving, a status change)
+        // Edits to older rows (a highlight arriving, a status change)
         // are not new content to jump to.
         if self.list.rows().keys().last() == Some(&key) {
             self.mark_new_content();
@@ -902,7 +957,7 @@ impl<G: BlockGeometry> Transcript<G> {
             .and_then(|s| s.after_remove(block, pos, &self.order, &NoText));
     }
 
-    /// Whether `block` is in the document as a block of `row`. A message can
+    /// Whether `block` is in the document as a block of `row`. A row can
     /// list blocks that are not: keys another row owns already, or repeats.
     /// Those are neither measured, drawn, nor selectable.
     fn owns(&self, row: RowKey, block: BlockKey) -> bool {
@@ -920,7 +975,7 @@ impl<G: BlockGeometry> Transcript<G> {
 
     fn mark_new_content(&mut self) {
         if !self.list.is_stuck_to_bottom() {
-            self.unseen = true;
+            self.content_below = true;
         }
     }
 
@@ -938,7 +993,7 @@ impl<G: BlockGeometry> Transcript<G> {
     pub fn set_scroll_offset(&mut self, offset: f32) -> f32 {
         let offset = self.list.set_scroll_offset(offset);
         if self.list.is_stuck_to_bottom() {
-            self.unseen = false;
+            self.content_below = false;
         }
         offset
     }
@@ -951,14 +1006,15 @@ impl<G: BlockGeometry> Transcript<G> {
         self.list.is_stuck_to_bottom()
     }
 
-    /// New content arrived while the view was scrolled up; show a "jump to
-    /// latest" affordance.
-    pub fn has_unseen(&self) -> bool {
-        self.unseen
+    /// Content arrived at the end while the view was scrolled away from
+    /// it; cleared once the view reaches the bottom. Apps show a "jump to
+    /// latest" affordance from it.
+    pub fn has_content_below(&self) -> bool {
+        self.content_below
     }
 
-    /// Scrolls to the newest content and pins there.
-    pub fn jump_to_latest(&mut self) {
+    /// Scrolls to the end and sticks there as content arrives.
+    pub fn scroll_to_bottom(&mut self) {
         self.set_scroll_offset(f32::MAX);
     }
 
@@ -990,7 +1046,7 @@ impl<G: BlockGeometry> Transcript<G> {
     /// selected gets its [`BlockStyle::copy_prefix`], and every line break
     /// inside a block its `copy_line_prefix`, so list markers, heading
     /// hashes, and quote marks survive the copy.
-    pub fn selected_text(&self, source: &impl TranscriptSource) -> String {
+    pub fn selected_text(&self, source: &impl DocumentSource) -> String {
         let mut out = String::new();
         let Some((start, end)) = self.selection.and_then(|s| s.ordered(&self.order)) else {
             return out;
@@ -1066,7 +1122,7 @@ impl<G: BlockGeometry> Transcript<G> {
     /// document. The current match is the first one; call
     /// [`Self::find_next`] to scroll to it. Matches stay current as the
     /// document changes: each prepare rescans the blocks that changed.
-    pub fn set_find_query(&mut self, query: &str, source: &impl TranscriptSource) {
+    pub fn set_find_query(&mut self, query: &str, source: &impl DocumentSource) {
         self.find
             .get_or_insert_with(FindState::default)
             .set_query(query);
@@ -1137,7 +1193,7 @@ impl<G: BlockGeometry> Transcript<G> {
         if !in_view {
             let _ = self.list.scroll_to(row, align);
             if self.list.is_stuck_to_bottom() {
-                self.unseen = false;
+                self.content_below = false;
             }
         }
         self.reveal = Some(Reveal {
@@ -1163,7 +1219,7 @@ impl<G: BlockGeometry> Transcript<G> {
     }
 
     /// Rescans the blocks that changed since the last scan.
-    fn refresh_find(&mut self, source: &impl TranscriptSource) {
+    fn refresh_find(&mut self, source: &impl DocumentSource) {
         self.find_stale = false;
         let Some(find) = &mut self.find else {
             return;
@@ -1179,7 +1235,7 @@ impl<G: BlockGeometry> Transcript<G> {
     /// Places a pending reveal now that the window has geometry.
     fn place_reveal<M: BlockMeasurer<Geometry = G>>(
         &mut self,
-        source: &impl TranscriptSource,
+        source: &impl DocumentSource,
         measurer: &mut M,
     ) {
         let Some(reveal) = self.reveal.take() else {
@@ -1217,27 +1273,26 @@ impl<G: BlockGeometry> Transcript<G> {
     // -- Input --
 
     /// Applies one input event from the element. Coordinates are relative
-    /// to the transcript's top left.
-    pub fn handle(&mut self, event: TranscriptEvent) {
+    /// to the document's top left.
+    pub fn handle(&mut self, event: DocumentEvent) {
         match event {
-            TranscriptEvent::PointerDown { x, y } => {
+            DocumentEvent::PointerDown { x, y } => {
                 self.drag = Some(Drag {
                     pointer: (x, y),
                     last_ms: None,
                 });
                 self.selection = self.point_at(x, y).map(Selection::collapsed);
             }
-            TranscriptEvent::PointerDrag { x, y } => {
+            DocumentEvent::PointerDrag { x, y } => {
                 if let Some(drag) = &mut self.drag {
                     drag.pointer = (x, y);
                 }
                 self.extend_selection_to(x, y);
             }
-            TranscriptEvent::PointerUp => self.drag = None,
-            TranscriptEvent::Wheel(lines) => {
+            DocumentEvent::PointerUp => self.drag = None,
+            DocumentEvent::Wheel(lines) => {
                 self.scroll_by(lines as f32 * self.style.line_scroll);
             }
-            TranscriptEvent::JumpToLatest => self.jump_to_latest(),
         }
     }
 
@@ -1327,7 +1382,7 @@ impl<G: BlockGeometry> Transcript<G> {
         width: f32,
         height: f32,
         now_ms: u64,
-        source: &impl TranscriptSource,
+        source: &impl DocumentSource,
         measurer: &mut M,
     ) {
         if height != self.size.1 {
@@ -1338,7 +1393,7 @@ impl<G: BlockGeometry> Transcript<G> {
 
         self.measure_window(source, measurer);
         if self.list.is_stuck_to_bottom() {
-            self.unseen = false;
+            self.content_below = false;
         }
         self.materialize(source, measurer);
         if self.find_stale {
@@ -1356,7 +1411,7 @@ impl<G: BlockGeometry> Transcript<G> {
     /// Measures the unmeasured rows of the overscanned window.
     fn measure_window<M: BlockMeasurer<Geometry = G>>(
         &mut self,
-        source: &impl TranscriptSource,
+        source: &impl DocumentSource,
         measurer: &mut M,
     ) {
         let style = self.style;
@@ -1366,7 +1421,10 @@ impl<G: BlockGeometry> Transcript<G> {
         self.list
             .measure_visible(width, style.overscan, |key, width| {
                 let blocks = owned_blocks(source, block_row, RowKey(key)).map(|(_, b)| b);
-                row_height(&style, width, blocks, |block, block_width| {
+                let header = source
+                    .row(RowKey(key))
+                    .map_or(0.0, |r| r.chrome.header_height);
+                row_height(&style, width, header, blocks, |block, block_width| {
                     measure_cached(cache, measurer, block, block_width).height()
                 })
             });
@@ -1391,7 +1449,7 @@ impl<G: BlockGeometry> Transcript<G> {
 
     fn materialize<M: BlockMeasurer<Geometry = G>>(
         &mut self,
-        source: &impl TranscriptSource,
+        source: &impl DocumentSource,
         measurer: &mut M,
     ) {
         let style = self.style;
@@ -1406,9 +1464,8 @@ impl<G: BlockGeometry> Transcript<G> {
             let key = rows.keys()[index];
             let top = rows.offset_of_index(index) - scroll;
             let height = rows.height_of(key).unwrap_or(0.0);
-            let message = source.message(key);
             let first = self.blocks.len();
-            let mut y = style.pad_y + style.header_height;
+            let mut y = style.pad_y + source.row(key).map_or(0.0, |r| r.chrome.header_height);
             for (n, (i, block)) in owned_blocks(source, &self.block_row, key).enumerate() {
                 y += gap_before(&style, n, block);
                 let geometry = measure_cached(&mut self.measured, measurer, block, block_width);
@@ -1439,7 +1496,6 @@ impl<G: BlockGeometry> Transcript<G> {
             self.rows.push(VisibleRow {
                 key,
                 index,
-                role: message.map_or(TranscriptRole::System, |m| m.role),
                 top,
                 height,
                 blocks: first..self.blocks.len(),
@@ -1502,11 +1558,14 @@ impl<G: BlockGeometry> Transcript<G> {
         found
     }
 
-    /// The blocks `row` lays out, as a snapshot another thread can measure.
-    fn row_snapshot(&self, source: &impl TranscriptSource, row: RowKey) -> Vec<TranscriptBlock> {
-        owned_blocks(source, &self.block_row, row)
+    /// The header height and blocks `row` lays out, as a snapshot another
+    /// thread can measure.
+    fn row_snapshot(&self, source: &impl DocumentSource, row: RowKey) -> (f32, Vec<Block>) {
+        let header = source.row(row).map_or(0.0, |r| r.chrome.header_height);
+        let blocks = owned_blocks(source, &self.block_row, row)
             .map(|(_, block)| block.clone())
-            .collect()
+            .collect();
+        (header, blocks)
     }
 
     /// Records a height measured off the UI thread for a row still holding
@@ -1534,22 +1593,22 @@ impl<G: BlockGeometry> Transcript<G> {
     /// Checks row `row` only: its blocks are owned by it and sit together
     /// in the block order, right after the previous row's blocks and right
     /// before the next row's, plus the map sizes and the selection. O(blocks
-    /// of the row) plus the rows without blocks around it; per-message
+    /// of the row) plus the rows without blocks around it; per-row
     /// edits call it through `debug_assert!`.
-    pub fn verify_row(&self, row: RowKey) -> Result<(), TranscriptIntegrityError> {
+    pub fn verify_row(&self, row: RowKey) -> Result<(), DocumentIntegrityError> {
         let rows = self.list.rows();
         let index = rows
             .index_of(row)
-            .ok_or(TranscriptIntegrityError::UnknownRow { row })?;
+            .ok_or(DocumentIntegrityError::UnknownRow { row })?;
         rows.verify_row(index)
-            .map_err(TranscriptIntegrityError::Rows)?;
+            .map_err(DocumentIntegrityError::Rows)?;
         if self.row_blocks.len() != rows.len() || self.block_row.len() != self.order.len() {
-            return Err(TranscriptIntegrityError::BlockOrder);
+            return Err(DocumentIntegrityError::BlockOrder);
         }
         let blocks = self
             .row_blocks
             .get(&row)
-            .ok_or(TranscriptIntegrityError::UnknownRow { row })?;
+            .ok_or(DocumentIntegrityError::UnknownRow { row })?;
         count_integrity_steps(blocks.len());
         let mut expected = self
             .last_block_before(row)
@@ -1557,10 +1616,10 @@ impl<G: BlockGeometry> Transcript<G> {
             .map_or(0, |p| p + 1);
         for block in blocks {
             if self.block_row.get(block) != Some(&row) {
-                return Err(TranscriptIntegrityError::BlockRow { block: *block });
+                return Err(DocumentIntegrityError::BlockRow { block: *block });
             }
             if self.order.position(*block) != Some(expected) {
-                return Err(TranscriptIntegrityError::BlockOrder);
+                return Err(DocumentIntegrityError::BlockOrder);
             }
             expected += 1;
         }
@@ -1569,32 +1628,32 @@ impl<G: BlockGeometry> Transcript<G> {
             .find_map(|key| self.row_blocks.get(key)?.first().copied());
         let next_pos = next_first.map_or(Some(self.order.len() as u32), |b| self.order.position(b));
         if next_pos != Some(expected) {
-            return Err(TranscriptIntegrityError::BlockOrder);
+            return Err(DocumentIntegrityError::BlockOrder);
         }
         self.verify_selection()
     }
 
-    fn verify_selection(&self) -> Result<(), TranscriptIntegrityError> {
+    fn verify_selection(&self) -> Result<(), DocumentIntegrityError> {
         match self.selection {
             Some(selection) if selection.ordered(&self.order).is_none() => {
-                Err(TranscriptIntegrityError::SelectionOutsideDocument)
+                Err(DocumentIntegrityError::SelectionOutsideDocument)
             }
             _ => Ok(()),
         }
     }
 
     /// Checks every row, block, and the selection. O(rows + blocks); batch
-    /// edits call it through `debug_assert!`, as do per-message ones with
+    /// edits call it through `debug_assert!`, as do per-row ones with
     /// `integrity-checks`.
-    pub fn verify_integrity(&self) -> Result<(), TranscriptIntegrityError> {
+    pub fn verify_integrity(&self) -> Result<(), DocumentIntegrityError> {
         count_integrity_steps(self.order.len());
         self.list
             .rows()
             .verify_integrity()
-            .map_err(TranscriptIntegrityError::Rows)?;
+            .map_err(DocumentIntegrityError::Rows)?;
         let rows = self.list.rows().keys();
         if self.row_blocks.len() != rows.len() {
-            return Err(TranscriptIntegrityError::BlockOrder);
+            return Err(DocumentIntegrityError::BlockOrder);
         }
         // Walk the rows' blocks against the order in place, without
         // collecting them.
@@ -1604,19 +1663,19 @@ impl<G: BlockGeometry> Transcript<G> {
             let blocks = self
                 .row_blocks
                 .get(row)
-                .ok_or(TranscriptIntegrityError::UnknownRow { row: *row })?;
+                .ok_or(DocumentIntegrityError::UnknownRow { row: *row })?;
             for block in blocks {
                 if self.block_row.get(block) != Some(row) {
-                    return Err(TranscriptIntegrityError::BlockRow { block: *block });
+                    return Err(DocumentIntegrityError::BlockRow { block: *block });
                 }
                 if order.get(at) != Some(block) {
-                    return Err(TranscriptIntegrityError::BlockOrder);
+                    return Err(DocumentIntegrityError::BlockOrder);
                 }
                 at += 1;
             }
         }
         if at != order.len() || self.block_row.len() != at {
-            return Err(TranscriptIntegrityError::BlockOrder);
+            return Err(DocumentIntegrityError::BlockOrder);
         }
         self.verify_selection()
     }
@@ -1634,32 +1693,33 @@ impl<G: BlockGeometry> Transcript<G> {
     }
 }
 
-/// The blocks of `row`'s message that the document holds as `row`'s, with
-/// their positions in the message.
+/// The blocks of `row`'s content that the document holds as `row`'s, with
+/// their positions in the row's `blocks`.
 fn owned_blocks<'a>(
-    source: &'a impl TranscriptSource,
+    source: &'a impl DocumentSource,
     block_row: &'a HashMap<BlockKey, RowKey>,
     row: RowKey,
-) -> impl Iterator<Item = (usize, &'a TranscriptBlock)> + 'a {
+) -> impl Iterator<Item = (usize, &'a Block)> + 'a {
     source
-        .message(row)
+        .row(row)
         .map_or(&[][..], |m| m.blocks.as_slice())
         .iter()
         .enumerate()
         .filter(move |(_, block)| block_row.get(&block.key) == Some(&row))
 }
 
-/// Height of a row of `width` holding `blocks`, given each block's height
-/// at the blocks' width. The UI thread and the background measurer both
-/// use it, so their heights agree to the bit.
+/// Height of a row of `width` with a `header` band holding `blocks`, given
+/// each block's height at the blocks' width. The UI thread and the
+/// background measurer both use it, so their heights agree to the bit.
 fn row_height<'a>(
-    style: &TranscriptStyle,
+    style: &DocumentStyle,
     width: f32,
-    blocks: impl Iterator<Item = &'a TranscriptBlock>,
-    mut block_height: impl FnMut(&TranscriptBlock, f32) -> f32,
+    header: f32,
+    blocks: impl Iterator<Item = &'a Block>,
+    mut block_height: impl FnMut(&Block, f32) -> f32,
 ) -> f32 {
     let block_width = block_width(style, width);
-    let mut height = style.pad_y * 2.0 + style.header_height;
+    let mut height = style.pad_y * 2.0 + header;
     for (n, block) in blocks.enumerate() {
         height += gap_before(style, n, block);
         height += block_height(block, block_width);
@@ -1667,8 +1727,8 @@ fn row_height<'a>(
     height
 }
 
-/// Space above the `index`-th block of a message.
-fn gap_before(style: &TranscriptStyle, index: usize, block: &TranscriptBlock) -> f32 {
+/// Space above the `index`-th block of a row.
+fn gap_before(style: &DocumentStyle, index: usize, block: &Block) -> f32 {
     match index {
         0 => 0.0,
         _ if block.style.tight => (style.block_gap * 0.5).round(),
@@ -1676,7 +1736,7 @@ fn gap_before(style: &TranscriptStyle, index: usize, block: &TranscriptBlock) ->
     }
 }
 
-fn block_width(style: &TranscriptStyle, width: f32) -> f32 {
+fn block_width(style: &DocumentStyle, width: f32) -> f32 {
     (width - style.pad_x * 2.0).max(1.0)
 }
 
@@ -1696,11 +1756,11 @@ struct SourceText<'a, S> {
     block_row: &'a HashMap<BlockKey, RowKey>,
 }
 
-impl<'a, S: TranscriptSource> SourceText<'a, S> {
-    fn block(&self, key: BlockKey) -> Option<&'a TranscriptBlock> {
+impl<'a, S: DocumentSource> SourceText<'a, S> {
+    fn block(&self, key: BlockKey) -> Option<&'a Block> {
         let row = self.block_row.get(&key)?;
         self.source
-            .message(*row)?
+            .row(*row)?
             .blocks
             .iter()
             .find(|block| block.key == key)

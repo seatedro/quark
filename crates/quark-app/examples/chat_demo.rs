@@ -1,5 +1,5 @@
-//! A chat transcript of 5,000 markdown messages of varied length, with an
-//! assistant answer streaming in at the bottom: headings, lists, quotes,
+//! A chat of 5,000 markdown messages of varied length, with an assistant
+//! answer streaming in at the bottom: headings, lists, quotes,
 //! tables, and fenced code blocks, each its own selectable block. Drag to
 //! select across messages (list markers and heading hashes survive the
 //! copy), Ctrl/Cmd+C to copy, Ctrl/Cmd+A to select all, wheel to scroll.
@@ -12,32 +12,39 @@
 //! shows an image block, decoded on the image worker from a generated
 //! gradient; it reserves a placeholder until its pixels arrive.
 //!
-//! The app keeps only markdown strings: `MarkdownTranscript` parses them
+//! The app keeps only markdown strings: `MarkdownDocument` parses them
 //! (incrementally while streaming), converts them to blocks, allocates the
 //! block keys, and routes arriving highlights back to their messages.
+//!
+//! The document knows nothing about chat. This demo adds the chat chrome
+//! on top, as a reference for apps: each message's role and author ride in
+//! its `RowChrome`, `ChatChrome` draws the author line and the tint behind
+//! user messages from it, and the "Jump to latest" button is an overlay
+//! shown while `Document::has_content_below`.
 //!
 //! Rows outside the window are measured on a background thread, so the
 //! scrollbar and scroll positions become exact while the demo idles.
 //!
-//! Set `QUARK_TRANSCRIPT_LOG=1` to print view build times (prepare plus
-//! element construction) and how many rows have exact heights every 120
-//! frames. `QUARK_TRANSCRIPT_HISTORY=<n>` sets the history length,
-//! `QUARK_TRANSCRIPT_IDLE=1` turns streaming off, and
-//! `QUARK_TRANSCRIPT_SYNC=1` turns background measurement off, for
-//! comparing frame times.
+//! Set `QUARK_CHAT_LOG=1` to print view build times (prepare plus element
+//! construction) and how many rows have exact heights every 120 frames.
+//! `QUARK_CHAT_HISTORY=<n>` sets the history length, `QUARK_CHAT_IDLE=1`
+//! turns streaming off, and `QUARK_CHAT_SYNC=1` turns background
+//! measurement off, for comparing frame times.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use quark_app::quark_ui::accessibility::Politeness;
+use quark_app::quark_ui::design::Alpha;
+use quark_app::quark_ui::document::{
+    Block, BlockMeasurer, DocumentCommand, DocumentEvent, DocumentStyle, FindBarActions,
+    LoadedImage, MarkdownDocument, MarkdownEntry, RowChrome, RowDecorator, TextGeometry,
+    TextMeasurer, find_bar, key_command,
+};
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
-use quark_app::quark_ui::transcript::{
-    BlockMeasurer, FindBarActions, LoadedImage, MarkdownEntry, MarkdownTranscript, TextGeometry,
-    TextMeasurer, TranscriptBlock, TranscriptCommand, TranscriptEvent, TranscriptRole,
-    TranscriptStyle, find_bar, key_command,
-};
+use quark_app::quark_ui::theme::{Color, Theme};
 use quark_app::quark_ui::virtual_list::RowKey;
 use quark_app::quark_ui::virtual_list::ScrollAlign;
 use quark_app::quark_ui::{Action, FocusId};
@@ -49,7 +56,7 @@ const STREAM_TICK: Duration = Duration::from_millis(60);
 /// Bytes of the scripted answer revealed per tick.
 const STREAM_CHUNK: usize = 7;
 const FONT_SIZE: f32 = 14.0;
-const FIND_FIELD: FocusId = FocusId::from_key("transcript.find");
+const FIND_FIELD: FocusId = FocusId::from_key("chat.find");
 const WORDS: &[&str] = &[
     "virtualized",
     "rows",
@@ -122,7 +129,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ),
     (
         "bash",
-        "# Run the demo with highlighted code blocks.\ncargo run --release -p quark-app --example transcript_demo --features syntax",
+        "# Run the demo with highlighted code blocks.\ncargo run --release -p quark-app --example chat_demo --features syntax",
     ),
     (
         "go",
@@ -133,7 +140,8 @@ const SAMPLES: &[(&str, &str)] = &[
 
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
-    Transcript(TranscriptEvent),
+    Document(DocumentEvent),
+    JumpToLatest,
     FindNext,
     FindPrev,
     CloseFind,
@@ -145,7 +153,73 @@ impl From<Msg> for Action {
     }
 }
 
-/// Deterministic xorshift so every run shows the same transcript.
+/// Who wrote a message. Stored in the row's `RowChrome::kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    User = 0,
+    Assistant = 1,
+}
+
+/// Height of the author line above each message's blocks.
+const AUTHOR_LINE: f32 = FONT_SIZE * 1.6;
+
+/// A message's chrome: the author names the row and fills its header.
+fn chat_chrome(role: Role, author: &str) -> RowChrome {
+    RowChrome {
+        header_height: AUTHOR_LINE.round(),
+        label: Some(author.into()),
+        kind: role as u32,
+    }
+}
+
+/// Draws the chat chrome the document leaves to the app: the author line
+/// above every message and a soft tint behind the user's.
+struct ChatChrome;
+
+impl RowDecorator for ChatChrome {
+    fn background(&self, chrome: &RowChrome, theme: &Theme) -> Option<Color> {
+        (chrome.kind == Role::User as u32).then(|| theme.colors.surface.with_alpha(Alpha::SOFT))
+    }
+
+    fn header(&self, chrome: &RowChrome, _width: f32, _theme: &Theme) -> Option<AnyElement> {
+        let author = chrome.label.as_deref()?;
+        Some(
+            text(author.to_owned())
+                .size(FONT_SIZE * 0.85)
+                .semibold()
+                .into_any(),
+        )
+    }
+}
+
+/// The overlay shown while new content arrived below the view.
+fn jump_to_latest(theme: &Theme, width: f32, height: f32) -> AnyElement {
+    let (w, h) = (FONT_SIZE * 10.0, FONT_SIZE * 2.4);
+    div()
+        .absolute()
+        .left(((width - w) * 0.5).max(0.0))
+        .top((height - h - FONT_SIZE).max(0.0))
+        .w(w)
+        .h(h)
+        .rounded(h * 0.5)
+        .items_center()
+        .justify_center()
+        .bg(theme.colors.accent)
+        .hover_bg(theme.colors.accent_strong)
+        .accessibility_id("chat.jump-to-latest")
+        .accessibility_role(accesskit::Role::Button)
+        .accessibility_label("Jump to latest")
+        .on_click(Msg::JumpToLatest)
+        .child(
+            text("Jump to latest")
+                .size(FONT_SIZE * 0.9)
+                .semibold()
+                .color(theme.colors.text_strong),
+        )
+        .into_any()
+}
+
+/// Deterministic xorshift so every run shows the same chat.
 struct Rng(u64);
 
 impl Rng {
@@ -264,13 +338,13 @@ struct Timing {
 }
 
 /// A text measurer that offers no background spec, so only the rows in
-/// the window are ever measured (`QUARK_TRANSCRIPT_SYNC=1`).
+/// the window are ever measured (`QUARK_CHAT_SYNC=1`).
 struct WindowOnly<'a>(TextMeasurer<'a>);
 
 impl BlockMeasurer for WindowOnly<'_> {
     type Geometry = TextGeometry;
 
-    fn measure(&mut self, block: &TranscriptBlock, width: f32) -> TextGeometry {
+    fn measure(&mut self, block: &Block, width: f32) -> TextGeometry {
         self.0.measure(block, width)
     }
 
@@ -284,7 +358,7 @@ fn env_flag(name: &str) -> bool {
 }
 
 struct Demo {
-    transcript: MarkdownTranscript,
+    chat: MarkdownDocument,
     rng: Rng,
     stream: Option<Stream>,
     answers: usize,
@@ -303,41 +377,43 @@ struct Demo {
 
 impl Demo {
     fn new() -> Self {
-        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-        let history_len = std::env::var("QUARK_TRANSCRIPT_HISTORY")
+        let history_len = std::env::var("QUARK_CHAT_HISTORY")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(HISTORY);
+        Self::with_history(history_len)
+    }
+
+    fn with_history(history_len: u64) -> Self {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
         let history: Vec<MarkdownEntry> = (0..history_len)
             .map(|i| {
-                let user = i.is_multiple_of(2);
+                let (role, author) = if i.is_multiple_of(2) {
+                    (Role::User, "You")
+                } else {
+                    (Role::Assistant, "Assistant")
+                };
                 MarkdownEntry {
                     row: RowKey(i),
-                    role: if user {
-                        TranscriptRole::User
-                    } else {
-                        TranscriptRole::Assistant
-                    },
-                    author: if user { "You" } else { "Assistant" }.into(),
+                    chrome: chat_chrome(role, author),
                     markdown: history_markdown(i, &mut rng),
                 }
             })
             .collect();
-        let mut transcript = MarkdownTranscript::new(TranscriptStyle::for_font_size(FONT_SIZE));
-        transcript.set_image_loader(Arc::new(gradient_image));
-        transcript
-            .extend(history)
-            .unwrap_or_else(|e| eprintln!("{e:?}"));
+        let mut chat = MarkdownDocument::new(DocumentStyle::for_font_size(FONT_SIZE));
+        chat.set_decorator(ChatChrome);
+        chat.set_image_loader(Arc::new(gradient_image));
+        chat.extend(history).unwrap_or_else(|e| eprintln!("{e:?}"));
         Self {
-            transcript,
+            chat,
             rng,
             stream: None,
             answers: 0,
             next_key: history_len,
             timing: Timing::default(),
-            log: std::env::var_os("QUARK_TRANSCRIPT_LOG").is_some(),
-            idle: env_flag("QUARK_TRANSCRIPT_IDLE"),
-            sync: env_flag("QUARK_TRANSCRIPT_SYNC"),
+            log: std::env::var_os("QUARK_CHAT_LOG").is_some(),
+            idle: env_flag("QUARK_CHAT_IDLE"),
+            sync: env_flag("QUARK_CHAT_SYNC"),
             frames: 0,
             all_exact: false,
             started: Instant::now(),
@@ -357,10 +433,9 @@ impl Demo {
             self.next_key += 1;
             let script = answer_markdown(self.answers, &mut self.rng);
             self.answers += 1;
-            let pushed = self.transcript.push(MarkdownEntry {
+            let pushed = self.chat.push(MarkdownEntry {
                 row: key,
-                role: TranscriptRole::Assistant,
-                author: "Assistant (streaming)".into(),
+                chrome: chat_chrome(Role::Assistant, "Assistant (streaming)"),
                 markdown: String::new(),
             });
             if let Err(e) = pushed {
@@ -380,10 +455,7 @@ impl Demo {
             end += 1;
         }
         stream.shown = end;
-        if let Err(e) = self
-            .transcript
-            .set_markdown(stream.key, &stream.script[..end])
-        {
+        if let Err(e) = self.chat.set_markdown(stream.key, &stream.script[..end]) {
             eprintln!("{e:?}");
         }
         end == stream.script.len()
@@ -391,11 +463,11 @@ impl Demo {
 
     fn record(&mut self, elapsed: Duration) {
         self.frames += 1;
-        let rows = self.transcript.transcript().list().rows();
+        let rows = self.chat.document().list().rows();
         let exact = rows.measured_count();
         if self.log && !self.all_exact && exact == rows.len() {
             eprintln!(
-                "transcript view: all {} rows exact after {} frames ({:.2} s)",
+                "chat view: all {} rows exact after {} frames ({:.2} s)",
                 rows.len(),
                 self.frames,
                 self.started.elapsed().as_secs_f64(),
@@ -408,13 +480,13 @@ impl Demo {
         t.max = t.max.max(elapsed);
         if self.log && t.frames == 120 {
             eprintln!(
-                "transcript view: avg {:.3} ms, max {:.3} ms over {} frames ({} rows, {} exact, {} materialized)",
+                "chat view: avg {:.3} ms, max {:.3} ms over {} frames ({} rows, {} exact, {} materialized)",
                 t.total.as_secs_f64() * 1e3 / f64::from(t.frames),
                 t.max.as_secs_f64() * 1e3,
                 t.frames,
                 rows.len(),
                 exact,
-                self.transcript.transcript().visible_rows().len(),
+                self.chat.document().visible_rows().len(),
             );
             *t = Timing::default();
         }
@@ -424,7 +496,7 @@ impl Demo {
 impl Demo {
     fn close_find(&mut self, cx: &mut UiContext) {
         self.find = None;
-        self.transcript.close_find();
+        self.chat.close_find();
         cx.set_focus(None);
     }
 }
@@ -462,42 +534,41 @@ impl UiApp for Demo {
 
         // Rebuild the messages whose code highlights arrived. Ticks redraw
         // often enough to pick them up while streaming.
-        self.transcript.poll_highlights();
-        self.transcript.poll_images();
-        if self.transcript.is_loading_images() {
+        self.chat.poll_highlights();
+        self.chat.poll_images();
+        if self.chat.is_loading_images() {
             cx.frame.request_frame();
         }
 
         let started = Instant::now();
         let header_h = 36.0;
         let body_h = (height - header_h).max(0.0);
-        let font_size = self.transcript.transcript().style().font_size;
+        let font_size = self.chat.document().style().font_size;
         let text_cx = cx.frame.text();
         let measurer =
             TextMeasurer::new(&mut text_cx.system, &mut text_cx.layouts, font_size, scale);
         let now_ms = now.as_millis() as u64;
         if self.sync {
-            self.transcript
+            self.chat
                 .prepare(width, body_h, now_ms, &mut WindowOnly(measurer));
         } else {
-            self.transcript
-                .prepare(width, body_h, now_ms, &mut { measurer });
+            self.chat.prepare(width, body_h, now_ms, &mut { measurer });
         }
         let element = self
-            .transcript
-            .element(cx.theme, |event| Msg::Transcript(event).into())
+            .chat
+            .element(cx.theme, |event| Msg::Document(event).into())
             .label("Conversation");
         self.record(started.elapsed());
 
         // The element schedules its own frames while a drag autoscrolls.
         // Background heights land in the frames after they are measured.
-        if self.transcript.is_measuring() {
+        if self.chat.is_measuring() {
             cx.frame.request_frame();
         }
 
         let find = self.find.as_ref().map(|field| {
             find_bar(
-                self.transcript.transcript().find(),
+                self.chat.document().find(),
                 field,
                 FIND_FIELD,
                 cx.is_focused(FIND_FIELD),
@@ -509,8 +580,13 @@ impl UiApp for Demo {
                 cx.theme,
             )
         });
+        let jump = self
+            .chat
+            .document()
+            .has_content_below()
+            .then(|| jump_to_latest(cx.theme, width, body_h));
         let colors = &cx.theme.colors;
-        let view = self.transcript.transcript();
+        let view = self.chat.document();
         let status = format!(
             "{} messages, {} materialized, {}{}",
             view.len(),
@@ -544,18 +620,26 @@ impl UiApp for Demo {
                     .child(text(status).size(12.0).color(colors.text_muted))
                     .children(find),
             )
-            .child(element)
+            .child(
+                div()
+                    .w(width)
+                    .h(body_h)
+                    .flex_shrink_0()
+                    .child(element)
+                    .children(jump),
+            )
             .into_any()
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
         match msg {
-            Msg::Transcript(event) => self.transcript.handle(event),
+            Msg::Document(event) => self.chat.handle(event),
+            Msg::JumpToLatest => self.chat.document_mut().scroll_to_bottom(),
             Msg::FindNext => {
-                self.transcript.find_next(ScrollAlign::Center);
+                self.chat.find_next(ScrollAlign::Center);
             }
             Msg::FindPrev => {
-                self.transcript.find_prev(ScrollAlign::Center);
+                self.chat.find_prev(ScrollAlign::Center);
             }
             Msg::CloseFind => self.close_find(cx),
         }
@@ -568,16 +652,16 @@ impl UiApp for Demo {
         };
         let now_ms = self.started.elapsed().as_millis() as u64;
         let outcome = field.apply_at(command, now_ms);
-        self.transcript.set_find_query(field.text());
+        self.chat.set_find_query(field.text());
         // Typing jumps to the first match, as browsers do.
-        self.transcript.reveal_current_match(ScrollAlign::Center);
+        self.chat.reveal_current_match(ScrollAlign::Center);
         outcome
     }
 
     fn set_text_value(&mut self, target: FocusId, value: String, _cx: &mut UiContext) {
         if let Some(field) = self.find.as_mut().filter(|_| target == FIND_FIELD) {
             field.set_text(value);
-            self.transcript.set_find_query(field.text());
+            self.chat.set_find_query(field.text());
         }
     }
 
@@ -593,9 +677,9 @@ impl UiApp for Demo {
                 }
                 Some(NamedKey::Enter) => {
                     if chord.shift() {
-                        self.transcript.find_prev(ScrollAlign::Center);
+                        self.chat.find_prev(ScrollAlign::Center);
                     } else {
-                        self.transcript.find_next(ScrollAlign::Center);
+                        self.chat.find_next(ScrollAlign::Center);
                     }
                     cx.window.request_redraw();
                     return true;
@@ -608,8 +692,8 @@ impl UiApp for Demo {
             return true;
         }
         match chord.binding().as_ref().and_then(key_command) {
-            Some(TranscriptCommand::Copy) => {
-                let copied = self.transcript.selected_text();
+            Some(DocumentCommand::Copy) => {
+                let copied = self.chat.selected_text();
                 if !copied.is_empty() {
                     cx.window.set_clipboard_text(&copied);
                     if self.log {
@@ -618,12 +702,12 @@ impl UiApp for Demo {
                 }
                 true
             }
-            Some(TranscriptCommand::SelectAll) => {
-                self.transcript.transcript_mut().select_all();
+            Some(DocumentCommand::SelectAll) => {
+                self.chat.document_mut().select_all();
                 cx.window.request_redraw();
                 true
             }
-            Some(TranscriptCommand::Find) => {
+            Some(DocumentCommand::Find) => {
                 self.find.get_or_insert_with(|| TextField::new(""));
                 cx.set_focus(Some(FIND_FIELD));
                 cx.window.request_redraw();
@@ -638,9 +722,80 @@ fn main() -> Result<(), quark_app::RunError> {
     quark_app::run_ui(
         Demo::new(),
         WindowOptions {
-            title: "Transcript".into(),
+            title: "Chat".into(),
             size: (900.0, 700.0),
             ..WindowOptions::default()
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use quark_app::testing::{By, UiTestHarness};
+
+    use super::*;
+
+    /// The demo with `history` messages, no stream timer, and only the
+    /// window measured, in a 600x400 window.
+    fn chat(history: u64) -> UiTestHarness<Demo> {
+        let mut demo = Demo::with_history(history);
+        demo.idle = true;
+        demo.sync = true;
+        UiTestHarness::new(demo, (600.0, 400.0), 1.0)
+    }
+
+    fn jump_button() -> By {
+        By::role_name(accesskit::Role::Button, "Jump to latest")
+    }
+
+    // Catches the chat's jump affordance not following the document's
+    // content below: hidden while pinned, shown once an answer streams in
+    // under a scrolled up view, and taking the view back down when clicked.
+    #[test]
+    fn jump_to_latest_shows_for_new_content_below_and_scrolls_back_down() {
+        let mut ui = chat(40);
+        let pinned = ui.try_find(jump_button()).is_some();
+        ui.app_mut().chat.document_mut().set_scroll_offset(0.0);
+        ui.send_message(StreamTick);
+        ui.frame();
+        let scrolled_up = ui.try_find(jump_button()).is_some();
+
+        ui.click_node(jump_button());
+        ui.frame();
+
+        let after = (
+            ui.try_find(jump_button()).is_some(),
+            ui.app().chat.document().is_stuck_to_bottom(),
+        );
+        assert_eq!((pinned, scrolled_up, after), (false, true, (false, true)));
+    }
+
+    // Catches the chat chrome not reaching the screen: every message gets
+    // its author line drawn above its first block.
+    #[test]
+    fn each_message_draws_its_author_line_above_its_text() {
+        let mut ui = chat(4);
+        ui.frame();
+
+        let texts = ui.painted_texts();
+        let author_above_text = |i: u64, author: &str| {
+            let message = texts
+                .iter()
+                .find(|t| t.text.starts_with(&format!("#{i}:")))
+                .map(|t| t.bounds.y);
+            let line = texts
+                .iter()
+                .filter(|t| t.text == author)
+                .map(|t| t.bounds.y)
+                .filter(|y| message.is_some_and(|m| *y < m))
+                .reduce(f32::max);
+            line.zip(message).map(|(l, m)| m - l)
+        };
+        // The author line sits right above its message, within one line.
+        let gaps: Vec<bool> = [(0, "You"), (1, "Assistant"), (2, "You"), (3, "Assistant")]
+            .into_iter()
+            .map(|(i, author)| author_above_text(i, author).is_some_and(|gap| gap <= AUTHOR_LINE))
+            .collect();
+        assert_eq!(gaps, [true; 4]);
+    }
 }

@@ -6,7 +6,7 @@
 //! the loader already decoded. The store hands each block its
 //! [`ImageState`]; an image renders as a placeholder until its pixels
 //! arrive, and the app calls [`ImageStore::poll`] each frame and rebuilds
-//! the messages of the images that resolved, as it does for code
+//! the rows of the images that resolved, as it does for code
 //! highlights.
 
 use std::collections::HashMap;
@@ -84,7 +84,7 @@ struct Worker {
 }
 
 /// Image states by URL, and the worker that loads them. One per app,
-/// shared by every markdown message.
+/// shared by every markdown row.
 #[derive(Default)]
 pub struct ImageStore {
     loader: Option<ImageLoader>,
@@ -186,7 +186,7 @@ impl ImageStore {
     }
 
     /// Takes the images decoded since the last call and returns their
-    /// URLs; rebuild the messages that show them.
+    /// URLs; rebuild the rows that show them.
     pub fn poll(&mut self) -> Vec<Arc<str>> {
         let mut done = Vec::new();
         while let Some(result) = self.worker.as_ref().and_then(|w| w.results.try_recv().ok()) {

@@ -1,10 +1,10 @@
-//! [`MarkdownTranscript`]: a transcript of markdown messages that owns
+//! [`MarkdownDocument`]: a document of markdown rows that owns
 //! everything between the app's markdown strings and the screen.
 //!
-//! Without it an app keeps the markdown sources, a [`MarkdownMessage`] per
-//! message, the converted messages, the [`Transcript`], and a
+//! Without it an app keeps the markdown sources, a [`MarkdownBlocks`] per
+//! row, the converted rows, the [`Document`], and a
 //! [`SyntaxHighlighter`] in step by hand: parse, convert, update, store,
-//! and route arriving highlights back to their messages every frame. It
+//! and route arriving highlights back to their rows every frame. It
 //! also measures the rows outside the window on a background thread, so
 //! their heights become exact while the app idles.
 
@@ -15,46 +15,44 @@ use quark::selection::BlockKey;
 
 use super::background::BackgroundMeasure;
 use super::images::{ImageLoader, ImageStore};
-use super::markdown::{BlockKeys, MarkdownMessage};
+use super::markdown::{BlockKeys, MarkdownBlocks};
 use super::syntax::SyntaxHighlighter;
 use super::{
-    BlockMeasurer, FindMatch, TextGeometry, Transcript, TranscriptElement, TranscriptEvent,
-    TranscriptMessage, TranscriptRole, TranscriptStyle,
+    BlockMeasurer, Document, DocumentElement, DocumentEvent, DocumentRow, DocumentStyle, FindMatch,
+    RowChrome, RowDecorator, TextGeometry,
 };
 use crate::action::Action;
 use crate::markdown::{BlockKind, IncrementalMarkdown, MarkdownDoc};
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowKey, ScrollAlign};
 
-/// A message to add to a [`MarkdownTranscript`].
+/// A row to add to a [`MarkdownDocument`].
 #[derive(Debug, Clone)]
 pub struct MarkdownEntry {
     pub row: RowKey,
-    pub role: TranscriptRole,
-    pub author: Arc<str>,
+    pub chrome: RowChrome,
     pub markdown: String,
 }
 
-/// What is kept per message to convert it again cheaply.
+/// What is kept per row to convert it again cheaply.
 struct Entry {
-    role: TranscriptRole,
-    author: Arc<str>,
+    chrome: RowChrome,
     source: String,
     parser: IncrementalMarkdown,
     doc: MarkdownDoc,
-    markdown: MarkdownMessage,
+    markdown: MarkdownBlocks,
 }
 
-/// A virtualized transcript of markdown messages, keyed by the app's
+/// A virtualized document of markdown rows, keyed by the app's
 /// [`RowKey`]s. It allocates every block key itself, so apps never pick
 /// block keys, and streaming sources are parsed incrementally.
 ///
 /// Each frame: [`Self::poll_highlights`], [`Self::prepare`], then
 /// [`Self::element`]; pass the element's events to [`Self::handle`]. While
 /// [`Self::is_measuring`], keep drawing frames so background heights land.
-pub struct MarkdownTranscript {
-    transcript: Transcript,
-    messages: HashMap<RowKey, TranscriptMessage>,
+pub struct MarkdownDocument {
+    document: Document,
+    rows: HashMap<RowKey, DocumentRow>,
     entries: HashMap<RowKey, Entry>,
     /// Owner of every block key handed out, for routing highlights.
     block_rows: HashMap<BlockKey, RowKey>,
@@ -64,11 +62,11 @@ pub struct MarkdownTranscript {
     background: BackgroundMeasure,
 }
 
-impl MarkdownTranscript {
-    pub fn new(style: TranscriptStyle) -> Self {
+impl MarkdownDocument {
+    pub fn new(style: DocumentStyle) -> Self {
         Self {
-            transcript: Transcript::new(style),
-            messages: HashMap::new(),
+            document: Document::new(style),
+            rows: HashMap::new(),
             entries: HashMap::new(),
             block_rows: HashMap::new(),
             syntax: SyntaxHighlighter::new(),
@@ -79,19 +77,24 @@ impl MarkdownTranscript {
     }
 
     /// Scroll, selection, and geometry state.
-    pub fn transcript(&self) -> &Transcript {
-        &self.transcript
+    pub fn document(&self) -> &Document {
+        &self.document
     }
 
     /// For scrolling and selection changes. Document edits go through the
-    /// facade, which keeps its messages in step with the transcript.
-    pub fn transcript_mut(&mut self) -> &mut Transcript {
-        &mut self.transcript
+    /// facade, which keeps its rows in step with the document.
+    pub fn document_mut(&mut self) -> &mut Document {
+        &mut self.document
     }
 
-    /// The converted messages, as a [`super::TranscriptSource`].
-    pub fn messages(&self) -> &HashMap<RowKey, TranscriptMessage> {
-        &self.messages
+    /// The converted rows, as a [`super::DocumentSource`].
+    pub fn rows(&self) -> &HashMap<RowKey, DocumentRow> {
+        &self.rows
+    }
+
+    /// See [`Document::set_decorator`].
+    pub fn set_decorator(&mut self, decorator: impl RowDecorator + 'static) {
+        self.document.set_decorator(decorator);
     }
 
     pub fn highlighter(&self) -> &SyntaxHighlighter {
@@ -104,38 +107,38 @@ impl MarkdownTranscript {
     }
 
     pub fn len(&self) -> usize {
-        self.transcript.len()
+        self.document.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.transcript.is_empty()
+        self.document.is_empty()
     }
 
-    /// Appends a message at the end.
+    /// Appends a row at the end.
     pub fn push(&mut self, entry: MarkdownEntry) -> Result<(), RowError> {
         self.extend([entry])
     }
 
-    /// Appends many messages, as when loading history.
+    /// Appends many rows, as when loading history.
     pub fn extend(
         &mut self,
         entries: impl IntoIterator<Item = MarkdownEntry>,
     ) -> Result<(), RowError> {
-        let messages = self.adopt(entries)?;
-        self.transcript.extend(&messages)?;
-        self.store(messages);
+        let rows = self.adopt(entries)?;
+        self.document.extend(&rows)?;
+        self.store(rows);
         Ok(())
     }
 
-    /// Inserts older messages before the first one; the rows on screen and
+    /// Inserts older rows before the first one; the rows on screen and
     /// the selection stay put.
     pub fn prepend(
         &mut self,
         entries: impl IntoIterator<Item = MarkdownEntry>,
     ) -> Result<(), RowError> {
-        let messages = self.adopt(entries)?;
-        self.transcript.prepend(&messages)?;
-        self.store(messages);
+        let rows = self.adopt(entries)?;
+        self.document.prepend(&rows)?;
+        self.store(rows);
         Ok(())
     }
 
@@ -156,8 +159,8 @@ impl MarkdownTranscript {
     }
 
     pub fn remove(&mut self, row: RowKey) -> Result<(), RowError> {
-        self.transcript.remove(row)?;
-        self.messages.remove(&row);
+        self.document.remove(row)?;
+        self.rows.remove(&row);
         self.background.forget(row);
         if let Some(mut entry) = self.entries.remove(&row) {
             for key in entry.markdown.keys() {
@@ -168,8 +171,8 @@ impl MarkdownTranscript {
         Ok(())
     }
 
-    /// Takes finished code highlights and rebuilds their messages. Returns
-    /// whether any message changed (draw a frame).
+    /// Takes finished code highlights and rebuilds their rows. Returns
+    /// whether any row changed (draw a frame).
     pub fn poll_highlights(&mut self) -> bool {
         let keys = self.syntax.poll();
         self.refresh_highlighted(keys)
@@ -196,8 +199,8 @@ impl MarkdownTranscript {
         self.refresh_images(&[Arc::from(src)]);
     }
 
-    /// Takes decoded images and rebuilds the messages showing them.
-    /// Returns whether any message changed (draw a frame). Rows above the
+    /// Takes decoded images and rebuilds the rows showing them.
+    /// Returns whether any row changed (draw a frame). Rows above the
     /// first visible one that change height keep the view in place.
     pub fn poll_images(&mut self) -> bool {
         let srcs = self.images.poll();
@@ -216,7 +219,7 @@ impl MarkdownTranscript {
         self.images.is_loading()
     }
 
-    /// Rebuilds the messages with an image block showing one of `srcs`.
+    /// Rebuilds the rows with an image block showing one of `srcs`.
     fn refresh_images(&mut self, srcs: &[Arc<str>]) -> bool {
         if srcs.is_empty() {
             return false;
@@ -253,7 +256,7 @@ impl MarkdownTranscript {
         }
     }
 
-    /// See [`Transcript::prepare`]. Also applies the row heights measured
+    /// See [`Document::prepare`]. Also applies the row heights measured
     /// in the background since the last frame and requests more, when the
     /// measurer offers a [`super::MeasureSpec`] ([`super::TextMeasurer`]
     /// does). A width or font change drops the requests in flight.
@@ -264,12 +267,12 @@ impl MarkdownTranscript {
         now_ms: u64,
         measurer: &mut M,
     ) {
-        let style = *self.transcript.style();
+        let style = *self.document.style();
         self.background.configure(measurer, style, width);
-        self.background.apply(&mut self.transcript);
-        self.transcript
-            .prepare(width, height, now_ms, &self.messages, measurer);
-        self.background.request(&self.transcript, &self.messages);
+        self.background.apply(&mut self.document);
+        self.document
+            .prepare(width, height, now_ms, &self.rows, measurer);
+        self.background.request(&self.document, &self.rows);
     }
 
     /// Rows are being measured in the background; draw another frame to
@@ -283,62 +286,62 @@ impl MarkdownTranscript {
     /// done. Positions of materialized rows update on the next prepare. For
     /// tests and screenshots. Returns whether any height changed.
     pub fn finish_measures(&mut self) -> bool {
-        self.background.finish(&mut self.transcript, &self.messages)
+        self.background.finish(&mut self.document, &self.rows)
     }
 
     #[cfg(test)]
-    pub(super) fn background_mut(&mut self) -> (&mut BackgroundMeasure, &mut Transcript) {
-        (&mut self.background, &mut self.transcript)
+    pub(super) fn background_mut(&mut self) -> (&mut BackgroundMeasure, &mut Document) {
+        (&mut self.background, &mut self.document)
     }
 
-    /// See [`Transcript::element`].
+    /// See [`Document::element`].
     pub fn element(
         &mut self,
         theme: &Theme,
-        on_event: impl Fn(TranscriptEvent) -> Action + 'static,
-    ) -> TranscriptElement {
-        self.transcript.element(&self.messages, theme, on_event)
+        on_event: impl Fn(DocumentEvent) -> Action + 'static,
+    ) -> DocumentElement {
+        self.document.element(&self.rows, theme, on_event)
     }
 
-    pub fn handle(&mut self, event: TranscriptEvent) {
-        self.transcript.handle(event);
+    pub fn handle(&mut self, event: DocumentEvent) {
+        self.document.handle(event);
     }
 
-    /// See [`Transcript::set_find_query`].
+    /// See [`Document::set_find_query`].
     pub fn set_find_query(&mut self, query: &str) {
-        self.transcript.set_find_query(query, &self.messages);
+        self.document.set_find_query(query, &self.rows);
     }
 
-    /// See [`Transcript::find_next`].
+    /// See [`Document::find_next`].
     pub fn find_next(&mut self, align: ScrollAlign) -> Option<FindMatch> {
-        self.transcript.find_next(align)
+        self.document.find_next(align)
     }
 
-    /// See [`Transcript::find_prev`].
+    /// See [`Document::find_prev`].
     pub fn find_prev(&mut self, align: ScrollAlign) -> Option<FindMatch> {
-        self.transcript.find_prev(align)
+        self.document.find_prev(align)
     }
 
-    /// See [`Transcript::reveal_current_match`].
+    /// See [`Document::reveal_current_match`].
     pub fn reveal_current_match(&mut self, align: ScrollAlign) -> Option<FindMatch> {
-        self.transcript.reveal_current_match(align)
+        self.document.reveal_current_match(align)
     }
 
-    /// See [`Transcript::close_find`].
+    /// See [`Document::close_find`].
     pub fn close_find(&mut self) {
-        self.transcript.close_find();
+        self.document.close_find();
     }
 
-    /// See [`Transcript::selected_text`].
+    /// See [`Document::selected_text`].
     pub fn selected_text(&self) -> String {
-        self.transcript.selected_text(&self.messages)
+        self.document.selected_text(&self.rows)
     }
 
-    /// Parses and converts new messages without adding them anywhere.
+    /// Parses and converts new rows without adding them anywhere.
     fn adopt(
         &mut self,
         entries: impl IntoIterator<Item = MarkdownEntry>,
-    ) -> Result<Vec<TranscriptMessage>, RowError> {
+    ) -> Result<Vec<DocumentRow>, RowError> {
         let entries: Vec<MarkdownEntry> = entries.into_iter().collect();
         for (i, entry) in entries.iter().enumerate() {
             let repeated = entries[..i].iter().any(|e| e.row == entry.row);
@@ -346,31 +349,29 @@ impl MarkdownTranscript {
                 return Err(RowError::DuplicateKey(entry.row));
             }
         }
-        let mut messages = Vec::with_capacity(entries.len());
+        let mut rows = Vec::with_capacity(entries.len());
         for new in entries {
             let mut parser = IncrementalMarkdown::new();
             let doc = parser.parse(&new.markdown);
             let mut entry = Entry {
-                role: new.role,
-                author: new.author,
+                chrome: new.chrome,
                 source: new.markdown,
                 parser,
                 doc,
-                markdown: MarkdownMessage::new(),
+                markdown: MarkdownBlocks::new(),
             };
-            messages.push(self.convert(new.row, &mut entry));
+            rows.push(self.convert(new.row, &mut entry));
             self.entries.insert(new.row, entry);
         }
-        Ok(messages)
+        Ok(rows)
     }
 
-    fn store(&mut self, messages: Vec<TranscriptMessage>) {
-        self.messages
-            .extend(messages.into_iter().map(|m| (m.key, m)));
+    fn store(&mut self, rows: Vec<DocumentRow>) {
+        self.rows.extend(rows.into_iter().map(|m| (m.key, m)));
     }
 
     /// Converts `entry`'s parsed markdown and records who owns its keys.
-    fn convert(&mut self, row: RowKey, entry: &mut Entry) -> TranscriptMessage {
+    fn convert(&mut self, row: RowKey, entry: &mut Entry) -> DocumentRow {
         let before = entry.markdown.keys().len();
         // Blocks past the new end give their keys up.
         for key in &entry.markdown.keys()[entry.doc.len().min(before)..] {
@@ -386,10 +387,9 @@ impl MarkdownTranscript {
         for key in &keys[before.min(keys.len())..] {
             self.block_rows.insert(*key, row);
         }
-        TranscriptMessage {
+        DocumentRow {
             key: row,
-            role: entry.role,
-            author: entry.author.clone(),
+            chrome: entry.chrome.clone(),
             blocks,
         }
     }
@@ -398,11 +398,11 @@ impl MarkdownTranscript {
         let Some(mut entry) = self.entries.remove(&row) else {
             return Err(RowError::UnknownKey(row));
         };
-        let message = self.convert(row, &mut entry);
+        let content = self.convert(row, &mut entry);
         self.entries.insert(row, entry);
         self.background.forget(row);
-        let result = self.transcript.update(&message);
-        self.messages.insert(row, message);
+        let result = self.document.update(&content);
+        self.rows.insert(row, content);
         result
     }
 
