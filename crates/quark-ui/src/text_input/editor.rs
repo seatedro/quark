@@ -5,9 +5,12 @@ use quark_render::scene::{FontKind, FontStyle, FontWeight};
 use quark_text::offset;
 use quark_text::{TextLayout, TextOffset, TextParams, TextSpan, TextStyle, TextSystem};
 
+use super::atoms::{InlineAtom, RichClipboard, RichText};
 use super::buffer::{TextBuffer, WordForward};
+use super::hooks::{InputHooks, Insertion, NoHooks};
 use super::ime::{Composition, Preedit};
 use super::text_edit::{TextEditCommand, TextEditOutcome};
+use super::trigger::{TriggerMatch, TriggerRule, find_trigger};
 use super::view::FrameScale;
 
 const LINE_HEIGHT_FACTOR: f32 = 1.35;
@@ -728,6 +731,15 @@ impl Editor {
     /// soft Home and End to the edges of the visual line; the rest is the
     /// same as in a [`super::TextField`], on logical lines.
     pub fn apply(&mut self, cmd: TextEditCommand) -> TextEditOutcome {
+        self.apply_with(cmd, &mut NoHooks)
+    }
+
+    /// [`Editor::apply`] with the app's policy for pastes.
+    pub fn apply_with(
+        &mut self,
+        cmd: TextEditCommand,
+        hooks: &mut dyn InputHooks,
+    ) -> TextEditOutcome {
         use TextEditCommand::*;
         let before = (self.buffer.cursor(), self.buffer.anchor());
         let vertical = matches!(cmd, CursorUp | CursorDown | SelectUp | SelectDown);
@@ -741,9 +753,15 @@ impl Editor {
             SelectSoftHome => self.move_soft(false, true),
             CursorSoftEnd => self.move_soft(true, false),
             SelectSoftEnd => self.move_soft(true, true),
-            other => outcome = self.buffer.apply(other),
+            other => outcome = self.buffer.apply_with(other, hooks),
         }
         outcome.selection_changed = (self.buffer.cursor(), self.buffer.anchor()) != before;
+        self.edited(&outcome, vertical);
+        outcome
+    }
+
+    /// Caret, scroll, and relayout bookkeeping after an edit.
+    fn edited(&mut self, outcome: &TextEditOutcome, vertical: bool) {
         if outcome.text_changed {
             self.text_changed();
         }
@@ -754,7 +772,96 @@ impl Editor {
         if moved && !vertical {
             self.desired_x = None;
         }
+    }
+
+    /// Insert at the caret, over any selection, as one undo step.
+    pub fn insert(&mut self, insertion: &Insertion) -> TextEditOutcome {
+        let outcome = self.buffer.insert_at(None, insertion);
+        self.edited(&outcome, false);
         outcome
+    }
+
+    /// Replace the byte range `range` (snapped onto the text, and grown to
+    /// take whole any atom it touches) with `insertion`, caret after it.
+    /// Accepting a completion replaces its trigger this way.
+    pub fn replace_range(&mut self, range: Range<usize>, insertion: &Insertion) -> TextEditOutcome {
+        let text = self.buffer.text();
+        let range = offset::ordered(text, range);
+        let outcome = self.buffer.insert_at(Some(range), insertion);
+        self.edited(&outcome, false);
+        outcome
+    }
+
+    /// A file dropped while the editor has focus, inserted at the caret as
+    /// `hooks` decides.
+    pub fn drop_path(
+        &mut self,
+        path: &std::path::Path,
+        hooks: &mut dyn InputHooks,
+    ) -> TextEditOutcome {
+        let insertion = hooks.drop_path(path);
+        self.insert(&insertion)
+    }
+
+    /// The atoms in the text, in order.
+    pub fn atoms(&self) -> &[InlineAtom] {
+        self.buffer.atoms()
+    }
+
+    /// The whole text with its atoms, for sending, history, or a draft.
+    pub fn rich_text(&self) -> RichText {
+        self.buffer
+            .rich_slice(TextOffset::ZERO..TextOffset::end(self.buffer.text()))
+    }
+
+    /// Replace the text and atoms programmatically, caret at the end.
+    /// Clears undo history.
+    pub fn set_rich_text(&mut self, rich: &RichText) {
+        self.buffer.set_rich_text(rich);
+        self.scroll_y = 0.0;
+        self.desired_x = None;
+        self.text_changed();
+        self.note_cursor_activity();
+    }
+
+    /// Share `clipboard` with other editors so atoms copied in one paste
+    /// as atoms in another. Each editor has its own until this is called.
+    pub fn set_rich_clipboard(&mut self, clipboard: RichClipboard) {
+        self.buffer.set_rich_clipboard(clipboard);
+    }
+
+    /// The trigger `rules` find at the caret, if the selection is empty and
+    /// no IME composition is open.
+    pub fn active_trigger(&self, rules: &[TriggerRule]) -> Option<TriggerMatch> {
+        if self.buffer.preedit().is_some() || !self.buffer.selection().is_empty() {
+            return None;
+        }
+        find_trigger(
+            self.buffer.text(),
+            self.buffer.cursor(),
+            self.buffer.atoms(),
+            rules,
+        )
+    }
+
+    /// Rects behind each atom's label in layout coordinates, as of the
+    /// last flush. Empty without atoms or while composing.
+    pub fn atom_rects(&self) -> Vec<SelectionRect> {
+        let atoms = self.buffer.atoms();
+        if atoms.is_empty() || self.buffer.preedit().is_some() {
+            return Vec::new();
+        }
+        let (Some(layout), false) = (self.layout.as_deref(), self.dirty) else {
+            return Vec::new();
+        };
+        let text = self.buffer.text();
+        atoms
+            .iter()
+            .flat_map(|atom| {
+                let range = offset::ordered(text, atom.range.clone());
+                layout.selection_rects(range).map(SelectionRect::from)
+            })
+            .collect()
     }
 }
 
