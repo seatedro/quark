@@ -13,12 +13,24 @@ pub fn render_element(
     width: f32,
     height: f32,
 ) {
+    #[cfg(feature = "devtools")]
+    let started = std::time::Instant::now();
     let mut engine = LayoutEngine::new();
-    let root_id = root.request_layout(&mut engine, cx);
-    engine.compute_layout(root_id, width, height);
-    root.prepaint(&engine, cx);
-    cx.run_hit_test();
-    root.paint(&engine, scene, cx);
+    {
+        profile_scope!("layout");
+        let root_id = root.request_layout(&mut engine, cx);
+        engine.compute_layout(root_id, width, height);
+    }
+    #[cfg(feature = "devtools")]
+    let laid_out = std::time::Instant::now();
+    {
+        profile_scope!("paint");
+        root.prepaint(&engine, cx);
+        cx.run_hit_test();
+        root.paint(&engine, scene, cx);
+    }
+    #[cfg(feature = "devtools")]
+    cx.devtools.record_phases(started, laid_out);
 }
 
 pub fn render_element_at(
