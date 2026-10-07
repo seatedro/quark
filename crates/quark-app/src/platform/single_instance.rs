@@ -171,13 +171,24 @@ mod imp {
         }
     }
 
+    const MAX_SOCKET_PATH: usize = 104;
+
     pub(super) fn endpoint(app_id: &str) -> io::Result<PathBuf> {
+        endpoint_in(
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            app_id,
+        )
+    }
+
+    pub(super) fn endpoint_in(runtime_dir: Option<PathBuf>, app_id: &str) -> io::Result<PathBuf> {
         let file = format!("{}.sock", sanitize(app_id));
-        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_absolute())
-        {
-            return Ok(dir.join(file));
+        if let Some(dir) = runtime_dir.filter(|dir| dir.is_absolute()) {
+            let path = dir.join(&file);
+            // sun_path holds about 104 bytes (108 on Linux, minus the NUL);
+            // a deep runtime dir would make bind fail, so use the temp dir.
+            if path.as_os_str().len() < MAX_SOCKET_PATH {
+                return Ok(path);
+            }
         }
         // A shared temp dir needs a private subdirectory, or another user
         // could create the socket first and receive our arguments.
@@ -322,5 +333,17 @@ mod tests {
         let launch = imp::acquire(&path, &[]).unwrap();
 
         assert!(matches!(launch, Instance::Primary(_)));
+    }
+
+    #[test]
+    fn runtime_dir_too_deep_for_a_socket_falls_back_to_temp_dir() {
+        let deep = PathBuf::from(format!("/{}", "d".repeat(120)));
+
+        let path = imp::endpoint_in(Some(deep.clone()), "app").unwrap();
+
+        assert!(!path.starts_with(&deep), "{}", path.display());
+        let _ = std::fs::remove_file(&path);
+        assert!(UnixListener::bind(&path).is_ok());
+        let _ = std::fs::remove_file(&path);
     }
 }
