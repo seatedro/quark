@@ -1,6 +1,6 @@
 use super::*;
 use crate::text_input::{
-    HorizontalScroll, Preedit, TextField, caret_blink, compose, reveal_offset,
+    HorizontalScroll, Preedit, TextField, caret_blink, compose, reveal_offset, text_pointer_drag,
 };
 use quark_render::RectPrimitive;
 
@@ -143,11 +143,13 @@ pub struct TextInputHitArea {
     pub focus_target: FocusId,
     pub multiline: bool,
     /// Painted layout of the displayed value (bullets when masked), with its
-    /// origin at `(text_x - scroll_x, text_y)`. `None` for placeholders,
-    /// compositions, and multiline editors.
+    /// origin at `(text_x - scroll_x, text_y - scroll_y)`. `None` for
+    /// placeholders and compositions.
     pub layout: Option<Arc<TextLayout>>,
     /// How far the single-line text is scrolled left.
     pub scroll_x: f32,
+    /// How far an editor's text is scrolled up.
+    pub scroll_y: f32,
     /// Caret rect in window coordinates while focused, for placing the IME
     /// candidate window.
     pub caret: Option<Rect>,
@@ -201,6 +203,9 @@ impl Element for TextInput {
         }
         if self.on_click.is_some() {
             flags |= HitFlags::CLICK;
+        }
+        if self.focus_target.is_some() {
+            flags |= HitFlags::DRAG;
         }
         (!flags.is_empty()).then(|| cx.insert_hit(bounds, flags, CursorHint::Text))
     }
@@ -486,6 +491,7 @@ impl Element for TextInput {
                 multiline: false,
                 layout: value_layout.filter(|_| composition.is_none()).cloned(),
                 scroll_x,
+                scroll_y: 0.0,
                 caret,
             });
         } else if on_click.is_some() {
@@ -501,9 +507,18 @@ impl Element for TextInput {
             if let Some(hit) = *prepaint_state {
                 cx.bind_hit(hit, node);
             }
-            if let Some(action) = on_click {
-                cx.handlers
-                    .on_click(node, ClickHandler::from_action(action));
+            // A field with a focus target owns the pointer for caret
+            // placement and selection; its drag reports the click action.
+            match (self.focus_target, on_click) {
+                (Some(target), on_click) => {
+                    cx.handlers
+                        .on_drag(node, text_pointer_drag(target, on_click));
+                }
+                (None, Some(action)) => {
+                    cx.handlers
+                        .on_click(node, ClickHandler::from_action(action));
+                }
+                (None, None) => {}
             }
         }
     }

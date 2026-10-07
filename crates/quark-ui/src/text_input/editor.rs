@@ -10,6 +10,7 @@ use super::text_edit::{
     prev_grapheme_boundary, prev_word_boundary, word_range_at,
 };
 use super::undo::{Edit, EditKind, EditLog};
+use super::view::FrameScale;
 
 const LINE_HEIGHT_FACTOR: f32 = 1.35;
 const SYNTAX_HIGHLIGHT_MAX_BYTES: usize = 256 * 1024;
@@ -132,6 +133,9 @@ pub struct Editor {
     /// Window scale factor; the layout is shaped at it so it can be painted
     /// as is (see `ElementContext::layout_text`).
     scale_factor: f32,
+    /// Scale of the frame the editor's element last painted in; applied
+    /// on the next flush.
+    pub(crate) frame_scale: FrameScale,
     last_width: f32,
     last_height: f32,
 }
@@ -163,6 +167,7 @@ impl Default for Editor {
             cursor_moved_at_ms: 0,
             font_size: 14.0,
             scale_factor: 1.0,
+            frame_scale: FrameScale::default(),
             last_width: 0.0,
             last_height: 0.0,
         }
@@ -427,7 +432,8 @@ impl Editor {
         self.dirty = true;
     }
 
-    /// Shape at the window's scale factor (pass the element context's).
+    /// Shape at `scale_factor`. Painting the editor's element sets this
+    /// from the frame on the next flush, so apps rarely need to call it.
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         if scale_factor.is_finite() && scale_factor > 0.0 && scale_factor != self.scale_factor {
             self.scale_factor = scale_factor;
@@ -496,6 +502,9 @@ impl Editor {
     /// Rebuild the layout after changes, place the caret, and scroll it
     /// into view if it moved.
     pub fn flush(&mut self, text_system: &mut TextSystem) {
+        if let Some(scale) = self.frame_scale.get() {
+            self.set_scale_factor(scale);
+        }
         self.refresh_syntax();
         let relayout = self.dirty || self.layout.is_none();
         if relayout {
@@ -1058,6 +1067,7 @@ impl Editor {
                     SetTextCursor(offset) => self.move_to(offset, false),
                     ExtendTextSelection(offset) => self.move_to(offset, true),
                     Copy => outcome.clipboard_write = self.selected_text(),
+                    CancelPreedit => self.clear_preedit(),
                     InsertText(_) | Paste(_) | Backspace | BackspaceWord | BackspaceLine
                     | DeleteForward | DeleteForwardWord | Undo | Redo | Cut => {}
                 }

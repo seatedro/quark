@@ -330,7 +330,7 @@ impl Element for TranscriptElement {
             DragStart::new(move |event| {
                 Box::new(SelectDrag {
                     origin,
-                    press: Some(event),
+                    press: event,
                     on_event: on_event.clone(),
                 })
             }),
@@ -406,11 +406,11 @@ impl IntoAnyElement for TranscriptElement {
     }
 }
 
-/// A drag-select gesture. The router gives a drag start no way to emit
-/// actions, so the press is reported with the first move or the release.
+/// A drag-select gesture. The press is reported at press time so the
+/// anchor lands on the text under the pointer before content streams in.
 struct SelectDrag {
     origin: (f32, f32),
-    press: Option<ClickEvent>,
+    press: ClickEvent,
     on_event: EventMap,
 }
 
@@ -418,26 +418,23 @@ impl SelectDrag {
     fn local(&self, x: f32, y: f32) -> (f32, f32) {
         (x - self.origin.0, y - self.origin.1)
     }
-
-    fn take_press(&mut self) -> Option<Action> {
-        let press = self.press.take()?;
-        let (x, y) = self.local(press.x, press.y);
-        Some((self.on_event)(TranscriptEvent::PointerDown { x, y }))
-    }
 }
 
 impl DragHandler for SelectDrag {
+    fn on_press(&mut self) -> Vec<Action> {
+        let (x, y) = self.local(self.press.x, self.press.y);
+        vec![(self.on_event)(TranscriptEvent::PointerDown { x, y })]
+    }
+
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
-        let mut actions: Vec<Action> = self.take_press().into_iter().collect();
         let (x, y) = self.local(x, y);
-        actions.push((self.on_event)(TranscriptEvent::PointerDrag { x, y }));
-        actions
+        vec![(self.on_event)(TranscriptEvent::PointerDrag { x, y })]
     }
 
     fn on_release(&mut self) -> DragReleaseResult {
-        let mut actions: Vec<Action> = self.take_press().into_iter().collect();
-        actions.push((self.on_event)(TranscriptEvent::PointerUp));
-        DragReleaseResult { actions }
+        DragReleaseResult {
+            actions: vec![(self.on_event)(TranscriptEvent::PointerUp)],
+        }
     }
 
     fn cursor(&self) -> CursorHint {
