@@ -32,7 +32,9 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup component add rustfmt clippy
 
-      # quark-terminal builds libghostty-vt from Ghostty's source with Zig.
+      # quark-terminal builds libghostty-vt from Ghostty's source with Zig
+      # (sources downloaded with curl, see its build.rs). Only quark-terminal
+      # and its terminal_demo example need it.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0

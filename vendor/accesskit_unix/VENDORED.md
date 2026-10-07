@@ -27,6 +27,9 @@ All in `src/atspi/interfaces/accessible.rs`:
   serves `GetAttributes` with no attributes instead of failing.
 - Tests for the three behaviors, through `accesskit_atspi_common`.
 
+Outside that file, `Cargo.toml` drops `resolver = "2"`: Cargo ignores a
+member's resolver in a workspace and warns about it on every build.
+
 Being a workspace member also adds the crate's optional tokio dependencies
 to `Cargo.lock`; they are not built.
 

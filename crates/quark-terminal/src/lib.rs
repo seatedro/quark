@@ -62,6 +62,11 @@ pub mod vt;
 
 #[cfg(all(test, ghostty_vt))]
 mod tests;
+// build.rs's manifest parsing, here so its unit tests run with the crate's.
+#[cfg(test)]
+#[path = "../build/ghostty_deps.rs"]
+#[allow(dead_code)]
+mod ghostty_deps;
 
 #[cfg(ghostty_vt)]
 pub use grid::{CellStyle, Colors, Cursor, CursorShape, Grid, GridRow, Rgb, Run, Underline};

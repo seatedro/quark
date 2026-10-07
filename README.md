@@ -174,6 +174,23 @@ definition in the crate's `Cargo.toml`.
   and file dialogs talk to D-Bus through zbus, so no GTK is needed.
 - **GPU.** A Vulkan driver, or OpenGL ES through EGL, on Linux; Metal on
   macOS; DX12 on Windows. `WGPU_BACKEND` overrides the choice.
+- **Zig and curl, for `quark-terminal` only.** Its build script builds
+  libghostty-vt with Zig 0.16 (`ZIG` names the binary) from Ghostty
+  sources it downloads with `curl`, so the system CA bundle,
+  `SSL_CERT_FILE`, and proxy variables apply. Offline, set
+  `QUARK_GHOSTTY_VT_SOURCE_DIR` to a directory of the downloaded tarballs
+  (a previous build leaves them in `target/<profile>/ghostty-vt/downloads`),
+  or `QUARK_GHOSTTY_VT_LIB_DIR` to a directory holding a prebuilt
+  `libghostty-vt.a`. [build.rs](crates/quark-terminal/build.rs) has the
+  details. Nothing else in the workspace needs Zig: the terminal demo is
+  `cargo run -p quark-terminal --example terminal_demo`.
+- **Nix.** [flake.nix](flake.nix) has a dev shell with the pinned Rust
+  toolchain, Zig, curl, and pkg-config, and puts the libraries winit, wgpu,
+  and AccessKit load at run time (Wayland, xkbcommon, the Vulkan loader,
+  libGL, X11, D-Bus) on `LD_LIBRARY_PATH`. GPU drivers still come from the
+  system (`hardware.graphics.enable` on NixOS). Enter the shell with
+  `nix develop`, or run `direnv allow` once to load it on `cd` through
+  [.envrc](.envrc).
 
 ```bash
 cargo build --workspace
