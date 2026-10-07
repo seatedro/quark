@@ -8,10 +8,9 @@
 //! exclusive lock on `<socket>.lock` for as long as it runs. On Windows it is
 //! a named pipe.
 //!
-//! macOS delivers URL clicks for a running app as an Apple Event to that
-//! process rather than launching a second one, and winit 0.30 does not expose
-//! `application:openURLs:`. So on macOS this handles only command line
-//! launches, not URL scheme or file associations.
+//! macOS delivers URL clicks as an Apple Event to the running app rather
+//! than launching a second one; the runner handles those itself (see
+//! [`super::deep_link`]), so on macOS this only covers command line launches.
 //!
 //! ```no_run
 //! use quark_app::platform::single_instance::{self, Instance};

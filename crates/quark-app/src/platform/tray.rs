@@ -13,7 +13,9 @@
 //! [`AppEvent::TrayMenu`]: crate::AppEvent::TrayMenu
 //! [`EventContext::set_exit_when_last_window_closes`]: crate::EventContext::set_exit_when_last_window_closes
 
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+#[cfg(not(any(target_os = "macos", windows)))]
+use tray_icon::menu::MenuEvent;
+use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::runner::{AppEvent, EventSink};
@@ -73,7 +75,8 @@ pub(crate) fn create(options: TrayOptions, events: &EventSink) -> Result<TrayIco
     Ok(tray)
 }
 
-/// The crates take one global handler each; reinstalling replaces it.
+/// The crates take one global handler each; reinstalling replaces it. On
+/// macOS and Windows the menu handler is shared with the menu bar.
 fn install_handlers(events: EventSink) {
     let tray_events = events.clone();
     TrayIconEvent::set_event_handler(Some(move |event| {
@@ -86,6 +89,9 @@ fn install_handlers(events: EventSink) {
             tray_events.send(AppEvent::TrayClicked);
         }
     }));
+    #[cfg(any(target_os = "macos", windows))]
+    crate::platform::native_menu::install_event_handler(events);
+    #[cfg(not(any(target_os = "macos", windows)))]
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         events.send(AppEvent::TrayMenu(event.id.0));
     }));
