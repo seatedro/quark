@@ -371,7 +371,13 @@ impl SplitState {
             self.collapsed[pane] = true;
             return;
         }
+        // Resolve with the pane at its minimum, so the others show their
+        // own sizes rather than what this pane's current size squeezes
+        // them to, and a push is written to their stored sizes.
+        let current = self.sizes[pane];
+        self.sizes[pane] = p.min;
         let resolved = self.resolve(extent);
+        self.sizes[pane] = current;
         let mut dividers = self.visible_dividers();
         if let Some(d) = self.pane_divider(pane)
             && !self.divider_visible(d)
@@ -818,6 +824,7 @@ mod tests {
             (150.0, [350.0, 300.0, 198.0]),
             // Every pane on the far side is at its minimum.
             (400.0, [398.0, 300.0, 150.0]),
+            (500.0, [398.0, 300.0, 150.0]),
             // The pushed pane recovers as the same drag comes back.
             (0.0, [200.0, 348.0, 300.0]),
         ];
@@ -837,6 +844,9 @@ mod tests {
                 expected,
                 "dragged by {delta}"
             );
+            // The push is kept, not just laid out: the right pane announces
+            // it and keeps it if the left pane later collapses.
+            assert_eq!(state.size(2), expected[2], "dragged by {delta}");
         }
     }
 
