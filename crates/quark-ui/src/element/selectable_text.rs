@@ -43,6 +43,47 @@ impl StyledSpan {
             link: None,
         }
     }
+
+    pub fn bold(mut self) -> Self {
+        self.font_weight = FontWeight::Bold;
+        self
+    }
+
+    pub fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    /// Monospaced, for inline code. Set a background with [`Self::pill`].
+    pub fn code(mut self) -> Self {
+        self.font_kind = FontKind::Mono;
+        self
+    }
+
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
+    pub fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    pub fn pill(mut self, background: Color) -> Self {
+        self.pill = Some(background);
+        self
+    }
+
+    pub fn link(mut self, url: impl Into<Arc<str>>) -> Self {
+        self.link = Some(url.into());
+        self
+    }
 }
 
 /// Emitted when a link inside selectable text is clicked and the element
