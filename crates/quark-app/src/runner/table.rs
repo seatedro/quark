@@ -98,6 +98,23 @@ impl<T> WindowTable<T> {
         })
     }
 
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = (WindowHandle, &mut T)> {
+        self.slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let generation = slot.generation;
+                let value = slot.value.as_mut()?;
+                Some((
+                    WindowHandle {
+                        index: index as u32,
+                        generation,
+                    },
+                    value,
+                ))
+            })
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.slots.len() == self.free.len()
     }
