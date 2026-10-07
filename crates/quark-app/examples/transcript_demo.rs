@@ -127,7 +127,7 @@ fn span(text: String, weight: FontWeight, italic: bool, kind: FontKind) -> Style
 }
 
 fn history_message(i: u64, rng: &mut Rng) -> TranscriptMessage {
-    let user = i % 2 == 0;
+    let user = i.is_multiple_of(2);
     let mut blocks = Vec::new();
     let paragraphs = if user { 1 } else { 1 + rng.below(3) };
     for p in 0..paragraphs {
