@@ -10,7 +10,7 @@
 //! - [`platform`]: menus, notifications, badges, tray, file dialogs, single
 //!   instance handoff, deep links, and window state persistence.
 //! - [`keymap`]: key binding tables with user overrides.
-//! - [`testing`] (feature `test-support`): [`testing::UiTestHarness`] runs a
+//! - `testing` (feature `test-support`): `testing::UiTestHarness` runs a
 //!   `UiApp` headlessly with a fake clock and clipboard.
 //!
 //! A complete app:
