@@ -1,14 +1,19 @@
 # quark-syntax
 
 Tree-sitter syntax highlighting for [Quark](../../README.md) code blocks.
-Each grammar is a cargo feature, off by default, because each compiles a C
-parser into the binary (about 30 KB for JSON, over 1 MB for TypeScript and
-Bash):
+No grammar is compiled in: each language is a pack (a shared library, its
+queries, and a manifest) that a `GrammarStore` loads from local pack
+directories the app trusts or, with the `download` feature, from a signed
+index. Code renders plain until its grammar is available.
 
-`rust`, `javascript`, `typescript`, `python`, `bash`, `json`, `go`, or
-`common` for all of them.
+Features: `engine` (the tree-sitter runtime and local packs) and `download`
+(fetching packs over HTTPS with Ed25519-verified indexes). Without `engine`
+the crate has no dependencies and every lookup falls back to plain text.
 
-Without a language feature the crate has no dependencies and every lookup
-falls back to plain text. `highlight` runs synchronously; `HighlightWorker`
-runs on a background thread and drops requests a newer generation
-superseded, which suits code that is still streaming.
+`highlight` runs synchronously; `HighlightWorker` runs on a background
+thread and drops requests a newer generation superseded, which suits code
+that is still streaming.
+
+Build packs with `cargo run -p syntax-pack -- build`. The
+[guide](../../docs/guide/syntax-packs.md) covers configuration, the pack
+format, publishing an index, and the threat model.

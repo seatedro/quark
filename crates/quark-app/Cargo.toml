@@ -123,8 +123,10 @@ ui = ["dep:quark-ui"]
 # for platforms without a native one.
 components = ["ui", "dep:quark-components"]
 hot-reload = ["dep:subsecond", "dep:tungstenite"]
-# Syntax highlighting in document code blocks; see quark-ui's `syntax`.
+# Syntax highlighting in document code blocks; see quark-ui's `syntax` and
+# `syntax-download`.
 syntax = ["ui", "quark-ui/syntax"]
+syntax-download = ["syntax", "quark-ui/syntax-download"]
 # PNG and JPEG decoding of document image blocks; see quark-ui's `images`.
 images = ["ui", "quark-ui/images"]
 # Desktop notifications through `EventContext::notify`.

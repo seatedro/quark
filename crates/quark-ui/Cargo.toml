@@ -32,10 +32,12 @@ tracing = { workspace = true, optional = true }
 
 [features]
 default = []
-# Syntax highlighting of document code blocks with the built-in grammars
-# (Rust, JS, TS, Python, Bash, JSON, Go). Off by default: the grammars add
-# several MB to the binary. Without it code blocks render plain.
-syntax = ["dep:quark-syntax", "quark-syntax/common"]
+# Syntax highlighting of document code blocks with grammars from the app's
+# `quark_syntax::GrammarStore` (local pack directories; no grammar is
+# compiled in). Without it code blocks render plain.
+syntax = ["dep:quark-syntax", "quark-syntax/engine"]
+# `syntax`, plus downloading missing grammar packs from a signed index.
+syntax-download = ["syntax", "quark-syntax/download"]
 # PNG and JPEG decoding of markdown image blocks on the image worker, and
 # GIF, WebP, and APNG decoding for `AnimatedImage::decode`. Without it,
 # loaders must hand over decoded pixels, and encoded images show their alt

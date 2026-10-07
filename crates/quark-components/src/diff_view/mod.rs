@@ -40,7 +40,7 @@ use quark_diff::{
 };
 use quark_render::FontKind;
 use quark_render::scene::Rect;
-use quark_syntax::{HighlightKind, HighlightSpan, HighlightWorker, LanguageId};
+use quark_syntax::{GrammarStore, HighlightKind, HighlightSpan, HighlightWorker, LanguageId};
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, WHEEL_LINE_PX};
@@ -480,13 +480,12 @@ impl DiffViewState {
         }
     }
 
-    /// Highlights every file on a background thread, by file extension.
-    /// Without grammar features in `quark-syntax`, text stays plain.
-    pub fn enable_syntax(&mut self) {
-        if self.syntax.is_none() {
-            self.syntax = Some(HighlightWorker::new());
-            self.request_highlights();
-        }
+    /// Highlights every file on a background thread, by file extension,
+    /// with `store`'s grammars. Files whose language has no grammar (or
+    /// whose grammar is still downloading) stay plain until it arrives.
+    pub fn enable_syntax(&mut self, store: GrammarStore) {
+        self.syntax = Some(HighlightWorker::new(store));
+        self.request_highlights();
     }
 
     pub fn set_selection(&mut self, selection: Option<Selection>, side: Side) {
@@ -1315,18 +1314,14 @@ impl DiffViewState {
             return;
         };
         for file in 0..self.doc.file_count() {
-            let path = self.doc.path(file);
-            let Some(language) = path
-                .rsplit_once('.')
-                .and_then(|(_, ext)| LanguageId::from_fence(ext))
-            else {
+            let Some(language) = LanguageId::from_path(self.doc.path(file)) else {
                 continue;
             };
             for side in [Side::Old, Side::New] {
                 let source = self.doc.text(file, side).shared().clone();
                 if !source.is_empty() {
                     let slot = u64::from(file) * 2 + side as u64;
-                    worker.request(slot, self.doc_generation, language, source);
+                    worker.request(slot, self.doc_generation, language.clone(), source);
                 }
             }
         }

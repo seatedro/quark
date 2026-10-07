@@ -101,6 +101,13 @@ impl MarkdownDocument {
         &self.syntax
     }
 
+    /// Highlights code blocks with `store`'s grammars; see
+    /// [`SyntaxHighlighter::set_grammar_store`].
+    #[cfg(feature = "syntax")]
+    pub fn set_grammar_store(&mut self, store: quark_syntax::GrammarStore) {
+        self.syntax.set_grammar_store(store);
+    }
+
     /// The markdown source of `row`.
     pub fn markdown(&self, row: RowKey) -> Option<&str> {
         self.entries.get(&row).map(|e| e.source.as_str())

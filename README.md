@@ -21,7 +21,7 @@ published to crates.io; see [docs/publish-readiness.md](docs/publish-readiness.m
 | [`quark-macros`](crates/quark-macros) | The `view!` macro and `#[derive(Store)]` | |
 | [`quark-text`](crates/quark-text) | Fonts, text shaping, layout, hit testing, and the layout cache | `quark` |
 | [`quark-render`](crates/quark-render) | The wgpu renderer for scenes | `quark`, `quark-text` |
-| [`quark-syntax`](crates/quark-syntax) | Tree-sitter highlighting, one cargo feature per language | |
+| [`quark-syntax`](crates/quark-syntax) | Tree-sitter highlighting with grammars loaded at runtime from signed packs | `quark-update` (feature `download`) |
 | [`quark-diff`](crates/quark-diff) | Unified diff parsing, line and word diffs, display projections | |
 | [`quark-ui`](crates/quark-ui) | Elements, layout, styling, themes, text input, virtual lists, the block document, markdown, accessibility | `quark`, `quark-text`, `quark-render`, `quark-syntax` (feature `syntax`) |
 | [`quark-components`](crates/quark-components) | Buttons, menus, popovers, select, combobox, command palette, split panes, dock, tree, table, diff view | `quark`, `quark-text`, `quark-render`, `quark-ui`, `quark-diff`, `quark-syntax` |
@@ -142,7 +142,8 @@ lists what each one does where.
 | `ui` | yes | `UiApp`, `run_ui`, and the quark-ui adapter |
 | `emoji-font` | yes | Bundles Noto Color Emoji (10.7 MB) as the emoji fallback |
 | `cjk-font` | yes | Bundles a 3.7 MB Noto Sans CJK subset as the CJK fallback |
-| `syntax` | no | Syntax highlighting in document code blocks (Rust, JavaScript, TypeScript, Python, Bash, JSON, Go) |
+| `syntax` | no | Syntax highlighting in document code blocks, with grammars from local packs ([guide](docs/guide/syntax-packs.md)) |
+| `syntax-download` | no | `syntax`, plus downloading grammar packs from a signed index |
 | `images` | no | PNG and JPEG decoding for markdown image blocks |
 | `notifications` | no | Desktop notifications through `EventContext::notify` |
 | `tray` | no | A system tray icon and menu through `EventContext::set_tray` |
@@ -154,12 +155,12 @@ lists what each one does where.
 | `headless-render` | no | Pixel readback in the test harness through a headless GPU device |
 | `profile-puffin`, `profile-tracy` | no | Profiler scopes around frame phases and text shaping; enable one at a time |
 
-Lower-level crates have their own: `quark-ui` has `syntax`, `images`,
-`devtools`, `profile`, `test-alloc`, and `integrity-checks`; `quark-text`
-has `emoji-font`, `cjk-font`, and `profile`; `quark-render` has
-`headless-render`; `quark-syntax` has one feature per language plus
-`common`; `quark` has `integrity-checks`. Each is described next to its
-definition in the crate's `Cargo.toml`.
+Lower-level crates have their own: `quark-ui` has `syntax`,
+`syntax-download`, `images`, `devtools`, `profile`, `test-alloc`, and
+`integrity-checks`; `quark-text` has `emoji-font`, `cjk-font`, and
+`profile`; `quark-render` has `headless-render`; `quark-syntax` has
+`engine` and `download`; `quark` has `integrity-checks`. Each is described
+next to its definition in the crate's `Cargo.toml`.
 
 ## Building
 

@@ -55,7 +55,8 @@ per-row chrome (headers, backgrounds) through a `RowDecorator`.
   read through `DocumentSource`.
 - `MarkdownDocument` wraps it for markdown rows: it parses, converts,
   highlights code blocks on a `quark-syntax` worker (with the `syntax`
-  feature), loads images on a worker (with `images`), and measures
+  feature and a grammar store; see
+  [Syntax highlighting and grammar packs](syntax-packs.md)), loads images on a worker (with `images`), and measures
   off-screen rows on a background thread so their heights become exact
   while the app is idle.
 - `IncrementalMarkdown` reparses only the tail of a streaming message: the

@@ -1,11 +1,13 @@
 //! Code block highlighting for markdown rows.
 //!
 //! With the `syntax` feature, highlighting runs on a `quark-syntax` worker
-//! thread. A code block renders plain (or with its previous highlight,
-//! while its source only grew) until its result arrives; the app calls
-//! [`SyntaxHighlighter::poll`] each frame and rebuilds its markdown
-//! rows when it returns blocks. Without the feature every block is
-//! plain.
+//! thread with the grammars of the app's `quark_syntax::GrammarStore`
+//! ([`SyntaxHighlighter::set_grammar_store`]). A code block renders plain
+//! (or with its previous highlight, while its source only grew) until its
+//! result arrives, and stays plain while its grammar downloads; the app
+//! calls [`SyntaxHighlighter::poll`] each frame and rebuilds its markdown
+//! rows when it returns blocks. Without the feature, or without a store,
+//! every block is plain.
 
 use quark::selection::BlockKey;
 use quark_render::FontKind;
@@ -41,6 +43,14 @@ pub struct SyntaxHighlighter {
 impl SyntaxHighlighter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Highlights with `store`'s grammars from now on. Blocks already
+    /// highlighted keep their colors; the rest are requested again when
+    /// their rows are next built.
+    #[cfg(feature = "syntax")]
+    pub fn set_grammar_store(&mut self, store: quark_syntax::GrammarStore) {
+        self.inner.set_store(store);
     }
 
     /// Takes finished highlights and returns the code blocks they are
@@ -139,13 +149,20 @@ mod imp {
     use std::sync::Arc;
 
     use quark::selection::BlockKey;
-    use quark_syntax::{HighlightKind, HighlightSpan, HighlightWorker, LanguageId};
+    use quark_syntax::{GrammarStore, HighlightKind, HighlightSpan, HighlightWorker, LanguageId};
 
     use super::{CodeLine, mono, plain_lines};
     use crate::document::{SpanTone, SyntaxTone};
 
     struct Done {
         generation: u64,
+        /// Distinct for every result taken, so rows rebuilt for a result
+        /// that recolors the same generation (a grammar that arrived)
+        /// see a new version.
+        version: u64,
+        /// A plain stand-in while the grammar downloads; the real result
+        /// for this generation follows.
+        pending: bool,
         source: Arc<str>,
         spans: Arc<[HighlightSpan]>,
     }
@@ -177,19 +194,37 @@ mod imp {
 
     #[derive(Default)]
     pub(super) struct Inner {
+        store: GrammarStore,
         worker: Option<HighlightWorker>,
         slots: HashMap<BlockKey, Slot>,
         generation: u64,
+        /// Last [`Done::version`] handed out.
+        version: u64,
     }
 
     impl Inner {
+        pub(super) fn set_store(&mut self, store: GrammarStore) {
+            self.store = store;
+            self.worker = None;
+            for slot in self.slots.values_mut() {
+                // Requested again by the next `version` call.
+                slot.generation = 0;
+            }
+        }
+
         pub(super) fn version(&mut self, slot: BlockKey, lang: &str, code: &str) -> u64 {
-            let Some(language) = LanguageId::from_fence(lang) else {
-                return 0;
+            // Checked without allocating when the block keeps its language,
+            // since this runs for every code block on every rebuild.
+            let language = match self.slots.get(&slot) {
+                Some(entry) if entry.language.matches(lang) => entry.language.clone(),
+                _ => match LanguageId::from_fence(lang) {
+                    Some(language) => language,
+                    None => return 0,
+                },
             };
             let entry = self.slots.entry(slot).or_insert_with(|| Slot {
                 generation: 0,
-                language,
+                language: language.clone(),
                 requested: Arc::from(""),
                 done: None,
             });
@@ -199,17 +234,18 @@ mod imp {
             if entry.generation == 0 || entry.language != language || changed {
                 self.generation += 1;
                 entry.generation = self.generation;
-                entry.language = language;
+                entry.language = language.clone();
                 entry.requested = Arc::from(code);
+                let store = &self.store;
                 self.worker
-                    .get_or_insert_with(HighlightWorker::new)
+                    .get_or_insert_with(|| HighlightWorker::new(store.clone()))
                     .request(slot.0, entry.generation, language, entry.requested.clone());
             }
             entry
                 .done
                 .as_ref()
                 .filter(|done| done.applies_to(code))
-                .map_or(0, |done| done.generation)
+                .map_or(0, |done| done.version)
         }
 
         pub(super) fn lines(&self, slot: BlockKey, code: &str) -> Vec<CodeLine> {
@@ -240,7 +276,9 @@ mod imp {
                     return changed;
                 };
                 match worker.try_recv() {
-                    Ok(Some(result)) => changed.extend(take(&mut self.slots, result)),
+                    Ok(Some(result)) => {
+                        changed.extend(take(&mut self.slots, &mut self.version, result))
+                    }
                     Ok(None) => return changed,
                     Err(_) => {
                         self.respawn();
@@ -260,7 +298,7 @@ mod imp {
                     break;
                 };
                 match worker.recv() {
-                    Ok(result) => changed.extend(take(&mut self.slots, result)),
+                    Ok(result) => changed.extend(take(&mut self.slots, &mut self.version, result)),
                     Err(_) if !respawned => {
                         respawned = true;
                         self.respawn();
@@ -274,13 +312,13 @@ mod imp {
         /// Replaces a dead worker and sends it every request still waiting
         /// for a result.
         fn respawn(&mut self) {
-            let worker = self.worker.insert(HighlightWorker::new());
+            let worker = self.worker.insert(HighlightWorker::new(self.store.clone()));
             for (slot, entry) in &self.slots {
                 if entry.pending() {
                     worker.request(
                         slot.0,
                         entry.generation,
-                        entry.language,
+                        entry.language.clone(),
                         entry.requested.clone(),
                     );
                 }
@@ -296,22 +334,26 @@ mod imp {
     /// Keeps a result unless the slot already holds a newer one. A result
     /// older than the newest request is still kept: it applies while the
     /// source only grew, and the newest one may be dropped by the worker's
-    /// coalescing in favor of an even newer one.
+    /// coalescing in favor of an even newer one. A pending stand-in gives
+    /// way to the real result of its generation.
     fn take(
         slots: &mut HashMap<BlockKey, Slot>,
+        version: &mut u64,
         result: quark_syntax::Highlighted,
     ) -> Option<BlockKey> {
         let key = BlockKey(result.slot);
         let slot = slots.get_mut(&key)?;
-        if slot
-            .done
-            .as_ref()
-            .is_some_and(|done| done.generation >= result.generation)
-        {
+        if slot.done.as_ref().is_some_and(|done| {
+            done.generation > result.generation
+                || (done.generation == result.generation && !done.pending)
+        }) {
             return None;
         }
+        *version += 1;
         slot.done = Some(Done {
             generation: result.generation,
+            version: *version,
+            pending: result.pending,
             source: result.source,
             spans: result.spans.into(),
         });
@@ -375,6 +417,49 @@ mod imp {
             line_start = line_end + 1;
         }
         lines
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // Catches a grammar that arrives after a block was answered plain
+        // never coloring it: the colored result has the same generation as
+        // the stand-in, and must still replace it and change the version.
+        #[test]
+        fn pending_stand_in_gives_way_to_the_colored_result() {
+            let code: Arc<str> = Arc::from("fn");
+            let key = BlockKey(1);
+            let mut slots = HashMap::from([(
+                key,
+                Slot {
+                    generation: 1,
+                    language: LanguageId::from_fence("rust").unwrap(),
+                    requested: code.clone(),
+                    done: None,
+                },
+            )]);
+            let mut version = 0;
+            let result = |pending, length| quark_syntax::Highlighted {
+                slot: key.0,
+                generation: 1,
+                source: code.clone(),
+                spans: vec![HighlightSpan {
+                    offset: 0,
+                    length,
+                    kind: HighlightKind::Keyword,
+                }],
+                pending,
+            };
+            let mut steps = Vec::new();
+            for (pending, length) in [(true, 0), (false, 2), (false, 0)] {
+                let taken = take(&mut slots, &mut version, result(pending, length));
+                let done = slots[&key].done.as_ref().unwrap();
+                steps.push((taken.is_some(), done.version, done.spans[0].length));
+            }
+
+            assert_eq!(steps, [(true, 1, 0), (true, 2, 2), (false, 2, 2)]);
+        }
     }
 }
 

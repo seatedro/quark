@@ -1064,10 +1064,21 @@ fn unknown_fence_language_renders_plain_with_its_label() {
     );
 }
 
+/// A highlighter with the Rust pack `syntax-pack build rust` writes, or
+/// `None` (the test skips) when it has not been built.
+#[cfg(feature = "syntax")]
+fn rust_highlighter() -> Option<SyntaxHighlighter> {
+    let mut syntax = SyntaxHighlighter::new();
+    syntax.set_grammar_store(quark_syntax::testing::store_with("rust")?);
+    Some(syntax)
+}
+
 #[cfg(feature = "syntax")]
 #[test]
 fn rust_code_block_is_colored_once_its_highlight_arrives() {
-    let mut syntax = SyntaxHighlighter::new();
+    let Some(mut syntax) = rust_highlighter() else {
+        return;
+    };
     let mut markdown = MarkdownBlocks::new();
     let source = "```rust\nfn main() { let s = \"hi\"; }\n```";
     let first = markdown_message(0, &mut markdown, source, &mut syntax);
@@ -1145,7 +1156,9 @@ fn shrinking_a_message_forgets_the_highlights_of_dropped_blocks() {
 #[cfg(feature = "syntax")]
 #[test]
 fn dead_highlight_worker_is_replaced_and_does_not_hang() {
-    let mut syntax = SyntaxHighlighter::new();
+    let Some(mut syntax) = rust_highlighter() else {
+        return;
+    };
     let mut markdown = MarkdownBlocks::new();
     let source = "```rust\nfn main() {}\n```";
     markdown_message(0, &mut markdown, source, &mut syntax);

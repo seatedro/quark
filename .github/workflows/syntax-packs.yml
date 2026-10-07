@@ -1,0 +1,87 @@
+name: Syntax packs
+
+# Builds quark-syntax grammar packs from the pinned sources in
+# tools/syntax-pack/grammars.toml for each target, signs a per-target
+# index, and uploads both as workflow artifacts. Nothing is published:
+# copying an artifact's directory to the index host is a separate,
+# deliberate step (see docs/guide/syntax-packs.md).
+on:
+  workflow_dispatch:
+    inputs:
+      languages:
+        description: Space-separated languages to build (empty builds every pinned one)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: syntax-packs-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Actions are pinned to commit SHAs; the comment names the release.
+jobs:
+  packs:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-compiled on Apple silicon with clang -arch x86_64, so the
+          # tool cannot load these to check them; the arm64 job checks the
+          # same sources.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # Fetches each grammar at its pinned commit, checks the source hash,
+      # compiles, and (for the runner's own target) loads the pack and
+      # compiles its query.
+      - name: Build packs
+        env:
+          LANGUAGES: ${{ inputs.languages }}
+        run: |
+          # Word splitting of $LANGUAGES is intended: one argument per language.
+          # shellcheck disable=SC2086
+          cargo run --release -p syntax-pack -- build --target "${{ matrix.target }}" $LANGUAGES
+
+      # The private key never leaves this step; the index carries only the
+      # signature. Without the secret the job fails rather than produce an
+      # unsigned index.
+      - name: Sign index
+        env:
+          QUARK_SYNTAX_SIGNING_KEY: ${{ secrets.QUARK_SYNTAX_SIGNING_KEY }}
+        run: |
+          if [ -z "$QUARK_SYNTAX_SIGNING_KEY" ]; then
+            echo "::error::QUARK_SYNTAX_SIGNING_KEY is not set; add the index signing seed as a repository secret"
+            exit 1
+          fi
+          cargo run --release -p syntax-pack -- index --target "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: syntax-packs-${{ matrix.target }}
+          path: target/syntax-packs/${{ matrix.target }}/
+          if-no-files-found: error
