@@ -187,8 +187,9 @@ definition in the crate's `Cargo.toml`.
 - **Nix.** [flake.nix](flake.nix) has a dev shell with the pinned Rust
   toolchain, Zig, curl, and pkg-config, and puts the libraries winit, wgpu,
   and AccessKit load at run time (Wayland, xkbcommon, the Vulkan loader,
-  libGL, X11, D-Bus) on `LD_LIBRARY_PATH`. Enter it with `nix develop`, or
-  run `direnv allow` once to load it on `cd` through
+  libGL, X11, D-Bus) on `LD_LIBRARY_PATH`. GPU drivers still come from the
+  system (`hardware.graphics.enable` on NixOS). Enter the shell with
+  `nix develop`, or run `direnv allow` once to load it on `cd` through
   [.envrc](.envrc).
 
 ```bash
