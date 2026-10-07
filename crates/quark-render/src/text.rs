@@ -416,6 +416,52 @@ mod tests {
         }
     }
 
+    // Regression guard for color glyphs: an emoji must draw from its color
+    // bitmap, not as a coverage mask tinted with the text color. The text is
+    // white on black, so a strongly red pixel can only be the heart's own.
+    #[test]
+    fn color_emoji_draws_in_its_own_colors() {
+        use crate::renderer::{RenderError, Renderer};
+        use crate::scene::{Primitive, TextPrimitive};
+
+        let mut renderer = match Renderer::new_headless(64, 64, 1.0) {
+            Ok(renderer) => renderer,
+            Err(RenderError::NoAdapter) => {
+                assert!(
+                    std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                    "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+                );
+                return;
+            }
+            Err(error) => panic!("headless renderer failed: {error}"),
+        };
+        let mut text = test_text();
+        let params = TextParams::new("\u{2764}\u{fe0f}", TextStyle::new(40.0));
+        let layout = text.layout(&params).expect("layout");
+        let mut scene = Scene::default();
+        scene.push(Primitive::TextRun(TextPrimitive {
+            rect: Rect {
+                x: 4.0,
+                y: 4.0,
+                width: 56.0,
+                height: 56.0,
+            },
+            layout: ShapedText::new(Arc::new(layout)),
+            color: Color::rgba(255, 255, 255, 255),
+        }));
+        let pixels = renderer
+            .render_to_rgba(&scene, &mut text, 64, 64)
+            .expect("offscreen render");
+        let red = pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 160 && p[1] < 90 && p[2] < 90)
+            .count();
+        assert!(
+            red > 50,
+            "{red} red pixels: the emoji drew without its colors"
+        );
+    }
+
     // Regression: the default vendored faces (Geist, Geist Mono) have no
     // italic, so italic spans painted upright. They must be slanted
     // synthetically, while a family that ships an italic face (JetBrains
