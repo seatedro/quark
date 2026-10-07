@@ -34,6 +34,53 @@ pub(crate) enum Mode {
     Spread(TokenStream2),
 }
 
+/// Where `child_stmts` adds children.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sink {
+    /// A builder in `__quark_parent`, reassigned by each call.
+    Chain,
+    /// `__quark_children: Vec<AnyElement>`.
+    Vec,
+    /// `__quark_children` of a props component, filled through `Into`.
+    Props,
+}
+
+impl Sink {
+    /// The statement adding one lowered node.
+    fn add(self, mode: Mode) -> TokenStream2 {
+        let into = quote!(::core::convert::Into::into);
+        match (self, mode) {
+            (Sink::Chain, Mode::Child(t)) => {
+                quote!(__quark_parent = __quark_parent.child(#t);)
+            }
+            (Sink::Chain, Mode::Optional(t)) => {
+                quote!(__quark_parent = __quark_parent.optional_child(#t);)
+            }
+            (Sink::Chain, Mode::Spread(t)) => {
+                quote!(__quark_parent = __quark_parent.children(#t);)
+            }
+            (Sink::Vec, Mode::Child(t)) => quote!(__quark_children.push((#t).into_any());),
+            (Sink::Vec, Mode::Optional(t)) => quote! {
+                if let ::core::option::Option::Some(__quark_child) = (#t) {
+                    __quark_children.push(__quark_child.into_any());
+                }
+            },
+            (Sink::Vec, Mode::Spread(t)) => quote!(__quark_children.extend(#t);),
+            (Sink::Props, Mode::Child(t)) => {
+                quote!(__quark_children.push(#into((#t).into_any()));)
+            }
+            (Sink::Props, Mode::Optional(t)) => quote! {
+                if let ::core::option::Option::Some(__quark_child) = (#t) {
+                    __quark_children.push(#into(__quark_child.into_any()));
+                }
+            },
+            (Sink::Props, Mode::Spread(t)) => quote! {
+                __quark_children.extend((#t).into_iter().map(|__quark_child| #into(__quark_child)));
+            },
+        }
+    }
+}
+
 /// What attributes are lowered against. Builders take flags as no-argument
 /// calls; `#[derive(Props)]` builders take every prop as one value, so a
 /// flag is `true` there.
@@ -156,6 +203,14 @@ impl Emit {
 
     /// The root of a `view!`.
     pub fn root(&self, node: &Node) -> TokenStream2 {
+        // A root fragment or loop fills a `div` in place, as children do.
+        if matches!(node, Node::Fragment(_) | Node::For(_))
+            || matches!(node, Node::Element(el) if is_fragment_tag(el))
+        {
+            let f = Ident::new("div", Span::call_site());
+            let chain = self.append_children(quote!(#f()), std::slice::from_ref(node));
+            return quote!(#chain.into_any());
+        }
         // Elements already end in `.into_any()`; a root `{expr}` passes
         // through as written.
         match self.node(node) {
@@ -201,15 +256,10 @@ impl Emit {
 
     /// Children as a `Vec<AnyElement>` expression.
     fn children_vec<'a>(&self, children: impl IntoIterator<Item = &'a Node>) -> TokenStream2 {
-        let stmts = children.into_iter().map(|child| match self.node(child) {
-            Mode::Child(t) => quote!(__quark_children.push((#t).into_any());),
-            Mode::Optional(t) => quote! {
-                if let ::core::option::Option::Some(__quark_child) = (#t) {
-                    __quark_children.push(__quark_child.into_any());
-                }
-            },
-            Mode::Spread(t) => quote!(__quark_children.extend(#t);),
-        });
+        let stmts: Vec<_> = children
+            .into_iter()
+            .map(|child| self.child_stmts(child, Sink::Vec))
+            .collect();
         quote! {{
             let mut __quark_children = ::std::vec::Vec::new();
             #(#stmts)*
@@ -222,28 +272,43 @@ impl Emit {
     /// component whose child type keeps strings can read them (a button
     /// names itself from its text); `Vec<AnyElement>` works too.
     fn prop_children_vec(&self, children: &[&Node]) -> TokenStream2 {
-        let into = quote!(::core::convert::Into::into);
-        let stmts = children.iter().map(|child| match child {
-            Node::Text(lit) => {
-                let text = self.text_value(&[lit]);
-                quote!(__quark_children.push(#into(#text));)
-            }
-            other => match self.node(other) {
-                Mode::Child(t) => quote!(__quark_children.push(#into((#t).into_any()));),
-                Mode::Optional(t) => quote! {
-                    if let ::core::option::Option::Some(__quark_child) = (#t) {
-                        __quark_children.push(#into(__quark_child.into_any()));
-                    }
-                },
-                Mode::Spread(t) => quote! {
-                    __quark_children.extend((#t).into_iter().map(|__quark_child| #into(__quark_child)));
-                },
-            },
-        });
+        let stmts: Vec<_> = children
+            .iter()
+            .map(|child| self.child_stmts(child, Sink::Props))
+            .collect();
         quote! {{
             let mut __quark_children = ::std::vec::Vec::new();
             #(#stmts)*
             __quark_children
+        }}
+    }
+
+    /// `children` added to a builder `chain` with `.child`,
+    /// `.optional_child`, and `.children`. Control flow becomes statements
+    /// that add to the builder in place, so an `if`, `match`, or `for`
+    /// costs no more than the hand-written builder code: no `Vec` per
+    /// branch or iteration.
+    fn append_children<'a>(
+        &self,
+        mut chain: TokenStream2,
+        children: impl IntoIterator<Item = &'a Node>,
+    ) -> TokenStream2 {
+        let children: Vec<&Node> = children.into_iter().collect();
+        if !children.iter().any(|c| is_control_flow(c)) {
+            for child in children {
+                chain = self.append_child(chain, child);
+            }
+            return chain;
+        }
+        let stmts: Vec<_> = children
+            .iter()
+            .map(|child| self.child_stmts(child, Sink::Chain))
+            .collect();
+        quote! {{
+            #[allow(unused_mut)]
+            let mut __quark_parent = #chain;
+            #(#stmts)*
+            __quark_parent
         }}
     }
 
@@ -253,6 +318,83 @@ impl Emit {
             Mode::Optional(t) => quote!(#chain.optional_child(#t)),
             Mode::Spread(t) => quote!(#chain.children(#t)),
         }
+    }
+
+    /// Statements adding `node`'s children to `sink`. Fragments, `if`,
+    /// `match`, and `for` become the matching Rust statements around their
+    /// children's statements, so every child is added where it is built.
+    fn child_stmts(&self, node: &Node, sink: Sink) -> TokenStream2 {
+        match node {
+            Node::Fragment(children) => self.stmts(children, sink),
+            Node::Element(el) if is_fragment_tag(el) => {
+                self.reject_attrs(el, "a fragment takes no attributes");
+                self.stmts(&el.children, sink)
+            }
+            Node::If(chain) => {
+                let mut tokens = TokenStream2::new();
+                let mut link = Some(chain);
+                let mut first = true;
+                while let Some(c) = link {
+                    let cond = &c.cond;
+                    let body = self.stmts(&c.then_children, sink);
+                    if !first {
+                        tokens.extend(quote!(else));
+                    }
+                    first = false;
+                    tokens.extend(quote!(if #cond { #body }));
+                    if let Some(else_children) = &c.else_children {
+                        let body = self.stmts(else_children, sink);
+                        tokens.extend(quote!(else { #body }));
+                    }
+                    link = c.else_if.as_deref();
+                }
+                tokens
+            }
+            Node::Match(m) => {
+                let arms = m.arms.iter().map(|arm| {
+                    let pat = &arm.pat;
+                    let guard = arm.guard.as_ref().map(|g| quote!(if #g));
+                    let body = self.stmts(&arm.body, sink);
+                    quote!(#pat #guard => { #body })
+                });
+                let match_token = m.match_token;
+                let scrutinee = &m.scrutinee;
+                quote!(#match_token #scrutinee { #(#arms)* })
+            }
+            Node::For(fl) => {
+                let pat = &fl.pat;
+                let iter = &fl.iter;
+                let body = match (&fl.key, fl.body.as_slice()) {
+                    (None, body) => self.stmts(body, sink),
+                    (Some(key), [Node::Element(el)]) => {
+                        let mode = self.element(el, Some(key));
+                        sink.add(mode)
+                    }
+                    (Some((name, _)), _) => {
+                        self.error(
+                            name.span(),
+                            "a keyed `for` needs exactly one element in its body to put the key on",
+                        );
+                        TokenStream2::new()
+                    }
+                };
+                quote!(for #pat in #iter { #body })
+            }
+            // Text stays text for a props component's children (see
+            // `prop_children_vec`).
+            Node::Text(lit) if sink == Sink::Props => {
+                let text = self.text_value(&[lit]);
+                quote!(__quark_children.push(::core::convert::Into::into(#text));)
+            }
+            other => sink.add(self.node(other)),
+        }
+    }
+
+    fn stmts(&self, children: &[Node], sink: Sink) -> TokenStream2 {
+        children
+            .iter()
+            .map(|child| self.child_stmts(child, sink))
+            .collect()
     }
 
     /// Branches of an `if` chain or `match`, unified to the widest mode
@@ -441,6 +583,7 @@ impl Emit {
                 }
             }
             Tag::Component(path) => Mode::Child(self.component(path, el, key_call)),
+            Tag::Function(path) => Mode::Child(self.function(path, el, key_call)),
             Tag::Slot(name) => {
                 self.error(
                     name.span(),
@@ -467,9 +610,7 @@ impl Emit {
         let f = Ident::new("div", el.span);
         let mut chain = self.attrs(quote!(#f()), &el.attrs, Target::Div);
         chain.extend(key_call);
-        for child in &el.children {
-            chain = self.append_child(chain, child);
-        }
+        let chain = self.append_children(chain, &el.children);
         quote!(#chain.into_any())
     }
 
@@ -664,13 +805,17 @@ impl Emit {
         el: &Element,
         key_call: Option<TokenStream2>,
     ) -> TokenStream2 {
+        let function = matches!(el.tag, Tag::Function(_));
         let props = el.ctor_args.is_none();
         let target = if props {
             Target::Props
         } else {
             Target::Builder
         };
-        let mut chain = if props {
+        let mut chain = if function {
+            let args = el.ctor_args.iter().flatten();
+            quote!(#path(#(#args),*))
+        } else if props {
             let builder = Ident::new("builder", el.span);
             quote!(#path::#builder())
         } else {
@@ -713,11 +858,30 @@ impl Emit {
             let build = Ident::new("build", el.span);
             quote!(#chain.#build().into_any())
         } else {
-            for child in rest {
-                chain = self.append_child(chain, child);
-            }
+            let chain = self.append_children(chain, rest);
             quote!(#chain.into_any())
         }
+    }
+
+    /// `<name(args) attrs>children</name>`: `name(args)`, then the same
+    /// attribute calls, slots, and `.child(..)` calls as a builder
+    /// component.
+    fn function(
+        &self,
+        path: &syn::Path,
+        el: &Element,
+        key_call: Option<TokenStream2>,
+    ) -> TokenStream2 {
+        if let Some(name) = path.get_ident().map(Ident::to_string)
+            && (BUILTIN_TAGS.contains(&name.as_str()) || INLINE_TAGS.contains(&name.as_str()))
+        {
+            self.error(
+                el.span,
+                format!("<{name}> is a built-in tag and takes no arguments; use attributes"),
+            );
+            return quote!("");
+        }
+        self.component(path, el, key_call)
     }
 
     /// `.method(child)` once per child of a `<.method>` slot. Slot values
@@ -894,6 +1058,11 @@ impl Emit {
         let handler = match value {
             AttrValue::Expr(e) => quote!(#e),
             AttrValue::Reactive(e) => quote!(cx.read(#e)),
+            // `on:click={if let Some(m) = msg { m }}`: no `else` leaves
+            // the handler unset.
+            AttrValue::If(if_expr) if event.binding.is_none() => {
+                return self.if_attr(chain, &method, if_expr, &None);
+            }
             _ => {
                 self.error(
                     name.first.span(),
@@ -1027,6 +1196,19 @@ fn method_ident(segments: &[Ident], span: Span) -> Ident {
         Ok(_) => Ident::new(&name, span),
         Err(_) => Ident::new_raw(&name, span),
     }
+}
+
+/// Children that `append_children` lowers to statements.
+fn is_control_flow(node: &Node) -> bool {
+    match node {
+        Node::If(_) | Node::For(_) | Node::Match(_) | Node::Fragment(_) => true,
+        Node::Element(el) => is_fragment_tag(el),
+        _ => false,
+    }
+}
+
+fn is_fragment_tag(el: &Element) -> bool {
+    matches!(&el.tag, Tag::Builtin(name) if name == "fragment")
 }
 
 fn node_span(node: &Node) -> Span {

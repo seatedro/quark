@@ -208,12 +208,27 @@ fn parse_braced_children(input: ParseStream) -> Result<Vec<Node>> {
 impl Parse for Element {
     fn parse(input: ParseStream) -> Result<Self> {
         input.parse::<Token![<]>()?;
-        let (tag, span) = parse_tag(input)?;
+        let (mut tag, span) = parse_tag(input)?;
 
         let ctor_args = if input.peek(syn::token::Paren) {
-            if !matches!(tag, Tag::Component(_)) {
-                return Err(input.error("only component tags take constructor arguments"));
-            }
+            // A lowercase name with arguments is a function call:
+            // `<canvas(paint)>`, `<widgets::panel(theme)>`.
+            tag = match tag {
+                Tag::Builtin(name) => Tag::Function(syn::Path::from(name)),
+                Tag::Component(path)
+                    if path.segments.last().is_some_and(|s| {
+                        s.ident
+                            .to_string()
+                            .starts_with(|c: char| c.is_ascii_lowercase())
+                    }) =>
+                {
+                    Tag::Function(path)
+                }
+                Tag::Slot(_) => {
+                    return Err(input.error("slot tags take no arguments"));
+                }
+                other => other,
+            };
             let content;
             parenthesized!(content in input);
             Some(content.parse_terminated(Expr::parse, Token![,])?)
@@ -295,7 +310,7 @@ fn parse_tag(input: ParseStream) -> Result<(Tag, proc_macro2::Span)> {
 pub(crate) fn tag_name(tag: &Tag) -> String {
     match tag {
         Tag::Builtin(name) => name.to_string(),
-        Tag::Component(path) => path
+        Tag::Component(path) | Tag::Function(path) => path
             .segments
             .iter()
             .map(|s| s.ident.to_string())
@@ -331,7 +346,7 @@ fn parse_closing_tag(input: ParseStream, open: &Tag) -> Result<()> {
     // `</Button>` closes `<widgets::Button>`: JSX compares the whole name,
     // but repeating a module path in the closing tag is noise.
     let matches = found == expected
-        || matches!(open, Tag::Component(p) if p.segments.last().is_some_and(|s| s.ident == found));
+        || matches!(open, Tag::Component(p) | Tag::Function(p) if p.segments.last().is_some_and(|s| s.ident == found));
     if !matches {
         return Err(syn::Error::new(
             start,

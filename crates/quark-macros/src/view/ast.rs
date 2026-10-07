@@ -58,7 +58,8 @@ pub(crate) struct Element {
     pub tag: Tag,
     /// Span of the tag name, where errors about the element point.
     pub span: Span,
-    /// `<Component(a, b)>`: arguments for `Component::new`.
+    /// `<Component(a, b)>`: arguments for `Component::new`; `<name(a, b)>`:
+    /// arguments for the function `name`.
     pub ctor_args: Option<Punctuated<Expr, Token![,]>>,
     pub attrs: Vec<Attr>,
     pub children: Vec<Node>,
@@ -70,6 +71,9 @@ pub(crate) enum Tag {
     /// so unknown names get a suggestion.
     Builtin(Ident),
     Component(syn::Path),
+    /// `<name(args)>`: a lowercase function that returns a builder, such as
+    /// `<canvas(paint)>` or `<popover_panel(theme)>`.
+    Function(syn::Path),
     /// `<.method>` inside a component: each child becomes `.method(child)`.
     Slot(Ident),
 }

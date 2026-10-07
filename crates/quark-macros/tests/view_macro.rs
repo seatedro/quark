@@ -664,6 +664,23 @@ fn component_value_slots_and_constructor_args() {
     );
 }
 
+// Catches `<name(args)>` not calling the in-scope function, or dropping
+// its attributes or children.
+#[test]
+fn lowercase_tag_with_arguments_calls_the_function() {
+    fn panel(title: &str) -> El {
+        div().test_id(title)
+    }
+    let el = view! {
+        <panel("inbox") gap={2.0}>
+            <text>"a"</text>
+            if true { "b" }
+        </panel>
+    };
+    assert_eq!(el.calls, ["test_id(\"inbox\")", "gap(2.0)"]);
+    assert_eq!(kids(&el), ["a", "b"]);
+}
+
 #[test]
 fn component_child_slots_map_to_repeated_builder_calls() {
     let el = view! {
@@ -768,6 +785,17 @@ fn event_handler_attribute_binds_closure() {
     handler();
     handler();
     assert_eq!(clicks.get(), 2);
+}
+
+// Catches `on:event={if ..}` failing to compile or setting a handler when
+// the condition does not hold.
+#[test]
+fn conditional_event_handler_is_set_only_when_present() {
+    let make = |handler: Option<fn()>| {
+        view! { <div on:click={if let Some(h) = handler { h }} /> }
+    };
+    assert_eq!(make(Some(|| {})).calls, ["on_click"]);
+    assert!(make(None).calls.is_empty());
 }
 
 #[test]

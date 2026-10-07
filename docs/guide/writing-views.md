@@ -60,10 +60,11 @@ div()
 | `<>...</>`, `<fragment>` | No element: the children join the parent |
 | `<Name attr=..>` | A `#[derive(Props)]` component: `Name::builder()...build()` |
 | `<Name(a, b) attr=..>` | A builder component: `Name::new(a, b)` then one call per attribute |
+| `<name(a, b) attr=..>` | A function returning a builder: `name(a, b)` then one call per attribute, as in `<canvas(paint)/>` or `<popover_panel(theme)>` |
 | `<.method>` | Inside a component: each child becomes `.method(child)` |
 
-Lowercase names are built-in tags; anything else is an error that suggests
-the closest one. Components start with an uppercase letter or are paths
+Lowercase names without arguments are built-in tags; anything else is an
+error that suggests the closest one. Components start with an uppercase letter or are paths
 (`<widgets::Card>`). A closing tag must match its opening tag; `</Card>`
 may close `<widgets::Card>`.
 
@@ -85,7 +86,7 @@ the call.
 | `gap={@sig}` | `.gap(cx.read(sig))`, with `cx` in scope |
 | `bg={if hot { a } else { b }}` | `.bg(if hot { a } else { b })`; with no `else` the call is skipped |
 | `@when {cond} { attrs }` | The attributes apply only when `cond` holds |
-| `on:click={a}`, `on:drag={f}`, `on:scroll={b}` | `.on_click(a)`, `.on_drag(f)`, `.on_scroll(b)`: any `on:name` is `.on_name` |
+| `on:click={a}`, `on:drag={f}`, `on:scroll={b}` | `.on_click(a)`, `.on_drag(f)`, `.on_scroll(b)`: any `on:name` is `.on_name`; `{if ..}` without `else` skips the call |
 | `on:key:mod+s={a}` | `.on_key("mod+s", a)`; unknown modifiers fail to compile |
 | `role="button"` | `.semantic_role(SemanticRole::Button)`, which also sets the platform role |
 | `aria-label`, `aria-description`, `aria-valuetext` | `.accessibility_label`, `_description`, `_value` |
@@ -331,7 +332,9 @@ is an error that suggests `"Send"`.
 | `for x in xs key={x.id} { <div>..</div> }` | Adds `.key(..)` to each iteration's single root |
 
 A branch or arm with several children adds them to the parent directly;
-no wrapper `div` changes the layout. `view!` returns the root element; a
+no wrapper `div` changes the layout. Inside an element, `if`, `match`, and
+`for` lower to the same Rust statements around `.child(..)` calls that you
+would write by hand, so they allocate nothing beyond the children. `view!` returns the root element; a
 root fragment becomes a `div`.
 
 ## Components with typed props

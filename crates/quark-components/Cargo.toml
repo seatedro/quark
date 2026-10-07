@@ -22,3 +22,5 @@ serde.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# `view_equivalence` counts what the macro's lowering allocates.
+quark-ui = { workspace = true, features = ["test-alloc"] }
