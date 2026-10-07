@@ -2,7 +2,11 @@
 //! sidebar on the left, the chat in the center, a right panel with Preview,
 //! Terminal, Diff, Files, and Pull requests tabs, and a terminal drawer
 //! along the bottom. Drag the dividers (double click one to reset it), or
-//! focus one and use the arrow keys and Enter. Drag tabs to reorder them.
+//! focus one and use the arrow keys and Enter. Drag a tab along its strip to
+//! reorder it, onto another strip or panel to move it there, or onto a
+//! panel's edge to split it. The right panel is sealed: its tabs split and
+//! reorder inside it but never leave, and other tabs cannot enter. Middle
+//! click a tab to close it.
 //! Mod+B toggles the sidebar, Mod+Alt+B the right panel, Mod+J the drawer.
 //! The layout is saved to the system temp directory and restored on the
 //! next launch. Escape quits.
@@ -16,7 +20,7 @@ use quark_app::quark_ui::theme::Theme;
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
 use quark_components::{
-    Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockState, Pane, PanelId,
+    Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockState, Pane, PanelId, TabPolicy,
 };
 
 const THREADS: PanelId = PanelId(1);
@@ -78,7 +82,8 @@ impl PanelsDemo {
         for panel in [PREVIEW, TERMINAL, DIFF, FILES, PULL_REQUESTS] {
             dock.open(DockRegion::Right, panel);
         }
-        dock.select(DockRegion::Right, 0);
+        dock.open(DockRegion::Right, PREVIEW);
+        dock.set_policy(DockRegion::Right, TabPolicy::SEALED);
         dock.open(DockRegion::Bottom, DRAWER);
         dock.set_visible(DockRegion::Bottom, false);
         Self {
@@ -130,7 +135,10 @@ impl UiApp for PanelsDemo {
             .toggle_key(DockRegion::Left, "mod+b")
             .toggle_key(DockRegion::Right, "mod+alt+b")
             .toggle_key(DockRegion::Bottom, "mod+j")
+            .always_show_tabs(DockRegion::Left)
+            .always_show_tabs(DockRegion::Center)
             .always_show_tabs(DockRegion::Right)
+            .always_show_tabs(DockRegion::Bottom)
             .build(
                 theme,
                 |id| title(id).to_owned(),
@@ -215,10 +223,12 @@ mod tests {
         ui.drag((x, y), (x + dx, y));
     }
 
+    /// The right panel's tabs, in order.
     fn tab_names(ui: &UiTestHarness<PanelsDemo>) -> Vec<String> {
         ui.find_all(By::role(Role::Tab))
             .into_iter()
             .filter_map(|n| n.name)
+            .filter(|name| !matches!(name.as_str(), "Threads" | "Chat"))
             .collect()
     }
 
@@ -404,6 +414,70 @@ mod tests {
         );
     }
 
+    fn tab_center(ui: &UiTestHarness<PanelsDemo>, name: &str) -> (f32, f32) {
+        ui.find(By::role_name(Role::Tab, name)).center()
+    }
+
+    #[test]
+    fn a_tab_dragged_onto_an_edge_previews_then_splits_the_panel() {
+        let mut ui = harness();
+        let chat = ui.find(By::role_name(Role::TabPanel, "Chat")).bounds;
+        let edge = (chat.x + chat.width - 20.0, chat.y + chat.height / 2.0);
+        ui.pointer_down(tab_center(&ui, "Threads"));
+        ui.pointer_move(edge);
+        // The preview covers the half of Chat the new group would take.
+        let preview = ui.find(By::test_id("dock-drop-preview")).bounds;
+        assert_eq!(
+            (preview.x, preview.y, preview.width, preview.height),
+            (
+                chat.x + (chat.width / 2.0).ceil(),
+                chat.y,
+                (chat.width / 2.0).floor(),
+                chat.height
+            )
+        );
+        ui.pointer_up(edge);
+
+        assert!(ui.try_find(By::test_id("dock-drop-preview")).is_none());
+        let chat_after = ui.find(By::role_name(Role::TabPanel, "Chat")).bounds;
+        let threads = ui.find(By::role_name(Role::TabPanel, "Threads")).bounds;
+        assert_eq!(chat_after.y, threads.y);
+        assert!(threads.x > chat_after.x + chat_after.width, "{threads:?}");
+        // The emptied sidebar hides.
+        assert_eq!(announced(&ui, "Sidebar"), None);
+    }
+
+    #[test]
+    fn right_panel_tabs_split_inside_it_but_never_leave() {
+        let mut ui = harness();
+        let chat = ui.find(By::role_name(Role::TabPanel, "Chat")).center();
+        ui.pointer_down(tab_center(&ui, "Diff"));
+        ui.pointer_move(chat);
+        assert!(ui.try_find(By::test_id("dock-drop-preview")).is_none());
+        ui.pointer_up(chat);
+        assert!(ui.try_find(By::role_name(Role::TabPanel, "Diff")).is_some());
+        assert_eq!(
+            tab_names(&ui),
+            ["Preview", "Terminal", "Diff", "Files", "Pull requests"]
+        );
+
+        // Nor does it take tabs from elsewhere.
+        let strip = tab_center(&ui, "Files");
+        ui.drag(tab_center(&ui, "Threads"), strip);
+        assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("260"));
+
+        // Its own bottom edge splits it.
+        let panel = ui.find(By::role_name(Role::TabPanel, "Diff")).bounds;
+        ui.drag(
+            tab_center(&ui, "Diff"),
+            (panel.x + panel.width / 2.0, panel.y + panel.height - 20.0),
+        );
+        let top = ui.find(By::role_name(Role::TabPanel, "Files")).bounds;
+        let bottom = ui.find(By::role_name(Role::TabPanel, "Diff")).bounds;
+        assert_eq!((top.x, top.width), (bottom.x, bottom.width));
+        assert!(bottom.y > top.y + top.height, "{top:?} over {bottom:?}");
+    }
+
     #[test]
     fn closing_the_last_tab_hides_the_region() {
         let mut ui = harness();
@@ -420,8 +494,12 @@ mod tests {
         assert_eq!(
             dock_tree(&ui),
             r#"
+  TabList "Sidebar" @dock-tabs
+    Tab "Threads" @dock-tab
   TabPanel "Threads"
   Splitter "Resize Sidebar" = "260" @split-divider
+  TabList "Chat" @dock-tabs
+    Tab "Chat" @dock-tab
   TabPanel "Chat"
   Splitter "Resize Right panel" = "420" @split-divider
   TabList "Right panel" @dock-tabs

@@ -307,6 +307,11 @@ impl SplitState {
         self.debug_verify();
     }
 
+    /// Whether `divider` is laid out: false for a hidden collapsed pane's.
+    pub(crate) fn divider_shown(&self, divider: usize) -> bool {
+        self.divider_visible(divider)
+    }
+
     fn divider_visible(&self, divider: usize) -> bool {
         !(self.hide_collapsed_dividers && self.collapsed[self.divider_pane(divider)])
     }
