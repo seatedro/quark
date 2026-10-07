@@ -5,6 +5,8 @@ pub fn run<A: App>(app: A, options: WindowOptions) -> Result<(), RunError> {
     if options.panic_hook {
         crate::panic_hook::install(&options.title);
     }
+    #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
+    crate::profile::start();
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let waker = Waker(event_loop.create_proxy());
@@ -125,6 +127,8 @@ impl<A: App> Runner<A> {
             scale_factor,
             surface_size: size,
             frame_clock: FrameClock::default(),
+            #[cfg(feature = "devtools")]
+            last_render: Default::default(),
             traffic_lights: options.traffic_lights,
             persist_key: options.persist_key.clone(),
         })
@@ -259,6 +263,8 @@ impl<A: App> Runner<A> {
             flags: &mut self.flags,
             waker: &self.waker,
             ime: FrameIme::default(),
+            #[cfg(feature = "devtools")]
+            last_render: state.last_render,
         };
 
         // Through subsecond, a hot patch to the app's frame code takes effect
@@ -266,7 +272,10 @@ impl<A: App> Runner<A> {
         #[cfg(feature = "hot-reload")]
         let scene = subsecond::call(|| self.app.frame(&mut cx));
         #[cfg(not(feature = "hot-reload"))]
-        let scene = self.app.frame(&mut cx);
+        let scene = {
+            profile_scope!("frame");
+            self.app.frame(&mut cx)
+        };
         let mut scene = scene;
         let ime = cx.ime;
         if let Some(allowed) = ime.allowed {
@@ -281,7 +290,14 @@ impl<A: App> Runner<A> {
 
         scene_to_physical(&mut scene, scale);
         let time = timing.elapsed.as_secs_f32();
-        match renderer.render(&scene, &mut self.text.system, time) {
+        let rendered = {
+            profile_scope!("render");
+            renderer.render(&scene, &mut self.text.system, time)
+        };
+        match rendered {
+            #[cfg(feature = "devtools")]
+            Ok(stats) => state.last_render = stats,
+            #[cfg(not(feature = "devtools"))]
             Ok(_) => {}
             // Nothing reached the screen; try again on the next pass.
             Err(RenderError::SurfaceReconfigured) => {
@@ -299,6 +315,8 @@ impl<A: App> Runner<A> {
             Err(error) => tracing::error!("render failed: {error}"),
         }
         self.text.layouts.trim();
+        #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
+        crate::profile::finish_frame();
 
         if let Some(update) = self.app.accessibility() {
             if let Ok(mut latest) = state.accessibility_tree.lock() {

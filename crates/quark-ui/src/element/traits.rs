@@ -38,6 +38,20 @@ pub trait Element: 'static {
         scene: &mut Scene,
         cx: &mut ElementContext,
     );
+
+    /// What the inspector shows about this element beyond its bounds.
+    /// Called only while the inspector records.
+    #[cfg(feature = "devtools")]
+    fn inspect(&self) -> crate::inspector::InspectInfo {
+        crate::inspector::InspectInfo::default()
+    }
+
+    /// The override key and style that devtools style overrides edit,
+    /// applied before layout.
+    #[cfg(feature = "devtools")]
+    fn inspect_style_mut(&mut self) -> Option<(UiKey, &mut ElementStyle)> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +70,8 @@ impl AnyElement {
                 layout_state: None,
                 prepaint_state: None,
                 layout_id: None,
+                #[cfg(feature = "devtools")]
+                inspect_record: None,
             }),
         }
     }
@@ -122,10 +138,15 @@ struct ElementHolder<E: Element> {
     layout_state: Option<E::LayoutState>,
     prepaint_state: Option<E::PrepaintState>,
     layout_id: Option<LayoutId>,
+    /// This element's row in the inspector's frame, while it records.
+    #[cfg(feature = "devtools")]
+    inspect_record: Option<usize>,
 }
 
 impl<E: Element> AnyElementImpl for ElementHolder<E> {
     fn request_layout(&mut self, engine: &mut LayoutEngine, cx: &mut ElementContext) -> LayoutId {
+        #[cfg(feature = "devtools")]
+        crate::inspector::apply_override(&mut self.element, cx);
         let (id, state) = self.element.request_layout(engine, cx);
         self.layout_id = Some(id);
         self.layout_state = Some(state);
@@ -153,6 +174,10 @@ impl<E: Element> AnyElementImpl for ElementHolder<E> {
             .as_mut()
             .expect("prepaint called before request_layout");
         cx.push_element_offset(offset_x, offset_y);
+        #[cfg(feature = "devtools")]
+        {
+            self.inspect_record = crate::inspector::record_prepaint(&self.element, bounds, cx);
+        }
         let prepaint_state = self.element.prepaint(bounds, layout_state, engine, cx);
         self.prepaint_state = Some(prepaint_state);
         cx.pop_element_offset();
@@ -182,8 +207,12 @@ impl<E: Element> AnyElementImpl for ElementHolder<E> {
             .as_mut()
             .expect("paint called before prepaint");
         cx.push_element_offset(offset_x, offset_y);
+        #[cfg(feature = "devtools")]
+        let semantic_before = cx.semantic.nodes().len();
         self.element
             .paint(bounds, layout_state, prepaint_state, engine, scene, cx);
+        #[cfg(feature = "devtools")]
+        crate::inspector::record_paint(self.inspect_record, semantic_before, bounds, cx);
         cx.pop_element_offset();
     }
 }

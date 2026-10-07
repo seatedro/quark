@@ -67,6 +67,8 @@ pub struct FrameContext<'a> {
     pub(super) flags: &'a mut Flags,
     pub(super) waker: &'a Waker,
     pub(super) ime: FrameIme,
+    #[cfg(feature = "devtools")]
+    pub(super) last_render: quark_render::FrameStats,
 }
 
 /// IME requests made while building a frame. The runner applies them to
@@ -79,6 +81,12 @@ pub(super) struct FrameIme {
 }
 
 impl FrameContext<'_> {
+    /// Renderer stats of this window's previous frame.
+    #[cfg(feature = "devtools")]
+    pub fn last_render_stats(&self) -> quark_render::FrameStats {
+        self.last_render
+    }
+
     /// Turn IME on or off for this window once the frame is built; see
     /// [`EventContext::set_ime_allowed`].
     pub fn set_ime_allowed(&mut self, allowed: bool) {

@@ -1024,6 +1024,35 @@ impl Element for Div {
             scene.pop_z_index();
         }
     }
+
+    #[cfg(feature = "devtools")]
+    fn inspect(&self) -> crate::inspector::InspectInfo {
+        crate::inspector::InspectInfo {
+            key: self.inspect_key(),
+            z_index: self.base_style.z_index,
+            blocks_mouse: self.block_mouse,
+            style: Some(crate::inspector::StyleSummary::of(&self.base_style)),
+        }
+    }
+
+    #[cfg(feature = "devtools")]
+    fn inspect_style_mut(&mut self) -> Option<(UiKey, &mut ElementStyle)> {
+        Some((self.inspect_key()?, &mut self.base_style))
+    }
+}
+
+#[cfg(feature = "devtools")]
+impl Div {
+    /// The key devtools overrides are stored under: the sibling key, or the
+    /// stable id when the div has no key.
+    fn inspect_key(&self) -> Option<UiKey> {
+        self.semantic_key.clone().or_else(|| {
+            self.semantic_id
+                .as_ref()
+                .map(|id| UiKey::new(id.as_str()))
+                .or_else(|| self.accessibility_id.as_deref().map(UiKey::from))
+        })
+    }
 }
 
 fn offset_bounds(bounds: Bounds, (dx, dy): (f32, f32)) -> Bounds {

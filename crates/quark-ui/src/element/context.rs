@@ -36,6 +36,9 @@ pub struct ElementContext<'a> {
     pub tooltip_regions: Vec<TooltipRegion>,
     pub accessibility: AccessibilityFrame,
     pub semantic: SemanticFrame,
+    /// Inspector recording, style overrides, and phase timings.
+    #[cfg(feature = "devtools")]
+    pub devtools: crate::inspector::FrameProbe,
     hovered: Vec<HitId>,
     /// Intersections of the clips pushed so far; the last one is current.
     clip_stack: Vec<Rect>,
@@ -77,6 +80,8 @@ impl<'a> ElementContext<'a> {
             tooltip_regions: Vec::new(),
             accessibility: AccessibilityFrame::default(),
             semantic: SemanticFrame::default(),
+            #[cfg(feature = "devtools")]
+            devtools: Default::default(),
             hovered: Vec::new(),
             clip_stack: Vec::new(),
             z_index_stack: vec![0],

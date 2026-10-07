@@ -78,6 +78,7 @@ impl TextSystem {
     /// Shapes and lays out text without caching. Prefer
     /// [`crate::LayoutCache::layout`] for per-frame use.
     pub fn layout(&mut self, params: &TextParams) -> Result<TextLayout, TextError> {
+        profile_scope!("text_shape");
         TextLayout::build(&mut self.font_system, params)
     }
 }

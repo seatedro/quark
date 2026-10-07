@@ -29,6 +29,8 @@ serde_json = "1.0"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"], optional = true }
 pollster = { workspace = true, optional = true }
 notify-rust = { version = "4.18", default-features = false, features = ["z"], optional = true }
+profiling = { workspace = true, optional = true }
+puffin_http = { version = "0.17", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -82,6 +84,16 @@ tray = ["dep:tray-icon"]
 dialogs = ["dep:rfd", "dep:pollster"]
 # Image get and set through `EventContext::clipboard_image`.
 clipboard-image = ["arboard/image-data"]
+# Developer tooling for UiApp windows: the frame HUD, the element inspector
+# with layout debug outlines, and live style overrides. Toggle with
+# ctrl+shift+h, ctrl+shift+i, and ctrl+shift+l, or start with
+# QUARK_DEVTOOLS=hud,inspector,layout.
+devtools = ["ui", "quark-ui/devtools"]
+# Profiler scopes around frame phases and text shaping, plus tracing spans.
+# puffin serves on 127.0.0.1:8585 (connect with puffin_viewer); tracy
+# connects to the Tracy profiler. Enable one at a time.
+profile-puffin = ["dep:profiling", "profiling/profile-with-puffin", "dep:puffin_http", "quark-ui?/profile", "quark-text/profile"]
+profile-tracy = ["dep:profiling", "profiling/profile-with-tracy", "quark-ui?/profile", "quark-text/profile"]
 
 [[example]]
 name = "hello_ui"

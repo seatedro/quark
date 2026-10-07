@@ -194,6 +194,20 @@ impl HitTable {
         self.bounds[id.index()]
     }
 
+    /// Every entry, in paint order.
+    pub fn ids(&self) -> impl Iterator<Item = HitId> + use<> {
+        (0..self.bounds.len() as u32).map(HitId)
+    }
+
+    /// Intersection of the entry's ancestor clips.
+    pub fn clip(&self, id: HitId) -> Rect {
+        self.clip[id.index()]
+    }
+
+    pub fn z(&self, id: HitId) -> i32 {
+        self.z[id.index()]
+    }
+
     pub fn node(&self, id: HitId) -> Option<usize> {
         let node = self.node[id.index()];
         (node != NO_NODE).then_some(node as usize)

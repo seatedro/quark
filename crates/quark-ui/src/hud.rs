@@ -9,18 +9,27 @@ const RESYNC_GAP_US: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HudSample {
+    /// Building the element tree (the app's view).
     pub build_us: u64,
+    pub layout_us: u64,
+    /// Prepaint, hit test, and paint.
     pub paint_us: u64,
     pub render_cpu_us: u64,
     pub acquire_us: u64,
     pub present_us: u64,
     pub primitive_count: usize,
     pub frame_interval_us: u64,
+    /// Text layout cache lookups this frame that reused a layout.
+    pub text_hits: u64,
+    /// Lookups this frame that shaped a new layout.
+    pub text_misses: u64,
+    /// Layouts held by the cache.
+    pub text_entries: usize,
 }
 
 impl HudSample {
     pub fn cpu_us(&self) -> u64 {
-        self.build_us + self.paint_us + self.render_cpu_us
+        self.build_us + self.layout_us + self.paint_us + self.render_cpu_us
     }
 }
 
