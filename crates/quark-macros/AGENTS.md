@@ -33,27 +33,26 @@ the `quark` crate and quark-ui's element builders must provide.
   `new_default` exists only with struct-level `#[store(default)]`, so
   non-`Default` structs derive cleanly. `snapshot()` is generated only when
   no field is skipped.
-- `view!` supports optional `scale,`, built-in tags (`div`, `text`, `icon`,
-  `spacer`, `fragment`), component tags, `if` / `else if` / `else`, `for`,
-  `match`, raw expressions, optional expressions, and spread expressions.
-  An `if` chain with no final `else` yields no child when nothing matches.
+- `view!` syntax is documented in `docs/guide/writing-views.md`; keep it
+  in step with the macro. Every attribute lowers to a method call whose
+  name carries the attribute's span, so the builder API stays the single
+  list of attributes; do not add attribute allow-lists. `on:`, `aria-`,
+  and `role` are the only mapped names (tables in `src/view/emit.rs`).
+- `class="..."` lowers through the tables in `src/classes.rs`. It is not
+  CSS. `__class_vocabulary!` compiles every entry against the builders in
+  quark-components' `tests/view_equivalence.rs`, and a unit test keeps the
+  generated reference in the guide current (`QUARK_BLESS=1` rewrites it).
+- `<Name ..>` lowers to `#[derive(Props)]`'s `Name::builder()...build()`;
+  `<Name(args) ..>` to `Name::new(args)` plus builder calls. Required props
+  are type-state markers whose bounds sit on `build`, so a missing one is
+  E0277 with the `on_unimplemented` message.
+- Multi-child `if`/`match` branches and fragments spread children into the
+  parent, never into a wrapper `div()`: wrapping changes layout.
 - Reactive attributes use `name={@signal}` and lower to `cx.read(signal)`.
-  Call sites must provide a `cx` with the expected `read` method.
-- `class="..."` lowers to builder method calls. It is not CSS and must stay
-  aligned with quark-ui's builder methods.
-- Multi-child `if` branches and fragments must spread children into the parent,
-  not wrap them in a bare `div()`. Wrapping changes layout and percentage-size
-  resolution.
-- Components know nothing about specific types. `<Button(a, b)>` lowers to
-  `Button::new(a, b)`; every attribute becomes a builder call.
-- `<.method>` inside a component is a slot: each child becomes
-  `.method(child)`. Slots take no attributes and need at least one child.
-- Input the macro cannot lower faithfully (non-identifier classes, extra
-  `<text>` children, children of `icon`/`spacer`, attributes on
-  `spacer`/`fragment`/slots) is a spanned compile error. Errors replace the
-  whole expansion.
-- Auto-scaling applies only to known spatial attributes when the optional
-  `scale` identifier is supplied.
+- Input the macro cannot lower faithfully is a spanned compile error, and
+  any error replaces the whole expansion.
+- Emitted paths are limited to `::core`, `::std`, and `::quark`; everything
+  else is a method call or a name the call site has in scope.
 
 ## Usage Patterns
 
@@ -62,7 +61,8 @@ the `quark` crate and quark-ui's element builders must provide.
 - Preserve hygienic internal names like `__quark_children` and `__w`; avoid
   names that can collide with user bindings unless they are already part of the
   macro convention.
-- Cover lowering changes with runtime tests in `tests/view_macro.rs` and
+- Cover lowering changes with runtime tests in `tests/view_macro.rs`, the
+  builder equivalence in quark-components' `tests/view_equivalence.rs`, and
   rejected inputs with trybuild cases in `tests/ui/`.
 
 ## Anti-Patterns
