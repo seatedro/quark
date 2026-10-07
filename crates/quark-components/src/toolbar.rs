@@ -39,22 +39,12 @@ impl RenderOnce for Toolbar {
         let tc = &cx.theme.colors;
         let scale = cx.theme.metrics.ui_scale();
 
-        let mut left = div().flex_row().items_center().gap_1();
-        for child in self.left {
-            left = left.child(child);
-        }
-
-        let mut right = div().flex_row().items_center().gap_1();
-        for child in self.right {
-            right = right.child(child);
-        }
-
         view! { scale,
             <div class="w-full flex-row items-center" h={cx.theme.metrics.ui_row_height} px={Sp::MD}
                  border_b={tc.border_variant}>
-                {left}
+                <div class="flex-row items-center" gap_1>{...self.left}</div>
                 <spacer />
-                {right}
+                <div class="flex-row items-center" gap_1>{...self.right}</div>
             </div>
         }
     }
