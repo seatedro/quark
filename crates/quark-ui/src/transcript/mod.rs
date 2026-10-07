@@ -13,10 +13,15 @@
 //! input comes back as [`TranscriptEvent`]s in the element's local
 //! coordinates, which the app passes to [`Transcript::handle`].
 //!
+//! Rows outside the window are measured on a background thread when the
+//! measurer offers a [`MeasureSpec`] ([`MarkdownTranscript`] does this by
+//! default), so their heights become exact without costing the UI thread.
+//!
 //! Selection endpoints are `(BlockKey, byte)` pairs, so a selection
 //! survives its rows scrolling out of the window, history being prepended,
 //! and text streaming into the last message.
 
+mod background;
 mod element;
 mod facade;
 mod markdown;
@@ -25,6 +30,7 @@ mod syntax;
 #[cfg(test)]
 mod tests;
 
+pub use background::MeasureSpec;
 pub use element::{TranscriptElement, TranscriptEvent};
 pub use facade::{MarkdownEntry, MarkdownTranscript};
 pub use markdown::{BlockKeys, CODE_SCALE, MarkdownMessage, heading_style};
@@ -457,6 +463,13 @@ pub trait BlockMeasurer {
     /// is measured again.
     fn settings_key(&self) -> u64 {
         0
+    }
+
+    /// How a background thread can measure exactly as this measurer does.
+    /// `None` (the default) keeps rows outside the window estimated until
+    /// they scroll in.
+    fn background_spec(&self) -> Option<MeasureSpec> {
+        None
     }
 }
 
@@ -1031,14 +1044,10 @@ impl<G: BlockGeometry> Transcript<G> {
         let cache = &mut self.measured;
         self.list
             .measure_visible(width, style.overscan, |key, width| {
-                let row = RowKey(key);
-                let block_width = block_width(&style, width);
-                let mut height = style.pad_y * 2.0 + style.header_height;
-                for (n, (_, block)) in owned_blocks(source, block_row, row).enumerate() {
-                    height += gap_before(&style, n, block);
-                    height += measure_cached(cache, measurer, block, block_width).height();
-                }
-                height
+                let blocks = owned_blocks(source, block_row, RowKey(key)).map(|(_, b)| b);
+                row_height(&style, width, blocks, |block, block_width| {
+                    measure_cached(cache, measurer, block, block_width).height()
+                })
             });
         if self.list.is_stuck_to_bottom() {
             self.unseen = false;
@@ -1136,6 +1145,61 @@ impl<G: BlockGeometry> Transcript<G> {
 
     pub fn viewport_size(&self) -> (f32, f32) {
         self.size
+    }
+
+    // -- Background measurement --
+
+    /// Up to `limit` rows still holding an estimate, nearest to the window
+    /// first, alternating above and below it, skipping rows `skip` names.
+    /// `skipped` is how many unmeasured rows `skip` can name at most; when
+    /// every unmeasured row is among them the scan is skipped.
+    fn unmeasured_near_window(
+        &self,
+        limit: usize,
+        skipped: usize,
+        skip: impl Fn(RowKey) -> bool,
+    ) -> Vec<RowKey> {
+        let rows = self.list.rows();
+        let mut found = Vec::new();
+        if limit == 0 || rows.len() - rows.measured_count() <= skipped {
+            return found;
+        }
+        let window = self.list.window(self.style.overscan).range;
+        let (mut above, mut below) = (window.start, window.start);
+        let take = |index: usize, found: &mut Vec<RowKey>| {
+            let key = rows.keys()[index];
+            if !rows.is_measured_at(index) && !skip(key) {
+                found.push(key);
+            }
+        };
+        while found.len() < limit && (above > 0 || below < rows.len()) {
+            if below < rows.len() {
+                take(below, &mut found);
+                below += 1;
+            }
+            if above > 0 && found.len() < limit {
+                above -= 1;
+                take(above, &mut found);
+            }
+        }
+        found
+    }
+
+    /// The blocks `row` lays out, as a snapshot another thread can measure.
+    fn row_snapshot(&self, source: &impl TranscriptSource, row: RowKey) -> Vec<TranscriptBlock> {
+        owned_blocks(source, &self.block_row, row)
+            .map(|(_, block)| block.clone())
+            .collect()
+    }
+
+    /// Records a height measured off the UI thread for a row still holding
+    /// an estimate. The first visible row keeps its place, or the view stays
+    /// pinned to the bottom. Returns whether the height was taken.
+    fn set_background_height(&mut self, row: RowKey, height: f32) -> bool {
+        if self.list.rows().is_measured(row) != Some(false) {
+            return false;
+        }
+        self.list.set_height(row, height).is_ok()
     }
 
     // -- Integrity --
@@ -1256,6 +1320,24 @@ fn owned_blocks<'a>(
         .iter()
         .enumerate()
         .filter(move |(_, block)| block_row.get(&block.key) == Some(&row))
+}
+
+/// Height of a row of `width` holding `blocks`, given each block's height
+/// at the blocks' width. The UI thread and the background measurer both
+/// use it, so their heights agree to the bit.
+fn row_height<'a>(
+    style: &TranscriptStyle,
+    width: f32,
+    blocks: impl Iterator<Item = &'a TranscriptBlock>,
+    mut block_height: impl FnMut(&TranscriptBlock, f32) -> f32,
+) -> f32 {
+    let block_width = block_width(style, width);
+    let mut height = style.pad_y * 2.0 + style.header_height;
+    for (n, block) in blocks.enumerate() {
+        height += gap_before(style, n, block);
+        height += block_height(block, block_width);
+    }
+    height
 }
 
 /// Space above the `index`-th block of a message.

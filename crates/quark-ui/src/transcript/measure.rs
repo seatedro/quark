@@ -11,7 +11,9 @@ use std::sync::Arc;
 use quark_render::FontKind;
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
-use super::{BlockContent, BlockGeometry, BlockMeasurer, RULE_HEIGHT, TranscriptBlock};
+use super::{
+    BlockContent, BlockGeometry, BlockMeasurer, MeasureSpec, RULE_HEIGHT, TranscriptBlock,
+};
 use crate::element::{CodeBlock, SelectableText};
 
 /// Measures blocks with the frame's text system and layout cache.
@@ -79,6 +81,14 @@ impl BlockMeasurer for TextMeasurer<'_> {
 
     fn settings_key(&self) -> u64 {
         (u64::from(self.font_size.to_bits()) << 32) | u64::from(self.scale_factor.to_bits())
+    }
+
+    fn background_spec(&self) -> Option<MeasureSpec> {
+        Some(MeasureSpec {
+            fonts: self.text.recipe(),
+            font_size: self.font_size,
+            scale_factor: self.scale_factor,
+        })
     }
 
     fn measure(&mut self, block: &TranscriptBlock, width: f32) -> TextGeometry {
