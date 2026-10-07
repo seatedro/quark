@@ -144,7 +144,26 @@ mod bar {
 
     fn submenu(menu: &Menu) -> Result<Submenu, muda::Error> {
         let submenu = Submenu::new(&menu.label, menu.enabled);
+        // Separators are added lazily, so the roles a platform leaves out
+        // (Services and Hide off macOS) leave no doubled, leading, or
+        // trailing separators behind.
+        let mut separator = false;
+        let mut any = false;
         for item in &menu.items {
+            if let MenuItem::Separator = item {
+                separator = any;
+                continue;
+            }
+            if let MenuItem::Role(role) = item
+                && role.macos_only()
+                && !cfg!(target_os = "macos")
+            {
+                continue;
+            }
+            if std::mem::take(&mut separator) {
+                submenu.append(&PredefinedMenuItem::separator())?;
+            }
+            any = true;
             match item {
                 MenuItem::Action(action) => {
                     let id = format!("{ACTION_PREFIX}{}", action.id);
@@ -171,7 +190,7 @@ mod bar {
                     }
                 }
                 MenuItem::Submenu(menu) => submenu.append(&self::submenu(menu)?)?,
-                MenuItem::Separator => submenu.append(&PredefinedMenuItem::separator())?,
+                MenuItem::Separator => {}
                 MenuItem::Role(role) => {
                     if let Some(item) = role_item(*role) {
                         submenu.append(item.as_ref())?;
@@ -186,9 +205,6 @@ mod bar {
     /// Hide), else a plain item the runner carries out, so every platform
     /// sees the same Quit, window, and edit behavior.
     fn role_item(role: MenuRole) -> Option<Box<dyn IsMenuItem>> {
-        if role.macos_only() && !cfg!(target_os = "macos") {
-            return None;
-        }
         let native: Option<Box<dyn IsMenuItem>> = match role {
             MenuRole::About => Some(Box::new(PredefinedMenuItem::about(None, None))),
             MenuRole::Services => Some(Box::new(PredefinedMenuItem::services(None))),
