@@ -1,4 +1,4 @@
-//! RGBA color primitive shared by halogen's style + render layers.
+//! RGBA color primitive shared by quark's style + render layers.
 
 use serde::{Deserialize, Serialize};
 

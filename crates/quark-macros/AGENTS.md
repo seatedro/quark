@@ -11,13 +11,13 @@ with plausible-looking changes.
 
 It does not own runtime reactivity, scene primitives, layout behavior, app
 actions, design tokens, or renderer behavior. It emits Rust method chains that
-the `halogen` crate and Diffy's UI builders must provide.
+the `quark` crate and quark-ui's element builders must provide.
 
 ## Related Context
 
 - Root Rust and change-hygiene rules: `../../AGENTS.md`
-- Runtime UI/reactivity contracts: `../halogen/AGENTS.md`
-- Macro syntax examples and reactive notes: `../halogen/ARCHITECTURE.md`
+- Runtime UI/reactivity contracts: `../quark/AGENTS.md`
+- Macro syntax examples and reactive notes: `../quark/ARCHITECTURE.md`
 
 ## Core Contracts
 
@@ -40,7 +40,7 @@ the `halogen` crate and Diffy's UI builders must provide.
 - Reactive attributes use `name={@signal}` and lower to `cx.read(signal)`.
   Call sites must provide a `cx` with the expected `read` method.
 - `class="..."` lowers to builder method calls. It is not CSS and must stay
-  aligned with Diffy's builder methods.
+  aligned with quark-ui's builder methods.
 - Multi-child `if` branches and fragments must spread children into the parent,
   not wrap them in a bare `div()`. Wrapping changes layout and percentage-size
   resolution.
@@ -79,12 +79,12 @@ the `halogen` crate and Diffy's UI builders must provide.
 ## Validation
 
 - Focused macro tests: `cargo test -p quark-macros`
-- Store derive integration: `cargo test -p halogen --test store_derive`
-- UI lowering fallout: run `cargo test -p halogen` when macro output changes
+- Store derive integration: `cargo test -p quark --test store_derive`
+- UI lowering fallout: run `cargo test -p quark` when macro output changes
   exported contracts.
 
 ## Maintenance
 
-Keep syntax facts here and runtime facts in `../halogen/AGENTS.md`. If a macro
-change requires a new builder method in Diffy, update the app-side API and tests
+Keep syntax facts here and runtime facts in `../quark/AGENTS.md`. If a macro
+change requires a new builder method in quark-ui, update its API and tests
 in the same change.

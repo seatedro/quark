@@ -28,7 +28,7 @@ pub enum CursorHint {
     Help,
 }
 
-/// Opaque identity payload for hover routing. Lets halogen-owned code
+/// Opaque identity payload for hover routing. Lets quark-owned code
 /// answer "which file/toast/entry is hovered?" without pattern-matching on
 /// the app's action enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
