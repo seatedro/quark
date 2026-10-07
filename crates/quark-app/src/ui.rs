@@ -32,6 +32,7 @@ use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
     ScrollbarTrack, TextInputHitArea, WheelEvent, render_element,
 };
+use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
 };
@@ -193,6 +194,7 @@ impl ViewContext<'_, '_> {
 pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
     focus: &'a mut Option<FocusId>,
+    key_bindings: &'a mut KeyBindings,
     announcer: &'a mut Announcer,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
@@ -201,6 +203,13 @@ pub struct UiContext<'a, 'w> {
 impl UiContext<'_, '_> {
     pub fn focus(&self) -> Option<FocusId> {
         *self.focus
+    }
+
+    /// The window's key bindings, resolved against the key contexts on
+    /// the focus path; see [`UiAdapter::with_key_bindings`]. Replace them
+    /// when the user edits the keymap.
+    pub fn key_bindings_mut(&mut self) -> &mut KeyBindings {
+        self.key_bindings
     }
 
     pub fn set_focus(&mut self, focus: Option<FocusId>) {
@@ -278,6 +287,7 @@ pub struct UiAdapter<U: UiApp> {
     hovered: Vec<HitId>,
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
+    key_bindings: KeyBindings,
     accessibility: AccessibilityFrame,
     announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
@@ -334,6 +344,7 @@ impl<U: UiApp> UiAdapter<U> {
             pointer: None,
             hovered: Vec::new(),
             router: InputRouter::default(),
+            key_bindings: KeyBindings::new(),
             accessibility: AccessibilityFrame::default(),
             announcer: Announcer::default(),
             text_areas: Vec::new(),
@@ -376,6 +387,18 @@ impl<U: UiApp> UiAdapter<U> {
         self
     }
 
+    /// Resolve key presses against `bindings` as well as the elements'
+    /// own `on_key` handlers. A binding's predicate is tested against the
+    /// key contexts (`key_context("editor")`) on the focus path; see
+    /// [`quark_ui::key_context`]. A binding matched through a context
+    /// deeper than the element handling the key wins; otherwise the
+    /// element's handler does, and a binding without a predicate only gets
+    /// keys no element handles.
+    pub fn with_key_bindings(mut self, bindings: KeyBindings) -> Self {
+        self.key_bindings = bindings;
+        self
+    }
+
     pub fn app(&self) -> &U {
         &self.app
     }
@@ -395,6 +418,7 @@ impl<U: UiApp> UiAdapter<U> {
         let mut ucx = UiContext {
             window: cx,
             focus: &mut self.focus,
+            key_bindings: &mut self.key_bindings,
             announcer: &mut self.announcer,
             sender: &self.sender,
         };
@@ -508,6 +532,10 @@ impl<U: UiApp> UiAdapter<U> {
             }
         }
         let delivery = self.router.key_down(&binding, self.focus);
+        if let Some(action) = self.bound_action(&binding, delivery.node) {
+            self.dispatch(vec![action], cx);
+            return;
+        }
         if delivery.node.is_some() {
             self.deliver(delivery, cx);
             return;
@@ -532,6 +560,28 @@ impl<U: UiApp> UiAdapter<U> {
                 redraw(Redraw::Focus, cx);
             }
         }
+    }
+
+    /// The key binding `pressed` triggers, when it outranks the element
+    /// `handled_by` that routing found: it matched through a key context
+    /// inside that element, or no element handled the key.
+    fn bound_action(&self, pressed: &Binding, handled_by: Option<usize>) -> Option<Action> {
+        if self.key_bindings.is_empty() {
+            return None;
+        }
+        let semantic = &self.router.frame().semantic;
+        let path = context_path(semantic, self.focus);
+        let entries: Vec<_> = path.iter().map(|(_, entry)| entry.clone()).collect();
+        let found = self.key_bindings.resolve(pressed, &entries)?;
+        let context_node = found.depth.checked_sub(1).map(|i| path[i].0);
+        let wins = match (handled_by, context_node) {
+            (None, _) => true,
+            (Some(element), Some(context)) => {
+                context != element && semantic.is_within(context, element)
+            }
+            (Some(_), None) => false,
+        };
+        wins.then(|| found.binding.action.clone())
     }
 
     fn input(&mut self, input: UiInput, cx: &mut EventContext) {

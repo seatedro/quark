@@ -21,6 +21,8 @@ mod devtools;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 pub mod input;
+#[cfg(all(test, feature = "test-support"))]
+mod key_context_tests;
 // Bindings are quark-ui's `Binding`, which the router matches too.
 #[cfg(all(test, feature = "test-support"))]
 mod frame_budget;

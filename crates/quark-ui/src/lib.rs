@@ -21,6 +21,7 @@ pub mod hud;
 pub mod icons;
 #[cfg(feature = "devtools")]
 pub mod inspector;
+pub mod key_context;
 pub mod markdown;
 pub mod palette;
 pub mod style;
