@@ -65,9 +65,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # quark only: quark-text's tests parse and shape the vendored fonts,
-      # which is far too slow under Miri, and quark-text has no unsafe of its
-      # own (the font parsing it would exercise is third-party).
+      # quark only: quark-text has no unsafe of its own, and shaping the
+      # vendored fonts under Miri takes ~16 s per layout (its properties take
+      # ~10 min each), so it would only re-check third-party font parsing.
       - name: Miri
         env:
           # Properties drop to 4 cases under cfg(miri); the Test job runs the
