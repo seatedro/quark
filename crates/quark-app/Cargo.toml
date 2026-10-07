@@ -125,5 +125,11 @@ name = "transcript_demo"
 required-features = ["ui"]
 
 [[example]]
+name = "panels_demo"
+required-features = ["ui"]
+# Its test module drives the dock through `quark_app::testing`.
+test = true
+
+[[example]]
 name = "platform_demo"
 required-features = ["notifications"]
