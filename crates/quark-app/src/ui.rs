@@ -728,6 +728,9 @@ fn scale_tree(update: &mut TreeUpdate, scale: f32) {
 #[derive(Debug)]
 enum Routed {
     Dispatch(Action),
+    /// A click: focus what the node stands for, as a pointer click does,
+    /// then deliver its action.
+    Click(Action, Option<FocusId>),
     Focus(FocusId),
     SetValue(FocusId, String),
     /// Select from `anchor` to `focus`, byte offsets into the field's text.
@@ -752,9 +755,10 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
         _ => ACCESSIBILITY_SCROLL_LINES,
     };
     match (request.action, target) {
-        (AxAction::Click, AccessibilityAction::Click(action)) => {
-            Some(Routed::Dispatch(action.clone()))
-        }
+        (AxAction::Click, AccessibilityAction::Click(action)) => Some(Routed::Click(
+            action.clone(),
+            frame.focus_target_of(request.target_node),
+        )),
         (
             AxAction::Click,
             AccessibilityAction::TextValue(focus)
@@ -1003,6 +1007,15 @@ impl<U: UiApp> UiAdapter<U> {
     fn handle_accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
         match route_accessibility(&self.accessibility, &request) {
             Some(Routed::Dispatch(action)) => self.dispatch(vec![action], cx),
+            Some(Routed::Click(action, focus)) => {
+                if let Some(focus) = focus
+                    && self.focus != Some(focus)
+                {
+                    self.focus = Some(focus);
+                    redraw(Redraw::Focus, cx);
+                }
+                self.dispatch(vec![action], cx);
+            }
             Some(Routed::Focus(focus)) => {
                 if self.focus != Some(focus) {
                     self.focus = Some(focus);
@@ -1601,26 +1614,68 @@ mod tests {
         assert_eq!(ui.app().field.text(), "hello there");
     }
 
+    /// Send an assistive tech Click to the first node with `role`.
+    fn accessibility_click<A: UiApp>(ui: &mut UiTestHarness<A>, role: Role) {
+        use accesskit::{Action as AxAction, ActionRequest, TreeId};
+        let node = ui
+            .accessibility_update()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == role)
+            .map(|(id, _)| *id)
+            .expect("node with role");
+        ui.accessibility_action(ActionRequest {
+            action: AxAction::Click,
+            target_tree: TreeId::ROOT,
+            target_node: node,
+            data: None,
+        });
+    }
+
     // AT-SPI offers only Click as an action, so a tool driving the field
     // through it must be able to focus the field that way.
     #[test]
     fn a_click_from_assistive_tech_focuses_the_field() {
-        use accesskit::{Action as AxAction, ActionRequest, TreeId};
         let mut ui = composer("");
-        let field = ui
-            .accessibility_update()
-            .nodes
-            .iter()
-            .find(|(_, node)| node.role() == Role::TextInput)
-            .map(|(id, _)| *id)
-            .expect("text field");
-        ui.accessibility_action(ActionRequest {
-            action: AxAction::Click,
-            target_tree: TreeId::ROOT,
-            target_node: field,
-            data: None,
-        });
+        accessibility_click(&mut ui, Role::TextInput);
         ui.type_text("hi");
         assert_eq!(ui.app().field.text(), "hi");
+    }
+
+    /// One focusable Save button.
+    struct SaveApp {
+        saved: usize,
+    }
+
+    const SAVE: FocusId = FocusId::from_key("save");
+
+    impl UiApp for SaveApp {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            div()
+                .w(80.0)
+                .h(30.0)
+                .track_focus(SAVE)
+                .accessibility_role(Role::Button)
+                .accessibility_label("Save")
+                .on_click(Msg::Save)
+                .into_any()
+        }
+
+        fn update(&mut self, Msg::Save: Msg, _cx: &mut UiContext) {
+            self.saved += 1;
+        }
+    }
+
+    // A click from assistive tech moves focus with it, as a pointer click
+    // does, so keys that follow reach the control (a radio's arrows).
+    #[test]
+    fn a_click_from_assistive_tech_focuses_its_control() {
+        let mut ui = UiTestHarness::new(SaveApp { saved: 0 }, (200.0, 100.0), 1.0);
+        accessibility_click(&mut ui, Role::Button);
+        assert_eq!(ui.app().saved, 1);
+        assert_eq!(ui.focus(), Some(SAVE));
     }
 }
