@@ -146,7 +146,7 @@ impl NumberFormat {
             if grouped && i > 0 {
                 let at_primary = left == self.primary;
                 let at_secondary =
-                    left > self.primary && (left - self.primary) % self.secondary == 0;
+                    left > self.primary && (left - self.primary).is_multiple_of(self.secondary);
                 if at_primary || at_secondary {
                     out.push(self.group);
                 }
