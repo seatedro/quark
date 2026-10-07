@@ -149,6 +149,8 @@ impl<A: App> Runner<A> {
             }
         };
         renderer.resize(size.width, size.height, scale_factor);
+        #[cfg(target_os = "linux")]
+        crate::platform::drag_out::window_created(&window);
         window.set_visible(true);
         position_traffic_lights(&window, options.traffic_lights);
         Ok(WindowState {
@@ -600,6 +602,8 @@ impl<A: App> ApplicationHandler for Runner<A> {
         // then segfaults in eglTerminate talking to the closed wl_display.
         self.windows = WindowTable::default();
         self.gpu = None;
+        #[cfg(target_os = "linux")]
+        crate::platform::drag_out::shutdown();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {

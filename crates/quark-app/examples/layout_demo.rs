@@ -262,8 +262,8 @@ impl Demo {
                         .items_center()
                         .border_b(theme.colors.border_variant)
                         .child(text(*file).text_sm());
-                    // Linux has no drag source yet (see `drag_out`), so rows
-                    // there are plain.
+                    // Where there is no drag source (the BSDs, see
+                    // `drag_out`), rows are plain.
                     if drag_out::supported() {
                         row.cursor(CursorHint::Grab)
                             .tooltip("Drag onto the desktop or a file manager")

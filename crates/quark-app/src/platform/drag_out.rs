@@ -12,7 +12,9 @@
 //! |---|---|
 //! | macOS | `NSView beginDraggingSession` with file URLs and Finder icons; returns at once, the drag runs on the event loop |
 //! | Windows | `SHDoDragDrop` over the shell's data object for the files (`CF_HDROP` and friends); blocks in OLE's drag loop until the drop |
-//! | Linux, BSD | [`DragOutError::Unsupported`]: winit owns the X11 and Wayland connections and exposes no drag source, and XDND or `wl_data_device.start_drag` cannot be driven from outside it |
+//! | Linux, Wayland | `wl_data_device.start_drag` with a `text/uri-list` source, on a queue of our own over winit's `wl_display` that a thread dispatches; returns at once |
+//! | Linux, X11 | The source side of XDND on a connection of our own, run by a thread that grabs the pointer from winit; returns at once |
+//! | BSD | [`DragOutError::Unsupported`] |
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +30,8 @@ pub enum DragOutError {
     /// The context has no native window (a headless test window).
     NoWindow,
     /// No pointer event is being handled to start the drag from (macOS
-    /// starts drags from the current mouse event).
+    /// starts drags from the current mouse event, Wayland from the serial
+    /// of the press that is still held).
     NoPointerEvent,
     /// The platform refused, with its message.
     Platform(String),
@@ -50,7 +53,7 @@ impl std::error::Error for DragOutError {}
 
 /// Whether [`crate::EventContext::start_drag_out`] can work here.
 pub const fn supported() -> bool {
-    cfg!(any(target_os = "macos", windows))
+    cfg!(any(target_os = "macos", windows, target_os = "linux"))
 }
 
 /// Absolute paths for the platform, or why there are none.
@@ -75,8 +78,86 @@ pub(crate) fn start(window: &Window, paths: &[PathBuf]) -> Result<(), DragOutErr
     return macos::start(window, paths);
     #[cfg(windows)]
     return windows_shell::start(window, paths);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    return linux::start(window, paths);
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     Err(DragOutError::Unsupported)
+}
+
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
+mod x11;
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{shutdown, window_created};
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::path::PathBuf;
+
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+    use winit::window::Window;
+
+    use super::{DragOutError, wayland, x11};
+
+    pub(super) fn start(window: &Window, paths: &[PathBuf]) -> Result<(), DragOutError> {
+        let platform =
+            |error: raw_window_handle::HandleError| DragOutError::Platform(error.to_string());
+        let display = window.display_handle().map_err(platform)?.as_raw();
+        let handle = window.window_handle().map_err(platform)?.as_raw();
+        let uris = super::uri_list(paths);
+        match (display, handle) {
+            (RawDisplayHandle::Wayland(_), RawWindowHandle::Wayland(handle)) => {
+                wayland::start(handle.surface.as_ptr(), uris)
+            }
+            (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(_)) => {
+                let display = display
+                    .display
+                    .ok_or_else(|| DragOutError::Platform("no Xlib display".into()))?;
+                x11::start(display.as_ptr(), uris)
+            }
+            _ => Err(DragOutError::Unsupported),
+        }
+    }
+
+    /// Set up for drags from a new window. On Wayland this binds the pointer
+    /// whose button serials `start_drag` needs, so it must run before the
+    /// press that starts a drag.
+    pub(crate) fn window_created(window: &Window) {
+        let Ok(display) = window.display_handle() else {
+            return;
+        };
+        if let RawDisplayHandle::Wayland(display) = display.as_raw() {
+            wayland::init(display.display.as_ptr());
+        }
+    }
+
+    /// Stop using winit's Wayland display, which closes after this.
+    pub(crate) fn shutdown() {
+        wayland::shutdown();
+    }
+}
+
+/// `paths` as a `text/uri-list` of `file://` URIs: each path's bytes
+/// percent-encoded except unreserved characters and `/`, one per line,
+/// CRLF terminated (RFC 2483).
+#[cfg(target_os = "linux")]
+fn uri_list(paths: &[PathBuf]) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = Vec::new();
+    for path in paths {
+        out.extend_from_slice(b"file://");
+        for &byte in path.as_os_str().as_bytes() {
+            if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+                out.push(byte);
+            } else {
+                out.extend_from_slice(format!("%{byte:02X}").as_bytes());
+            }
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out
 }
 
 #[cfg(target_os = "macos")]
@@ -234,5 +315,34 @@ mod windows_shell {
             unsafe { ILFree(Some(pidl)) };
         }
         result.map_err(|error| DragOutError::Platform(error.message()))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    #[test]
+    fn uri_list_percent_encodes_each_path_on_its_own_crlf_line() {
+        let cases: [(&[&[u8]], &str); 3] = [
+            (&[b"/tmp/notes.txt"], "file:///tmp/notes.txt\r\n"),
+            (
+                &[b"/home/a b/r\xc3\xa9sum\xc3\xa9 #1.pdf", b"/x/100%~_-.y"],
+                "file:///home/a%20b/r%C3%A9sum%C3%A9%20%231.pdf\r\nfile:///x/100%25~_-.y\r\n",
+            ),
+            // Not UTF-8: the raw bytes are encoded, not replaced.
+            (&[b"/tmp/\xff"], "file:///tmp/%FF\r\n"),
+        ];
+        for (paths, expected) in cases {
+            let paths: Vec<PathBuf> = paths
+                .iter()
+                .map(|bytes| std::ffi::OsStr::from_bytes(bytes).into())
+                .collect();
+            assert_eq!(
+                String::from_utf8(super::uri_list(&paths)).unwrap(),
+                expected
+            );
+        }
     }
 }

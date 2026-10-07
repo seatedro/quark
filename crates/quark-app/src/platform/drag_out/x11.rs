@@ -1,0 +1,838 @@
+//! Dragging out on X11: the source side of XDND (version 5).
+//!
+//! winit reads every event on its own connection, so the drag runs on a
+//! connection of ours, from a thread, with an unmapped window of ours as
+//! the XDND source and `XdndSelection` owner (targets answer that window,
+//! and selection requests go to the client that owns the selection).
+//!
+//! The press that started the drag left the pointer grabbed by winit's
+//! client, and X refuses a grab while another client holds one. So the drag
+//! first releases winit's grab through winit's own connection (the only
+//! client allowed to), then grabs the pointer for itself until the release.
+
+use std::os::fd::AsRawFd;
+use std::time::{Duration, Instant};
+
+use x11rb::connection::Connection;
+use x11rb::protocol::Event;
+use x11rb::protocol::xinput::ConnectionExt as _;
+use x11rb::protocol::xproto::{
+    AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode,
+    GrabStatus, PropMode, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent, SelectionRequestEvent,
+    Window, WindowClass,
+};
+use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
+use x11rb::xcb_ffi::XCBConnection;
+use x11rb::{CURRENT_TIME, NONE};
+
+use super::DragOutError;
+
+x11rb::atom_manager! {
+    Atoms: AtomsCookie {
+        XdndAware,
+        XdndProxy,
+        XdndSelection,
+        XdndEnter,
+        XdndPosition,
+        XdndStatus,
+        XdndLeave,
+        XdndDrop,
+        XdndFinished,
+        XdndActionCopy,
+        TARGETS,
+        TEXT_URI_LIST: b"text/uri-list",
+    }
+}
+
+/// The XDND version this source speaks.
+const VERSION: u32 = 5;
+
+/// How long a released drag waits on the target: for its status, then for
+/// it to fetch the files and finish.
+const DROP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `XK_Escape`.
+const ESCAPE: u32 = 0xff1b;
+
+pub(super) fn start(display: *mut std::ffi::c_void, uris: Vec<u8>) -> Result<(), DragOutError> {
+    let platform = |error: String| DragOutError::Platform(error);
+    release_winit_grab(display).map_err(platform)?;
+    let session = Session::open(uris).map_err(platform)?;
+    std::thread::Builder::new()
+        .name("quark-drag-out".into())
+        .spawn(move || {
+            if let Err(error) = session.run() {
+                tracing::warn!("drag out: {error}");
+            }
+        })
+        .map_err(|error| DragOutError::Platform(error.to_string()))?;
+    Ok(())
+}
+
+/// End the implicit grab winit's client got from the press, on winit's
+/// connection, and wait until the server has done it.
+fn release_winit_grab(display: *mut std::ffi::c_void) -> Result<(), String> {
+    let xlib_xcb = x11_dl::xlib_xcb::Xlib_xcb::open().map_err(|error| error.to_string())?;
+    // SAFETY: `display` is winit's live Xlib display, and the XCB connection
+    // under it lives as long. Only requests go out on it: winit stays the
+    // one reading its events.
+    let conn = unsafe {
+        let raw = (xlib_xcb.XGetXCBConnection)(display.cast());
+        XCBConnection::from_raw_xcb_connection(raw, false)
+    }
+    .map_err(|error| error.to_string())?;
+    // winit selects XInput 2 button events, so the grab is an XI2 one,
+    // which the core UngrabPointer leaves alone.
+    let pointer = conn
+        .xinput_xi_get_client_pointer(NONE)
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| error.to_string())?;
+    conn.xinput_xi_ungrab_device(CURRENT_TIME, pointer.deviceid)
+        .map_err(|error| error.to_string())?;
+    conn.ungrab_pointer(CURRENT_TIME)
+        .map_err(|error| error.to_string())?;
+    // A round trip, so our grab on the other connection comes after.
+    conn.get_input_focus()
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+struct Session {
+    conn: RustConnection,
+    atoms: Atoms,
+    root: Window,
+    source: Window,
+    escape: Option<u8>,
+    uris: Vec<u8>,
+}
+
+impl Session {
+    fn open(uris: Vec<u8>) -> Result<Self, String> {
+        let error = |error: &dyn std::fmt::Display| error.to_string();
+        let (conn, screen) = x11rb::connect(None).map_err(|e| error(&e))?;
+        let root = conn.setup().roots[screen].root;
+        let atoms = Atoms::new(&conn)
+            .map_err(|e| error(&e))?
+            .reply()
+            .map_err(|e| error(&e))?;
+        let source = conn.generate_id().map_err(|e| error(&e))?;
+        conn.create_window(
+            0,
+            source,
+            root,
+            -1,
+            -1,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &CreateWindowAux::new(),
+        )
+        .map_err(|e| error(&e))?;
+        conn.set_selection_owner(source, atoms.XdndSelection, CURRENT_TIME)
+            .map_err(|e| error(&e))?;
+        let cursor = hand_cursor(&conn).unwrap_or(NONE);
+        let grab = conn
+            .grab_pointer(
+                false,
+                root,
+                EventMask::POINTER_MOTION | EventMask::BUTTON_RELEASE,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                NONE,
+                cursor,
+                CURRENT_TIME,
+            )
+            .map_err(|e| error(&e))?
+            .reply()
+            .map_err(|e| error(&e))?;
+        if grab.status != GrabStatus::SUCCESS {
+            return Err(format!("could not grab the pointer: {:?}", grab.status));
+        }
+        // Escape cancels; without the keyboard the drag still ends on release.
+        let _ = conn
+            .grab_keyboard(false, root, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
+            .map(|cookie| cookie.reply());
+        let escape = escape_keycode(&conn);
+        Ok(Self {
+            conn,
+            atoms,
+            root,
+            source,
+            escape,
+            uris,
+        })
+    }
+
+    fn run(self) -> Result<(), String> {
+        let error = |error: &dyn std::fmt::Display| error.to_string();
+        let mut drag = Drag::default();
+        let mut deadline = None;
+        let at = self
+            .conn
+            .query_pointer(self.root)
+            .map_err(|e| error(&e))?
+            .reply()
+            .map_err(|e| error(&e))?;
+        let target = find_target(&self, self.root);
+        self.send(drag.moved(target, at.root_x, at.root_y, CURRENT_TIME))?;
+        while drag.phase() != Phase::Over {
+            let Some(event) = self.next_event(deadline)? else {
+                // The target never answered: give up on it.
+                self.send(drag.cancel())?;
+                break;
+            };
+            let sends = match event {
+                Event::MotionNotify(event) => {
+                    let target = find_target(&self, self.root);
+                    drag.moved(target, event.root_x, event.root_y, event.time)
+                }
+                Event::ButtonRelease(event) => {
+                    self.ungrab();
+                    deadline = Some(Instant::now() + DROP_TIMEOUT);
+                    drag.released(event.time)
+                }
+                Event::KeyPress(event) if Some(event.detail) == self.escape => {
+                    self.ungrab();
+                    drag.cancel()
+                }
+                Event::ClientMessage(event) if event.type_ == self.atoms.XdndStatus => {
+                    let data = event.data.as_data32();
+                    drag.status(data[0], data[1] & 1 != 0)
+                }
+                Event::ClientMessage(event) if event.type_ == self.atoms.XdndFinished => {
+                    drag.finished(event.data.as_data32()[0]);
+                    Vec::new()
+                }
+                Event::SelectionRequest(request) => {
+                    self.answer(&request)?;
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+            self.send(sends)?;
+        }
+        self.ungrab();
+        let _ = self.conn.destroy_window(self.source);
+        let _ = self.conn.flush();
+        Ok(())
+    }
+
+    fn ungrab(&self) {
+        let _ = self.conn.ungrab_pointer(CURRENT_TIME);
+        let _ = self.conn.ungrab_keyboard(CURRENT_TIME);
+        let _ = self.conn.flush();
+    }
+
+    /// The next event, or `None` once `deadline` passes.
+    fn next_event(&self, deadline: Option<Instant>) -> Result<Option<Event>, String> {
+        loop {
+            if let Some(event) = self
+                .conn
+                .poll_for_event()
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Some(event));
+            }
+            let timeout = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(None);
+                    }
+                    left.as_millis().min(i32::MAX as u128) as i32
+                }
+                None => -1,
+            };
+            let mut fd = libc::pollfd {
+                fd: self.conn.stream().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd for the connection's open socket.
+            if unsafe { libc::poll(&mut fd, 1, timeout) } < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error.to_string());
+                }
+            }
+        }
+    }
+
+    fn send(&self, sends: Vec<Send>) -> Result<(), String> {
+        for send in sends {
+            let (target, kind, data) = match send {
+                Send::Enter(target) => (
+                    target,
+                    self.atoms.XdndEnter,
+                    enter(self.source, target.version, self.atoms.TEXT_URI_LIST),
+                ),
+                Send::Position { target, x, y, time } => (
+                    target,
+                    self.atoms.XdndPosition,
+                    position(self.source, x, y, time, self.atoms.XdndActionCopy),
+                ),
+                Send::Leave(target) => (target, self.atoms.XdndLeave, leave(self.source)),
+                Send::Drop { target, time } => {
+                    (target, self.atoms.XdndDrop, drop(self.source, time))
+                }
+            };
+            let message = ClientMessageEvent::new(32, target.window, kind, data);
+            self.conn
+                .send_event(false, target.send_to, EventMask::NO_EVENT, message)
+                .map_err(|error| error.to_string())?;
+        }
+        self.conn.flush().map_err(|error| error.to_string())
+    }
+
+    /// Hand the files to a target converting `XdndSelection`.
+    fn answer(&self, request: &SelectionRequestEvent) -> Result<(), String> {
+        let error = |error: &dyn std::fmt::Display| error.to_string();
+        // Obsolete clients leave the property unset and mean the target.
+        let property = if request.property == NONE {
+            request.target
+        } else {
+            request.property
+        };
+        let answered = if request.target == self.atoms.TARGETS {
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    request.requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    &[self.atoms.TARGETS, self.atoms.TEXT_URI_LIST],
+                )
+                .map_err(|e| error(&e))?;
+            true
+        } else if request.target == self.atoms.TEXT_URI_LIST {
+            self.conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    request.requestor,
+                    property,
+                    self.atoms.TEXT_URI_LIST,
+                    &self.uris,
+                )
+                .map_err(|e| error(&e))?;
+            true
+        } else {
+            false
+        };
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: request.time,
+            requestor: request.requestor,
+            selection: request.selection,
+            target: request.target,
+            property: if answered { property } else { NONE },
+        };
+        self.conn
+            .send_event(false, request.requestor, EventMask::NO_EVENT, notify)
+            .map_err(|e| error(&e))?;
+        self.conn.flush().map_err(|e| error(&e))?;
+        Ok(())
+    }
+}
+
+/// The window tree under the pointer, as XDND target lookup reads it.
+trait Tree {
+    /// The child of `window` the pointer is in.
+    fn child_at_pointer(&self, window: Window) -> Option<Window>;
+    /// The XDND version `window` advertises in `XdndAware`.
+    fn aware(&self, window: Window) -> Option<u32>;
+    /// The window `window`'s `XdndProxy` names.
+    fn proxy(&self, window: Window) -> Option<Window>;
+}
+
+impl Tree for Session {
+    fn child_at_pointer(&self, window: Window) -> Option<Window> {
+        let reply = self.conn.query_pointer(window).ok()?.reply().ok()?;
+        (reply.child != NONE).then_some(reply.child)
+    }
+
+    fn aware(&self, window: Window) -> Option<u32> {
+        self.property(window, self.atoms.XdndAware, AtomEnum::ATOM)
+    }
+
+    fn proxy(&self, window: Window) -> Option<Window> {
+        self.property(window, self.atoms.XdndProxy, AtomEnum::WINDOW)
+    }
+}
+
+impl Session {
+    fn property(&self, window: Window, name: u32, kind: AtomEnum) -> Option<u32> {
+        let reply = self
+            .conn
+            .get_property(false, window, name, kind, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        reply.value32()?.next()
+    }
+}
+
+/// Where XDND messages for the window under the pointer go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Target {
+    /// The window the drop lands on, named in every message.
+    window: Window,
+    /// Where the messages are sent: `window`, or the proxy it names.
+    send_to: Window,
+    /// The version both sides speak.
+    version: u32,
+}
+
+/// The XDND version to speak with a target advertising `theirs`. Versions
+/// before 3 differ in message layout and are long gone.
+fn negotiate(theirs: u32) -> Option<u32> {
+    (theirs >= 3).then_some(theirs.min(VERSION))
+}
+
+/// The innermost XDND aware window under the pointer, walking down from
+/// `root`. A window whose `XdndProxy` names a window that names itself has
+/// its messages sent there instead.
+fn find_target(tree: &impl Tree, root: Window) -> Option<Target> {
+    let mut window = root;
+    loop {
+        if let Some(proxy) = tree.proxy(window)
+            && tree.proxy(proxy) == Some(proxy)
+        {
+            let version = negotiate(tree.aware(proxy)?)?;
+            return Some(Target {
+                window,
+                send_to: proxy,
+                version,
+            });
+        }
+        if let Some(theirs) = tree.aware(window) {
+            return Some(Target {
+                window,
+                send_to: window,
+                version: negotiate(theirs)?,
+            });
+        }
+        window = tree.child_at_pointer(window)?;
+    }
+}
+
+fn enter(source: Window, version: u32, offered: u32) -> [u32; 5] {
+    [source, version << 24, offered, NONE, NONE]
+}
+
+fn position(source: Window, x: i16, y: i16, time: u32, action: u32) -> [u32; 5] {
+    [
+        source,
+        0,
+        ((x as u16 as u32) << 16) | y as u16 as u32,
+        time,
+        action,
+    ]
+}
+
+fn leave(source: Window) -> [u32; 5] {
+    [source, 0, 0, 0, 0]
+}
+
+fn drop(source: Window, time: u32) -> [u32; 5] {
+    [source, 0, time, 0, 0]
+}
+
+/// A message to a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Send {
+    Enter(Target),
+    Position {
+        target: Target,
+        x: i16,
+        y: i16,
+        time: u32,
+    },
+    Leave(Target),
+    Drop {
+        target: Target,
+        time: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The button is held.
+    Dragging,
+    /// Released while the target had a position unanswered.
+    Releasing,
+    /// Dropped on the window; it fetches the files, then finishes.
+    Dropped(Window),
+    Over,
+}
+
+/// The source's half of XDND, apart from the X connection: which target
+/// the pointer is over, and what to tell it. One position is in flight at a
+/// time; moves meanwhile collapse into the latest.
+#[derive(Debug)]
+struct Drag {
+    phase: Phase,
+    target: Option<Target>,
+    /// Sent a position, no status back yet.
+    waiting: bool,
+    /// The latest move made while waiting.
+    queued: Option<(i16, i16, u32)>,
+    /// The target's last status accepted a drop.
+    accepted: bool,
+    release_time: u32,
+}
+
+impl Default for Drag {
+    fn default() -> Self {
+        Self {
+            phase: Phase::Dragging,
+            target: None,
+            waiting: false,
+            queued: None,
+            accepted: false,
+            release_time: 0,
+        }
+    }
+}
+
+impl Drag {
+    fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    fn moved(&mut self, target: Option<Target>, x: i16, y: i16, time: u32) -> Vec<Send> {
+        if self.phase != Phase::Dragging {
+            return Vec::new();
+        }
+        let mut sends = Vec::new();
+        if target.map(|t| t.window) != self.target.map(|t| t.window) {
+            sends.extend(self.target.take().map(Send::Leave));
+            self.target = target;
+            self.waiting = false;
+            self.queued = None;
+            self.accepted = false;
+            sends.extend(target.map(Send::Enter));
+        }
+        if let Some(target) = self.target {
+            if self.waiting {
+                self.queued = Some((x, y, time));
+            } else {
+                self.waiting = true;
+                sends.push(Send::Position { target, x, y, time });
+            }
+        }
+        sends
+    }
+
+    fn status(&mut self, from: Window, accept: bool) -> Vec<Send> {
+        let Some(target) = self.target else {
+            return Vec::new();
+        };
+        if from != target.window || !self.waiting {
+            return Vec::new();
+        }
+        self.waiting = false;
+        self.accepted = accept;
+        match self.phase {
+            Phase::Releasing => self.drop_or_leave(),
+            _ => match self.queued.take() {
+                Some((x, y, time)) => {
+                    self.waiting = true;
+                    vec![Send::Position { target, x, y, time }]
+                }
+                None => Vec::new(),
+            },
+        }
+    }
+
+    fn released(&mut self, time: u32) -> Vec<Send> {
+        if self.phase != Phase::Dragging {
+            return Vec::new();
+        }
+        self.release_time = time;
+        if self.waiting {
+            // The answer to the last position decides.
+            self.phase = Phase::Releasing;
+            return Vec::new();
+        }
+        self.drop_or_leave()
+    }
+
+    fn drop_or_leave(&mut self) -> Vec<Send> {
+        match self.target.take() {
+            Some(target) if self.accepted => {
+                self.phase = Phase::Dropped(target.window);
+                vec![Send::Drop {
+                    target,
+                    time: self.release_time,
+                }]
+            }
+            target => {
+                self.phase = Phase::Over;
+                target.map(Send::Leave).into_iter().collect()
+            }
+        }
+    }
+
+    fn finished(&mut self, from: Window) {
+        if self.phase == Phase::Dropped(from) {
+            self.phase = Phase::Over;
+        }
+    }
+
+    /// Escape, or a target that stopped answering.
+    fn cancel(&mut self) -> Vec<Send> {
+        let sends = match self.phase {
+            Phase::Dragging | Phase::Releasing => self.target.take().map(Send::Leave),
+            Phase::Dropped(_) | Phase::Over => None,
+        };
+        self.phase = Phase::Over;
+        sends.into_iter().collect()
+    }
+}
+
+/// The cursor font's hand, shown while dragging.
+fn hand_cursor(conn: &RustConnection) -> Option<u32> {
+    const XC_HAND2: u16 = 60;
+    let font = conn.generate_id().ok()?;
+    conn.open_font(font, b"cursor").ok()?;
+    let cursor = conn.generate_id().ok()?;
+    conn.create_glyph_cursor(
+        cursor,
+        font,
+        font,
+        XC_HAND2,
+        XC_HAND2 + 1,
+        0,
+        0,
+        0,
+        0xffff,
+        0xffff,
+        0xffff,
+    )
+    .ok()?;
+    conn.close_font(font).ok()?;
+    Some(cursor)
+}
+
+fn escape_keycode(conn: &RustConnection) -> Option<u8> {
+    let setup = conn.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let mapping = conn
+        .get_keyboard_mapping(min, max - min + 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    let per = usize::from(mapping.keysyms_per_keycode).max(1);
+    let index = mapping.keysyms.iter().position(|&sym| sym == ESCAPE)?;
+    u8::try_from(index / per).ok().map(|offset| min + offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// A window tree: each window's child under the pointer and its
+    /// `XdndAware` and `XdndProxy` properties.
+    #[derive(Default)]
+    struct Windows {
+        child: HashMap<Window, Window>,
+        aware: HashMap<Window, u32>,
+        proxy: HashMap<Window, Window>,
+    }
+
+    impl Tree for Windows {
+        fn child_at_pointer(&self, window: Window) -> Option<Window> {
+            self.child.get(&window).copied()
+        }
+        fn aware(&self, window: Window) -> Option<u32> {
+            self.aware.get(&window).copied()
+        }
+        fn proxy(&self, window: Window) -> Option<Window> {
+            self.proxy.get(&window).copied()
+        }
+    }
+
+    const ROOT: Window = 1;
+
+    #[test]
+    fn target_lookup_finds_the_aware_window_under_the_pointer_and_honors_proxies() {
+        let target = |window, send_to, version| {
+            Some(Target {
+                window,
+                send_to,
+                version,
+            })
+        };
+        // Root, then a window manager frame (10), then the client (11).
+        let cases: [(&str, Windows, Option<Target>); 6] = [
+            (
+                "aware client inside a frame",
+                Windows {
+                    child: [(ROOT, 10), (10, 11)].into(),
+                    aware: [(11, 5)].into(),
+                    ..Default::default()
+                },
+                target(11, 11, 5),
+            ),
+            (
+                "newer target speaks our version",
+                Windows {
+                    child: [(ROOT, 10)].into(),
+                    aware: [(10, 9)].into(),
+                    ..Default::default()
+                },
+                target(10, 10, 5),
+            ),
+            (
+                "too old to talk to",
+                Windows {
+                    child: [(ROOT, 10), (10, 11)].into(),
+                    aware: [(10, 2), (11, 5)].into(),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "nothing aware",
+                Windows {
+                    child: [(ROOT, 10), (10, 11)].into(),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "a desktop proxies the root",
+                Windows {
+                    child: [(ROOT, 10)].into(),
+                    aware: [(20, 4)].into(),
+                    proxy: [(ROOT, 20), (20, 20)].into(),
+                },
+                target(ROOT, 20, 4),
+            ),
+            (
+                "a proxy that does not name itself is stale",
+                Windows {
+                    child: [(ROOT, 10)].into(),
+                    aware: [(10, 5), (20, 5)].into(),
+                    proxy: [(ROOT, 20)].into(),
+                },
+                target(10, 10, 5),
+            ),
+        ];
+        for (name, windows, expected) in cases {
+            assert_eq!(find_target(&windows, ROOT), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn client_messages_pack_version_and_position_as_xdnd_specifies() {
+        assert_eq!(enter(7, 5, 300), [7, 0x0500_0000, 300, 0, 0]);
+        assert_eq!(position(7, 640, 480, 99, 301), [7, 0, 0x0280_01e0, 99, 301]);
+        // Negative coordinates (left of a monitor at the origin) keep their
+        // 16 bits rather than spilling into the other half.
+        assert_eq!(position(7, -1, 2, 0, 0)[2], 0xffff_0002);
+        assert_eq!(drop(7, 1234), [7, 0, 1234, 0, 0]);
+    }
+
+    /// Run `script` through a drag, one line per message it sends.
+    fn run(script: &[Step]) -> String {
+        let target = |window| Target {
+            window,
+            send_to: window,
+            version: 5,
+        };
+        let mut drag = Drag::default();
+        let mut log = String::new();
+        for step in script {
+            let sends = match *step {
+                Step::Move(window, x) => drag.moved(window.map(target), x, 0, 0),
+                Step::Status(window, accept) => drag.status(window, accept),
+                Step::Release => drag.released(77),
+                Step::Escape => drag.cancel(),
+                Step::Finished(window) => {
+                    drag.finished(window);
+                    Vec::new()
+                }
+            };
+            for send in sends {
+                log += &match send {
+                    Send::Enter(t) => format!("enter {}\n", t.window),
+                    Send::Position { target, x, .. } => {
+                        format!("position {} x={x}\n", target.window)
+                    }
+                    Send::Leave(t) => format!("leave {}\n", t.window),
+                    Send::Drop { target, time } => format!("drop {} t={time}\n", target.window),
+                };
+            }
+        }
+        log + &format!("{:?}", drag.phase())
+    }
+
+    #[derive(Clone, Copy)]
+    enum Step {
+        Move(Option<Window>, i16),
+        Status(Window, bool),
+        Release,
+        Escape,
+        Finished(Window),
+    }
+
+    #[test]
+    fn drag_talks_to_targets_one_position_at_a_time_and_drops_only_when_accepted() {
+        use Step::*;
+        let cases: [(&str, &[Step], &str); 6] = [
+            (
+                "moving between targets leaves one before entering the next",
+                &[
+                    Move(Some(5), 1),
+                    Status(5, false),
+                    Move(Some(6), 2),
+                    Move(None, 3),
+                ],
+                "enter 5\nposition 5 x=1\nleave 5\nenter 6\nposition 6 x=2\nleave 6\nDragging",
+            ),
+            (
+                "moves while a status is due collapse into the latest",
+                &[
+                    Move(Some(5), 1),
+                    Move(Some(5), 2),
+                    Move(Some(5), 3),
+                    Status(5, true),
+                ],
+                "enter 5\nposition 5 x=1\nposition 5 x=3\nDragging",
+            ),
+            (
+                "an accepted drop waits for the target to finish",
+                &[Move(Some(5), 1), Status(5, true), Release, Finished(5)],
+                "enter 5\nposition 5 x=1\ndrop 5 t=77\nOver",
+            ),
+            (
+                "a release with a status due waits for it, then drops",
+                &[Move(Some(5), 1), Release, Status(5, true)],
+                "enter 5\nposition 5 x=1\ndrop 5 t=77\nDropped(5)",
+            ),
+            (
+                "a refused drop leaves",
+                &[Move(Some(5), 1), Release, Status(5, false)],
+                "enter 5\nposition 5 x=1\nleave 5\nOver",
+            ),
+            (
+                "escape leaves the target",
+                &[Move(Some(5), 1), Status(5, true), Escape, Release],
+                "enter 5\nposition 5 x=1\nleave 5\nOver",
+            ),
+        ];
+        for (name, script, expected) in cases {
+            assert_eq!(run(script), expected, "{name}");
+        }
+    }
+}

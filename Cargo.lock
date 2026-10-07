@@ -2965,6 +2965,7 @@ dependencies = [
  "glyphon",
  "image",
  "interprocess",
+ "libc",
  "muda",
  "notify-rust",
  "objc2 0.6.5",
@@ -2992,8 +2993,12 @@ dependencies = [
  "tracing",
  "tray-icon",
  "tungstenite",
+ "wayland-backend",
+ "wayland-client",
  "windows",
  "winit",
+ "x11-dl",
+ "x11rb",
  "zbus",
 ]
 
