@@ -11,6 +11,7 @@ and each names the file that compiles it.
 | [State, actions, and messages](state-actions-messages.md) | `UiApp` state, typed actions, `UiSender`, focus, redraws, signals |
 | [Text and input](text-and-input.md) | `TextField`, `Editor`, IME, undo, and the composer pieces |
 | [Lists and documents](lists-and-documents.md) | Virtual lists, the block document, selection, find, trees, tables, diffs |
+| [Syntax highlighting and grammar packs](syntax-packs.md) | `GrammarStore`, building packs with `syntax-pack`, signed indexes, the threat model |
 | [Accessibility and automation](accessibility-and-automation.md) | The AccessKit tree, AT-SPI coverage, ids, end-to-end specs with cua |
 | [Performance model](performance.md) | Cache boundaries, frame memory reuse, allocation budgets, profiling |
 | [Platform services](platform-services.md) | Menus, notifications, badges, tray, dialogs, deep links, single instance, window state |
