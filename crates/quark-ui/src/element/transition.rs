@@ -34,19 +34,28 @@ impl Transitions {
         key.map(AnimKey::from)
     }
 
-    /// The translate offset to paint with this frame.
-    pub(super) fn translate(
+    /// The transform to paint with this frame.
+    pub(super) fn transform(
         &self,
         key: Option<&UiKey>,
-        target: (f32, f32),
+        target: PaintTransform,
         cx: &mut ElementContext,
-    ) -> (f32, f32) {
+    ) -> PaintTransform {
         let (Some(key), Some(motion)) = (self.key(key), self.motion(Prop::Transform)) else {
             return target;
         };
-        let (x, _) = cx.transition(key, animation::TRANSLATE_X, target.0, motion);
-        let (y, _) = cx.transition(key, animation::TRANSLATE_Y, target.1, motion);
-        (x, y)
+        let mut value = |prop, target| cx.transition(key, prop, target, motion).0;
+        PaintTransform {
+            translate: (
+                value(animation::TRANSLATE_X, target.translate.0),
+                value(animation::TRANSLATE_Y, target.translate.1),
+            ),
+            rotate: value(animation::ROTATE, target.rotate),
+            scale: (
+                value(animation::SCALE_X, target.scale.0),
+                value(animation::SCALE_Y, target.scale.1),
+            ),
+        }
     }
 
     /// Replace transitioned values of `style` (the resolved target) with the
@@ -71,6 +80,41 @@ impl Transitions {
             let (value, _) = cx.transition(key, animation::OPACITY, style.opacity, motion);
             style.opacity = value.clamp(0.0, 1.0);
         }
+    }
+}
+
+/// A div's paint-time transform: an offset that layout ignores, then a
+/// rotation and scale about the center of the offset bounds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PaintTransform {
+    pub translate: (f32, f32),
+    /// Radians, clockwise on screen.
+    pub rotate: f32,
+    pub scale: (f32, f32),
+}
+
+impl PaintTransform {
+    pub const IDENTITY: Self = Self {
+        translate: (0.0, 0.0),
+        rotate: 0.0,
+        scale: (1.0, 1.0),
+    };
+
+    /// The rotation and scale about the center of `bounds`, or `None` when
+    /// the transform only translates.
+    pub fn matrix(&self, bounds: Bounds) -> Option<Transform2D> {
+        if self.rotate == 0.0 && self.scale == (1.0, 1.0) {
+            return None;
+        }
+        let center = (
+            bounds.x + bounds.width * 0.5,
+            bounds.y + bounds.height * 0.5,
+        );
+        Some(
+            Transform2D::scale(self.scale.0, self.scale.1)
+                .then(Transform2D::rotate(self.rotate))
+                .around(center.0, center.1),
+        )
     }
 }
 
@@ -266,6 +310,83 @@ mod tests {
         assert_eq!(
             frame(panel(100.0), &mut table, at(105.0), now).backgrounds,
             vec![HOVER]
+        );
+    }
+
+    // Catches hit testing that ignores rotation: a square turned 45
+    // degrees is hovered at its new tip and not at its old corner.
+    #[test]
+    fn rotated_div_is_hovered_where_it_is_drawn() {
+        let tile = || {
+            div().p(30.0).child(
+                div()
+                    .w(40.0)
+                    .h(40.0)
+                    .bg(IDLE)
+                    .hover_bg(HOVER)
+                    .rotate(std::f32::consts::FRAC_PI_4),
+            )
+        };
+        let mut table = AnimationTable::new();
+        // The square spans 30..70; its center is (50, 50).
+        let tip = frame(tile(), &mut table, Some((76.0, 50.0)), 0);
+        assert_eq!(tip.backgrounds, vec![HOVER], "tip not hovered");
+        let corner = frame(tile(), &mut table, Some((31.0, 31.0)), 0);
+        assert_eq!(corner.backgrounds, vec![IDLE], "old corner hovered");
+    }
+
+    /// Opacity of each layer the frame opens, in paint order.
+    fn layer_opacities(
+        root: impl IntoAnyElement,
+        table: &mut AnimationTable,
+        now: u64,
+    ) -> Vec<f32> {
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        let store = SignalStore::new();
+        let theme = Theme::default_dark();
+        table.tick(now);
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &store)
+            .with_clock(now)
+            .with_animations(table);
+        let mut scene = Scene::default();
+        render_element(&mut root.into_any(), &mut scene, &mut cx, 200.0, 100.0);
+        cx.finish_frame();
+        scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::LayerStart(layer) => Some(layer.opacity),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Catches a fade that jumps, or a settled div that keeps paying for an
+    // offscreen layer: opacity passes through the middle as one group, and
+    // at rest a fully opaque div opens no layer at all.
+    #[test]
+    fn opacity_transition_fades_as_a_layer_and_drops_it_at_rest() {
+        let card = |opacity: f32| {
+            div()
+                .key("card")
+                .w(50.0)
+                .h(50.0)
+                .bg(IDLE)
+                .opacity(opacity)
+                .transition(Prop::Opacity, Motion::tween(100, Curve::Linear))
+                .child(div().w(10.0).h(10.0).bg(HOVER))
+        };
+        let mut table = AnimationTable::new();
+        assert_eq!(layer_opacities(card(1.0), &mut table, 0), Vec::<f32>::new());
+        layer_opacities(card(0.0), &mut table, 0);
+        let mid = layer_opacities(card(0.0), &mut table, 50);
+        assert_eq!(mid.len(), 1);
+        assert!((mid[0] - 0.5).abs() < 0.05, "{mid:?}");
+        layer_opacities(card(1.0), &mut table, 150);
+        assert_eq!(
+            layer_opacities(card(1.0), &mut table, 300),
+            Vec::<f32>::new()
         );
     }
 }

@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::geometry::Rect;
+use crate::transform::Transform2D;
 
 /// Requested cursor shape for a hit region.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -129,6 +130,24 @@ pub const EMPTY_CLIP: Rect = Rect {
 
 const NO_NODE: u32 = u32::MAX;
 
+/// Space of entries outside every transformed subtree.
+const SCREEN: u32 = u32::MAX;
+
+/// The coordinate space of a transformed subtree's entries; see
+/// [`HitTable::push_space`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitSpace(u32);
+
+#[derive(Debug, Clone, Copy)]
+struct SpaceRow {
+    /// Pointer in the parent space to pointer in this one. `None` for a
+    /// degenerate transform, whose entries are never hit.
+    inverse: Option<Transform2D>,
+    parent: u32,
+    /// Clip of the subtree, in the parent space.
+    clip: Rect,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HitTableIntegrityError {
     ColumnLength {
@@ -154,6 +173,9 @@ pub struct HitTable {
     flags: Vec<HitFlags>,
     cursor: Vec<CursorHint>,
     identity: Vec<Option<HitIdentity>>,
+    /// Space of each entry's bounds and clip (`SCREEN` or a `spaces` row).
+    space: Vec<u32>,
+    spaces: Vec<SpaceRow>,
 }
 
 impl Default for HitTable {
@@ -167,6 +189,8 @@ impl Default for HitTable {
             flags: Vec::new(),
             cursor: Vec::new(),
             identity: Vec::new(),
+            space: Vec::new(),
+            spaces: Vec::new(),
         }
     }
 }
@@ -193,6 +217,20 @@ impl HitTable {
         flags: HitFlags,
         cursor: CursorHint,
     ) -> HitId {
+        self.push_in(bounds, clip, z, flags, cursor, None)
+    }
+
+    /// [`Self::push`] with `bounds` and `clip` in `space` (screen space when
+    /// `None`).
+    pub fn push_in(
+        &mut self,
+        bounds: Rect,
+        clip: Rect,
+        z: i32,
+        flags: HitFlags,
+        cursor: CursorHint,
+        space: Option<HitSpace>,
+    ) -> HitId {
         let id = self.id(self.bounds.len());
         self.bounds.push(bounds);
         self.clip.push(clip);
@@ -201,8 +239,53 @@ impl HitTable {
         self.flags.push(flags);
         self.cursor.push(cursor);
         self.identity.push(None);
+        self.space.push(space.map_or(SCREEN, |s| s.0));
         debug_assert_eq!(self.verify_integrity(), Ok(()));
         id
+    }
+
+    /// A space for the entries of a transformed subtree: `transform` maps
+    /// its coordinates to those of `parent` (screen space when `None`), and
+    /// `clip` (in the parent's coordinates) clips the whole subtree. The
+    /// pointer is mapped back through every enclosing transform before it
+    /// is tested against an entry.
+    pub fn push_space(
+        &mut self,
+        parent: Option<HitSpace>,
+        transform: Transform2D,
+        clip: Rect,
+    ) -> HitSpace {
+        self.spaces.push(SpaceRow {
+            inverse: transform.invert(),
+            parent: parent.map_or(SCREEN, |p| p.0),
+            clip,
+        });
+        HitSpace(self.spaces.len() as u32 - 1)
+    }
+
+    /// The pointer in `space`'s coordinates, or `None` when a clip of an
+    /// enclosing transformed subtree excludes it.
+    fn point_in(&self, space: u32, x: f32, y: f32) -> Option<(f32, f32)> {
+        if space == SCREEN {
+            return Some((x, y));
+        }
+        let row = self.spaces.get(space as usize)?;
+        // Spaces are pushed after their parents, so this walk ends.
+        let parent = if row.parent < space {
+            row.parent
+        } else {
+            SCREEN
+        };
+        let (px, py) = self.point_in(parent, x, y)?;
+        if !row.clip.contains(px, py) {
+            return None;
+        }
+        Some(row.inverse?.apply(px, py))
+    }
+
+    fn contains(&self, row: usize, x: f32, y: f32) -> bool {
+        self.point_in(self.space[row], x, y)
+            .is_some_and(|(x, y)| self.bounds[row].contains(x, y) && self.clip[row].contains(x, y))
     }
 
     pub fn set_node(&mut self, id: HitId, node: usize) {
@@ -276,7 +359,7 @@ impl HitTable {
         out.clear();
         out.extend(
             (0..self.bounds.len())
-                .filter(|&i| self.bounds[i].contains(x, y) && self.clip[i].contains(x, y))
+                .filter(|&i| self.contains(i, x, y))
                 .map(|i| self.id(i)),
         );
         let z = |id: &HitId| self.z[id.index as usize];
@@ -300,6 +383,8 @@ impl HitTable {
         self.flags.clear();
         self.cursor.clear();
         self.identity.clear();
+        self.space.clear();
+        self.spaces.clear();
     }
 
     pub fn verify_integrity(&self) -> Result<(), HitTableIntegrityError> {
@@ -311,6 +396,7 @@ impl HitTable {
             ("flags", self.flags.len()),
             ("cursor", self.cursor.len()),
             ("identity", self.identity.len()),
+            ("space", self.space.len()),
         ];
         for (column, len) in columns {
             if len != expected {
@@ -408,6 +494,29 @@ mod tests {
         for (name, rows, expected) in cases {
             assert_eq!(stack(rows), *expected, "{name}");
         }
+    }
+
+    // A rotated entry is hit where it is drawn: the pointer maps back
+    // through its transform, and the clip around the subtree still applies.
+    #[test]
+    fn stack_at_maps_the_pointer_into_a_rotated_space() {
+        let mut table = HitTable::default();
+        let quarter = Transform2D::rotate(std::f32::consts::FRAC_PI_4).around(50.0, 50.0);
+        let space = table.push_space(None, quarter, rect(0.0, 0.0, 100.0, 70.0));
+        // A 40x40 square at the center, turned into a diamond reaching
+        // 28 px from the center.
+        let id = table.push_in(
+            rect(30.0, 30.0, 40.0, 40.0),
+            UNCLIPPED,
+            0,
+            HitFlags::HOVER,
+            CursorHint::Default,
+            Some(space),
+        );
+        let hits = |x, y| table.stack_at(x, y) == [id];
+        assert!(hits(50.0 + 26.0, 50.0), "diamond tip");
+        assert!(!hits(32.0, 32.0), "old corner");
+        assert!(!hits(50.0, 50.0 + 26.0), "tip below the subtree clip");
     }
 
     #[test]

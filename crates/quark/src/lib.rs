@@ -37,8 +37,8 @@ pub use event::{UiEventBinding, UiEventKind, UiEventPhase, UiEventPropagation, U
 pub use focus::{FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, TabStop};
 pub use geometry::Rect;
 pub use hit::{
-    ClickEvent, CursorHint, EMPTY_CLIP, HitFlags, HitId, HitIdentity, HitTable, TooltipRegion,
-    UNCLIPPED,
+    ClickEvent, CursorHint, EMPTY_CLIP, HitFlags, HitId, HitIdentity, HitSpace, HitTable,
+    TooltipRegion, UNCLIPPED,
 };
 pub use identity::{TestId, UiKey, UiNodeId, stable_hash};
 pub use path::{FillRule, LineCap, LineJoin, Path, PathBuilder, PathVerb, StrokeStyle};

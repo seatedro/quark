@@ -28,7 +28,9 @@ use quark::{
     UiEventPhase, UiEventResult, UiKey, UiNodeId,
 };
 use quark_render::Scene;
-use quark_render::scene::{BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect};
+use quark_render::scene::{
+    BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect, Transform2D,
+};
 
 pub use taffy::NodeId as LayoutId;
 
@@ -88,4 +90,4 @@ pub use spacer::*;
 pub use text::*;
 pub use text_input::*;
 pub use traits::*;
-use transition::Transitions;
+use transition::{PaintTransform, Transitions};

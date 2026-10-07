@@ -27,7 +27,9 @@ pub enum Prop {
     Background,
     BorderColor,
     Opacity,
-    /// The div's [`translate`](crate::element::Div::translate) offset.
+    /// The div's [`translate`](crate::element::Div::translate) offset,
+    /// [`rotate`](crate::element::Div::rotate), and
+    /// [`scale`](crate::element::Div::scale).
     Transform,
 }
 
@@ -84,6 +86,9 @@ pub(crate) const BORDER_COLOR: [PropId; 4] = prop_range(4);
 pub(crate) const OPACITY: PropId = PropId(TRANSITION_PROP_BASE + 8);
 pub(crate) const TRANSLATE_X: PropId = PropId(TRANSITION_PROP_BASE + 9);
 pub(crate) const TRANSLATE_Y: PropId = PropId(TRANSITION_PROP_BASE + 10);
+pub(crate) const ROTATE: PropId = PropId(TRANSITION_PROP_BASE + 11);
+pub(crate) const SCALE_X: PropId = PropId(TRANSITION_PROP_BASE + 12);
+pub(crate) const SCALE_Y: PropId = PropId(TRANSITION_PROP_BASE + 13);
 
 const fn prop_range(start: u16) -> [PropId; 4] {
     let base = TRANSITION_PROP_BASE + start;
