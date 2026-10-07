@@ -66,9 +66,17 @@ pub struct FrameContext<'a> {
     pub(super) timing: FrameTiming,
     pub(super) flags: &'a mut Flags,
     pub(super) waker: &'a Waker,
+    #[cfg(feature = "devtools")]
+    pub(super) last_render: quark_render::FrameStats,
 }
 
 impl FrameContext<'_> {
+    /// Renderer stats of this window's previous frame.
+    #[cfg(feature = "devtools")]
+    pub fn last_render_stats(&self) -> quark_render::FrameStats {
+        self.last_render
+    }
+
     /// The window this frame is for.
     pub fn window_handle(&self) -> WindowHandle {
         self.window

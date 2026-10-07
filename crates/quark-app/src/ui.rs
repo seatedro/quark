@@ -117,6 +117,8 @@ pub struct UiAdapter<U: UiApp> {
     ime_area: Option<Rect>,
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
+    #[cfg(feature = "devtools")]
+    devtools: quark_ui::inspector::Devtools,
 }
 
 /// Open a window titled by `options` and run `app` in it.
@@ -141,6 +143,8 @@ impl<U: UiApp> UiAdapter<U> {
             ime_allowed: false,
             ime_area: None,
             scale_factor: 1.0,
+            #[cfg(feature = "devtools")]
+            devtools: quark_ui::inspector::Devtools::from_env(),
         }
     }
 
@@ -355,28 +359,32 @@ impl<U: UiApp> App for UiAdapter<U> {
         let (width, height) = cx.size();
         let scale = cx.scale_factor();
         let clock_ms = cx.elapsed().as_millis() as u64;
+        #[cfg(feature = "devtools")]
+        let view_started = std::time::Instant::now();
         let mut root = self.app.view(&mut ViewContext {
             frame: cx,
             theme: &self.theme,
             focus: self.focus,
         });
+        #[cfg(feature = "devtools")]
+        let build_us = view_started.elapsed().as_micros() as u64;
 
         let text = cx.text();
-        let painted = paint(
-            &mut root,
-            &mut ElementContext::new(
-                &self.theme,
-                scale,
-                &mut text.system,
-                &mut text.layouts,
-                self.pointer,
-                &self.signals,
-            )
-            .with_focus(self.focus)
-            .with_clock(clock_ms),
-            width,
-            height,
-        );
+        let mut ecx = ElementContext::new(
+            &self.theme,
+            scale,
+            &mut text.system,
+            &mut text.layouts,
+            self.pointer,
+            &self.signals,
+        )
+        .with_focus(self.focus)
+        .with_clock(clock_ms);
+        #[cfg(feature = "devtools")]
+        self.devtools.begin_frame(&mut ecx.devtools);
+        let painted = paint(&mut root, &mut ecx, width, height);
+        #[cfg(feature = "devtools")]
+        let phases = self.devtools.end_frame(&mut ecx.devtools);
         self.router.set_frame(painted.input);
         self.accessibility = painted.accessibility;
         self.text_targets = painted.text_targets;
@@ -384,6 +392,17 @@ impl<U: UiApp> App for UiAdapter<U> {
         if let Some(at_ms) = painted.next_frame_ms {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
+        #[cfg(feature = "devtools")]
+        let frame = crate::devtools::PaintedFrame {
+            router: &self.router,
+            theme: &self.theme,
+            signals: &self.signals,
+            build_us,
+            phases,
+        };
+        #[cfg(feature = "devtools")]
+        return crate::devtools::finish_frame(&mut self.devtools, painted.scene, cx, frame);
+        #[cfg(not(feature = "devtools"))]
         painted.scene
     }
 
@@ -416,6 +435,10 @@ impl<U: UiApp> App for UiAdapter<U> {
 
 impl<U: UiApp> UiAdapter<U> {
     fn handle_event(&mut self, event: InputEvent, cx: &mut EventContext) {
+        #[cfg(feature = "devtools")]
+        if crate::devtools::intercept(&mut self.devtools, &event, cx) {
+            return;
+        }
         let mut ucx = UiContext {
             window: cx,
             focus: &mut self.focus,
