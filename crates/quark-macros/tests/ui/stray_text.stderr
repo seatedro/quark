@@ -1,0 +1,5 @@
+error: unexpected `Send`: text must be a string literal, as in `"Send"`; a child is <element>, "text", {expr}, if, for, or match
+ --> tests/ui/stray_text.rs:4:26
+  |
+4 |     let _ = view! { <div>Send</div> };
+  |                          ^^^^

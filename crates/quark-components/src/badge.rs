@@ -90,7 +90,7 @@ impl RenderOnce for Badge {
                 if let Some(svg) = self.icon {
                     <icon svg={svg} size={icon_size} color={fg} />
                 }
-                <text class="text-xs medium" color={fg}>{self.label}</text>
+                <text class="text-xs font-medium" color={fg}>{self.label}</text>
             </div>
         }
     }

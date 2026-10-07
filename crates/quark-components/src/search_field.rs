@@ -21,9 +21,10 @@ pub fn search_field(
     let trailing = if has_value {
         on_clear.map(|action| {
             view! {
-                <Button(action) tooltip={quark_ui::i18n::tr("quark-clear")} size={ButtonSize::Compact}>
-                    <.icon>{lucide::X}</.icon>
-                </Button>
+                <Button on:click={action}
+                        tooltip={quark_ui::i18n::tr("quark-clear")}
+                        size={ButtonSize::Compact}
+                        icon={lucide::X} />
             }
         })
     } else {
@@ -38,7 +39,7 @@ pub fn search_field(
              rounded={m.control_radius}
              border={tc.border_variant}>
             <icon svg={lucide::SEARCH} size={Ico::XS} color={tc.text_muted} />
-            <div class="flex-1" min_w={0.0}>
+            <div class="flex-1" min-w={0.0}>
                 {input}
             </div>
             {?trailing}

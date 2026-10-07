@@ -97,7 +97,7 @@ impl RenderOnce for Avatar {
             <div class="shrink-0 items-center justify-center"
                  w={px} h={px}
                  bg={bg} rounded={px / 2.0}>
-                <text class="bold text-center" size={font_size}
+                <text class="font-bold text-center" size={font_size}
                       color={Color::rgba(255, 255, 255, 255)}>{inits}</text>
             </div>
         }

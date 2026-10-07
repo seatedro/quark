@@ -1,5 +1,4 @@
-use quark::SemanticRole;
-use quark::view;
+use quark::{Props, view};
 
 use quark_ui::Action;
 use quark_ui::design::{Alpha, Ico, Rad, Sp};
@@ -22,31 +21,38 @@ pub enum ButtonSize {
     Compact,
 }
 
+/// A button. Build it with [`Button::new`] and its builder methods, or in
+/// `view!` from its props:
+/// `<Button on:click={msg} icon={lucide::SEND} variant={ButtonStyle::Filled}>"Send"</Button>`.
+#[derive(Props)]
 pub struct Button {
+    #[prop(optional)]
     icon: Option<&'static str>,
+    #[prop(optional, into)]
     label: Option<String>,
-    action: Action,
-    style: ButtonStyle,
+    #[prop(into)]
+    on_click: Action,
+    #[prop(default = ButtonStyle::Ghost)]
+    variant: ButtonStyle,
+    #[prop(default = ButtonSize::Default)]
     size: ButtonSize,
+    #[prop(default)]
     active: bool,
+    #[prop(default)]
     disabled: bool,
-    tooltip_text: Option<std::sync::Arc<str>>,
+    #[prop(optional, into)]
+    tooltip: Option<std::sync::Arc<str>>,
+    #[prop(optional)]
     fixed_size: Option<f32>,
+    /// Content after the icon and label; text here names the button for
+    /// screen readers when it has no label or tooltip.
+    #[prop(default)]
+    children: Vec<AnyElement>,
 }
 
 impl Button {
     pub fn new(action: impl Into<Action>) -> Self {
-        Self {
-            icon: None,
-            label: None,
-            action: action.into(),
-            style: ButtonStyle::Ghost,
-            size: ButtonSize::Default,
-            active: false,
-            disabled: false,
-            tooltip_text: None,
-            fixed_size: None,
-        }
+        Self::builder().on_click(action).build()
     }
 
     pub fn icon(mut self, icon: &'static str) -> Self {
@@ -60,7 +66,7 @@ impl Button {
     }
 
     pub fn style(mut self, style: ButtonStyle) -> Self {
-        self.style = style;
+        self.variant = style;
         self
     }
 
@@ -80,7 +86,7 @@ impl Button {
     }
 
     pub fn tooltip(mut self, text: impl Into<std::sync::Arc<str>>) -> Self {
-        self.tooltip_text = Some(text.into());
+        self.tooltip = Some(text.into());
         self
     }
 
@@ -101,7 +107,7 @@ impl RenderOnce for Button {
             ButtonSize::Compact => (Ico::BUTTON_COMPACT, Sp::SM, Sp::XXS),
         };
 
-        let (bg, hover_bg, icon_color, text_color) = match self.style {
+        let (bg, hover_bg, icon_color, text_color) = match self.variant {
             ButtonStyle::Filled => (tc.accent, tc.accent_strong, tc.text_strong, tc.text_strong),
             ButtonStyle::Subtle => (
                 tc.element_background,
@@ -152,9 +158,9 @@ impl RenderOnce for Button {
         let action = if disabled {
             quark_ui::element::NoopAction.into()
         } else {
-            self.action
+            self.on_click
         };
-        let tooltip_text = self.tooltip_text;
+        let tooltip_text = self.tooltip;
         let cursor = if disabled {
             CursorHint::Default
         } else {
@@ -162,11 +168,18 @@ impl RenderOnce for Button {
         };
 
         let label_text = self.label;
+        let children = self.children;
+        // Without a label or tooltip, text children name the button (a
+        // button's descendant text is its accessible name); with neither,
+        // the name is empty, as before children existed.
         let accessibility_label = label_text
             .clone()
             .or_else(|| tooltip_text.as_deref().map(str::to_owned))
-            .unwrap_or_default();
-        let accessibility_id = format!("button:{action:?}:{accessibility_label}");
+            .or_else(|| children.is_empty().then(String::new));
+        let accessibility_id = format!(
+            "button:{action:?}:{}",
+            accessibility_label.as_deref().unwrap_or_default()
+        );
 
         let label_el = label_text.map(|label| {
             let mut txt = text(label).medium().color(text_color);
@@ -181,14 +194,15 @@ impl RenderOnce for Button {
             <div class="shrink-0" bg={bg}
                  cursor={cursor}
                  id={accessibility_id.clone()}
-                 test_id={"button"}
-                 semantic_role={SemanticRole::Button}
-                 accessibility_role={accesskit::Role::Button}
-                 accessibility_label={accessibility_label}
+                 test-id="button"
+                 role="button"
+                 @when {accessibility_label.is_some()} {
+                     aria-label={accessibility_label.unwrap_or_default()}
+                 }
                  accessibility_id={accessibility_id}
-                 accessibility_selected={self.active}
-                 accessibility_disabled={disabled}
-                 @when { !disabled } { on_click={action} }
+                 aria-selected={self.active}
+                 aria-disabled={disabled}
+                 @when { !disabled } { on:click={action} }
                  @when { fixed.is_some() } {
                      items_center justify_center
                      w={fixed.unwrap()} h={fixed.unwrap()}
@@ -208,6 +222,7 @@ impl RenderOnce for Button {
                     <icon svg={icon.unwrap()} size={icon_size} color={icon_color} />
                 }
                 {?label_el}
+                {...children}
             </div>
         }
     }

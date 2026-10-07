@@ -1,0 +1,20 @@
+error[E0308]: mismatched types
+  --> tests/ui/wrong_prop_type.rs:17:26
+   |
+17 |     view! { <Card title={5} /> };
+   |                   -----  ^ expected `String`, found integer
+   |                   |
+   |                   arguments to this method are incorrect
+   |
+note: method defined here
+  --> tests/ui/wrong_prop_type.rs:5:5
+   |
+ 3 | #[derive(Props)]
+   |          -----
+ 4 | struct Card {
+ 5 |     title: String,
+   |     ^^^^^
+help: try using a conversion method
+   |
+17 |     view! { <Card title={5.to_string()} /> };
+   |                           ++++++++++++

@@ -63,8 +63,8 @@ pub fn picker_list<T: PickerItem>(
 
     view! { scale,
         <div class="w-full flex-col" gap={Sp::XS} h={list_h}
-             id={"picker-list"}
-             test_id={"picker-list"}
+             id="picker-list"
+             test-id="picker-list"
              semantic_role={SemanticRole::ScrollArea}
              accessibility_role={accesskit::Role::ListBox}
              accessibility_id={"picker-list"}
@@ -117,18 +117,17 @@ fn picker_row<T: PickerItem>(
         <div class="w-full shrink-0 flex-row items-center"
              id={format!("picker-row:{i}:{}", entry.label())}
              key={format!("{i}:{}", entry.label())}
-             test_id={"picker-row"}
-             semantic_role={SemanticRole::ListBoxOption}
+             test-id="picker-row"
+             role="option"
              h={row_h} gap={Sp::SM} px={Sp::MD} rounded={Rad::MD}
              bg={row_bg}
              @when {!selected && !disabled} { hover_bg={tc.sidebar_row_hover} }
-             on_click={on_select}
+             on:click={on_select}
              hit_identity={HitIdentity::OverlayEntry(i)}
-             accessibility_role={accesskit::Role::ListBoxOption}
              accessibility_id={format!("picker-row:{i}:{}", entry.label())}
-             accessibility_label={entry.label()}
-             accessibility_selected={selected}
-             accessibility_disabled={disabled}
+             aria-label={entry.label()}
+             aria-selected={selected}
+             aria-disabled={disabled}
              cursor={CursorHint::Pointer}>
             {?icon_child}
             {picker_label(

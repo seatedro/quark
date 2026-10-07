@@ -86,14 +86,13 @@ impl RenderOnce for Checkbox {
             <div class="flex-row items-center" gap={m.spacing_sm}
                  id={accessibility_id.clone()}
                  key={accessibility_label.clone()}
-                 test_id={"checkbox"}
-                 semantic_role={SemanticRole::CheckBox}
-                 accessibility_role={accesskit::Role::CheckBox}
+                 test-id="checkbox"
+                 role="checkbox"
                  accessibility_id={accessibility_id}
-                 accessibility_label={accessibility_label}
-                 accessibility_toggled={self.checked}
-                 accessibility_disabled={self.disabled}
-                 @when {click_action.is_some()} { on_click={click_action.unwrap()} }>
+                 aria-label={accessibility_label}
+                 aria-checked={self.checked}
+                 aria-disabled={self.disabled}
+                 @when {click_action.is_some()} { on:click={click_action.unwrap()} }>
                 {check_box}
                 if let Some(label_text) = label_text {
                     <text class="text-sm" color={label_color}>{label_text}</text>

@@ -1,0 +1,5 @@
+error: unknown tag <dvi>; did you mean <div>? Built-in tags are div, text, p, icon, spacer, fragment, and components start with an uppercase letter
+ --> tests/ui/unknown_tag.rs:4:22
+  |
+4 |     let _ = view! { <dvi><b>"x"</b></dvi> };
+  |                      ^^^

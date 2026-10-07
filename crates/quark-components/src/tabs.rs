@@ -1,4 +1,4 @@
-use quark::{SemanticRole, view};
+use quark::view;
 
 use quark_ui::Action;
 use quark_ui::design::{Rad, Shadow, Sp, Sz};
@@ -68,19 +68,18 @@ impl RenderOnce for TabBar {
 
         view! {
             <div class="flex-row items-end" border_b={tc.border_variant}
-                 id={"tab-bar"} test_id={"tab-bar"}
-                 semantic_role={SemanticRole::TabList} accessibility_id={"tab-bar"}>
+                 id="tab-bar" test-id="tab-bar"
+                 role="tablist" accessibility_id={"tab-bar"}>
                 for item in self.items {
                     <div class="flex-col items-center"
                          id={format!("tab:{:?}:{}", item.action, item.label)}
                          key={item.label.clone()}
-                         test_id={"tab"}
-                         semantic_role={SemanticRole::Tab}
-                         on_click={item.action.clone()}
-                         accessibility_role={accesskit::Role::Tab}
+                         test-id="tab"
+                         role="tab"
+                         on:click={item.action.clone()}
                          accessibility_id={format!("tab:{:?}:{}", item.action, item.label)}
-                         accessibility_label={item.label.clone()}
-                         accessibility_selected={item.active}
+                         aria-label={item.label.clone()}
+                         aria-selected={item.active}
                          @when {!item.active} { hover_bg={tc.ghost_element_hover} }
                          @when {fill} { flex_1 }>
                         <div class="flex-row items-center"
@@ -128,9 +127,9 @@ impl RenderOnce for SegmentedTabs {
 
         view! {
             <div class="flex-row items-center"
-                 id={"segmented-tabs"}
-                 test_id={"segmented-tabs"}
-                 semantic_role={SemanticRole::TabList}
+                 id="segmented-tabs"
+                 test-id="segmented-tabs"
+                 role="tablist"
                  accessibility_id={"segmented-tabs"}
                  gap={seg_gap} p={seg_gap}
                  bg={tc.element_background} rounded={m.control_radius}>
@@ -138,15 +137,14 @@ impl RenderOnce for SegmentedTabs {
                     <div class="flex-row flex-1 items-center justify-center"
                          id={format!("segmented-tab:{:?}:{}", item.action, item.label)}
                          key={item.label.clone()}
-                         test_id={"segmented-tab"}
-                         semantic_role={SemanticRole::Tab}
+                         test-id="segmented-tab"
+                         role="tab"
                          px={m.spacing_md} py={m.spacing_xs}
                          rounded={inner_radius}
-                         on_click={item.action.clone()}
-                         accessibility_role={accesskit::Role::Tab}
+                         on:click={item.action.clone()}
                          accessibility_id={format!("segmented-tab:{:?}:{}", item.action, item.label)}
-                         accessibility_label={item.label.clone()}
-                         accessibility_selected={item.active}
+                         aria-label={item.label.clone()}
+                         aria-selected={item.active}
                          @when {item.active} { bg={tc.surface} shadow_preset={Shadow::SUBTLE} }
                          @when {!item.active} { hover_bg={tc.ghost_element_hover} }>
                         <text class="text-sm font-medium"

@@ -418,14 +418,14 @@ impl RenderOnce for ToastVisuals {
                 rounded={CORNER_RADIUS}
                 border={tc.border}
                 shadow_preset={Shadow::TOAST}
-                on_click={self.dismiss.clone()}
+                on:click={self.dismiss.clone()}
                 hit_identity={HitIdentity::Toast(self.index)}
                 cursor={CursorHint::Pointer}
                 z_index={self.z}
                 accessibility_id={format!("toast:{toast_id}")}
                 accessibility_role={role}
-                accessibility_label={self.message}
-                accessibility_description={self.description.unwrap_or_default()}
+                aria-label={self.message}
+                aria-description={self.description.unwrap_or_default()}
                 live={politeness}
             >
                 // Main row: leading badge | stacked title/description | close.
@@ -443,10 +443,10 @@ impl RenderOnce for ToastVisuals {
                         <icon svg={icon_svg} size={Ico::SM} color={accent} />
                     </div>
 
-                    <div class="flex-1 flex-col" min_w={0.0}>
+                    <div class="flex-1 flex-col" min-w={0.0}>
                         {...title_children}
                         if has_description {
-                            <div class="flex-col" pt={DESC_GAP} min_w={0.0}>
+                            <div class="flex-col" pt={DESC_GAP} min-w={0.0}>
                                 {...desc_children}
                             </div>
                         }
@@ -458,12 +458,12 @@ impl RenderOnce for ToastVisuals {
                         w={CLOSE_SIZE} h={CLOSE_SIZE}
                         rounded={Rad::MD}
                         hover_bg={tc.ghost_element_hover}
-                        on_click={self.dismiss.clone()}
+                        on:click={self.dismiss.clone()}
                         hit_identity={HitIdentity::Toast(self.index)}
                         cursor={CursorHint::Pointer}
                         accessibility_id={format!("toast-dismiss:{toast_id}")}
                         accessibility_role={accesskit::Role::Button}
-                        accessibility_label={quark_ui::i18n::tr("quark-dismiss")}
+                        aria-label={quark_ui::i18n::tr("quark-dismiss")}
                     >
                         <icon svg={lucide::X} size={Ico::XS} color={tc.text_muted} />
                     </div>

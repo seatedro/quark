@@ -1,0 +1,5 @@
+error: unknown class `itmes-center`; did you mean `items-center`? See the class reference in docs/guide/writing-views.md
+ --> tests/ui/class_unknown.rs:4:32
+  |
+4 |     let _ = view! { <div class="flex-row itmes-center" /> };
+  |                                ^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,4 +1,4 @@
-use quark::{SemanticRole, view};
+use quark::view;
 
 use quark_ui::Action;
 use quark_ui::design::{Shadow, Sp};
@@ -99,19 +99,18 @@ impl RenderOnce for Dropdown {
             <div class="flex-col">
                 <div class="flex-row items-center"
                      id={trigger_id.clone()}
-                     test_id={"dropdown-trigger"}
-                     semantic_role={SemanticRole::ComboBox}
+                     test-id="dropdown-trigger"
+                     role="combobox"
                      focus_scope={trigger_label.clone()}
                      key_context={"dropdown"}
                      gap={m.spacing_sm} px={m.spacing_md} py={trigger_py}
                      bg={tc.element_background} border={tc.border_variant}
                      rounded={m.control_radius} hover_bg={tc.element_hover}
-                     accessibility_role={accesskit::Role::ComboBox}
                      accessibility_id={trigger_id}
-                     accessibility_label={trigger_label.clone()}
-                     accessibility_expanded={self.open}
+                     aria-label={trigger_label.clone()}
+                     aria-expanded={self.open}
                      @when {self.width.is_some()} { w={self.width.unwrap()} }
-                     @when {self.on_toggle.is_some()} { on_click={self.on_toggle.unwrap()} }>
+                     @when {self.on_toggle.is_some()} { on:click={self.on_toggle.unwrap()} }>
                     <div class="flex-1">
                         <text class="text-sm" color={tc.text}>{self.label}</text>
                     </div>
@@ -120,8 +119,8 @@ impl RenderOnce for Dropdown {
                 if self.open {
                     <div class="flex-col w-full"
                          id={format!("dropdown-menu:{trigger_label}")}
-                         test_id={"dropdown-menu"}
-                         semantic_role={SemanticRole::Menu}
+                         test-id="dropdown-menu"
+                         role="menu"
                          accessibility_id={format!("dropdown-menu:{trigger_label}")}
                          focus_scope={trigger_label.clone()}
                          key_context={"dropdown"}
@@ -134,20 +133,19 @@ impl RenderOnce for Dropdown {
                             <div class="flex-row items-center"
                                  id={format!("dropdown-item:{:?}:{}", item.action, item.label)}
                                  key={item.label.clone()}
-                                 test_id={"dropdown-item"}
-                                 semantic_role={SemanticRole::MenuItem}
+                                 test-id="dropdown-item"
+                                 role="menuitem"
                                  gap={m.spacing_sm} px={m.spacing_md}
                                  py={m.spacing_xs + (Sp::XXS * scale).round()}
                                  bg={if item.selected { tc.ghost_element_selected } else { Color::TRANSPARENT }}
                                  hover_bg={tc.ghost_element_hover}
-                                 accessibility_role={accesskit::Role::MenuItem}
                                  accessibility_id={format!("dropdown-item:{:?}:{}", item.action, item.label)}
-                                 accessibility_label={item.label.clone()}
+                                 aria-label={item.label.clone()}
                                  @when {item.description.is_some()} {
-                                     accessibility_description={item.description.as_deref().unwrap_or_default()}
+                                     aria-description={item.description.as_deref().unwrap_or_default()}
                                  }
-                                 accessibility_selected={item.selected}
-                                 on_click={item.action}>
+                                 aria-selected={item.selected}
+                                 on:click={item.action}>
                                 if let Some(svg) = item.icon {
                                     <icon svg={svg} size={icon_size} color={tc.icon} />
                                 }

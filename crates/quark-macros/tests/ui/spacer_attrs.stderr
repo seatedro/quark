@@ -1,4 +1,4 @@
-error: `<spacer>` takes no attributes
+error: <spacer> takes no attributes
  --> tests/ui/spacer_attrs.rs:4:29
   |
 4 |     let _ = view! { <spacer gap={4.0} /> };

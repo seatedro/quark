@@ -1,0 +1,13 @@
+error[E0599]: no method named `colr` found for struct `Div` in the current scope
+  --> tests/ui/unknown_attribute.rs:18:18
+   |
+ 3 | struct Div;
+   | ---------- method `colr` not found for this struct
+...
+18 |     view! { <div colr="red" /> };
+   |                  ^^^^
+   |
+help: there is a method `color` with a similar name
+   |
+18 |     view! { <div color="red" /> };
+   |                     +

@@ -1,0 +1,20 @@
+error[E0277]: missing required prop `title` on `<Card>`
+  --> tests/ui/missing_required_prop.rs:21:14
+   |
+21 |     view! { <Card on:close="x" selected /> };
+   |              ^^^^ `<Card>` needs `title={..}`
+   |
+   = help: the trait `__CardRequires_title` is not implemented for `()`
+help: the trait `__CardRequires_title` is implemented for `__CardPropSet`
+  --> tests/ui/missing_required_prop.rs:3:10
+   |
+ 3 | #[derive(Props)]
+   |          ^^^^^
+note: required by a bound in `CardBuilder::<__P0, __P1>::build`
+  --> tests/ui/missing_required_prop.rs:4:8
+   |
+ 3 | #[derive(Props)]
+   |          ----- required by a bound in this associated function
+ 4 | struct Card {
+   |        ^^^^ required by this bound in `CardBuilder::<__P0, __P1>::build`
+   = note: this error originates in the derive macro `Props` (in Nightly builds, run with -Z macro-backtrace for more info)

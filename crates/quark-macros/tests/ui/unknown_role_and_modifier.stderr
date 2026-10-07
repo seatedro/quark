@@ -1,0 +1,17 @@
+error: unknown role "buton"; did you mean "button"? roles are alert, alertdialog, button, cell, checkbox, combobox, dialog, document, grid, gridcell, group, heading, img, label, link, list, listbox, listitem, menu, menubar, menuitem, option, progressbar, radio, radiogroup, row, scrollarea, separator, slider, spinbutton, status, switch, tab, table, tablist, tabpanel, textbox, toolbar, tooltip, tree, treeitem
+ --> tests/ui/unknown_role_and_modifier.rs:4:31
+  |
+4 |     let _ = view! { <div role="buton" on:key:ctl+s={()} aria-lable="x" /> };
+  |                               ^^^^^^^
+
+error: unknown modifier `ctl` in key binding `ctl+s`; did you mean `ctrl`? modifiers are mod, cmd, ctrl, alt, shift
+ --> tests/ui/unknown_role_and_modifier.rs:4:46
+  |
+4 |     let _ = view! { <div role="buton" on:key:ctl+s={()} aria-lable="x" /> };
+  |                                              ^^^
+
+error: unknown attribute `aria-lable`; did you mean `aria-label`? supported: aria-label, aria-description, aria-valuetext, aria-selected, aria-checked, aria-pressed, aria-expanded, aria-disabled, aria-invalid, aria-required, aria-readonly, aria-multiselectable, aria-level, aria-rowindex, aria-colindex, aria-sort, aria-live
+ --> tests/ui/unknown_role_and_modifier.rs:4:57
+  |
+4 |     let _ = view! { <div role="buton" on:key:ctl+s={()} aria-lable="x" /> };
+  |                                                         ^^^^

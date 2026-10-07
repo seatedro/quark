@@ -2,16 +2,18 @@
 //!
 //! `view!` is duck-typed: it emits calls to whatever `div()`, `text()`,
 //! `spacer()`, component constructors, and builder methods are in scope at
-//! the call site (quark-ui provides them in `element`). The `dsl`
-//! module below provides a minimal recording implementation of that contract
-//! so each lowering rule can be asserted at runtime. Rejected inputs are
-//! covered by the trybuild cases in `tests/ui/`.
+//! the call site (quark-ui provides them in `element`). The `dsl` module
+//! below is a minimal recording implementation of that contract, so each
+//! lowering rule can be asserted as the list of builder calls it makes.
+//! quark-components' `tests/view_equivalence.rs` checks the same rules
+//! against the real builders, and rejected inputs are the trybuild cases in
+//! `tests/ui/`.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use quark::reactive::{Signal, SignalStore};
-use quark_macros::view;
+use quark_macros::{Props, view};
 
 use dsl::*;
 
@@ -43,25 +45,117 @@ mod dsl {
         }
     }
 
-    pub struct Div {
+    pub trait IntoAnyElement {
+        fn into_any(self) -> AnyElement;
+    }
+
+    impl IntoAnyElement for AnyElement {
+        fn into_any(self) -> AnyElement {
+            self
+        }
+    }
+
+    impl IntoAnyElement for &str {
+        fn into_any(self) -> AnyElement {
+            text(self).into_any()
+        }
+    }
+
+    impl IntoAnyElement for String {
+        fn into_any(self) -> AnyElement {
+            text(self).into_any()
+        }
+    }
+
+    /// One builder type stands in for div, text, icon, and spacer: every
+    /// method records its name and arguments.
+    pub struct El {
         el: AnyElement,
     }
 
-    pub fn div() -> Div {
-        Div {
+    impl IntoAnyElement for El {
+        fn into_any(self) -> AnyElement {
+            self.el
+        }
+    }
+
+    pub fn div() -> El {
+        El {
             el: AnyElement::new("div"),
         }
     }
 
-    impl Div {
-        pub fn child(mut self, child: AnyElement) -> Self {
-            self.el.children.push(child);
+    pub fn text(content: impl Into<String>) -> El {
+        let mut el = AnyElement::new("text");
+        el.value = Some(content.into());
+        El { el }
+    }
+
+    pub fn spacer() -> El {
+        El {
+            el: AnyElement::new("spacer"),
+        }
+    }
+
+    pub fn svg_icon(svg: &'static str, size: f32) -> El {
+        let mut el = AnyElement::new("icon");
+        el.value = Some(format!("{svg}@{size}"));
+        El { el }
+    }
+
+    /// A recorded `StyleOverride` for `hover:` classes.
+    #[derive(Default)]
+    pub struct Hover(Vec<String>);
+
+    impl Hover {
+        pub fn bg(mut self, c: &str) -> Self {
+            self.0.push(format!("bg({c})"));
+            self
+        }
+        pub fn opacity(mut self, v: f32) -> Self {
+            self.0.push(format!("opacity({v})"));
+            self
+        }
+    }
+
+    macro_rules! record {
+        ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
+            impl El {
+                $(pub fn $name(mut self, $($arg: $ty),*) -> Self {
+                    let args: Vec<String> = vec![$(format!("{:?}", $arg)),*];
+                    self.el.calls.push(if args.is_empty() {
+                        stringify!($name).to_owned()
+                    } else {
+                        format!("{}({})", stringify!($name), args.join(", "))
+                    });
+                    self
+                })*
+            }
+        };
+    }
+
+    record! {
+        flex_row(); flex_col(); flex_grow(); flex_shrink_0(); items_center(); hidden();
+        bold(); mono(); text_sm(); medium();
+        gap(v: f32); px(v: f32); p(v: f32); w(v: f32); min_w(v: f32); opacity(v: f32);
+        flex_grow_val(v: f32); size(v: f32);
+        bg(c: &str); color(c: &str); test_id(v: &str); id(v: String); key(v: String);
+        shadow(blur: f32, y: f32, c: &str);
+        accessibility_label(v: &str); accessibility_selected(v: bool);
+        accessibility_disabled(v: bool);
+        semantic_role(r: quark::SemanticRole);
+        on_key(binding: &str, action: &str);
+    }
+
+    impl El {
+        pub fn child(mut self, child: impl IntoAnyElement) -> Self {
+            self.el.children.push(child.into_any());
             self
         }
 
-        pub fn optional_child(mut self, child: Option<AnyElement>) -> Self {
+        pub fn optional_child(mut self, child: Option<impl IntoAnyElement>) -> Self {
             if let Some(child) = child {
-                self.el.children.push(child);
+                self.el.children.push(child.into_any());
             }
             self
         }
@@ -71,33 +165,10 @@ mod dsl {
             self
         }
 
-        pub fn gap(mut self, value: f32) -> Self {
-            self.el.calls.push(format!("gap({value})"));
-            self
-        }
-
-        pub fn flex_row(mut self) -> Self {
-            self.el.calls.push("flex_row".into());
-            self
-        }
-
-        pub fn flex_grow(mut self) -> Self {
-            self.el.calls.push("flex_grow".into());
-            self
-        }
-
-        pub fn flex_grow_val(mut self, value: f32) -> Self {
-            self.el.calls.push(format!("flex_grow_val({value})"));
-            self
-        }
-
-        pub fn flex_shrink_0(mut self) -> Self {
-            self.el.calls.push("flex_shrink_0".into());
-            self
-        }
-
-        pub fn px_2(mut self) -> Self {
-            self.el.calls.push("px_2".into());
+        pub fn hover(mut self, f: impl FnOnce(Hover) -> Hover) -> Self {
+            self.el
+                .calls
+                .push(format!("hover[{}]", f(Hover::default()).0.join(", ")));
             self
         }
 
@@ -106,62 +177,44 @@ mod dsl {
             self.el.on_click = Some(Rc::new(handler));
             self
         }
+    }
 
-        pub fn into_any(self) -> AnyElement {
-            self.el
+    /// Rich text: `selectable_rich_text` and its spans.
+    pub struct StyledSpan(pub String);
+
+    impl StyledSpan {
+        pub fn plain(text: impl Into<String>) -> Self {
+            StyledSpan(text.into())
+        }
+        pub fn bold(self) -> Self {
+            StyledSpan(format!("**{}**", self.0))
+        }
+        pub fn italic(self) -> Self {
+            StyledSpan(format!("_{}_", self.0))
+        }
+        pub fn code(self) -> Self {
+            StyledSpan(format!("`{}`", self.0))
+        }
+        pub fn link(self, url: &str) -> Self {
+            StyledSpan(format!("[{}]({url})", self.0))
         }
     }
 
-    pub struct Text {
-        el: AnyElement,
-    }
-
-    pub fn text(content: impl ToString) -> Text {
-        let mut el = AnyElement::new("text");
-        el.value = Some(content.to_string());
-        Text { el }
-    }
-
-    impl Text {
-        pub fn color(mut self, value: impl ToString) -> Self {
-            self.el.calls.push(format!("color({})", value.to_string()));
-            self
-        }
-
-        pub fn bold(mut self) -> Self {
-            self.el.calls.push("bold".into());
-            self
-        }
-
-        pub fn mono(mut self) -> Self {
-            self.el.calls.push("mono".into());
-            self
-        }
-
-        pub fn into_any(self) -> AnyElement {
-            self.el
-        }
-    }
-
-    pub struct Spacer {
-        el: AnyElement,
-    }
-
-    pub fn spacer() -> Spacer {
-        Spacer {
-            el: AnyElement::new("spacer"),
-        }
-    }
-
-    impl Spacer {
-        pub fn into_any(self) -> AnyElement {
-            self.el
-        }
+    pub fn selectable_rich_text(spans: Vec<StyledSpan>) -> El {
+        let mut el = AnyElement::new("p");
+        el.value = Some(spans.into_iter().map(|s| s.0).collect());
+        El { el }
     }
 
     /// Component with one constructor arg plus `icon`/`label` builders.
     pub struct Button {
         el: AnyElement,
+    }
+
+    impl IntoAnyElement for Button {
+        fn into_any(self) -> AnyElement {
+            self.el
+        }
     }
 
     impl Button {
@@ -190,15 +243,17 @@ mod dsl {
             self.el.calls.push("flex_grow".into());
             self
         }
-
-        pub fn into_any(self) -> AnyElement {
-            self.el
-        }
     }
 
     /// Component with `left_child`/`right_child` builders for slots.
     pub struct Toolbar {
         el: AnyElement,
+    }
+
+    impl IntoAnyElement for Toolbar {
+        fn into_any(self) -> AnyElement {
+            self.el
+        }
     }
 
     impl Toolbar {
@@ -224,10 +279,38 @@ mod dsl {
             self.el.children.push(child);
             self
         }
+    }
+}
 
-        pub fn into_any(self) -> AnyElement {
-            self.el
-        }
+/// A `#[derive(Props)]` component: every kind of prop.
+#[derive(Props)]
+pub struct Card {
+    title: String,
+    #[prop(into)]
+    on_close: String,
+    #[prop(optional, into)]
+    subtitle: Option<String>,
+    #[prop(default = 2)]
+    level: u8,
+    #[prop(default)]
+    selected: bool,
+    #[prop(default)]
+    children: Vec<AnyElement>,
+}
+
+impl IntoAnyElement for Card {
+    fn into_any(self) -> AnyElement {
+        let mut el = div().into_any();
+        el.tag = "Card";
+        el.calls = vec![
+            format!("title({})", self.title),
+            format!("on_close({})", self.on_close),
+            format!("subtitle({:?})", self.subtitle),
+            format!("level({})", self.level),
+            format!("selected({})", self.selected),
+        ];
+        el.children = self.children;
+        el
     }
 }
 
@@ -243,6 +326,14 @@ impl Cx<'_> {
     }
 }
 
+/// Child values (text, or tag for elements without one), in order.
+fn kids(el: &AnyElement) -> Vec<&str> {
+    el.children
+        .iter()
+        .map(|c| c.value.as_deref().unwrap_or(c.tag))
+        .collect()
+}
+
 #[test]
 fn basic_element_emit() {
     let el = view! {
@@ -253,12 +344,42 @@ fn basic_element_emit() {
     };
 
     assert_eq!(el.tag, "div");
-    assert_eq!(el.calls, ["flex_row", "gap(4)"]);
-    assert_eq!(el.children.len(), 2);
-    assert_eq!(el.children[0].tag, "text");
-    assert_eq!(el.children[0].value.as_deref(), Some("hello"));
-    assert_eq!(el.children[0].calls, ["color(red)"]);
-    assert_eq!(el.children[1].tag, "spacer");
+    assert_eq!(el.calls, ["flex_row", "gap(4.0)"]);
+    assert_eq!(kids(&el), ["hello", "spacer"]);
+    assert_eq!(el.children[0].calls, ["color(\"red\")"]);
+}
+
+// Catches a regression in any attribute form: flags, literals, kebab-case
+// names, tuple splats, and the `aria-`/`role`/`on:key` mappings.
+#[test]
+fn attribute_forms_lower_to_builder_calls() {
+    let el = view! {
+        <div hidden
+             min-w={0.0}
+             test-id="row"
+             id={"r".to_string()}
+             shadow={(2.0, 1.0, "black")}
+             aria-label="Close"
+             aria-selected={false}
+             aria-disabled
+             role="button"
+             on:key:mod+s={"save"} />
+    };
+    assert_eq!(
+        el.calls,
+        [
+            "hidden",
+            "min_w(0.0)",
+            "test_id(\"row\")",
+            "id(\"r\")",
+            "shadow(2.0, 1.0, \"black\")",
+            "accessibility_label(\"Close\")",
+            "accessibility_selected(false)",
+            "accessibility_disabled(true)",
+            "semantic_role(Button)",
+            "on_key(\"mod+s\", \"save\")",
+        ]
+    );
 }
 
 #[test]
@@ -279,22 +400,76 @@ fn nested_children_expression_forms_and_fragment() {
             {?present}
             {?absent}
             {...extras}
-            <fragment>
+            <>
                 <text>"a"</text>
-                <text>"b"</text>
-            </fragment>
+                "b"
+            </>
         </div>
     };
 
     // nested div + present optional + 2 spread + 2 fragment children, with the
     // fragment flattened into the parent (no wrapper node).
-    let kinds: Vec<&str> = el
-        .children
-        .iter()
-        .map(|c| c.value.as_deref().unwrap_or(c.tag))
-        .collect();
-    assert_eq!(kinds, ["div", "badge-3", "badge-1", "badge-2", "a", "b"]);
+    assert_eq!(
+        kids(&el),
+        ["div", "badge-3", "badge-1", "badge-2", "a", "b"]
+    );
     assert_eq!(el.children[0].children[0].value.as_deref(), Some("badge-0"));
+}
+
+// Catches builders and macro output failing to mix: a builder value is a
+// child anywhere, including spread positions that need `AnyElement`s.
+#[test]
+fn builder_values_and_macro_output_compose() {
+    let inner = view! { <text>"from macro"</text> };
+    let make = |many: bool| {
+        view! {
+            <div>
+                {div().child(inner_text())}
+                if many {
+                    {text("x")}
+                    {div()}
+                }
+                {...[text("s1"), text("s2")]}
+            </div>
+        }
+    };
+    fn inner_text() -> AnyElement {
+        text("built").into_any()
+    }
+    assert_eq!(kids(&make(true)), ["div", "x", "div", "s1", "s2"]);
+    assert_eq!(kids(&make(false)), ["div", "s1", "s2"]);
+    let el = div().child(inner).into_any();
+    assert_eq!(kids(&el), ["from macro"]);
+}
+
+#[test]
+fn text_interpolates_and_joins_parts() {
+    let name = "Ada";
+    let n = 3;
+    let el = view! {
+        <div>
+            <text>"Hello, {name}! {{braces}}"</text>
+            <text>"n=" {n} " ratio={1.0 / 3.0:.2}"</text>
+            "{n} items"
+        </div>
+    };
+    assert_eq!(
+        kids(&el),
+        ["Hello, Ada! {braces}", "n=3 ratio=0.33", "3 items"]
+    );
+}
+
+#[test]
+fn rich_text_inline_tags_style_spans() {
+    let url = "https://x.dev";
+    let el = view! {
+        <p>"Run " <code>"cargo test"</code> ", " <b>"then " <i>"read"</i></b> <br/>
+           <a href={url}>"docs"</a></p>
+    };
+    assert_eq!(
+        el.value.as_deref(),
+        Some("Run `cargo test`, **then **_**read**_\n[docs](https://x.dev)")
+    );
 }
 
 #[test]
@@ -307,8 +482,7 @@ fn if_without_else_is_optional_child() {
         }
     };
 
-    assert_eq!(make(true).children.len(), 1);
-    assert_eq!(make(true).children[0].value.as_deref(), Some("shown"));
+    assert_eq!(kids(&make(true)), ["shown"]);
     assert!(make(false).children.is_empty());
 }
 
@@ -318,15 +492,28 @@ fn if_else_and_else_if_chain_pick_one_branch() {
         view! {
             <div>
                 if a { <text>"a"</text> }
-                else if b { <text>"b"</text> }
+                else if b { "b" }
                 else { <text>"c"</text> }
             </div>
         }
     };
 
-    assert_eq!(pick(true, false).children[0].value.as_deref(), Some("a"));
-    assert_eq!(pick(false, true).children[0].value.as_deref(), Some("b"));
-    assert_eq!(pick(false, false).children[0].value.as_deref(), Some("c"));
+    assert_eq!(kids(&pick(true, false)), ["a"]);
+    assert_eq!(kids(&pick(false, true)), ["b"]);
+    assert_eq!(kids(&pick(false, false)), ["c"]);
+}
+
+#[test]
+fn if_let_binds_into_its_branch() {
+    let make = |opt: Option<&str>| {
+        view! {
+            <div>
+                if let Some(label) = opt { <text>{label}</text> } else { <spacer/> }
+            </div>
+        }
+    };
+    assert_eq!(kids(&make(Some("x"))), ["x"]);
+    assert_eq!(kids(&make(None)), ["spacer"]);
 }
 
 /// Regression: a chain with no final `else` used to inject a spacer when no
@@ -342,7 +529,7 @@ fn else_if_without_final_else_adds_no_child() {
         }
     };
 
-    assert_eq!(pick(false, true).children[0].value.as_deref(), Some("b"));
+    assert_eq!(kids(&pick(false, true)), ["b"]);
     assert!(pick(false, false).children.is_empty());
 }
 
@@ -362,14 +549,8 @@ fn multi_child_else_if_branch_spreads_into_parent() {
         }
     };
 
-    let values = |el: AnyElement| -> Vec<String> {
-        el.children
-            .iter()
-            .map(|c| c.value.clone().unwrap_or(c.tag.to_owned()))
-            .collect()
-    };
-    assert_eq!(values(pick(true)), ["a"]);
-    assert_eq!(values(pick(false)), ["b1", "b2"]);
+    assert_eq!(kids(&pick(true)), ["a"]);
+    assert_eq!(kids(&pick(false)), ["b1", "b2"]);
 }
 
 #[test]
@@ -387,23 +568,9 @@ fn multi_child_if_spreads_into_parent_without_wrapper() {
         }
     };
 
-    let on = make(true);
-    let values: Vec<&str> = on
-        .children
-        .iter()
-        .map(|c| c.value.as_deref().unwrap_or(c.tag))
-        .collect();
-    // Branch children flow inline into the parent — no wrapper div node.
-    assert_eq!(values, ["lead", "x", "y", "tail"]);
-    assert!(on.children.iter().all(|c| c.tag == "text"));
-
-    let off = make(false);
-    let values: Vec<&str> = off
-        .children
-        .iter()
-        .map(|c| c.value.as_deref().unwrap_or(c.tag))
-        .collect();
-    assert_eq!(values, ["lead", "tail"]);
+    // Branch children flow inline into the parent: no wrapper div node.
+    assert_eq!(kids(&make(true)), ["lead", "x", "y", "tail"]);
+    assert_eq!(kids(&make(false)), ["lead", "tail"]);
 }
 
 #[test]
@@ -413,36 +580,52 @@ fn for_loop_flattens_each_iteration() {
     let el = view! {
         <div>
             for (i, item) in items.iter().enumerate() {
-                <text>{format!("{i}:{item}")}</text>
+                <text>"{i}:{item}"</text>
             }
         </div>
     };
 
-    let values: Vec<&str> = el
-        .children
-        .iter()
-        .map(|c| c.value.as_deref().unwrap_or_default())
-        .collect();
-    assert_eq!(values, ["0:a", "1:b", "2:c"]);
+    assert_eq!(kids(&el), ["0:a", "1:b", "2:c"]);
 }
 
 #[test]
-fn match_arms_emit_child() {
+fn keyed_for_puts_the_key_on_each_root() {
+    let items = ["a", "b"];
+    let el = view! {
+        <div>
+            for item in items key={format!("row-{item}")} {
+                <div>{item}</div>
+            }
+        </div>
+    };
+    let keys: Vec<&[String]> = el.children.iter().map(|c| c.calls.as_slice()).collect();
+    assert_eq!(keys, [["key(\"row-a\")"], ["key(\"row-b\")"]]);
+}
+
+#[test]
+fn match_arms_take_markup_rust_and_multiple_children() {
     let render = |n: u8| {
         view! {
             <div>
                 match n {
-                    0 => view! { <text>"zero"</text> },
+                    0 => <text>"zero"</text>
                     1 => text("one").into_any(),
-                    _ => spacer().into_any(),
+                    2 | 3 => {
+                        <text>"two"</text>
+                        <text>"three"</text>
+                    }
+                    n if n > 100 => {}
+                    _ => <spacer />
                 }
             </div>
         }
     };
 
-    assert_eq!(render(0).children[0].value.as_deref(), Some("zero"));
-    assert_eq!(render(1).children[0].value.as_deref(), Some("one"));
-    assert_eq!(render(7).children[0].tag, "spacer");
+    assert_eq!(kids(&render(0)), ["zero"]);
+    assert_eq!(kids(&render(1)), ["one"]);
+    assert_eq!(kids(&render(2)), ["two", "three"]);
+    assert!(kids(&render(200)).is_empty());
+    assert_eq!(kids(&render(7)), ["spacer"]);
 }
 
 #[test]
@@ -472,7 +655,7 @@ fn component_value_slots_and_constructor_args() {
 #[test]
 fn component_child_slots_map_to_repeated_builder_calls() {
     let el = view! {
-        <Toolbar compact>
+        <Toolbar() compact>
             <.left_child>
                 <spacer />
             </.left_child>
@@ -501,17 +684,47 @@ fn component_child_slots_map_to_repeated_builder_calls() {
     );
 }
 
+// Catches props reaching the component wrong: required, `into`, optional,
+// defaults, flags as `true`, `on:` events, and children.
+#[test]
+fn props_component_takes_props_and_children() {
+    let el = view! {
+        <Card title={"Inbox".to_string()} on:close="dismiss" selected>
+            "first"
+            <text>"second"</text>
+        </Card>
+    };
+    assert_eq!(
+        el.calls,
+        [
+            "title(Inbox)",
+            "on_close(dismiss)",
+            "subtitle(None)",
+            "level(2)",
+            "selected(true)",
+        ]
+    );
+    assert_eq!(kids(&el), ["first", "second"]);
+
+    let el = view! { <Card title={String::new()} on:close="x" subtitle="Sub" level={1} /> };
+    assert_eq!(el.calls[2..4], ["subtitle(Some(\"Sub\"))", "level(1)"]);
+}
+
 #[test]
 fn class_attribute_lowers_to_builder_methods() {
-    let el = view! { <div class="flex-row grow grow-0 shrink-0 px-2" /> };
+    let el =
+        view! { <div class="flex-row grow grow-0 shrink-0 px-2 gap-[6] w-[320px] opacity-50" /> };
     assert_eq!(
         el.calls,
         [
             "flex_row",
             "flex_grow",
-            "flex_grow_val(0)",
+            "flex_grow_val(0.0)",
             "flex_shrink_0",
-            "px_2"
+            "px(8.0)",
+            "gap(6.0)",
+            "w(320.0)",
+            "opacity(0.5)",
         ]
     );
 
@@ -520,12 +733,20 @@ fn class_attribute_lowers_to_builder_methods() {
 }
 
 #[test]
+fn hover_classes_gather_into_one_override() {
+    let accent = "accent";
+    let el = view! { <div class="hover:bg-[accent] p-1 hover:opacity-80" /> };
+    assert_eq!(el.calls, ["p(4.0)", "hover[bg(accent), opacity(0.8)]"]);
+    let _ = accent;
+}
+
+#[test]
 fn event_handler_attribute_binds_closure() {
     let clicks = Rc::new(Cell::new(0u32));
     let sink = clicks.clone();
 
     let el = view! {
-        <div on_click={move || sink.set(sink.get() + 1)}>
+        <div on:click={move || sink.set(sink.get() + 1)}>
             <text>"button"</text>
         </div>
     };
@@ -541,7 +762,7 @@ fn event_handler_attribute_binds_closure() {
 fn reactive_attribute_reads_through_cx() {
     let store = SignalStore::default();
     let gap = store.create(4.0f32);
-    let label = store.create(String::from("alpha"));
+    let label = store.create("alpha");
     let cx = Cx { store: &store };
 
     let build = || {
@@ -553,13 +774,20 @@ fn reactive_attribute_reads_through_cx() {
     };
 
     let el = build();
-    assert_eq!(el.calls, ["gap(4)"]);
-    assert_eq!(el.children[0].calls, ["color(alpha)"]);
+    assert_eq!(el.calls, ["gap(4.0)"]);
+    assert_eq!(el.children[0].calls, ["color(\"alpha\")"]);
 
     store.write(gap, 12.0);
-    store.write(label, String::from("beta"));
+    store.write(label, "beta");
 
     let el = build();
-    assert_eq!(el.calls, ["gap(12)"]);
-    assert_eq!(el.children[0].calls, ["color(beta)"]);
+    assert_eq!(el.calls, ["gap(12.0)"]);
+    assert_eq!(el.children[0].calls, ["color(\"beta\")"]);
+}
+
+#[test]
+fn scale_multiplies_spatial_attributes_only() {
+    let scale = 2.0f32;
+    let el = view! { scale, <div gap={3.0} w={10.0} p={if true { 1.5 } else { 0.0 }} /> };
+    assert_eq!(el.calls, ["gap(6.0)", "w(10.0)", "p(3.0)"]);
 }

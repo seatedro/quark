@@ -1,4 +1,3 @@
-use quark::SemanticRole;
 use quark::view;
 
 use quark_ui::Action;
@@ -117,15 +116,14 @@ impl RenderOnce for Modal {
                  w={panel_width} p={padding} gap={gap}
                  bg={tc.elevated_surface} rounded={Rad::XXXL}
                  border_b={tc.border} shadow_preset={Shadow::MODAL}
-                 on_click={quark_ui::element::NoopAction}
+                 on:click={quark_ui::element::NoopAction}
                  id={format!("modal:{accessibility_label}")}
-                 test_id={"modal"}
-                 semantic_role={SemanticRole::Dialog}
+                 test-id="modal"
+                 role="dialog"
                  focus_scope={accessibility_label.clone()}
                  trap_focus={true}
-                 accessibility_role={accesskit::Role::Dialog}
                  accessibility_id={format!("modal:{accessibility_label}")}
-                 accessibility_label={accessibility_label}
+                 aria-label={accessibility_label}
                  @when {self.height.is_some()} { h={(self.height.unwrap() * scale).round().min(max_h)} }>
                 {header}
                 {...self.body}
@@ -144,9 +142,9 @@ impl RenderOnce for Modal {
                  w={self.window_width} h={self.window_height}
                  z_index={100}
                  bg={tc.overlay_scrim}
-                 id={"overlay.backdrop"}
-                 test_id={"modal-backdrop"}
-                 on_click={self.on_dismiss}
+                 id="overlay.backdrop"
+                 test-id="modal-backdrop"
+                 on:click={self.on_dismiss}
                  block_mouse
                  hit_identity={HitIdentity::OverlayBackdrop}
                  @when {self.align == ModalAlign::Center} { justify_center }
