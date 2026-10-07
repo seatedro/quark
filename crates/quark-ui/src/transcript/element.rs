@@ -426,6 +426,7 @@ impl Element for TranscriptElement {
         cx.push_accessibility_for_semantic(
             AccessibilityNode::new("transcript", AccessibilityRole::List, bounds)
                 .label(self.label.clone())
+                .set_size(self.row_count)
                 .action(AccessibilityAction::Scroll(builder)),
             list,
         );

@@ -694,10 +694,17 @@ fn rows_publish_their_position_among_all_rows_and_their_block_text() {
         .filter_map(|id| update.nodes.iter().find(|(nid, _)| nid == id))
         .filter_map(|(_, n)| n.value())
         .collect();
+    // AT-SPI reads the set size from the list, not the items.
+    let list_size = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::List)
+        .and_then(|(_, n)| n.size_of_set());
     assert_eq!(
-        (item.label(), item.size_of_set(), texts),
+        (item.label(), item.size_of_set(), list_size, texts),
         (
             Some("author 2500"),
+            Some(5000),
             Some(5000),
             vec!["Message 2500 wraps across a few lines when the column is narrow enough."]
         )

@@ -37,6 +37,9 @@ pub struct AccessibilityNode {
     /// 1-based position among siblings and the set size, for list items
     /// whose set is larger than the materialized rows.
     position_in_set: Option<(usize, usize)>,
+    /// Item count of a container (list), for adapters that read the set
+    /// size from the container rather than the items (AT-SPI).
+    set_size: Option<usize>,
     action: Option<AccessibilityAction>,
     author_id: String,
     parent: Option<NodeId>,
@@ -57,6 +60,7 @@ impl AccessibilityNode {
             toggled: None,
             expanded: None,
             position_in_set: None,
+            set_size: None,
             action: None,
             author_id: key.to_owned(),
             parent: None,
@@ -116,6 +120,13 @@ impl AccessibilityNode {
         self
     }
 
+    /// On a container: how many items its set has, including items that
+    /// are not in the tree.
+    pub fn set_size(mut self, size: usize) -> Self {
+        self.set_size = Some(size);
+        self
+    }
+
     pub fn action(mut self, action: AccessibilityAction) -> Self {
         self.action = Some(action);
         self
@@ -152,6 +163,9 @@ impl AccessibilityNode {
         }
         if let Some((position, size)) = self.position_in_set {
             node.set_position_in_set(position);
+            node.set_size_of_set(size);
+        }
+        if let Some(size) = self.set_size {
             node.set_size_of_set(size);
         }
         match &self.action {
