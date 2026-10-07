@@ -234,6 +234,18 @@ fn named_binding_key(named: NamedKey) -> Option<(&'static str, bool)> {
         NamedKey::End => ("end", false),
         NamedKey::Backspace => ("backspace", false),
         NamedKey::Delete => ("delete", false),
+        NamedKey::F1 => ("f1", false),
+        NamedKey::F2 => ("f2", false),
+        NamedKey::F3 => ("f3", false),
+        NamedKey::F4 => ("f4", false),
+        NamedKey::F5 => ("f5", false),
+        NamedKey::F6 => ("f6", false),
+        NamedKey::F7 => ("f7", false),
+        NamedKey::F8 => ("f8", false),
+        NamedKey::F9 => ("f9", false),
+        NamedKey::F10 => ("f10", false),
+        NamedKey::F11 => ("f11", false),
+        NamedKey::F12 => ("f12", false),
         _ => return None,
     })
 }

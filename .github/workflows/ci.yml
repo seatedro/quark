@@ -43,6 +43,11 @@ jobs:
       # Every optional feature at once, so feature-gated code keeps
       # compiling. profile-tracy is left out: it and profile-puffin each
       # install a global profiler backend and cannot be enabled together.
+      # Apps build the library without test-support; test builds always
+      # turn it on, so check the plain library separately.
+      - name: Check library as apps build it
+        run: cargo check --workspace --lib
+
       - name: Check all features
         run: >-
           cargo check --workspace --all-targets --features
