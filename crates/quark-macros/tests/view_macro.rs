@@ -4,8 +4,8 @@
 //! `spacer()`, component constructors, and builder methods are in scope at
 //! the call site (in Diffy those live in `src/ui/element.rs`). The `dsl`
 //! module below provides a minimal recording implementation of that contract
-//! so each lowering rule can be asserted at runtime instead of only as token
-//! snapshots (those live in `src/lib.rs` unit tests).
+//! so each lowering rule can be asserted at runtime. Rejected inputs are
+//! covered by the trybuild cases in `tests/ui/`.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -86,6 +86,11 @@ mod dsl {
             self
         }
 
+        pub fn flex_grow_val(mut self, value: f32) -> Self {
+            self.el.calls.push(format!("flex_grow_val({value})"));
+            self
+        }
+
         pub fn flex_shrink_0(mut self) -> Self {
             self.el.calls.push("flex_shrink_0".into());
             self
@@ -154,8 +159,7 @@ mod dsl {
         }
     }
 
-    /// Component with one constructor arg (`action`, per
-    /// `constructor_arg_order`) plus `Icon`/`Label` value slots.
+    /// Component with one constructor arg plus `icon`/`label` builders.
     pub struct Button {
         el: AnyElement,
     }
@@ -192,7 +196,7 @@ mod dsl {
         }
     }
 
-    /// Component with `Left`/`Right` child slots.
+    /// Component with `left_child`/`right_child` builders for slots.
     pub struct Toolbar {
         el: AnyElement,
     }
@@ -325,8 +329,10 @@ fn if_else_and_else_if_chain_pick_one_branch() {
     assert_eq!(pick(false, false).children[0].value.as_deref(), Some("c"));
 }
 
+/// Regression: a chain with no final `else` used to inject a spacer when no
+/// branch matched.
 #[test]
-fn else_if_without_final_else_falls_back_to_spacer() {
+fn else_if_without_final_else_adds_no_child() {
     let pick = |a: bool, b: bool| {
         view! {
             <div>
@@ -337,7 +343,33 @@ fn else_if_without_final_else_falls_back_to_spacer() {
     };
 
     assert_eq!(pick(false, true).children[0].value.as_deref(), Some("b"));
-    assert_eq!(pick(false, false).children[0].tag, "spacer");
+    assert!(pick(false, false).children.is_empty());
+}
+
+/// Regression: only the first `if` body and the final `else` were checked
+/// for multiple children, so a multi-child `else if` was wrapped in a div.
+#[test]
+fn multi_child_else_if_branch_spreads_into_parent() {
+    let pick = |a: bool| {
+        view! {
+            <div>
+                if a { <text>"a"</text> }
+                else if !a {
+                    <text>"b1"</text>
+                    <text>"b2"</text>
+                }
+            </div>
+        }
+    };
+
+    let values = |el: AnyElement| -> Vec<String> {
+        el.children
+            .iter()
+            .map(|c| c.value.clone().unwrap_or(c.tag.to_owned()))
+            .collect()
+    };
+    assert_eq!(values(pick(true)), ["a"]);
+    assert_eq!(values(pick(false)), ["b1", "b2"]);
 }
 
 #[test]
@@ -416,14 +448,14 @@ fn match_arms_emit_child() {
 #[test]
 fn component_value_slots_and_constructor_args() {
     let el = view! {
-        <Button action={"save"} tooltip={"Save file"} class="grow">
-            <Icon>{"disk"}</Icon>
-            <Label>"Save"</Label>
+        <Button("save") tooltip={"Save file"} class="grow">
+            <.icon>{"disk"}</.icon>
+            <.label>"Save"</.label>
         </Button>
     };
 
     assert_eq!(el.tag, "Button");
-    // Constructor arg first, then builder calls in attribute order (with the
+    // Constructor args first, then builder calls in attribute order (with the
     // class lowered to its mapped builder method), then slot calls.
     assert_eq!(
         el.calls,
@@ -441,13 +473,13 @@ fn component_value_slots_and_constructor_args() {
 fn component_child_slots_map_to_repeated_builder_calls() {
     let el = view! {
         <Toolbar compact>
-            <Left>
+            <.left_child>
                 <spacer />
-            </Left>
-            <Right>
+            </.left_child>
+            <.right_child>
                 <text>"r1"</text>
                 <text>"r2"</text>
-            </Right>
+            </.right_child>
         </Toolbar>
     };
 
@@ -471,8 +503,11 @@ fn component_child_slots_map_to_repeated_builder_calls() {
 
 #[test]
 fn class_attribute_lowers_to_builder_methods() {
-    let el = view! { <div class="flex-row grow shrink-0 px-2" /> };
-    assert_eq!(el.calls, ["flex_row", "flex_grow", "flex_shrink_0", "px_2"]);
+    let el = view! { <div class="flex-row grow grow-0 shrink-0 px-2" /> };
+    assert_eq!(
+        el.calls,
+        ["flex_row", "flex_grow", "flex_grow_val(0)", "flex_shrink_0", "px_2"]
+    );
 
     let el = view! { <text class="font-bold font-mono">"x"</text> };
     assert_eq!(el.calls, ["bold", "mono"]);

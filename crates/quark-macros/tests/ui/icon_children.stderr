@@ -1,0 +1,5 @@
+error: `<icon>` takes no children; pass `svg={...}`
+ --> tests/ui/icon_children.rs:4:36
+  |
+4 |     let _ = view! { <icon svg={""}>"x"</icon> };
+  |                                    ^^^

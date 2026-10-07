@@ -29,11 +29,14 @@ the `halogen` crate and Diffy's UI builders must provide.
 - Store leaves become `::quark::reactive::Signal<T>`. `#[store(flatten)]`
   maps a named `Foo` field to `FooStore`; `#[store(skip)]` omits the field from
   the generated store.
-- Generated stores derive `Clone`, `Copy`, and `Debug`, expose `new` and
-  `new_default`, and only generate `snapshot()` when no field is skipped.
+- Generated stores derive `Clone`, `Copy`, and `Debug` and expose `new`.
+  `new_default` exists only with struct-level `#[store(default)]`, so
+  non-`Default` structs derive cleanly. `snapshot()` is generated only when
+  no field is skipped.
 - `view!` supports optional `scale,`, built-in tags (`div`, `text`, `icon`,
   `spacer`, `fragment`), component tags, `if` / `else if` / `else`, `for`,
   `match`, raw expressions, optional expressions, and spread expressions.
+  An `if` chain with no final `else` yields no child when nothing matches.
 - Reactive attributes use `name={@signal}` and lower to `cx.read(signal)`.
   Call sites must provide a `cx` with the expected `read` method.
 - `class="..."` lowers to builder method calls. It is not CSS and must stay
@@ -41,10 +44,14 @@ the `halogen` crate and Diffy's UI builders must provide.
 - Multi-child `if` branches and fragments must spread children into the parent,
   not wrap them in a bare `div()`. Wrapping changes layout and percentage-size
   resolution.
-- Component constructor arguments are intentionally ordered by
-  `constructor_arg_order`; unknown attributes become builder calls.
-- Component slot tags like `Icon`, `Label`, `Body`, `Left`, and `Right` lower to
-  value or child builder methods and do not accept attributes.
+- Components know nothing about specific types. `<Button(a, b)>` lowers to
+  `Button::new(a, b)`; every attribute becomes a builder call.
+- `<.method>` inside a component is a slot: each child becomes
+  `.method(child)`. Slots take no attributes and need at least one child.
+- Input the macro cannot lower faithfully (non-identifier classes, extra
+  `<text>` children, children of `icon`/`spacer`, attributes on
+  `spacer`/`fragment`/slots) is a spanned compile error. Errors replace the
+  whole expansion.
 - Auto-scaling applies only to known spatial attributes when the optional
   `scale` identifier is supplied.
 
@@ -55,11 +62,8 @@ the `halogen` crate and Diffy's UI builders must provide.
 - Preserve hygienic internal names like `__quark_children` and `__w`; avoid
   names that can collide with user bindings unless they are already part of the
   macro convention.
-- Add or update token-output tests for every syntax, slot, class mapping, or
-  lowering change.
-- When adding a new component constructor special case, make the ordering
-  explicit in `constructor_arg_order` and test missing/duplicate args if the
-  behavior is non-obvious.
+- Cover lowering changes with runtime tests in `tests/view_macro.rs` and
+  rejected inputs with trybuild cases in `tests/ui/`.
 
 ## Anti-Patterns
 
