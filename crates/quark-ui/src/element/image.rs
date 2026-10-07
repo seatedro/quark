@@ -66,7 +66,7 @@ impl Element for SvgIcon {
         _layout_state: &mut (),
         _engine: &LayoutEngine,
         _cx: &mut ElementContext,
-    ) -> () {
+    ) {
     }
 
     fn paint(

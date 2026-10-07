@@ -25,6 +25,12 @@ pub struct LayoutEngine {
     pub(super) tree: taffy::TaffyTree<NodeMeasure>,
 }
 
+impl Default for LayoutEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LayoutEngine {
     pub fn new() -> Self {
         Self {

@@ -37,16 +37,8 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # Crates with no clippy warnings, denied so they stay that way.
-      # --no-deps keeps clippy off the workspace crates they depend on.
-      - name: Clippy (gated crates)
-        run: cargo clippy --no-deps -p quark -p quark-macros -p quark-components --all-targets -- -D warnings
-
-      # TODO: deny here once quark-ui's warnings are fixed (and quark-text,
-      # quark-render, quark-syntax, and quark-app stay clean through their
-      # in-flight branches); then the step above can go.
-      - name: Clippy (workspace)
-        run: cargo clippy --workspace --all-targets
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # Every optional feature at once, so feature-gated code keeps
       # compiling. profile-tracy is left out: it and profile-puffin each

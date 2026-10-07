@@ -499,10 +499,8 @@ impl Div {
 
     fn resolve_style(&self, hovered: bool) -> ElementStyle {
         let mut resolved = self.base_style.clone();
-        if hovered {
-            if let Some(ref ov) = self.hover_style {
-                apply_override(&mut resolved, ov);
-            }
+        if hovered && let Some(ref ov) = self.hover_style {
+            apply_override(&mut resolved, ov);
         }
         resolved
     }
@@ -618,10 +616,10 @@ impl Element for Div {
         let z = style.z_index;
         let opacity = style.opacity;
 
-        if opacity < 1.0 {
-            if let Some(ref mut bg) = style.background {
-                bg.a = (bg.a as f32 * opacity) as u8;
-            }
+        if opacity < 1.0
+            && let Some(ref mut bg) = style.background
+        {
+            bg.a = (bg.a as f32 * opacity) as u8;
         }
 
         if z != 0 {
@@ -695,33 +693,33 @@ impl Element for Div {
         }
 
         // Border
-        if let Some(border) = style.border_color {
-            if style.border_widths != [0.0; 4] {
-                scene.border(BorderPrimitive {
-                    rect: bounds,
-                    widths: style.border_widths,
-                    corner_radii: radii,
-                    color: border,
-                });
-            }
+        if let Some(border) = style.border_color
+            && style.border_widths != [0.0; 4]
+        {
+            scene.border(BorderPrimitive {
+                rect: bounds,
+                widths: style.border_widths,
+                corner_radii: radii,
+                color: border,
+            });
         }
 
-        if let Some(target) = self.focus_target {
-            if cx.is_focused(target) {
-                let ring_inset = -2.0;
-                let ring_bounds = Rect {
-                    x: bounds.x + ring_inset,
-                    y: bounds.y + ring_inset,
-                    width: bounds.width - ring_inset * 2.0,
-                    height: bounds.height - ring_inset * 2.0,
-                };
-                scene.border(BorderPrimitive {
-                    rect: ring_bounds,
-                    widths: [2.0; 4],
-                    corner_radii: radii.map(|c| c + 2.0),
-                    color: cx.theme.colors.focus_border,
-                });
-            }
+        if let Some(target) = self.focus_target
+            && cx.is_focused(target)
+        {
+            let ring_inset = -2.0;
+            let ring_bounds = Rect {
+                x: bounds.x + ring_inset,
+                y: bounds.y + ring_inset,
+                width: bounds.width - ring_inset * 2.0,
+                height: bounds.height - ring_inset * 2.0,
+            };
+            scene.border(BorderPrimitive {
+                rect: ring_bounds,
+                widths: [2.0; 4],
+                corner_radii: radii.map(|c| c + 2.0),
+                color: cx.theme.colors.focus_border,
+            });
         }
 
         let click_action = self.on_click.clone();
@@ -767,10 +765,10 @@ impl Element for Div {
         if hovered {
             style_state.insert(StyleState::HOVER);
         }
-        if let Some(target) = self.focus_target {
-            if cx.is_focused(target) {
-                style_state.insert(StyleState::FOCUS_VISIBLE);
-            }
+        if let Some(target) = self.focus_target
+            && cx.is_focused(target)
+        {
+            style_state.insert(StyleState::FOCUS_VISIBLE);
         }
         if self.accessibility_disabled {
             style_state.insert(StyleState::DISABLED);

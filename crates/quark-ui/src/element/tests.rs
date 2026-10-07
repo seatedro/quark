@@ -446,7 +446,7 @@ fn realistic_file_list_with_scroll() {
     let mut scene = Scene::default();
 
     let theme = cx.theme;
-    let files = vec!["src/main.rs", "src/lib.rs", "Cargo.toml", "README.md"];
+    let files = ["src/main.rs", "src/lib.rs", "Cargo.toml", "README.md"];
 
     let mut root =
         div()
@@ -757,14 +757,14 @@ fn render_once_component_renders_correctly() {
 #[test]
 fn hover_style_override_changes_border() {
     let mut ts = TestText::new();
-    let mut store = SignalStore::new();
+    let store = SignalStore::new();
     let mut cx = ElementContext::new(
         Box::leak(Box::new(Theme::default_dark())),
         1.0,
         &mut ts.system,
         &mut ts.layouts,
         Some((100.0, 25.0)), // inside
-        &mut store,
+        &store,
     );
     let mut scene = Scene::default();
 
@@ -839,14 +839,14 @@ fn when_conditional_applies() {
 #[test]
 fn focus_tracking_query() {
     let mut ts = TestText::new();
-    let mut store = SignalStore::new();
+    let store = SignalStore::new();
     let cx = ElementContext::new(
         Box::leak(Box::new(Theme::default_dark())),
         1.0,
         &mut ts.system,
         &mut ts.layouts,
         None,
-        &mut store,
+        &store,
     )
     .with_focus(Some(FOCUS_LIST));
 

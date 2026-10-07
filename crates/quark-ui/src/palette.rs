@@ -58,6 +58,8 @@ fn oklch_to_color(l: f32, c: f32, h_deg: f32) -> Color {
     oklab_to_color(l, a, b)
 }
 
+// The Oklab matrices are copied verbatim from the published reference.
+#[allow(clippy::excessive_precision)]
 fn oklab_to_color(l: f32, a: f32, b: f32) -> Color {
     // Oklab → linear sRGB via LMS intermediate.
     let l_ = l + 0.3963377774 * a + 0.2158037573 * b;

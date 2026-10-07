@@ -188,7 +188,7 @@ impl Element for TextElement {
         _layout_state: &mut Self::LayoutState,
         _engine: &LayoutEngine,
         _cx: &mut ElementContext,
-    ) -> () {
+    ) {
     }
 
     fn paint(
