@@ -32,4 +32,4 @@ pub use layout::{
 };
 pub use offset::{TextOffset, ToTextOffset};
 pub use row::{RowHeights, RowMeasure};
-pub use system::TextSystem;
+pub use system::{TextSystem, TextSystemRecipe};
