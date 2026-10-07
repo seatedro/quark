@@ -11,8 +11,8 @@ def checkbox():
 
 def spec(cua: Cua):
     pid = app_pid()
-    # cua indexes no text entry, and reports no focus: pixel click, D-Bus state.
-    cua.click_node(pid, app_tree().require("entry", "Name"), delivery_mode="foreground")
+    # cua reports no focus, so focus is read over D-Bus.
+    cua.press(pid, "entry", "Name")
     wait_for("the Name entry to take focus", lambda: app_tree().require("entry", "Name").has_state(STATE_FOCUSED))
     cua.call("press_key", pid=pid, key="tab", delivery_mode="foreground")
     wait_for("Tab to focus the checkbox", lambda: checkbox().has_state(STATE_FOCUSED))
