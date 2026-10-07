@@ -723,10 +723,10 @@ fn routed_drag_selects_from_one_message_into_another() {
     // Left of message 1's text, then past the end of message 2's last line.
     let (from, to) = (block(10), block(20));
 
-    let mut actions = Vec::new();
-    painted
+    let mut actions = painted
         .router
-        .pointer_down(from.x - 5.0, top + from.y + 5.0, &mut None);
+        .pointer_down(from.x - 5.0, top + from.y + 5.0, &mut None)
+        .actions;
     actions.extend(
         painted
             .router

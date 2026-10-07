@@ -363,10 +363,12 @@ impl InputNormalizer {
                 self.ime_composing = false;
                 vec![InputEvent::TextInput(text)]
             }
-            Ime::Disabled => {
-                self.ime_composing = false;
-                Vec::new()
+            // Turning IME off mid-composition drops the preedit; say so,
+            // or the field keeps painting it.
+            Ime::Disabled if std::mem::take(&mut self.ime_composing) => {
+                vec![InputEvent::ImePreedit(String::new(), None)]
             }
+            Ime::Disabled => Vec::new(),
         }
     }
 }

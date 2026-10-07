@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use super::editor::syntax_layout_spans;
-use super::view::caret_blink;
+use super::text_pointer_drag;
+use super::view::{FrameScale, caret_blink};
 use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind};
 use crate::FocusId;
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
@@ -41,6 +42,8 @@ pub struct TextEditorElement {
     line_tops: Vec<(usize, f32)>,
     focus_target: FocusId,
     on_scroll: ScrollActionBuilder,
+    /// The snapshotted editor's frame scale, set during paint.
+    frame_scale: Option<FrameScale>,
     base_style: ElementStyle,
 }
 
@@ -71,6 +74,7 @@ pub fn text_editor_element(
         line_tops: Vec::new(),
         focus_target,
         on_scroll,
+        frame_scale: None,
         base_style: ElementStyle::default(),
     }
 }
@@ -159,6 +163,7 @@ impl TextEditorElement {
         self.text = editor.text_arc();
         self.syntax_spans = editor.syntax_spans().to_vec();
         self.line_tops = editor.logical_line_tops();
+        self.frame_scale = Some(editor.frame_scale.clone());
         self
     }
 
@@ -194,7 +199,11 @@ impl Element for TextEditorElement {
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> HitId {
-        cx.insert_hit(bounds, HitFlags::TEXT | HitFlags::SCROLL, CursorHint::Text)
+        cx.insert_hit(
+            bounds,
+            HitFlags::TEXT | HitFlags::SCROLL | HitFlags::DRAG,
+            CursorHint::Text,
+        )
     }
 
     fn paint(
@@ -299,6 +308,12 @@ impl Element for TextEditorElement {
         let style = TextStyle::new(font_size)
             .kind(font_kind)
             .line_height(line_height);
+        // The painted layout, for mapping pointer points to offsets; none
+        // while composing, when it holds the preedit too.
+        let mut hit_layout = None;
+        if let Some(frame_scale) = &self.frame_scale {
+            frame_scale.set(cx.scale_factor);
+        }
         if self.is_empty {
             let placeholder_color = theme.colors.text_muted.with_alpha(Alpha::PLACEHOLDER);
             let params = TextParams::new(std::mem::take(&mut self.placeholder), style);
@@ -319,6 +334,15 @@ impl Element for TextEditorElement {
             // The editor's layout is used only if it was shaped at this
             // frame's scale; otherwise paint a fresh one until it catches up.
             let scale = cx.scale_factor;
+            // Paint again right away so the editor reshapes at the frame's
+            // scale (recorded above) on its next flush.
+            if self
+                .layout
+                .as_ref()
+                .is_some_and(|l| l.scale_factor() != scale)
+            {
+                cx.request_frame_at_ms(cx.clock_ms);
+            }
             let own = self.layout.take().filter(|l| l.scale_factor() == scale);
             let (layout, kinds) = match own {
                 Some(layout) => (Some(layout), std::mem::take(&mut self.span_kinds)),
@@ -334,6 +358,9 @@ impl Element for TextEditorElement {
                 .iter()
                 .map(|kind| syntax_color(*kind, self.text_color, theme))
                 .collect();
+            if self.preedit_rects.is_empty() {
+                hit_layout = layout.clone();
+            }
             if let Some(layout) = layout {
                 scene.rich_text(RichTextPrimitive {
                     rect: Rect {
@@ -397,6 +424,7 @@ impl Element for TextEditorElement {
         semantic_node.focus = Some(target);
         let node = cx.semantic.push(semantic_node);
         cx.bind_hit(*prepaint_state, node);
+        cx.handlers.on_drag(node, text_pointer_drag(target, None));
         cx.handlers.on_scroll(
             node,
             ScrollTarget {
@@ -424,8 +452,9 @@ impl Element for TextEditorElement {
             font_size,
             focus_target: target,
             multiline: true,
-            layout: None,
+            layout: hit_layout,
             scroll_x: 0.0,
+            scroll_y: self.scroll_y,
             caret,
         });
     }
@@ -532,5 +561,37 @@ mod tests {
             .map(|r| (r.x, r.y, r.w, r.h))
             .collect();
         assert_eq!(editor_rects, painted_rects);
+    }
+
+    // Regression: apps had to call Editor::set_scale_factor themselves, and
+    // an editor that never did stayed shaped at 1x on HiDPI screens.
+    #[test]
+    fn painting_at_a_scale_reshapes_the_editor_at_it_on_the_next_flush() {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut editor = Editor::new(EditorMode::ProseInput);
+        editor.sync_size(200.0, 100.0);
+        editor.set_text("hello");
+        editor.flush(&mut text);
+        let shaped_at = |editor: &Editor| editor.layout().map(|l| l.scale_factor());
+        let before = shaped_at(&editor);
+
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 2.0, &mut text, &mut layouts, None, &signals);
+        let mut root = text_editor_element(
+            FocusId::from_key("e"),
+            ScrollActionBuilder::new(Action::new),
+        )
+        .editor_snapshot(&editor)
+        .w(200.0)
+        .h(100.0)
+        .into_any();
+        render_element(&mut root, &mut Scene::default(), &mut cx, 200.0, 100.0);
+        let repaint_at = cx.next_frame_ms();
+        editor.flush(&mut text);
+
+        assert_eq!((before, shaped_at(&editor)), (Some(1.0), Some(2.0)));
+        assert_eq!(repaint_at, Some(0), "a repaint picks up the new layout");
     }
 }

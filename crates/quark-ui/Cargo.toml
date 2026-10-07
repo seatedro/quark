@@ -27,3 +27,7 @@ syntax = ["dep:quark-syntax", "quark-syntax/common"]
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
+
+[lints.rust]
+# `cfg(kani)` gates the bounded model checking harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

@@ -118,3 +118,75 @@ impl Fenwick {
         pos
     }
 }
+
+/// Bounded model checking; run with `cargo kani -p quark-ui`.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const N: usize = 4;
+
+    /// Non-negative and small so sums cannot overflow; heights are never
+    /// negative in practice.
+    fn any_values() -> [i64; N] {
+        let values: [i64; N] = kani::any();
+        for v in values {
+            kani::assume((0..1 << 20).contains(&v));
+        }
+        values
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn fenwick_push_matches_build_and_prefix_matches_naive_sum() {
+        let values = any_values();
+        let len: usize = kani::any();
+        kani::assume(len <= N);
+        let built = Fenwick::build(values[..len].iter().copied());
+        let mut pushed = Fenwick::default();
+        for v in &values[..len] {
+            pushed.push(*v);
+        }
+        assert!(built == pushed);
+        let mut sum = 0;
+        for count in 0..=len {
+            assert!(built.prefix(count) == sum);
+            if count < len {
+                sum += values[count];
+            }
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn fenwick_add_matches_rebuild() {
+        let mut values = any_values();
+        let index: usize = kani::any();
+        let delta: i64 = kani::any();
+        kani::assume(index < N);
+        kani::assume((0..1 << 20).contains(&(values[index] + delta)));
+        let mut tree = Fenwick::build(values);
+        tree.add(index, delta);
+        values[index] += delta;
+        assert!(tree == Fenwick::build(values));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn fenwick_search_returns_largest_fitting_prefix() {
+        let tree = Fenwick::build(any_values());
+        let target: i64 = kani::any();
+        kani::assume((-1..1 << 23).contains(&target));
+        let strict: bool = kani::any();
+        let fits = |count: usize| {
+            let p = tree.prefix(count);
+            if strict { p < target } else { p <= target }
+        };
+        let found = tree.search(target, strict);
+        assert!(found <= N);
+        // Prefixes are monotonic, so `found` fitting and `found + 1` not
+        // fitting pins it as the largest (count 0 always counts as found).
+        assert!(found == 0 || fits(found));
+        assert!(found == N || !fits(found + 1));
+    }
+}
