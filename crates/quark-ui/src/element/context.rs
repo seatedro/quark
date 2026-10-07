@@ -7,7 +7,10 @@ use super::*;
 pub struct ElementContext<'a> {
     pub theme: &'a Theme,
     pub scale_factor: f32,
-    pub font_system: &'a mut glyphon::FontSystem,
+    /// Shapes every text element; the renderer must draw with the same one.
+    pub text: &'a mut TextSystem,
+    /// Layouts shared by measurement, paint, hit-testing, and selection.
+    pub layouts: &'a mut LayoutCache,
     pub mouse_position: Option<(f32, f32)>,
     /// Pointer hit entries in paint order; built in prepaint.
     pub hit_table: HitTable,
@@ -30,64 +33,24 @@ pub struct ElementContext<'a> {
     element_offset_stack: Vec<(f32, f32)>,
     text_color_stack: Vec<Color>,
     icon_color_stack: Vec<Color>,
-    frame_text_measure_cache: HashMap<TextMeasureKey, f32>,
-    persistent_text_measure_cache: Option<&'a mut TextMeasureCache>,
     accessibility_text_hidden_stack: Vec<bool>,
     semantic_parent_stack: Vec<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TextMeasureKey {
-    text: String,
-    font_size_bits: u32,
-    font_kind: u8,
-    font_weight: u8,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct TextMeasureCache {
-    widths: HashMap<TextMeasureKey, f32>,
-    order: VecDeque<TextMeasureKey>,
-}
-
-impl TextMeasureCache {
-    const MAX_ENTRIES: usize = 65_536;
-
-    pub(crate) fn clear(&mut self) {
-        self.widths.clear();
-        self.order.clear();
-    }
-
-    fn get(&self, key: &TextMeasureKey) -> Option<f32> {
-        self.widths.get(key).copied()
-    }
-
-    fn insert(&mut self, key: TextMeasureKey, width: f32) {
-        if !self.widths.contains_key(&key) {
-            self.order.push_back(key.clone());
-            while self.widths.len() >= Self::MAX_ENTRIES {
-                let Some(oldest) = self.order.pop_front() else {
-                    break;
-                };
-                self.widths.remove(&oldest);
-            }
-        }
-        self.widths.insert(key, width);
-    }
 }
 
 impl<'a> ElementContext<'a> {
     pub fn new(
         theme: &'a Theme,
         scale_factor: f32,
-        font_system: &'a mut glyphon::FontSystem,
+        text: &'a mut TextSystem,
+        layouts: &'a mut LayoutCache,
         mouse_position: Option<(f32, f32)>,
         signal_store: &'a SignalStore,
     ) -> Self {
         Self {
             theme,
             scale_factor,
-            font_system,
+            text,
+            layouts,
             mouse_position,
             hit_table: HitTable::default(),
             handlers: InputHandlers::default(),
@@ -107,49 +70,34 @@ impl<'a> ElementContext<'a> {
             element_offset_stack: vec![(0.0, 0.0)],
             text_color_stack: Vec::new(),
             icon_color_stack: Vec::new(),
-            frame_text_measure_cache: HashMap::new(),
-            persistent_text_measure_cache: None,
             accessibility_text_hidden_stack: Vec::new(),
             semantic_parent_stack: Vec::new(),
         }
     }
 
-    pub(crate) fn with_text_measure_cache(mut self, cache: &'a mut TextMeasureCache) -> Self {
-        self.persistent_text_measure_cache = Some(cache);
-        self
+    /// Shaped layout from the frame's cache, shared with paint and
+    /// hit-testing. `None` when quark-text rejects the params (e.g. a zero
+    /// font size), which callers treat as empty text.
+    pub fn layout_text(&mut self, params: &TextParams) -> Option<Arc<TextLayout>> {
+        self.layouts.layout(self.text, params).ok()
     }
 
+    /// Advance width of single-line text, rounded up to whole pixels.
     pub fn measure_text_width(
         &mut self,
         text: &str,
         font_size: f32,
-        font_kind: quark_render::FontKind,
-        font_weight: quark_render::FontWeight,
+        font_kind: FontKind,
+        font_weight: FontWeight,
     ) -> f32 {
         if text.is_empty() {
             return 0.0;
         }
-        let key = TextMeasureKey {
-            text: text.to_owned(),
-            font_size_bits: font_size.to_bits(),
-            font_kind: font_kind_measure_tag(font_kind),
-            font_weight: font_weight_measure_tag(font_weight),
-        };
-        if let Some(cache) = self.persistent_text_measure_cache.as_ref()
-            && let Some(width) = cache.get(&key)
-        {
-            return width;
-        }
-        if let Some(width) = self.frame_text_measure_cache.get(&key).copied() {
-            return width;
-        }
-        let width = measure_text_width(self.font_system, text, font_size, font_kind, font_weight);
-        if let Some(cache) = self.persistent_text_measure_cache.as_mut() {
-            cache.insert(key, width);
-        } else {
-            self.frame_text_measure_cache.insert(key, width);
-        }
-        width
+        let style = TextStyle::new(font_size)
+            .kind(font_kind)
+            .weight(font_weight);
+        self.layout_text(&TextParams::new(text, style))
+            .map_or(0.0, |layout| layout.size().0.ceil())
     }
 
     /// Read a signal's value (clones it out). Tracked by the current observer scope.

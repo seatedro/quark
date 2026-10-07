@@ -41,11 +41,11 @@ impl PickerItem for Item {
 /// Paint `root` at 800x600 with the pointer at `pointer`; return the router
 /// for the frame and the test ids of nodes painted hovered.
 fn paint(mut root: AnyElement, pointer: Option<(f32, f32)>) -> (InputRouter, Vec<String>) {
-    let mut font_system = glyphon::FontSystem::new();
-    quark_render::fonts::configure_font_system(&mut font_system);
+    let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+    let mut layouts = quark_text::LayoutCache::default();
     let store = SignalStore::new();
     let theme = Theme::default_dark();
-    let mut cx = ElementContext::new(&theme, 1.0, &mut font_system, pointer, &store);
+    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, pointer, &store);
     render_element(&mut root, &mut Scene::default(), &mut cx, 800.0, 600.0);
     let hovered = cx
         .semantic

@@ -356,15 +356,12 @@ mod tests {
 
     /// Paint `root` into a `w`x`h` window and route input through the result.
     fn routed(root: impl IntoAnyElement, w: f32, h: f32) -> InputRouter {
-        // No fonts: these trees carry no text, and an empty database keeps
-        // the tests fast and independent of the host's fonts.
-        let mut font_system = glyphon::FontSystem::new_with_locale_and_db(
-            "en-US".into(),
-            glyphon::fontdb::Database::new(),
-        );
+        // Vendored fonts only, so the tests do not depend on the host's fonts.
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
         let theme = Theme::default_dark();
         let signals = SignalStore::new();
-        let mut cx = ElementContext::new(&theme, 1.0, &mut font_system, None, &signals);
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
         cx.semantic = SemanticFrame::new(w, h);
         let mut root = root.into_any();
         render_element(&mut root, &mut Scene::default(), &mut cx, w, h);

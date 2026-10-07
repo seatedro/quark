@@ -1,14 +1,12 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use bytemuck::{Pod, Zeroable};
-use glyphon::{
-    Buffer, Cache, FontSystem, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport,
-};
+use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
+use quark_text::TextSystem;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::fonts::FontSettings;
 use crate::scene::{ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive};
 
 use crate::shaders::{BLIT_SHADER, BLUR_SHADER, EFFECT_SHADER, QUAD_SHADER, SHADOW_SHADER};
@@ -295,29 +293,24 @@ pub struct Renderer {
     image_frame: u64,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
-    font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
     /// One text renderer per text segment of the frame, grown on demand.
     text_renderers: Vec<TextRenderer>,
-    text_cache: HashMap<u64, CachedTextBuffer>,
-    text_cache_frame: u64,
-    cached_mono_char_width: Option<(f32, f32)>,
+    /// `(font size, TextSystem generation, width)` of the last measurement.
+    cached_mono_char_width: Option<(f32, u64, f32)>,
     flattener: Flattener,
     flat: FlattenedScene,
     batches: FrameBatches,
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, font_settings: &FontSettings) -> Result<Self, RenderError> {
-        pollster::block_on(Self::new_async(window, font_settings))
+    pub fn new(window: Arc<Window>) -> Result<Self, RenderError> {
+        pollster::block_on(Self::new_async(window))
     }
 
-    async fn new_async(
-        window: Arc<Window>,
-        font_settings: &FontSettings,
-    ) -> Result<Self, RenderError> {
+    async fn new_async(window: Arc<Window>) -> Result<Self, RenderError> {
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
 
@@ -373,7 +366,6 @@ impl Renderer {
             size,
             scale_factor,
             Some(surface),
-            font_settings,
         )
     }
 
@@ -381,18 +373,8 @@ impl Renderer {
     /// an adapter with no compatible surface, creates a device+queue, and shares
     /// the same pipeline/atlas setup as the windowed path. No swapchain is created.
     #[cfg(any(test, feature = "headless-render"))]
-    pub fn new_headless(
-        width: u32,
-        height: u32,
-        scale_factor: f64,
-        font_settings: &FontSettings,
-    ) -> Result<Self, RenderError> {
-        pollster::block_on(Self::new_headless_async(
-            width,
-            height,
-            scale_factor,
-            font_settings,
-        ))
+    pub fn new_headless(width: u32, height: u32, scale_factor: f64) -> Result<Self, RenderError> {
+        pollster::block_on(Self::new_headless_async(width, height, scale_factor))
     }
 
     #[cfg(any(test, feature = "headless-render"))]
@@ -400,7 +382,6 @@ impl Renderer {
         width: u32,
         height: u32,
         scale_factor: f64,
-        font_settings: &FontSettings,
     ) -> Result<Self, RenderError> {
         let size = PhysicalSize::new(width.max(1), height.max(1));
 
@@ -448,7 +429,6 @@ impl Renderer {
             size,
             scale_factor,
             None,
-            font_settings,
         )
     }
 
@@ -462,7 +442,6 @@ impl Renderer {
         size: PhysicalSize<u32>,
         scale_factor: f64,
         surface: Option<wgpu::Surface<'static>>,
-        font_settings: &FontSettings,
     ) -> Result<Self, RenderError> {
         let viewport_uniform = ViewportUniform::new(surface_config.width, surface_config.height);
         let viewport_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -723,7 +702,6 @@ impl Renderer {
 
         let texture_pool = TexturePool::new(surface_format);
 
-        let font_system = crate::fonts::new_font_system_with_settings(font_settings);
         let swash_cache = SwashCache::new();
         let glyph_cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &glyph_cache);
@@ -751,13 +729,10 @@ impl Renderer {
             image_frame: 0,
             viewport_buffer,
             viewport_bind_group,
-            font_system,
             swash_cache,
             viewport,
             atlas,
             text_renderers: vec![text_renderer],
-            text_cache: HashMap::new(),
-            text_cache_frame: 0,
             cached_mono_char_width: None,
             flattener: Flattener::default(),
             flat: FlattenedScene::default(),
@@ -786,35 +761,24 @@ impl Renderer {
         );
     }
 
-    pub fn font_system(&mut self) -> &mut FontSystem {
-        &mut self.font_system
-    }
-
-    pub fn font_system_mut(&mut self) -> &mut FontSystem {
-        &mut self.font_system
-    }
-
-    pub fn set_font_settings(&mut self, settings: &FontSettings) {
-        self.font_system = crate::fonts::new_font_system_with_settings(settings);
-        self.swash_cache = SwashCache::new();
-        self.text_cache.clear();
-        self.cached_mono_char_width = None;
-    }
-
     pub fn scale_factor(&self) -> f64 {
         self.scale_factor
     }
 
-    pub fn text_metrics(&mut self) -> TextMetrics {
+    pub fn text_metrics(&mut self, text: &mut TextSystem) -> TextMetrics {
         let scale = self.scale_factor as f32;
         let mono_font_size = 13.0 * scale;
+        let generation = text.generation();
         let char_w = match self.cached_mono_char_width {
-            Some((cached_size, cached_w)) if (cached_size - mono_font_size).abs() < 0.001 => {
+            Some((cached_size, cached_generation, cached_w))
+                if (cached_size - mono_font_size).abs() < 0.001
+                    && cached_generation == generation =>
+            {
                 cached_w
             }
             _ => {
-                let w = measure_mono_char_width(&mut self.font_system, mono_font_size);
-                self.cached_mono_char_width = Some((mono_font_size, w));
+                let w = measure_mono_char_width(text, mono_font_size);
+                self.cached_mono_char_width = Some((mono_font_size, generation, w));
                 w
             }
         };
@@ -864,8 +828,8 @@ impl Renderer {
     }
 
     /// Render `scene` into an offscreen sRGB texture at the given physical
-    /// `width`/`height` and `scale_factor` (which must match the scale used to
-    /// build the scene), read the pixels back, and write them as a PNG to `path`.
+    /// `width`/`height`, read the pixels back, and write them as a PNG to `path`.
+    /// `text` must be the system that shaped the scene's text layouts.
     ///
     /// This is a self-contained, no-swapchain draw flow used by the dev/test
     /// "screenshot" leg.
@@ -873,13 +837,13 @@ impl Renderer {
     pub fn render_to_png(
         &mut self,
         scene: &Scene,
+        text: &mut TextSystem,
         width: u32,
         height: u32,
-        scale_factor: f32,
         path: &std::path::Path,
     ) -> Result<(), RenderError> {
         let (w, h) = (width.max(1), height.max(1));
-        let pixels = self.render_to_rgba(scene, w, h, scale_factor)?;
+        let pixels = self.render_to_rgba(scene, text, w, h)?;
         let buffer = image::RgbaImage::from_raw(w, h, pixels)
             .expect("readback pixel buffer matches dimensions");
         if let Some(parent) = path.parent() {
@@ -897,9 +861,9 @@ impl Renderer {
     pub fn render_to_rgba(
         &mut self,
         scene: &Scene,
+        text: &mut TextSystem,
         width: u32,
         height: u32,
-        scale_factor: f32,
     ) -> Result<Vec<u8>, RenderError> {
         let w = width.max(1);
         let h = height.max(1);
@@ -942,7 +906,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("diffy_png_encoder"),
             });
-        self.record_frame(&mut encoder, &view, w, h, scale_factor as f64)?;
+        self.record_frame(&mut encoder, &view, text, w, h)?;
 
         let bytes_per_pixel = 4u32;
         let unpadded_bytes_per_row = w * bytes_per_pixel;
@@ -1003,7 +967,13 @@ impl Renderer {
         Ok(pixels)
     }
 
-    pub fn render(&mut self, scene: &Scene, time_seconds: f32) -> Result<FrameStats, RenderError> {
+    /// `text` must be the system that shaped the scene's text layouts.
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        text: &mut TextSystem,
+        time_seconds: f32,
+    ) -> Result<FrameStats, RenderError> {
         if self.surface_config.width == 0 || self.surface_config.height == 0 {
             return Ok(FrameStats::default());
         }
@@ -1058,7 +1028,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("diffy_frame_encoder"),
             });
-        self.record_frame(&mut encoder, &view, sw, sh, self.scale_factor)?;
+        self.record_frame(&mut encoder, &view, text, sw, sh)?;
 
         let present_started_at = Instant::now();
         self.queue.submit(Some(encoder.finish()));
@@ -1104,21 +1074,14 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
+        text: &mut TextSystem,
         width: u32,
         height: u32,
-        scale_factor: f64,
     ) -> Result<(), RenderError> {
         let flat = std::mem::take(&mut self.flat);
         let mut batches = std::mem::take(&mut self.batches);
-        let result = self.record_flattened(
-            encoder,
-            target,
-            &flat,
-            &mut batches,
-            width,
-            height,
-            scale_factor,
-        );
+        let result =
+            self.record_flattened(encoder, target, &flat, &mut batches, text, width, height);
         self.flat = flat;
         self.batches = batches;
         result
@@ -1131,9 +1094,9 @@ impl Renderer {
         target: &wgpu::TextureView,
         flat: &FlattenedScene,
         batches: &mut FrameBatches,
+        text: &mut TextSystem,
         width: u32,
         height: u32,
-        scale_factor: f64,
     ) -> Result<(), RenderError> {
         self.image_frame += 1;
         for image in &flat.images {
@@ -1177,17 +1140,13 @@ impl Renderer {
                 continue;
             };
             let text_areas = prepare_text_areas(
-                &mut self.font_system,
-                &mut self.text_cache,
-                &mut self.text_cache_frame,
                 &flat.texts[items.start as usize..items.end as usize],
                 &flat.rich_texts[rich.start as usize..rich.end as usize],
-                scale_factor,
             );
             self.text_renderers[text_index].prepare(
                 &self.device,
                 &self.queue,
-                &mut self.font_system,
+                text.font_system_mut(),
                 &mut self.atlas,
                 &self.viewport,
                 text_areas,
@@ -2051,12 +2010,6 @@ struct ImageDrawCommand {
     clip: Rect,
 }
 
-#[derive(Debug)]
-pub(super) struct CachedTextBuffer {
-    pub(super) buffer: Buffer,
-    pub(super) last_used_frame: u64,
-}
-
 /// Bounds of everything drawn after some segment, for overlap queries. Rects
 /// are grouped in chunks of consecutive pushes; paint order is spatially
 /// coherent, so chunk bounds reject most queries without visiting the rects.
@@ -2736,6 +2689,9 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::fonts::FontSettings;
+    use crate::scene::{FontKind, ShapedText};
+    use quark_text::{TextParams, TextStyle};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
     fn scissor_rect_clamps_to_render_target() {
@@ -2840,7 +2796,7 @@ mod tests {
     /// Headless renderer, or `None` when no adapter exists (a failure when
     /// `QUARK_REQUIRE_GPU` is set).
     fn gpu_renderer(width: u32, height: u32) -> Option<Renderer> {
-        match Renderer::new_headless(width, height, 1.0, &FontSettings::default()) {
+        match Renderer::new_headless(width, height, 1.0) {
             Ok(renderer) => Some(renderer),
             Err(RenderError::NoAdapter) => {
                 assert!(
@@ -2853,10 +2809,27 @@ mod tests {
         }
     }
 
+    /// One vendored-only system shared by the tests that shape and render.
+    fn test_text() -> MutexGuard<'static, TextSystem> {
+        static TEXT: OnceLock<Mutex<TextSystem>> = OnceLock::new();
+        TEXT.get_or_init(|| Mutex::new(TextSystem::vendored_only(&FontSettings::default())))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn render_pixels(scene: &Scene, width: u32, height: u32) -> Option<image::RgbaImage> {
+        render_pixels_with(scene, &mut test_text(), width, height)
+    }
+
+    fn render_pixels_with(
+        scene: &Scene,
+        text: &mut TextSystem,
+        width: u32,
+        height: u32,
+    ) -> Option<image::RgbaImage> {
         let mut renderer = gpu_renderer(width, height)?;
         let pixels = renderer
-            .render_to_rgba(scene, width, height, 1.0)
+            .render_to_rgba(scene, text, width, height)
             .expect("offscreen render");
         Some(image::RgbaImage::from_raw(width, height, pixels).expect("pixel buffer size"))
     }
@@ -2871,13 +2844,12 @@ mod tests {
     }
 
     fn white_text(rect: Rect, text: &str) -> Primitive {
+        let params = TextParams::new(text, TextStyle::new(16.0));
+        let layout = test_text().layout(&params).expect("layout");
         Primitive::TextRun(TextPrimitive {
             rect,
-            text: text.into(),
+            layout: ShapedText::new(Arc::new(layout)),
             color: quark::Color::rgba(255, 255, 255, 255),
-            font_size: 16.0,
-            font_kind: crate::scene::FontKind::Ui,
-            font_weight: crate::scene::FontWeight::Normal,
         })
     }
 
@@ -2934,6 +2906,99 @@ mod tests {
         };
         assert!(any_light_pixel(&image, low), "z=0 text is missing");
         assert!(any_light_pixel(&image, high), "z=1 text is missing");
+    }
+
+    fn count_pixels(image: &image::RgbaImage, area: Rect, pred: impl Fn([u8; 4]) -> bool) -> usize {
+        let (x0, y0) = (area.x as u32, area.y as u32);
+        let (x1, y1) = (area.right() as u32, area.bottom() as u32);
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| pred(image.get_pixel(x, y).0))
+            .count()
+    }
+
+    // Regression: mono text used Basic shaping, which skips font fallback, so
+    // an emoji in code drew as the mono face's tofu box.
+    #[test]
+    fn render_mono_emoji_draws_glyph_from_fallback_font() {
+        let mut text = TextSystem::new();
+        let has_emoji_font = text
+            .font_system()
+            .db()
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name.contains("Emoji")));
+        if !has_emoji_font {
+            return;
+        }
+        let params = TextParams::new("a\u{1F600}b", TextStyle::new(32.0).kind(FontKind::Mono));
+        let layout = text.layout(&params).expect("layout");
+        let g = layout.glyphs();
+        assert_eq!(g.len(), 3);
+        assert_ne!(
+            g.font_id[1], g.font_id[0],
+            "emoji shaped with the mono face"
+        );
+        assert_ne!(g.glyph_id[1], 0, "emoji shaped as .notdef");
+        let emoji = rect(g.x[1], 0.0, g.advance[1], 48.0);
+        let mut scene = Scene::default();
+        scene.text(TextPrimitive {
+            rect: rect(0.0, 0.0, 160.0, 48.0),
+            layout: ShapedText::new(Arc::new(layout)),
+            color: quark::Color::rgba(255, 255, 255, 255),
+        });
+        let Some(image) = render_pixels_with(&scene, &mut text, 160, 48) else {
+            return;
+        };
+        let lit = count_pixels(&image, emoji, |p| p[..3].iter().any(|&c| c > 128));
+        assert!(lit > 20, "emoji drew nothing ({lit} lit pixels)");
+    }
+
+    // The renderer splits a rich layout into per-color areas; each span must
+    // keep its own color and the other span's glyphs must not bleed over.
+    #[test]
+    fn render_rich_text_paints_each_span_in_its_color() {
+        let text = "WWWWWWMMMMMM";
+        let params = TextParams::new(text, TextStyle::new(20.0)).spans(vec![
+            quark_text::TextSpan {
+                range: 0..6,
+                weight: None,
+                style: None,
+                kind: None,
+            },
+            quark_text::TextSpan {
+                range: 6..12,
+                weight: None,
+                style: None,
+                kind: None,
+            },
+        ]);
+        let layout = test_text().layout(&params).expect("layout");
+        let split = layout.caret(6).x;
+        let mut scene = Scene::default();
+        scene.rich_text(RichTextPrimitive {
+            rect: rect(0.0, 0.0, 200.0, 32.0),
+            layout: ShapedText::new(Arc::new(layout)),
+            default_color: quark::Color::rgba(255, 255, 255, 255),
+            span_colors: Arc::from([
+                quark::Color::rgba(255, 0, 0, 255),
+                quark::Color::rgba(0, 255, 0, 255),
+            ]),
+        });
+        let Some(image) = render_pixels(&scene, 200, 32) else {
+            return;
+        };
+        let red = |p: [u8; 4]| p[0] > 120 && p[1] < 40;
+        let green = |p: [u8; 4]| p[1] > 120 && p[0] < 40;
+        // One pixel of slack each side: area bounds round to whole pixels.
+        let left = rect(0.0, 0.0, split.floor() - 1.0, 32.0);
+        let right = rect(split.ceil() + 1.0, 0.0, 198.0 - split.ceil(), 32.0);
+        assert!(count_pixels(&image, left, red) > 20, "first span not red");
+        assert!(
+            count_pixels(&image, right, green) > 20,
+            "second span not green"
+        );
+        assert_eq!(count_pixels(&image, left, green), 0, "green left of split");
+        assert_eq!(count_pixels(&image, right, red), 0, "red right of split");
     }
 
     // Splitting at every kind transition would cost one draw and one text

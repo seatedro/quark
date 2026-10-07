@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use quark::scene::{FontKind, FontWeight, RectPrimitive, Scene, TextPrimitive};
+use quark::scene::{RectPrimitive, Scene, ShapedText, TextPrimitive};
 use quark::{Color, Rect};
 use quark_app::platform::notification::{Notification, NotificationAction};
 use quark_app::platform::single_instance::{self, Instance, PrimaryInstance};
@@ -18,6 +18,7 @@ use quark_app::winit::window::Theme;
 use quark_app::{
     App, AppEvent, EventContext, FrameContext, InputEvent, WindowHandle, WindowOptions,
 };
+use quark_text::{TextParams, TextStyle};
 
 struct Demo {
     primary: Option<PrimaryInstance>,
@@ -102,19 +103,22 @@ impl App for Demo {
             },
             color: background,
         });
-        scene.text(TextPrimitive {
-            rect: Rect {
-                x: 16.0 * scale,
-                y: 16.0 * scale,
-                width: width - 32.0 * scale,
-                height: height - 32.0 * scale,
-            },
-            text: text.into(),
-            color: foreground,
-            font_size: 14.0 * scale,
-            font_kind: FontKind::Ui,
-            font_weight: FontWeight::Normal,
-        });
+        let rect = Rect {
+            x: 16.0 * scale,
+            y: 16.0 * scale,
+            width: width - 32.0 * scale,
+            height: height - 32.0 * scale,
+        };
+        let params =
+            TextParams::new(text, TextStyle::new(14.0 * scale)).wrap_width(Some(rect.width));
+        let app_text = cx.text();
+        if let Ok(layout) = app_text.layouts.layout(&mut app_text.system, &params) {
+            scene.text(TextPrimitive {
+                rect,
+                layout: ShapedText::new(layout),
+                color: foreground,
+            });
+        }
         scene
     }
 

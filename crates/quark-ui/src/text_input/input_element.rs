@@ -8,9 +8,10 @@ use crate::element::*;
 use crate::style::{ElementStyle, Styled};
 use quark::{SemanticActions, SemanticNode, SemanticRole};
 use quark_render::scene::{
-    FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, RichTextSpan, TextPrimitive,
+    FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, ShapedText, TextPrimitive,
 };
 use quark_render::{RectPrimitive, RoundedRectPrimitive, Scene};
+use quark_text::{TextParams, TextSpan, TextStyle};
 
 pub struct CursorSnapshot {
     pub x: f32,
@@ -246,6 +247,13 @@ impl Element for TextEditorElement {
                 if painted_y + line_height < bounds.y || painted_y > bounds.bottom() {
                     continue;
                 }
+                let style = TextStyle::new(font_size)
+                    .kind(FontKind::Mono)
+                    .line_height(line_height);
+                let number = format!("{line_no:>gutter_digits$}");
+                let Some(layout) = cx.layout_text(&TextParams::new(number, style)) else {
+                    continue;
+                };
                 scene.text(TextPrimitive {
                     rect: Rect {
                         x: bounds.x,
@@ -253,11 +261,8 @@ impl Element for TextEditorElement {
                         width: (gutter_w - 8.0).max(1.0),
                         height: line_height,
                     },
-                    text: format!("{line_no:>gutter_digits$}").into(),
+                    layout: ShapedText::new(layout),
                     color: theme.colors.gutter_text,
-                    font_size,
-                    font_kind: FontKind::Mono,
-                    font_weight: FontWeight::Normal,
                 });
             }
         }
@@ -278,42 +283,50 @@ impl Element for TextEditorElement {
             }
         }
 
+        let style = TextStyle::new(font_size)
+            .kind(font_kind)
+            .line_height(line_height);
         if self.is_empty {
             let placeholder_color = theme.colors.text_muted.with_alpha(Alpha::PLACEHOLDER);
-            let content_h = line_height;
-            scene.text(quark_render::scene::TextPrimitive {
-                rect: Rect {
-                    x: text_x,
-                    y: text_y,
-                    width: text_area_w,
-                    height: content_h,
-                },
-                text: std::mem::take(&mut self.placeholder).into(),
-                color: placeholder_color,
-                font_size,
-                font_kind,
-                font_weight: FontWeight::Normal,
-            });
+            let params = TextParams::new(std::mem::take(&mut self.placeholder), style);
+            if let Some(layout) = cx.layout_text(&params) {
+                scene.text(TextPrimitive {
+                    rect: Rect {
+                        x: text_x,
+                        y: text_y,
+                        width: text_area_w,
+                        height: line_height,
+                    },
+                    layout: ShapedText::new(layout),
+                    color: placeholder_color,
+                });
+            }
         } else {
             let content_h = self.content_height.max(line_height);
-            scene.rich_text(RichTextPrimitive {
-                rect: Rect {
-                    x: text_x,
-                    y: text_y - self.scroll_y,
-                    width: text_area_w,
-                    height: content_h,
-                },
-                spans: build_editor_spans(
-                    self.text.as_ref(),
-                    &self.syntax_spans,
-                    self.text_color,
-                    theme,
-                ),
-                default_color: self.text_color,
-                font_size,
-                font_kind,
-                font_weight: FontWeight::Normal,
-            });
+            let (spans, span_colors) = build_editor_spans(
+                self.text.as_ref(),
+                &self.syntax_spans,
+                self.text_color,
+                theme,
+            );
+            // Wraps at the same width the editor's own buffer wraps at, so its
+            // caret and selection rects line up with the painted lines.
+            let params = TextParams::new(self.text.clone(), style)
+                .spans(spans)
+                .wrap_width(Some(text_area_w.max(1.0)));
+            if let Some(layout) = cx.layout_text(&params) {
+                scene.rich_text(RichTextPrimitive {
+                    rect: Rect {
+                        x: text_x,
+                        y: text_y - self.scroll_y,
+                        width: text_area_w,
+                        height: content_h,
+                    },
+                    layout: ShapedText::new(layout),
+                    default_color: self.text_color,
+                    span_colors: span_colors.into(),
+                });
+            }
         }
 
         if self.focused {
@@ -373,6 +386,7 @@ impl Element for TextEditorElement {
             font_size,
             focus_target: target,
             multiline: true,
+            layout: None,
         });
     }
 }
@@ -393,26 +407,16 @@ fn gutter_digits(max_line: usize) -> usize {
     max_line.max(1).ilog10() as usize + 1
 }
 
+/// Layout spans and their colors for the syntax-highlighted runs; text outside
+/// every run uses the base style and `default_color`.
 fn build_editor_spans(
     text: &str,
     syntax_spans: &[SyntaxSpan],
     default_color: crate::theme::Color,
     theme: &crate::theme::Theme,
-) -> Arc<[RichTextSpan]> {
-    if text.is_empty() {
-        return Arc::from(Vec::new());
-    }
-    if syntax_spans.is_empty() {
-        return Arc::from(vec![RichTextSpan {
-            text: Arc::from(text),
-            color: default_color,
-            font_weight: None,
-            font_style: None,
-        }]);
-    }
-
-    let mut out = Vec::new();
-    let mut cursor = 0_usize;
+) -> (Vec<TextSpan>, Vec<crate::theme::Color>) {
+    let mut spans = Vec::with_capacity(syntax_spans.len());
+    let mut colors = Vec::with_capacity(syntax_spans.len());
     for span in syntax_spans {
         let raw_start = span.offset as usize;
         let raw_end = raw_start
@@ -421,26 +425,16 @@ fn build_editor_spans(
         let Some((start, end)) = valid_text_range(text, raw_start, raw_end) else {
             continue;
         };
-        if cursor < start {
-            push_editor_span(&mut out, &text[cursor..start], default_color, None, None);
-        }
         let (color, weight, style) = syntax_style(span.kind, default_color, theme);
-        push_editor_span(&mut out, &text[start..end], color, weight, style);
-        cursor = cursor.max(end);
-    }
-    if cursor < text.len() {
-        push_editor_span(&mut out, &text[cursor..], default_color, None, None);
-    }
-
-    if out.is_empty() {
-        out.push(RichTextSpan {
-            text: Arc::from(text),
-            color: default_color,
-            font_weight: None,
-            font_style: None,
+        spans.push(TextSpan {
+            range: start..end,
+            weight,
+            style,
+            kind: None,
         });
+        colors.push(color);
     }
-    Arc::from(out)
+    (spans, colors)
 }
 
 fn valid_text_range(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
@@ -452,35 +446,6 @@ fn valid_text_range(text: &str, start: usize, end: usize) -> Option<(usize, usiz
     } else {
         None
     }
-}
-
-fn push_editor_span(
-    out: &mut Vec<RichTextSpan>,
-    text: &str,
-    color: crate::theme::Color,
-    font_weight: Option<FontWeight>,
-    font_style: Option<FontStyle>,
-) {
-    if text.is_empty() {
-        return;
-    }
-    if let Some(last) = out.last_mut()
-        && last.color == color
-        && last.font_weight == font_weight
-        && last.font_style == font_style
-    {
-        let mut merged = String::with_capacity(last.text.len() + text.len());
-        merged.push_str(last.text.as_ref());
-        merged.push_str(text);
-        last.text = Arc::from(merged);
-        return;
-    }
-    out.push(RichTextSpan {
-        text: Arc::from(text),
-        color,
-        font_weight,
-        font_style,
-    });
 }
 
 fn syntax_style(

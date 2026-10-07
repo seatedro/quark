@@ -57,7 +57,7 @@ pub struct FrameContext<'a> {
     pub(super) size: PhysicalSize<u32>,
     pub(super) scale_factor: f64,
     pub(super) text_metrics: TextMetrics,
-    pub(super) font_system: &'a mut FontSystem,
+    pub(super) text: &'a mut AppText,
     pub(super) elapsed: Duration,
     pub(super) flags: &'a mut Flags,
     pub(super) waker: &'a Waker,
@@ -93,7 +93,13 @@ impl FrameContext<'_> {
     }
 
     pub fn font_system(&mut self) -> &mut FontSystem {
-        self.font_system
+        self.text.system.font_system_mut()
+    }
+
+    /// The text system and layout cache this frame's scene must be shaped
+    /// with.
+    pub fn text(&mut self) -> &mut AppText {
+        self.text
     }
 
     /// Time since the runner started.
@@ -118,11 +124,9 @@ impl FrameContext<'_> {
 pub struct EventContext<'a> {
     pub(super) windows: &'a mut WindowTable<WindowEntry>,
     pub(super) window: Option<WindowHandle>,
+    pub(super) text: &'a mut AppText,
     pub(super) flags: &'a mut Flags,
     pub(super) clipboard: &'a mut Option<arboard::Clipboard>,
-    /// Stands in for a renderer's `FontSystem` while no window is open.
-    pub(super) fallback_fonts: &'a mut Option<FontSystem>,
-    pub(super) fonts: &'a FontSettings,
     pub(super) waker: &'a Waker,
     pub(super) events: &'a EventSink,
     pub(super) theme: Option<Theme>,
@@ -195,16 +199,11 @@ impl EventContext<'_> {
     }
 
     pub fn font_system(&mut self) -> &mut FontSystem {
-        let fonts = self.fonts;
-        let window = self.window;
-        if let Some(state) = window
-            .and_then(|window| self.windows.get_mut(window))
-            .and_then(WindowEntry::open_mut)
-        {
-            return state.renderer.font_system_mut();
-        }
-        self.fallback_fonts
-            .get_or_insert_with(|| quark_render::fonts::new_font_system_with_settings(fonts))
+        self.text.system.font_system_mut()
+    }
+
+    pub fn text(&mut self) -> &mut AppText {
+        self.text
     }
 
     pub fn set_cursor(&mut self, cursor: CursorIcon) {

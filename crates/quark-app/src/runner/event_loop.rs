@@ -31,16 +31,15 @@ struct Runner<A> {
     app: A,
     /// The first window's options until `resumed` opens it.
     first_window: Option<WindowOptions>,
-    fonts: FontSettings,
     windows: WindowTable<WindowEntry>,
     focused: Option<WindowHandle>,
     theme: Option<Theme>,
     started: bool,
+    text: AppText,
     waker: Waker,
     events: EventSink,
     app_events: Receiver<AppEvent>,
     clipboard: Option<arboard::Clipboard>,
-    fallback_fonts: Option<FontSystem>,
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
     flags: Flags,
@@ -55,20 +54,20 @@ struct Runner<A> {
 impl<A: App> Runner<A> {
     fn new(app: A, options: WindowOptions, waker: Waker) -> Self {
         let (accessibility_action_sender, accessibility_actions) = mpsc::channel();
+        let text = AppText::new(&options.fonts);
         let (events, app_events) = EventSink::new(waker.clone());
         Self {
             app,
-            fonts: options.fonts.clone(),
             first_window: Some(options),
             windows: WindowTable::default(),
             focused: None,
             theme: None,
             started: false,
+            text,
             waker,
             events,
             app_events,
             clipboard: None,
-            fallback_fonts: None,
             #[cfg(feature = "tray")]
             tray: None,
             flags: Flags::default(),
@@ -103,7 +102,7 @@ impl<A: App> Runner<A> {
             },
             AccessibilityDeactivation,
         );
-        let mut renderer = Renderer::new(window.clone(), &options.fonts)?;
+        let mut renderer = Renderer::new(window.clone())?;
         renderer.resize(size.width, size.height, scale_factor);
         window.set_visible(true);
         position_traffic_lights(&window, options.traffic_lights);
@@ -149,10 +148,9 @@ impl<A: App> Runner<A> {
         let mut cx = EventContext {
             windows: &mut self.windows,
             window,
+            text: &mut self.text,
             flags: &mut self.flags,
             clipboard: &mut self.clipboard,
-            fallback_fonts: &mut self.fallback_fonts,
-            fonts: &self.fonts,
             waker: &self.waker,
             events: &self.events,
             theme: self.theme,
@@ -237,13 +235,14 @@ impl<A: App> Runner<A> {
         };
         let renderer = &mut state.renderer;
         let elapsed = self.launch_at.elapsed();
-        let text_metrics = renderer.text_metrics();
+        self.text.layouts.begin_frame();
+        let text_metrics = renderer.text_metrics(&mut self.text.system);
         let mut cx = FrameContext {
             window: handle,
             size: state.surface_size,
             scale_factor: state.scale_factor,
             text_metrics,
-            font_system: renderer.font_system_mut(),
+            text: &mut self.text,
             elapsed,
             flags: &mut self.flags,
             waker: &self.waker,
@@ -256,9 +255,10 @@ impl<A: App> Runner<A> {
         #[cfg(not(feature = "hot-reload"))]
         let scene = self.app.frame(&mut cx);
 
-        if let Err(error) = renderer.render(&scene, elapsed.as_secs_f32()) {
+        if let Err(error) = renderer.render(&scene, &mut self.text.system, elapsed.as_secs_f32()) {
             tracing::error!("render failed: {error}");
         }
+        self.text.layouts.trim();
 
         if let Some(update) = self.app.accessibility() {
             if let Ok(mut latest) = state.accessibility_tree.lock() {

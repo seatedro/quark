@@ -24,8 +24,8 @@ impl WindowEntry {
 }
 
 /// Everything the runner owns for one native window. Each window has its own
-/// renderer: `quark_render::Renderer` owns its wgpu device and `FontSystem`,
-/// so windows do not share GPU resources or loaded fonts.
+/// renderer (and wgpu device); all of them borrow the runner's one
+/// [`AppText`] so layouts shaped for any window rasterize in every window.
 pub(super) struct WindowState {
     // Declared before `window` so the surface goes first on drop.
     pub(super) renderer: Renderer,

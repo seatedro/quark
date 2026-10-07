@@ -282,10 +282,12 @@ impl<U: UiApp> App for UiAdapter<U> {
         });
 
         let mut scene = Scene::default();
+        let text = cx.text();
         let mut ecx = ElementContext::new(
             &self.theme,
             scale,
-            cx.font_system(),
+            &mut text.system,
+            &mut text.layouts,
             self.pointer,
             &self.signals,
         )
@@ -406,11 +408,11 @@ mod tests {
     const FIELD: FocusId = FocusId::from_key("field");
 
     fn painted_frame() -> AccessibilityFrame {
-        let mut font_system = glyphon::FontSystem::new();
-        quark_render::fonts::configure_font_system(&mut font_system);
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut layouts = quark_text::LayoutCache::default();
         let theme = Theme::default_dark();
         let signals = SignalStore::new();
-        let mut cx = ElementContext::new(&theme, 1.0, &mut font_system, None, &signals);
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
         let mut root = div()
             .w(400.0)
             .h(300.0)

@@ -44,7 +44,7 @@ pub use retained::{DisposedNode, RetainedNode, RetainedTree};
 pub use scene::{
     BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive, EffectType, FontKind,
     FontWeight, IconPrimitive, ImagePrimitive, Primitive, RectPrimitive, RichTextPrimitive,
-    RichTextSpan, RoundedRectPrimitive, Scene, ShadowPrimitive, TextPrimitive,
+    RoundedRectPrimitive, Scene, ShadowPrimitive, ShapedText, TextPrimitive,
 };
 pub use selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText, copy_text};
 pub use semantic::{

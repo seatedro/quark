@@ -1,12 +1,5 @@
 //! One text layout shared by measurement, hit-testing, selection, and
 //! painting.
-//!
-//! Integration note (follow-up task): once quark-render and quark-ui use this
-//! crate, delete from quark-render `fonts.rs`'s font bytes, `new_font_system*`,
-//! `configure_font_system*`, and `configure_generic_families` (keep or move
-//! the family catalog), move `assets/fonts` into this crate, drop the
-//! renderer-owned `FontSystem` and its `CachedTextBuffer` cache in `text.rs`,
-//! and remove quark-ui's `measure_text_width` cache.
 
 mod cache;
 pub mod fonts;

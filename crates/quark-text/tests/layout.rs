@@ -183,6 +183,7 @@ fn glyph_runs_split_by_span() {
         range: 6..10,
         weight: Some(FontWeight::Bold),
         style: Some(FontStyle::Italic),
+        kind: None,
     }];
     let params = TextParams::new(text, TextStyle::new(14.0)).spans(spans);
     let layout = system().layout(&params).expect("layout");
@@ -275,6 +276,7 @@ fn invalid_params_error() {
         range: 0..5,
         weight: None,
         style: None,
+        kind: None,
     }]);
     assert!(matches!(
         sys.layout(&bad_span),

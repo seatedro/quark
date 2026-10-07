@@ -2582,6 +2582,7 @@ dependencies = [
  "pollster",
  "quark",
  "quark-render",
+ "quark-text",
  "quark-ui",
  "raw-window-handle",
  "rfd",
@@ -2601,9 +2602,9 @@ name = "quark-components"
 version = "0.1.0"
 dependencies = [
  "accesskit",
- "glyphon",
  "quark",
  "quark-render",
+ "quark-text",
  "quark-ui",
 ]
 
@@ -2627,6 +2628,7 @@ dependencies = [
  "pollster",
  "profiling",
  "quark",
+ "quark-text",
  "resvg",
  "serde",
  "thiserror 2.0.21",
@@ -2655,6 +2657,7 @@ dependencies = [
  "proptest",
  "quark",
  "quark-render",
+ "quark-text",
  "serde",
  "taffy",
  "unicode-segmentation",
