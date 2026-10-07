@@ -301,8 +301,8 @@ impl TreeState {
         }
     }
 
-    /// The column data, for changes that must not show (none do), or the
-    /// view's data with the revision bumped.
+    /// The data for a change the view shows: copied first if a frame still
+    /// shares it, and with the revision bumped.
     fn m(&mut self) -> &mut TreeData {
         let d = Rc::make_mut(&mut self.data);
         d.revision += 1;
