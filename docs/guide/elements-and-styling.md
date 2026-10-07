@@ -38,10 +38,13 @@ colors (`bg`, `border`), and corners (`rounded`). `quark_ui::design` holds
 the tokens: `Sp` for spacing, `Rad` for radii, `Sz`, `Shadow`, and text
 styles. Colors come from the theme.
 
-This doctest from [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs)
+Views write these calls with `view!` ([Writing views](writing-views.md)):
+each attribute is the builder method of the same name, and each class one
+builder call. This doctest from [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs)
 builds a toolbar with one button:
 
 ```rust
+use quark::view;
 use quark_ui::Action;
 use quark_ui::design::{Rad, Sp};
 use quark_ui::element::{AnyElement, IntoAnyElement, div, text};
@@ -53,22 +56,14 @@ struct Save;
 
 fn toolbar(theme: &Theme) -> AnyElement {
     let colors = &theme.colors;
-    div()
-        .flex_row()
-        .gap(Sp::SM)
-        .p(Sp::MD)
-        .bg(colors.surface)
-        .child(
-            div()
-                .test_id("toolbar.save")
-                .on_click(Action::new(Save))
-                .px(Sp::LG)
-                .rounded(Rad::XL)
-                .bg(colors.accent)
-                .hover_bg(colors.accent_strong)
-                .child(text("Save").color(colors.text_strong).semibold()),
-        )
-        .into_any()
+    view! {
+        <div class="flex-row" gap={Sp::SM} p={Sp::MD} bg={colors.surface}>
+            <div test_id="toolbar.save" on:click={Action::new(Save)} px={Sp::LG}
+                 rounded={Rad::XL} bg={colors.accent} hover_bg={colors.accent_strong}>
+                <text color={colors.text_strong} class="font-semibold">"Save"</text>
+            </div>
+        </div>
+    }
 }
 ```
 

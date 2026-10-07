@@ -35,13 +35,14 @@ doctest in [crates/quark-app/src/lib.rs](../../crates/quark-app/src/lib.rs),
 so `cargo test --doc -p quark-app` compiles it. Its parts:
 
 - `type Action = Msg`: the enum elements emit. `impl From<Msg> for Action`
-  lets `on_click(Msg::Increment)` wrap it in the type-erased
+  lets `on:click={Msg::Increment}` wrap it in the type-erased
   `quark_ui::Action` elements carry.
 - `type Message = ()`: values other threads send. `()` means none; see
   [State, actions, and messages](state-actions-messages.md).
 - `view(&mut self, cx: &mut ViewContext) -> AnyElement` builds the whole
-  tree from `self`. `cx.theme` holds the colors; `cx.frame.size()` is the
-  window size in logical points.
+  tree from `self` with `view!` ([Writing views](writing-views.md)).
+  `cx.theme` holds the colors; `cx.frame.size()` is the window size in
+  logical points.
 - `update(&mut self, msg, cx)` changes state. The adapter redraws after
   every action, so `update` does not request a frame.
 
