@@ -17,8 +17,31 @@
 //! selection collapses at byte 0 of the next surviving block, or at the end of
 //! the previous one when the removed block was last.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+
+thread_local! {
+    static INTEGRITY_STEPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Entries visited by integrity checks on this thread so far. Debug checks
+/// report their work here so a test can tell a linear load from a
+/// quadratic one without timing it; release builds never add to it.
+pub fn integrity_steps() -> u64 {
+    INTEGRITY_STEPS.with(Cell::get)
+}
+
+/// Adds `n` to [`integrity_steps`]. For integrity checks in other crates.
+#[doc(hidden)]
+pub fn count_integrity_steps(n: usize) {
+    INTEGRITY_STEPS.with(|steps| steps.set(steps.get().saturating_add(n as u64)));
+}
+
+/// Whether mutations run the full O(n) integrity check: debug builds with
+/// the `integrity-checks` feature. Without it they check only what they
+/// touched, so debug builds stay linear on large documents.
+pub const FULL_INTEGRITY_CHECKS: bool = cfg!(all(debug_assertions, feature = "integrity-checks"));
 
 /// Stable identity of a text block. Never an index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -171,8 +194,25 @@ impl BlockOrder {
         }
         self.index.insert(key, self.keys.len() as u32);
         self.keys.push(key);
-        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        self.debug_check_key(key);
         true
+    }
+
+    /// Appends `keys` (in their given order) after the current last block.
+    /// Keys already present, or repeated in `keys`, are skipped. Indexes and
+    /// checks once per batch. Returns how many were added.
+    pub fn extend(&mut self, keys: impl IntoIterator<Item = BlockKey>) -> usize {
+        let start = self.keys.len();
+        for key in keys {
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.index.entry(key) {
+                slot.insert(self.keys.len() as u32);
+                self.keys.push(key);
+            }
+        }
+        if self.keys.len() > start {
+            debug_assert_eq!(self.verify_integrity(), Ok(()));
+        }
+        self.keys.len() - start
     }
 
     /// Prepends `keys` (in their given order) before the current first block.
@@ -236,9 +276,44 @@ impl BlockOrder {
         }
     }
 
-    /// Checks that `index` is exactly the inverse of `keys`. Mutations call
-    /// this through `debug_assert!`, so release builds skip it. O(n).
+    /// Checks the entries for `key` only: it sits where `index` says and the
+    /// two sides have the same length. O(1); single-key mutations call it
+    /// through `debug_assert!`.
+    pub fn verify_key(&self, key: BlockKey) -> Result<(), IntegrityError> {
+        count_integrity_steps(1);
+        if self.index.len() != self.keys.len() {
+            return Err(IntegrityError::IndexLength {
+                keys: self.keys.len(),
+                index: self.index.len(),
+            });
+        }
+        match self.index.get(&key) {
+            Some(&pos) if self.keys.get(pos as usize) == Some(&key) => Ok(()),
+            found => Err(IntegrityError::Position {
+                key,
+                position: self
+                    .keys
+                    .iter()
+                    .position(|k| *k == key)
+                    .unwrap_or(usize::MAX),
+                index: found.copied(),
+            }),
+        }
+    }
+
+    fn debug_check_key(&self, key: BlockKey) {
+        if FULL_INTEGRITY_CHECKS {
+            debug_assert_eq!(self.verify_integrity(), Ok(()));
+        } else {
+            debug_assert_eq!(self.verify_key(key), Ok(()));
+        }
+    }
+
+    /// Checks that `index` is exactly the inverse of `keys`. Batch and O(n)
+    /// mutations call this through `debug_assert!`, so release builds skip
+    /// it. O(n).
     pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
+        count_integrity_steps(self.keys.len());
         if self.keys.len() > u32::MAX as usize {
             return Err(IntegrityError::TooManyBlocks(self.keys.len()));
         }
@@ -431,6 +506,7 @@ mod tests {
     #[derive(Debug, Clone)]
     enum Op {
         Append(u64),
+        Extend(Vec<u64>),
         Prepend(Vec<u64>),
         InsertAfter(u64, u64),
         Remove(u64),
@@ -442,6 +518,7 @@ mod tests {
         let key = 0..KEYS;
         prop_oneof![
             key.clone().prop_map(Op::Append),
+            prop::collection::vec(key.clone(), 0..5).prop_map(Op::Extend),
             prop::collection::vec(key.clone(), 0..5).prop_map(Op::Prepend),
             (key.clone(), key.clone()).prop_map(|(a, b)| Op::InsertAfter(a, b)),
             key.prop_map(Op::Remove),
@@ -467,6 +544,15 @@ mod tests {
                             model.push(key);
                         }
                         prop_assert_eq!(order.append(k(key)), fresh);
+                    }
+                    Op::Extend(keys) => {
+                        let before = model.len();
+                        for key in &keys {
+                            if !model.contains(key) {
+                                model.push(*key);
+                            }
+                        }
+                        prop_assert_eq!(order.extend(keys.into_iter().map(k)), model.len() - before);
                     }
                     Op::Prepend(keys) => {
                         let mut fresh: Vec<u64> = Vec::new();
@@ -606,6 +692,25 @@ mod tests {
                 prop_assert!(a >= f, "backward selection flipped: {:?}", fixed);
             }
         }
+    }
+
+    // Catches a per-append check that walks the whole order, which made
+    // debug builds quadratic while a transcript loads block by block.
+    #[test]
+    fn appending_30k_blocks_one_at_a_time_checks_linearly() {
+        if FULL_INTEGRITY_CHECKS {
+            return;
+        }
+        let mut order = BlockOrder::new();
+        let before = integrity_steps();
+        for key in 0..30_000 {
+            order.append(k(key));
+        }
+        let steps = integrity_steps() - before;
+        assert!(
+            cfg!(not(debug_assertions)) || steps <= 2 * 30_000,
+            "{steps} steps"
+        );
     }
 
     #[test]

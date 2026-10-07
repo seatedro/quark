@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use crate::identity::UiKey;
+use crate::selection::{FULL_INTEGRITY_CHECKS, count_integrity_steps};
 
 /// Stable animation identity. Usually derived from a [`UiKey`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -284,7 +285,7 @@ impl AnimationTable {
         self.velocities[row] = 0.0;
         self.updated_ms[row] = now_ms;
         self.active[row] = false;
-        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        self.debug_check_row(row);
     }
 
     /// Starts or retargets an animation toward `target`.
@@ -302,7 +303,9 @@ impl AnimationTable {
         now_ms: u64,
     ) {
         self.animate_row_to(key, prop, target, motion, now_ms);
-        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        if let Some(row) = self.row(key, prop) {
+            self.debug_check_row(row);
+        }
     }
 
     fn animate_row_to(
@@ -468,18 +471,47 @@ impl AnimationTable {
         match self.row(key, prop) {
             Some(row) => {
                 self.swap_remove_row(row);
-                debug_assert_eq!(self.verify_integrity(), Ok(()));
+                // The last row moved into `row`.
+                if row < self.keys.len() {
+                    self.debug_check_row(row);
+                }
                 true
             }
             None => false,
         }
     }
 
+    /// Checks one row: column and index lengths, the index entry of its
+    /// `(key, prop)`, and that it rests on its target when inactive. O(1);
+    /// single-row mutations call it through `debug_assert!`.
+    pub fn verify_row(&self, row: usize) -> Result<(), IntegrityError> {
+        count_integrity_steps(1);
+        self.verify_lengths()?;
+        self.verify_row_entries(row)
+    }
+
+    fn debug_check_row(&self, row: usize) {
+        if FULL_INTEGRITY_CHECKS {
+            debug_assert_eq!(self.verify_integrity(), Ok(()));
+        } else {
+            debug_assert_eq!(self.verify_row(row), Ok(()));
+        }
+    }
+
     /// Checks that every column has one entry per row, `index` maps each
     /// row's `(key, prop)` to that row, and inactive rows rest exactly on
-    /// their target. Mutations call this through `debug_assert!`, so release
-    /// builds skip it. O(rows).
+    /// their target. Whole-table mutations call this through
+    /// `debug_assert!`, so release builds skip it. O(rows).
     pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
+        count_integrity_steps(self.keys.len());
+        self.verify_lengths()?;
+        for row in 0..self.keys.len() {
+            self.verify_row_entries(row)?;
+        }
+        Ok(())
+    }
+
+    fn verify_lengths(&self) -> Result<(), IntegrityError> {
         let rows = self.keys.len();
         let columns = [
             ("props", self.props.len()),
@@ -501,18 +533,20 @@ impl AnimationTable {
                 index: self.index.len(),
             });
         }
-        for row in 0..rows {
-            let found = self.index.get(&(self.keys[row], self.props[row])).copied();
-            if found != Some(row as u32) {
-                return Err(IntegrityError::IndexRow { row, index: found });
-            }
-            // Every path that clears `active` also snaps to the target, so an
-            // inactive row away from it would never be ticked there.
-            let (value, target) = (self.values[row], self.targets[row]);
-            let on_target = value == target || (value.is_nan() && target.is_nan());
-            if !self.active[row] && !(on_target && self.velocities[row] == 0.0) {
-                return Err(IntegrityError::InactiveOffTarget { row });
-            }
+        Ok(())
+    }
+
+    fn verify_row_entries(&self, row: usize) -> Result<(), IntegrityError> {
+        let found = self.index.get(&(self.keys[row], self.props[row])).copied();
+        if found != Some(row as u32) {
+            return Err(IntegrityError::IndexRow { row, index: found });
+        }
+        // Every path that clears `active` also snaps to the target, so an
+        // inactive row away from it would never be ticked there.
+        let (value, target) = (self.values[row], self.targets[row]);
+        let on_target = value == target || (value.is_nan() && target.is_nan());
+        if !self.active[row] && !(on_target && self.velocities[row] == 0.0) {
+            return Err(IntegrityError::InactiveOffTarget { row });
         }
         Ok(())
     }
