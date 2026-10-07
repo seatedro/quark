@@ -43,7 +43,7 @@ struct Runner<A> {
     waker: Waker,
     events: EventSink,
     app_events: Receiver<AppEvent>,
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Clipboard,
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
     flags: Flags,
@@ -72,7 +72,7 @@ impl<A: App> Runner<A> {
             waker,
             events,
             app_events,
-            clipboard: None,
+            clipboard: Clipboard::System(None),
             #[cfg(feature = "tray")]
             tray: None,
             flags: Flags::default(),
@@ -172,6 +172,8 @@ impl<A: App> Runner<A> {
             waker: &self.waker,
             events: &self.events,
             theme: self.theme,
+            #[cfg(feature = "test-support")]
+            headless: None,
             elapsed: self.launch_at.elapsed(),
             #[cfg(feature = "tray")]
             tray: &mut self.tray,

@@ -810,6 +810,37 @@ impl<U: UiApp> App for UiAdapter<U> {
     }
 }
 
+/// What [`crate::testing`] reads from the adapter.
+#[cfg(feature = "test-support")]
+impl<U: UiApp> UiAdapter<U> {
+    pub(crate) fn app_mut(&mut self) -> &mut U {
+        &mut self.app
+    }
+
+    pub(crate) fn focus(&self) -> Option<FocusId> {
+        self.focus
+    }
+
+    /// The last painted frame's accessibility tree, in points.
+    pub(crate) fn logical_accessibility_tree(&self) -> TreeUpdate {
+        self.accessibility.tree_update(&self.name, self.focus)
+    }
+
+    pub(crate) fn accessibility_frame(&self) -> &AccessibilityFrame {
+        &self.accessibility
+    }
+
+    pub(crate) fn semantic_frame(&self) -> &SemanticFrame {
+        &self.router.frame().semantic
+    }
+
+    /// The semantic node of the topmost hit region at a point that has one.
+    pub(crate) fn semantic_node_at(&self, x: f32, y: f32) -> Option<usize> {
+        let hits = &self.router.frame().hits;
+        hits.stack_at(x, y).into_iter().find_map(|id| hits.node(id))
+    }
+}
+
 impl<U: UiApp> UiAdapter<U> {
     /// Keep `painted`'s input state for routing until the next frame, and
     /// return its scene with the IME changes for the caret it painted.
@@ -866,12 +897,9 @@ mod tests {
     use quark_ui::element::{IntoAnyElement, div, text_input};
     use quark_ui::style::Styled;
     use quark_ui::text_input::TextField;
-    use winit::event::{ElementState, MouseButton};
-    use winit::keyboard::ModifiersState;
 
     use super::*;
-    use crate::input::{KeyChord, KeyKind};
-    use crate::runner::TestRunner;
+    use crate::testing::UiTestHarness;
 
     #[derive(Debug, Clone, PartialEq)]
     enum Msg {
@@ -1182,7 +1210,6 @@ mod tests {
         saved: usize,
         events: Vec<String>,
         messages: Vec<(String, ThreadId)>,
-        copied: Vec<String>,
     }
 
     impl UiApp for ComposerApp {
@@ -1230,54 +1257,17 @@ mod tests {
             assert_eq!(target, FIELD);
             self.field.apply(command)
         }
-
-        fn read_clipboard(&mut self, _cx: &mut UiContext) -> Option<String> {
-            Some("pasted".to_owned())
-        }
-
-        fn write_clipboard(&mut self, text: String, _cx: &mut UiContext) {
-            self.copied.push(text);
-        }
     }
 
-    /// A composer adapter with one frame painted.
-    fn composer(text: &str) -> (UiAdapter<ComposerApp>, TestRunner) {
-        let mut adapter = UiAdapter::new(
-            ComposerApp {
-                field: TextField::new(text),
-                saved: 0,
-                events: Vec::new(),
-                messages: Vec::new(),
-                copied: Vec::new(),
-            },
-            "Test",
-        );
-        let mut runner = TestRunner::new();
-        App::init(&mut adapter, &mut runner.event_cx(0));
-        runner.frame(&mut adapter, 0);
-        runner.take_redraw();
-        (adapter, runner)
-    }
-
-    fn send(adapter: &mut UiAdapter<ComposerApp>, runner: &mut TestRunner, event: InputEvent) {
-        App::event(adapter, event, &mut runner.event_cx(0));
-    }
-
-    fn click(adapter: &mut UiAdapter<ComposerApp>, runner: &mut TestRunner, x: f32, y: f32) {
-        send(adapter, runner, InputEvent::PointerMoved { x, y });
-        for state in [ElementState::Pressed, ElementState::Released] {
-            let button = MouseButton::Left;
-            send(adapter, runner, InputEvent::PointerButton { button, state });
-        }
-    }
-
-    fn ctrl(key: &str) -> InputEvent {
-        InputEvent::KeyPress(KeyChord {
-            logical: KeyKind::Character(key.to_owned()),
-            physical: None,
-            modifiers: ModifiersState::CONTROL,
-            repeat: false,
-        })
+    /// A composer in a 400x300 point window, first frame painted.
+    fn composer(text: &str) -> UiTestHarness<ComposerApp> {
+        let app = ComposerApp {
+            field: TextField::new(text),
+            saved: 0,
+            events: Vec::new(),
+            messages: Vec::new(),
+        };
+        UiTestHarness::new(app, (400.0, 300.0), 1.0)
     }
 
     /// The color of the window-sized background quad.
@@ -1296,20 +1286,13 @@ mod tests {
     // run_ui app never saw theme changes, URLs, or notification clicks.
     #[test]
     fn app_event_reaches_the_app_and_the_theme_follows() {
-        let (mut adapter, mut runner) = composer("");
+        let mut ui = composer("");
 
-        App::app_event(
-            &mut adapter,
-            AppEvent::ThemeChanged(SystemTheme::Light),
-            &mut runner.event_cx(0),
-        );
-        let redrawn = runner.take_redraw();
-        let scene = runner.frame(&mut adapter, 10);
+        ui.app_event(AppEvent::ThemeChanged(SystemTheme::Light));
 
-        assert_eq!(adapter.app.events, ["ThemeChanged(Light)"]);
-        assert!(redrawn, "a theme change repaints");
+        assert_eq!(ui.app().events, ["ThemeChanged(Light)"]);
         assert_eq!(
-            background(&scene),
+            background(ui.scene()),
             Some(Theme::default_light().colors.background)
         );
     }
@@ -1318,8 +1301,8 @@ mod tests {
     // value they had, so apps shared state behind locks to pass data in.
     #[test]
     fn messages_from_a_worker_arrive_in_order_on_the_ui_thread() {
-        let (mut adapter, mut runner) = composer("");
-        let sender = adapter.sender();
+        let mut ui = composer("");
+        let sender = ui.sender();
 
         thread::spawn(move || {
             sender.send("connected".to_owned());
@@ -1327,12 +1310,15 @@ mod tests {
         })
         .join()
         .unwrap();
-        App::wake(&mut adapter, &mut runner.event_cx(5));
+        ui.run_until_idle();
 
-        let ui = thread::current().id();
+        let ui_thread = thread::current().id();
         assert_eq!(
-            adapter.app.messages,
-            [("connected".to_owned(), ui), ("line 1".to_owned(), ui)]
+            ui.app().messages,
+            [
+                ("connected".to_owned(), ui_thread),
+                ("line 1".to_owned(), ui_thread)
+            ]
         );
     }
 
@@ -1340,12 +1326,13 @@ mod tests {
     // element where no hover style can change.
     #[test]
     fn pointer_moves_redraw_only_when_the_hovered_elements_change() {
-        let (mut adapter, mut runner) = composer("");
+        let mut ui = composer("");
 
         let moves = [(10.0, 10.0), (12.0, 14.0), (10.0, 200.0), (30.0, 250.0)];
-        let redraws = moves.map(|(x, y)| {
-            send(&mut adapter, &mut runner, InputEvent::PointerMoved { x, y });
-            runner.take_redraw()
+        let redraws = moves.map(|at| {
+            let before = ui.frame_count();
+            ui.pointer_move(at);
+            ui.frame_count() > before
         });
 
         assert_eq!(redraws, [true, false, true, false]);
@@ -1353,26 +1340,24 @@ mod tests {
 
     // The composer needs no input code of its own: typed text, editing
     // keys, copy, and paste reach the focused field through edit_text and
-    // the clipboard hooks, and clicking Save keeps the field focused.
+    // the clipboard, and clicking Save keeps the field focused.
     #[test]
     fn focused_field_gets_text_keys_and_clipboard_without_app_code() {
-        let (mut adapter, mut runner) = composer("");
+        let mut ui = composer("");
 
-        click(&mut adapter, &mut runner, 10.0, 50.0);
-        send(
-            &mut adapter,
-            &mut runner,
-            InputEvent::TextInput("hi".into()),
-        );
-        for key in ["a", "c", "v"] {
-            send(&mut adapter, &mut runner, ctrl(key));
-        }
-        click(&mut adapter, &mut runner, 10.0, 10.0);
+        ui.click((10.0, 50.0));
+        ui.type_text("hi");
+        ui.key("mod+a");
+        ui.key("mod+c");
+        let copied = ui.clipboard_text();
+        ui.set_clipboard_text("pasted");
+        ui.key("mod+v");
+        ui.click((10.0, 10.0));
 
-        assert_eq!(adapter.app.field.text(), "pasted");
-        assert_eq!(adapter.app.copied, ["hi"]);
-        assert_eq!(adapter.app.saved, 1);
-        assert_eq!(adapter.focus, Some(FIELD), "Save kept the field focused");
+        assert_eq!(copied.as_deref(), Some("hi"));
+        assert_eq!(ui.app().field.text(), "pasted");
+        assert_eq!(ui.app().saved, 1);
+        assert_eq!(ui.focus(), Some(FIELD), "Save kept the field focused");
     }
 
     // Regression: a selection drag held past a field's edge kept
@@ -1385,38 +1370,19 @@ mod tests {
             ("window blurred", true, false),
         ];
         for (name, blur, grows) in cases {
-            let (mut adapter, mut runner) = composer(text);
-            click(&mut adapter, &mut runner, 5.0, 50.0);
-            runner.frame(&mut adapter, 10);
-            let press = ElementState::Pressed;
-            let button = MouseButton::Left;
-            send(
-                &mut adapter,
-                &mut runner,
-                InputEvent::PointerButton {
-                    button,
-                    state: press,
-                },
-            );
-            send(
-                &mut adapter,
-                &mut runner,
-                InputEvent::PointerMoved { x: 260.0, y: 50.0 },
-            );
+            let mut ui = composer(text);
+            ui.click((5.0, 50.0));
+            // Long enough that the next press is not a double click.
+            ui.advance(1_000);
+            ui.pointer_down((5.0, 50.0));
+            ui.pointer_move((260.0, 50.0));
             if blur {
-                send(&mut adapter, &mut runner, InputEvent::Focused(false));
+                ui.focus_loss();
             }
-            let before = adapter.app.field.cursor();
-            for ms in [100, 200, 300, 400] {
-                runner.frame(&mut adapter, ms);
-            }
-            let grew = adapter.app.field.cursor() > before;
-            assert_eq!(
-                grew,
-                grows,
-                "{name}: cursor {before} -> {}",
-                adapter.app.field.cursor()
-            );
+            let before = ui.app().field.cursor();
+            ui.advance(400);
+            let after = ui.app().field.cursor();
+            assert_eq!(after > before, grows, "{name}: cursor {before} -> {after}");
         }
     }
 }
