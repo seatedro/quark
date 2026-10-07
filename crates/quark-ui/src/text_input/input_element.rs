@@ -437,24 +437,26 @@ impl Element for TextEditorElement {
                 max: Some((self.content_height - bounds.height).max(0.0)),
             },
         );
-        cx.push_accessibility(
-            AccessibilityNode::new(
-                format!("text-editor:{target:?}"),
-                accesskit::Role::MultilineTextInput,
-                bounds,
-            )
-            .label(accessibility_label)
-            .text(match self.text_selection {
-                Some((anchor, caret)) => {
-                    AccessibleText::new(self.text.clone()).selection(anchor, caret)
-                }
-                None => AccessibleText::new(self.text.clone()),
-            })
-            .action(AccessibilityAction::EditorViewport {
-                focus: target,
-                scroll: self.on_scroll.clone(),
-            }),
-        );
+        if cx.accessibility_enabled() {
+            cx.push_accessibility(
+                AccessibilityNode::new(
+                    format!("text-editor:{target:?}"),
+                    accesskit::Role::MultilineTextInput,
+                    bounds,
+                )
+                .label(accessibility_label)
+                .text(match self.text_selection {
+                    Some((anchor, caret)) => {
+                        AccessibleText::new(self.text.clone()).selection(anchor, caret)
+                    }
+                    None => AccessibleText::new(self.text.clone()),
+                })
+                .action(AccessibilityAction::EditorViewport {
+                    focus: target,
+                    scroll: self.on_scroll.clone(),
+                }),
+            );
+        }
         cx.text_input_hit_areas.push(TextInputHitArea {
             bounds,
             focus_target: target,

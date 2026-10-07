@@ -7,7 +7,9 @@ use super::*;
 /// Every UI node implements `Element`. The lifecycle is:
 ///
 /// 1. **request_layout** — declare your Taffy style and children. Returns a
-///    `LayoutId` and arbitrary per-element state.
+///    `LayoutId` and arbitrary per-element state. It can run more than once
+///    per frame (a stale cache boundary reruns the pass), so it must not
+///    consume what a second call needs.
 /// 2. **prepaint** — given resolved bounds, register hitboxes and resolve
 ///    interaction state. Returns arbitrary prepaint state.
 /// 3. **paint** — emit scene primitives using resolved bounds and prepaint state.
@@ -58,22 +60,36 @@ pub trait Element: 'static {
 // AnyElement — type-erased element
 // ---------------------------------------------------------------------------
 
+/// An element of any type. Its box is recycled when it drops (see
+/// `element::pool`), so building the next frame's tree reuses it.
 pub struct AnyElement {
-    inner: Box<dyn AnyElementImpl>,
+    inner: Option<Box<dyn HolderImpl>>,
 }
 
 impl AnyElement {
     pub fn new<E: Element>(element: E) -> Self {
+        if let Some(mut inner) = super::pool::take_box::<E>()
+            && let Some(holder) = inner.as_any_mut().downcast_mut::<ElementHolder<E>>()
+        {
+            holder.element = Some(element);
+            return Self { inner: Some(inner) };
+        }
         Self {
-            inner: Box::new(ElementHolder {
-                element,
+            inner: Some(Box::new(ElementHolder {
+                element: Some(element),
                 layout_state: None,
                 prepaint_state: None,
                 layout_id: None,
                 #[cfg(feature = "devtools")]
                 inspect_record: None,
-            }),
+            })),
         }
+    }
+
+    fn inner(&mut self) -> &mut dyn HolderImpl {
+        self.inner
+            .as_deref_mut()
+            .expect("element is live until dropped")
     }
 
     pub fn request_layout(
@@ -81,11 +97,11 @@ impl AnyElement {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> LayoutId {
-        self.inner.request_layout(engine, cx)
+        self.inner().request_layout(engine, cx)
     }
 
     pub fn prepaint(&mut self, engine: &LayoutEngine, cx: &mut ElementContext) {
-        self.inner.prepaint(engine, cx, 0.0, 0.0);
+        self.inner().prepaint(engine, cx, 0.0, 0.0);
     }
 
     pub fn prepaint_with_offset(
@@ -95,11 +111,11 @@ impl AnyElement {
         offset_x: f32,
         offset_y: f32,
     ) {
-        self.inner.prepaint(engine, cx, offset_x, offset_y);
+        self.inner().prepaint(engine, cx, offset_x, offset_y);
     }
 
     pub fn paint(&mut self, engine: &LayoutEngine, scene: &mut Scene, cx: &mut ElementContext) {
-        self.inner.paint(engine, scene, cx, 0.0, 0.0);
+        self.inner().paint(engine, scene, cx, 0.0, 0.0);
     }
 
     pub fn paint_with_offset(
@@ -110,11 +126,44 @@ impl AnyElement {
         offset_x: f32,
         offset_y: f32,
     ) {
-        self.inner.paint(engine, scene, cx, offset_x, offset_y);
+        self.inner().paint(engine, scene, cx, offset_x, offset_y);
     }
 }
 
-trait AnyElementImpl {
+impl Drop for AnyElement {
+    fn drop(&mut self) {
+        if let Some(mut inner) = self.inner.take() {
+            inner.empty();
+            inner.recycle();
+        }
+    }
+}
+
+pub(super) trait HolderImpl: super::pool::Recycle + AnyElementImpl {
+    /// Return this emptied box to its type's free list.
+    fn recycle(self: Box<Self>);
+}
+
+impl<E: Element> super::pool::Recycle for ElementHolder<E> {
+    fn empty(&mut self) {
+        self.element = None;
+        self.layout_state = None;
+        self.prepaint_state = None;
+        self.layout_id = None;
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl<E: Element> HolderImpl for ElementHolder<E> {
+    fn recycle(self: Box<Self>) {
+        super::pool::give_box::<E>(self);
+    }
+}
+
+pub(super) trait AnyElementImpl {
     fn request_layout(&mut self, engine: &mut LayoutEngine, cx: &mut ElementContext) -> LayoutId;
     fn prepaint(
         &mut self,
@@ -134,7 +183,8 @@ trait AnyElementImpl {
 }
 
 struct ElementHolder<E: Element> {
-    element: E,
+    /// `None` only while the box waits in its free list.
+    element: Option<E>,
     layout_state: Option<E::LayoutState>,
     prepaint_state: Option<E::PrepaintState>,
     layout_id: Option<LayoutId>,
@@ -146,8 +196,12 @@ struct ElementHolder<E: Element> {
 impl<E: Element> AnyElementImpl for ElementHolder<E> {
     fn request_layout(&mut self, engine: &mut LayoutEngine, cx: &mut ElementContext) -> LayoutId {
         #[cfg(feature = "devtools")]
-        crate::inspector::apply_override(&mut self.element, cx);
-        let (id, state) = self.element.request_layout(engine, cx);
+        crate::inspector::apply_override(self.element.as_mut().expect("live element"), cx);
+        let (id, state) = self
+            .element
+            .as_mut()
+            .expect("live element")
+            .request_layout(engine, cx);
         self.layout_id = Some(id);
         self.layout_state = Some(state);
         id
@@ -176,9 +230,17 @@ impl<E: Element> AnyElementImpl for ElementHolder<E> {
         cx.push_element_offset(offset_x, offset_y);
         #[cfg(feature = "devtools")]
         {
-            self.inspect_record = crate::inspector::record_prepaint(&self.element, bounds, cx);
+            self.inspect_record = crate::inspector::record_prepaint(
+                self.element.as_ref().expect("live element"),
+                bounds,
+                cx,
+            );
         }
-        let prepaint_state = self.element.prepaint(bounds, layout_state, engine, cx);
+        let prepaint_state =
+            self.element
+                .as_mut()
+                .expect("live element")
+                .prepaint(bounds, layout_state, engine, cx);
         self.prepaint_state = Some(prepaint_state);
         cx.pop_element_offset();
     }
@@ -209,8 +271,14 @@ impl<E: Element> AnyElementImpl for ElementHolder<E> {
         cx.push_element_offset(offset_x, offset_y);
         #[cfg(feature = "devtools")]
         let semantic_before = cx.semantic.nodes().len();
-        self.element
-            .paint(bounds, layout_state, prepaint_state, engine, scene, cx);
+        self.element.as_mut().expect("live element").paint(
+            bounds,
+            layout_state,
+            prepaint_state,
+            engine,
+            scene,
+            cx,
+        );
         #[cfg(feature = "devtools")]
         crate::inspector::record_paint(self.inspect_record, semantic_before, bounds, cx);
         cx.pop_element_offset();
@@ -256,14 +324,16 @@ impl<C: RenderOnce> Element for ComponentElement<C> {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, ()) {
-        let component = self
-            .component
-            .take()
-            .expect("ComponentElement rendered twice");
-        let mut any = component.render(cx);
-        let id = any.request_layout(engine, cx);
-        self.rendered = Some(any);
-        (id, ())
+        // A layout pass can run twice in a frame (see `render_element`);
+        // the second one lays out what the first rendered.
+        if let Some(component) = self.component.take() {
+            self.rendered = Some(component.render(cx));
+        }
+        let rendered = self
+            .rendered
+            .as_mut()
+            .expect("ComponentElement has a component or its render");
+        (rendered.request_layout(engine, cx), ())
     }
 
     fn prepaint(

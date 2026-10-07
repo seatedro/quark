@@ -281,6 +281,7 @@ impl<A: App> Runner<A> {
             flags: &mut self.flags,
             waker: &self.waker,
             ime: FrameIme::default(),
+            accessibility_active: state.accessibility_state.is_active(),
             #[cfg(feature = "devtools")]
             last_render: state.last_render,
         };
@@ -312,6 +313,7 @@ impl<A: App> Runner<A> {
             profile_scope!("render");
             renderer.render(&scene, &mut self.text.system, time)
         };
+        self.app.recycle_scene(scene);
         #[cfg(debug_assertions)]
         if rendered.is_ok()
             && let Some(left) = &mut self.exit_after_frames

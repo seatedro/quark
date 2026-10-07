@@ -7,6 +7,7 @@
 //! 2. **prepaint** — register hit entries, resolve hover.
 //! 3. **paint** — emit scene primitives using resolved hover/hit state.
 
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -45,8 +46,9 @@ use quark_render::scene::{
     FontStyle, RichTextPrimitive, ShapedText, TextDecoration, TextDecorationKind,
 };
 use quark_render::{FontKind, TextPrimitive};
-use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
+use quark_text::{LayoutCache, TextLayout, TextParams, TextQuery, TextSpan, TextStyle, TextSystem};
 
+mod cache;
 mod canvas;
 mod code_block;
 mod context;
@@ -55,6 +57,7 @@ mod hit;
 mod image;
 mod layout;
 mod measure;
+mod pool;
 mod render;
 mod router;
 mod selectable_text;
@@ -67,6 +70,7 @@ mod transition;
 #[cfg(test)]
 mod tests;
 
+pub use cache::{CacheKey, Cached, ElementCache, cached, inputs_hash};
 pub use canvas::*;
 pub use code_block::*;
 pub use context::*;

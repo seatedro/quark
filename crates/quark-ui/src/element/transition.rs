@@ -11,6 +11,10 @@ use crate::animation::{self, AnimKey, Motion, Prop, PropId, PropSet};
 pub(super) struct Transitions(Vec<(PropSet, Motion)>);
 
 impl Transitions {
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(super) fn push(&mut self, props: PropSet, motion: Motion) {
         self.0.push((props, motion));
     }

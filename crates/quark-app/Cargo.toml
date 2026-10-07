@@ -63,6 +63,7 @@ tray-icon = { version = "0.26", default-features = false, optional = true }
 interprocess = { version = "2.2", default-features = false }
 
 [dev-dependencies]
+quark-ui = { workspace = true, features = ["test-alloc"] }
 quark-render = { workspace = true, features = ["headless-render"] }
 # The a11y_demo example's checkbox, switch, and toasts.
 quark-components.workspace = true

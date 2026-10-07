@@ -219,6 +219,80 @@ impl InputHandlers {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.click_node.clear();
+        self.click.clear();
+        self.drag_node.clear();
+        self.drag.clear();
+        self.scroll_node.clear();
+        self.scroll.clear();
+        self.key_node.clear();
+        self.key_binding.clear();
+        self.key_action.clear();
+    }
+
+    pub(super) fn marks(&self) -> HandlerMarks {
+        HandlerMarks {
+            click: self.click.len(),
+            drag: self.drag.len(),
+            scroll: self.scroll.len(),
+            key: self.key_action.len(),
+        }
+    }
+
+    /// Replace `out` with the handlers registered since `marks`, their nodes
+    /// made relative to `node_base`. False when one belongs to a node
+    /// before `node_base`, which a relative copy cannot express.
+    pub(super) fn copy_since(
+        &self,
+        marks: HandlerMarks,
+        node_base: usize,
+        out: &mut InputHandlers,
+    ) -> bool {
+        fn nodes(from: &[usize], base: usize, out: &mut Vec<usize>) -> bool {
+            out.clear();
+            out.extend(from.iter().map(|node| node.wrapping_sub(base)));
+            from.iter().all(|node| *node >= base)
+        }
+        let ok = nodes(
+            &self.click_node[marks.click..],
+            node_base,
+            &mut out.click_node,
+        ) & nodes(&self.drag_node[marks.drag..], node_base, &mut out.drag_node)
+            & nodes(
+                &self.scroll_node[marks.scroll..],
+                node_base,
+                &mut out.scroll_node,
+            )
+            & nodes(&self.key_node[marks.key..], node_base, &mut out.key_node);
+        fn copy<T: Clone>(from: &[T], out: &mut Vec<T>) {
+            out.clear();
+            out.extend_from_slice(from);
+        }
+        copy(&self.click[marks.click..], &mut out.click);
+        copy(&self.drag[marks.drag..], &mut out.drag);
+        copy(&self.scroll[marks.scroll..], &mut out.scroll);
+        copy(&self.key_binding[marks.key..], &mut out.key_binding);
+        copy(&self.key_action[marks.key..], &mut out.key_action);
+        ok
+    }
+
+    /// Append `from`, whose nodes are relative, with nodes at `node_base`.
+    pub(super) fn extend_shifted(&mut self, from: &InputHandlers, node_base: usize) {
+        fn shift(nodes: &[usize], base: usize) -> impl Iterator<Item = usize> + '_ {
+            nodes.iter().map(move |node| node + base)
+        }
+        self.click_node.extend(shift(&from.click_node, node_base));
+        self.click.extend_from_slice(&from.click);
+        self.drag_node.extend(shift(&from.drag_node, node_base));
+        self.drag.extend_from_slice(&from.drag);
+        self.scroll_node.extend(shift(&from.scroll_node, node_base));
+        self.scroll.extend_from_slice(&from.scroll);
+        self.key_node.extend(shift(&from.key_node, node_base));
+        self.key_binding.extend_from_slice(&from.key_binding);
+        self.key_action.extend_from_slice(&from.key_action);
+    }
+
     fn click(&self, node: usize) -> Option<&ClickHandler> {
         let i = self.click_node.iter().position(|n| *n == node)?;
         self.click.get(i)
@@ -239,6 +313,16 @@ impl InputHandlers {
             .find(|&i| self.key_node[i] == node && self.key_binding[i].matches(pressed))?;
         self.key_action.get(i)
     }
+}
+
+/// Column lengths of [`InputHandlers`]: where a cache boundary's
+/// registrations start.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct HandlerMarks {
+    click: usize,
+    drag: usize,
+    scroll: usize,
+    key: usize,
 }
 
 /// What one painted frame registered for input.
@@ -285,6 +369,15 @@ impl InputRouter {
             let identities = node_identities(&self.frame.semantic);
             capture.node = identities.iter().position(|id| *id == capture.identity);
         }
+    }
+
+    /// [`Self::set_frame`], returning the previous frame so its buffers
+    /// can be reused for the next one (see
+    /// [`ElementContext::with_input_frame`]).
+    pub fn replace_frame(&mut self, frame: InputFrame) -> InputFrame {
+        let previous = std::mem::take(&mut self.frame);
+        self.set_frame(frame);
+        previous
     }
 
     pub fn frame(&self) -> &InputFrame {

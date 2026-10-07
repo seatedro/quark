@@ -29,4 +29,12 @@ pub mod theme;
 pub mod transcript;
 pub mod virtual_list;
 
+#[cfg(any(test, feature = "test-alloc"))]
+#[doc(hidden)]
+pub mod test_alloc;
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: test_alloc::Counting = test_alloc::Counting;
+
 pub use action::{Action, ActionPayload, FocusId};

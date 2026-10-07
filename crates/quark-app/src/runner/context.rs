@@ -134,6 +134,8 @@ pub struct FrameContext<'a> {
     pub(super) flags: &'a mut Flags,
     pub(super) waker: &'a Waker,
     pub(super) ime: FrameIme,
+    /// Assistive tech listens to this window.
+    pub(super) accessibility_active: bool,
     #[cfg(feature = "devtools")]
     pub(super) last_render: quark_render::FrameStats,
 }
@@ -148,6 +150,13 @@ pub(super) struct FrameIme {
 }
 
 impl FrameContext<'_> {
+    /// Whether assistive tech listens to this window. While it does not,
+    /// the window's accessibility tree is not published, so a frame need
+    /// not build one.
+    pub fn accessibility_active(&self) -> bool {
+        self.accessibility_active
+    }
+
     /// Renderer stats of this window's previous frame.
     #[cfg(feature = "devtools")]
     pub fn last_render_stats(&self) -> quark_render::FrameStats {

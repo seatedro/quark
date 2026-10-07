@@ -5,7 +5,7 @@ use std::sync::Arc;
 use quark::scene::FontStyle;
 use quark::{FontKind, FontWeight};
 
-use crate::layout::{TextError, TextLayout, TextParams};
+use crate::layout::{TextError, TextLayout, TextParams, TextQuery};
 use crate::system::TextSystem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -19,11 +19,11 @@ pub struct LayoutKey {
 
 impl LayoutKey {
     pub fn new(params: &TextParams) -> Self {
-        Self::with_content(params, hash_text(&params.text))
+        Self::with_content(&params.query(), hash_text(&params.text))
     }
 
     /// The key for `params` whose text hashes to `content`.
-    fn with_content(params: &TextParams, content: u64) -> Self {
+    fn with_content(params: &TextQuery, content: u64) -> Self {
         let style = &params.style;
         let mut attrs = DefaultHasher::new();
         attrs.write_u8(kind_tag(style.font_kind));
@@ -54,8 +54,8 @@ fn hash_text(text: &str) -> u64 {
     content.finish()
 }
 
-/// Identifies one `Arc<str>` allocation by address and length.
-fn text_id(text: &Arc<str>) -> (usize, usize) {
+/// Identifies one string allocation by address and length.
+fn text_id(text: &str) -> (usize, usize) {
     (text.as_ptr() as usize, text.len())
 }
 
@@ -191,13 +191,32 @@ impl LayoutCache {
         system: &mut TextSystem,
         params: &TextParams,
     ) -> Result<Arc<TextLayout>, TextError> {
+        self.lookup(system, &params.query(), || params.clone())
+    }
+
+    /// [`Self::layout`] for borrowed params: a hit allocates nothing, a
+    /// miss copies the text and spans into the layout.
+    pub fn layout_query(
+        &mut self,
+        system: &mut TextSystem,
+        query: &TextQuery,
+    ) -> Result<Arc<TextLayout>, TextError> {
+        self.lookup(system, query, || query.to_params())
+    }
+
+    fn lookup(
+        &mut self,
+        system: &mut TextSystem,
+        params: &TextQuery,
+        owned: impl FnOnce() -> TextParams,
+    ) -> Result<Arc<TextLayout>, TextError> {
         if system.generation() != self.font_generation {
             self.clear();
             self.font_generation = system.generation();
         }
-        let content = match self.content_hashes.get(&text_id(&params.text)) {
+        let content = match self.content_hashes.get(&text_id(params.text)) {
             Some(&content) => content,
-            None => hash_text(&params.text),
+            None => hash_text(params.text),
         };
         let key = LayoutKey::with_content(params, content);
         self.lookups += 1;
@@ -213,7 +232,7 @@ impl LayoutCache {
             }
         }
         self.stats.misses += 1;
-        let layout = Arc::new(system.layout(params)?);
+        let layout = Arc::new(system.layout(&owned())?);
         self.content_hashes
             .insert(text_id(layout.text()), key.content);
         let replaced = self.entries.insert(
@@ -263,11 +282,11 @@ impl Default for LayoutCache {
     }
 }
 
-fn same_inputs(layout: &TextLayout, params: &TextParams) -> bool {
+fn same_inputs(layout: &TextLayout, params: &TextQuery) -> bool {
     let text_eq =
-        Arc::ptr_eq(layout.text(), &params.text) || layout.text().as_ref() == params.text.as_ref();
-    let spans_eq = Arc::ptr_eq(layout.spans(), &params.spans)
-        || layout.spans().as_ref() == params.spans.as_ref();
+        std::ptr::eq(layout.text().as_ref(), params.text) || layout.text().as_ref() == params.text;
+    let spans_eq = std::ptr::eq(layout.spans().as_ref(), params.spans)
+        || layout.spans().as_ref() == params.spans;
     text_eq && spans_eq && layout.style() == params.style
 }
 

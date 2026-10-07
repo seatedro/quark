@@ -47,6 +47,10 @@ impl AccessibilityState {
         self.active.store(false, Ordering::Release);
     }
 
+    pub(super) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
     /// Whether assistive tech connected since the last call. The tree it
     /// got on connecting may be stale, so the window must draw again.
     pub(super) fn take_activation(&self) -> bool {

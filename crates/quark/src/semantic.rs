@@ -269,6 +269,17 @@ impl SemanticFrame {
         self.nodes.clear();
     }
 
+    /// Empty the frame for a `width` x `height` window, keeping its buffer.
+    pub fn reset(&mut self, width: f32, height: f32) {
+        self.nodes.clear();
+        self.root_bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        };
+    }
+
     /// Indices from the root down to `target`. Built from
     /// [`Self::ancestors_inclusive`], so a malformed parent link ends the
     /// path instead of looping.

@@ -31,6 +31,9 @@ pub(crate) struct HeadlessRunner {
     /// hand out `Instant`s, so it has to be a real one; nothing reads the
     /// wall clock after construction.
     launch: Instant,
+    /// Whether frames see assistive tech listening; on by default, since
+    /// most tests read the tree a frame builds.
+    pub(crate) accessibility_active: bool,
     now_ms: u64,
     last_frame_ms: Option<u64>,
     /// Times frames were requested for, in ms since launch. One frame
@@ -66,6 +69,7 @@ impl HeadlessRunner {
             app_events,
             theme: None,
             launch: Instant::now(),
+            accessibility_active: true,
             now_ms: 0,
             last_frame_ms: None,
             frames: BTreeSet::new(),
@@ -217,6 +221,7 @@ impl HeadlessRunner {
             flags: &mut self.flags,
             waker: &self.waker,
             ime: FrameIme::default(),
+            accessibility_active: self.accessibility_active,
             #[cfg(feature = "devtools")]
             last_render: Default::default(),
         };

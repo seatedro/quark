@@ -22,16 +22,15 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use accesskit::{Action as AxAction, ActionData, ActionRequest, Affine, TreeUpdate};
-use quark::Rect;
-use quark::SemanticFrame;
 use quark::hit::HitId;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
+use quark::{Rect, SemanticFrame};
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer, Politeness};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
-    AnyElement, Binding, CursorHint, Delivery, ElementContext, InputRouter, Mods, TextInputHitArea,
-    render_element,
+    AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
+    TextInputHitArea, render_element,
 };
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
@@ -261,7 +260,7 @@ enum ThemeChoice {
 
 /// Runs a [`UiApp`] as an [`App`].
 pub struct UiAdapter<U: UiApp> {
-    app: U,
+    pub(crate) app: U,
     name: String,
     theme: Theme,
     theme_choice: ThemeChoice,
@@ -287,6 +286,14 @@ pub struct UiAdapter<U: UiApp> {
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
     animations: AnimationTable,
+    /// Cached subtrees and the layout engine, reused every frame.
+    element_cache: ElementCache,
+    /// Buffers of the frame before last, reused by the next frame: the
+    /// scene the runner handed back, the input frame routing let go of,
+    /// and the text input areas.
+    spare_scene: Scene,
+    spare_input: quark_ui::element::InputFrame,
+    spare_text_areas: Vec<TextInputHitArea>,
     sender: UiSender<U::Message>,
     messages: Receiver<U::Message>,
     #[cfg(feature = "devtools")]
@@ -327,6 +334,10 @@ impl<U: UiApp> UiAdapter<U> {
             ime_area: None,
             scale_factor: 1.0,
             animations: AnimationTable::new(),
+            element_cache: ElementCache::new(),
+            spare_scene: Scene::default(),
+            spare_input: Default::default(),
+            spare_text_areas: Vec::new(),
             sender: UiSender {
                 sender,
                 waker: Arc::new(OnceLock::new()),
@@ -643,11 +654,18 @@ struct Painted {
     text_areas: Vec<TextInputHitArea>,
 }
 
-/// Lay out and paint `root` into a `width` x `height` point viewport.
-fn paint(root: &mut AnyElement, ecx: &mut ElementContext, width: f32, height: f32) -> Painted {
-    let mut scene = Scene::default();
+/// Lay out and paint `root` into a `width` x `height` point viewport, in
+/// `scene`'s buffer.
+fn paint(
+    root: &mut AnyElement,
+    ecx: &mut ElementContext,
+    mut scene: Scene,
+    width: f32,
+    height: f32,
+) -> Painted {
+    scene.primitives.clear();
     ecx.accessibility = AccessibilityFrame::new(width, height);
-    ecx.semantic = SemanticFrame::new(width, height);
+    ecx.semantic.reset(width, height);
     render_element(root, &mut scene, ecx, width, height);
     ecx.finish_frame();
     Painted {
@@ -769,6 +787,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         #[cfg(feature = "devtools")]
         let build_us = view_started.elapsed().as_micros() as u64;
 
+        let accessibility = cx.accessibility_active();
         let text = cx.text();
         let mut ecx = ElementContext::new(
             &self.theme,
@@ -780,10 +799,16 @@ impl<U: UiApp> App for UiAdapter<U> {
         )
         .with_focus(self.focus)
         .with_clock(clock_ms)
-        .with_animations(&mut self.animations);
+        .with_animations(&mut self.animations)
+        .with_element_cache(&mut self.element_cache)
+        .with_accessibility(accessibility)
+        .with_input_frame(std::mem::take(&mut self.spare_input));
+        ecx.text_input_hit_areas = std::mem::take(&mut self.spare_text_areas);
+        ecx.text_input_hit_areas.clear();
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
-        let painted = paint(&mut root, &mut ecx, width, height);
+        let scene = std::mem::take(&mut self.spare_scene);
+        let painted = paint(&mut root, &mut ecx, scene, width, height);
         #[cfg(feature = "devtools")]
         let phases = self.devtools.end_frame(&mut ecx.devtools);
         self.scale_factor = scale;
@@ -844,6 +869,10 @@ impl<U: UiApp> App for UiAdapter<U> {
         self.with_app(cx, |app, ucx| app.close_requested(ucx))
     }
 
+    fn recycle_scene(&mut self, scene: Scene) {
+        self.spare_scene = scene;
+    }
+
     fn accessibility(&mut self) -> Option<TreeUpdate> {
         // A full tree; accesskit diffs it against the last one.
         let mut update = self.logical_accessibility_tree();
@@ -894,13 +923,13 @@ impl<U: UiApp> UiAdapter<U> {
     /// Keep `painted`'s input state for routing until the next frame, and
     /// return its scene with the IME changes for the caret it painted.
     fn finish_frame(&mut self, painted: Painted) -> (Scene, ImeRequest) {
-        self.router.set_frame(painted.input);
+        self.spare_input = self.router.replace_frame(painted.input);
         // This frame painted hover for the current pointer; later moves
         // compare against it.
         self.hovered = self.hovered_at(self.pointer);
         self.accessibility = painted.accessibility;
         let ime = self.ime_request(&painted.text_areas);
-        self.text_areas = painted.text_areas;
+        self.spare_text_areas = std::mem::replace(&mut self.text_areas, painted.text_areas);
         (painted.scene, ime)
     }
 
@@ -1013,7 +1042,7 @@ mod tests {
                 None,
                 &self.signals,
             );
-            paint(&mut root, &mut ecx, 400.0, 300.0)
+            paint(&mut root, &mut ecx, Scene::default(), 400.0, 300.0)
         }
 
         /// Paint `field` as the focused text input `FIELD`.
@@ -1035,7 +1064,7 @@ mod tests {
                 .w(200.0)
                 .h(52.0)
                 .into_any();
-            paint(&mut root, &mut ecx, 400.0, 300.0)
+            paint(&mut root, &mut ecx, Scene::default(), 400.0, 300.0)
         }
     }
 

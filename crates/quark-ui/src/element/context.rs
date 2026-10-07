@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use super::*;
 use crate::animation::{AnimKey, AnimationTable, Motion, PropId};
 
@@ -41,13 +43,32 @@ pub struct ElementContext<'a> {
     pub devtools: crate::inspector::FrameProbe,
     hovered: Vec<HitId>,
     /// Intersections of the clips pushed so far; the last one is current.
-    clip_stack: Vec<Rect>,
+    clip_stack: Vec<ClipEntry>,
+    /// The window's element cache, when the host keeps one.
+    pub(super) cache: Option<&'a mut ElementCache>,
+    /// Cache boundaries recording hits right now (they nest).
+    hit_recordings: u32,
+    /// Clip of each hit inserted while recording, relative to the
+    /// innermost recording boundary; row `i` is hit row `local_hit_base + i`.
+    local_hit_clips: Vec<Rect>,
+    /// Ids of the same hits, so the boundary can read them back.
+    local_hit_ids: Vec<HitId>,
+    local_hit_base: usize,
+    /// Reads of focus state, so a cache boundary knows its output depends
+    /// on focus.
+    focus_reads: Cell<u32>,
+    /// Requests that make painted output depend on the clock (repaint
+    /// requests, running transitions), so a cache boundary does not keep it.
+    volatile_reads: u32,
     z_index_stack: Vec<i32>,
     element_offset_stack: Vec<(f32, f32)>,
     text_color_stack: Vec<Color>,
     icon_color_stack: Vec<Color>,
     accessibility_text_hidden_stack: Vec<bool>,
     semantic_parent_stack: Vec<usize>,
+    /// Whether to build accessibility nodes: off while no assistive tech
+    /// listens, so frames do not build labels nobody reads.
+    accessibility_enabled: bool,
 }
 
 impl<'a> ElementContext<'a> {
@@ -84,12 +105,20 @@ impl<'a> ElementContext<'a> {
             devtools: Default::default(),
             hovered: Vec::new(),
             clip_stack: Vec::new(),
-            z_index_stack: vec![0],
-            element_offset_stack: vec![(0.0, 0.0)],
+            cache: None,
+            hit_recordings: 0,
+            local_hit_clips: Vec::new(),
+            local_hit_ids: Vec::new(),
+            local_hit_base: 0,
+            focus_reads: Cell::new(0),
+            volatile_reads: 0,
+            z_index_stack: Vec::new(),
+            element_offset_stack: Vec::new(),
             text_color_stack: Vec::new(),
             icon_color_stack: Vec::new(),
             accessibility_text_hidden_stack: Vec::new(),
             semantic_parent_stack: Vec::new(),
+            accessibility_enabled: true,
         }
     }
 
@@ -109,6 +138,13 @@ impl<'a> ElementContext<'a> {
         self.layouts.layout(self.text, &params).ok()
     }
 
+    /// [`Self::layout_text`] for borrowed params: a cache hit allocates
+    /// nothing.
+    pub fn layout_text_query(&mut self, query: &TextQuery) -> Option<Arc<TextLayout>> {
+        let query = query.scale_factor(self.scale_factor);
+        self.layouts.layout_query(self.text, &query).ok()
+    }
+
     /// Advance width of single-line text, rounded up to whole pixels.
     pub fn measure_text_width(
         &mut self,
@@ -123,7 +159,7 @@ impl<'a> ElementContext<'a> {
         let style = TextStyle::new(font_size)
             .kind(font_kind)
             .weight(font_weight);
-        self.layout_text(&TextParams::new(text, style))
+        self.layout_text_query(&TextQuery::new(text, style))
             .map_or(0.0, |layout| layout.size().0.ceil())
     }
 
@@ -166,6 +202,7 @@ impl<'a> ElementContext<'a> {
     /// a toast expiring). The earliest request in a frame wins; the host
     /// reads it with [`Self::next_frame_ms`] and schedules that window only.
     pub fn request_frame_at_ms(&mut self, at_ms: u64) {
+        self.volatile_reads += 1;
         self.next_frame_ms = Some(self.next_frame_ms.map_or(at_ms, |next| next.min(at_ms)));
     }
 
@@ -184,6 +221,38 @@ impl<'a> ElementContext<'a> {
         }
     }
 
+    /// Build accessibility nodes this frame, or skip them (the default is
+    /// to build). Hosts turn it off while no assistive tech listens.
+    pub fn with_accessibility(mut self, enabled: bool) -> Self {
+        self.accessibility_enabled = enabled;
+        self
+    }
+
+    /// Whether elements should build accessibility nodes this frame.
+    pub fn accessibility_enabled(&self) -> bool {
+        self.accessibility_enabled
+    }
+
+    /// Attach the window's element cache so [`cached`] boundaries reuse
+    /// their output across frames and layout reuses one engine.
+    pub fn with_element_cache(mut self, cache: &'a mut ElementCache) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Build this frame's hit table, handlers, and semantic tree in the
+    /// buffers of an earlier frame (from [`InputRouter::replace_frame`]),
+    /// so they are not allocated again.
+    pub fn with_input_frame(mut self, mut frame: InputFrame) -> Self {
+        frame.hits.reset();
+        frame.handlers.clear();
+        frame.semantic.clear();
+        self.hit_table = frame.hits;
+        self.handlers = frame.handlers;
+        self.semantic = frame.semantic;
+        self
+    }
+
     /// Attach the window's animation table so divs can run transitions.
     /// The table persists across frames; the context only borrows it.
     pub fn with_animations(mut self, table: &'a mut AnimationTable) -> Self {
@@ -199,6 +268,12 @@ impl<'a> ElementContext<'a> {
             crate::animation::sweep_transitions(table, &mut self.transition_keys);
         }
         self.transition_keys.clear();
+        if let Some(cache) = self.cache.as_deref_mut() {
+            std::mem::swap(
+                &mut cache.buffers.transition_keys,
+                &mut self.transition_keys,
+            );
+        }
     }
 
     pub fn animations(&self) -> Option<&AnimationTable> {
@@ -222,13 +297,35 @@ impl<'a> ElementContext<'a> {
             self.transition_keys.push(key);
         }
         table.animate_to(key, prop, target, motion, self.clock_ms);
-        (
-            table.get(key, prop).unwrap_or(target),
-            table.is_animating(key, prop),
-        )
+        let animating = table.is_animating(key, prop);
+        if animating {
+            self.volatile_reads += 1;
+        }
+        (table.get(key, prop).unwrap_or(target), animating)
+    }
+
+    /// Keep transition rows of `keys` through this frame's sweep: a
+    /// replayed cache boundary paints them without calling `transition`.
+    pub(super) fn keep_transition_keys(&mut self, keys: &[AnimKey]) {
+        if self.animations.is_some() {
+            self.transition_keys.extend_from_slice(keys);
+        }
+    }
+
+    pub(super) fn transition_keys(&self) -> &[AnimKey] {
+        &self.transition_keys
+    }
+
+    pub(super) fn focus_reads(&self) -> u32 {
+        self.focus_reads.get()
+    }
+
+    pub(super) fn volatile_reads(&self) -> u32 {
+        self.volatile_reads
     }
 
     pub fn is_focused(&self, target: FocusId) -> bool {
+        self.focus_reads.set(self.focus_reads.get().wrapping_add(1));
         self.focus == Some(target)
     }
 
@@ -241,9 +338,7 @@ impl<'a> ElementContext<'a> {
     }
 
     pub fn pop_z_index(&mut self) {
-        if self.z_index_stack.len() > 1 {
-            self.z_index_stack.pop();
-        }
+        self.z_index_stack.pop();
     }
 
     pub fn push_text_color(&mut self, color: Color) {
@@ -306,6 +401,9 @@ impl<'a> ElementContext<'a> {
     /// Push an accessibility node under the nearest semantic ancestor that has
     /// an accessibility node, or under the window when none does.
     pub fn push_accessibility(&mut self, node: AccessibilityNode) -> accesskit::NodeId {
+        if !self.accessibility_enabled {
+            return crate::accessibility::ROOT_ID;
+        }
         let parent = self.accessible_semantic_ancestor();
         self.accessibility.push_child(node, parent)
     }
@@ -318,11 +416,13 @@ impl<'a> ElementContext<'a> {
         semantic_index: usize,
     ) -> accesskit::NodeId {
         let id = self.push_accessibility(node);
-        self.accessibility.bind_semantic(semantic_index, id);
+        if self.accessibility_enabled {
+            self.accessibility.bind_semantic(semantic_index, id);
+        }
         id
     }
 
-    fn accessible_semantic_ancestor(&self) -> Option<accesskit::NodeId> {
+    pub(super) fn accessible_semantic_ancestor(&self) -> Option<accesskit::NodeId> {
         let mut current = self.current_semantic_parent();
         while let Some(index) = current {
             if let Some(id) = self.accessibility.semantic_owner(index) {
@@ -351,26 +451,28 @@ impl<'a> ElementContext<'a> {
     }
 
     pub fn pop_element_offset(&mut self) {
-        if self.element_offset_stack.len() > 1 {
-            self.element_offset_stack.pop();
-        }
+        self.element_offset_stack.pop();
     }
 
     pub fn current_clip(&self) -> Rect {
         self.clip_stack
             .last()
-            .copied()
-            .unwrap_or(quark::hit::UNCLIPPED)
+            .map_or(quark::hit::UNCLIPPED, |entry| entry.effective)
+    }
+
+    fn current_local_clip(&self) -> Rect {
+        self.clip_stack
+            .last()
+            .map_or(quark::hit::UNCLIPPED, |entry| entry.local)
     }
 
     /// Clip later hit entries to `rect`, intersected with the current clip,
     /// mirroring `Scene::clip` for hit testing.
     pub fn push_clip(&mut self, rect: Rect) {
-        let clip = self
-            .current_clip()
-            .intersection(rect)
-            .unwrap_or(quark::hit::EMPTY_CLIP);
-        self.clip_stack.push(clip);
+        self.clip_stack.push(ClipEntry {
+            effective: intersect(self.current_clip(), rect),
+            local: intersect(self.current_local_clip(), rect),
+        });
     }
 
     pub fn pop_clip(&mut self) {
@@ -380,8 +482,65 @@ impl<'a> ElementContext<'a> {
     /// Register a hit entry at the current z and clip. Bind it to its
     /// semantic node with [`Self::bind_hit`] once that node exists.
     pub fn insert_hit(&mut self, bounds: Bounds, flags: HitFlags, cursor: CursorHint) -> HitId {
-        let (z, clip) = (self.current_z_index(), self.current_clip());
-        self.hit_table.push(bounds, clip, z, flags, cursor)
+        let z = self.current_z_index();
+        self.insert_hit_clipped(bounds, quark::hit::UNCLIPPED, z, flags, cursor)
+    }
+
+    /// Insert a hit entry clipped to `clip` within the current clip, at
+    /// layer `z`: how a replayed cache boundary re-registers its hits.
+    pub(super) fn insert_hit_clipped(
+        &mut self,
+        bounds: Bounds,
+        clip: Rect,
+        z: i32,
+        flags: HitFlags,
+        cursor: CursorHint,
+    ) -> HitId {
+        let local = intersect(self.current_local_clip(), clip);
+        let clip = intersect(self.current_clip(), clip);
+        let id = self.hit_table.push(bounds, clip, z, flags, cursor);
+        if self.hit_recordings > 0 {
+            self.local_hit_clips.push(local);
+            self.local_hit_ids.push(id);
+        }
+        id
+    }
+
+    /// Start recording the hits a cache boundary inserts: their clips are
+    /// kept relative to the boundary, so a replay can clip them again
+    /// under a different ancestor clip. Returns the first recorded row.
+    pub(super) fn begin_hit_recording(&mut self) -> usize {
+        if self.hit_recordings == 0 {
+            self.local_hit_clips.clear();
+            self.local_hit_ids.clear();
+            self.local_hit_base = self.hit_table.len();
+        }
+        self.hit_recordings += 1;
+        self.clip_stack.push(ClipEntry {
+            effective: self.current_clip(),
+            local: quark::hit::UNCLIPPED,
+        });
+        self.hit_table.len()
+    }
+
+    /// Ids and boundary-relative clips of hit rows `start..`, inserted since
+    /// the matching [`Self::begin_hit_recording`].
+    pub(super) fn recorded_hits(&self, start: usize) -> (&[HitId], &[Rect]) {
+        let from = start - self.local_hit_base;
+        (&self.local_hit_ids[from..], &self.local_hit_clips[from..])
+    }
+
+    /// End a recording: the rows' clips become relative to the enclosing
+    /// recording boundary, if any.
+    pub(super) fn end_hit_recording(&mut self, start: usize) {
+        self.clip_stack.pop();
+        self.hit_recordings -= 1;
+        if self.hit_recordings > 0 {
+            let outer = self.current_local_clip();
+            for clip in &mut self.local_hit_clips[start - self.local_hit_base..] {
+                *clip = intersect(*clip, outer);
+            }
+        }
     }
 
     pub fn bind_hit(&mut self, id: HitId, node: usize) {
@@ -393,10 +552,10 @@ impl<'a> ElementContext<'a> {
     }
 
     pub fn run_hit_test(&mut self) {
-        self.hovered = match self.mouse_position {
-            Some((x, y)) => self.hit_table.stack_at(x, y),
-            None => Vec::new(),
-        };
+        match self.mouse_position {
+            Some((x, y)) => self.hit_table.stack_at_into(x, y, &mut self.hovered),
+            None => self.hovered.clear(),
+        }
     }
 
     /// Move this frame's hit table, handlers, and semantic tree out for an
@@ -406,6 +565,103 @@ impl<'a> ElementContext<'a> {
             hits: std::mem::take(&mut self.hit_table),
             handlers: std::mem::take(&mut self.handlers),
             semantic: std::mem::take(&mut self.semantic),
+        }
+    }
+}
+
+/// One level of the hit clip stack: the clip in window space, and the clip
+/// relative to the innermost recording cache boundary.
+#[derive(Clone, Copy)]
+struct ClipEntry {
+    effective: Rect,
+    local: Rect,
+}
+
+fn intersect(a: Rect, b: Rect) -> Rect {
+    a.intersection(b).unwrap_or(quark::hit::EMPTY_CLIP)
+}
+
+/// The context's working stacks, kept by the window's [`ElementCache`]
+/// between frames so a frame reuses last frame's capacity. They are empty
+/// whenever a frame is not being rendered.
+#[derive(Default)]
+pub(super) struct FrameBuffers {
+    clip_stack: Vec<ClipEntry>,
+    z_index_stack: Vec<i32>,
+    element_offset_stack: Vec<(f32, f32)>,
+    text_color_stack: Vec<Color>,
+    icon_color_stack: Vec<Color>,
+    accessibility_text_hidden_stack: Vec<bool>,
+    semantic_parent_stack: Vec<usize>,
+    hovered: Vec<HitId>,
+    local_hit_clips: Vec<Rect>,
+    local_hit_ids: Vec<HitId>,
+    /// Kept apart: the context needs its keys until `finish_frame`.
+    transition_keys: Vec<AnimKey>,
+}
+
+/// Swap each listed field between the buffers and the context.
+macro_rules! swap_buffers {
+    ($buffers:expr, $cx:expr) => {
+        std::mem::swap(&mut $buffers.clip_stack, &mut $cx.clip_stack);
+        std::mem::swap(&mut $buffers.z_index_stack, &mut $cx.z_index_stack);
+        std::mem::swap(
+            &mut $buffers.element_offset_stack,
+            &mut $cx.element_offset_stack,
+        );
+        std::mem::swap(&mut $buffers.text_color_stack, &mut $cx.text_color_stack);
+        std::mem::swap(&mut $buffers.icon_color_stack, &mut $cx.icon_color_stack);
+        std::mem::swap(
+            &mut $buffers.accessibility_text_hidden_stack,
+            &mut $cx.accessibility_text_hidden_stack,
+        );
+        std::mem::swap(
+            &mut $buffers.semantic_parent_stack,
+            &mut $cx.semantic_parent_stack,
+        );
+        std::mem::swap(&mut $buffers.hovered, &mut $cx.hovered);
+        std::mem::swap(&mut $buffers.local_hit_clips, &mut $cx.local_hit_clips);
+        std::mem::swap(&mut $buffers.local_hit_ids, &mut $cx.local_hit_ids);
+    };
+}
+
+impl ElementContext<'_> {
+    /// Borrow the cache's stacks for a render (they are empty between
+    /// renders), and its transition key buffer once per frame.
+    pub(super) fn load_buffers(&mut self) {
+        let Some(cache) = self.cache.as_deref_mut() else {
+            return;
+        };
+        let mut buffers = std::mem::take(&mut cache.buffers);
+        swap_buffers!(buffers, self);
+        if self.transition_keys.is_empty() {
+            std::mem::swap(&mut buffers.transition_keys, &mut self.transition_keys);
+            self.transition_keys.clear();
+        }
+        if let Some(cache) = self.cache.as_deref_mut() {
+            cache.buffers = buffers;
+        }
+    }
+
+    /// Return the stacks after a render; they are balanced, so empty.
+    pub(super) fn store_buffers(&mut self) {
+        let Some(cache) = self.cache.as_deref_mut() else {
+            return;
+        };
+        let mut buffers = std::mem::take(&mut cache.buffers);
+        swap_buffers!(buffers, self);
+        buffers.clip_stack.clear();
+        buffers.z_index_stack.clear();
+        buffers.element_offset_stack.clear();
+        buffers.text_color_stack.clear();
+        buffers.icon_color_stack.clear();
+        buffers.accessibility_text_hidden_stack.clear();
+        buffers.semantic_parent_stack.clear();
+        buffers.hovered.clear();
+        buffers.local_hit_clips.clear();
+        buffers.local_hit_ids.clear();
+        if let Some(cache) = self.cache.as_deref_mut() {
+            cache.buffers = buffers;
         }
     }
 }

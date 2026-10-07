@@ -109,8 +109,15 @@ impl<U: UiApp> UiTestHarness<U> {
     /// [`UiApp::wake`].
     pub fn run_until_idle(&mut self) {
         if let Some(scene) = self.runner.run_until_idle(&mut self.adapter) {
-            self.scene = scene;
+            self.keep_scene(scene);
         }
+    }
+
+    /// Keep `scene` as the last frame and hand the one before back to the
+    /// app, as the event loop does once a frame is rendered.
+    fn keep_scene(&mut self, scene: Scene) {
+        let previous = std::mem::replace(&mut self.scene, scene);
+        self.adapter.recycle_scene(previous);
     }
 
     /// Move the clock forward `ms`, drawing every frame requested on the way
@@ -118,13 +125,14 @@ impl<U: UiApp> UiTestHarness<U> {
     /// autoscroll runs as they would in real time.
     pub fn advance(&mut self, ms: u64) {
         if let Some(scene) = self.runner.advance(&mut self.adapter, ms) {
-            self.scene = scene;
+            self.keep_scene(scene);
         }
     }
 
     /// Draw a frame now whether or not one was asked for, and return it.
     pub fn frame(&mut self) -> &Scene {
-        self.scene = self.runner.draw(&mut self.adapter);
+        let scene = self.runner.draw(&mut self.adapter);
+        self.keep_scene(scene);
         self.run_until_idle();
         &self.scene
     }
@@ -136,6 +144,13 @@ impl<U: UiApp> UiTestHarness<U> {
 
     /// Frames drawn since the harness started, counting the first. Compare
     /// before and after an input to see whether it repainted.
+    /// Whether frames see assistive tech listening (on by default). While
+    /// off, frames skip building the accessibility tree, as they do when no
+    /// screen reader is connected.
+    pub fn set_accessibility_active(&mut self, active: bool) {
+        self.runner.accessibility_active = active;
+    }
+
     pub fn frame_count(&self) -> u64 {
         self.runner.frames_drawn()
     }

@@ -265,17 +265,41 @@ impl HitTable {
     /// contain it. The list ends at the first `BLOCKS_MOUSE` entry
     /// (inclusive), so nothing beneath a blocker is hovered or clicked.
     pub fn stack_at(&self, x: f32, y: f32) -> Vec<HitId> {
-        let mut rows: Vec<usize> = (0..self.bounds.len())
-            .filter(|&i| self.bounds[i].contains(x, y) && self.clip[i].contains(x, y))
-            .collect();
-        rows.sort_unstable_by(|&a, &b| (self.z[b], b).cmp(&(self.z[a], a)));
-        if let Some(blocker) = rows
+        let mut stack = Vec::new();
+        self.stack_at_into(x, y, &mut stack);
+        stack
+    }
+
+    /// [`Self::stack_at`] into `out`, replacing its contents, so a caller
+    /// that keeps `out` reuses its buffer.
+    pub fn stack_at_into(&self, x: f32, y: f32, out: &mut Vec<HitId>) {
+        out.clear();
+        out.extend(
+            (0..self.bounds.len())
+                .filter(|&i| self.bounds[i].contains(x, y) && self.clip[i].contains(x, y))
+                .map(|i| self.id(i)),
+        );
+        let z = |id: &HitId| self.z[id.index as usize];
+        out.sort_unstable_by_key(|id| std::cmp::Reverse((z(id), id.index)));
+        if let Some(blocker) = out
             .iter()
-            .position(|&i| self.flags[i].contains(HitFlags::BLOCKS_MOUSE))
+            .position(|id| self.flags[id.index as usize].contains(HitFlags::BLOCKS_MOUSE))
         {
-            rows.truncate(blocker + 1);
+            out.truncate(blocker + 1);
         }
-        rows.into_iter().map(|i| self.id(i)).collect()
+    }
+
+    /// Empty the table for a new frame, keeping its buffers. Ids issued
+    /// before stop resolving, as with a new table.
+    pub fn reset(&mut self) {
+        self.frame = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
+        self.bounds.clear();
+        self.clip.clear();
+        self.z.clear();
+        self.node.clear();
+        self.flags.clear();
+        self.cursor.clear();
+        self.identity.clear();
     }
 
     pub fn verify_integrity(&self) -> Result<(), HitTableIntegrityError> {

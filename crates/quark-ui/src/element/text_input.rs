@@ -323,8 +323,7 @@ impl Element for TextInput {
             let label_style = TextStyle::new(label_size)
                 .weight(FontWeight::Medium)
                 .line_height(label_lh);
-            let label_params = TextParams::new(std::mem::take(&mut self.label), label_style);
-            if let Some(layout) = cx.layout_text(&label_params) {
+            if let Some(layout) = cx.layout_text_query(&TextQuery::new(&self.label, label_style)) {
                 scene.text(TextPrimitive {
                     rect: Rect {
                         x: bounds.x + pad,
@@ -511,18 +510,28 @@ impl Element for TextInput {
             // bullets of a masked field), from the committed value.
             let (text_anchor, text_focus) = (to_display(self.anchor), to_display(self.cursor));
             let accessible_value = masked_display.unwrap_or_else(|| self.value.to_string());
-            let accessible_text = AccessibleText::new(accessible_value.as_str())
-                .selection(text_anchor.get(), text_focus.get());
             let semantic_id = format!("text-input:{target:?}");
+            // Built only for a listening screen reader; the semantic node
+            // then takes the strings.
+            let accessibility = cx.accessibility_enabled().then(|| {
+                AccessibilityNode::new(&semantic_id, role, bounds)
+                    .label(accessibility_label.clone())
+                    .value(accessible_value.clone())
+                    .text(
+                        AccessibleText::new(accessible_value.as_str())
+                            .selection(text_anchor.get(), text_focus.get()),
+                    )
+                    .action(AccessibilityAction::TextValue(target))
+            });
             let mut style_state = StyleState::empty();
             if self.focused {
                 style_state.insert(StyleState::FOCUS_VISIBLE);
             }
             let mut semantic_node = SemanticNode::new(bounds)
-                .id(semantic_id.clone())
+                .id(semantic_id)
                 .role(SemanticRole::TextInput)
-                .label(accessibility_label.clone())
-                .value(accessible_value.clone());
+                .label(accessibility_label)
+                .value(accessible_value);
             semantic_node.parent = cx.current_semantic_parent();
             semantic_node.actions = SemanticActions::default().text_value().hit_test();
             if on_click.is_some() {
@@ -535,14 +544,9 @@ impl Element for TextInput {
             };
             let index = cx.semantic.push(semantic_node);
             semantic_index = Some(index);
-            cx.push_accessibility_for_semantic(
-                AccessibilityNode::new(semantic_id, role, bounds)
-                    .label(accessibility_label)
-                    .value(accessible_value)
-                    .text(accessible_text)
-                    .action(AccessibilityAction::TextValue(target)),
-                index,
-            );
+            if let Some(node) = accessibility {
+                cx.push_accessibility_for_semantic(node, index);
+            }
             cx.text_input_hit_areas.push(TextInputHitArea {
                 bounds,
                 focus_target: target,
