@@ -261,7 +261,7 @@ pub fn completion_list(
             .bg(colors.surface)
             .border(colors.border_soft)
             .accessibility_role(accesskit::Role::ListBox)
-            .accessibility_label("Suggestions")
+            .accessibility_label(quark_i18n::tr("quark-suggestions"))
             .children(rows)
             .into_any(),
     )

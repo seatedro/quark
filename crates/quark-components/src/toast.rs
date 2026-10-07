@@ -463,7 +463,7 @@ impl RenderOnce for ToastVisuals {
                         cursor={CursorHint::Pointer}
                         accessibility_id={format!("toast-dismiss:{toast_id}")}
                         accessibility_role={accesskit::Role::Button}
-                        accessibility_label={"Dismiss"}
+                        accessibility_label={quark_ui::i18n::tr("quark-dismiss")}
                     >
                         <icon svg={lucide::X} size={Ico::XS} color={tc.text_muted} />
                     </div>

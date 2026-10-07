@@ -3,6 +3,46 @@ use serde::{Deserialize, Serialize};
 
 pub use quark::Color;
 
+mod file;
+
+pub use file::{ThemeError, ThemeFamily, ThemeIssue, ThemeRegistry, parse_color};
+
+/// A struct of named tokens of one type, with lookup by name for theme
+/// files.
+macro_rules! tokens {
+    (
+        $(#[$meta:meta])*
+        pub struct $name:ident: $ty:ty { $($field:ident,)* }
+    ) => {
+        $(#[$meta])*
+        pub struct $name {
+            $(pub $field: $ty,)*
+        }
+
+        impl $name {
+            /// Every token name, in declaration order.
+            pub const TOKENS: &'static [&'static str] = &[$(stringify!($field)),*];
+
+            /// The token called `name`.
+            pub fn get(&self, name: &str) -> Option<$ty> {
+                match name {
+                    $(stringify!($field) => Some(self.$field),)*
+                    _ => None,
+                }
+            }
+
+            /// Set the token called `name`; false when there is none.
+            pub fn set(&mut self, name: &str, value: $ty) -> bool {
+                match name {
+                    $(stringify!($field) => self.$field = value,)*
+                    _ => return false,
+                }
+                true
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeMode {
@@ -11,90 +51,96 @@ pub enum ThemeMode {
     Light,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ThemeColors {
-    pub app_bg: Color,
-    pub canvas: Color,
-    pub panel: Color,
-    pub panel_strong: Color,
-    pub border_soft: Color,
-    pub text_strong: Color,
-    pub accent: Color,
-    pub accent_strong: Color,
-    pub selection_bg: Color,
-    pub background: Color,
-    pub surface: Color,
-    pub editor_surface: Color,
-    pub elevated_surface: Color,
-    pub modal_surface: Color,
-    pub overlay_scrim: Color,
-    pub border: Color,
-    pub border_variant: Color,
-    pub focus_border: Color,
-    pub text: Color,
-    pub text_muted: Color,
-    pub text_accent: Color,
-    pub icon: Color,
-    pub element_background: Color,
-    pub element_hover: Color,
-    pub element_active: Color,
-    pub element_selected: Color,
-    pub ghost_element_hover: Color,
-    pub ghost_element_active: Color,
-    pub ghost_element_selected: Color,
-    pub title_bar_background: Color,
-    pub status_bar_background: Color,
-    pub sidebar_background: Color,
-    pub sidebar_row_hover: Color,
-    pub sidebar_row_selected: Color,
-    pub empty_state_background: Color,
-    pub empty_state_border: Color,
-    pub scrollbar_thumb: Color,
-    pub status_info: Color,
-    pub status_warning: Color,
-    pub status_error: Color,
-    pub line_add: Color,
-    pub line_del: Color,
-    pub line_modified: Color,
-    pub gutter_bg: Color,
-    pub gutter_text: Color,
-    pub file_header_bg: Color,
-    pub hunk_header_bg: Color,
-    pub line_add_text: Color,
-    pub line_del_text: Color,
-    pub line_add_word_bg: Color,
-    pub line_del_word_bg: Color,
-    pub hover_overlay: Color,
-    pub search_match_bg: Color,
-    pub search_match_active_bg: Color,
-    pub syntax_keyword: Color,
-    pub syntax_string: Color,
-    pub syntax_comment: Color,
-    pub syntax_function: Color,
-    pub syntax_type: Color,
-    pub syntax_number: Color,
-    pub syntax_property: Color,
-    pub syntax_operator: Color,
+tokens! {
+    /// The semantic color tokens. Theme files name them as written here.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ThemeColors: Color {
+        app_bg,
+        canvas,
+        panel,
+        panel_strong,
+        border_soft,
+        text_strong,
+        accent,
+        accent_strong,
+        selection_bg,
+        background,
+        surface,
+        editor_surface,
+        elevated_surface,
+        modal_surface,
+        overlay_scrim,
+        border,
+        border_variant,
+        focus_border,
+        text,
+        text_muted,
+        text_accent,
+        icon,
+        element_background,
+        element_hover,
+        element_active,
+        element_selected,
+        ghost_element_hover,
+        ghost_element_active,
+        ghost_element_selected,
+        title_bar_background,
+        status_bar_background,
+        sidebar_background,
+        sidebar_row_hover,
+        sidebar_row_selected,
+        empty_state_background,
+        empty_state_border,
+        scrollbar_thumb,
+        status_info,
+        status_warning,
+        status_error,
+        line_add,
+        line_del,
+        line_modified,
+        gutter_bg,
+        gutter_text,
+        file_header_bg,
+        hunk_header_bg,
+        line_add_text,
+        line_del_text,
+        line_add_word_bg,
+        line_del_word_bg,
+        hover_overlay,
+        search_match_bg,
+        search_match_active_bg,
+        syntax_keyword,
+        syntax_string,
+        syntax_comment,
+        syntax_function,
+        syntax_type,
+        syntax_number,
+        syntax_property,
+        syntax_operator,
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ThemeMetrics {
-    pub title_bar_height: f32,
-    pub status_bar_height: f32,
-    pub sidebar_width: f32,
-    pub panel_radius: f32,
-    pub control_radius: f32,
-    pub modal_radius: f32,
-    pub spacing_xs: f32,
-    pub spacing_sm: f32,
-    pub spacing_md: f32,
-    pub spacing_lg: f32,
-    pub ui_font_size: f32,
-    pub ui_small_font_size: f32,
-    pub heading_font_size: f32,
-    pub mono_font_size: f32,
-    pub ui_row_height: f32,
-    pub code_row_height: f32,
+tokens! {
+    /// Sizes in logical points. Theme files name them as written here.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct ThemeMetrics: f32 {
+        title_bar_height,
+        status_bar_height,
+        sidebar_width,
+        panel_radius,
+        control_radius,
+        modal_radius,
+        spacing_xs,
+        spacing_sm,
+        spacing_md,
+        spacing_lg,
+        ui_font_size,
+        ui_small_font_size,
+        heading_font_size,
+        mono_font_size,
+        ui_row_height,
+        code_row_height,
+    }
 }
 
 impl ThemeMetrics {
@@ -454,7 +500,44 @@ fn default_mono_family() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Theme, ThemeMode};
+    use super::{Theme, ThemeFamily, ThemeMode};
+
+    // Catches a theme switch reshaping text: a new theme with the same
+    // metrics must repaint in its colors from the layouts already cached.
+    #[test]
+    fn switching_themes_repaints_from_cached_text_layouts() {
+        use crate::element::{ElementContext, IntoAnyElement, render_element, text};
+        use quark::reactive::SignalStore;
+        use quark_render::{Primitive, Scene};
+
+        let harbor = ThemeFamily::from_json(
+            r##"{"name": "Harbor", "dark": {"colors": {"text": "#59c2ff"}}}"##,
+        )
+        .expect("valid theme")
+        .theme(ThemeMode::Dark);
+        let mut system = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut layouts = quark_text::LayoutCache::default();
+        let signals = SignalStore::new();
+        let mut paint = |theme: &Theme| {
+            layouts.begin_frame();
+            let mut cx = ElementContext::new(theme, 1.0, &mut system, &mut layouts, None, &signals);
+            let mut root = text("switch me live").into_any();
+            let mut scene = Scene::default();
+            render_element(&mut root, &mut scene, &mut cx, 300.0, 100.0);
+            let color = scene.primitives.iter().find_map(|p| match p {
+                Primitive::TextRun(run) => Some(run.color),
+                _ => None,
+            });
+            (color, layouts.stats().misses)
+        };
+        let (color, shaped) = paint(&Theme::default_dark());
+        assert_eq!(color, Some(Theme::default_dark().colors.text));
+        assert_eq!(
+            paint(&harbor),
+            (Some(harbor.colors.text), shaped),
+            "repainted in the new color without reshaping"
+        );
+    }
 
     #[test]
     fn dark_focus_border_is_blue_accent() {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::editor::{gutter_digits, gutter_width_in, syntax_layout_spans};
 use super::text_pointer_drag;
 use super::view::{FrameScale, caret_blink};
-use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind};
+use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind, TextDecoration};
 use crate::FocusId;
 use crate::accessibility::{AccessibilityAction, AccessibilityNode, AccessibleText};
 use crate::design::{Alpha, Sz};
@@ -28,6 +28,8 @@ pub struct TextEditorElement {
     selection_rects: Vec<SelectionRect>,
     /// Pills behind atom labels.
     atom_rects: Vec<SelectionRect>,
+    /// Formatting lines and boxes, and spelling squiggles.
+    decorations: Vec<(TextDecoration, SelectionRect)>,
     content_height: f32,
     scroll_y: f32,
     font_size: f32,
@@ -67,6 +69,7 @@ pub fn text_editor_element(
         cursor: None,
         selection_rects: Vec::new(),
         atom_rects: Vec::new(),
+        decorations: Vec::new(),
         content_height: 0.0,
         scroll_y: 0.0,
         font_size: 14.0,
@@ -166,6 +169,7 @@ impl TextEditorElement {
         (self.preedit_rects, self.clause_rects) = editor.preedit_rects();
         self.selection_rects = editor.selection_rects();
         self.atom_rects = editor.atom_rects();
+        self.decorations = editor.decoration_rects();
         self.content_height = editor.content_height();
         self.scroll_y = editor.scroll_y;
         self.mode = editor.mode();
@@ -313,6 +317,26 @@ impl Element for TextEditorElement {
             }
         }
 
+        if !self.is_empty {
+            let code_bg = theme.colors.element_background;
+            for (_, rect) in self
+                .decorations
+                .iter()
+                .filter(|(kind, _)| *kind == TextDecoration::CodeBackground)
+            {
+                scene.rounded_rect(RoundedRectPrimitive::uniform(
+                    Rect {
+                        x: text_x + rect.x - 1.0,
+                        y: text_y - self.scroll_y + rect.y + 1.0,
+                        width: rect.w + 2.0,
+                        height: rect.h - 2.0,
+                    },
+                    3.0,
+                    code_bg,
+                ));
+            }
+        }
+
         if self.focused && !self.is_empty {
             let sel_color = theme.colors.accent.with_alpha(Alpha::SOFT);
             for rect in &self.selection_rects {
@@ -398,9 +422,17 @@ impl Element for TextEditorElement {
                     span_colors: span_colors.into(),
                 });
             }
+            let thin = theme.metrics.ui_scale().max(1.0);
+            paint_decorations(
+                scene,
+                &self.decorations,
+                (text_x, text_y - self.scroll_y),
+                thin,
+                self.text_color,
+                theme,
+            );
             // IME composition: thin underline under the preedit, thick under
             // the clause the IME is converting.
-            let thin = theme.metrics.ui_scale().max(1.0);
             for (rects, thickness) in [
                 (&self.preedit_rects, thin),
                 (&self.clause_rects, thin * 2.0),
@@ -501,6 +533,58 @@ impl IntoAnyElement for TextEditorElement {
     }
 }
 
+/// Underlines and strikethroughs in the text color (links in the accent),
+/// and a wavy line in the error color under misspellings. `origin` is the
+/// layout's top left in the scene.
+fn paint_decorations(
+    scene: &mut Scene,
+    decorations: &[(TextDecoration, SelectionRect)],
+    origin: (f32, f32),
+    thickness: f32,
+    text_color: crate::theme::Color,
+    theme: &crate::theme::Theme,
+) {
+    for (kind, rect) in decorations {
+        let (x, y) = (origin.0 + rect.x, origin.1 + rect.y);
+        let line = |scene: &mut Scene, y: f32| {
+            scene.rect(RectPrimitive {
+                rect: Rect {
+                    x,
+                    y,
+                    width: rect.w,
+                    height: thickness,
+                },
+                color: text_color,
+            });
+        };
+        match kind {
+            TextDecoration::Underline => line(scene, y + rect.h * 0.82),
+            TextDecoration::Strikethrough => line(scene, y + rect.h * 0.52),
+            TextDecoration::CodeBackground => {}
+            TextDecoration::Misspelled => {
+                // A zigzag of short dashes alternating between two rows.
+                let step = 2.0 * thickness;
+                let base = y + rect.h - 2.0 * thickness;
+                let mut at = 0.0;
+                let mut up = false;
+                while at < rect.w {
+                    scene.rect(RectPrimitive {
+                        rect: Rect {
+                            x: x + at,
+                            y: if up { base - thickness } else { base },
+                            width: step.min(rect.w - at),
+                            height: thickness,
+                        },
+                        color: theme.colors.status_error,
+                    });
+                    at += step;
+                    up = !up;
+                }
+            }
+        }
+    }
+}
+
 fn syntax_color(
     syntax_kind: SyntaxTokenKind,
     default_color: crate::theme::Color,
@@ -516,6 +600,7 @@ fn syntax_color(
         Type | Namespace | Tag => theme.colors.syntax_type,
         Attribute | Property => theme.colors.syntax_property,
         Operator | Punctuation => theme.colors.syntax_operator,
+        Link => theme.colors.text_accent,
         Variable | Normal => default_color,
     }
 }
@@ -683,6 +768,7 @@ mod tests {
                 id: AtomId::new(1, 0),
                 export: "[main.rs](main.rs)".into(),
             }],
+            styles: Vec::new(),
         };
         editor.set_rich_text(&rich);
         editor.flush(&mut text);
@@ -717,5 +803,52 @@ mod tests {
             .filter(|r| r.x <= start && r.x + r.width >= end && r.width < end - start + 8.0)
             .collect();
         assert_eq!(pills.len(), 1, "start {start} end {end}");
+    }
+
+    // Catches formatting that reaches the model but not the screen: an
+    // underlined run must paint a line spanning exactly its glyphs, below
+    // their middle.
+    #[test]
+    fn an_underlined_run_paints_a_line_under_its_glyphs() {
+        use crate::text_input::{InlineStyle, RichText, StyleSpan};
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut editor = Editor::new(EditorMode::ProseInput);
+        editor.sync_size(300.0, 60.0);
+        editor.set_rich_text(&RichText {
+            text: "see under now".into(),
+            styles: vec![StyleSpan::new(4..9, InlineStyle::UNDERLINE)],
+            ..RichText::default()
+        });
+        editor.flush(&mut text);
+
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+        let mut root = text_editor_element(
+            FocusId::from_key("e"),
+            ScrollActionBuilder::new(Action::new),
+        )
+        .editor_snapshot(&editor)
+        .w(300.0)
+        .h(60.0)
+        .into_any();
+        let mut scene = Scene::default();
+        render_element(&mut root, &mut scene, &mut cx, 300.0, 60.0);
+
+        let layout = editor.layout().expect("layout");
+        let at = |o| layout.caret(TextOffset::snap(editor.text(), o));
+        let (start, end) = (at(4), at(9));
+        let lines: Vec<_> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Rect(r) => Some(r.rect),
+                _ => None,
+            })
+            .filter(|r| (r.x - start.x).abs() < 0.5 && (r.x + r.width - end.x).abs() < 0.5)
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].y > start.y + 14.0 * 1.35 * 0.5, "{:?}", lines[0]);
     }
 }

@@ -21,7 +21,7 @@ pub fn search_field(
     let trailing = if has_value {
         on_clear.map(|action| {
             view! {
-                <Button(action) tooltip={"Clear"} size={ButtonSize::Compact}>
+                <Button(action) tooltip={quark_ui::i18n::tr("quark-clear")} size={ButtonSize::Compact}>
                     <.icon>{lucide::X}</.icon>
                 </Button>
             }
