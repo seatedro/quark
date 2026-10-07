@@ -70,6 +70,7 @@ fn gallery() -> AnyElement {
         created_at_ms: 0,
         hovered: false,
         progress: None,
+        ..Default::default()
     }];
     let animation = AnimationTable::new();
     let toast_stack = ToastStack::new(&toasts, &animation, 800.0, 600.0, 1.0, 0.0, 0, &[], |_| {

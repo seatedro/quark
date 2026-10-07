@@ -21,6 +21,7 @@ fn toasts() -> [Toast; 1] {
         created_at_ms: 0,
         hovered: false,
         progress: None,
+        ..Default::default()
     }]
 }
 

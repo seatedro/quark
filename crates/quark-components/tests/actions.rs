@@ -152,6 +152,7 @@ fn toast_emits_on_dismiss_with_index() {
         created_at_ms: 0,
         hovered: false,
         progress: None,
+        ..Default::default()
     }];
     let animation = AnimationTable::new();
     let stack = ToastStack::new(&toasts, &animation, 800.0, 600.0, 1.0, 0.0, 0, &[], |i| {

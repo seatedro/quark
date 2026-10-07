@@ -1,4 +1,5 @@
 use quark::view;
+use quark_render::Rect;
 use quark_ui::Action;
 use quark_ui::accessibility::Politeness;
 use quark_ui::animation::{AnimKey, AnimationTable, Curve, Motion, PropId};
@@ -9,9 +10,9 @@ use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
 use quark_ui::theme::{Color, Theme, ThemeColors};
 
-/// A notification shown by [`ToastStack`]. The app owns the list and its
-/// lifetime; the stack only renders it.
-#[derive(Debug, Clone, PartialEq)]
+/// A notification shown by [`ToastStack`]. Keep a list yourself or use
+/// [`ToastQueue`], which also expires, pauses, and retires toasts.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Toast {
     /// Stable identity, used to key entrance and progress animations.
     pub id: u64,
@@ -19,15 +20,131 @@ pub struct Toast {
     pub message: String,
     pub description: Option<String>,
     pub created_at_ms: u64,
-    /// Hovered toasts pause their lifetime bar.
+    /// Hovered toasts pause their lifetime; set it with
+    /// [`Toast::set_hovered`] so the pause is timed.
     pub hovered: bool,
     /// When `Some`, the toast renders an externally driven progress bar in
     /// place of the time-based one.
     pub progress: Option<f32>,
+    /// Buttons shown beside the message.
+    pub actions: Vec<ToastAction>,
+    /// Visible lifetime, not counting pauses. `None` keeps the toast until
+    /// it is dismissed.
+    pub duration_ms: Option<u64>,
+    /// Paused time before the current pause.
+    pub paused_ms: u64,
+    /// When the current pause began.
+    pub paused_at_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A button on a toast.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToastAction {
+    pub label: String,
+    pub action: Action,
+    /// The undo button, which the app's undo shortcut also presses.
+    pub undo: bool,
+}
+
+impl Toast {
+    /// A toast with the default lifetime. [`ToastQueue::push`] assigns the
+    /// id and creation time.
+    pub fn new(kind: ToastKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            duration_ms: Some(TOAST_LIFETIME_MS),
+            ..Self::default()
+        }
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(ToastKind::Info, message)
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(ToastKind::Error, message)
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Add a button that emits `action`.
+    pub fn action(mut self, label: impl Into<String>, action: impl Into<Action>) -> Self {
+        self.actions.push(ToastAction {
+            label: label.into(),
+            action: action.into(),
+            undo: false,
+        });
+        self
+    }
+
+    /// Offer to undo what the toast reports: an Undo button that emits
+    /// `action`, live for `timeout_ms`. After that the toast leaves and
+    /// the undo can no longer run.
+    pub fn undo(mut self, action: impl Into<Action>, timeout_ms: u64) -> Self {
+        self.actions.push(ToastAction {
+            label: "Undo".to_owned(),
+            action: action.into(),
+            undo: true,
+        });
+        self.duration_ms = Some(timeout_ms);
+        self
+    }
+
+    pub fn duration(mut self, ms: u64) -> Self {
+        self.duration_ms = Some(ms);
+        self
+    }
+
+    /// Keep the toast until it is dismissed.
+    pub fn sticky(mut self) -> Self {
+        self.duration_ms = None;
+        self
+    }
+
+    /// Time shown at `now_ms`, not counting pauses.
+    pub fn elapsed_ms(&self, now_ms: u64) -> u64 {
+        let end = self.paused_at_ms.unwrap_or(now_ms);
+        end.saturating_sub(self.created_at_ms)
+            .saturating_sub(self.paused_ms)
+    }
+
+    /// Lifetime left at `now_ms`; `None` for sticky toasts.
+    pub fn remaining_ms(&self, now_ms: u64) -> Option<u64> {
+        self.duration_ms
+            .map(|duration| duration.saturating_sub(self.elapsed_ms(now_ms)))
+    }
+
+    /// Pause (hovered) or resume the lifetime at `now_ms`.
+    pub fn set_hovered(&mut self, hovered: bool, now_ms: u64) {
+        match (self.paused_at_ms, hovered) {
+            (None, true) => self.paused_at_ms = Some(now_ms),
+            (Some(since), false) => {
+                self.paused_ms += now_ms.saturating_sub(since);
+                self.paused_at_ms = None;
+            }
+            _ => {}
+        }
+        self.hovered = hovered;
+    }
+
+    /// Fraction of the lifetime used, 0 (fresh) to 1 (about to leave).
+    fn lifetime_used(&self, now_ms: u64) -> f32 {
+        match self.duration_ms {
+            Some(duration) if duration > 0 => {
+                (self.elapsed_ms(now_ms) as f32 / duration as f32).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToastKind {
+    #[default]
     Info,
     Error,
 }
@@ -120,6 +237,8 @@ pub const TOAST_WIDTH: f32 = 460.0;
 pub const BADGE_SIZE: f32 = 26.0;
 pub const CLOSE_SIZE: f32 = 22.0;
 const PROGRESS_H: f32 = 2.0;
+/// Height of an action button.
+const ACTION_H: f32 = 24.0;
 const CORNER_RADIUS: f32 = Rad::XL;
 /// Max wrapped lines for title and description.
 pub const TITLE_MAX_LINES: usize = 2;
@@ -197,6 +316,8 @@ struct ToastVisuals {
     message: String,
     description: Option<String>,
     dismiss: Action,
+    /// Button labels with the actions they emit.
+    actions: Vec<(String, Action)>,
     kind: ToastKind,
     title_lines: Vec<String>,
     description_lines: Vec<String>,
@@ -264,6 +385,28 @@ impl RenderOnce for ToastVisuals {
             ToastKind::Error => (accesskit::Role::Alert, Politeness::Assertive),
         };
         let toast_id = self.id;
+        let action_buttons: Vec<AnyElement> = self
+            .actions
+            .into_iter()
+            .map(|(label, action)| {
+                div()
+                    .flex_row()
+                    .items_center()
+                    .flex_shrink_0()
+                    .h(ACTION_H)
+                    .px(Sp::SM)
+                    .rounded(Rad::MD)
+                    .border(tc.border)
+                    .hover_bg(tc.ghost_element_hover)
+                    .on_click(action)
+                    .cursor(CursorHint::Pointer)
+                    .accessibility_id(format!("toast-action:{toast_id}:{label}"))
+                    .accessibility_role(accesskit::Role::Button)
+                    .accessibility_label(label.clone())
+                    .child(text(label).text_xs().medium().color(tc.text_strong))
+                    .into_any()
+            })
+            .collect();
 
         view! { scale,
             <div class="absolute"
@@ -309,6 +452,8 @@ impl RenderOnce for ToastVisuals {
                         }
                     </div>
 
+                    {...action_buttons}
+
                     <div class="flex-row items-center justify-center shrink-0"
                         w={CLOSE_SIZE} h={CLOSE_SIZE}
                         rounded={Rad::MD}
@@ -352,6 +497,9 @@ pub struct ToastStack<'a> {
     pub layouts: &'a [ToastLayout],
     /// Builds the action emitted when the toast at an index is clicked.
     pub on_dismiss: Box<dyn Fn(usize) -> Action + 'a>,
+    /// Builds the action a toast's button emits from the toast's id and the
+    /// button's index. `None` emits the button's own action.
+    pub on_action: Option<Box<dyn Fn(u64, usize) -> Action + 'a>>,
 }
 
 impl<'a> ToastStack<'a> {
@@ -379,6 +527,66 @@ impl<'a> ToastStack<'a> {
             clock_ms,
             layouts,
             on_dismiss: Box::new(on_dismiss),
+            on_action: None,
+        }
+    }
+
+    /// Route button presses through the app, as [`ToastQueue::activate`]
+    /// needs, instead of emitting the buttons' actions directly.
+    pub fn on_action(mut self, f: impl Fn(u64, usize) -> Action + 'a) -> Self {
+        self.on_action = Some(Box::new(f));
+        self
+    }
+
+    fn container_left_width(&self) -> (f32, f32) {
+        let scale = self.ui_scale;
+        let container_w = toast_stack_width(self.window_width, scale);
+        let side_margin = (Sp::XL * scale).round();
+        let container_left = (self.window_width - container_w - side_margin).max(side_margin);
+        (container_left, container_w)
+    }
+
+    fn container_bottom(&self) -> f32 {
+        self.status_bar_height + (Sp::LG * self.ui_scale).round()
+    }
+
+    fn height_of(&self, index: usize) -> f32 {
+        self.layouts
+            .get(index)
+            .map(|l| l.height)
+            .unwrap_or(Sz::TOAST)
+    }
+
+    /// Height of the stack at the current fan state.
+    fn stack_height(&self) -> f32 {
+        let count = self.toasts.len();
+        if count == 0 {
+            return 0.0;
+        }
+        let scale = self.ui_scale;
+        let peek = (STACK_PEEK * scale).round();
+        let fan_gap = (FAN_GAP * scale).round();
+        let fan_t = self.animation.get(stack_key(), FAN).unwrap_or(0.0);
+        let visible = count.min(MAX_VISIBLE_BEHIND + 1);
+        // Collapsed: front-toast height + MAX_VISIBLE_BEHIND peeks.
+        let collapsed = self.height_of(count - 1) + (MAX_VISIBLE_BEHIND as f32) * peek;
+        // Fanned: visible toast heights + inter-toast gaps.
+        let fanned = (0..visible)
+            .map(|d| self.height_of(count - 1 - d))
+            .sum::<f32>()
+            + (visible.saturating_sub(1) as f32) * fan_gap;
+        collapsed + fan_t * (fanned - collapsed)
+    }
+
+    /// The stack's rect in the window, for hover tracking.
+    pub fn bounds(&self) -> Rect {
+        let (left, width) = self.container_left_width();
+        let height = self.stack_height();
+        Rect {
+            x: left,
+            y: self.window_height - self.container_bottom() - height,
+            width,
+            height,
         }
     }
 
@@ -386,48 +594,17 @@ impl<'a> ToastStack<'a> {
         let scale = self.ui_scale;
         let peek = (STACK_PEEK * scale).round();
         let fan_gap = (FAN_GAP * scale).round();
-
-        let container_w = toast_stack_width(self.window_width, scale);
-        let side_margin = (Sp::XL * scale).round();
-        let container_left = (self.window_width - container_w - side_margin).max(side_margin);
-
+        let (container_left, container_w) = self.container_left_width();
         let fan_t = self.animation.get(stack_key(), FAN).unwrap_or(0.0);
-
         let count = self.toasts.len();
         let visible = count.min(MAX_VISIBLE_BEHIND + 1);
 
-        // Resolve front toast height (it anchors both collapsed and fanned stacks).
-        let front_h = if count > 0 {
-            self.layouts
-                .get(count - 1)
-                .map(|l| l.height)
-                .unwrap_or(Sz::TOAST)
-        } else {
-            Sz::TOAST
-        };
-
-        // Collapsed: front-toast height + MAX_VISIBLE_BEHIND peeks.
-        let collapsed_height = front_h + (MAX_VISIBLE_BEHIND as f32) * peek;
-
-        // Fanned: sum of visible toast heights + inter-toast gaps.
-        let fanned_height: f32 = (0..visible)
-            .map(|d| {
-                self.layouts
-                    .get(count - 1 - d)
-                    .map(|l| l.height)
-                    .unwrap_or(Sz::TOAST)
-            })
-            .sum::<f32>()
-            + (visible.saturating_sub(1) as f32) * fan_gap;
-
-        let stack_height = collapsed_height + fan_t * (fanned_height - collapsed_height);
-
         let mut container = div()
             .absolute()
-            .bottom(self.status_bar_height + (Sp::LG * scale).round())
+            .bottom(self.container_bottom())
             .left(container_left)
             .w(container_w)
-            .h(stack_height)
+            .h(self.stack_height())
             .z_index(TOAST_Z_BASE);
 
         // Pre-compute cumulative fanned offsets from front (depth 0) upward.
@@ -436,12 +613,7 @@ impl<'a> ToastStack<'a> {
         let mut running = 0.0_f32;
         for d in 0..visible {
             fanned_bottoms.push(running);
-            let h = self
-                .layouts
-                .get(count - 1 - d)
-                .map(|l| l.height)
-                .unwrap_or(Sz::TOAST);
-            running += h + fan_gap;
+            running += self.height_of(count - 1 - d) + fan_gap;
         }
 
         // Deepest first so the front toast paints last.
@@ -477,12 +649,19 @@ impl<'a> ToastStack<'a> {
                 bottom_raw
             };
 
-            let elapsed = self.clock_ms.saturating_sub(toast.created_at_ms);
-            let time_progress = if toast.hovered {
-                0.0
-            } else {
-                (elapsed as f32 / TOAST_LIFETIME_MS as f32).clamp(0.0, 1.0)
-            };
+            let time_progress = toast.lifetime_used(self.clock_ms);
+            let actions = toast
+                .actions
+                .iter()
+                .enumerate()
+                .map(|(i, button)| {
+                    let action = match &self.on_action {
+                        Some(on_action) => on_action(toast.id, i),
+                        None => button.action.clone(),
+                    };
+                    (button.label.clone(), action)
+                })
+                .collect();
             let external_progress = toast.progress.map(|raw| {
                 self.animation
                     .get(toast_key(toast.id), PROGRESS)
@@ -497,6 +676,7 @@ impl<'a> ToastStack<'a> {
                 message: toast.message.clone(),
                 description: toast.description.clone(),
                 dismiss: (self.on_dismiss)(toast_idx),
+                actions,
                 kind: toast.kind,
                 title_lines: layout.title_lines,
                 description_lines: layout.description_lines,
@@ -511,5 +691,207 @@ impl<'a> ToastStack<'a> {
         }
 
         container
+    }
+}
+
+/// The app's toasts with their lifecycle: ids, entrance and exit, timed
+/// expiry that pauses while the stack is hovered, action buttons that work
+/// only while the toast is live, and the undo shortcut.
+///
+/// Each frame, call [`ToastQueue::tick`] and schedule a frame at the time
+/// it returns, then render [`ToastQueue::stack`]. Pass pointer moves to
+/// [`ToastQueue::pointer_moved`], and key presses to
+/// [`ToastQueue::undo_shortcut`].
+#[derive(Debug, Default)]
+pub struct ToastQueue {
+    toasts: Vec<Toast>,
+    /// Ids of toasts sliding out; their buttons no longer work.
+    exiting: Vec<u64>,
+    next_id: u64,
+    hovered: bool,
+    /// The stack's rect from the last [`Self::stack`].
+    bounds: Option<Rect>,
+}
+
+impl ToastQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Oldest first; the newest is in front.
+    pub fn toasts(&self) -> &[Toast] {
+        &self.toasts
+    }
+
+    /// Show `toast`, assigning its id and creation time. Returns the id.
+    pub fn push(&mut self, mut toast: Toast, table: &mut AnimationTable, now_ms: u64) -> u64 {
+        self.next_id += 1;
+        toast.id = self.next_id;
+        toast.created_at_ms = now_ms;
+        toast.paused_ms = 0;
+        toast.paused_at_ms = None;
+        toast.hovered = false;
+        if self.hovered {
+            toast.set_hovered(true, now_ms);
+        }
+        animate_toast_in(table, toast.id, now_ms);
+        let id = toast.id;
+        self.toasts.push(toast);
+        id
+    }
+
+    fn is_live(&self, toast: &Toast, now_ms: u64) -> bool {
+        !self.exiting.contains(&toast.id) && toast.remaining_ms(now_ms) != Some(0)
+    }
+
+    /// Start toast `id` sliding out.
+    pub fn dismiss(&mut self, id: u64, table: &mut AnimationTable, now_ms: u64) {
+        if self.toasts.iter().any(|t| t.id == id) && !self.exiting.contains(&id) {
+            self.exiting.push(id);
+            animate_toast_out(table, id, now_ms);
+        }
+    }
+
+    /// Dismiss the toast at `index` in [`Self::toasts`], as the stack's
+    /// `on_dismiss` reports.
+    pub fn dismiss_index(&mut self, index: usize, table: &mut AnimationTable, now_ms: u64) {
+        if let Some(id) = self.toasts.get(index).map(|t| t.id) {
+            self.dismiss(id, table, now_ms);
+        }
+    }
+
+    /// Button `index` of toast `id` was pressed: dismiss the toast and
+    /// return the button's action, or `None` when the toast already timed
+    /// out or left.
+    pub fn activate(
+        &mut self,
+        id: u64,
+        index: usize,
+        table: &mut AnimationTable,
+        now_ms: u64,
+    ) -> Option<Action> {
+        let toast = self.toasts.iter().find(|t| t.id == id)?;
+        if !self.is_live(toast, now_ms) {
+            return None;
+        }
+        let action = toast.actions.get(index)?.action.clone();
+        self.dismiss(id, table, now_ms);
+        Some(action)
+    }
+
+    /// The app's undo shortcut: `mod+z` presses the newest live toast's
+    /// Undo button. Pass `in_text_field` as whether a text field has focus;
+    /// there `mod+z` undoes typing instead, so this returns `None`.
+    pub fn undo_shortcut(
+        &mut self,
+        pressed: &Binding,
+        in_text_field: bool,
+        table: &mut AnimationTable,
+        now_ms: u64,
+    ) -> Option<Action> {
+        let m = pressed.mods;
+        let primary = (m.cmd || m.ctrl) && !(m.cmd && m.ctrl);
+        if in_text_field || pressed.key != "z" || !primary || m.alt || m.shift {
+            return None;
+        }
+        let (id, index) = self
+            .toasts
+            .iter()
+            .rev()
+            .filter(|t| self.is_live(t, now_ms))
+            .find_map(|t| Some((t.id, t.actions.iter().position(|a| a.undo)?)))?;
+        self.activate(id, index, table, now_ms)
+    }
+
+    /// Pause every toast while the pointer is on the stack (and fan it
+    /// out). Returns whether hover changed.
+    pub fn set_hovered(&mut self, hovered: bool, table: &mut AnimationTable, now_ms: u64) -> bool {
+        if self.hovered == hovered {
+            return false;
+        }
+        self.hovered = hovered;
+        for toast in &mut self.toasts {
+            toast.set_hovered(hovered, now_ms);
+        }
+        animate_toast_fan(table, hovered, now_ms);
+        true
+    }
+
+    /// The pointer moved to `pointer` (`None`: it left the window).
+    /// Returns whether hover changed.
+    pub fn pointer_moved(
+        &mut self,
+        pointer: Option<(f32, f32)>,
+        table: &mut AnimationTable,
+        now_ms: u64,
+    ) -> bool {
+        let over = !self.toasts.is_empty()
+            && pointer
+                .zip(self.bounds)
+                .is_some_and(|((x, y), r)| r.contains(x, y));
+        self.set_hovered(over, table, now_ms)
+    }
+
+    /// Slide out toasts whose time ran out and drop those whose exit
+    /// finished. Returns when the next toast times out, for scheduling a
+    /// frame; animations schedule their own.
+    pub fn tick(&mut self, table: &mut AnimationTable, now_ms: u64) -> Option<u64> {
+        for i in 0..self.toasts.len() {
+            let toast = &self.toasts[i];
+            if !self.exiting.contains(&toast.id) && toast.remaining_ms(now_ms) == Some(0) {
+                let id = toast.id;
+                self.dismiss(id, table, now_ms);
+            }
+        }
+        let exiting = &mut self.exiting;
+        self.toasts.retain(|t| {
+            let gone = exiting.contains(&t.id) && retire_toast(table, t.id);
+            if gone {
+                exiting.retain(|id| *id != t.id);
+            }
+            !gone
+        });
+        if self.toasts.is_empty() && self.hovered {
+            self.hovered = false;
+            animate_toast_fan(table, false, now_ms);
+        }
+        self.toasts
+            .iter()
+            .filter(|t| !self.exiting.contains(&t.id) && t.paused_at_ms.is_none())
+            .filter_map(|t| Some(now_ms + t.remaining_ms(now_ms)?))
+            .min()
+    }
+
+    /// The stack for this frame. Remembers its rect for
+    /// [`Self::pointer_moved`]. `on_action` should route to
+    /// [`Self::activate`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn stack<'a>(
+        &mut self,
+        animation: &'a AnimationTable,
+        window: (f32, f32),
+        ui_scale: f32,
+        status_bar_height: f32,
+        clock_ms: u64,
+        layouts: &'a [ToastLayout],
+        on_dismiss: impl Fn(usize) -> Action + 'a,
+        on_action: impl Fn(u64, usize) -> Action + 'a,
+    ) -> Div {
+        let stack = ToastStack::new(
+            &self.toasts,
+            animation,
+            window.0,
+            window.1,
+            ui_scale,
+            status_bar_height,
+            clock_ms,
+            layouts,
+            on_dismiss,
+        )
+        .on_action(on_action);
+        let bounds = stack.bounds();
+        let built = stack.build();
+        self.bounds = Some(bounds);
+        built
     }
 }

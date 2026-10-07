@@ -12,6 +12,7 @@ pub mod button;
 pub mod checkbox;
 pub mod context_menu;
 pub mod dropdown;
+pub mod hover_card;
 pub mod kbd;
 pub mod modal;
 pub mod palette;
@@ -35,6 +36,7 @@ pub use button::{Button, ButtonSize, ButtonStyle};
 pub use checkbox::*;
 pub use context_menu::*;
 pub use dropdown::*;
+pub use hover_card::*;
 pub use kbd::*;
 pub use modal::{Modal, ModalAlign};
 pub use palette::{
@@ -50,8 +52,8 @@ pub use sidebar_skeleton::sidebar_skeleton;
 pub use stat_summary::*;
 pub use tabs::*;
 pub use toast::{
-    Toast, ToastKind, ToastLayout, ToastStack, animate_toast_fan, animate_toast_in,
-    animate_toast_out, animate_toast_progress, retire_toast,
+    Toast, ToastAction, ToastKind, ToastLayout, ToastQueue, ToastStack, animate_toast_fan,
+    animate_toast_in, animate_toast_out, animate_toast_progress, retire_toast,
 };
 pub use toolbar::Toolbar;
 pub use tooltip::*;

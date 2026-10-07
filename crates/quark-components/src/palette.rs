@@ -711,8 +711,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let mut remaining = delta.abs();
         while remaining > 0 {
             let mut next = row + step;
-            while (0..=last).contains(&next) && matches!(self.rows[next as usize], Row::Header(_))
-            {
+            while (0..=last).contains(&next) && matches!(self.rows[next as usize], Row::Header(_)) {
                 next += step;
             }
             if !(0..=last).contains(&next) {
@@ -874,7 +873,13 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                 let up = on_event(PaletteEvent::Scroll(-1));
                 // The callback must be 'static, so the two actions are built
                 // up front; a multi-line delta moves one row.
-                move |lines| if lines < 0 { up.clone() } else { scroll.clone() }
+                move |lines| {
+                    if lines < 0 {
+                        up.clone()
+                    } else {
+                        scroll.clone()
+                    }
+                }
             }));
         if self.rows.is_empty() {
             list = list.child(
@@ -910,7 +915,14 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                 Row::Item(m) => {
                     let quick = (item_number < QUICK_SELECT_COUNT).then_some(item_number);
                     item_number += 1;
-                    self.item_row(row, self.matches[m as usize], quick, row_h, theme, &on_event)
+                    self.item_row(
+                        row,
+                        self.matches[m as usize],
+                        quick,
+                        row_h,
+                        theme,
+                        &on_event,
+                    )
                 }
             };
             list = list.child(element);
@@ -979,8 +991,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let scale = theme.metrics.ui_scale();
         let item = &self.items[found.item as usize];
         let selected = row == self.selected;
-        let highlights =
-            &self.positions[found.highlights.0 as usize..found.highlights.1 as usize];
+        let highlights = &self.positions[found.highlights.0 as usize..found.highlights.1 as usize];
         let hint = self.hints[found.item as usize]
             .as_deref()
             .or_else(|| quick.map(|i| self.quick_hints[i].as_str()));
@@ -1076,7 +1087,11 @@ mod tests {
             .enumerate()
             .filter_map(|(i, c)| Some((matcher.score(c, &mut positions)?, i, *c)))
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.len().cmp(&b.2.len())).then(a.1.cmp(&b.1)));
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(a.2.len().cmp(&b.2.len()))
+                .then(a.1.cmp(&b.1))
+        });
         scored.into_iter().map(|(_, _, c)| c).collect()
     }
 
@@ -1107,11 +1122,19 @@ mod tests {
             // Word starts beat letters buried mid-word.
             ("gs", &["bogus", "Git: Status"], &["Git: Status", "bogus"]),
             // A run beats the same letters spread out.
-            ("term", &["the rematch", "Toggle terminal"], &["Toggle terminal", "the rematch"]),
+            (
+                "term",
+                &["the rematch", "Toggle terminal"],
+                &["Toggle terminal", "the rematch"],
+            ),
             // camelCase humps count as word starts.
             ("nt", &["intent", "newThread"], &["newThread", "intent"]),
             // Path segments count as word starts.
-            ("mr", &["src/main.rs", "crates/quark/mirror.rs"], &["src/main.rs", "crates/quark/mirror.rs"]),
+            (
+                "mr",
+                &["src/main.rs", "crates/quark/mirror.rs"],
+                &["src/main.rs", "crates/quark/mirror.rs"],
+            ),
             // Order matters; a query out of order does not match.
             ("ba", &["ab"], &[]),
             // Lowercase queries ignore case; an uppercase letter makes the
