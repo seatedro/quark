@@ -102,8 +102,10 @@ pub(crate) struct Remote {
     /// The cached index's packs: `None` until read, then the verified
     /// packs (empty when there is no valid cached index).
     cached: Option<Vec<Arc<PackManifest>>>,
-    /// The index was fetched (or the fetch failed) this session; it is not
-    /// fetched again.
+    /// The fetch thread has started this session's one index fetch.
+    started: bool,
+    /// This session's index fetch finished (or failed). Until then a tag
+    /// missing from `cached` may still be in the fresh index.
     fetched: bool,
 }
 
@@ -233,13 +235,16 @@ fn fetch(
     agent: &ureq::Agent,
     tag: &str,
 ) -> Result<(), FetchError> {
-    let first = !std::mem::replace(&mut lock(&inner.state).remote.fetched, true);
+    let first = !std::mem::replace(&mut lock(&inner.state).remote.started, true);
     if first {
-        match fetch_index(downloads, agent) {
-            Ok(packs) => lock(&inner.state).remote.cached = Some(packs),
+        let fetched = fetch_index(downloads, agent);
+        let mut state = lock(&inner.state);
+        match fetched {
+            Ok(packs) => state.remote.cached = Some(packs),
             // Keep whatever the cache had; the session does not retry.
             Err(error) => tracing::warn!(%error, "syntax pack index unavailable"),
         }
+        state.remote.fetched = true;
     }
     let manifest = {
         let state = lock(&inner.state);

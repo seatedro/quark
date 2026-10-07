@@ -178,10 +178,12 @@ mod download {
     }
 
     /// Serves `files` by path over HTTP/1.1 on localhost, one request per
-    /// connection, and logs each request's path.
+    /// connection, and logs each request's path. Responses wait while a
+    /// test holds `hold`.
     struct Server {
         url: String,
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        hold: Arc<Mutex<()>>,
         log: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
@@ -193,9 +195,10 @@ mod download {
             let url = format!("http://{}", listener.local_addr().unwrap());
             let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
             let log: Arc<Mutex<Vec<String>>> = Arc::default();
+            let hold: Arc<Mutex<()>> = Arc::default();
             let stop = Arc::new(AtomicBool::new(false));
-            let (thread_files, thread_log, thread_stop) =
-                (files.clone(), log.clone(), stop.clone());
+            let (thread_files, thread_log, thread_hold, thread_stop) =
+                (files.clone(), log.clone(), hold.clone(), stop.clone());
             let thread = std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     if thread_stop.load(Ordering::Relaxed) {
@@ -214,6 +217,7 @@ mod download {
                     }
                     let path = request.split(' ').nth(1).unwrap_or("").to_owned();
                     thread_log.lock().unwrap().push(path.clone());
+                    drop(thread_hold.lock().unwrap());
                     let body = thread_files.lock().unwrap().get(&path).cloned();
                     let (status, body) = match body {
                         Some(body) => ("200 OK", body),
@@ -230,6 +234,7 @@ mod download {
             Self {
                 url,
                 files,
+                hold,
                 log,
                 stop,
                 thread: Some(thread),
@@ -340,6 +345,28 @@ mod download {
             (store.status(&language("rust")), installed),
             (LanguageStatus::Unavailable, false)
         );
+    }
+
+    // Catches a language looked up while the index is downloading being
+    // remembered as unavailable for the session because the (still empty)
+    // cache lacks it.
+    #[test]
+    fn language_looked_up_during_the_index_fetch_stays_pending() {
+        let server = Server::start();
+        let pack = manifest("go", b"a library", b"(identifier) @variable");
+        server.serve(&index_path(), sign(&index(vec![pack])).into_bytes());
+        let cache = tempfile::tempdir().unwrap();
+        let (store, _) = downloading_store(&server, cache.path());
+
+        let held = server.hold.lock().unwrap();
+        store.status(&language("rust"));
+        while server.log().is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let during = store.status(&language("go"));
+        drop(held);
+
+        assert_eq!(during, LanguageStatus::Pending);
     }
 
     /// The tool-built pack in the test root, served under `/packs`.
