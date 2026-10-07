@@ -140,22 +140,39 @@ mod verification {
         values
     }
 
+    /// Element-wise so CBMC unrolls a short loop instead of a byte-wise
+    /// `memcmp` over the whole Vec, which needs a much larger unwind bound.
+    fn same_tree(a: &Fenwick, b: &Fenwick) -> bool {
+        if a.tree.len() != b.tree.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.tree.len() {
+            if a.tree[i] != b.tree[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
     #[kani::proof]
     #[kani::unwind(6)]
     fn fenwick_push_matches_build_and_prefix_matches_naive_sum() {
+        // A concrete length: a symbolic one makes the Vec's growth symbolic
+        // and CBMC ran out of memory past 16 GB. `prefix` still covers
+        // every shorter count.
         let values = any_values();
-        let len: usize = kani::any();
-        kani::assume(len <= N);
-        let built = Fenwick::build(values[..len].iter().copied());
+        let built = Fenwick::build(values);
         let mut pushed = Fenwick::default();
-        for v in &values[..len] {
-            pushed.push(*v);
+        for v in values {
+            pushed.push(v);
         }
-        assert!(built == pushed);
+        assert!(same_tree(&built, &pushed));
         let mut sum = 0;
-        for count in 0..=len {
+        for count in 0..=N {
             assert!(built.prefix(count) == sum);
-            if count < len {
+            if count < N {
                 sum += values[count];
             }
         }
@@ -168,11 +185,13 @@ mod verification {
         let index: usize = kani::any();
         let delta: i64 = kani::any();
         kani::assume(index < N);
-        kani::assume((0..1 << 20).contains(&(values[index] + delta)));
+        // Checked so the assumption itself cannot overflow on an arbitrary delta.
+        let updated = values[index].checked_add(delta);
+        kani::assume(updated.is_some_and(|v| (0..1 << 20).contains(&v)));
         let mut tree = Fenwick::build(values);
         tree.add(index, delta);
         values[index] += delta;
-        assert!(tree == Fenwick::build(values));
+        assert!(same_tree(&tree, &Fenwick::build(values)));
     }
 
     #[kani::proof]
