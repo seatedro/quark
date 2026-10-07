@@ -90,7 +90,6 @@ impl RenderOnce for Dropdown {
         } else {
             lucide::CHEVRON_DOWN
         };
-        let chevron_icon = svg_icon(chevron, icon_size - Sp::XXS * scale).color(tc.text_muted);
         let trigger_py = m.spacing_xs + (Sp::XXS * scale).round();
         let trigger_label = self.label.clone();
         let trigger_id = format!("dropdown-trigger:{:?}:{trigger_label}", self.on_toggle);
@@ -114,7 +113,7 @@ impl RenderOnce for Dropdown {
                     <div class="flex-1">
                         <text class="text-sm" color={tc.text}>{self.label}</text>
                     </div>
-                    {chevron_icon}
+                    <icon svg={chevron} size={icon_size - Sp::XXS * scale} color={tc.text_muted} />
                 </div>
                 if self.open {
                     <div class="flex-col w-full"
