@@ -84,7 +84,8 @@ pub fn context_menu_layer(
         <div class="absolute flex-col" left={x} top={y} z_index={250}
              id={"context-menu"}
              test_id={"context-menu"}
-             semantic_role={SemanticRole::Group}
+             semantic_role={SemanticRole::Menu}
+             accessibility_id={"context-menu"}
              focus_scope={"context-menu"}
              key_context={"context-menu"}
              min_w={Sz::CONTEXT_MENU_MIN_W * scale}

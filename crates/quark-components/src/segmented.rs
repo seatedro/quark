@@ -47,6 +47,8 @@ impl RenderOnce for SegmentedControl {
             <div class="flex-row shrink-0 items-center overflow-hidden"
                  id={"segmented-control"}
                  test_id={"segmented-control"}
+                 semantic_role={SemanticRole::RadioGroup}
+                 accessibility_id={"segmented-control"}
                  bg={tc.element_background}
                  rounded={Rad::XL}
                  p={Sp::XXS} gap={Sp::XXS}>

@@ -66,6 +66,8 @@ pub fn picker_list<T: PickerItem>(
              id={"picker-list"}
              test_id={"picker-list"}
              semantic_role={SemanticRole::ScrollArea}
+             accessibility_role={accesskit::Role::ListBox}
+             accessibility_id={"picker-list"}
              overflow_hidden scroll_y={scroll} scroll_total={total_h}
              on_scroll={on_scroll}
              hide_scrollbar>
