@@ -595,8 +595,8 @@ impl<U: UiApp> UiTestHarness<U> {
             }
             nodes.push(Node {
                 role: None,
-                name: semantic.label.clone(),
-                value: semantic.value.clone(),
+                name: semantic.label.as_deref().map(str::to_owned),
+                value: semantic.value.as_deref().map(str::to_owned),
                 id: None,
                 test_id: Some(test_id),
                 bounds: semantic.bounds,

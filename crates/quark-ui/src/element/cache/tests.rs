@@ -287,6 +287,62 @@ fn a_new_width_rebuilds_at_that_width() {
     assert_eq!(builds.get(), 2);
 }
 
+/// A cached 100pt viewport over twenty 20pt rows, row `i` filled with
+/// red `i`, scrolled by `handle`. The inputs hash never changes.
+fn scroller(handle: &ScrollHandle) -> AnyElement {
+    let handle = handle.clone();
+    cached("scroller", 1, move || {
+        div()
+            .w(100.0)
+            .h(100.0)
+            .flex_col()
+            .track_scroll(&handle)
+            .overflow_y_scroll()
+            .children((0..20u8).map(|i| {
+                div()
+                    .w_full()
+                    .h(20.0)
+                    .flex_shrink_0()
+                    .bg(Color::rgba(i, 0, 0, 255))
+                    .into_any()
+            }))
+    })
+    .into_any()
+}
+
+impl Frame {
+    /// Top edge of the rect filled with `color`.
+    fn top_of(&self, color: Color) -> Option<f32> {
+        self.scene.primitives.iter().find_map(|p| match p {
+            quark_render::Primitive::RoundedRect(r) if r.color == color => Some(r.rect.y),
+            _ => None,
+        })
+    }
+}
+
+#[test]
+fn a_moved_scroll_handle_repaints_its_cached_subtree() {
+    type Move = fn(&ScrollHandle);
+    let moves: &[(&str, Move)] = &[
+        ("requested jump", |h| h.set_offset(0.0, 60.0)),
+        ("wheel", |h| {
+            h.scroll_by(Axis::Y, 60.0, 0);
+        }),
+    ];
+    for (name, scroll) in moves {
+        let mut window = Window::new();
+        let handle = ScrollHandle::new();
+        window.paint(scroller(&handle));
+        scroll(&handle);
+        let frame = window.paint(scroller(&handle));
+        assert_eq!(
+            frame.top_of(Color::rgba(3, 0, 0, 255)),
+            Some(0.0),
+            "{name}: row 3 at the top"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Frame budget: the regression guard for per-frame waste
 // ---------------------------------------------------------------------------

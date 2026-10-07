@@ -16,7 +16,8 @@
 //! - the focused element, if the subtree read focus;
 //! - inherited paint state: the z layer, the text and icon color pushed by
 //!   an ancestor's hover, and whether an ancestor hides text from
-//!   accessibility.
+//!   accessibility;
+//! - with devtools, the inspector's style overrides.
 //!
 //! Interaction state inside the subtree invalidates it instead of going
 //! stale:
@@ -28,6 +29,9 @@
 //!   has a transition in motion is rebuilt every frame until it settles.
 //!   Transition rows of a replayed subtree are kept alive.
 //! - **Text inputs**: a subtree with a text input is never replayed.
+//! - **Scroll handles**: the boundary watches every [`ScrollHandle`] its
+//!   subtree paints and rebuilds when one has moved, has a request pending,
+//!   or is in motion. Replays keep the handles' viewports current.
 //!
 //! A boundary is a block box: the content is laid out at the width the
 //! parent gives the boundary and keeps its own height. Style the boundary
@@ -233,8 +237,10 @@ impl ElementCache {
             return Claim::Uncached;
         }
         self.last_pass[r] = self.pass;
+        let scroll_unchanged = self.paint[r].scroll_unchanged();
         let inputs = &mut self.inputs[r];
         let replay = self.replay
+            && scroll_unchanged
             && inputs.reusable
             && inputs.hash == hash
             && inputs.scale == scale
@@ -433,6 +439,24 @@ impl<F> Styled for Cached<F> {
     }
 }
 
+impl<F> Cached<F> {
+    /// The inputs hash, mixed with what every entry depends on that the
+    /// caller does not hash: the inspector's style overrides, which apply
+    /// to elements inside the subtree while it builds.
+    fn frame_hash(&self, cx: &ElementContext) -> u64 {
+        #[cfg(feature = "devtools")]
+        {
+            let revision = cx.devtools.overrides.revision();
+            self.hash ^ revision.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        }
+        #[cfg(not(feature = "devtools"))]
+        {
+            let _ = cx;
+            self.hash
+        }
+    }
+}
+
 impl<F: FnOnce() -> AnyElement + 'static> Cached<F> {
     fn build(&mut self) -> AnyElement {
         (self.build.take().expect("cached subtree built twice"))()
@@ -450,7 +474,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Cached<F> {
         Box::new(Live {
             child,
             layout: LiveLayout::Own(engine),
-            entry: Some((row, self.hash)),
+            entry: Some((row, self.frame_hash(cx))),
             recording: None,
         })
     }
@@ -530,8 +554,9 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
             accessibility: cx.accessibility_enabled(),
             focus: cx.focus,
         };
+        let hash = self.frame_hash(cx);
         let claim = match cx.cache.as_deref_mut() {
-            Some(cache) => cache.claim(self.key, self.hash, frame),
+            Some(cache) => cache.claim(self.key, hash, frame),
             None => Claim::Uncached,
         };
         let entry = match claim {
@@ -547,7 +572,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
                 self.state = State::Replay { row };
                 return (id, ());
             }
-            Claim::Replay(row) | Claim::Build(row) => Some((row, self.hash)),
+            Claim::Replay(row) | Claim::Build(row) => Some((row, hash)),
             Claim::Uncached => None,
         };
         let mut child = match std::mem::replace(&mut self.state, State::Idle) {

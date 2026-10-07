@@ -30,7 +30,7 @@ pub struct Button {
     size: ButtonSize,
     active: bool,
     disabled: bool,
-    tooltip_text: Option<String>,
+    tooltip_text: Option<std::sync::Arc<str>>,
     fixed_size: Option<f32>,
 }
 
@@ -79,7 +79,7 @@ impl Button {
         self
     }
 
-    pub fn tooltip(mut self, text: impl Into<String>) -> Self {
+    pub fn tooltip(mut self, text: impl Into<std::sync::Arc<str>>) -> Self {
         self.tooltip_text = Some(text.into());
         self
     }
@@ -164,7 +164,7 @@ impl RenderOnce for Button {
         let label_text = self.label;
         let accessibility_label = label_text
             .clone()
-            .or_else(|| tooltip_text.clone())
+            .or_else(|| tooltip_text.as_deref().map(str::to_owned))
             .unwrap_or_default();
         let accessibility_id = format!("button:{action:?}:{accessibility_label}");
 
@@ -202,7 +202,7 @@ impl RenderOnce for Button {
                  @when { !disabled && icon_only } { hover_icon_color={tc.text} }
                  @when { !disabled && !icon_only } { hover_bg={hover_bg} }
                  @when { tooltip_text.is_some() } {
-                     tooltip={tooltip_text.as_deref().unwrap_or_default()}
+                     tooltip={tooltip_text.clone().unwrap_or_default()}
                  }>
                 if icon.is_some() {
                     <icon svg={icon.unwrap()} size={icon_size} color={icon_color} />

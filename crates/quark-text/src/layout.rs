@@ -362,6 +362,34 @@ struct RunColumns {
     glyph_end: Vec<u32>,
 }
 
+const FIT_PASSES: usize = 4;
+
+/// Lay `buffer` out again at its widest line when a line runs right to
+/// left. cosmic-text aligns such a line against the buffer width (the wrap
+/// width, or each paragraph's own widest line without one), so it would
+/// paint outside the measured box, or at negative x past a cluster wider
+/// than the wrap. At the widest line's width every line still fits, and
+/// cosmic-text sums widths so that relaying out at a measured width keeps
+/// the wrapping; the one exception, a cluster wider than the wrap, already
+/// sets that width, so the layout stays as wide as it measured.
+fn fit_rtl_lines(fs: &mut FontSystem, buffer: &mut Buffer) {
+    for _ in 0..FIT_PASSES {
+        let mut widest = 0.0_f32;
+        let mut rtl = false;
+        for run in buffer.layout_runs() {
+            widest = widest.max(run.line_w);
+            rtl |= run.rtl;
+        }
+        if !rtl || buffer.size().0 == Some(widest) {
+            return;
+        }
+        buffer.set_size(fs, Some(widest), None);
+        for line_i in 0..buffer.lines.len() {
+            buffer.line_layout(fs, line_i);
+        }
+    }
+}
+
 /// Immutable result of shaping + layout, shared via `Arc` by measurement,
 /// hit-testing, selection, and painting.
 #[derive(Debug)]
@@ -436,6 +464,7 @@ impl TextLayout {
         for line_i in 0..buffer.lines.len() {
             buffer.line_layout(fs, line_i);
         }
+        fit_rtl_lines(fs, &mut buffer);
 
         let inv = 1.0 / scale;
         let mut glyphs = GlyphColumns::default();
@@ -1341,11 +1370,8 @@ mod tests {
         range: Range<usize>,
     ) -> Result<(), TestCaseError> {
         let (width, height) = layout.size();
-        // Lines can align within the wrap width, which can exceed the
-        // measured width, and empty lines get a 0.3 em marker even in a
-        // narrower layout.
-        let box_width = layout.wrap_width().map_or(width, |w| w.max(width));
-        let max_x = box_width.max(layout.style().font_size * 0.3) + 0.01;
+        // Empty lines get a 0.3 em marker even in a narrower layout.
+        let max_x = width.max(layout.style().font_size * 0.3) + 0.01;
         for r in layout.selection_rects(range.clone()) {
             prop_assert!(
                 r.x >= -0.01
@@ -1414,13 +1440,13 @@ mod tests {
             }
         }
 
-        // Left-to-right only: cosmic-text lets an RTL word wider than the
-        // wrap width overflow to negative x. Widths start above the widest
-        // single cluster for the same reason.
+        // Catches selection painting outside the measured box: right-to-left
+        // lines aligned against the wrap width, or a cluster wider than the
+        // wrap pushed to negative x.
         #[test]
         fn layout_selection_rects_stay_within_layout_bounds(
-            text in text(LTR_PIECES),
-            wrap in prop_oneof![Just(None), (40.0f32..300.0).prop_map(Some)],
+            text in mixed_text(),
+            wrap in wrap(),
             a in 0usize..120,
             b in 0usize..120,
         ) {

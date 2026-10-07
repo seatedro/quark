@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, Rect, StyleState, TabStop, TestId,
     UiEventBinding, UiEventPhase, UiKey, UiNodeId,
@@ -134,10 +136,10 @@ pub struct SemanticNode {
     pub test_id: Option<TestId>,
     pub parent: Option<usize>,
     pub role: Option<SemanticRole>,
-    pub label: Option<String>,
-    pub value: Option<String>,
-    pub description: Option<String>,
-    pub tooltip: Option<String>,
+    pub label: Option<Arc<str>>,
+    pub value: Option<Arc<str>>,
+    pub description: Option<Arc<str>>,
+    pub tooltip: Option<Arc<str>>,
     pub bounds: Rect,
     pub actions: SemanticActions,
     pub state: SemanticNodeState,
@@ -197,7 +199,7 @@ impl SemanticNode {
         self
     }
 
-    pub fn label(mut self, label: impl Into<String>) -> Self {
+    pub fn label(mut self, label: impl Into<Arc<str>>) -> Self {
         let label = label.into();
         if !label.is_empty() {
             self.label = Some(label);
@@ -205,12 +207,12 @@ impl SemanticNode {
         self
     }
 
-    pub fn value(mut self, value: impl Into<String>) -> Self {
+    pub fn value(mut self, value: impl Into<Arc<str>>) -> Self {
         self.value = Some(value.into());
         self
     }
 
-    pub fn description(mut self, description: impl Into<String>) -> Self {
+    pub fn description(mut self, description: impl Into<Arc<str>>) -> Self {
         let description = description.into();
         if !description.is_empty() {
             self.description = Some(description);
@@ -218,7 +220,7 @@ impl SemanticNode {
         self
     }
 
-    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
+    pub fn tooltip(mut self, tooltip: impl Into<Arc<str>>) -> Self {
         let tooltip = tooltip.into();
         if !tooltip.is_empty() {
             self.tooltip = Some(tooltip);

@@ -1006,7 +1006,7 @@ impl Element for TranscriptElement {
         let mut node = SemanticNode::new(bounds);
         node.parent = cx.current_semantic_parent();
         node.role = Some(SemanticRole::ScrollArea);
-        node.label = Some(self.label.to_string());
+        node.label = Some(Arc::from(&*self.label));
         node.actions = SemanticActions::default().scrollable().draggable();
         let list = cx.semantic.push(node);
         cx.bind_hit(*hit, list);

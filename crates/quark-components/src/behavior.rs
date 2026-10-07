@@ -17,7 +17,7 @@ pub trait Focusable: Sized {
 }
 
 pub trait Tooltipable: Sized {
-    fn tooltip(self, text: impl Into<String>) -> Self;
+    fn tooltip(self, text: impl Into<std::sync::Arc<str>>) -> Self;
 }
 
 pub trait Selectable: Sized {
@@ -48,7 +48,7 @@ impl Focusable for Div {
 }
 
 impl Tooltipable for Div {
-    fn tooltip(self, text: impl Into<String>) -> Self {
+    fn tooltip(self, text: impl Into<std::sync::Arc<str>>) -> Self {
         Div::tooltip(self, text)
     }
 }
@@ -78,7 +78,7 @@ impl Disableable for Button {
 }
 
 impl Tooltipable for Button {
-    fn tooltip(self, text: impl Into<String>) -> Self {
+    fn tooltip(self, text: impl Into<std::sync::Arc<str>>) -> Self {
         self.tooltip(text)
     }
 }
