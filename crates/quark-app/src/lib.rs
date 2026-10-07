@@ -34,6 +34,8 @@ pub mod keymap;
 mod layout_tests;
 #[cfg(target_os = "macos")]
 pub mod macos_window;
+#[cfg(all(test, feature = "test-support", feature = "components"))]
+mod menu_bar_tests;
 mod panic_hook;
 pub mod platform;
 #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]

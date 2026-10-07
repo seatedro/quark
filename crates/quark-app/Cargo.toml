@@ -11,6 +11,7 @@ quark.workspace = true
 quark-render.workspace = true
 quark-text.workspace = true
 quark-ui = { workspace = true, optional = true }
+quark-components = { workspace = true, optional = true }
 accesskit.workspace = true
 accesskit_winit.workspace = true
 arboard.workspace = true
@@ -98,7 +99,7 @@ quark-diff.workspace = true
 image.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }
 # Tests and examples always get the headless harness (`quark_app::testing`).
-quark-app = { path = ".", features = ["headless-render"] }
+quark-app = { path = ".", features = ["headless-render", "components"] }
 
 [features]
 default = ["ui", "emoji-font", "cjk-font"]
@@ -109,6 +110,9 @@ cjk-font = ["quark-text/cjk-font"]
 # quark-ui because the adapter implements `App`, and quark-ui must not
 # depend on the windowing runner.
 ui = ["dep:quark-ui"]
+# A drawn menu bar over the app's menus (`quark_app::platform::drawn_menu`)
+# for platforms without a native one.
+components = ["ui", "dep:quark-components"]
 hot-reload = ["dep:subsecond", "dep:tungstenite"]
 # Syntax highlighting in transcript code blocks; see quark-ui's `syntax`.
 syntax = ["ui", "quark-ui/syntax"]

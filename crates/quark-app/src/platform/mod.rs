@@ -8,6 +8,8 @@ pub mod desktop_entry;
 #[cfg(feature = "dialogs")]
 pub mod dialog;
 pub mod drag_out;
+#[cfg(feature = "components")]
+pub mod drawn_menu;
 #[cfg(feature = "ui")]
 pub mod menu;
 #[cfg(any(target_os = "macos", windows))]
