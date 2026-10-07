@@ -51,6 +51,17 @@ pub use view::diff_view;
 /// Lines one click on an expand control reveals.
 pub const REVEAL_STEP: u32 = 20;
 
+/// Autoscroll speed per point the pointer is past the edge band, in
+/// points per millisecond.
+const AUTOSCROLL_GAIN: f32 = 0.02;
+/// Fastest autoscroll, in points per millisecond.
+const AUTOSCROLL_MAX: f32 = 4.0;
+/// Longest frame gap autoscroll integrates over, so a stalled frame does
+/// not jump the view.
+const AUTOSCROLL_MAX_DT_MS: u64 = 50;
+/// Frame interval the view asks for while a drag autoscrolls.
+pub(crate) const AUTOSCROLL_FRAME_MS: u64 = 16;
+
 /// Which text a unified selection copies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum CopySide {
@@ -278,6 +289,15 @@ struct PrepareKey {
     scale: u32,
 }
 
+/// A selection drag in progress.
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    /// The pointer, view-local.
+    pointer: (f32, f32),
+    /// Clock of the last autoscroll step, while past an edge.
+    last_ms: Option<u64>,
+}
+
 /// App-owned diff view state. See the [module docs](self).
 pub struct DiffViewState {
     id: &'static str,
@@ -295,7 +315,7 @@ pub struct DiffViewState {
     selection: Option<Selection>,
     /// The side a side-by-side selection copies.
     selection_side: Side,
-    dragging: bool,
+    drag: Option<Drag>,
     /// The view's bounds in the window as of the last frame.
     bounds: Rc<Cell<Rect>>,
     metrics: Option<(Metrics, u32)>,
@@ -309,8 +329,6 @@ pub struct DiffViewState {
     highlights: Vec<[Option<Arc<[HighlightSpan]>>; 2]>,
     highlight_gen: Vec<u32>,
     revision: u64,
-    /// Bumped each frame a scroll handle is moving, so the view rebuilds.
-    nonce: u64,
     /// Bumped with every frame `prepare` builds.
     frame_id: u64,
 }
@@ -336,7 +354,7 @@ impl DiffViewState {
             hscroll: [ScrollHandle::new(), ScrollHandle::new()],
             selection: None,
             selection_side: Side::New,
-            dragging: false,
+            drag: None,
             bounds: Rc::default(),
             metrics: None,
             painted: HashMap::new(),
@@ -348,7 +366,6 @@ impl DiffViewState {
             highlights: Vec::new(),
             highlight_gen: Vec::new(),
             revision: 0,
-            nonce: 0,
             frame_id: 0,
         };
         state.reset_highlights();
@@ -513,13 +530,19 @@ impl DiffViewState {
             DiffEvent::Press { x, y } => {
                 let (x, y) = self.local(x, y);
                 self.selection_side = self.side_at(x);
-                self.dragging = true;
+                self.drag = Some(Drag {
+                    pointer: (x, y),
+                    last_ms: None,
+                });
                 self.selection = self.point_at(x, y).map(Selection::collapsed);
                 self.revision += 1;
                 true
             }
             DiffEvent::Drag { x, y } => {
                 let (x, y) = self.local(x, y);
+                if let Some(drag) = &mut self.drag {
+                    drag.pointer = (x, y);
+                }
                 match (self.selection, self.point_at(x, y)) {
                     (Some(s), Some(point)) if s.focus != point => {
                         self.selection = Some(Selection::new(s.anchor, point));
@@ -530,7 +553,7 @@ impl DiffViewState {
                 }
             }
             DiffEvent::Release => {
-                self.dragging = false;
+                self.drag = None;
                 false
             }
             DiffEvent::Scroll(lines) => {
@@ -821,6 +844,68 @@ impl DiffViewState {
         ))
     }
 
+    // ---- Autoscroll ----------------------------------------------------
+
+    /// A drag is held past the top or bottom edge: the view scrolls each
+    /// frame, so it needs another one.
+    pub fn wants_frame(&self) -> bool {
+        self.drag
+            .is_some_and(|drag| self.autoscroll_velocity(drag.pointer.1) != 0.0)
+    }
+
+    /// Signed autoscroll speed in points per millisecond for a pointer at
+    /// view-local `y`: zero away from the edges, growing with the distance
+    /// into or past a one-line band at the top or bottom.
+    fn autoscroll_velocity(&self, y: f32) -> f32 {
+        let (edge, height) = (self.metrics().line_h, self.viewport.1);
+        let past = if y < edge {
+            y - edge
+        } else if y > height - edge {
+            y - (height - edge)
+        } else {
+            0.0
+        };
+        (past * AUTOSCROLL_GAIN).clamp(-AUTOSCROLL_MAX, AUTOSCROLL_MAX)
+    }
+
+    /// Scroll a held drag past an edge by the time since its last step.
+    /// Returns whether the view moved.
+    fn autoscroll(&mut self, now_ms: u64) -> bool {
+        let Some(mut drag) = self.drag else {
+            return false;
+        };
+        let velocity = self.autoscroll_velocity(drag.pointer.1);
+        let mut moved = false;
+        if velocity == 0.0 {
+            drag.last_ms = None;
+        } else {
+            if let Some(last) = drag.last_ms {
+                let dt = now_ms.saturating_sub(last).min(AUTOSCROLL_MAX_DT_MS);
+                let offset = self.list.scroll_offset() + velocity * dt as f32;
+                moved = self.set_scroll(offset);
+            }
+            drag.last_ms = Some(now_ms);
+        }
+        self.drag = Some(drag);
+        moved
+    }
+
+    /// Move the selection's focus to whatever now sits under the held
+    /// pointer. Returns whether it changed.
+    fn follow_pointer(&mut self) -> bool {
+        let (Some(drag), Some(selection)) = (self.drag, self.selection) else {
+            return false;
+        };
+        match self.point_at(drag.pointer.0, drag.pointer.1) {
+            Some(point) if point != selection.focus => {
+                self.selection = Some(Selection::new(selection.anchor, point));
+                self.revision += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
     // ---- Frame ---------------------------------------------------------
 
     fn overscan(&self) -> f32 {
@@ -843,15 +928,27 @@ impl DiffViewState {
         )
     }
 
-    /// Shapes the rows entering the window and builds the frame the view
-    /// paints. Does nothing (and allocates nothing) when the window, the
-    /// state, and the scale are what the last call saw. `scale` must be the
-    /// frame's scale factor.
-    pub fn prepare(&mut self, text: &mut TextSystem, layouts: &mut LayoutCache, scale: f32) {
+    /// Advances a drag's autoscroll to `now_ms`, shapes the rows entering
+    /// the window, and builds the frame the view paints. Does nothing (and
+    /// allocates nothing) when the window, the state, and the scale are
+    /// what the last call saw. `scale` must be the frame's scale factor.
+    pub fn prepare(
+        &mut self,
+        text: &mut TextSystem,
+        layouts: &mut LayoutCache,
+        scale: f32,
+        now_ms: u64,
+    ) {
         self.poll_highlights();
-        if self.hscroll.iter().any(|h| !h.is_settled()) {
-            self.nonce += 1;
+        let scrolled = self.autoscroll(now_ms);
+        self.build_frame(text, layouts, scale);
+        // Rows moved under the held pointer: its selection end follows.
+        if scrolled && self.follow_pointer() {
+            self.build_frame(text, layouts, scale);
         }
+    }
+
+    fn build_frame(&mut self, text: &mut TextSystem, layouts: &mut LayoutCache, scale: f32) {
         if self.metrics.is_none_or(|(_, s)| s != scale.to_bits()) {
             self.measure_font(text, layouts, scale);
         }
