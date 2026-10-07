@@ -5,7 +5,7 @@
 //! - [`reactive`]: `Signal<T>` handles into a `SignalStore`, memos, and
 //!   dependency tracking.
 //! - [`view!`] and [`Store`], re-exported from `quark-macros`.
-//! - [`geometry`]: [`Rect`].
+//! - [`geometry`] holds [`Rect`].
 //! - [`hit`]: one hit table per frame, in paint order, for hover, click,
 //!   wheel, and drag.
 //! - [`scene`]: the primitives the paint phase emits and the renderer draws.

@@ -12,7 +12,7 @@
 //!   boundaries ([`element::cached`]).
 //! - [`style`], [`design`], [`theme`], [`palette`]: the [`style::Styled`]
 //!   builder methods, spacing and radius tokens, and themes.
-//! - [`text_input`]: [`text_input::TextField`] and [`text_input::Editor`]
+//! - [`text_input`] holds [`text_input::TextField`] and [`text_input::Editor`]
 //!   editing models, IME preedit, undo, and composer pieces (atoms,
 //!   triggers, completion, prompt history).
 //! - [`virtual_list`], [`transcript`], [`markdown`]: variable-height
