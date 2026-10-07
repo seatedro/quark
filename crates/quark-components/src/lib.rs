@@ -14,6 +14,7 @@ pub mod context_menu;
 pub mod dropdown;
 pub mod kbd;
 pub mod modal;
+pub mod palette;
 pub mod picker;
 pub mod popover;
 pub mod progress;
@@ -36,6 +37,10 @@ pub use context_menu::*;
 pub use dropdown::*;
 pub use kbd::*;
 pub use modal::{Modal, ModalAlign};
+pub use palette::{
+    CommandPalette, FuzzyMatcher, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome,
+    PaletteProvider, binding_label,
+};
 pub use picker::{PickerItem, PickerLabelStyle, picker_list};
 pub use popover::*;
 pub use progress::*;
