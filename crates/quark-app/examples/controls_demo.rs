@@ -4,7 +4,7 @@
 //! bottom of the window whose list opens upward. Tab moves between
 //! controls; inside a radio group or segmented control the arrow keys move
 //! the choice. Escape closes an open list, or quits when none is open.
-//! The layout is written with `view!` around the components' builders.
+//! The layout and the controls are written with `view!`.
 
 use std::rc::Rc;
 
@@ -165,31 +165,34 @@ impl UiApp for ControlsDemo {
         let viewport = cx.frame.size();
         let (width, height) = viewport;
         let colors = &cx.theme.colors;
-        let fruit = select(&self.fruit, self.fruits.clone(), |m| Msg::Fruit(m).into())
-            .label("Fruit")
-            .viewport(viewport);
-        let city = combobox(&self.city, "City", |m| Msg::City(m).into())
-            .placeholder("Search cities")
-            .viewport(viewport);
+        let fruit = view! {
+            <select(&self.fruit, self.fruits.clone(), |m| Msg::Fruit(m).into())
+                label="Fruit" viewport={viewport} />
+        };
+        let city = view! {
+            <combobox(&self.city, "City", |m| Msg::City(m).into())
+                placeholder="Search cities" viewport={viewport} />
+        };
         let sizes = SIZES
             .iter()
             .map(|s| RadioOption::new(*s).disabled(*s == "Huge"))
             .collect();
-        let size = radio_group("controls.size", "Size", sizes, self.size, |i| {
-            Msg::Size(i).into()
-        });
+        let size = view! {
+            <radio_group("controls.size", "Size", sizes, self.size, |i| Msg::Size(i).into()) />
+        };
         let views = VIEWS
             .iter()
             .enumerate()
             .map(|(i, v)| SegmentedItem::new(*v, Msg::View(i), i == self.view))
             .collect();
-        let volume = slider("controls.volume", "Volume", self.volume, 0.0, 100.0, |v| {
-            Msg::Volume(v).into()
-        })
-        .step(5.0);
-        let theme = select(&self.theme, self.themes.clone(), |m| Msg::Theme(m).into())
-            .label("Theme")
-            .viewport(viewport);
+        let volume = view! {
+            <slider("controls.volume", "Volume", self.volume, 0.0, 100.0, |v| Msg::Volume(v).into())
+                step={5.0} />
+        };
+        let theme = view! {
+            <select(&self.theme, self.themes.clone(), |m| Msg::Theme(m).into())
+                label="Theme" viewport={viewport} />
+        };
         // Builder values and markup mix freely: rows take either.
         view! {
             <div w={width} h={height} class="p-6 flex-col justify-between bg-[colors.background]">
@@ -197,7 +200,11 @@ impl UiApp for ControlsDemo {
                     {Self::row("Fruit", fruit, cx)}
                     {Self::row("City", city, cx)}
                     {Self::row("Size", size, cx)}
-                    {Self::row("View", SegmentedControl::new(views).id("controls.view"), cx)}
+                    {Self::row(
+                        "View",
+                        view! { <SegmentedControl(views) id="controls.view" /> },
+                        cx,
+                    )}
                     {Self::row(
                         "Network",
                         view! { <Switch on={self.wifi} label="Wi-Fi" on:toggle={Msg::Wifi} /> },
