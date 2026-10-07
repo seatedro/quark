@@ -196,9 +196,13 @@ fn run(
                 }
             }
         }
+        // Slots rerun for a retry; one still pending already has its plain
+        // stand-in, so it is parked again without another result.
+        let mut retried = Vec::new();
         if retry {
             for (slot, job) in parked.drain() {
                 order.push(slot);
+                retried.push(slot);
                 newest.insert(slot, job);
             }
         }
@@ -215,6 +219,9 @@ fn run(
                 .unwrap_or_default();
             if outcome.pending {
                 parked.insert(slot, job.clone());
+                if retried.contains(&slot) {
+                    continue;
+                }
             }
             let result = Highlighted {
                 slot,

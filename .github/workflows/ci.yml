@@ -56,20 +56,28 @@ jobs:
       - name: Check all features
         run: >-
           cargo check --workspace --all-targets --features
-          quark-app/hot-reload,quark-app/syntax,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-app/autostart,quark-app/global-shortcut,quark-app/telemetry,quark-render/headless-render,quark-syntax/common,quark-ui/syntax,quark-ui/devtools,quark-ui/profile,quark-text/profile
+          quark-app/hot-reload,quark-app/syntax-download,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-app/autostart,quark-app/global-shortcut,quark-app/telemetry,quark-render/headless-render,quark-syntax/download,quark-ui/syntax-download,quark-ui/devtools,quark-ui/profile,quark-text/profile
+
+      # The Rust grammar pack that quark-syntax's and quark-ui's highlighting
+      # tests load, built from its pinned source like a released pack.
+      - name: Build test grammar pack
+        run: cargo run -p syntax-pack -- build rust
 
       - name: Test
         env:
           # Turns a missing wgpu adapter into a failure in the headless render
           # test instead of a silent skip; lavapipe provides the adapter.
           QUARK_REQUIRE_GPU: "1"
+          # Likewise a missing grammar pack in the highlighting tests.
+          QUARK_REQUIRE_SYNTAX_PACKS: "1"
           # Only takes effect once quark-render builds its Instance from env
           # (InstanceDescriptor::from_env_or_default); default backends already
           # include Vulkan.
           WGPU_BACKEND: vulkan
         # Full O(n) integrity checks after every mutation (quark-ui's feature
-        # turns on quark's too); cheap debug checks run without it.
-        run: cargo test --workspace --features quark-ui/integrity-checks
+        # turns on quark's too); cheap debug checks run without it. `syntax`
+        # runs the document's highlighting tests against the pack above.
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax
 
   # macOS (Apple silicon) and Windows: the Linux job's clippy and tests, then
   # a smoke launch of hello_ui. Formatting and feature combinations are
@@ -112,8 +120,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Built with this platform's compiler and linker (MSVC on Windows), so
+      # the tests load a dylib or DLL the way apps do.
+      - name: Build test grammar pack
+        run: cargo run -p syntax-pack -- build rust
+
       - name: Test
-        run: cargo test --workspace --features quark-ui/integrity-checks
+        env:
+          QUARK_REQUIRE_SYNTAX_PACKS: "1"
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax
 
       # QUARK_EXIT_AFTER_FRAMES (debug builds only) quits after that many
       # presented frames, so a zero exit means a window opened and drew.
