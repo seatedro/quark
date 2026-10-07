@@ -87,3 +87,14 @@ impl Default for TextSystem {
         Self::new()
     }
 }
+
+/// One vendored-only system per test binary; building it parses every font.
+#[cfg(test)]
+pub(crate) fn test_system() -> std::sync::MutexGuard<'static, TextSystem> {
+    use std::sync::{Mutex, OnceLock};
+    static SYSTEM: OnceLock<Mutex<TextSystem>> = OnceLock::new();
+    SYSTEM
+        .get_or_init(|| Mutex::new(TextSystem::vendored_only(&FontSettings::default())))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

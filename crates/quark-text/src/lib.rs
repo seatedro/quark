@@ -11,8 +11,8 @@ pub use cache::{LayoutCache, LayoutCacheStats, LayoutKey};
 pub use cosmic_text;
 pub use fonts::{FontRole, FontSettings, MONO_FAMILY, UI_FAMILY};
 pub use layout::{
-    Caret, DEFAULT_LINE_HEIGHT_FACTOR, GlyphColumns, GlyphRun, LineInfo, TextError, TextLayout,
-    TextParams, TextSpan, TextStyle,
+    Caret, DEFAULT_LINE_HEIGHT_FACTOR, GlyphColumns, GlyphRun, IntegrityError, LineInfo, TextError,
+    TextLayout, TextParams, TextSpan, TextStyle,
 };
 pub use row::{RowHeights, RowMeasure};
 pub use system::TextSystem;
