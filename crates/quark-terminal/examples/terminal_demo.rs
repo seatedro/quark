@@ -39,7 +39,7 @@ struct Demo {
     command: Option<PtyCommand>,
     /// Called on the PTY thread after each event is sent, so tests can
     /// wait for output without polling.
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     on_pty: Option<std::sync::mpsc::Sender<()>>,
 }
 
@@ -49,7 +49,7 @@ impl Demo {
             #[cfg(not(windows))]
             term: TerminalState::new("demo.terminal", TERM_FOCUS),
             command,
-            #[cfg(test)]
+            #[cfg(all(test, not(windows)))]
             on_pty: None,
         }
     }
