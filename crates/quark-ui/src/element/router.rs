@@ -153,8 +153,9 @@ impl InputRouter {
             .unwrap_or_default()
     }
 
-    /// Press: update `focus`, then start a drag (capturing the pointer) or
-    /// deliver a click to the first handler on the route.
+    /// Press: update `focus`, then start a drag (capturing the pointer and
+    /// delivering its press actions) or deliver a click to the first handler
+    /// on the route.
     pub fn pointer_down(&mut self, x: f32, y: f32, focus: &mut Option<FocusId>) -> Delivery {
         let target = self.target_at(x, y);
         if let Some(next) = self.focus_after_press(target) {
@@ -172,11 +173,12 @@ impl InputRouter {
         if let Some(node) = drag.node
             && let Some(start) = handlers.drag(node)
         {
-            let drag = start.start(ClickEvent { x, y });
+            let mut drag = start.start(ClickEvent { x, y });
+            let actions = drag.on_press();
             self.capture = Some(Capture { node, drag });
             return Delivery {
                 node: Some(node),
-                actions: Vec::new(),
+                actions,
             };
         }
         self.walk(target, UiEventKind::Click, |node| {
@@ -518,6 +520,155 @@ mod tests {
             [moved, released],
             ["handle [Move(300, 300)]", "handle [Release]"]
         );
+    }
+
+    mod streaming {
+        use std::collections::HashMap;
+
+        use quark::selection::BlockKey;
+
+        use super::*;
+        use crate::transcript::{
+            TextMeasurer, Transcript, TranscriptBlock, TranscriptEvent, TranscriptMessage,
+            TranscriptRole, TranscriptStyle,
+        };
+        use crate::virtual_list::RowKey;
+
+        #[derive(Debug, Clone, PartialEq)]
+        struct Ev(TranscriptEvent);
+
+        impl From<Ev> for Action {
+            fn from(ev: Ev) -> Self {
+                Action::new(ev)
+            }
+        }
+
+        type Messages = HashMap<RowKey, TranscriptMessage>;
+
+        fn message(i: u64, text: &str) -> TranscriptMessage {
+            TranscriptMessage {
+                key: RowKey(i),
+                role: TranscriptRole::Assistant,
+                author: format!("author {i}").into(),
+                blocks: vec![TranscriptBlock::plain(BlockKey(i), text)],
+            }
+        }
+
+        /// A 400x300 transcript stuck to the bottom, with shared text state
+        /// so each frame is painted the way the adapter paints it.
+        struct Chat {
+            messages: Messages,
+            transcript: Transcript,
+            text: TextSystem,
+            layouts: LayoutCache,
+            router: InputRouter,
+        }
+
+        impl Chat {
+            fn new(n: u64) -> Self {
+                let messages: Messages = (0..n)
+                    .map(|i| (RowKey(i), message(i, &format!("Message {i} text."))))
+                    .collect();
+                let mut transcript = Transcript::new(TranscriptStyle::for_font_size(14.0));
+                transcript
+                    .extend((0..n).map(|i| &messages[&RowKey(i)]))
+                    .unwrap();
+                let mut chat = Self {
+                    messages,
+                    transcript,
+                    text: TextSystem::vendored_only(&Default::default()),
+                    layouts: LayoutCache::default(),
+                    router: InputRouter::default(),
+                };
+                chat.frame();
+                chat.transcript.jump_to_latest();
+                chat.frame();
+                chat
+            }
+
+            /// Prepare and paint a frame; route input through it from now on.
+            fn frame(&mut self) {
+                let (w, h) = (400.0, 300.0);
+                self.transcript.prepare(
+                    w,
+                    h,
+                    0,
+                    &self.messages,
+                    &mut TextMeasurer::new(&mut self.text, &mut self.layouts, 14.0, 1.0),
+                );
+                let theme = Theme::default_dark();
+                let signals = SignalStore::new();
+                let mut root = self
+                    .transcript
+                    .element(&self.messages, &theme, |ev| Ev(ev).into())
+                    .into_any();
+                let mut cx = ElementContext::new(
+                    &theme,
+                    1.0,
+                    &mut self.text,
+                    &mut self.layouts,
+                    None,
+                    &signals,
+                );
+                cx.semantic = SemanticFrame::new(w, h);
+                render_element(&mut root, &mut Scene::default(), &mut cx, w, h);
+                self.router.set_frame(cx.take_input_frame());
+            }
+
+            /// Apply delivered actions the way an app would, right away.
+            fn apply(&mut self, delivery: Delivery) {
+                for action in delivery.actions {
+                    if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
+                        self.transcript.handle(*event);
+                    }
+                }
+            }
+
+            fn block_rect(&self, key: u64) -> Rect {
+                self.transcript
+                    .visible_blocks()
+                    .iter()
+                    .find(|b| b.key == BlockKey(key))
+                    .map(|b| b.rect)
+                    .expect("block is visible")
+            }
+
+            /// Grow the last message, as a streaming reply does.
+            fn stream_into_last(&mut self, text: &str) {
+                let last = RowKey(self.messages.len() as u64 - 1);
+                let message = message(last.0, text);
+                self.transcript.update(&message).unwrap();
+                self.messages.insert(last, message);
+            }
+        }
+
+        // Regression: a drag reported its press only with the first move, so
+        // text streaming in between shifted the anchor onto other text.
+        #[test]
+        fn press_then_stream_keeps_the_anchor_at_the_pressed_text() {
+            let mut chat = Chat::new(8);
+            let from = chat.block_rect(5);
+
+            let pressed = chat
+                .router
+                .pointer_down(from.x - 5.0, from.y + 5.0, &mut None);
+            chat.apply(pressed);
+            chat.stream_into_last(&"streamed words ".repeat(15));
+            chat.frame();
+            let to = chat.block_rect(5);
+            let moved = chat
+                .router
+                .pointer_move(to.x + to.width + 40.0, to.y + to.height - 2.0);
+            chat.apply(moved);
+            let released = chat.router.pointer_up();
+            chat.apply(released);
+
+            assert!(to.y < from.y, "streaming moved the pressed block up");
+            assert_eq!(
+                chat.transcript.selected_text(&chat.messages),
+                "Message 5 text."
+            );
+        }
     }
 
     fn focusable(name: &'static str) -> Div {

@@ -52,6 +52,13 @@ impl DragStart {
 }
 
 pub trait DragHandler {
+    /// Called once right after the drag starts, before any move. Actions
+    /// returned here are delivered with the press, so they act on the frame
+    /// the user pressed in rather than whatever is on screen at the first
+    /// move.
+    fn on_press(&mut self) -> Vec<Action> {
+        Vec::new()
+    }
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action>;
     fn on_release(&mut self) -> DragReleaseResult;
     fn cursor(&self) -> CursorHint {
