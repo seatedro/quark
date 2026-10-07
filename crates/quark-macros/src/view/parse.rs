@@ -283,6 +283,12 @@ impl Parse for Element {
 }
 
 fn parse_tag(input: ParseStream) -> Result<(Tag, proc_macro2::Span)> {
+    if input.peek(syn::token::Brace) {
+        let content;
+        let brace = braced!(content in input);
+        let expr: Expr = content.parse()?;
+        return Ok((Tag::Value(Box::new(expr)), brace.span.join()));
+    }
     if input.peek(Token![.]) {
         input.parse::<Token![.]>()?;
         let name = input.call(Ident::parse_any)?;
@@ -317,6 +323,7 @@ pub(crate) fn tag_name(tag: &Tag) -> String {
             .collect::<Vec<_>>()
             .join("::"),
         Tag::Slot(name) => format!(".{name}"),
+        Tag::Value(_) => "{..}".to_owned(),
     }
 }
 
@@ -328,6 +335,13 @@ fn parse_closing_tag(input: ParseStream, open: &Tag) -> Result<()> {
     input.parse::<Token![<]>()?;
     input.parse::<Token![/]>()?;
     let expected = tag_name(open);
+    if matches!(open, Tag::Value(_)) {
+        if !input.peek(Token![>]) {
+            return Err(input.error("an expression tag `<{..}>` closes with `</>`"));
+        }
+        input.parse::<Token![>]>()?;
+        return Ok(());
+    }
     if input.peek(Token![>]) {
         return Err(input.error(format!("expected closing tag `</{expected}>`, found `</>`")));
     }

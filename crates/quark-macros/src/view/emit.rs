@@ -582,8 +582,9 @@ impl Emit {
                     }
                 }
             }
-            Tag::Component(path) => Mode::Child(self.component(path, el, key_call)),
+            Tag::Component(path) => Mode::Child(self.component(Some(path), el, key_call)),
             Tag::Function(path) => Mode::Child(self.function(path, el, key_call)),
+            Tag::Value(_) => Mode::Child(self.component(None, el, key_call)),
             Tag::Slot(name) => {
                 self.error(
                     name.span(),
@@ -799,20 +800,27 @@ impl Emit {
         quote!(#chain.into_any())
     }
 
+    /// `<Name>`, `<Name(args)>`, `<name(args)>`, and `<{expr}>` (no path).
     fn component(
         &self,
-        path: &syn::Path,
+        path: Option<&syn::Path>,
         el: &Element,
         key_call: Option<TokenStream2>,
     ) -> TokenStream2 {
         let function = matches!(el.tag, Tag::Function(_));
-        let props = el.ctor_args.is_none();
+        let value = match &el.tag {
+            Tag::Value(expr) => Some(expr),
+            _ => None,
+        };
+        let props = el.ctor_args.is_none() && value.is_none();
         let target = if props {
             Target::Props
         } else {
             Target::Builder
         };
-        let mut chain = if function {
+        let mut chain = if let Some(expr) = value {
+            quote!((#expr))
+        } else if function {
             let args = el.ctor_args.iter().flatten();
             quote!(#path(#(#args),*))
         } else if props {
@@ -881,7 +889,7 @@ impl Emit {
             );
             return quote!("");
         }
-        self.component(path, el, key_call)
+        self.component(Some(path), el, key_call)
     }
 
     /// `.method(child)` once per child of a `<.method>` slot. Slot values

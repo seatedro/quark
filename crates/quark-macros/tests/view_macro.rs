@@ -681,6 +681,22 @@ fn lowercase_tag_with_arguments_calls_the_function() {
     assert_eq!(kids(&el), ["a", "b"]);
 }
 
+// Catches `<{expr}>` not applying its attributes and children to the
+// builder value the expression evaluates to.
+#[test]
+fn expression_tag_applies_attributes_to_a_builder_value() {
+    let base = div().test_id("base");
+    let el = view! {
+        <{base} gap={2.0}>
+            <text>"a"</text>
+        </>
+    };
+    assert_eq!(el.calls, ["test_id(\"base\")", "gap(2.0)"]);
+    assert_eq!(kids(&el), ["a"]);
+    let lone = view! { <{Button::new("save")} tooltip="Save" /> };
+    assert_eq!(lone.calls, ["action(save)", "tooltip(Save)"]);
+}
+
 #[test]
 fn component_child_slots_map_to_repeated_builder_calls() {
     let el = view! {

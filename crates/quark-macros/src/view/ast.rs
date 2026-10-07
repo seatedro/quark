@@ -76,6 +76,9 @@ pub(crate) enum Tag {
     Function(syn::Path),
     /// `<.method>` inside a component: each child becomes `.method(child)`.
     Slot(Ident),
+    /// `<{expr} attrs/>`: attributes applied to a builder value, as in
+    /// `<{self.input} focused={f} />`.
+    Value(Box<Expr>),
 }
 
 pub(crate) enum Attr {

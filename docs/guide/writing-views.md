@@ -60,6 +60,7 @@ div()
 | `<>...</>`, `<fragment>` | No element: the children join the parent |
 | `<Name attr=..>` | A `#[derive(Props)]` component: `Name::builder()...build()` |
 | `<Name(a, b) attr=..>` | A builder component: `Name::new(a, b)` then one call per attribute |
+| `<{expr} attr=..>` | A builder value: `(expr)` then one call per attribute, as in `<{self.input} focused={f} />`; with children it closes with `</>` |
 | `<name(a, b) attr=..>` | A function returning a builder: `name(a, b)` then one call per attribute, as in `<canvas(paint)/>` or `<popover_panel(theme)>` |
 | `<.method>` | Inside a component: each child becomes `.method(child)` |
 
