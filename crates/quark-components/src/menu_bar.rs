@@ -21,7 +21,7 @@
 //! The bar must sit at the window's top-left corner: its menus are placed
 //! in window coordinates, below each title.
 
-use quark::SemanticRole;
+use quark::view;
 use quark_render::Rect;
 use quark_ui::Action;
 use quark_ui::element::{AnyElement, Binding, IntoAnyElement, div, text};
@@ -284,21 +284,7 @@ impl MenuBar {
         let height = (m.ui_small_font_size * 1.35 + m.spacing_xs * 2.0).ceil();
         let mut x = m.spacing_xs;
         self.titles.clear();
-        let mut bar = div()
-            .flex_row()
-            .items_center()
-            .w(viewport.0)
-            .h(height)
-            .flex_shrink_0()
-            .px(m.spacing_xs)
-            .bg(tc.title_bar_background)
-            .border_b(tc.border)
-            .test_id("menu-bar")
-            .semantic_role(SemanticRole::Menu)
-            .accessibility_role(accesskit::Role::MenuBar)
-            .accessibility_label("Menu bar")
-            .key_context("menu-bar");
-        for (index, menu) in self.menus.iter().enumerate() {
+        for menu in &self.menus {
             let width = Self::title_width(&menu.label, theme);
             self.titles.push(Rect {
                 x,
@@ -307,39 +293,35 @@ impl MenuBar {
                 height,
             });
             x += width;
-            let active = self.active_title() == Some(index);
-            let fg = if menu.enabled { tc.text } else { tc.text_muted };
-            let mut title = div()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .w(width)
-                .h(height - 4.0)
-                .flex_shrink_0()
-                .rounded(m.spacing_xs)
-                .bg(if active {
-                    tc.sidebar_row_hover
-                } else {
-                    Color::TRANSPARENT
-                })
-                .key(menu.label.as_str())
-                .test_id(format!("menu-bar:{}", menu.label))
-                .semantic_role(SemanticRole::MenuItem)
-                .accessibility_role(accesskit::Role::MenuItem)
-                .accessibility_label(menu.label.as_str())
-                .accessibility_expanded(self.mode == Mode::Open(index))
-                .accessibility_disabled(!menu.enabled)
-                .child(text(menu.label.as_str()).text_sm().color(fg));
-            if menu.enabled {
-                title = title
-                    .on_click(on_title(index))
-                    .hover_bg(tc.sidebar_row_hover);
-            }
-            bar = bar.child(title);
         }
-        match self.dropdown.render(viewport, theme) {
-            Some(layer) => bar.child(layer).into_any(),
-            None => bar.into_any(),
+        view! {
+            <div class="flex-row items-center" w={viewport.0} h={height} class="shrink-0"
+                 px={m.spacing_xs} bg={tc.title_bar_background} border_b={tc.border}
+                 test_id="menu-bar" role="menu" accessibility_role={accesskit::Role::MenuBar}
+                 aria-label="Menu bar" key_context="menu-bar">
+                for (index, menu) in self.menus.iter().enumerate() {
+                    <div class="flex-row items-center justify-center" w={self.titles[index].width}
+                         h={height - 4.0} class="shrink-0" rounded={m.spacing_xs}
+                         bg={if self.active_title() == Some(index) {
+                             tc.sidebar_row_hover
+                         } else {
+                             Color::TRANSPARENT
+                         }}
+                         key={menu.label.as_str()} test_id={format!("menu-bar:{}", menu.label)}
+                         role="menuitem" accessibility_role={accesskit::Role::MenuItem}
+                         aria-label={menu.label.as_str()}
+                         aria-expanded={self.mode == Mode::Open(index)}
+                         aria-disabled={!menu.enabled}
+                         @when {menu.enabled} {
+                             on:click={on_title(index)} hover_bg={tc.sidebar_row_hover}
+                         }>
+                        <text class="text-sm" color={if menu.enabled { tc.text } else { tc.text_muted }}>
+                            {menu.label.as_str()}
+                        </text>
+                    </div>
+                }
+                {?self.dropdown.render(viewport, theme)}
+            </div>
         }
     }
 }
