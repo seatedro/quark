@@ -36,6 +36,8 @@ mod panic_hook;
 pub mod platform;
 #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
 mod profile;
+#[cfg(all(test, feature = "test-support"))]
+mod reorder_tests;
 mod runner;
 #[cfg(all(test, feature = "test-support"))]
 mod scroll_tests;
