@@ -82,15 +82,17 @@ jobs:
         with:
           workspaces: fuzz
 
+      # The prebuilt cargo-fuzz binary is a musl build and defaults to that
+      # target, where ASan can't link; build for the runner's gnu target.
       - name: Build fuzz targets
-        run: cargo fuzz build
+        run: cargo fuzz build --target x86_64-unknown-linux-gnu
 
       # -runs=0 executes each committed input once and stops: a regression
       # check over the corpus, not a fuzzing session.
       - name: Replay corpora
         run: |
           for target in text_layout markdown; do
-            cargo fuzz run "$target" "$PWD/fuzz/corpus/$target" -- -runs=0
+            cargo fuzz run --target x86_64-unknown-linux-gnu "$target" "$PWD/fuzz/corpus/$target" -- -runs=0
           done
 
       # Report only. Feeds every CommonMark 0.31.2 spec example through
@@ -104,7 +106,7 @@ jobs:
             https://raw.githubusercontent.com/commonmark/commonmark-spec/0.31.2/spec.txt
           echo "257c41ad946f7a1414a499aca402a1aa8fdac3678532266611348c1cf54f4b80  $dir/spec.txt" | sha256sum -c -
           python3 -I fuzz/commonmark_corpus.py "$dir/spec.txt" "$dir/corpus"
-          cargo fuzz run markdown "$dir/corpus" -- -runs=0
+          cargo fuzz run --target x86_64-unknown-linux-gnu markdown "$dir/corpus" -- -runs=0
 
   miri:
     runs-on: ubuntu-latest

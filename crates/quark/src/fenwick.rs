@@ -251,6 +251,7 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(crate::test_support::proptest_config(256))]
         // Catches lowbit slips in `push`, `add`, `prefix`, and the binary
         // lifting in `search`, which would misplace rows in virtual lists.
         #[test]
