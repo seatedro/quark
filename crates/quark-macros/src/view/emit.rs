@@ -933,6 +933,16 @@ impl Emit {
                 let inner = self.attrs(quote!(__w), attrs, target);
                 quote!({ let __w = #chain; if #cond { #inner } else { __w } })
             }
+            Attr::For(pat, iter, attrs) => {
+                let inner = self.attrs(quote!(__w), attrs, target);
+                quote!({
+                    let mut __w = #chain;
+                    for #pat in #iter {
+                        __w = #inner;
+                    }
+                    __w
+                })
+            }
             Attr::Method { name, value } => {
                 if let Some(event) = &name.event {
                     return self.event(chain, name, event, value);

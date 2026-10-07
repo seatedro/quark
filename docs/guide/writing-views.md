@@ -87,6 +87,7 @@ the call.
 | `gap={@sig}` | `.gap(cx.read(sig))`, with `cx` in scope |
 | `bg={if hot { a } else { b }}` | `.bg(if hot { a } else { b })`; with no `else` the call is skipped |
 | `@when {cond} { attrs }` | The attributes apply only when `cond` holds |
+| `@for pat in iter { attrs }` | The attributes apply once per item, as in `@for key in KEYS { on_key={(key, act)} }` |
 | `on:click={a}`, `on:drag={f}`, `on:scroll={b}` | `.on_click(a)`, `.on_drag(f)`, `.on_scroll(b)`: any `on:name` is `.on_name`; `{if ..}` without `else` skips the call |
 | `on:key:mod+s={a}` | `.on_key("mod+s", a)`; unknown modifiers fail to compile |
 | `role="button"` | `.semantic_role(SemanticRole::Button)`, which also sets the platform role |

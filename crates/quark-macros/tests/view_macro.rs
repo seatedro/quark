@@ -814,6 +814,21 @@ fn conditional_event_handler_is_set_only_when_present() {
     assert!(make(None).calls.is_empty());
 }
 
+// Catches `@for` not applying its attributes once per item, in order.
+#[test]
+fn for_attribute_applies_its_attributes_per_item() {
+    let keys = ["a", "b"];
+    let el = view! { <div @for key in keys { on_key={(key, "type")} } gap={1.0} /> };
+    assert_eq!(
+        el.calls,
+        [
+            "on_key(\"a\", \"type\")",
+            "on_key(\"b\", \"type\")",
+            "gap(1.0)"
+        ]
+    );
+}
+
 #[test]
 fn reactive_attribute_reads_through_cx() {
     let store = SignalStore::default();

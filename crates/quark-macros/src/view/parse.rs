@@ -374,11 +374,28 @@ fn parse_closing_tag(input: ParseStream, open: &Tag) -> Result<()> {
 impl Parse for Attr {
     fn parse(input: ParseStream) -> Result<Self> {
         // @when {condition} { attr1 attr2=val ... }
+        // @for pat in iter { attr1 attr2=val ... }
         if input.peek(Token![@]) {
             input.parse::<Token![@]>()?;
+            if input.peek(Token![for]) {
+                input.parse::<Token![for]>()?;
+                let pat = Pat::parse_multi_with_leading_vert(input)?;
+                input.parse::<Token![in]>()?;
+                let iter = Expr::parse_without_eager_brace(input)?;
+                let attrs_content;
+                braced!(attrs_content in input);
+                let mut attrs = Vec::new();
+                while !attrs_content.is_empty() {
+                    attrs.push(attrs_content.parse()?);
+                }
+                return Ok(Attr::For(Box::new(pat), iter, attrs));
+            }
             let kw: Ident = input.parse()?;
             if kw != "when" {
-                return Err(syn::Error::new(kw.span(), "expected `when` after `@`"));
+                return Err(syn::Error::new(
+                    kw.span(),
+                    "expected `when` or `for` after `@`",
+                ));
             }
             let cond_content;
             braced!(cond_content in input);

@@ -92,6 +92,8 @@ pub(crate) enum Attr {
     Class(LitStr),
     /// `@when {cond} { attrs }`
     When(Expr, Vec<Attr>),
+    /// `@for pat in iter { attrs }`: the attributes once per item.
+    For(Box<Pat>, Expr, Vec<Attr>),
 }
 
 pub(crate) struct AttrName {
@@ -127,6 +129,7 @@ impl Attr {
             Attr::Method { name, .. } => name.first.span(),
             Attr::Class(lit) => lit.span(),
             Attr::When(cond, _) => syn::spanned::Spanned::span(cond),
+            Attr::For(pat, _, _) => syn::spanned::Spanned::span(pat),
         }
     }
 }
