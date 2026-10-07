@@ -79,9 +79,9 @@ jobs:
 
   kani:
     runs-on: ubuntu-latest
-    # Report-only until a baseline run passes: the harnesses go through std's
-    # HashMap (BlockOrder's index), which Kani handles slowly, and they have
-    # not been run outside CI yet.
+    # Report-only until a baseline run passes: the BlockOrder harnesses go
+    # through std's HashMap, which Kani handles slowly, quark-ui drags in the
+    # renderer's dependencies, and none of them have run outside CI yet.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -89,3 +89,10 @@ jobs:
       - uses: model-checking/kani-github-action@v1
         with:
           args: -p quark
+
+      # Separate step so a quark-ui failure (it pulls in quark-render and wgpu)
+      # still leaves the quark results.
+      - uses: model-checking/kani-github-action@v1
+        if: success() || failure()
+        with:
+          args: -p quark-ui
