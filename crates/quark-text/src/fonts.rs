@@ -55,7 +55,9 @@ macro_rules! font {
     };
 }
 
-const VENDORED_FONT_BYTES: &[&[u8]] = &[
+// A static, not a const: a const may be instantiated (and its font bytes
+// embedded) once per use.
+static VENDORED_FONT_BYTES: &[&[u8]] = &[
     font!("Geist-Regular.otf"),
     font!("Geist-Medium.otf"),
     font!("Geist-SemiBold.otf"),
@@ -88,10 +90,12 @@ pub fn normalize_font_selection(role: FontRole, family: &str) -> String {
     trimmed.to_owned()
 }
 
+/// Sources that read the fonts embedded in the binary in place, so each
+/// [`crate::TextSystem`] costs no copy of the font files.
 pub(crate) fn vendored_font_sources() -> impl Iterator<Item = fontdb::Source> {
     VENDORED_FONT_BYTES
         .iter()
-        .map(|bytes| fontdb::Source::Binary(Arc::new(bytes.to_vec())))
+        .map(|&bytes| fontdb::Source::Binary(Arc::new(bytes)))
 }
 
 pub(crate) fn configure_generic_families(db: &mut fontdb::Database, settings: &FontSettings) {
@@ -308,4 +312,27 @@ fn build_role_catalog(
     }
 
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::test_system;
+
+    // Regression: every TextSystem copied the vendored fonts (several MB)
+    // onto the heap instead of reading the bytes embedded in the binary.
+    #[test]
+    fn vendored_faces_read_the_embedded_font_bytes() {
+        let system = test_system();
+        let db = system.font_system().db();
+        let embedded = |data: &[u8]| {
+            VENDORED_FONT_BYTES
+                .iter()
+                .any(|font| font.as_ptr_range().contains(&data.as_ptr()))
+        };
+        for face in db.faces() {
+            let in_place = db.with_face_data(face.id, |data, _| embedded(data));
+            assert_eq!(in_place, Some(true), "{:?} was copied", face.families);
+        }
+    }
 }
