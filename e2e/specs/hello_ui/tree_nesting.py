@@ -1,7 +1,7 @@
 """Catches: the form's accessibility tree losing its structure or its role
 names. As cua reads it, the named dialog must sit in the window frame and
-hold the heading, the Name entry, the hint, and both buttons, with both
-buttons indexed as clickable."""
+hold the heading, the Name entry, the hint, and both buttons, with the
+entry and both buttons indexed as clickable."""
 
 from quark_e2e import Cua, app_pid, app_tree, main
 
@@ -23,7 +23,7 @@ def spec(cua: Cua):
     ]
     assert children == expected, f"dialog children {children}, expected {expected}"
     clickable = sorted(e["label"] for e in snapshot.elements if "click" in e.get("actions", []))
-    assert clickable == ["Clear", "Greet"], f"cua indexed {clickable} as clickable"
+    assert clickable == ["Clear", "Greet", "Name"], f"cua indexed {clickable} as clickable"
 
 
 main(spec)

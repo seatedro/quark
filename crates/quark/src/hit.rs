@@ -53,7 +53,8 @@ pub struct ClickEvent {
 #[derive(Debug, Clone)]
 pub struct TooltipRegion {
     pub bounds: Rect,
-    pub text: String,
+    /// Shared, so replaying a cached subtree's tooltips does not allocate.
+    pub text: std::sync::Arc<str>,
 }
 
 /// An entry in one [`HitTable`]. Each table gets a fresh frame stamp, so

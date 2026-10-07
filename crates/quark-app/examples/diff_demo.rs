@@ -80,9 +80,10 @@ impl UiApp for Demo {
         self.diff
             .set_viewport((width - sidebar).max(0.0), (height - TOOLBAR_H).max(0.0));
         let scale = cx.frame.scale_factor();
+        let now_ms = cx.frame.elapsed().as_millis() as u64;
         let text_cx = cx.frame.text();
         self.diff
-            .prepare(&mut text_cx.system, &mut text_cx.layouts, scale);
+            .prepare(&mut text_cx.system, &mut text_cx.layouts, scale, now_ms);
         let env = CollectionEnv {
             focused: cx.is_focused(DIFF_FOCUS),
             accessible: cx.frame.accessibility_active(),
@@ -498,6 +499,46 @@ mod tests {
             ui.clipboard_text().as_deref(),
             Some("line 9\nline ten\nline 11\nline 39\nline forty")
         );
+    }
+
+    // Selection drags past the view's top or bottom edge scroll it on the
+    // clock, with the selection end following, until release.
+    #[test]
+    fn a_drag_held_past_an_edge_scrolls_until_release() {
+        let lines = numbered(0..400);
+        let cases = [
+            ("top", TOOLBAR_H - 30.0, -1.0),
+            ("bottom", SIZE.1 + 30.0, 1.0),
+        ];
+        for (edge, pointer_y, direction) in cases {
+            let mut ui = harness(diff_texts(None, Some("f"), None, Some(&lines), 3));
+            ui.app_mut().diff.scroll_to_row(200);
+            ui.frame();
+            let pressed = ui.find(line("line 205")).center();
+            ui.pointer_down(pressed);
+            ui.pointer_move((pressed.0, pointer_y));
+            let start = ui.app().diff.scroll_offset();
+            ui.advance(500);
+            let held = ui.app().diff.scroll_offset();
+            ui.pointer_up((pressed.0, pointer_y));
+            ui.advance(500);
+
+            assert!(
+                (held - start) * direction > 50.0,
+                "{edge}: {start} -> {held}"
+            );
+            assert_eq!(
+                ui.app().diff.scroll_offset(),
+                held,
+                "{edge}: stopped on release"
+            );
+            ui.key("ctrl+c");
+            let copied = ui.clipboard_text().unwrap_or_default().lines().count();
+            assert!(
+                copied > 10,
+                "{edge}: the selection followed, {copied} lines"
+            );
+        }
     }
 
     #[test]

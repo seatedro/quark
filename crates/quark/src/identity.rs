@@ -1,11 +1,14 @@
 macro_rules! string_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ::serde::Serialize, ::serde::Deserialize)]
-        pub struct $name(String);
+        ///
+        /// The string is shared: clones (a cached subtree's replay) do not
+        /// allocate.
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(::std::sync::Arc<str>);
 
         impl $name {
-            pub fn new(value: impl Into<String>) -> Self {
+            pub fn new(value: impl Into<::std::sync::Arc<str>>) -> Self {
                 Self(value.into())
             }
 
@@ -16,19 +19,37 @@ macro_rules! string_id {
 
         impl From<String> for $name {
             fn from(value: String) -> Self {
-                Self(value)
+                Self(value.into())
             }
         }
 
         impl From<&str> for $name {
             fn from(value: &str) -> Self {
-                Self(value.to_owned())
+                Self(value.into())
+            }
+        }
+
+        impl From<::std::sync::Arc<str>> for $name {
+            fn from(value: ::std::sync::Arc<str>) -> Self {
+                Self(value)
             }
         }
 
         impl ::std::fmt::Display for $name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.write_str(&self.0)
+            }
+        }
+
+        impl ::serde::Serialize for $name {
+            fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(&self.0)
+            }
+        }
+
+        impl<'de> ::serde::Deserialize<'de> for $name {
+            fn deserialize<D: ::serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                <String as ::serde::Deserialize>::deserialize(deserializer).map(Self::from)
             }
         }
     };

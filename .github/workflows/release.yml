@@ -1,0 +1,222 @@
+name: Release packages
+
+# Builds installable packages of the hello_ui example on every platform and
+# keeps them as workflow artifacts. Manual dispatch only: it never runs on
+# push or tags, creates no tags or releases, and uploads nothing outside
+# this workflow run.
+#
+# Every signing step is skipped when its secrets are missing, so the
+# workflow also runs on forks and produces unsigned packages there.
+#
+# Secrets a signed release needs (Settings > Secrets and variables > Actions):
+#
+#   macOS (cargo-packager signs the .app and dmg, then notarizes the app)
+#     APPLE_CERTIFICATE           base64 of the "Developer ID Application" .p12
+#     APPLE_CERTIFICATE_PASSWORD  the .p12 password
+#     APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#     APPLE_API_KEY               App Store Connect API key ID (notarization)
+#     APPLE_API_ISSUER            App Store Connect issuer ID
+#     APPLE_API_PRIVATE_KEY       contents of the AuthKey_<id>.p8 file
+#   Windows (signtool signs the binary, the NSIS installer, and the MSI)
+#     WINDOWS_CERTIFICATE           base64 of the code signing .pfx
+#     WINDOWS_CERTIFICATE_PASSWORD  the .pfx password
+#   Updates (signs the quark-update manifest)
+#     QUARK_UPDATE_SIGNING_KEY  64 hex digits from
+#                               `cargo run -p quark-update --example manifest_tool -- keygen`;
+#                               the printed public key goes into the app
+#
+# Linux packages are not signed. AppImage signatures are rarely checked,
+# and apt and dnf repositories sign their metadata rather than each file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version (semver)
+        default: 0.1.0
+        required: true
+      channel:
+        description: Update channel the manifest is for
+        default: stable
+        required: true
+      download_base_url:
+        description: URL the artifacts will be served from, for the update manifest
+        default: https://example.invalid/quark-hello
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PACKAGER_VERSION: 0.11.8
+
+# Actions are pinned to commit SHAs; the comment names the release.
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            formats: appimage,deb
+          - platform: macos-aarch64
+            os: macos-15
+            formats: dmg
+          - platform: macos-x86_64
+            os: macos-15-intel
+            formats: dmg
+          - platform: windows-x86_64
+            os: windows-2022
+            formats: nsis,wix
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "version must be semver, got $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev rpm
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+
+      - name: Prepare config and icons
+        run: |
+          python3 packaging/icons.py 2>/dev/null || python packaging/icons.py
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" packaging/packager.toml
+
+      # cargo-packager imports APPLE_CERTIFICATE into a temporary keychain
+      # and notarizes with the APPLE_API_* variables once an identity is set.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != '' && env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          printf 'signingIdentity = "%s"\n' "$APPLE_SIGNING_IDENTITY" >> packaging/packager.toml
+          if [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+            key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY.p8"
+            printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key"
+            echo "APPLE_API_KEY_PATH=$key" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure Windows signing
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          Add-Content packaging/packager.toml "`n[windows]`ncertificateThumbprint = `"$($cert.Thumbprint)`"`ndigestAlgorithm = `"sha256`"`ntimestampUrl = `"http://timestamp.digicert.com`""
+
+      - name: Package
+        run: cargo packager -c packaging/packager.toml -f ${{ matrix.formats }}
+
+      - name: Package rpm
+        if: runner.os == 'Linux'
+        run: packaging/linux/build-rpm.sh target/release/examples/hello_ui "$VERSION" target/packages
+
+      - name: Collect packages
+        run: |
+          mkdir -p dist
+          for f in target/packages/*; do
+            case "$f" in
+              *.AppImage|*.deb|*.rpm|*.dmg|*-setup.exe|*.msi) cp "$f" dist/ ;;
+            esac
+          done
+          ls -la dist
+          test -n "$(ls dist)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packages-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  # A signed update manifest over the packages above, kept as an artifact for
+  # inspection. Skipped without QUARK_UPDATE_SIGNING_KEY.
+  manifest:
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    env:
+      QUARK_UPDATE_SIGNING_KEY: ${{ secrets.QUARK_UPDATE_SIGNING_KEY }}
+      VERSION: ${{ inputs.version }}
+      CHANNEL: ${{ inputs.channel }}
+      BASE_URL: ${{ inputs.download_base_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: env.QUARK_UPDATE_SIGNING_KEY != ''
+
+      - name: Install toolchain
+        if: env.QUARK_UPDATE_SIGNING_KEY != ''
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Download packages
+        if: env.QUARK_UPDATE_SIGNING_KEY != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'packages-*' --dir packages
+
+      - name: Sign manifest
+        if: env.QUARK_UPDATE_SIGNING_KEY != ''
+        run: |
+          # Self-updating formats only: deb and rpm update through the
+          # package manager.
+          shopt -s nullglob
+          specs=()
+          add() {
+            # Unquoted on purpose: $3 is a glob.
+            # shellcheck disable=SC2206
+            local files=($3)
+            if [ ${#files[@]} -gt 0 ]; then specs+=("$1=$2=${files[0]}"); fi
+          }
+          add linux-x86_64 appimage 'packages/packages-linux-x86_64/*.AppImage'
+          add macos-aarch64 dmg 'packages/packages-macos-aarch64/*.dmg'
+          add macos-x86_64 dmg 'packages/packages-macos-x86_64/*.dmg'
+          add windows-x86_64 nsis 'packages/packages-windows-x86_64/*-setup.exe'
+          mkdir -p manifest
+          cargo run -q -p quark-update --example manifest_tool -- \
+            sign dev.quark.hello "$CHANNEL" "$VERSION" "$BASE_URL" "${specs[@]}" \
+            > "manifest/$CHANNEL.json"
+          cat "manifest/$CHANNEL.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: env.QUARK_UPDATE_SIGNING_KEY != ''
+        with:
+          name: update-manifest
+          path: manifest/
+          if-no-files-found: error

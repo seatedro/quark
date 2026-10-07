@@ -36,7 +36,7 @@ pub struct Div {
     clips: bool,
     block_mouse: bool,
     focus_target: Option<FocusId>,
-    tooltip: Option<String>,
+    tooltip: Option<std::sync::Arc<str>>,
     hit_identity: Option<HitIdentity>,
     semantic_id: Option<UiNodeId>,
     semantic_key: Option<UiKey>,
@@ -47,11 +47,11 @@ pub struct Div {
     tab_stop: Option<TabStop>,
     key_context: Option<KeyContext>,
     event_bindings: Vec<UiEventBinding>,
-    accessibility_id: Option<String>,
+    accessibility_id: Option<std::sync::Arc<str>>,
     accessibility_role: Option<AccessibilityRole>,
-    accessibility_label: Option<String>,
-    accessibility_value: Option<String>,
-    accessibility_description: Option<String>,
+    accessibility_label: Option<std::sync::Arc<str>>,
+    accessibility_value: Option<std::sync::Arc<str>>,
+    accessibility_description: Option<std::sync::Arc<str>>,
     accessibility_selected: Option<bool>,
     accessibility_toggled: Option<bool>,
     accessibility_expanded: Option<bool>,
@@ -441,12 +441,12 @@ impl Div {
         self
     }
 
-    pub fn tooltip(mut self, text: impl Into<String>) -> Self {
+    pub fn tooltip(mut self, text: impl Into<std::sync::Arc<str>>) -> Self {
         self.tooltip = Some(text.into());
         self
     }
 
-    pub fn accessibility_id(mut self, id: impl Into<String>) -> Self {
+    pub fn accessibility_id(mut self, id: impl Into<std::sync::Arc<str>>) -> Self {
         self.accessibility_id = Some(id.into());
         self
     }
@@ -456,17 +456,20 @@ impl Div {
         self
     }
 
-    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+    pub fn accessibility_label(mut self, label: impl Into<std::sync::Arc<str>>) -> Self {
         self.accessibility_label = Some(label.into());
         self
     }
 
-    pub fn accessibility_value(mut self, value: impl Into<String>) -> Self {
+    pub fn accessibility_value(mut self, value: impl Into<std::sync::Arc<str>>) -> Self {
         self.accessibility_value = Some(value.into());
         self
     }
 
-    pub fn accessibility_description(mut self, description: impl Into<String>) -> Self {
+    pub fn accessibility_description(
+        mut self,
+        description: impl Into<std::sync::Arc<str>>,
+    ) -> Self {
         self.accessibility_description = Some(description.into());
         self
     }

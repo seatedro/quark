@@ -1373,14 +1373,13 @@ mod tests {
         use quark::selection::BlockKey;
 
         use super::*;
-        use crate::transcript::{
-            TextMeasurer, Transcript, TranscriptBlock, TranscriptEvent, TranscriptMessage,
-            TranscriptRole, TranscriptStyle,
+        use crate::document::{
+            Block, Document, DocumentEvent, DocumentRow, DocumentStyle, RowChrome, TextMeasurer,
         };
         use crate::virtual_list::RowKey;
 
         #[derive(Debug, Clone, PartialEq)]
-        struct Ev(TranscriptEvent);
+        struct Ev(DocumentEvent);
 
         impl From<Ev> for Action {
             fn from(ev: Ev) -> Self {
@@ -1388,22 +1387,25 @@ mod tests {
             }
         }
 
-        type Messages = HashMap<RowKey, TranscriptMessage>;
+        type Messages = HashMap<RowKey, DocumentRow>;
 
-        fn message(i: u64, text: &str) -> TranscriptMessage {
-            TranscriptMessage {
+        fn message(i: u64, text: &str) -> DocumentRow {
+            DocumentRow {
                 key: RowKey(i),
-                role: TranscriptRole::Assistant,
-                author: format!("author {i}").into(),
-                blocks: vec![TranscriptBlock::plain(BlockKey(i), text)],
+                chrome: RowChrome {
+                    header_height: 22.0,
+                    label: Some(format!("author {i}").into()),
+                    kind: 0,
+                },
+                blocks: vec![Block::plain(BlockKey(i), text)],
             }
         }
 
-        /// A 400x300 transcript stuck to the bottom, with shared text state
+        /// A 400x300 document stuck to the bottom, with shared text state
         /// so each frame is painted the way the adapter paints it.
         struct Chat {
             messages: Messages,
-            transcript: Transcript,
+            document: Document,
             text: TextSystem,
             layouts: LayoutCache,
             router: InputRouter,
@@ -1414,19 +1416,19 @@ mod tests {
                 let messages: Messages = (0..n)
                     .map(|i| (RowKey(i), message(i, &format!("Message {i} text."))))
                     .collect();
-                let mut transcript = Transcript::new(TranscriptStyle::for_font_size(14.0));
-                transcript
+                let mut document = Document::new(DocumentStyle::for_font_size(14.0));
+                document
                     .extend((0..n).map(|i| &messages[&RowKey(i)]))
                     .unwrap();
                 let mut chat = Self {
                     messages,
-                    transcript,
+                    document,
                     text: TextSystem::vendored_only(&Default::default()),
                     layouts: LayoutCache::default(),
                     router: InputRouter::default(),
                 };
                 chat.frame();
-                chat.transcript.jump_to_latest();
+                chat.document.scroll_to_bottom();
                 chat.frame();
                 chat
             }
@@ -1434,7 +1436,7 @@ mod tests {
             /// Prepare and paint a frame; route input through it from now on.
             fn frame(&mut self) {
                 let (w, h) = (400.0, 300.0);
-                self.transcript.prepare(
+                self.document.prepare(
                     w,
                     h,
                     0,
@@ -1444,7 +1446,7 @@ mod tests {
                 let theme = Theme::default_dark();
                 let signals = SignalStore::new();
                 let mut root = self
-                    .transcript
+                    .document
                     .element(&self.messages, &theme, |ev| Ev(ev).into())
                     .into_any();
                 let mut cx = ElementContext::new(
@@ -1464,13 +1466,13 @@ mod tests {
             fn apply(&mut self, delivery: Delivery) {
                 for action in delivery.actions {
                     if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
-                        self.transcript.handle(*event);
+                        self.document.handle(*event);
                     }
                 }
             }
 
             fn block_rect(&self, key: u64) -> Rect {
-                self.transcript
+                self.document
                     .visible_blocks()
                     .iter()
                     .find(|b| b.key == BlockKey(key))
@@ -1482,7 +1484,7 @@ mod tests {
             fn stream_into_last(&mut self, text: &str) {
                 let last = RowKey(self.messages.len() as u64 - 1);
                 let message = message(last.0, text);
-                self.transcript.update(&message).unwrap();
+                self.document.update(&message).unwrap();
                 self.messages.insert(last, message);
             }
         }
@@ -1510,7 +1512,7 @@ mod tests {
 
             assert!(to.y < from.y, "streaming moved the pressed block up");
             assert_eq!(
-                chat.transcript.selected_text(&chat.messages),
+                chat.document.selected_text(&chat.messages),
                 "Message 5 text."
             );
         }

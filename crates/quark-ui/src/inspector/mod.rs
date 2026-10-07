@@ -12,8 +12,9 @@
 //! - `ctrl+shift+i` toggles the inspector. Hover highlights the topmost
 //!   element under the pointer; click pins it; Escape unpins. The side panel
 //!   shows bounds, clip, z, semantics, and style, edits padding, gap, colors,
-//!   and radius of a pinned element that has a key or id, and lists the
-//!   semantic tree (click a row to pin it).
+//!   and radius of a pinned element that has a key or id (also inside
+//!   cached subtrees, which rebuild under a new edit), and lists the
+//!   semantic tree in a scrolling list (click a row to pin it).
 //! - `ctrl+shift+l` toggles layout debug: every element's bounds outlined,
 //!   and hit regions cut by a clip shown with their clipped part.
 
@@ -37,7 +38,7 @@ pub use probe::{
 };
 
 use crate::Action;
-use crate::element::InputRouter;
+use crate::element::{InputRouter, ScrollHandle, WheelEvent};
 use crate::hud::{HudSample, HudState};
 
 pub const TOGGLE_HUD: &str = "ctrl+shift+h";
@@ -64,7 +65,11 @@ pub enum DevtoolsInput<'a> {
     PointerLeft,
     PointerDown,
     PointerUp,
-    Wheel,
+    /// Wheel motion in points; positive moves content up and left.
+    Wheel {
+        dx: f32,
+        dy: f32,
+    },
     /// A key binding in keymap format, such as `"ctrl+shift+i"`.
     Key(&'a str),
 }
@@ -126,8 +131,10 @@ pub struct Devtools {
     overrides: StyleOverrides,
     frame: InspectFrame,
     huds: Vec<(u64, HudState)>,
-    /// Routes clicks on the overlay's own panels.
+    /// Routes clicks and wheel motion on the overlay's own panels.
     panel: InputRouter,
+    /// The inspector's semantic tree list.
+    tree_scroll: ScrollHandle,
     text_stats: LayoutCacheStats,
 }
 
@@ -256,9 +263,18 @@ impl Devtools {
                 self.panel.pointer_up();
                 Response::HANDLED
             }
-            DevtoolsInput::Wheel => Response {
-                consumed: self.pointer_over_panel(),
-                redraw: false,
+            DevtoolsInput::Wheel { dx, dy } => match self.pointer {
+                Some((x, y)) if self.pointer_over_panel() => {
+                    // No clock here, so no fling: the panel's lists move
+                    // only while the wheel turns.
+                    let event = WheelEvent { dx, dy, now_ms: 0 };
+                    let delivery = self.panel.scroll_wheel(x, y, event);
+                    Response {
+                        consumed: true,
+                        redraw: delivery.redraw,
+                    }
+                }
+                _ => Response::IGNORED,
             },
             DevtoolsInput::Key(_) => Response::IGNORED,
         }

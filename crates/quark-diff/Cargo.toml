@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/quark-diff"
+keywords = ["diff", "patch", "unified-diff", "myers"]
+categories = ["text-processing", "development-tools"]
 
 # No UI, text shaping, or syntax dependencies: the diff view in
 # quark-components adapts this model into elements.

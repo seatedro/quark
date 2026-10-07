@@ -71,6 +71,9 @@ pub struct ElementContext<'a> {
     semantic_parent_stack: Vec<usize>,
     /// Scroll handles of the containers being prepainted, innermost last.
     scroll_stack: Vec<ScrollHandle>,
+    /// Scroll handles prepainted inside cache boundaries, for their
+    /// recordings; cleared when the outermost recording begins.
+    scroll_watches: Vec<ScrollWatch>,
     /// Whether to build accessibility nodes: off while no assistive tech
     /// listens, so frames do not build labels nobody reads.
     accessibility_enabled: bool,
@@ -125,6 +128,7 @@ impl<'a> ElementContext<'a> {
             accessibility_text_hidden_stack: Vec::new(),
             semantic_parent_stack: Vec::new(),
             scroll_stack: Vec::new(),
+            scroll_watches: Vec::new(),
             accessibility_enabled: true,
         }
     }
@@ -571,6 +575,7 @@ impl<'a> ElementContext<'a> {
         if self.hit_recordings == 0 {
             self.local_hit_clips.clear();
             self.local_hit_ids.clear();
+            self.scroll_watches.clear();
             self.local_hit_base = self.hit_table.len();
         }
         self.hit_recordings += 1;
@@ -599,6 +604,18 @@ impl<'a> ElementContext<'a> {
                 *clip = intersect(*clip, outer);
             }
         }
+    }
+
+    /// Note a scroll handle prepainted now, when a cache boundary records.
+    pub(super) fn watch_scroll(&mut self, watch: impl FnOnce() -> ScrollWatch) {
+        if self.hit_recordings > 0 {
+            self.scroll_watches.push(watch());
+        }
+    }
+
+    /// Handles noted by [`Self::watch_scroll`] in this recording.
+    pub(super) fn scroll_watches(&self) -> &[ScrollWatch] {
+        &self.scroll_watches
     }
 
     pub fn bind_hit(&mut self, id: HitId, node: usize) {
@@ -655,6 +672,7 @@ pub(super) struct FrameBuffers {
     local_hit_clips: Vec<Rect>,
     local_hit_ids: Vec<HitId>,
     scroll_stack: Vec<ScrollHandle>,
+    scroll_watches: Vec<ScrollWatch>,
     /// Kept apart: the context needs its keys until `finish_frame`.
     transition_keys: Vec<AnimKey>,
 }
@@ -682,6 +700,7 @@ macro_rules! swap_buffers {
         std::mem::swap(&mut $buffers.local_hit_clips, &mut $cx.local_hit_clips);
         std::mem::swap(&mut $buffers.local_hit_ids, &mut $cx.local_hit_ids);
         std::mem::swap(&mut $buffers.scroll_stack, &mut $cx.scroll_stack);
+        std::mem::swap(&mut $buffers.scroll_watches, &mut $cx.scroll_watches);
     };
 }
 
@@ -721,6 +740,7 @@ impl ElementContext<'_> {
         buffers.local_hit_clips.clear();
         buffers.local_hit_ids.clear();
         buffers.scroll_stack.clear();
+        buffers.scroll_watches.clear();
         if let Some(cache) = self.cache.as_deref_mut() {
             cache.buffers = buffers;
         }

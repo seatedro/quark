@@ -4,7 +4,9 @@ use quark::{Color, Rect, UiKey};
 use quark_text::{LayoutCache, TextSystem};
 
 use super::*;
-use crate::element::{AnyElement, ElementContext, IntoAnyElement, div, render_element};
+use crate::element::{
+    AnyElement, ElementCache, ElementContext, IntoAnyElement, cached, div, render_element,
+};
 use crate::style::Styled;
 use crate::theme::Theme;
 
@@ -12,12 +14,24 @@ const RED: Color = Color::rgba(250, 10, 10, 255);
 
 /// Paints `root` into a 400x300 window with the inspector recording, and
 /// returns the scene. The recorded frame is left in `devtools`.
-fn paint(devtools: &mut Devtools, mut root: AnyElement) -> Scene {
+fn paint(devtools: &mut Devtools, root: AnyElement) -> Scene {
+    paint_cached(devtools, None, root)
+}
+
+/// [`paint`], with an element cache kept across calls.
+fn paint_cached(
+    devtools: &mut Devtools,
+    cache: Option<&mut ElementCache>,
+    mut root: AnyElement,
+) -> Scene {
     let mut text = TextSystem::vendored_only(&Default::default());
     let mut layouts = LayoutCache::default();
     let theme = Theme::default_dark();
     let signals = SignalStore::new();
     let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+    if let Some(cache) = cache {
+        cx = cx.with_element_cache(cache);
+    }
     devtools.begin_frame(&mut cx.devtools);
     let mut scene = Scene::default();
     render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
@@ -138,4 +152,107 @@ fn style_override_applies_to_keyed_element_until_cleared() {
     let scene = paint(&mut devtools, tree());
     assert_eq!(inset(&devtools, "a"), (4.0, 4.0));
     assert_eq!(painted_in(&scene, RED), Vec::<Rect>::new());
+}
+
+/// Paints `root` with the inspector recording, then the overlay over it,
+/// in a 400x300 window, so the panel routes the next input.
+fn paint_with_overlay(devtools: &mut Devtools, mut root: AnyElement) {
+    let mut text = TextSystem::vendored_only(&Default::default());
+    let mut layouts = LayoutCache::default();
+    let theme = Theme::default_dark();
+    let signals = SignalStore::new();
+    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+    cx.semantic = quark::SemanticFrame::new(400.0, 300.0);
+    devtools.begin_frame(&mut cx.devtools);
+    let mut scene = Scene::default();
+    render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
+    devtools.end_frame(&mut cx.devtools);
+    let semantic = std::mem::take(&mut cx.semantic);
+    let hits = std::mem::take(&mut cx.hit_table);
+    drop(cx);
+    devtools.paint_overlay(
+        &mut scene,
+        OverlayContext {
+            theme: &theme,
+            scale_factor: 1.0,
+            text: &mut text,
+            layouts: &mut layouts,
+            signals: &signals,
+            width: 400.0,
+            height: 300.0,
+            semantic: &semantic,
+            hits: &hits,
+            window: 0,
+        },
+    );
+}
+
+/// A hundred tiny rows, each its own semantic node.
+fn many_nodes() -> AnyElement {
+    div()
+        .w(400.0)
+        .h(300.0)
+        .flex_col()
+        .children((0..100).map(|i| div().test_id(format!("row-{i}")).h(2.0).into_any()))
+        .into_any()
+}
+
+/// The semantic node of the element the inspector pinned after a click at
+/// `(x, y)` on its panel.
+fn pin_by_clicking(devtools: &mut Devtools, x: f32, y: f32) -> Option<usize> {
+    devtools.handle(DevtoolsInput::PointerMoved { x, y });
+    devtools.handle(DevtoolsInput::PointerDown);
+    devtools.handle(DevtoolsInput::PointerUp);
+    paint_with_overlay(devtools, many_nodes());
+    devtools.frame().records()[devtools.pinned()?].semantic
+}
+
+// Regression: the semantic tree list clipped every node past the panel's
+// bottom, with no way to reach them.
+#[test]
+fn wheel_over_the_semantic_tree_scrolls_it() {
+    let row_y = 280.0;
+    let mut still = inspecting();
+    paint_with_overlay(&mut still, many_nodes());
+    let unscrolled = pin_by_clicking(&mut still, 300.0, row_y).expect("a row");
+
+    let mut scrolled = inspecting();
+    paint_with_overlay(&mut scrolled, many_nodes());
+    scrolled.handle(DevtoolsInput::PointerMoved { x: 300.0, y: row_y });
+    let wheel = scrolled.handle(DevtoolsInput::Wheel { dx: 0.0, dy: 160.0 });
+    paint_with_overlay(&mut scrolled, many_nodes());
+    let after = pin_by_clicking(&mut scrolled, 300.0, row_y).expect("a row");
+
+    assert!(wheel.consumed && wheel.redraw);
+    // 160 points is ten 16-point rows.
+    assert_eq!(after, unscrolled + 10);
+}
+
+// Regression: an edit to an element inside a cached subtree never showed,
+// because the subtree replayed its recording instead of rebuilding.
+#[test]
+fn style_override_reaches_an_element_inside_a_cached_subtree() {
+    let tree = || {
+        div()
+            .w(400.0)
+            .h(300.0)
+            .child(cached("card", 1, || div().key("card").w(50.0).h(50.0)))
+            .into_any()
+    };
+    let mut devtools = inspecting();
+    let mut cache = ElementCache::new();
+    paint_cached(&mut devtools, Some(&mut cache), tree());
+    devtools.overrides_mut().edit(UiKey::from("card"), |edit| {
+        edit.background = Some(RED);
+    });
+    let scene = paint_cached(&mut devtools, Some(&mut cache), tree());
+    assert_eq!(
+        painted_in(&scene, RED),
+        vec![Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 50.0,
+            height: 50.0
+        }]
+    );
 }
