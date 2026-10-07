@@ -606,51 +606,37 @@ impl Div {
         )
     }
 
-    /// Lay out this frame's scrollbars and give the visible, interactive
-    /// ones hit entries (under the current clip, above the children).
+    /// Lay out this frame's scrollbars (under the current clip, above the
+    /// children).
     fn prepaint_scrollbars(
         &self,
         bounds: Bounds,
         content: (f32, f32),
         scroll: (f32, f32),
         cx: &mut ElementContext,
-    ) -> [Option<(Scrollbar, Option<HitId>)>; 2] {
+    ) -> Scrollbars {
         let axes = match self.scroll_handle {
-            _ if self.hide_scrollbar => return [None, None],
+            _ if self.hide_scrollbar => return Scrollbars::default(),
             Some(_) => self.scroll_axes,
             None => ScrollAxes {
                 x: self.scroll_total_width > 0.0,
                 y: self.scroll_total_height > 0.0,
             },
         };
-        let bars = scrollbars(bounds, content, scroll, axes);
-        if bars.iter().all(Option::is_none) {
-            return [None, None];
+        if !axes.x && !axes.y {
+            return Scrollbars::default();
         }
-        if self.scrollbar_auto_hide {
-            let pointer_inside = cx
-                .mouse_position
-                .is_some_and(|(x, y)| bounds.contains(x, y) && cx.current_clip().contains(x, y));
-            let visible = pointer_inside
-                || self.scroll_handle.as_ref().is_some_and(|handle| {
-                    handle.dragging().is_some() || handle.recently_scrolled(cx)
-                });
-            if !visible {
-                return [None, None];
-            }
-        }
-        bars.map(|bar| {
-            bar.map(|bar| {
-                let hit = self.scrollbar_sink(bar.axis).is_some().then(|| {
-                    cx.insert_hit(
-                        bar.hit,
-                        HitFlags::DRAG | HitFlags::HOVER,
-                        CursorHint::Default,
-                    )
-                });
-                (bar, hit)
-            })
-        })
+        Scrollbars::prepaint(
+            ScrollbarInput {
+                bounds,
+                content,
+                offset: scroll,
+                axes,
+                sinks: Axis::BOTH.map(|axis| self.scrollbar_sink(axis)),
+                auto_hide: self.scrollbar_auto_hide,
+            },
+            cx,
+        )
     }
 
     /// Where input on the scrollbar of `axis` goes, if anywhere.
@@ -695,7 +681,7 @@ pub struct DivPrepaintState {
     /// Rotation and scale about the center, when the div has any.
     matrix: Option<Transform2D>,
     scroll: (f32, f32),
-    scrollbars: [Option<(Scrollbar, Option<HitId>)>; 2],
+    scrollbars: Scrollbars,
 }
 
 impl Element for Div {
@@ -1163,18 +1149,7 @@ impl Element for Div {
         cx.push_accessibility_text_hidden(suppress_descendant_accessibility_text);
         if let Some(index) = semantic_parent {
             cx.push_semantic_parent(index);
-            // Before the children, so each bar's node keeps its position
-            // (and so its identity for drag capture) as children change.
-            for (bar, hit) in prepaint_state.scrollbars.iter().flatten() {
-                if let (Some(hit), Some(sink)) = (hit, self.scrollbar_sink(bar.axis)) {
-                    let mut node = SemanticNode::new(bar.hit);
-                    node.parent = Some(index);
-                    node.actions = SemanticActions::default().draggable();
-                    let node = cx.semantic.push(node);
-                    cx.bind_hit(*hit, node);
-                    cx.handlers.on_scrollbar(node, *bar, sink);
-                }
-            }
+            prepaint_state.scrollbars.register(index, cx);
         }
 
         if (child_dx, child_dy) != (0.0, 0.0) {
@@ -1198,11 +1173,7 @@ impl Element for Div {
             cx.pop_text_color();
         }
 
-        let dragging = self.scroll_handle.as_ref().and_then(ScrollHandle::dragging);
-        for (bar, hit) in prepaint_state.scrollbars.iter().flatten() {
-            let hovered = hit.is_some_and(|hit| cx.is_hovered(hit));
-            bar.paint(scene, cx.theme, hovered, dragging == Some(bar.axis));
-        }
+        prepaint_state.scrollbars.paint(scene, cx);
 
         if should_clip {
             scene.pop_clip();

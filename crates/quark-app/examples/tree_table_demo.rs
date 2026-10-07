@@ -575,6 +575,47 @@ mod tests {
         assert_eq!(ui.find_all(By::role(Role::Cell)).len(), 19 * 2);
     }
 
+    // Catches the table's columns not scrolling under a horizontal thumb
+    // drag, or the body and header moving apart: dragging the thumb to the
+    // end shows the last column flush with the table's right edge, its
+    // cells under its header.
+    #[test]
+    fn dragging_the_tables_horizontal_thumb_scrolls_body_and_header_together() {
+        let mut ui = harness(project(), 100);
+        // 300 points of table over 480 of columns.
+        let right = TREE_WIDTH + 300.0;
+        ui.resize(right, SIZE.1);
+        let thumb = ui
+            .scene()
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                // The bottom bar's thumb; its track is the faint one.
+                quark::scene::Primitive::RoundedRect(r)
+                    if r.rect.x > TREE_WIDTH && r.rect.y > SIZE.1 - 8.0 && r.color.a != 10 =>
+                {
+                    Some((
+                        r.rect.x + r.rect.width / 2.0,
+                        r.rect.y + r.rect.height / 2.0,
+                    ))
+                }
+                _ => None,
+            })
+            .expect("a horizontal thumb");
+        ui.drag(thumb, (right + 40.0, thumb.1));
+
+        let header = ui.find(By::role_name(Role::ColumnHeader, "Kind")).bounds;
+        let cell = ui.find_all(By::role_name(Role::Cell, "rust"))[0].bounds;
+        assert_eq!(
+            (
+                ui.app().table.scroll_offset().0,
+                header.x + header.width,
+                cell.x
+            ),
+            (180.0, right, header.x)
+        );
+    }
+
     // ---- Frames ----------------------------------------------------------
 
     /// A frame that repeats the last one, with no screen reader connected,

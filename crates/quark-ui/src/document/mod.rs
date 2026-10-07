@@ -1293,6 +1293,9 @@ impl<G: BlockGeometry> Document<G> {
             DocumentEvent::Wheel(lines) => {
                 self.scroll_by(lines as f32 * self.style.line_scroll);
             }
+            DocumentEvent::ScrollTo(offset) => {
+                self.set_scroll_offset(offset);
+            }
         }
     }
 

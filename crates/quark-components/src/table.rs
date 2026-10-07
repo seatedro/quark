@@ -11,8 +11,9 @@
 //! Each row is its own cache boundary inside one boundary for the whole
 //! view, so an unchanged frame replays without building or allocating.
 //!
-//! Horizontal scrolling has no wheel input yet: the view clips to its
-//! width, keyboard navigation scrolls the cursor column into view, and
+//! The body scrolls both ways under shared scrollbars: wheel (Shift+wheel
+//! or sideways trackpad motion for horizontal), thumb drags, and track
+//! presses. Keyboard navigation scrolls the cursor column into view, and
 //! apps can call [`TableState::scroll_x_by`].
 //!
 //! Like [`crate::tree_view`], the view emits [`TableEvent`]s through a
@@ -109,6 +110,9 @@ pub enum TableEvent {
     Key(TableKey),
     Scroll(i32),
     ScrollTo(f32),
+    /// Horizontal wheel lines; positive scrolls right.
+    ScrollX(i32),
+    ScrollXTo(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -474,6 +478,21 @@ impl TableState {
             TableEvent::ScrollTo(offset) => {
                 let t = self.m();
                 t.scroll_y = offset;
+                t.clamp_scroll();
+                TableOutcome::Changed
+            }
+            TableEvent::ScrollX(lines) => {
+                let before = t.scroll_x;
+                self.scroll_x_by(lines as f32 * WHEEL_LINE_PX);
+                if self.inner.scroll_x == before {
+                    TableOutcome::Unchanged
+                } else {
+                    TableOutcome::Changed
+                }
+            }
+            TableEvent::ScrollXTo(offset) => {
+                let t = self.m_layout();
+                t.scroll_x = offset;
                 t.clamp_scroll();
                 TableOutcome::Changed
             }
@@ -972,6 +991,12 @@ fn build_table<D: TableData>(
         .on_scroll(
             ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))
                 .with_to_px(move |px| on_event(TableEvent::ScrollTo(px as f32))),
+        )
+        .scroll_x(t.scroll_x)
+        .scroll_total_x(t.total_width())
+        .on_scroll_x(
+            ScrollActionBuilder::new(move |lines| on_event(TableEvent::ScrollX(lines)))
+                .with_to_px(move |px| on_event(TableEvent::ScrollXTo(px as f32))),
         );
     body = body.child(div().w_full().h(window.top_spacer).flex_shrink_0());
     for display in window.range {
@@ -1115,7 +1140,6 @@ fn table_row<D: TableData>(
             .h(t.row_height)
             .flex_shrink_0()
             .flex_row()
-            .translate(-t.scroll_x, 0.0)
             .border_b(colors.border)
             .on_click(on_event(TableEvent::PressRow(row)));
         el = if selected {
