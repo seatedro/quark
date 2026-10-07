@@ -101,17 +101,6 @@ fn picker_row<T: PickerItem>(
     } else {
         Color::TRANSPARENT
     };
-    let icon_child = entry
-        .icon_svg()
-        .map(|svg| svg_icon(svg, icon_size).color(tc.icon));
-    let detail_child = entry
-        .detail()
-        .filter(|d| !d.is_empty())
-        .map(|d| text(d).text_xs().color(tc.text_muted).truncate());
-    let rhs_child = entry
-        .rhs()
-        .filter(|d| !d.is_empty())
-        .map(|d| text(d).text_xs().color(tc.text_muted));
     let disabled = entry.is_disabled();
     view! { scale,
         <div class="w-full shrink-0 flex-row items-center"
@@ -129,7 +118,9 @@ fn picker_row<T: PickerItem>(
              aria-selected={selected}
              aria-disabled={disabled}
              cursor={CursorHint::Pointer}>
-            {?icon_child}
+            if let Some(svg) = entry.icon_svg() {
+                <icon svg={svg} size={icon_size} color={tc.icon} />
+            }
             {picker_label(
                 entry.label(),
                 entry.label_style(),
@@ -137,8 +128,12 @@ fn picker_row<T: PickerItem>(
                 selected,
                 theme
             )}
-            {?detail_child}
-            {?rhs_child}
+            if let Some(detail) = entry.detail().filter(|d| !d.is_empty()) {
+                <text class="text-xs" color={tc.text_muted} class="truncate">{detail}</text>
+            }
+            if let Some(rhs) = entry.rhs().filter(|d| !d.is_empty()) {
+                <text class="text-xs" color={tc.text_muted}>{rhs}</text>
+            }
         </div>
     }
 }
@@ -220,8 +215,8 @@ fn id_prefix_label(
         return view! {
             <div class="flex-1 overflow-hidden">
                 <div class="flex-row overflow-hidden">
-                    {text(prefix).text_sm().bold().color(prefix_color)}
-                    {text(rest).text_sm().color(tc.text_muted)}
+                    <text class="text-sm font-bold" color={prefix_color}>{prefix}</text>
+                    <text class="text-sm" color={tc.text_muted}>{rest}</text>
                 </div>
             </div>
         };
@@ -237,13 +232,11 @@ fn id_prefix_label(
         let color = if highlighted { tc.accent } else { prefix_color };
         if segment_start < split {
             let segment_end = end.min(split);
-            spans.push(
-                text(&label_text[segment_start..segment_end])
-                    .text_sm()
-                    .bold()
-                    .color(color)
-                    .into_any(),
-            );
+            spans.push(view! {
+                <text class="text-sm font-bold" color={color}>
+                    {&label_text[segment_start..segment_end]}
+                </text>
+            });
             segment_start = segment_end;
         }
         if segment_start < end {
@@ -252,12 +245,9 @@ fn id_prefix_label(
             } else {
                 tc.text_muted
             };
-            spans.push(
-                text(&label_text[segment_start..end])
-                    .text_sm()
-                    .color(color)
-                    .into_any(),
-            );
+            spans.push(view! {
+                <text class="text-sm" color={color}>{&label_text[segment_start..end]}</text>
+            });
         }
     };
 
