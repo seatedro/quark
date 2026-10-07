@@ -79,10 +79,8 @@ jobs:
 
   kani:
     runs-on: ubuntu-latest
-    # Report-only until a baseline run passes. Harnesses cover HashMap-free
-    # cores only (std's SipHash makes Kani's search blow up); the earlier
-    # BlockOrder harness ran 87 minutes without finishing.
-    continue-on-error: true
+    # Harnesses cover HashMap-free cores only: std's SipHash makes Kani's
+    # search blow up (an earlier BlockOrder harness ran 87 minutes).
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

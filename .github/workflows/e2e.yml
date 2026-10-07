@@ -16,10 +16,6 @@ jobs:
   # Xvfb + openbox. See e2e/run.sh.
   e2e:
     runs-on: ubuntu-latest
-    # Report-only while the baseline settles (TEST_BIBLE: conformance suites
-    # report without failing until they pass). Remove this line once the job
-    # has been green on two consecutive runs of main.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
