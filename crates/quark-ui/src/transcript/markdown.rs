@@ -1,37 +1,64 @@
 //! Markdown messages as transcript blocks.
 //!
 //! [`MarkdownMessage`] turns each [`MarkdownDoc`] block into one
-//! [`TranscriptBlock`] keyed by (message, block index), so every heading,
-//! paragraph, list item, quote, table, code block, and rule is its own
-//! selectable block and selection runs across messages. Converted blocks
-//! are kept between calls and reused while their markdown and highlight
-//! are unchanged, so a streaming message rebuilds only its growing tail and
-//! the leading blocks keep the layouts already shaped for them.
+//! [`TranscriptBlock`], so every heading, paragraph, list item, quote,
+//! table, code block, and rule is its own selectable block and selection
+//! runs across messages. Converted blocks are kept between calls and reused
+//! while their markdown and highlight are unchanged, so a streaming message
+//! rebuilds only its growing tail and the leading blocks keep the layouts
+//! already shaped for them.
+//!
+//! Blocks carry [`SpanTone`]s instead of theme colors; the transcript
+//! element resolves them, so a theme change needs no reconversion.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use quark::selection::BlockKey;
 use quark_render::{FontKind, FontWeight};
+use unicode_width::UnicodeWidthStr;
 
-use super::syntax::SyntaxHighlighter;
-use super::{BlockStyle, TranscriptBlock};
+use super::syntax::{CodeLine, SyntaxHighlighter};
+use super::{BlockStyle, SpanTone, TranscriptBlock};
 use crate::element::StyledSpan;
-use crate::markdown::{BlockKind, ListMarker, MarkdownDoc, heading_style, styled_spans};
-use crate::theme::Theme;
-use crate::virtual_list::RowKey;
+use crate::markdown::{BlockKind, ListMarker, MarkdownDoc, SpanFlags};
 
-/// Code block font size relative to body text.
-const CODE_SCALE: f32 = 0.92;
+/// Code block and table font size relative to body text.
+pub const CODE_SCALE: f32 = 0.92;
 
-/// Key of block `index` of message `row`: `row << 16 | index`. Rows must
-/// stay below 2^48 and messages below 65,536 blocks.
-pub fn markdown_block_key(row: RowKey, index: usize) -> BlockKey {
-    BlockKey((row.0 << 16) | (index as u64 & 0xffff))
+/// Font size scale and base weight of a heading level.
+pub fn heading_style(level: u8) -> (f32, FontWeight) {
+    match level {
+        1 => (1.5, FontWeight::Bold),
+        2 => (1.3, FontWeight::Bold),
+        3 => (1.15, FontWeight::Semibold),
+        _ => (1.0, FontWeight::Semibold),
+    }
 }
 
-/// The message a [`markdown_block_key`] belongs to.
-pub fn markdown_block_row(key: BlockKey) -> RowKey {
-    RowKey(key.0 >> 16)
+/// Hands out block keys that are never reused, so blocks of different
+/// messages, or of one message before and after an edit, cannot collide.
+#[derive(Debug, Clone, Default)]
+pub struct BlockKeys {
+    next: u64,
+}
+
+impl BlockKeys {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Starts at `first`, for apps that keep other block keys below it.
+    pub fn starting_at(first: u64) -> Self {
+        Self { next: first }
+    }
+
+    pub fn allocate(&mut self) -> BlockKey {
+        let key = BlockKey(self.next);
+        // 2^64 keys at a billion per second last 584 years.
+        self.next = self.next.wrapping_add(1);
+        key
+    }
 }
 
 struct Converted {
@@ -41,39 +68,52 @@ struct Converted {
 }
 
 /// One message's markdown converted to transcript blocks, with the
-/// conversions kept for reuse. Build a new one (or call
-/// [`MarkdownMessage::clear`]) when the theme changes, since block colors
-/// come from it.
+/// conversions kept for reuse. Block `i` keeps its key for as long as the
+/// message has an `i`-th block.
+#[derive(Default)]
 pub struct MarkdownMessage {
-    row: RowKey,
+    keys: Vec<BlockKey>,
     converted: Vec<Converted>,
 }
 
 impl MarkdownMessage {
-    pub fn new(row: RowKey) -> Self {
-        Self {
-            row,
-            converted: Vec::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Forgets every conversion.
-    pub fn clear(&mut self) {
+    /// Keys of the blocks the last [`Self::blocks`] call returned.
+    pub fn keys(&self) -> &[BlockKey] {
+        &self.keys
+    }
+
+    /// Forgets every conversion and the highlights of every block, as when
+    /// the message is removed.
+    pub fn clear(&mut self, syntax: &mut SyntaxHighlighter) {
+        for key in self.keys.drain(..) {
+            syntax.forget(key);
+        }
         self.converted.clear();
     }
 
     /// The blocks of `doc`. A block whose markdown hash and code highlight
     /// match the previous call is returned as before (its spans shared,
-    /// not rebuilt).
+    /// not rebuilt). New blocks get keys from `keys`; blocks past the end
+    /// of `doc` give up their keys and highlights.
     pub fn blocks(
         &mut self,
         doc: &MarkdownDoc,
-        theme: &Theme,
         syntax: &mut SyntaxHighlighter,
+        keys: &mut BlockKeys,
     ) -> Vec<TranscriptBlock> {
+        for key in self.keys.drain(doc.len().min(self.keys.len())..) {
+            syntax.forget(key);
+        }
         self.converted.truncate(doc.len());
+        while self.keys.len() < doc.len() {
+            self.keys.push(keys.allocate());
+        }
         for index in 0..doc.len() {
-            let key = markdown_block_key(self.row, index);
+            let key = self.keys[index];
             let hash = doc.hash(index);
             let highlight = match doc.kind(index) {
                 BlockKind::CodeBlock => syntax.version(key, doc.lang(index), doc.text(index)),
@@ -89,7 +129,7 @@ impl MarkdownMessage {
             let converted = Converted {
                 hash,
                 highlight,
-                block: convert(doc, index, key, theme, syntax),
+                block: convert(doc, index, key, syntax),
             };
             match self.converted.get_mut(index) {
                 Some(slot) => *slot = converted,
@@ -104,23 +144,58 @@ fn convert(
     doc: &MarkdownDoc,
     index: usize,
     key: BlockKey,
-    theme: &Theme,
     syntax: &SyntaxHighlighter,
 ) -> TranscriptBlock {
     let style = block_style(doc, index);
     let block = match doc.kind(index) {
-        BlockKind::Paragraph | BlockKind::Heading(_) => TranscriptBlock::prose(
-            key,
-            styled_spans(doc, doc.spans(index), style.weight, theme),
-        ),
+        BlockKind::Paragraph | BlockKind::Heading(_) => {
+            TranscriptBlock::toned_prose(key, styled_spans(doc, doc.spans(index), style.weight))
+        }
         BlockKind::CodeBlock => {
-            TranscriptBlock::code(key, syntax.lines(key, doc.text(index), theme))
+            TranscriptBlock::toned_code(key, syntax.lines(key, doc.text(index)))
                 .with_label(Some(Arc::from(doc.lang(index))))
         }
-        BlockKind::Table => TranscriptBlock::code(key, table_lines(doc, index, theme)),
+        BlockKind::Table => TranscriptBlock::toned_code(key, table_lines(doc, index)),
         BlockKind::Rule => TranscriptBlock::rule(key),
     };
     block.with_style(style)
+}
+
+/// The spans `spans` of `doc` as styled runs with their tones. Span weights
+/// override the block's base weight in SelectableText, so the base
+/// (heading weight) is folded into every span here.
+fn styled_spans(
+    doc: &MarkdownDoc,
+    spans: Range<usize>,
+    base: FontWeight,
+) -> Vec<(StyledSpan, SpanTone)> {
+    spans
+        .map(|s| {
+            let (text, flags, url) = doc.span(s);
+            let code = flags.contains(SpanFlags::CODE);
+            let image = flags.contains(SpanFlags::IMAGE);
+            let span = StyledSpan {
+                font_kind: if code { FontKind::Mono } else { FontKind::Ui },
+                font_weight: if flags.contains(SpanFlags::BOLD) {
+                    FontWeight::Bold
+                } else {
+                    base
+                },
+                italic: flags.contains(SpanFlags::ITALIC) || image,
+                strikethrough: flags.contains(SpanFlags::STRIKE),
+                link: url.cloned(),
+                ..StyledSpan::plain(text)
+            };
+            let tone = if code {
+                SpanTone::InlineCode
+            } else if image {
+                SpanTone::Muted
+            } else {
+                SpanTone::Plain
+            };
+            (span, tone)
+        })
+        .collect()
 }
 
 /// Indent, marker, size, and copy prefixes of block `index`.
@@ -169,16 +244,18 @@ fn block_style(doc: &MarkdownDoc, index: usize) -> BlockStyle {
             ListMarker::Task(false) => Some(Arc::from("[ ]")),
         },
         muted: quote > 0,
-        // Consecutive list blocks sit closer, as in the markdown view.
+        // Consecutive list blocks sit closer together.
         tight: index > 0 && depth > 0 && doc.indent(index - 1) > 0,
         copy_prefix: Arc::from(prefix),
         copy_line_prefix: Arc::from(quote_prefix),
     }
 }
 
-/// A table as aligned monospace pipe rows, header in bold. The text is
-/// valid markdown, so copying a table pastes as one.
-fn table_lines(doc: &MarkdownDoc, block: usize, theme: &Theme) -> Vec<Vec<StyledSpan>> {
+/// A table as aligned monospace pipe rows, header in bold. Columns are
+/// padded by display width, so wide (CJK) and zero-width chars line up in
+/// the monospace grid. The text is valid markdown, so copying a table
+/// pastes as one.
+fn table_lines(doc: &MarkdownDoc, block: usize) -> Vec<CodeLine> {
     let columns = doc.table_columns(block).max(1);
     let mut rows: Vec<Vec<String>> = Vec::new();
     for cell in doc.cells(block) {
@@ -193,25 +270,27 @@ fn table_lines(doc: &MarkdownDoc, block: usize, theme: &Theme) -> Vec<Vec<Styled
     let mut widths = vec![3; columns];
     for row in &rows {
         for (width, text) in widths.iter_mut().zip(row) {
-            *width = (*width).max(text.chars().count());
+            *width = (*width).max(text.width());
         }
     }
 
-    let muted = theme.colors.text_muted;
-    let span = |text: String, weight: FontWeight, color: Option<quark::Color>| StyledSpan {
+    let span = |text: String, weight: FontWeight| StyledSpan {
         font_kind: FontKind::Mono,
         font_weight: weight,
-        color,
         ..StyledSpan::plain(text)
     };
+    let pipe = |text: &str| (span(text.to_owned(), FontWeight::Normal), SpanTone::Muted);
     let row_line = |row: &[String], weight: FontWeight| {
         let mut line = Vec::new();
         for (text, width) in row.iter().zip(&widths) {
-            line.push(span("| ".to_owned(), FontWeight::Normal, Some(muted)));
-            let pad = width - text.chars().count();
-            line.push(span(format!("{text}{} ", " ".repeat(pad)), weight, None));
+            line.push(pipe("| "));
+            let pad = width - text.width();
+            line.push((
+                span(format!("{text}{} ", " ".repeat(pad)), weight),
+                SpanTone::Plain,
+            ));
         }
-        line.push(span("|".to_owned(), FontWeight::Normal, Some(muted)));
+        line.push(pipe("|"));
         line
     };
 
@@ -224,7 +303,7 @@ fn table_lines(doc: &MarkdownDoc, block: usize, theme: &Theme) -> Vec<Vec<Styled
                 .map(|w| format!("| {} ", "-".repeat(*w)))
                 .chain(std::iter::once("|".to_owned()))
                 .collect();
-            lines.push(vec![span(rule, FontWeight::Normal, Some(muted))]);
+            lines.push(vec![pipe(&rule)]);
         } else {
             lines.push(row_line(row, FontWeight::Normal));
         }

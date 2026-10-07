@@ -20,7 +20,10 @@ const LABEL_ROW: f32 = 1.4;
 /// selection offsets index and copy reads. An optional label (the fence
 /// language) sits in a row above the code and is not part of that string.
 pub struct CodeBlock {
-    lines: Vec<Vec<StyledSpan>>,
+    /// The lines joined by [`join_code_lines`], shared so a caller that keeps
+    /// them builds the element every frame without copying their text.
+    spans: Arc<[StyledSpan]>,
+    line_count: usize,
     label: Option<Arc<str>>,
     width: f32,
     font_size: f32,
@@ -38,8 +41,15 @@ pub struct CodeBlockMetrics {
 }
 
 pub fn code_block(lines: Vec<Vec<StyledSpan>>) -> CodeBlock {
+    let line_count = lines.len();
+    code_block_joined(join_code_lines(&lines), line_count)
+}
+
+/// A code block from lines already joined by [`join_code_lines`].
+pub fn code_block_joined(spans: impl Into<Arc<[StyledSpan]>>, line_count: usize) -> CodeBlock {
     CodeBlock {
-        lines,
+        spans: spans.into(),
+        line_count,
         label: None,
         width: 0.0,
         font_size: 0.0,
@@ -77,10 +87,16 @@ impl CodeBlock {
     /// The text params `request_layout` shapes for `lines`: one unwrapped
     /// monospace text with the lines joined by `\n`.
     pub fn layout_params(lines: &[Vec<StyledSpan>], font_size: f32) -> TextParams {
+        Self::joined_layout_params(&join_code_lines(lines), font_size)
+    }
+
+    /// [`Self::layout_params`] for lines already joined by
+    /// [`join_code_lines`].
+    pub fn joined_layout_params(spans: &[StyledSpan], font_size: f32) -> TextParams {
         let style = TextStyle::new(font_size)
             .kind(FontKind::Mono)
             .line_height(font_size * CODE_LINE_HEIGHT);
-        styled_params(&joined_spans(lines), style, None)
+        styled_params(spans, style, None)
     }
 
     /// Height and text origin of a block of `line_count` lines.
@@ -95,8 +111,9 @@ impl CodeBlock {
     }
 }
 
-/// The lines flattened into spans, with a plain `\n` span between lines.
-fn joined_spans(lines: &[Vec<StyledSpan>]) -> Vec<StyledSpan> {
+/// The lines flattened into spans, with a plain `\n` span between lines:
+/// the text a code block lays out, selects, and copies.
+pub fn join_code_lines(lines: &[Vec<StyledSpan>]) -> Vec<StyledSpan> {
     let mut spans = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
@@ -114,7 +131,7 @@ fn joined_spans(lines: &[Vec<StyledSpan>]) -> Vec<StyledSpan> {
 pub struct CodeBlockState {
     layout: Option<Arc<TextLayout>>,
     label: Option<Arc<TextLayout>>,
-    spans: Vec<StyledSpan>,
+    spans: Arc<[StyledSpan]>,
 }
 
 impl Element for CodeBlock {
@@ -126,9 +143,9 @@ impl Element for CodeBlock {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
-        let params = Self::layout_params(&self.lines, self.font_size);
+        let params = Self::joined_layout_params(&self.spans, self.font_size);
         let layout = cx.layout_text(&params);
-        let spans = joined_spans(&self.lines);
+        let spans = self.spans.clone();
         let label = self.label.as_ref().and_then(|label| {
             let size = self.font_size * LABEL_SIZE;
             cx.layout_text(&TextParams::new(
@@ -138,7 +155,7 @@ impl Element for CodeBlock {
                     .line_height(size * 1.2),
             ))
         });
-        let height = Self::metrics(self.font_size, self.lines.len(), self.label.is_some()).height;
+        let height = Self::metrics(self.font_size, self.line_count, self.label.is_some()).height;
         let id = engine.request_layout(
             taffy::Style {
                 size: taffy::Size {
@@ -180,7 +197,7 @@ impl Element for CodeBlock {
     ) {
         let default_color = cx.text_color_override().unwrap_or(cx.theme.colors.text);
         let radius = (self.font_size * 0.35).min(8.0);
-        let metrics = Self::metrics(self.font_size, self.lines.len(), self.label.is_some());
+        let metrics = Self::metrics(self.font_size, self.line_count, self.label.is_some());
         let origin = (
             bounds.x + metrics.text_origin.0,
             bounds.y + metrics.text_origin.1,

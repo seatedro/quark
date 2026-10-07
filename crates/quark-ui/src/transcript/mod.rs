@@ -18,6 +18,7 @@
 //! and text streaming into the last message.
 
 mod element;
+mod facade;
 mod markdown;
 mod measure;
 mod syntax;
@@ -25,19 +26,25 @@ mod syntax;
 mod tests;
 
 pub use element::{TranscriptElement, TranscriptEvent};
-pub use markdown::{MarkdownMessage, markdown_block_key, markdown_block_row};
+pub use facade::{MarkdownEntry, MarkdownTranscript};
+pub use markdown::{BlockKeys, CODE_SCALE, MarkdownMessage, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use quark::selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText};
+use quark::selection::{
+    BlockKey, BlockOrder, FULL_INTEGRITY_CHECKS, Selection, SelectionPoint, SelectionText,
+    count_integrity_steps,
+};
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
-use crate::element::StyledSpan;
+use crate::element::{Binding, StyledSpan, join_code_lines};
+use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, VariableList};
+use quark::Color;
 
 /// What separates blocks in copied text.
 pub const BLOCK_SEPARATOR: &str = "\n\n";
@@ -61,20 +68,98 @@ const QUOTE_STEP: f32 = 1.0;
 const LIST_STEP: f32 = 1.75;
 
 /// The styled content of one block. The concatenation of the span texts
-/// (code lines joined with `\n`) is the plain text that selection offsets
-/// index and copy reads.
+/// is the plain text that selection offsets index and copy reads.
 #[derive(Debug, Clone)]
 pub enum BlockContent {
     /// Wrapped text, painted by `SelectableText`.
     Prose(Arc<[StyledSpan]>),
     /// Unwrapped monospace lines, painted by `CodeBlock`, with an optional
-    /// label (the fence language) above them.
+    /// label (the fence language) above them. `spans` are the lines joined
+    /// by [`join_code_lines`], a plain `\n` span between lines.
     Code {
-        lines: Arc<[Vec<StyledSpan>]>,
+        spans: Arc<[StyledSpan]>,
+        line_count: usize,
         label: Option<Arc<str>>,
     },
     /// A horizontal rule. Its text is `---`, so copy keeps it.
     Rule,
+}
+
+impl BlockContent {
+    fn spans(&self) -> Option<&Arc<[StyledSpan]>> {
+        match self {
+            Self::Prose(spans) | Self::Code { spans, .. } => Some(spans),
+            Self::Rule => None,
+        }
+    }
+}
+
+/// Where a span's color comes from when it depends on the theme. Resolved
+/// each time the element is built, so a theme change needs no rebuild of
+/// the blocks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SpanTone {
+    /// The span's own `color`, or the block's text color when `None`.
+    #[default]
+    Plain,
+    /// The muted text color (image alt text, table rules).
+    Muted,
+    /// Inline code: a pill in the element background color behind it.
+    InlineCode,
+    /// A syntax highlight class.
+    Syntax(SyntaxTone),
+}
+
+/// Syntax highlight classes, each with its own theme color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SyntaxTone {
+    Keyword,
+    String,
+    Comment,
+    Function,
+    Type,
+    Number,
+    Property,
+    Operator,
+}
+
+/// The theme colors [`SpanTone`]s resolve to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Palette {
+    muted: Color,
+    pill: Color,
+    syntax: [Color; 8],
+}
+
+impl Palette {
+    fn new(theme: &Theme) -> Self {
+        let c = &theme.colors;
+        Self {
+            muted: c.text_muted,
+            pill: c.element_background,
+            syntax: [
+                c.syntax_keyword,
+                c.syntax_string,
+                c.syntax_comment,
+                c.syntax_function,
+                c.syntax_type,
+                c.syntax_number,
+                c.syntax_property,
+                c.syntax_operator,
+            ],
+        }
+    }
+
+    fn paint(&self, span: &StyledSpan, tone: SpanTone) -> StyledSpan {
+        let mut span = span.clone();
+        match tone {
+            SpanTone::Plain => {}
+            SpanTone::Muted => span.color = Some(self.muted),
+            SpanTone::InlineCode => span.pill = Some(self.pill),
+            SpanTone::Syntax(tone) => span.color = Some(self.syntax[tone as usize]),
+        }
+        span
+    }
 }
 
 /// How a block sits in its message: size, indent, list marker, quote bars,
@@ -135,6 +220,8 @@ pub struct TranscriptBlock {
     pub content: BlockContent,
     pub style: BlockStyle,
     text: Arc<str>,
+    /// One per content span, when any span takes its color from the theme.
+    tones: Option<Arc<[SpanTone]>>,
 }
 
 impl TranscriptBlock {
@@ -149,7 +236,14 @@ impl TranscriptBlock {
             content: BlockContent::Prose(spans.into()),
             style: BlockStyle::default(),
             text: text.into(),
+            tones: None,
         }
+    }
+
+    /// Prose whose spans take theme colors by [`SpanTone`].
+    pub fn toned_prose(key: BlockKey, spans: Vec<(StyledSpan, SpanTone)>) -> Self {
+        let (spans, tones): (Vec<StyledSpan>, Vec<SpanTone>) = spans.into_iter().unzip();
+        Self::prose(key, spans).with_tones(tones)
     }
 
     pub fn rule(key: BlockKey) -> Self {
@@ -158,6 +252,7 @@ impl TranscriptBlock {
             content: BlockContent::Rule,
             style: BlockStyle::default(),
             text: Arc::from("---"),
+            tones: None,
         }
     }
 
@@ -176,29 +271,102 @@ impl TranscriptBlock {
 
     /// Each inner `Vec` is one source line.
     pub fn code(key: BlockKey, lines: Vec<Vec<StyledSpan>>) -> Self {
-        let mut text = String::new();
-        for (i, line) in lines.iter().enumerate() {
-            if i > 0 {
-                text.push('\n');
-            }
-            for span in line {
-                text.push_str(&span.text);
-            }
-        }
+        let line_count = lines.len();
+        let spans = join_code_lines(&lines);
+        let text: String = spans.iter().map(|span| span.text.as_str()).collect();
         Self {
             key,
             content: BlockContent::Code {
-                lines: lines.into(),
+                spans: spans.into(),
+                line_count,
                 label: None,
             },
             style: BlockStyle::default(),
             text: text.into(),
+            tones: None,
         }
+    }
+
+    /// Code whose spans take theme colors by [`SpanTone`].
+    pub fn toned_code(key: BlockKey, lines: Vec<Vec<(StyledSpan, SpanTone)>>) -> Self {
+        let mut tones = Vec::new();
+        let lines = lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, line)| {
+                if i > 0 {
+                    // The `\n` span join_code_lines puts between lines.
+                    tones.push(SpanTone::Plain);
+                }
+                line.into_iter()
+                    .map(|(span, tone)| {
+                        tones.push(tone);
+                        span
+                    })
+                    .collect()
+            })
+            .collect();
+        Self::code(key, lines).with_tones(tones)
+    }
+
+    /// `tones` holds one tone per content span; a block whose tones are all
+    /// plain stores none.
+    fn with_tones(mut self, tones: Vec<SpanTone>) -> Self {
+        debug_assert_eq!(
+            Some(tones.len()),
+            self.content.spans().map(|spans| spans.len())
+        );
+        self.tones = tones
+            .iter()
+            .any(|tone| *tone != SpanTone::Plain)
+            .then(|| tones.into());
+        self
     }
 
     /// The plain text selection and copy operate on.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The tone of each content span, or `None` when all are plain.
+    pub fn tones(&self) -> Option<&[SpanTone]> {
+        self.tones.as_deref()
+    }
+
+    /// Whether `other` lays out exactly like this block: the same shared
+    /// content and the same style. Colors do not affect layout.
+    fn same_layout(&self, other: &TranscriptBlock) -> bool {
+        let content = match (&self.content, &other.content) {
+            (BlockContent::Prose(a), BlockContent::Prose(b)) => Arc::ptr_eq(a, b),
+            (
+                BlockContent::Code {
+                    spans: a,
+                    label: la,
+                    ..
+                },
+                BlockContent::Code {
+                    spans: b,
+                    label: lb,
+                    ..
+                },
+            ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some(),
+            (BlockContent::Rule, BlockContent::Rule) => true,
+            _ => false,
+        };
+        content && self.style == other.style
+    }
+
+    /// The content spans with their tones resolved against `palette`.
+    fn painted_spans(&self, palette: &Palette) -> Option<Arc<[StyledSpan]>> {
+        let spans = self.content.spans()?;
+        Some(match &self.tones {
+            None => spans.clone(),
+            Some(tones) => spans
+                .iter()
+                .zip(tones.iter())
+                .map(|(span, tone)| palette.paint(span, *tone))
+                .collect(),
+        })
     }
 }
 
@@ -270,8 +438,9 @@ impl Default for TranscriptStyle {
     }
 }
 
-/// Measured geometry of one block at one width.
-pub trait BlockGeometry {
+/// Measured geometry of one block at one width. Kept between frames for
+/// blocks that stay materialized, so it should be cheap to clone.
+pub trait BlockGeometry: Clone {
     fn height(&self) -> f32;
     /// Byte offset nearest to a point relative to the block's top left.
     fn hit(&self, x: f32, y: f32) -> usize;
@@ -282,6 +451,52 @@ pub trait BlockGeometry {
 pub trait BlockMeasurer {
     type Geometry: BlockGeometry;
     fn measure(&mut self, block: &TranscriptBlock, width: f32) -> Self::Geometry;
+
+    /// Identifies the settings geometry depends on besides the block and
+    /// width (font size, scale factor). Geometry measured under another key
+    /// is measured again.
+    fn settings_key(&self) -> u64 {
+        0
+    }
+}
+
+/// Geometry of a block as measured, with what it was measured from.
+#[derive(Debug, Clone)]
+struct Measured<G> {
+    block: TranscriptBlock,
+    width: u32,
+    settings: u64,
+    geometry: G,
+}
+
+/// `block`'s geometry from `cache` when it was measured from the same
+/// content, style, width, and measurer settings; otherwise measures it and
+/// caches the result.
+fn measure_cached<G: BlockGeometry, M: BlockMeasurer<Geometry = G>>(
+    cache: &mut HashMap<BlockKey, Measured<G>>,
+    measurer: &mut M,
+    block: &TranscriptBlock,
+    width: f32,
+) -> G {
+    let settings = measurer.settings_key();
+    if let Some(m) = cache.get(&block.key)
+        && m.width == width.to_bits()
+        && m.settings == settings
+        && m.block.same_layout(block)
+    {
+        return m.geometry.clone();
+    }
+    let geometry = measurer.measure(block, width);
+    cache.insert(
+        block.key,
+        Measured {
+            block: block.clone(),
+            width: width.to_bits(),
+            settings,
+            geometry: geometry.clone(),
+        },
+    );
+    geometry
 }
 
 /// A materialized row, in viewport coordinates.
@@ -302,6 +517,8 @@ pub struct VisibleRow {
 pub struct VisibleBlock<G> {
     pub key: BlockKey,
     pub row: RowKey,
+    /// Position of the block in its message's `blocks`.
+    pub index: usize,
     pub rect: Rect,
     pub text_len: usize,
     pub geometry: G,
@@ -336,15 +553,16 @@ pub enum TranscriptCommand {
     SelectAll,
 }
 
-/// Maps a keymap binding (`"cmd+c"`, `"ctrl+a"`) to a command. Cmd and
-/// Ctrl both work so one binding table serves every platform.
-pub fn key_command(binding: &str) -> Option<TranscriptCommand> {
-    let binding = binding.to_ascii_lowercase();
-    match binding.as_str() {
-        "cmd+c" | "ctrl+c" => Some(TranscriptCommand::Copy),
-        "cmd+a" | "ctrl+a" => Some(TranscriptCommand::SelectAll),
-        _ => None,
-    }
+/// The command a pressed key triggers. Bound to `mod+c` and `mod+a`, so
+/// Cmd and Ctrl both work and one table serves every platform.
+pub fn key_command(pressed: &Binding) -> Option<TranscriptCommand> {
+    [
+        ("mod+c", TranscriptCommand::Copy),
+        ("mod+a", TranscriptCommand::SelectAll),
+    ]
+    .into_iter()
+    .find(|(pattern, _)| pattern.parse::<Binding>().is_ok_and(|p| p.matches(pressed)))
+    .map(|(_, command)| command)
 }
 
 /// Transcript state. `G` is the block geometry the measurer produces.
@@ -361,6 +579,11 @@ pub struct Transcript<G = TextGeometry> {
     size: (f32, f32),
     rows: Vec<VisibleRow>,
     blocks: Vec<VisibleBlock<G>>,
+    /// Geometry of the blocks measured for the current window; materialize
+    /// reuses it instead of measuring every visible block every frame.
+    measured: HashMap<BlockKey, Measured<G>>,
+    /// Theme-resolved spans of the blocks the last element painted.
+    painted: HashMap<BlockKey, element::PaintedSpans>,
 }
 
 impl<G: BlockGeometry> Transcript<G> {
@@ -378,6 +601,8 @@ impl<G: BlockGeometry> Transcript<G> {
             size: (0.0, 0.0),
             rows: Vec::new(),
             blocks: Vec::new(),
+            measured: HashMap::new(),
+            painted: HashMap::new(),
         }
     }
 
@@ -410,34 +635,31 @@ impl<G: BlockGeometry> Transcript<G> {
             .collect();
         self.adopt(message.key, blocks);
         self.mark_new_content();
-        self.debug_check();
+        self.debug_check_row(message.key);
         Ok(())
     }
 
-    /// Appends many messages, checking integrity once. Into an empty
-    /// transcript this is one batch insert.
+    /// Appends many messages as one batch, checking integrity once.
     pub fn extend<'a>(
         &mut self,
         messages: impl IntoIterator<Item = &'a TranscriptMessage>,
     ) -> Result<(), RowError> {
         let messages: Vec<&TranscriptMessage> = messages.into_iter().collect();
-        if self.is_empty() {
-            let keys: Vec<RowKey> = messages.iter().map(|m| m.key).collect();
-            self.list.prepend(&keys)?;
-        } else {
-            for message in &messages {
-                self.list.append(message.key)?;
-            }
-        }
+        let keys: Vec<RowKey> = messages.iter().map(|m| m.key).collect();
+        self.list.extend(&keys)?;
+        let mut fresh = Vec::new();
+        let mut seen = HashSet::new();
         for message in messages {
-            let blocks = message
+            let blocks: Vec<BlockKey> = message
                 .blocks
                 .iter()
                 .map(|block| block.key)
-                .filter(|key| self.order.append(*key))
+                .filter(|key| !self.order.contains(*key) && seen.insert(*key))
                 .collect();
+            fresh.extend_from_slice(&blocks);
             self.adopt(message.key, blocks);
         }
+        self.order.extend(fresh);
         self.mark_new_content();
         self.debug_check();
         Ok(())
@@ -502,8 +724,12 @@ impl<G: BlockGeometry> Transcript<G> {
         }
         self.adopt(key, kept);
         self.list.invalidate(key)?;
-        self.mark_new_content();
-        self.debug_check();
+        // Edits to older messages (a highlight arriving, a status change)
+        // are not new content to jump to.
+        if self.list.rows().keys().last() == Some(&key) {
+            self.mark_new_content();
+        }
+        self.debug_check_row(key);
         Ok(())
     }
 
@@ -534,6 +760,13 @@ impl<G: BlockGeometry> Transcript<G> {
         self.selection = self
             .selection
             .and_then(|s| s.after_remove(block, pos, &self.order, &NoText));
+    }
+
+    /// Whether `block` is in the document as a block of `row`. A message can
+    /// list blocks that are not: keys another row owns already, or repeats.
+    /// Those are neither measured, drawn, nor selectable.
+    fn owns(&self, row: RowKey, block: BlockKey) -> bool {
+        self.block_row.get(&block) == Some(&row)
     }
 
     /// Last block of the nearest earlier row that has blocks.
@@ -754,9 +987,15 @@ impl<G: BlockGeometry> Transcript<G> {
     /// hit test of its layout. Points outside the viewport clamp to it.
     pub fn point_at(&self, x: f32, y: f32) -> Option<SelectionPoint> {
         let y = y.clamp(0.0, (self.size.1 - 1.0).max(0.0));
-        let block = self.blocks.iter().min_by(|a, b| {
-            vertical_distance(&a.rect, y).total_cmp(&vertical_distance(&b.rect, y))
-        })?;
+        // Edits since the last prepare may have taken materialized blocks
+        // out of the document; a point must never land in one.
+        let block = self
+            .blocks
+            .iter()
+            .filter(|b| self.owns(b.row, b.key))
+            .min_by(|a, b| {
+                vertical_distance(&a.rect, y).total_cmp(&vertical_distance(&b.rect, y))
+            })?;
         let rect = block.rect;
         let byte = if y < rect.y {
             0
@@ -788,16 +1027,16 @@ impl<G: BlockGeometry> Transcript<G> {
         self.autoscroll(now_ms);
 
         let style = self.style;
+        let block_row = &self.block_row;
+        let cache = &mut self.measured;
         self.list
             .measure_visible(width, style.overscan, |key, width| {
+                let row = RowKey(key);
                 let block_width = block_width(&style, width);
-                let blocks = source
-                    .message(RowKey(key))
-                    .map_or(&[][..], |m| m.blocks.as_slice());
                 let mut height = style.pad_y * 2.0 + style.header_height;
-                for (i, block) in blocks.iter().enumerate() {
-                    height += gap_before(&style, i, block);
-                    height += measurer.measure(block, block_width).height();
+                for (n, (_, block)) in owned_blocks(source, block_row, row).enumerate() {
+                    height += gap_before(&style, n, block);
+                    height += measure_cached(cache, measurer, block, block_width).height();
                 }
                 height
             });
@@ -842,6 +1081,7 @@ impl<G: BlockGeometry> Transcript<G> {
         let rows = self.list.rows();
         self.rows.clear();
         self.blocks.clear();
+        let mut kept = HashMap::with_capacity(self.measured.len());
         for index in window.range {
             let key = rows.keys()[index];
             let top = rows.offset_of_index(index) - scroll;
@@ -849,13 +1089,17 @@ impl<G: BlockGeometry> Transcript<G> {
             let message = source.message(key);
             let first = self.blocks.len();
             let mut y = top + style.pad_y + style.header_height;
-            for (i, block) in message.iter().flat_map(|m| m.blocks.iter()).enumerate() {
-                y += gap_before(&style, i, block);
-                let geometry = measurer.measure(block, block_width);
+            for (n, (i, block)) in owned_blocks(source, &self.block_row, key).enumerate() {
+                y += gap_before(&style, n, block);
+                let geometry = measure_cached(&mut self.measured, measurer, block, block_width);
+                if let Some(entry) = self.measured.remove(&block.key) {
+                    kept.insert(block.key, entry);
+                }
                 let block_height = geometry.height();
                 self.blocks.push(VisibleBlock {
                     key: block.key,
                     row: key,
+                    index: i,
                     rect: Rect {
                         x: style.pad_x,
                         y,
@@ -876,6 +1120,8 @@ impl<G: BlockGeometry> Transcript<G> {
                 blocks: first..self.blocks.len(),
             });
         }
+        // Only the window's geometry is kept.
+        self.measured = kept;
     }
 
     /// Rows materialized by the last prepare, top to bottom.
@@ -894,7 +1140,63 @@ impl<G: BlockGeometry> Transcript<G> {
 
     // -- Integrity --
 
+    /// Checks row `row` only: its blocks are owned by it and sit together
+    /// in the block order, right after the previous row's blocks and right
+    /// before the next row's, plus the map sizes and the selection. O(blocks
+    /// of the row) plus the rows without blocks around it; per-message
+    /// edits call it through `debug_assert!`.
+    pub fn verify_row(&self, row: RowKey) -> Result<(), TranscriptIntegrityError> {
+        let rows = self.list.rows();
+        let index = rows
+            .index_of(row)
+            .ok_or(TranscriptIntegrityError::UnknownRow { row })?;
+        rows.verify_row(index)
+            .map_err(TranscriptIntegrityError::Rows)?;
+        if self.row_blocks.len() != rows.len() || self.block_row.len() != self.order.len() {
+            return Err(TranscriptIntegrityError::BlockOrder);
+        }
+        let blocks = self
+            .row_blocks
+            .get(&row)
+            .ok_or(TranscriptIntegrityError::UnknownRow { row })?;
+        count_integrity_steps(blocks.len());
+        let mut expected = self
+            .last_block_before(row)
+            .and_then(|b| self.order.position(b))
+            .map_or(0, |p| p + 1);
+        for block in blocks {
+            if self.block_row.get(block) != Some(&row) {
+                return Err(TranscriptIntegrityError::BlockRow { block: *block });
+            }
+            if self.order.position(*block) != Some(expected) {
+                return Err(TranscriptIntegrityError::BlockOrder);
+            }
+            expected += 1;
+        }
+        let next_first = rows.keys()[index + 1..]
+            .iter()
+            .find_map(|key| self.row_blocks.get(key)?.first().copied());
+        let next_pos = next_first.map_or(Some(self.order.len() as u32), |b| self.order.position(b));
+        if next_pos != Some(expected) {
+            return Err(TranscriptIntegrityError::BlockOrder);
+        }
+        self.verify_selection()
+    }
+
+    fn verify_selection(&self) -> Result<(), TranscriptIntegrityError> {
+        match self.selection {
+            Some(selection) if selection.ordered(&self.order).is_none() => {
+                Err(TranscriptIntegrityError::SelectionOutsideDocument)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks every row, block, and the selection. O(rows + blocks); batch
+    /// edits call it through `debug_assert!`, as do per-message ones with
+    /// `integrity-checks`.
     pub fn verify_integrity(&self) -> Result<(), TranscriptIntegrityError> {
+        count_integrity_steps(self.order.len());
         self.list
             .rows()
             .verify_integrity()
@@ -903,7 +1205,10 @@ impl<G: BlockGeometry> Transcript<G> {
         if self.row_blocks.len() != rows.len() {
             return Err(TranscriptIntegrityError::BlockOrder);
         }
-        let mut expected = Vec::with_capacity(self.order.len());
+        // Walk the rows' blocks against the order in place, without
+        // collecting them.
+        let order = self.order.keys();
+        let mut at = 0;
         for row in rows {
             let blocks = self
                 .row_blocks
@@ -913,23 +1218,44 @@ impl<G: BlockGeometry> Transcript<G> {
                 if self.block_row.get(block) != Some(row) {
                     return Err(TranscriptIntegrityError::BlockRow { block: *block });
                 }
+                if order.get(at) != Some(block) {
+                    return Err(TranscriptIntegrityError::BlockOrder);
+                }
+                at += 1;
             }
-            expected.extend_from_slice(blocks);
         }
-        if expected != self.order.keys() || self.block_row.len() != expected.len() {
+        if at != order.len() || self.block_row.len() != at {
             return Err(TranscriptIntegrityError::BlockOrder);
         }
-        if let Some(selection) = self.selection
-            && selection.ordered(&self.order).is_none()
-        {
-            return Err(TranscriptIntegrityError::SelectionOutsideDocument);
-        }
-        Ok(())
+        self.verify_selection()
     }
 
     fn debug_check(&self) {
         debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
+
+    fn debug_check_row(&self, row: RowKey) {
+        if FULL_INTEGRITY_CHECKS {
+            self.debug_check();
+        } else {
+            debug_assert_eq!(self.verify_row(row), Ok(()));
+        }
+    }
+}
+
+/// The blocks of `row`'s message that the document holds as `row`'s, with
+/// their positions in the message.
+fn owned_blocks<'a>(
+    source: &'a impl TranscriptSource,
+    block_row: &'a HashMap<BlockKey, RowKey>,
+    row: RowKey,
+) -> impl Iterator<Item = (usize, &'a TranscriptBlock)> + 'a {
+    source
+        .message(row)
+        .map_or(&[][..], |m| m.blocks.as_slice())
+        .iter()
+        .enumerate()
+        .filter(move |(_, block)| block_row.get(&block.key) == Some(&row))
 }
 
 /// Space above the `index`-th block of a message.
