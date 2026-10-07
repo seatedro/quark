@@ -9,6 +9,123 @@ use crate::theme::Color;
 
 pub use quark::style::{ElementStyle, ShadowStyle, StyleOverride, apply_override};
 
+/// Grid track sizes for [`Styled::grid_cols`] and [`Styled::grid_rows`],
+/// in CSS grid terms: `track::px(120.0)`, `track::fr(1.0)`,
+/// `track::minmax(track::px(80.0), track::fr(1.0))`,
+/// `track::repeat(3, [track::fr(1.0)])`.
+///
+/// Content keywords (`min_content`, `max_content`, `fit_content`) size
+/// tracks from what is in them. Taffy has no content keywords for an
+/// element's own `width`/`height`, so content sizing goes through a track:
+/// a one-column grid with a `max_content` column is as wide as its widest
+/// child.
+pub mod track {
+    use taffy::style_helpers::{TaffyAuto, TaffyMaxContent, TaffyMinContent};
+    use taffy::{
+        GridTemplateComponent, GridTemplateRepetition, LengthPercentage, MaxTrackSizingFunction,
+        MinTrackSizingFunction, RepetitionCount, TrackSizingFunction,
+    };
+
+    /// One entry of a grid template: a single track or a `repeat(..)`.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Track(pub(crate) GridTemplateComponent<String>);
+
+    impl Track {
+        fn single(sizing: TrackSizingFunction) -> Self {
+            Self(GridTemplateComponent::Single(sizing))
+        }
+
+        /// The size of a single track. A `repeat` has no single size; it
+        /// becomes `auto` (a programming error in debug builds).
+        pub(crate) fn sizing(&self) -> TrackSizingFunction {
+            match &self.0 {
+                GridTemplateComponent::Single(sizing) => *sizing,
+                GridTemplateComponent::Repeat(_) => {
+                    debug_assert!(false, "repeat() is not a single track size");
+                    TrackSizingFunction::AUTO
+                }
+            }
+        }
+    }
+
+    /// A fixed track `v` points wide.
+    pub fn px(v: f32) -> Track {
+        Track::single(taffy::style_helpers::length(v))
+    }
+
+    /// A fraction of the container, 0.0 to 1.0.
+    pub fn percent(v: f32) -> Track {
+        Track::single(taffy::style_helpers::percent(v))
+    }
+
+    /// `v` shares of the space the other tracks leave.
+    pub fn fr(v: f32) -> Track {
+        Track::single(taffy::style_helpers::fr(v))
+    }
+
+    pub fn auto() -> Track {
+        Track::single(TrackSizingFunction::AUTO)
+    }
+
+    /// As narrow as the content can wrap: its longest unbreakable run.
+    pub fn min_content() -> Track {
+        Track::single(TrackSizingFunction::MIN_CONTENT)
+    }
+
+    /// As wide as the content without wrapping.
+    pub fn max_content() -> Track {
+        Track::single(TrackSizingFunction::MAX_CONTENT)
+    }
+
+    /// `max_content`, but no wider than `limit` points.
+    pub fn fit_content(limit: f32) -> Track {
+        Track::single(taffy::style_helpers::fit_content(LengthPercentage::length(
+            limit,
+        )))
+    }
+
+    /// At least `min`'s size and at most `max`'s: `minmax(px(80.0),
+    /// fr(1.0))` is a flexible track that never gets narrower than 80.
+    pub fn minmax(min: Track, max: Track) -> Track {
+        let min: MinTrackSizingFunction = min.sizing().min;
+        let max: MaxTrackSizingFunction = max.sizing().max;
+        Track::single(TrackSizingFunction { min, max })
+    }
+
+    /// `tracks`, `count` times over.
+    pub fn repeat(count: u16, tracks: impl IntoIterator<Item = Track>) -> Track {
+        repetition(RepetitionCount::Count(count), tracks)
+    }
+
+    /// As many repetitions of `tracks` as fit, keeping empty ones
+    /// (`repeat(auto-fill, ..)`). Every track must have a definite size.
+    pub fn repeat_fill(tracks: impl IntoIterator<Item = Track>) -> Track {
+        repetition(RepetitionCount::AutoFill, tracks)
+    }
+
+    /// As many repetitions of `tracks` as fit, collapsing empty ones so
+    /// the filled tracks stretch (`repeat(auto-fit, ..)`).
+    pub fn repeat_fit(tracks: impl IntoIterator<Item = Track>) -> Track {
+        repetition(RepetitionCount::AutoFit, tracks)
+    }
+
+    fn repetition(count: RepetitionCount, tracks: impl IntoIterator<Item = Track>) -> Track {
+        let tracks: Vec<TrackSizingFunction> = tracks.into_iter().map(|t| t.sizing()).collect();
+        let line_names = vec![Vec::new(); tracks.len() + 1];
+        Track(GridTemplateComponent::Repeat(GridTemplateRepetition {
+            count,
+            tracks,
+            line_names,
+        }))
+    }
+}
+
+/// A grid line placement. Lines count from 1; negative lines count from
+/// the far edge (`-1` is the last line).
+fn grid_line(index: i16) -> taffy::GridPlacement<String> {
+    taffy::style_helpers::line(index)
+}
+
 // ---------------------------------------------------------------------------
 // Styled trait — fluent setters shared across element types
 // ---------------------------------------------------------------------------
@@ -618,6 +735,151 @@ pub trait Styled: Sized {
 
     fn relative(mut self) -> Self {
         self.element_style_mut().layout.position = taffy::Position::Relative;
+        self
+    }
+
+    // -- Grid --
+
+    /// Lay children out on a CSS grid instead of a flex line.
+    fn grid(mut self) -> Self {
+        self.element_style_mut().layout.display = taffy::Display::Grid;
+        self
+    }
+
+    /// Grid with these column tracks; children fill them in order.
+    fn grid_cols(mut self, tracks: impl IntoIterator<Item = track::Track>) -> Self {
+        let l = &mut self.element_style_mut().layout;
+        l.display = taffy::Display::Grid;
+        l.grid_template_columns = tracks.into_iter().map(|t| t.0).collect();
+        self
+    }
+
+    /// Grid with these row tracks. Rows past them are sized by
+    /// [`Self::grid_auto_rows`].
+    fn grid_rows(mut self, tracks: impl IntoIterator<Item = track::Track>) -> Self {
+        let l = &mut self.element_style_mut().layout;
+        l.display = taffy::Display::Grid;
+        l.grid_template_rows = tracks.into_iter().map(|t| t.0).collect();
+        self
+    }
+
+    /// `n` equal columns: `repeat(n, 1fr)`.
+    fn grid_cols_n(self, n: u16) -> Self {
+        self.grid_cols([track::repeat(n, [track::fr(1.0)])])
+    }
+
+    /// Size of rows the template does not list (implicit rows).
+    fn grid_auto_rows(mut self, size: track::Track) -> Self {
+        self.element_style_mut().layout.grid_auto_rows = vec![size.sizing()];
+        self
+    }
+
+    /// Size of columns the template does not list (implicit columns).
+    fn grid_auto_cols(mut self, size: track::Track) -> Self {
+        self.element_style_mut().layout.grid_auto_columns = vec![size.sizing()];
+        self
+    }
+
+    /// Auto-place children down each column, adding columns as needed.
+    fn grid_flow_col(mut self) -> Self {
+        let l = &mut self.element_style_mut().layout;
+        l.grid_auto_flow = if l.grid_auto_flow.is_dense() {
+            taffy::GridAutoFlow::ColumnDense
+        } else {
+            taffy::GridAutoFlow::Column
+        };
+        self
+    }
+
+    /// Auto-place children along each row (the default).
+    fn grid_flow_row(mut self) -> Self {
+        let l = &mut self.element_style_mut().layout;
+        l.grid_auto_flow = if l.grid_auto_flow.is_dense() {
+            taffy::GridAutoFlow::RowDense
+        } else {
+            taffy::GridAutoFlow::Row
+        };
+        self
+    }
+
+    /// Backfill holes earlier in the grid with later, smaller children.
+    /// Keeps the row or column flow already set.
+    fn grid_dense(mut self) -> Self {
+        let l = &mut self.element_style_mut().layout;
+        l.grid_auto_flow = match l.grid_auto_flow {
+            taffy::GridAutoFlow::Row | taffy::GridAutoFlow::RowDense => {
+                taffy::GridAutoFlow::RowDense
+            }
+            taffy::GridAutoFlow::Column | taffy::GridAutoFlow::ColumnDense => {
+                taffy::GridAutoFlow::ColumnDense
+            }
+        };
+        self
+    }
+
+    /// Span `n` columns of the parent grid.
+    fn col_span(mut self, n: u16) -> Self {
+        let col = &mut self.element_style_mut().layout.grid_column;
+        col.end = taffy::GridPlacement::Span(n);
+        if matches!(col.start, taffy::GridPlacement::Span(_)) {
+            col.start = taffy::GridPlacement::Auto;
+        }
+        self
+    }
+
+    /// Span `n` rows of the parent grid.
+    fn row_span(mut self, n: u16) -> Self {
+        let row = &mut self.element_style_mut().layout.grid_row;
+        row.end = taffy::GridPlacement::Span(n);
+        if matches!(row.start, taffy::GridPlacement::Span(_)) {
+            row.start = taffy::GridPlacement::Auto;
+        }
+        self
+    }
+
+    /// Start at column line `line` (1 is the left edge, -1 the right).
+    fn col_start(mut self, line: i16) -> Self {
+        self.element_style_mut().layout.grid_column.start = grid_line(line);
+        self
+    }
+
+    /// End at column line `line`.
+    fn col_end(mut self, line: i16) -> Self {
+        self.element_style_mut().layout.grid_column.end = grid_line(line);
+        self
+    }
+
+    /// Start at row line `line` (1 is the top edge, -1 the bottom).
+    fn row_start(mut self, line: i16) -> Self {
+        self.element_style_mut().layout.grid_row.start = grid_line(line);
+        self
+    }
+
+    /// End at row line `line`.
+    fn row_end(mut self, line: i16) -> Self {
+        self.element_style_mut().layout.grid_row.end = grid_line(line);
+        self
+    }
+
+    // -- Intrinsic sizing --
+
+    /// Keep width / height at `ratio` when only one of them is set (or
+    /// stretched).
+    fn aspect_ratio(mut self, ratio: f32) -> Self {
+        self.element_style_mut().layout.aspect_ratio = Some(ratio);
+        self
+    }
+
+    /// Size to the content in a flex line: the main axis takes the
+    /// content's unwrapped (max-content) size and never shrinks; the cross
+    /// axis does not stretch, so it fits the content too (clamped to the
+    /// space available, as CSS `fit-content` is).
+    fn size_max_content(mut self) -> Self {
+        let l = &mut self.element_style_mut().layout;
+        l.size = taffy::Size::auto();
+        l.flex_basis = taffy::Dimension::auto();
+        l.flex_shrink = 0.0;
+        l.align_self = Some(taffy::AlignSelf::FlexStart);
         self
     }
 

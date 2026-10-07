@@ -26,6 +26,8 @@ pub mod input;
 mod frame_budget;
 #[cfg(feature = "ui")]
 pub mod keymap;
+#[cfg(all(test, feature = "test-support"))]
+mod layout_tests;
 #[cfg(target_os = "macos")]
 pub mod macos_window;
 mod panic_hook;
