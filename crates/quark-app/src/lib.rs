@@ -33,6 +33,8 @@ pub mod platform;
 #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
 mod profile;
 mod runner;
+#[cfg(all(test, feature = "test-support"))]
+mod scroll_tests;
 #[cfg(feature = "test-support")]
 pub mod testing;
 #[cfg(feature = "ui")]

@@ -9,6 +9,8 @@ members = [
   "crates/quark-ui",
   "crates/quark-components",
   "crates/quark-app",
+  # A member so CI's fmt, clippy, and tests cover the patch.
+  "vendor/accesskit_unix",
 ]
 # cargo-fuzz targets build on their own with nightly sanitizers.
 exclude = ["fuzz"]
@@ -24,7 +26,9 @@ repository = "https://github.com/seatedro/quark"
 quark = { path = "crates/quark" }
 quark-macros = { path = "crates/quark-macros" }
 quark-render = { path = "crates/quark-render" }
-quark-text = { path = "crates/quark-text" }
+# Without the bundled emoji and CJK fonts (about 14 MB); quark-app turns
+# them on by default.
+quark-text = { path = "crates/quark-text", default-features = false }
 quark-syntax = { path = "crates/quark-syntax" }
 quark-ui = { path = "crates/quark-ui" }
 quark-components = { path = "crates/quark-components" }
@@ -68,3 +72,8 @@ codegen-units = 1
 strip = "debuginfo"
 # Keep the default panic = "unwind" so the panic hook can log before exit.
 panic = "unwind"
+
+# accesskit_unix 0.22.1 plus the AT-SPI methods cua-driver needs
+# (GetRoleName, an `id` attribute). See vendor/accesskit_unix/VENDORED.md.
+[patch.crates-io]
+accesskit_unix = { path = "vendor/accesskit_unix" }

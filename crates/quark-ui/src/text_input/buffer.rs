@@ -12,6 +12,8 @@ use std::ops::Range;
 use quark_text::TextOffset;
 use quark_text::offset;
 
+use super::atoms::{AtomList, InlineAtom, RichClipboard, RichText};
+use super::hooks::{InputHooks, Insertion, NoHooks};
 use super::ime::{Composition, Preedit, compose};
 use super::text_edit::{TextEditCommand, TextEditOutcome};
 use super::undo::{Edit, EditKind, EditLog};
@@ -29,6 +31,10 @@ pub(super) enum WordForward {
 #[derive(Debug, Clone, Default)]
 pub(super) struct TextBuffer {
     text: String,
+    /// Atomic spans of `text`; the caret never rests inside one.
+    atoms: AtomList,
+    /// Where copies of text with atoms keep them for pasting back.
+    rich_clipboard: RichClipboard,
     cursor: TextOffset,
     anchor: TextOffset,
     preedit: Option<Preedit>,
@@ -49,8 +55,19 @@ pub(super) struct TextBuffer {
 
 impl PartialEq for TextBuffer {
     fn eq(&self, other: &Self) -> bool {
-        (&self.text, self.cursor, self.anchor, &self.preedit)
-            == (&other.text, other.cursor, other.anchor, &other.preedit)
+        (
+            &self.text,
+            &self.atoms,
+            self.cursor,
+            self.anchor,
+            &self.preedit,
+        ) == (
+            &other.text,
+            &other.atoms,
+            other.cursor,
+            other.anchor,
+            &other.preedit,
+        )
     }
 }
 
@@ -86,6 +103,36 @@ impl TextBuffer {
         (!selected.is_empty()).then_some(selected)
     }
 
+    pub(super) fn atoms(&self) -> &[InlineAtom] {
+        self.atoms.as_slice()
+    }
+
+    /// `range` of the text with the atoms wholly inside it.
+    pub(super) fn rich_slice(&self, range: Range<TextOffset>) -> RichText {
+        let range = range.start.get()..range.end.get();
+        RichText {
+            text: offset::slice(&self.text, range.clone()).to_owned(),
+            atoms: self.atoms.slice(range),
+        }
+    }
+
+    pub(super) fn set_rich_clipboard(&mut self, clipboard: RichClipboard) {
+        self.rich_clipboard = clipboard;
+    }
+
+    /// Replace the text and atoms programmatically, caret at the end. Atoms
+    /// that do not fit `rich.text` are dropped. Clears undo history.
+    pub(super) fn set_rich_text(&mut self, rich: &RichText) {
+        self.set_text(&rich.text);
+        if rich.verify_integrity().is_ok() {
+            self.atoms.set(&rich.atoms);
+        }
+    }
+
+    fn debug_check_atoms(&self) {
+        debug_assert_eq!(self.atoms.verify_integrity(&self.text), Ok(()));
+    }
+
     pub(super) fn now_ms(&self) -> u64 {
         self.now_ms
     }
@@ -103,6 +150,7 @@ impl TextBuffer {
     pub(super) fn set_text(&mut self, text: &str) {
         self.text.clear();
         self.text.push_str(text);
+        self.atoms.clear();
         self.cursor = TextOffset::end(&self.text);
         self.anchor = self.cursor;
         self.history.clear();
@@ -177,33 +225,51 @@ impl TextBuffer {
     /// undo step.
     pub(super) fn commit_ime(&mut self, value: &str) -> bool {
         self.history.break_coalescing();
-        let changed = self.replace(self.selection(), value, EditKind::Typing);
+        let changed = self.replace(self.selection(), value, &[], EditKind::Typing);
         self.history.break_coalescing();
         changed
     }
 
-    /// Replace `range` with `inserted`, record it for undo, and collapse the
-    /// caret after the inserted text. The one place user edits change the
-    /// text. Any composition is dropped.
-    fn replace(&mut self, range: Range<TextOffset>, inserted: &str, kind: EditKind) -> bool {
+    /// Replace `range` with `inserted` (holding `inserted_atoms`, relative
+    /// to it), record it for undo, and collapse the caret after the
+    /// inserted text. The one place user edits change the text. A range
+    /// that touches part of an atom takes all of it, and an insertion
+    /// inside one lands after it. Any composition is dropped.
+    fn replace(
+        &mut self,
+        range: Range<TextOffset>,
+        inserted: &str,
+        inserted_atoms: &[InlineAtom],
+        kind: EditKind,
+    ) -> bool {
         if self.read_only {
             return false;
         }
         self.clear_preedit();
         let range = offset::ordered(&self.text, range);
+        let range = self.atoms.expand(range.start.get()..range.end.get());
+        let range =
+            TextOffset::snap(&self.text, range.start)..TextOffset::snap(&self.text, range.end);
         if range.is_empty() && inserted.is_empty() {
             return false;
         }
         let before = (self.anchor, self.cursor);
         let removed = offset::replace(&mut self.text, range.clone(), inserted);
+        let at = range.start.get();
+        let removed_atoms = self
+            .atoms
+            .splice(at, removed.len(), inserted_atoms, inserted.len());
+        self.debug_check_atoms();
         // Rounding up keeps the caret after inserted text that merges into
         // the grapheme after it (a combining mark typed before another).
-        self.cursor = TextOffset::snap_up(&self.text, range.start.get() + inserted.len());
+        self.cursor = TextOffset::snap_up(&self.text, at + inserted.len());
         self.anchor = self.cursor;
         let edit = Edit {
-            at: range.start.get(),
+            at,
             removed,
             inserted: inserted.to_owned(),
+            removed_atoms,
+            inserted_atoms: inserted_atoms.to_vec(),
             before,
             after: (self.anchor, self.cursor),
         };
@@ -211,30 +277,112 @@ impl TextBuffer {
         true
     }
 
+    /// Replace `range` with `insertion`; each is its own undo step.
+    fn insert(&mut self, range: Range<TextOffset>, insertion: &Insertion) -> bool {
+        self.history.break_coalescing();
+        match insertion {
+            Insertion::Text(text) => self.replace(range, text, &[], EditKind::Other),
+            Insertion::Rich(rich) if rich.verify_integrity().is_ok() => {
+                self.replace(range, &rich.text, &rich.atoms, EditKind::Other)
+            }
+            Insertion::Rich(rich) => self.replace(range, &rich.text, &[], EditKind::Other),
+            Insertion::Nothing => false,
+        }
+    }
+
+    /// [`Self::insert`] reporting an outcome.
+    pub(super) fn insert_at(
+        &mut self,
+        range: Option<Range<TextOffset>>,
+        insertion: &Insertion,
+    ) -> TextEditOutcome {
+        let before = (self.cursor, self.anchor, self.preedit_rev);
+        let range = range.unwrap_or_else(|| self.selection());
+        let text_changed = self.insert(range, insertion);
+        self.outcome(before, text_changed)
+    }
+
+    fn outcome(
+        &self,
+        before: (TextOffset, TextOffset, u32),
+        text_changed: bool,
+    ) -> TextEditOutcome {
+        TextEditOutcome {
+            text_changed,
+            selection_changed: (self.cursor, self.anchor) != (before.0, before.1),
+            clipboard_write: None,
+            preedit_changed: self.preedit_rev != before.2,
+        }
+    }
+
+    /// The selection exported for the system clipboard, keeping its atoms
+    /// in the app's clipboard.
+    fn copy_selection(&self) -> Option<String> {
+        let selection = self.selection();
+        if selection.is_empty() {
+            return None;
+        }
+        let rich = self.rich_slice(selection);
+        if rich.atoms.is_empty() {
+            self.rich_clipboard.store(None);
+            return Some(rich.text);
+        }
+        let exported = rich.export();
+        self.rich_clipboard.store(Some(rich));
+        Some(exported)
+    }
+
     fn delete_selection(&mut self) -> bool {
         let selection = self.selection();
-        !selection.is_empty() && self.replace(selection, "", EditKind::Other)
+        !selection.is_empty() && self.replace(selection, "", &[], EditKind::Other)
     }
 
     /// Delete the selection, or from the caret to `target`.
     fn delete_to(&mut self, target: TextOffset, kind: EditKind) -> bool {
-        self.delete_selection() || self.replace(self.cursor..target, "", kind)
+        self.delete_selection() || self.replace(self.cursor..target, "", &[], kind)
     }
 
-    /// Move the caret to `at`, keeping the anchor when `extend`. Ends the
+    /// Move the caret to `at`, keeping the anchor when `extend`. A target
+    /// inside an atom goes on past it in the direction of travel. Ends the
     /// current undo step and any composition.
     pub(super) fn move_to(&mut self, at: TextOffset, extend: bool) {
+        let at = at.within(&self.text);
+        let at = match self.atoms.containing(at.get()) {
+            Some(atom) if at < self.cursor => atom.range.start,
+            Some(atom) => atom.range.end,
+            None => at.get(),
+        };
+        self.place(TextOffset::snap(&self.text, at), extend);
+    }
+
+    /// [`Self::move_to`] for a pointer: a point inside an atom goes to its
+    /// nearer edge.
+    fn move_to_point(&mut self, raw: usize, extend: bool) {
+        let at = TextOffset::snap(&self.text, raw);
+        let at = match self.atoms.containing(at.get()) {
+            Some(atom) if at.get() - atom.range.start < atom.range.end - at.get() => {
+                atom.range.start
+            }
+            Some(atom) => atom.range.end,
+            None => at.get(),
+        };
+        self.place(TextOffset::snap(&self.text, at), extend);
+    }
+
+    fn place(&mut self, at: TextOffset, extend: bool) {
         self.history.break_coalescing();
         self.clear_preedit();
-        self.cursor = at.within(&self.text);
+        self.cursor = at;
         if !extend {
             self.anchor = self.cursor;
         }
     }
 
+    /// Select `range`, grown to take whole any atom it touches.
     fn select(&mut self, range: Range<TextOffset>) {
-        self.move_to(range.start, false);
-        self.move_to(range.end, true);
+        let range = self.atoms.expand(range.start.get()..range.end.get());
+        self.place(TextOffset::snap(&self.text, range.start), false);
+        self.place(TextOffset::snap(&self.text, range.end), true);
     }
 
     /// Move the caret to `target(self, cursor)`, or, when not extending,
@@ -275,7 +423,8 @@ impl TextBuffer {
             return false;
         }
         self.clear_preedit();
-        let restored = self.history.undo(&mut self.text);
+        let restored = self.history.undo(&mut self.text, &mut self.atoms);
+        self.debug_check_atoms();
         self.restore(restored)
     }
 
@@ -284,7 +433,8 @@ impl TextBuffer {
             return false;
         }
         self.clear_preedit();
-        let restored = self.history.redo(&mut self.text);
+        let restored = self.history.redo(&mut self.text, &mut self.atoms);
+        self.debug_check_atoms();
         self.restore(restored)
     }
 
@@ -300,13 +450,29 @@ impl TextBuffer {
     /// Apply `cmd`. Vertical movement needs a layout, so it is a no-op
     /// here; [`super::Editor`] handles it (and visual line ends) itself.
     pub(super) fn apply(&mut self, cmd: TextEditCommand) -> TextEditOutcome {
+        self.apply_with(cmd, &mut NoHooks)
+    }
+
+    /// [`Self::apply`] with the app's paste policy.
+    pub(super) fn apply_with(
+        &mut self,
+        cmd: TextEditCommand,
+        hooks: &mut dyn InputHooks,
+    ) -> TextEditOutcome {
         use TextEditCommand::*;
         let before = (self.cursor, self.anchor, self.preedit_rev);
         let cursor = self.cursor;
         let mut outcome = TextEditOutcome::default();
         let text_changed = match cmd {
-            InsertText(value) => self.replace(self.selection(), &value, EditKind::Typing),
-            Paste(value) => self.replace(self.selection(), &value, EditKind::Other),
+            InsertText(value) => self.replace(self.selection(), &value, &[], EditKind::Typing),
+            Paste(value) => {
+                let pasted = match self.rich_clipboard.resolve(&value) {
+                    Some(rich) => Insertion::Rich(rich),
+                    None => Insertion::Text(value),
+                };
+                let insertion = hooks.paste(pasted);
+                self.insert(self.selection(), &insertion)
+            }
             Backspace => {
                 let target = offset::prev_grapheme(&self.text, cursor);
                 self.delete_to(target, EditKind::Deleting)
@@ -322,7 +488,7 @@ impl TextBuffer {
             DeleteForwardWord => self.delete_to(self.word_forward(cursor), EditKind::Other),
             BackspaceLine => self.delete_to(self.line_bounds(cursor).start, EditKind::Other),
             Cut => {
-                outcome.clipboard_write = self.selected_text().map(str::to_owned);
+                outcome.clipboard_write = self.copy_selection();
                 outcome.clipboard_write.is_some() && self.delete_selection()
             }
             Undo => self.undo(),
@@ -332,7 +498,7 @@ impl TextBuffer {
                 false
             }
             Copy => {
-                outcome.clipboard_write = self.selected_text().map(str::to_owned);
+                outcome.clipboard_write = self.copy_selection();
                 false
             }
             other => {
@@ -377,10 +543,8 @@ impl TextBuffer {
                 };
                 self.select(range);
             }
-            SetTextCursor(raw) => self.move_to(TextOffset::snap(&self.text, raw), false),
-            ExtendTextSelection(raw) => {
-                self.move_to(TextOffset::snap(&self.text, raw), true);
-            }
+            SetTextCursor(raw) => self.move_to_point(raw, false),
+            ExtendTextSelection(raw) => self.move_to_point(raw, true),
             CancelPreedit => self.clear_preedit(),
             CursorUp | CursorDown | SelectUp | SelectDown => {}
             InsertText(_)

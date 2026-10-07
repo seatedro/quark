@@ -15,7 +15,7 @@
 #   CUA_DRIVER         cua-driver binary (default: PATH, then e2e/install-cua.sh's)
 #   QUARK_E2E_OUT      artifacts root (default target/e2e/artifacts)
 #
-# A failed spec leaves screen.png, tree.txt, and every log in
+# A failed spec leaves screen.png, tree.txt, cua-tree.txt, and every log in
 # $QUARK_E2E_OUT/<example>-<behavior>/.
 set -euo pipefail
 

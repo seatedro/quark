@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use quark_ui::element::{AnyElement, IntoAnyElement, NoopAction, cached, div, text};
+use quark_ui::element::{AnyElement, IntoAnyElement, NoopAction, ScrollHandle, cached, div, text};
 use quark_ui::style::Styled;
 use quark_ui::test_alloc::{self, Counting};
 use quark_ui::transcript::{
@@ -30,6 +30,8 @@ const ROW_BUDGET: u64 = 40;
 /// revision.
 struct List {
     rows: Vec<(Arc<str>, u64)>,
+    /// Scroll through a handle (with scrollbars) instead of a fixed offset.
+    tracked: Option<ScrollHandle>,
 }
 
 impl UiApp for List {
@@ -38,24 +40,25 @@ impl UiApp for List {
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let surface = cx.theme.colors.surface;
-        div()
-            .size_full()
-            .flex_col()
-            .scroll_y(0.0)
-            .children(self.rows.iter().enumerate().map(|(i, (body, revision))| {
-                let body = body.clone();
-                cached(i as u64, *revision, move || {
-                    div()
-                        .w_full()
-                        .flex_col()
-                        .p(4.0)
-                        .bg(surface)
-                        .child(text("Author").size(12.0).semibold())
-                        .child(text(&*body).size(14.0))
-                })
-                .into_any()
-            }))
+        let list = div().size_full().flex_col();
+        let list = match &self.tracked {
+            Some(handle) => list.track_scroll(handle).overflow_y_scroll(),
+            None => list.scroll_y(0.0),
+        };
+        list.children(self.rows.iter().enumerate().map(|(i, (body, revision))| {
+            let body = body.clone();
+            cached(i as u64, *revision, move || {
+                div()
+                    .w_full()
+                    .flex_col()
+                    .p(4.0)
+                    .bg(surface)
+                    .child(text("Author").size(12.0).semibold())
+                    .child(text(&*body).size(14.0))
+            })
             .into_any()
+        }))
+        .into_any()
     }
 
     fn update(&mut self, _action: (), _cx: &mut UiContext) {}
@@ -63,10 +66,14 @@ impl UiApp for List {
 
 /// The list in a harness with no assistive tech, past its warm-up frames.
 fn list() -> UiTestHarness<List> {
+    harness(None)
+}
+
+fn harness(tracked: Option<ScrollHandle>) -> UiTestHarness<List> {
     let rows = (0..ROWS)
         .map(|i| (Arc::from(format!("Message {i} with a few words")), 0))
         .collect();
-    let mut ui = UiTestHarness::new(List { rows }, (800.0, 600.0), 1.0);
+    let mut ui = UiTestHarness::new(List { rows, tracked }, (800.0, 600.0), 1.0);
     ui.set_accessibility_active(false);
     for _ in 0..3 {
         ui.frame();
@@ -77,6 +84,20 @@ fn list() -> UiTestHarness<List> {
 #[test]
 fn a_repeated_list_frame_allocates_nothing() {
     let mut ui = list();
+    let ((), allocated) = test_alloc::count(|| {
+        ui.frame();
+    });
+    assert_eq!(allocated, 0);
+}
+
+// A tracked container resolves its offset, lays out scrollbars, and
+// registers their hit entries and handlers every frame, all in reused
+// memory.
+#[test]
+fn a_repeated_tracked_scroll_frame_allocates_nothing() {
+    let mut ui = harness(Some(ScrollHandle::new()));
+    ui.pointer_move((795.0, 20.0));
+    ui.frame();
     let ((), allocated) = test_alloc::count(|| {
         ui.frame();
     });

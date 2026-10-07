@@ -3,12 +3,16 @@
 Two clients, both talking to the real desktop session run.sh set up:
 
 - `Cua` drives the app the way a computer-use agent does, through the cua
-  driver's MCP server (clicks, keys, clipboard, screenshots).
-- `atspi_tree` reads the raw AT-SPI tree over D-Bus. The specs assert on it
-  because cua 0.34 cannot report AccessKit roles: it asks for
-  `GetRoleName`, which accesskit_unix does not implement, so every role comes
-  back blank. The same gap makes cua's element_token clicks fail, so actions
-  go through cua's pixel route, which hit-tests to the AT-SPI action.
+  driver's MCP server: its snapshot of the AT-SPI tree (roles, names, the
+  checked state of check boxes), element_token clicks, keys, clipboard, and
+  screenshots. cua reads roles with `GetRoleName`, which quark's vendored
+  accesskit_unix serves (vendor/accesskit_unix/VENDORED.md).
+- `atspi_tree` reads the raw AT-SPI tree over D-Bus, for what cua does not
+  report: states other than checked (focused, pressed), object attributes
+  (`id`, `posinset`, `setsize`), the Text interface, and SetSelection.
+
+cua indexes only nodes with an AT-SPI action, so a text entry has no
+element_token; specs focus one with a pixel click (`Cua.click_node`).
 
 Waiting is by polling observable state against a deadline, never a fixed
 sleep.
@@ -36,6 +40,7 @@ ROLE = {
     "list": 31,
     "list item": 32,
     "check box": 7,
+    "radio button": 44,
     "toggle button": 62,
     "status bar": 54,
     "notification": 101,
@@ -91,6 +96,14 @@ class Node:
 
     def find_all(self, role):
         return [n for n in self.walk() if n.role == ROLE[role]]
+
+    def require_id(self, test_id):
+        """The node whose AT-SPI `id` attribute (quark's accessibility id,
+        semantic id, key, or test id) is `test_id`."""
+        for node in self.walk():
+            if node.attributes.get("id") == test_id:
+                return node
+        raise AssertionError(f"no node with id {test_id!r}:\n{self.dump()}")
 
     def has_state(self, state):
         return bool(self.states[state // 32] & (1 << (state % 32)))
@@ -266,6 +279,93 @@ class CuaError(AssertionError):
     pass
 
 
+class CuaNode:
+    """One row of cua's tree: role and name as cua read them over AT-SPI,
+    and the indexed element (with its `element_token`) for actionable rows."""
+
+    def __init__(self, role, name, element=None):
+        self.role = role
+        self.name = name
+        self.element = element
+        self.children = []
+
+    def walk(self):
+        yield self
+        for child in self.children:
+            yield from child.walk()
+
+    def find(self, role, name=None):
+        for node in self.walk():
+            if node.role == role and (name is None or node.name == name):
+                return node
+        return None
+
+    def dump(self, depth=0):
+        index = f"[{self.element['element_index']}] " if self.element else ""
+        line = f"{'  ' * depth}{index}{self.role} {self.name!r}\n"
+        return line + "".join(c.dump(depth + 1) for c in self.children)
+
+
+# One tree_markdown row: `- role = "name"`, or `- [N] role "name" [actions=...]`
+# for indexed elements. A name with newlines continues on the next lines.
+_ROW = re.compile(r'^(?P<indent> *)- (?:\[(?P<index>\d+)\] (?P<irole>.+?) "|(?P<role>.+?) = ")(?P<name>.*)$')
+
+
+class Snapshot:
+    """One get_window_state of a window. Its element tokens stay valid
+    until the next snapshot of the same window."""
+
+    def __init__(self, state):
+        self.state = state
+        self.elements = state.get("elements", [])
+        self.root = self._parse(state.get("tree_markdown", ""))
+
+    def _parse(self, markdown):
+        by_index = {e["element_index"]: e for e in self.elements}
+        root = CuaNode("root", "")
+        stack = [(-1, root)]
+        rows = []
+        for line in markdown.splitlines():
+            match = _ROW.match(line)
+            if match:
+                rows.append([match, match.group("name")])
+            elif rows:
+                rows[-1][1] += "\n" + line
+        for match, rest in rows:
+            # Strip the closing quote and, for elements, the action list.
+            name = re.sub(r'"( \[actions=.*\])?$', "", rest.rstrip())
+            index = match.group("index")
+            element = by_index.get(int(index)) if index is not None else None
+            node = CuaNode(match.group("irole") or match.group("role"), name, element)
+            depth = len(match.group("indent"))
+            while stack[-1][0] >= depth:
+                stack.pop()
+            stack[-1][1].children.append(node)
+            stack.append((depth, node))
+        return root
+
+    def find(self, role, name=None):
+        return self.root.find(role, name)
+
+    def element(self, role, label):
+        """The indexed element with this role and label, as cua reports it."""
+        for element in self.elements:
+            if element.get("role") == role and element.get("label") == label:
+                return element
+        raise AssertionError(f"cua indexed no {role} {label!r}:\n{self.root.dump()}")
+
+    def element_by_id(self, test_id):
+        """The indexed element for the node whose AT-SPI `id` attribute is
+        `test_id`. cua does not report attributes, so the id is looked up
+        over D-Bus and matched to cua's element by its screen frame."""
+        node = app_tree().require_id(test_id)
+        x, y, w, h = node.extents
+        for element in self.elements:
+            if element.get("frame") == {"x": x, "y": y, "w": w, "h": h} and element.get("label") == node.name:
+                return element
+        raise AssertionError(f"cua indexed nothing for id {test_id!r} ({node.name!r} at {node.extents}):\n{self.root.dump()}")
+
+
 class Cua:
     """One MCP session with `cua-driver mcp`, kept open so snapshots and
     captures persist between calls."""
@@ -319,8 +419,31 @@ class Cua:
             raise CuaError(f"pid {pid} has no on-screen window")
         return max(windows, key=lambda w: w.get("z_index") or 0)
 
+    def snapshot(self, pid):
+        """A fresh snapshot of the pid's window, without a screenshot."""
+        window = self.window(pid)
+        return Snapshot(
+            self.call("get_window_state", pid=pid, window_id=window["window_id"], include_screenshot=False)
+        )
+
+    def click_element(self, pid, element):
+        """Click an indexed element by its token, through its AT-SPI action."""
+        result = self.call("click", pid=pid, element_token=element["element_token"])
+        if result.get("route") != "accessibility":
+            raise CuaError(f"click on {element.get('label')!r} did not use the AT-SPI action: {result}")
+        return result
+
+    def press(self, pid, role, label):
+        """Click the element cua indexes with this role and label."""
+        return self.click_element(pid, self.snapshot(pid).element(role, label))
+
+    def press_id(self, pid, test_id):
+        """Click the element whose AT-SPI `id` attribute is `test_id`."""
+        return self.click_element(pid, self.snapshot(pid).element_by_id(test_id))
+
     def click_node(self, pid, node, delivery_mode="background"):
-        """Click the center of an AT-SPI node in window-local pixels.
+        """Click the center of an AT-SPI node in window-local pixels, for
+        nodes cua does not index (text entries).
 
         A pixel click needs a screenshot from this session first; the fresh
         get_window_state also supplies the window origin for the conversion.
@@ -384,7 +507,8 @@ def main(spec):
 
 def _cli():
     """`wait`: block until the launched app's tree is up.
-    `dump DIR`: save a screenshot and the AT-SPI tree for a failed spec."""
+    `dump DIR`: save a screenshot, the AT-SPI tree, and cua's tree for a
+    failed spec."""
     command = sys.argv[1]
     if command == "wait":
         app_tree(content=False)
@@ -396,6 +520,8 @@ def _cli():
         cua = Cua()
         try:
             cua.screenshot(os.path.join(out, "screen.png"))
+            with open(os.path.join(out, "cua-tree.txt"), "w") as f:
+                f.write(cua.snapshot(app_pid()).root.dump())
         finally:
             cua.close()
     else:

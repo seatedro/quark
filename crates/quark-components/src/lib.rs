@@ -10,21 +10,32 @@ pub mod behavior;
 pub mod breadcrumb;
 pub mod button;
 pub mod checkbox;
+pub mod combobox;
 pub mod context_menu;
+pub mod dock;
 pub mod dropdown;
+pub mod hover_card;
 pub mod kbd;
+mod list_nav;
 pub mod modal;
+pub mod palette;
 pub mod picker;
 pub mod popover;
 pub mod progress;
+pub mod radio;
 pub mod search_field;
 pub mod segmented;
+pub mod select;
 pub mod sidebar_skeleton;
+pub mod slider;
+pub mod split;
 pub mod stat_summary;
+pub mod table;
 pub mod tabs;
 pub mod toast;
 pub mod toolbar;
 pub mod tooltip;
+pub mod tree;
 
 pub use avatar::*;
 pub use badge::*;
@@ -32,21 +43,46 @@ pub use behavior::*;
 pub use breadcrumb::*;
 pub use button::{Button, ButtonSize, ButtonStyle};
 pub use checkbox::*;
+pub use combobox::*;
 pub use context_menu::*;
+pub use dock::{
+    Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockSplit, DockState, PanelId,
+    RegionSnapshot,
+};
 pub use dropdown::*;
+pub use hover_card::*;
 pub use kbd::*;
+pub use list_nav::TypeAhead;
 pub use modal::{Modal, ModalAlign};
+pub use palette::{
+    CommandPalette, FuzzyMatcher, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome,
+    PaletteProvider, binding_label,
+};
 pub use picker::{PickerItem, PickerLabelStyle, picker_list};
 pub use popover::*;
 pub use progress::*;
+pub use radio::*;
 pub use search_field::*;
-pub use segmented::{SegmentedControl, SegmentedItem};
+pub use segmented::{SegmentedControl, SegmentedItem, segmented_focus_id};
+pub use select::*;
 pub use sidebar_skeleton::sidebar_skeleton;
+pub use slider::*;
+pub use split::{
+    Axis, Pane, PaneSizes, Split, SplitEvent, SplitIntegrityError, SplitSnapshot, SplitState,
+};
 pub use stat_summary::*;
+pub use table::{
+    CellStyle, TableData, TableEvent, TableIntegrityError, TableKey, TableOutcome, TableState,
+    table_view,
+};
 pub use tabs::*;
 pub use toast::{
-    Toast, ToastKind, ToastLayout, ToastStack, animate_toast_fan, animate_toast_in,
-    animate_toast_out, animate_toast_progress, retire_toast,
+    Toast, ToastAction, ToastKind, ToastLayout, ToastQueue, ToastStack, animate_toast_fan,
+    animate_toast_in, animate_toast_out, animate_toast_progress, retire_toast,
 };
 pub use toolbar::Toolbar;
 pub use tooltip::*;
+pub use tree::{
+    CollectionEnv, DropPosition, DropTarget, NodeId, SelectMods, SelectionMode, TreeEvent,
+    TreeIntegrityError, TreeKey, TreeNav, TreeOutcome, TreeState, tree_view,
+};

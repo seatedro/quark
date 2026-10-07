@@ -66,6 +66,8 @@ pub struct ElementContext<'a> {
     icon_color_stack: Vec<Color>,
     accessibility_text_hidden_stack: Vec<bool>,
     semantic_parent_stack: Vec<usize>,
+    /// Scroll handles of the containers being prepainted, innermost last.
+    scroll_stack: Vec<ScrollHandle>,
     /// Whether to build accessibility nodes: off while no assistive tech
     /// listens, so frames do not build labels nobody reads.
     accessibility_enabled: bool,
@@ -118,6 +120,7 @@ impl<'a> ElementContext<'a> {
             icon_color_stack: Vec::new(),
             accessibility_text_hidden_stack: Vec::new(),
             semantic_parent_stack: Vec::new(),
+            scroll_stack: Vec::new(),
             accessibility_enabled: true,
         }
     }
@@ -278,6 +281,29 @@ impl<'a> ElementContext<'a> {
 
     pub fn animations(&self) -> Option<&AnimationTable> {
         self.animations.as_deref()
+    }
+
+    pub(crate) fn animations_mut(&mut self) -> Option<&mut AnimationTable> {
+        self.animations.as_deref_mut()
+    }
+
+    /// Prepaint children of a container scrolled by `handle` between this
+    /// and [`Self::pop_scroll_handle`].
+    pub(crate) fn push_scroll_handle(&mut self, handle: &ScrollHandle) {
+        self.scroll_stack.push(handle.clone());
+    }
+
+    pub(crate) fn pop_scroll_handle(&mut self) {
+        self.scroll_stack.pop();
+    }
+
+    /// Tell the innermost tracked scroll container that the element keyed
+    /// `key` was prepainted at `bounds`, for
+    /// [`ScrollHandle::scroll_to_item`]. Free outside scroll containers.
+    pub fn record_scroll_item(&mut self, key: &UiKey, bounds: Bounds) {
+        if let Some(handle) = self.scroll_stack.last() {
+            handle.record_item(quark::stable_hash(key.as_str()), bounds);
+        }
     }
 
     /// Move `(key, prop)` toward `target` with `motion`, starting from its
@@ -596,6 +622,7 @@ pub(super) struct FrameBuffers {
     hovered: Vec<HitId>,
     local_hit_clips: Vec<Rect>,
     local_hit_ids: Vec<HitId>,
+    scroll_stack: Vec<ScrollHandle>,
     /// Kept apart: the context needs its keys until `finish_frame`.
     transition_keys: Vec<AnimKey>,
 }
@@ -622,6 +649,7 @@ macro_rules! swap_buffers {
         std::mem::swap(&mut $buffers.hovered, &mut $cx.hovered);
         std::mem::swap(&mut $buffers.local_hit_clips, &mut $cx.local_hit_clips);
         std::mem::swap(&mut $buffers.local_hit_ids, &mut $cx.local_hit_ids);
+        std::mem::swap(&mut $buffers.scroll_stack, &mut $cx.scroll_stack);
     };
 }
 
@@ -660,6 +688,7 @@ impl ElementContext<'_> {
         buffers.hovered.clear();
         buffers.local_hit_clips.clear();
         buffers.local_hit_ids.clear();
+        buffers.scroll_stack.clear();
         if let Some(cache) = self.cache.as_deref_mut() {
             cache.buffers = buffers;
         }

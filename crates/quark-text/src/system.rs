@@ -1,6 +1,8 @@
 use cosmic_text::{FontSystem, fontdb};
 
-use crate::fonts::{FontSettings, configure_generic_families, vendored_font_sources};
+use crate::fonts::{
+    FontSettings, QuarkFallback, configure_generic_families, emoji_family, vendored_font_sources,
+};
 use crate::layout::{SyntheticItalic, TextError, TextLayout, TextParams};
 
 /// Owns the cosmic-text [`FontSystem`]: vendored fonts, system fonts (for
@@ -13,6 +15,8 @@ pub struct TextSystem {
     /// out scans every face, so it runs when the fonts change rather than on
     /// every layout.
     synthetic_italic: SyntheticItalic,
+    /// The color emoji family emoji clusters ask for first.
+    emoji_family: Option<&'static str>,
     /// Built by [`Self::vendored_only`]; another thread builds its twin the
     /// same way.
     vendored_only: bool,
@@ -46,8 +50,13 @@ impl TextSystem {
     }
 
     pub fn with_settings(settings: &FontSettings) -> Self {
-        let mut font_system = FontSystem::new_with_fonts(vendored_font_sources());
-        configure_generic_families(font_system.db_mut(), settings);
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        for source in vendored_font_sources() {
+            db.load_font_source(source);
+        }
+        let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned());
+        let font_system = font_system(locale, db, settings);
         Self::from_parts(font_system, settings, false)
     }
 
@@ -59,14 +68,14 @@ impl TextSystem {
         for source in vendored_font_sources() {
             db.load_font_source(source);
         }
-        configure_generic_families(&mut db, settings);
-        let font_system = FontSystem::new_with_locale_and_db("en-US".to_owned(), db);
+        let font_system = font_system("en-US".to_owned(), db, settings);
         Self::from_parts(font_system, settings, true)
     }
 
     fn from_parts(font_system: FontSystem, settings: &FontSettings, vendored_only: bool) -> Self {
         Self {
             synthetic_italic: SyntheticItalic::new(&font_system),
+            emoji_family: emoji_family(font_system.db(), settings.bundled_fallback),
             font_system,
             settings: settings.normalized(),
             generation: 0,
@@ -94,8 +103,17 @@ impl TextSystem {
         if settings == self.settings {
             return;
         }
-        configure_generic_families(self.font_system.db_mut(), &settings);
+        if settings.bundled_fallback != self.settings.bundled_fallback {
+            // cosmic-text fixes the fallback chain at construction; the
+            // rebuild reuses the font database, so nothing is rescanned.
+            let empty = FontSystem::new_with_locale_and_db(String::new(), fontdb::Database::new());
+            let (locale, db) = std::mem::replace(&mut self.font_system, empty).into_locale_and_db();
+            self.font_system = font_system(locale, db, &settings);
+        } else {
+            configure_generic_families(self.font_system.db_mut(), &settings);
+        }
         self.synthetic_italic = SyntheticItalic::new(&self.font_system);
+        self.emoji_family = emoji_family(self.font_system.db(), settings.bundled_fallback);
         self.settings = settings;
         self.generation = self.generation.wrapping_add(1);
     }
@@ -120,8 +138,20 @@ impl TextSystem {
     /// [`crate::LayoutCache::layout`] for per-frame use.
     pub fn layout(&mut self, params: &TextParams) -> Result<TextLayout, TextError> {
         profile_scope!("text_shape");
-        TextLayout::build(&mut self.font_system, params, self.synthetic_italic)
+        TextLayout::build(
+            &mut self.font_system,
+            params,
+            self.synthetic_italic,
+            self.emoji_family,
+        )
     }
+}
+
+fn font_system(locale: String, mut db: fontdb::Database, settings: &FontSettings) -> FontSystem {
+    configure_generic_families(&mut db, settings);
+    let fallback = QuarkFallback::new(settings.bundled_fallback, &locale);
+    fallback.fill_weights(&mut db);
+    FontSystem::new_with_locale_and_db_and_fallback(locale, db, fallback)
 }
 
 impl Default for TextSystem {

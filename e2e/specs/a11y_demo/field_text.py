@@ -13,6 +13,8 @@ def entry():
 
 def spec(cua: Cua):
     pid = app_pid()
+    # cua indexes no text entry and has no Text interface reads or
+    # SetSelection, so this spec stays on pixels and D-Bus.
     cua.click_node(pid, entry(), delivery_mode="foreground")
     wait_for("the Name entry to take focus", lambda: entry().has_state(STATE_FOCUSED))
     cua.call("type_text", pid=pid, text="Ada Lovelace", delivery_mode="foreground")
