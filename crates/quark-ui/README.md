@@ -1,7 +1,7 @@
 # quark-ui
 
 Elements, layout, styling, themes, text input, virtual lists, the block
-transcript, markdown, and accessibility for [Quark](../../README.md).
+block document, markdown, and accessibility for [Quark](../../README.md).
 
 A view builds a tree of element values every frame (`div`, `text`,
 `text_input`, ...) styled through the `Styled` trait; Taffy lays it out
@@ -14,7 +14,7 @@ in [src/lib.rs](src/lib.rs) have runnable examples.
 
 | Feature | Effect |
 |---|---|
-| `syntax` | Highlights transcript code blocks with the built-in grammars |
+| `syntax` | Highlights document code blocks with the built-in grammars |
 | `images` | Decodes PNG and JPEG markdown images on a worker |
 | `devtools` | The inspector overlay, frame HUD, and live style overrides |
 | `integrity-checks` | Full integrity checks after every mutation in debug builds |

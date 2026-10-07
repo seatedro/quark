@@ -63,7 +63,7 @@ passes. The full contract is in
 The tree, table, and diff views put each row (the diff view: each row's
 cells) in a boundary inside one boundary for the whole view, so a frame
 where nothing changed replays one entry, and a scrolled frame builds only
-the rows that entered the window. The transcript caches each row.
+the rows that entered the window. The block document caches each row.
 
 ## Recycled frame memory
 
@@ -89,7 +89,7 @@ keys map to rows through an index, which the animation table, for one,
 keeps in sync as it swap-removes rows. Each of these types has a
 `verify_integrity` method that debug builds call after mutations, as
 [TEST_BIBLE.md](../../TEST_BIBLE.md) requires. For `BlockOrder`, the
-animation table, the row table, and the transcript, debug builds check
+animation table, the row table, and the block document, debug builds check
 only the entries a mutation touched unless the `integrity-checks` feature
 asks for the whole structure.
 
@@ -106,8 +106,8 @@ frames through the adapter and asserts:
 | A cached list repeating the last frame, with or without a screen reader connected | 0 allocations |
 | A tracked scroll container repeating the last frame | 0 |
 | A list frame where one cached row changed | 40 per changed row |
-| A markdown transcript repeating the last frame | 16 |
-| A transcript frame after text streams into one message | 320 |
+| A markdown document repeating the last frame | 16 |
+| A document frame after text streams into one message | 320 |
 
 Examples with a test module can carry a budget of their own:
 `hello_ui` rebuilds without a cache boundary and holds a repeated frame to

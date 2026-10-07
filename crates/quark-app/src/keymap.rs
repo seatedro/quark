@@ -2,8 +2,15 @@
 //! app; bindings are strings like `"mod+shift+p"` that parse as a
 //! [`Binding`], where `mod` matches either Cmd or Ctrl. A binding may be a
 //! sequence of strokes separated by spaces (`"g g"`).
+//!
+//! Each entry's [`ShortcutScope`] is a key-context predicate (`"editor"`,
+//! `"editor && mode == insert"`; see [`quark_ui::key_context`]).
+//! [`Keymap::key_bindings`] turns the table into the [`KeyBindings`] the
+//! adapter resolves along the focus path.
 
+use quark_ui::Action;
 use quark_ui::element::Binding;
+use quark_ui::key_context::{KeyBinding, KeyBindings, KeyPredicate};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,16 +19,40 @@ pub struct KeymapOverride<C> {
     pub binding: String,
 }
 
-/// Where a binding applies. Two bindings conflict only when their scopes
-/// overlap; `GLOBAL` overlaps every scope.
+/// Where a binding applies: a key-context predicate over the focus path,
+/// such as `"editor"` or `"pane > editor && mode == insert"`. `GLOBAL`
+/// applies everywhere, below every context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ShortcutScope(pub &'static str);
 
 impl ShortcutScope {
     pub const GLOBAL: Self = Self("global");
 
+    /// The scope's predicate; `None` for `GLOBAL`. A scope that does not
+    /// parse is a programming error: it panics in debug builds and never
+    /// matches in release builds.
+    pub fn predicate(self) -> Option<KeyPredicate> {
+        if self == Self::GLOBAL {
+            return None;
+        }
+        match self.0.parse() {
+            Ok(predicate) => Some(predicate),
+            Err(error) => {
+                debug_assert!(false, "{error}");
+                // No context has an empty identifier.
+                Some(KeyPredicate::Id(String::new()))
+            }
+        }
+    }
+
+    /// Whether one focus path can satisfy both scopes, so the same key in
+    /// both is ambiguous. `GLOBAL` overlaps every scope: a scoped binding
+    /// hides a global one wherever it applies.
     pub fn overlaps(self, other: Self) -> bool {
-        self == other || self == Self::GLOBAL || other == Self::GLOBAL
+        match (self.predicate(), other.predicate()) {
+            (Some(a), Some(b)) => a.overlaps(&b),
+            _ => true,
+        }
     }
 }
 
@@ -100,6 +131,31 @@ impl<C: Copy + PartialEq> Keymap<C> {
         self.active_bindings(overrides, command)
             .iter()
             .any(|candidate| binding_eq(candidate, binding))
+    }
+
+    /// Every entry's active bindings as [`KeyBindings`], each under its
+    /// scope's predicate, with `action` naming the command's action.
+    /// Bindings of several strokes are left out: [`KeyBindings`] matches
+    /// single strokes.
+    pub fn key_bindings(
+        &self,
+        overrides: &[KeymapOverride<C>],
+        action: impl Fn(C) -> Action,
+    ) -> KeyBindings {
+        let mut bindings = KeyBindings::new();
+        for entry in self.entries() {
+            let predicate = entry.scope.predicate();
+            for keys in self.active_bindings(overrides, entry.command) {
+                if let Ok(keys) = keys.parse::<Binding>() {
+                    bindings.push(KeyBinding {
+                        keys,
+                        predicate: predicate.clone(),
+                        action: action(entry.command),
+                    });
+                }
+            }
+        }
+        bindings
     }
 
     pub fn binding_conflict(
@@ -288,6 +344,58 @@ mod tests {
 
         reset_override(&mut overrides, Command::Save);
         assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn scoped_bindings_conflict_only_where_one_context_satisfies_both() {
+        const INSERT: ShortcutScope = ShortcutScope("editor && mode == insert");
+        const NORMAL: ShortcutScope = ShortcutScope("editor && mode == normal");
+        const ENTRIES: &[ShortcutEntry<Command>] = &[
+            ShortcutEntry::new(INSERT, Command::Open, &["escape"], "Leave insert"),
+            ShortcutEntry::new(NORMAL, Command::Save, &["escape"], "Cancel"),
+            ShortcutEntry::new(EDITOR, Command::Next, &["n"], "Next"),
+        ];
+        const MODAL: Keymap<Command> = Keymap::new(&[ShortcutGroup {
+            title: "Modal",
+            entries: ENTRIES,
+        }]);
+        let conflict = |command, binding| {
+            let entry = MODAL.entry(command).unwrap();
+            MODAL
+                .binding_conflict(&[], entry, binding)
+                .map(|entry| entry.command)
+        };
+
+        assert_eq!(conflict(Command::Open, "escape"), None);
+        // Plain `editor` holds in insert mode too.
+        assert_eq!(conflict(Command::Next, "escape"), Some(Command::Open));
+    }
+
+    #[test]
+    fn key_bindings_carry_overrides_and_scopes() {
+        #[derive(Debug, Clone, PartialEq)]
+        struct Fired(Command);
+        let mut overrides = Vec::new();
+        set_override(&mut overrides, Command::Save, "mod+shift+s".into());
+        let bindings = KEYMAP.key_bindings(&overrides, |command| Action::new(Fired(command)));
+
+        let fire = |pressed: &str, context: &[&str]| {
+            let path: Vec<_> = context
+                .iter()
+                .map(|text| quark_ui::key_context::ContextEntry::parse(text))
+                .collect();
+            let pressed: Binding = pressed.parse().unwrap();
+            bindings
+                .resolve(&pressed, &path)
+                .and_then(|found| found.binding.action.downcast_ref::<Fired>().cloned())
+                .map(|Fired(command)| command)
+        };
+
+        assert_eq!(fire("ctrl+s", &[]), None);
+        assert_eq!(fire("ctrl+shift+s", &[]), Some(Command::Save));
+        assert_eq!(fire("n", &["workspace"]), None);
+        assert_eq!(fire("n", &["workspace", "editor"]), Some(Command::Next));
+        assert_eq!(fire("ctrl+enter", &["text-field"]), Some(Command::Submit));
     }
 
     #[test]

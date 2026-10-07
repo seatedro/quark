@@ -426,6 +426,22 @@ impl ContextMenuState {
         entries
     }
 
+    /// Whether the deepest open panel's highlighted row opens a submenu,
+    /// so Right would open it.
+    pub fn on_submenu(&self) -> bool {
+        let Some(level) = self.levels.last() else {
+            return false;
+        };
+        let entries = self.entries_at(self.deepest());
+        matches!(
+            level.highlighted.and_then(|i| entries.get(i)),
+            Some(ContextMenuEntry::Submenu {
+                disabled: false,
+                ..
+            })
+        )
+    }
+
     fn deepest(&self) -> usize {
         self.levels.len().saturating_sub(1)
     }

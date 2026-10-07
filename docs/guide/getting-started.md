@@ -65,7 +65,7 @@ cargo run -p quark-app --example hello_ui
 | `a11y_demo` | Text field, checkbox, switch, a toast as a live region, an announcement |
 | `animation_demo` | Hover transitions and a spring that reverses mid-flight |
 | `composer_demo` | A chat composer: completions, atomic chips, attachments, prompt history |
-| `transcript_demo` | 5,000 markdown messages with a streaming answer, selection, and find |
+| `chat_demo` | A chat built on the block document: 5,000 markdown messages, a streaming answer, selection, and find |
 | `tree_table_demo` | A lazy file tree and a 100,000-row sortable table |
 | `diff_demo` | A diff viewer over two files, a patch file, or a built-in sample |
 | `panels_demo` | A docked workspace from `Dock` and `Split` |

@@ -23,7 +23,7 @@ published to crates.io; see [docs/publish-readiness.md](docs/publish-readiness.m
 | [`quark-render`](crates/quark-render) | The wgpu renderer for scenes | `quark`, `quark-text` |
 | [`quark-syntax`](crates/quark-syntax) | Tree-sitter highlighting, one cargo feature per language | |
 | [`quark-diff`](crates/quark-diff) | Unified diff parsing, line and word diffs, display projections | |
-| [`quark-ui`](crates/quark-ui) | Elements, layout, styling, themes, text input, virtual lists, the transcript, markdown, accessibility | `quark`, `quark-text`, `quark-render`, `quark-syntax` (feature `syntax`) |
+| [`quark-ui`](crates/quark-ui) | Elements, layout, styling, themes, text input, virtual lists, the block document, markdown, accessibility | `quark`, `quark-text`, `quark-render`, `quark-syntax` (feature `syntax`) |
 | [`quark-components`](crates/quark-components) | Buttons, menus, popovers, select, combobox, command palette, split panes, dock, tree, table, diff view | `quark`, `quark-text`, `quark-render`, `quark-ui`, `quark-diff`, `quark-syntax` |
 | [`quark-app`](crates/quark-app) | Windows, the event loop, input, `UiApp`, platform services, the test harness | `quark`, `quark-render`, `quark-text`, `quark-ui` (feature `ui`) |
 
@@ -142,7 +142,7 @@ lists what each one does where.
 | `ui` | yes | `UiApp`, `run_ui`, and the quark-ui adapter |
 | `emoji-font` | yes | Bundles Noto Color Emoji (10.7 MB) as the emoji fallback |
 | `cjk-font` | yes | Bundles a 3.7 MB Noto Sans CJK subset as the CJK fallback |
-| `syntax` | no | Syntax highlighting in transcript code blocks (Rust, JavaScript, TypeScript, Python, Bash, JSON, Go) |
+| `syntax` | no | Syntax highlighting in document code blocks (Rust, JavaScript, TypeScript, Python, Bash, JSON, Go) |
 | `images` | no | PNG and JPEG decoding for markdown image blocks |
 | `notifications` | no | Desktop notifications through `EventContext::notify` |
 | `tray` | no | A system tray icon and menu through `EventContext::set_tray` |
