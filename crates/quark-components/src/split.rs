@@ -17,10 +17,10 @@
 use std::rc::Rc;
 
 use accesskit::Role;
-use quark::SemanticRole;
+use quark::view;
 use quark_ui::accessibility::NumericValue;
 use quark_ui::element::{
-    AnyElement, ClickEvent, CursorHint, Div, DragHandler, DragReleaseResult, IntoAnyElement, div,
+    AnyElement, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement, div,
 };
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
@@ -616,29 +616,24 @@ impl<'a> Split<'a> {
         } = self;
         let resolved = state.resolve(extent);
         let horizontal = state.axis == Axis::Horizontal;
-        let mut root = div().relative();
-        root = if horizontal {
-            root.flex_row().w(extent).h_full()
-        } else {
-            root.flex_col().h(extent).w_full()
-        };
-        for (i, child) in children.into_iter().enumerate().take(state.panes.len()) {
-            if i > 0 && state.divider_visible(i - 1) {
-                root = root.child(divider(id, state, i - 1, extent, &map, theme));
-            }
-            let size = resolved.sizes[i];
-            let mut pane = div().flex_none().clip().relative();
-            pane = if horizontal {
-                pane.w(size).h_full()
-            } else {
-                pane.h(size).w_full()
-            };
-            if !state.collapsed[i] {
-                pane = pane.child(child);
-            }
-            root = root.child(pane);
+        view! {
+            <div class="relative"
+                 @when {horizontal} { class="flex-row" w={extent} class="h-full" }
+                 @when {!horizontal} { class="flex-col" h={extent} class="w-full" }>
+                for (i, child) in children.into_iter().enumerate().take(state.panes.len()) {
+                    if i > 0 && state.divider_visible(i - 1) {
+                        {divider(id, state, i - 1, extent, &map, theme)}
+                    }
+                    <div class="flex-none overflow-clip relative"
+                         @when {horizontal} { w={resolved.sizes[i]} class="h-full" }
+                         @when {!horizontal} { h={resolved.sizes[i]} class="w-full" }>
+                        if !state.collapsed[i] {
+                            {child}
+                        }
+                    </div>
+                }
+            </div>
         }
-        root.into_any()
     }
 }
 
@@ -649,7 +644,7 @@ fn divider(
     extent: f32,
     map: &EventMap,
     theme: &Theme,
-) -> Div {
+) -> AnyElement {
     let colors = &theme.colors;
     let horizontal = state.axis == Axis::Horizontal;
     let pane = state.divider_pane(index);
@@ -674,59 +669,52 @@ fn divider(
         })
     };
     let drag_map = map.clone();
-    let mut hit = div()
-        .absolute()
-        .z_index(1)
-        .accessibility_id(format!("{id}:divider:{index}"))
-        .accessibility_role(Role::Splitter)
-        .semantic_role(SemanticRole::Separator)
-        .accessibility_label(quark_ui::i18n::tr_args(
-            "quark-resize-named",
-            [("name", p.label.into())],
-        ))
-        .accessibility_value(format!("{size:.0}"))
-        .accessibility_numeric(NumericValue {
-            value: f64::from(size),
-            min: if p.collapsible { 0.0 } else { f64::from(p.min) },
-            max: f64::from(p.max.min(extent)),
-            step: Some(f64::from(NUDGE_STEP)),
-        })
-        .test_id("split-divider")
-        .focus_ring(Split::divider_focus(id, index))
-        .cursor(cursor)
-        .hover_bg(colors.accent)
-        .on_key(back, nudge(-NUDGE_STEP))
-        .on_key(forward, nudge(NUDGE_STEP))
-        .on_key(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))
-        .on_key(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))
-        .on_drag(move |press: ClickEvent| {
-            Box::new(DividerDrag {
-                map: drag_map.clone(),
-                divider: index,
-                horizontal,
-                origin: if horizontal { press.x } else { press.y },
-                extent,
-                cursor,
-            }) as Box<dyn DragHandler>
-        });
-    if p.collapsible {
-        hit = hit
-            .accessibility_expanded(!collapsed)
-            .on_key("enter", map(SplitEvent::Toggle { divider: index }));
-    }
     let offset = -(DIVIDER_HIT - DIVIDER_THICKNESS) / 2.0;
-    hit = if horizontal {
-        hit.top(0.0).bottom(0.0).left(offset).w(DIVIDER_HIT)
-    } else {
-        hit.left(0.0).right(0.0).top(offset).h(DIVIDER_HIT)
-    };
-    let line = div().flex_none().relative().bg(colors.border_variant);
-    let line = if horizontal {
-        line.w(DIVIDER_THICKNESS).h_full()
-    } else {
-        line.h(DIVIDER_THICKNESS).w_full()
-    };
-    line.child(hit)
+    view! {
+        <div class="flex-none relative" bg={colors.border_variant}
+             @when {horizontal} { w={DIVIDER_THICKNESS} class="h-full" }
+             @when {!horizontal} { h={DIVIDER_THICKNESS} class="w-full" }>
+            <div class="absolute" z_index={1} accessibility_id={format!("{id}:divider:{index}")}
+                 accessibility_role={Role::Splitter} role="separator"
+                 aria-label={quark_ui::i18n::tr_args(
+                     "quark-resize-named",
+                     [("name", p.label.into())],
+                 )}
+                 aria-valuetext={format!("{size:.0}")}
+                 accessibility_numeric={NumericValue {
+                     value: f64::from(size),
+                     min: if p.collapsible { 0.0 } else { f64::from(p.min) },
+                     max: f64::from(p.max.min(extent)),
+                     step: Some(f64::from(NUDGE_STEP)),
+                 }}
+                 test_id="split-divider" focus_ring={Split::divider_focus(id, index)}
+                 cursor={cursor} hover_bg={colors.accent}
+                 on_key={(back, nudge(-NUDGE_STEP))}
+                 on_key={(forward, nudge(NUDGE_STEP))}
+                 on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
+                 on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
+                 on:drag={move |press: ClickEvent| {
+                     Box::new(DividerDrag {
+                         map: drag_map.clone(),
+                         divider: index,
+                         horizontal,
+                         origin: if horizontal { press.x } else { press.y },
+                         extent,
+                         cursor,
+                     }) as Box<dyn DragHandler>
+                 }}
+                 @when {p.collapsible} {
+                     aria-expanded={!collapsed}
+                     on_key={("enter", map(SplitEvent::Toggle { divider: index }))}
+                 }
+                 @when {horizontal} {
+                     class="top-0 bottom-0" left={offset} w={DIVIDER_HIT}
+                 }
+                 @when {!horizontal} {
+                     class="left-0 right-0" top={offset} h={DIVIDER_HIT}
+                 } />
+        </div>
+    }
 }
 
 struct DividerDrag {
