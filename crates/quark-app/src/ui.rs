@@ -925,8 +925,16 @@ impl<U: UiApp> UiAdapter<U> {
     fn finish_frame(&mut self, painted: Painted) -> (Scene, ImeRequest) {
         self.spare_input = self.router.replace_frame(painted.input);
         // This frame painted hover for the current pointer; later moves
-        // compare against it.
-        self.hovered = self.hovered_at(self.pointer);
+        // compare against it. Into the kept buffer: a pointer resting over
+        // the window must not cost an allocation per frame.
+        match self.pointer {
+            Some((x, y)) => self
+                .router
+                .frame()
+                .hits
+                .stack_at_into(x, y, &mut self.hovered),
+            None => self.hovered.clear(),
+        }
         self.accessibility = painted.accessibility;
         let ime = self.ime_request(&painted.text_areas);
         self.spare_text_areas = std::mem::replace(&mut self.text_areas, painted.text_areas);
