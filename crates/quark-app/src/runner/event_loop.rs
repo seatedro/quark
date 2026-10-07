@@ -53,6 +53,11 @@ struct Runner<A> {
     accessibility_actions: Receiver<(WindowId, ActionRequest)>,
     #[cfg(feature = "hot-reload")]
     hot_reload_pending: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Presented frames left before exiting, from `QUARK_EXIT_AFTER_FRAMES`.
+    /// Lets CI smoke runs start an example, draw, and quit on their own.
+    /// Debug builds only, so a stray variable cannot close a shipped app.
+    #[cfg(debug_assertions)]
+    exit_after_frames: Option<u64>,
 }
 
 impl<A: App> Runner<A> {
@@ -82,6 +87,10 @@ impl<A: App> Runner<A> {
             accessibility_actions,
             #[cfg(feature = "hot-reload")]
             hot_reload_pending: None,
+            #[cfg(debug_assertions)]
+            exit_after_frames: std::env::var("QUARK_EXIT_AFTER_FRAMES")
+                .ok()
+                .and_then(|frames| frames.parse().ok()),
         }
     }
 
@@ -301,6 +310,16 @@ impl<A: App> Runner<A> {
             profile_scope!("render");
             renderer.render(&scene, &mut self.text.system, time)
         };
+        #[cfg(debug_assertions)]
+        if rendered.is_ok()
+            && let Some(left) = &mut self.exit_after_frames
+        {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                tracing::info!("QUARK_EXIT_AFTER_FRAMES reached; exiting");
+                self.flags.exit_requested = true;
+            }
+        }
         match rendered {
             #[cfg(feature = "devtools")]
             Ok(stats) => state.last_render = stats,
