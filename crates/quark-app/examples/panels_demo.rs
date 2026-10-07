@@ -238,16 +238,17 @@ mod tests {
     fn dragging_a_divider_resizes_within_its_limits() {
         // (divider, drag dx, expected announced size). The sidebar is
         // 180..=480 and collapses below 90; the right panel is 280..=900.
-        // Either stops where the 1200 wide window leaves the center its
-        // 320: 1200 - 2 dividers - 320 - the other side's size.
+        // With the center at its 320, either pushes the other side down to
+        // its minimum: the sidebar reaches its 480 maximum, and the right
+        // panel stops at 1200 - 2 dividers - 320 - 180 = 698.
         let cases: &[(&str, f32, Option<&str>)] = &[
             ("Sidebar", 100.0, Some("360")),
-            ("Sidebar", 1000.0, Some("458")),
+            ("Sidebar", 1000.0, Some("480")),
             ("Sidebar", -60.0, Some("200")),
             ("Sidebar", -150.0, Some("180")),
             ("Sidebar", -200.0, None),
             ("Right panel", -100.0, Some("520")),
-            ("Right panel", -1000.0, Some("618")),
+            ("Right panel", -1000.0, Some("698")),
             ("Right panel", 200.0, Some("280")),
         ];
         for &(label, dx, expected) in cases {

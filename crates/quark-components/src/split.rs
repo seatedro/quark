@@ -9,8 +9,10 @@
 //!
 //! Exactly one pane is the flex pane: it fills whatever the fixed panes
 //! leave. Every other pane owns the one divider on its side facing the flex
-//! pane, so dragging a divider resizes exactly one pane. Sizes are in
-//! logical points.
+//! pane. Dragging a divider resizes that pane out of the flex pane; once the
+//! flex pane is at its minimum, the pane pushes the fixed panes beyond its
+//! divider down to their minimums, nearest first, and they recover if the
+//! same drag comes back. Sizes are in logical points.
 
 use std::rc::Rc;
 
@@ -155,6 +157,8 @@ struct DragOrigin {
     divider: usize,
     size: f32,
     collapsed: bool,
+    /// Every pane's size at the press, so panes the drag pushed recover.
+    sizes: [f32; MAX_PANES],
 }
 
 /// Pane sizes resolved for one extent.
@@ -346,14 +350,28 @@ impl SplitState {
         out
     }
 
-    /// Largest size `pane` can take in `extent` while every other pane keeps
-    /// its resolved size and the flex pane its minimum.
-    fn upper_bound(&self, pane: usize, extent: f32) -> f32 {
+    /// Fixed panes `pane` pushes once the flex pane is at its minimum: the
+    /// expanded ones beyond its divider, nearest first.
+    fn push_order(&self, pane: usize) -> impl Iterator<Item = usize> + '_ {
+        let beyond: Box<dyn Iterator<Item = usize>> = if pane < self.flex {
+            Box::new(pane + 1..self.panes.len())
+        } else {
+            Box::new((0..pane).rev())
+        };
+        beyond.filter(|&i| i != self.flex && !self.collapsed[i])
+    }
+
+    /// Give `pane` the size `target` (already in pane terms): collapse below
+    /// half the minimum when collapsible, otherwise clamp to what fits. Space
+    /// comes from the flex pane down to its minimum, then from the panes
+    /// [`Self::push_order`] lists down to theirs.
+    fn resize_to(&mut self, pane: usize, target: f32, extent: f32, may_collapse: bool) {
+        let p = self.panes[pane];
+        if may_collapse && p.collapsible && target < p.min / 2.0 {
+            self.collapsed[pane] = true;
+            return;
+        }
         let resolved = self.resolve(extent);
-        let others: f32 = (0..self.panes.len())
-            .filter(|&i| i != pane && i != self.flex)
-            .map(|i| resolved.sizes[i])
-            .sum();
         let mut dividers = self.visible_dividers();
         if let Some(d) = self.pane_divider(pane)
             && !self.divider_visible(d)
@@ -362,23 +380,31 @@ impl SplitState {
             dividers += 1;
         }
         let avail = extent - dividers as f32 * DIVIDER_THICKNESS;
-        let p = self.panes[pane];
-        (avail - others - self.panes[self.flex].min)
-            .min(p.max)
-            .max(p.min)
-    }
-
-    /// Give `pane` the size `target` (already in pane terms): collapse below
-    /// half the minimum when collapsible, otherwise clamp to what fits.
-    fn resize_to(&mut self, pane: usize, target: f32, extent: f32, may_collapse: bool) {
-        let p = self.panes[pane];
-        if may_collapse && p.collapsible && target < p.min / 2.0 {
-            self.collapsed[pane] = true;
-            return;
-        }
-        let upper = self.upper_bound(pane, extent);
+        let others: f32 = (0..self.panes.len())
+            .filter(|&i| i != pane && i != self.flex)
+            .map(|i| resolved.sizes[i])
+            .sum();
+        // What the pane can take from the flex pane alone.
+        let free = avail - others - self.panes[self.flex].min;
+        let slack: f32 = self
+            .push_order(pane)
+            .map(|i| (resolved.sizes[i] - self.panes[i].min).max(0.0))
+            .sum();
+        let size = target.clamp(p.min, (free + slack).min(p.max).max(p.min));
         self.collapsed[pane] = false;
-        self.sizes[pane] = target.clamp(p.min, upper);
+        self.sizes[pane] = size;
+        let mut overflow = size - free;
+        let donors: Vec<usize> = self.push_order(pane).collect();
+        for i in donors {
+            if overflow <= 0.0 {
+                break;
+            }
+            let give = (resolved.sizes[i] - self.panes[i].min).clamp(0.0, overflow);
+            if give > 0.0 {
+                self.sizes[i] = resolved.sizes[i] - give;
+                overflow -= give;
+            }
+        }
     }
 
     /// `+1` when moving the divider right or down grows its pane.
@@ -402,10 +428,13 @@ impl SplitState {
                 } else {
                     self.last_press = Some((divider, now_ms));
                 }
+                let mut sizes = [0.0; MAX_PANES];
+                sizes[..self.sizes.len()].copy_from_slice(&self.sizes);
                 self.drag = Some(DragOrigin {
                     divider,
                     size: self.sizes[pane],
                     collapsed: self.collapsed[pane],
+                    sizes,
                 });
                 double
             }
@@ -418,6 +447,13 @@ impl SplitState {
                     return false;
                 };
                 let pane = self.divider_pane(divider);
+                // Start over from the press, so panes an earlier move pushed
+                // grow back when the pointer returns.
+                for i in 0..self.panes.len() {
+                    if i != pane && i != self.flex {
+                        self.sizes[i] = origin.sizes[i];
+                    }
+                }
                 let start = if origin.collapsed { 0.0 } else { origin.size };
                 if origin.collapsed {
                     // Expanding from collapsed starts from the stored size,
@@ -769,6 +805,35 @@ mod tests {
             ),
             divider.prop_map(|divider| SplitEvent::Toggle { divider }),
         ]
+    }
+
+    // Regression: with the center at its minimum, the left divider stopped
+    // dead even though the right pane had room to give.
+    #[test]
+    fn a_drag_past_the_flex_minimum_pushes_the_far_pane() {
+        // Extent 850 leaves 848 after two dividers: 200 + 348 + 300.
+        // (drag dx, resolved sizes), all moves of one press.
+        let moves: &[(f32, [f32; 3])] = &[
+            (100.0, [300.0, 300.0, 248.0]),
+            (150.0, [350.0, 300.0, 198.0]),
+            // Every pane on the far side is at its minimum.
+            (400.0, [398.0, 300.0, 150.0]),
+            // The pushed pane recovers as the same drag comes back.
+            (0.0, [200.0, 348.0, 300.0]),
+        ];
+        let mut state = three_panes();
+        state.apply(SplitEvent::Press { divider: 0 }, 0);
+        for &(delta, expected) in moves {
+            state.apply(
+                SplitEvent::Drag {
+                    divider: 0,
+                    delta,
+                    extent: 850.0,
+                },
+                0,
+            );
+            assert_eq!(state.resolve(850.0).as_slice(), expected, "dragged by {delta}");
+        }
     }
 
     proptest! {
