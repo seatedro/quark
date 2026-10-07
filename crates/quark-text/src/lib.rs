@@ -1,5 +1,8 @@
 //! One text layout shared by measurement, hit-testing, selection, and
 //! painting.
+// Byte slicing of strings lives in `offset`, which snaps every index
+// onto a grapheme boundary first.
+#![deny(clippy::string_slice)]
 
 /// A profiler scope plus a `tracing` span for the rest of the block, both
 /// compiled only with the `profile` feature.
@@ -16,6 +19,7 @@ macro_rules! profile_scope {
 mod cache;
 pub mod fonts;
 mod layout;
+pub mod offset;
 mod row;
 mod system;
 
@@ -26,5 +30,6 @@ pub use layout::{
     Caret, DEFAULT_LINE_HEIGHT_FACTOR, GlyphColumns, GlyphRun, IntegrityError, LineInfo, TextError,
     TextLayout, TextParams, TextSpan, TextStyle,
 };
+pub use offset::{TextOffset, ToTextOffset};
 pub use row::{RowHeights, RowMeasure};
 pub use system::TextSystem;
