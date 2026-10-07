@@ -11,6 +11,21 @@ use quark_render::RectPrimitive;
 use quark_text::TextOffset;
 use quark_text::offset;
 
+/// Space between a labeled field's label line and its value line.
+const LABEL_GAP: f32 = 2.0;
+/// Caret height as a multiple of the value font size.
+const CARET_EM: f32 = 1.2;
+
+/// The natural height of a labeled field: padding, label line, gap, value
+/// line, padding. Matches the metrics `paint` uses.
+fn labeled_height(metrics: &crate::theme::ThemeMetrics) -> f32 {
+    let scale = metrics.ui_scale();
+    let label_lh = (metrics.ui_small_font_size - 1.0) * 1.4;
+    let value_lh = metrics.ui_font_size * 1.5;
+    let top_pad = (Sz::INPUT_TOP_PAD * scale).round();
+    top_pad * 2.0 + label_lh + LABEL_GAP + value_lh
+}
+
 const BULLET: &str = "\u{2022}";
 
 // ---------------------------------------------------------------------------
@@ -239,9 +254,18 @@ impl Element for TextInput {
     fn request_layout(
         &mut self,
         engine: &mut LayoutEngine,
-        _cx: &mut ElementContext,
+        cx: &mut ElementContext,
     ) -> (LayoutId, ()) {
-        let id = engine.request_layout(self.base_style.layout.clone(), &[]);
+        let mut layout = self.base_style.layout.clone();
+        // A labeled field is at least tall enough for its label, value line,
+        // and padding, so apps need not guess a height.
+        if !self.bare
+            && layout.size.height == taffy::Dimension::auto()
+            && layout.min_size.height == taffy::Dimension::auto()
+        {
+            layout.min_size.height = taffy::Dimension::length(labeled_height(&cx.theme.metrics));
+        }
+        let id = engine.request_layout(layout, &[]);
         (id, ())
     }
 
@@ -318,7 +342,12 @@ impl Element for TextInput {
             let label_size = theme.metrics.ui_small_font_size - 1.0;
             let label_lh = label_size * 1.4;
             let pad = (Sz::INPUT_SIDE_PAD * scale).round();
-            let top_pad = (Sz::INPUT_TOP_PAD * scale).round();
+
+            // Center the label and value lines in whatever height the field
+            // was given; a field shorter than its content would otherwise
+            // push the value line into the bottom border.
+            let stack_h = label_lh + LABEL_GAP + value_lh;
+            let stack_top = bounds.y + ((bounds.height - stack_h) * 0.5).max(0.0);
 
             let label_style = TextStyle::new(label_size)
                 .weight(FontWeight::Medium)
@@ -327,7 +356,7 @@ impl Element for TextInput {
                 scene.text(TextPrimitive {
                     rect: Rect {
                         x: bounds.x + pad,
-                        y: bounds.y + top_pad,
+                        y: stack_top,
                         width: bounds.width - pad * 2.0,
                         height: label_lh,
                     },
@@ -337,7 +366,7 @@ impl Element for TextInput {
             }
 
             text_x = bounds.x + pad;
-            text_y = bounds.y + top_pad + label_lh + 2.0;
+            text_y = stack_top + label_lh + LABEL_GAP;
             text_area_w = bounds.width - pad * 2.0;
         }
 
@@ -479,11 +508,14 @@ impl Element for TextInput {
         }
 
         // Cursor caret
+        // As tall as the text, not the line box, centered on the line where
+        // the glyphs are painted.
+        let caret_h = (value_size * CARET_EM).min(value_lh);
         let caret = caret_byte.filter(|_| self.focused).map(|byte| Rect {
             x: origin_x + caret_x(byte),
-            y: text_y + 1.0,
+            y: text_y + (value_lh - caret_h) * 0.5,
             width: Sz::CURSOR_WIDTH,
-            height: value_lh - Sz::CURSOR_WIDTH,
+            height: caret_h,
         });
         if let Some(rect) = caret {
             let (visible, next_toggle_ms) = caret_blink(cx.clock_ms, self.cursor_moved_at_ms);
@@ -642,6 +674,31 @@ mod tests {
             render_element(&mut root, &mut Scene::default(), &mut cx, 160.0, 52.0);
             cx.text_input_hit_areas.pop().expect("text input hit area")
         }
+    }
+
+    // Regression: in a 52px labeled field (hello_ui's size) the label and
+    // value lines plus top padding filled the field, and the caret spanned
+    // the whole 1.5x line box, so it ran into the bottom border.
+    #[test]
+    fn caret_in_a_labeled_field_clears_the_border() {
+        let mut painter = Painter::new();
+        let mut field = TextField::new("");
+        field.apply(InsertText("Quark".into()));
+        let area = painter.paint(&field);
+        let caret = area.caret.expect("focused field reports a caret");
+        let bottom = 52.0 - 1.0; // inside the 1px border
+        assert!(
+            caret.y >= 1.0 && caret.y + caret.height <= bottom - 2.0,
+            "caret {}..{} reaches the border (field 0..52)",
+            caret.y,
+            caret.y + caret.height
+        );
+        let font = painter.theme.metrics.ui_font_size;
+        assert!(
+            caret.height <= font * 1.25,
+            "caret {} taller than its text",
+            caret.height
+        );
     }
 
     fn assert_caret_visible(area: &TextInputHitArea) {
