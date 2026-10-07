@@ -8,7 +8,9 @@
 //! Enter and Shift+Enter step through them, Escape closes it. Escape
 //! without find open quits.
 //!
-//! Build with `--features syntax` for highlighted code blocks. Each answer
+//! Build with `--features syntax` for highlighted code blocks, after
+//! building the grammar packs with `cargo run -p syntax-pack -- build`
+//! (`QUARK_SYNTAX_PACKS` names another pack root). Each answer
 //! shows an image block, decoded on the image worker from a generated
 //! gradient; it reserves a placeholder until its pixels arrive.
 //!
@@ -129,7 +131,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ),
     (
         "bash",
-        "# Run the demo with highlighted code blocks.\ncargo run --release -p quark-app --example chat_demo --features syntax",
+        "# Build the grammar packs, then run the demo with highlighted code blocks.\ncargo run -p syntax-pack -- build\ncargo run --release -p quark-app --example chat_demo --features syntax",
     ),
     (
         "go",
@@ -375,6 +377,19 @@ struct Demo {
     find: Option<TextField>,
 }
 
+/// Grammars from the pack root `$QUARK_SYNTAX_PACKS`, or the one
+/// `cargo run -p syntax-pack -- build` writes (`target/syntax-packs`).
+#[cfg(feature = "syntax")]
+fn grammar_store() -> quark_app::quark_ui::quark_syntax::GrammarStore {
+    use quark_app::quark_ui::quark_syntax::{GrammarStore, StoreConfig};
+    let root = std::env::var_os("QUARK_SYNTAX_PACKS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/syntax-packs")
+        });
+    GrammarStore::new(StoreConfig::new().local_packs(root))
+}
+
 impl Demo {
     fn new() -> Self {
         let history_len = std::env::var("QUARK_CHAT_HISTORY")
@@ -402,6 +417,8 @@ impl Demo {
             .collect();
         let mut chat = MarkdownDocument::new(DocumentStyle::for_font_size(FONT_SIZE));
         chat.set_decorator(ChatChrome);
+        #[cfg(feature = "syntax")]
+        chat.set_grammar_store(grammar_store());
         chat.set_image_loader(Arc::new(gradient_image));
         chat.extend(history).unwrap_or_else(|e| eprintln!("{e:?}"));
         Self {

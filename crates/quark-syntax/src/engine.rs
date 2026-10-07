@@ -1,155 +1,133 @@
-//! Parsing and query evaluation.
-//! Parsers and compiled queries are cached per thread, so a worker thread
-//! compiles each language once.
+//! Loading grammars from packs, parsing, and query evaluation.
+//!
+//! A [`Grammar`] is shared by every thread; parsers are not `Sync`, so each
+//! thread keeps its own per grammar.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tree_sitter as ts;
 use tree_sitter::StreamingIterator;
 
-use crate::{HighlightKind, HighlightSpan, LanguageId};
+use crate::pack::{PackError, PackManifest, supported_abi, verify_files};
+use crate::{HighlightKind, HighlightSpan};
 
-struct CompiledLanguage {
+/// A loaded language: its tree-sitter grammar and compiled highlight query.
+pub(crate) struct Grammar {
+    id: u64,
+    language: ts::Language,
     query: ts::Query,
     capture_kinds: Vec<HighlightKind>,
 }
 
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
 thread_local! {
-    /// `None` records a language whose query failed to compile, so it is
-    /// not retried on every block.
-    static COMPILED: RefCell<HashMap<LanguageId, Option<Rc<CompiledLanguage>>>> =
-        RefCell::new(HashMap::new());
-    static PARSERS: RefCell<HashMap<LanguageId, ts::Parser>> = RefCell::new(HashMap::new());
+    static PARSERS: RefCell<HashMap<u64, ts::Parser>> = RefCell::new(HashMap::new());
 }
 
-/// Grammar and highlight query of a compiled-in language.
-fn grammar(language: LanguageId) -> Option<(ts::Language, String)> {
-    match language {
-        #[cfg(feature = "rust")]
-        LanguageId::Rust => Some((
-            tree_sitter_rust::LANGUAGE.into(),
-            tree_sitter_rust::HIGHLIGHTS_QUERY.to_owned(),
-        )),
-        #[cfg(feature = "javascript")]
-        LanguageId::JavaScript => Some((
-            tree_sitter_javascript::LANGUAGE.into(),
-            [
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-            ]
-            .join("\n"),
-        )),
-        // TypeScript's query only covers what it adds to JavaScript; the
-        // grammar repository layers it over JavaScript's query.
-        #[cfg(feature = "typescript")]
-        LanguageId::TypeScript => Some((
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            [
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            ]
-            .join("\n"),
-        )),
-        #[cfg(feature = "python")]
-        LanguageId::Python => Some((
-            tree_sitter_python::LANGUAGE.into(),
-            tree_sitter_python::HIGHLIGHTS_QUERY.to_owned(),
-        )),
-        #[cfg(feature = "bash")]
-        LanguageId::Bash => Some((
-            tree_sitter_bash::LANGUAGE.into(),
-            tree_sitter_bash::HIGHLIGHT_QUERY.to_owned(),
-        )),
-        #[cfg(feature = "json")]
-        LanguageId::Json => Some((
-            tree_sitter_json::LANGUAGE.into(),
-            tree_sitter_json::HIGHLIGHTS_QUERY.to_owned(),
-        )),
-        #[cfg(feature = "go")]
-        LanguageId::Go => Some((
-            tree_sitter_go::LANGUAGE.into(),
-            tree_sitter_go::HIGHLIGHTS_QUERY.to_owned(),
-        )),
-        #[allow(unreachable_patterns)]
-        _ => None,
-    }
-}
-
-pub(crate) fn highlight(language: LanguageId, source: &str) -> Vec<HighlightSpan> {
-    if source.is_empty() {
-        return Vec::new();
-    }
-    let Some((ts_language, compiled)) = compiled(language) else {
-        return Vec::new();
-    };
-    let Some(tree) = parse(language, &ts_language, source) else {
-        return Vec::new();
-    };
-    compact_spans(collect_spans(&compiled, &tree, source))
-}
-
-fn compiled(language: LanguageId) -> Option<(ts::Language, Rc<CompiledLanguage>)> {
-    let (ts_language, query_source) = grammar(language)?;
-    let compiled = COMPILED.with(|cache| {
-        cache
-            .borrow_mut()
-            .entry(language)
-            .or_insert_with(|| {
-                let query = ts::Query::new(&ts_language, &query_source).ok()?;
-                let capture_kinds = query
-                    .capture_names()
-                    .iter()
-                    .map(|name| capture_name_to_highlight_kind(name))
-                    .collect();
-                Some(Rc::new(CompiledLanguage {
-                    query,
-                    capture_kinds,
-                }))
-            })
-            .clone()
-    })?;
-    Some((ts_language, compiled))
-}
-
-fn parse(language: LanguageId, ts_language: &ts::Language, source: &str) -> Option<ts::Tree> {
-    PARSERS.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let parser = match cache.entry(language) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let mut parser = ts::Parser::new();
-                parser.set_language(ts_language).ok()?;
-                entry.insert(parser)
-            }
+impl Grammar {
+    /// Verifies the pack's files against `manifest` (already validated),
+    /// loads its library, and compiles its highlight query.
+    ///
+    /// The library stays loaded for the rest of the process: tree-sitter
+    /// languages, parsers, and trees on other threads point into it, and
+    /// nothing tracks when the last of them is gone.
+    pub(crate) fn load(dir: &Path, manifest: &PackManifest) -> Result<Self, PackError> {
+        verify_files(dir, manifest)?;
+        let highlights = std::fs::read_to_string(dir.join(&manifest.highlights.path))?;
+        let library_path = dir.join(&manifest.library.path);
+        // SAFETY: loading a library runs its initializers, and calling the
+        // symbol runs its code. The pack passed its SHA-256 check against a
+        // manifest that is either signed (downloaded packs) or in a
+        // directory the app opted into (local packs); see the threat model
+        // in the crate docs.
+        let language = unsafe {
+            let library = libloading::Library::new(&library_path)
+                .map_err(|e| PackError::Library(e.to_string()))?;
+            let library: &'static libloading::Library = Box::leak(Box::new(library));
+            let mut name = manifest.symbol.clone().into_bytes();
+            name.push(0);
+            let symbol = library
+                .get::<unsafe extern "C" fn() -> *const ()>(&name)
+                .map_err(|e| PackError::Library(e.to_string()))?;
+            ts::Language::new(tree_sitter_language::LanguageFn::from_raw(*symbol))
         };
-        parser.parse(source, None)
-    })
-}
-
-/// `(start, end, kind, pattern)` for every capture with a highlight kind.
-fn collect_spans(
-    compiled: &CompiledLanguage,
-    tree: &ts::Tree,
-    source: &str,
-) -> Vec<(usize, usize, HighlightKind, usize)> {
-    let mut cursor = ts::QueryCursor::new();
-    let mut captures = cursor.captures(&compiled.query, tree.root_node(), source.as_bytes());
-    let mut raw = Vec::new();
-    while let Some((query_match, capture_index)) = captures.next() {
-        let capture = query_match.captures[*capture_index];
-        let kind = compiled
-            .capture_kinds
-            .get(capture.index as usize)
-            .copied()
-            .unwrap_or_default();
-        let (start, end) = (capture.node.start_byte(), capture.node.end_byte());
-        if kind != HighlightKind::Normal && end > start {
-            raw.push((start, end, kind, query_match.pattern_index));
+        // The manifest's ABI was checked; this checks the library agrees.
+        let abi = language.abi_version() as u32;
+        if abi != manifest.abi || !supported_abi().contains(&abi) {
+            let range = supported_abi();
+            return Err(PackError::Abi {
+                abi,
+                min: *range.start(),
+                max: *range.end(),
+            });
         }
+        let query =
+            ts::Query::new(&language, &highlights).map_err(|e| PackError::Query(e.to_string()))?;
+        let capture_kinds = query
+            .capture_names()
+            .iter()
+            .map(|name| capture_name_to_highlight_kind(name))
+            .collect();
+        Ok(Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            language,
+            query,
+            capture_kinds,
+        })
     }
-    raw
+
+    pub(crate) fn highlight(&self, source: &str) -> Vec<HighlightSpan> {
+        if source.is_empty() {
+            return Vec::new();
+        }
+        let Some(tree) = self.parse(source) else {
+            return Vec::new();
+        };
+        compact_spans(self.collect_spans(&tree, source))
+    }
+
+    fn parse(&self, source: &str) -> Option<ts::Tree> {
+        PARSERS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let parser = match cache.entry(self.id) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let mut parser = ts::Parser::new();
+                    parser.set_language(&self.language).ok()?;
+                    entry.insert(parser)
+                }
+            };
+            parser.parse(source, None)
+        })
+    }
+
+    /// `(start, end, kind, pattern)` for every capture with a highlight kind.
+    fn collect_spans(
+        &self,
+        tree: &ts::Tree,
+        source: &str,
+    ) -> Vec<(usize, usize, HighlightKind, usize)> {
+        let mut cursor = ts::QueryCursor::new();
+        let mut captures = cursor.captures(&self.query, tree.root_node(), source.as_bytes());
+        let mut raw = Vec::new();
+        while let Some((query_match, capture_index)) = captures.next() {
+            let capture = query_match.captures[*capture_index];
+            let kind = self
+                .capture_kinds
+                .get(capture.index as usize)
+                .copied()
+                .unwrap_or_default();
+            let (start, end) = (capture.node.start_byte(), capture.node.end_byte());
+            if kind != HighlightKind::Normal && end > start {
+                raw.push((start, end, kind, query_match.pattern_index));
+            }
+        }
+        raw
+    }
 }
 
 /// Resolves overlapping captures into sorted, disjoint spans: at the same

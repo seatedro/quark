@@ -7,7 +7,9 @@
 //! selects (side by side, the side you start on), Ctrl/Cmd+C copies,
 //! Ctrl/Cmd+A selects all. The toolbar switches between unified and side by
 //! side and turns word wrap on. Build with `--features syntax` for syntax
-//! colors.
+//! colors, after building the grammar packs with
+//! `cargo run -p syntax-pack -- build` (`QUARK_SYNTAX_PACKS` names another
+//! pack root).
 
 use std::rc::Rc;
 
@@ -354,11 +356,26 @@ fn load(args: &[String]) -> std::io::Result<(DiffDocument, String)> {
     }
 }
 
+/// Grammars from the pack root `$QUARK_SYNTAX_PACKS`, or the one
+/// `cargo run -p syntax-pack -- build` writes (`target/syntax-packs`).
+#[cfg(feature = "syntax")]
+fn grammar_store() -> quark_app::quark_ui::quark_syntax::GrammarStore {
+    use quark_app::quark_ui::quark_syntax::{GrammarStore, StoreConfig};
+    let root = std::env::var_os("QUARK_SYNTAX_PACKS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/syntax-packs")
+        });
+    GrammarStore::new(StoreConfig::new().local_packs(root))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (doc, title) = load(&args)?;
+    #[cfg_attr(not(feature = "syntax"), allow(unused_mut))]
     let mut demo = Demo::new(doc, title);
-    demo.diff.enable_syntax();
+    #[cfg(feature = "syntax")]
+    demo.diff.enable_syntax(grammar_store());
     quark_app::run_ui(
         demo,
         WindowOptions {

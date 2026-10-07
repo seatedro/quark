@@ -7,13 +7,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread::JoinHandle;
 
-use crate::{HighlightSpan, LanguageId, highlight};
+use crate::store::Outcome;
+use crate::{GrammarStore, HighlightSpan, LanguageId};
 
+#[derive(Clone)]
 struct Job {
     slot: u64,
     generation: u64,
     language: LanguageId,
     source: Arc<str>,
+}
+
+enum Message {
+    Job(Job),
+    /// A pending grammar resolved: rerun the jobs waiting for one.
+    Retry,
+    Stop,
 }
 
 /// A finished highlight of the source requested for `slot` at
@@ -24,6 +33,10 @@ pub struct Highlighted {
     pub generation: u64,
     pub source: Arc<str>,
     pub spans: Vec<HighlightSpan>,
+    /// The language's grammar is still arriving, so `spans` is empty for
+    /// now; another result for this slot and generation follows once it
+    /// resolves (colored, or plain for good if it failed).
+    pub pending: bool,
 }
 
 /// The worker thread is gone (it could not be spawned), so no more results
@@ -32,19 +45,23 @@ pub struct Highlighted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerGone;
 
-type HighlightFn = fn(LanguageId, &str) -> Vec<HighlightSpan>;
+type HighlightFn = Arc<dyn Fn(&LanguageId, &str) -> Outcome + Send + Sync>;
 
-/// Highlights requests on one background thread. A slot is one code block;
-/// when several requests for a slot are queued, only the newest generation
-/// is highlighted, so a block that streams faster than it highlights does
-/// not build a backlog. Results arrive in [`HighlightWorker::try_recv`];
-/// callers still compare generations, since a result can land after a
-/// newer request was sent.
+/// Highlights requests on one background thread with a [`GrammarStore`]'s
+/// grammars. A slot is one code block; when several requests for a slot
+/// are queued, only the newest generation is highlighted, so a block that
+/// streams faster than it highlights does not build a backlog. Results
+/// arrive in [`HighlightWorker::try_recv`]; callers still compare
+/// generations, since a result can land after a newer request was sent.
+///
+/// A request whose grammar is still downloading gets a plain result marked
+/// [`Highlighted::pending`] at once, and its real result when the grammar
+/// resolves, unless a newer request for the slot superseded it.
 ///
 /// A highlight that panics yields a result with no spans (the block stays
 /// plain) and the thread keeps serving requests.
 pub struct HighlightWorker {
-    jobs: Option<Sender<Job>>,
+    jobs: Option<Sender<Message>>,
     done: Receiver<Highlighted>,
     thread: Option<JoinHandle<()>>,
     /// Set on drop so the thread stops between highlights instead of
@@ -53,18 +70,25 @@ pub struct HighlightWorker {
 }
 
 impl HighlightWorker {
-    pub fn new() -> Self {
-        Self::with_highlighter(highlight)
+    pub fn new(store: GrammarStore) -> Self {
+        let highlighter = store.clone();
+        let worker = Self::with_highlighter(Arc::new(move |language, source| {
+            highlighter.highlight(language, source)
+        }));
+        if let Some(jobs) = worker.jobs.clone() {
+            store.subscribe(move || jobs.send(Message::Retry).is_ok());
+        }
+        worker
     }
 
     fn with_highlighter(highlight: HighlightFn) -> Self {
-        let (jobs, job_rx) = channel::<Job>();
+        let (jobs, job_rx) = channel::<Message>();
         let (done_tx, done) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
         let thread = std::thread::Builder::new()
             .name("quark-syntax".to_owned())
-            .spawn(move || run(job_rx, done_tx, &stop, highlight))
+            .spawn(move || run(&job_rx, &done_tx, &stop, &*highlight))
             .ok();
         Self {
             jobs: Some(jobs),
@@ -90,12 +114,12 @@ impl HighlightWorker {
 
     pub fn request(&self, slot: u64, generation: u64, language: LanguageId, source: Arc<str>) {
         if let Some(jobs) = &self.jobs {
-            let _ = jobs.send(Job {
+            let _ = jobs.send(Message::Job(Job {
                 slot,
                 generation,
                 language,
                 source,
-            });
+            }));
         }
     }
 
@@ -116,17 +140,21 @@ impl HighlightWorker {
 }
 
 impl Default for HighlightWorker {
+    /// A worker without grammars: every result is plain.
     fn default() -> Self {
-        Self::new()
+        Self::new(GrammarStore::none())
     }
 }
 
 impl Drop for HighlightWorker {
     fn drop(&mut self) {
-        // The flag stops a batch in progress; closing the job channel ends
-        // the thread's loop. The wait is at most one highlight.
+        // The flag stops a batch in progress; `Stop` ends the thread's loop
+        // (the store's subscription keeps a sender, so the channel does not
+        // close). The wait is at most one highlight.
         self.cancel.store(true, Ordering::Relaxed);
-        self.jobs = None;
+        if let Some(jobs) = self.jobs.take() {
+            let _ = jobs.send(Message::Stop);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -134,17 +162,29 @@ impl Drop for HighlightWorker {
 }
 
 fn run(
-    jobs: Receiver<Job>,
-    done: Sender<Highlighted>,
+    messages: &Receiver<Message>,
+    done: &Sender<Highlighted>,
     cancel: &AtomicBool,
-    highlight: HighlightFn,
+    highlight: &(dyn Fn(&LanguageId, &str) -> Outcome + Send + Sync),
 ) {
-    while let Ok(first) = jobs.recv() {
+    // Jobs whose grammar was pending, newest per slot, rerun on `Retry`.
+    let mut parked: HashMap<u64, Job> = HashMap::new();
+    while let Ok(first) = messages.recv() {
         // Coalesce everything queued: keep the newest job per slot, in the
         // order the slots were first requested.
         let mut order = Vec::new();
         let mut newest: HashMap<u64, Job> = HashMap::new();
-        for job in std::iter::once(first).chain(jobs.try_iter()) {
+        let mut retry = false;
+        for message in std::iter::once(first).chain(messages.try_iter()) {
+            let job = match message {
+                Message::Job(job) => job,
+                Message::Retry => {
+                    retry = true;
+                    continue;
+                }
+                Message::Stop => return,
+            };
+            parked.remove(&job.slot);
             match newest.get(&job.slot) {
                 Some(queued) if queued.generation > job.generation => {}
                 Some(_) => {
@@ -156,6 +196,12 @@ fn run(
                 }
             }
         }
+        if retry {
+            for (slot, job) in parked.drain() {
+                order.push(slot);
+                newest.insert(slot, job);
+            }
+        }
         for slot in order {
             if cancel.load(Ordering::Relaxed) {
                 return;
@@ -165,13 +211,17 @@ fn run(
             };
             // A grammar bug must not take the thread down: every later block
             // would silently stay plain.
-            let spans = catch_unwind(AssertUnwindSafe(|| highlight(job.language, &job.source)))
+            let outcome = catch_unwind(AssertUnwindSafe(|| highlight(&job.language, &job.source)))
                 .unwrap_or_default();
+            if outcome.pending {
+                parked.insert(slot, job.clone());
+            }
             let result = Highlighted {
                 slot,
                 generation: job.generation,
                 source: job.source,
-                spans,
+                spans: outcome.spans,
+                pending: outcome.pending,
             };
             if done.send(result).is_err() {
                 return;
@@ -184,23 +234,30 @@ fn run(
 mod tests {
     use super::*;
 
-    fn panics_on_boom(_: LanguageId, source: &str) -> Vec<HighlightSpan> {
+    fn panics_on_boom(_: &LanguageId, source: &str) -> Outcome {
         assert_ne!(source, "boom", "highlighter bug");
-        vec![HighlightSpan {
-            offset: 0,
-            length: source.len() as u32,
-            kind: crate::HighlightKind::Keyword,
-        }]
+        Outcome {
+            spans: vec![HighlightSpan {
+                offset: 0,
+                length: source.len() as u32,
+                kind: crate::HighlightKind::Keyword,
+            }],
+            pending: false,
+        }
+    }
+
+    fn rust() -> LanguageId {
+        LanguageId::from_fence("rust").unwrap()
     }
 
     // Catches a panicking highlight killing the thread, after which every
     // block would stay plain.
     #[test]
     fn worker_survives_a_panicking_highlight() {
-        let worker = HighlightWorker::with_highlighter(panics_on_boom);
-        worker.request(1, 1, LanguageId::Rust, Arc::from("boom"));
+        let worker = HighlightWorker::with_highlighter(Arc::new(panics_on_boom));
+        worker.request(1, 1, rust(), Arc::from("boom"));
         let failed = worker.recv().map(|r| (r.slot, r.spans.len()));
-        worker.request(2, 2, LanguageId::Rust, Arc::from("fn"));
+        worker.request(2, 2, rust(), Arc::from("fn"));
         let next = worker.recv().map(|r| (r.slot, r.spans.len()));
 
         assert_eq!((failed, next), (Ok((1, 0)), Ok((2, 1))));

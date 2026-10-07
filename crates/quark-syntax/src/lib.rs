@@ -1,19 +1,71 @@
-//! Tree-sitter syntax highlighting for code blocks, with grammars compiled
-//! in.
+//! Tree-sitter syntax highlighting for code blocks, with grammars loaded at
+//! runtime.
 //!
-//! Each language is a cargo feature (`rust`, `javascript`, `typescript`,
-//! `python`, `bash`, `json`, `go`, or `common` for all of them). A language
-//! whose feature is off is unknown: [`LanguageId::from_fence`] returns
-//! `None` and callers render plain text.
+//! No grammar is compiled in. Each language arrives as a pack, a shared
+//! library exporting the tree-sitter language function plus its queries
+//! and a manifest (see [`pack`]), from a [`GrammarStore`] the app
+//! configures: local pack directories it trusts, and with the `download`
+//! feature a signed index it downloads missing packs from. Until a
+//! language's grammar is available its code renders plain.
 //!
 //! [`highlight`] runs synchronously; [`HighlightWorker`] runs it on a
 //! background thread and drops requests superseded by a newer generation
 //! for the same slot, which suits a code block that is still streaming.
+//!
+//! Features: `engine` (the tree-sitter runtime and local packs) and
+//! `download` (fetching packs). Without `engine` every lookup is plain and
+//! the crate has no dependencies.
+//!
+//! # Threat model
+//!
+//! Loading a pack runs native code from it with the app's privileges, so
+//! the question for every pack is who could have written its bytes.
+//!
+//! - Downloaded packs are trusted only through the index signature: the
+//!   index must verify against an Ed25519 key the app compiled in, and
+//!   every file must match the SHA-256 the signed index lists, both when
+//!   it is downloaded and each time it is loaded from the cache. There is
+//!   no switch to accept unsigned indexes. The index names its target
+//!   triple, so a signed index for another platform is refused; each
+//!   manifest's file names must be plain file names, its symbol a C
+//!   identifier, its library this platform's extension, and its ABI one
+//!   this runtime supports. A compromised host or network can withhold
+//!   packs or serve an older signed index (a downgrade to packs that were
+//!   once signed), but cannot get unsigned code loaded.
+//! - Local packs are not signed. They load only from directories the app
+//!   names ([`StoreConfig::local_packs`]); their manifests are checked the
+//!   same way, and their SHA-256 sums catch corruption, not tampering.
+//!   Name only directories that only the app's installer or the developer
+//!   can write, never a downloads folder or a world-writable path.
+//! - Anyone who can write the user's cache directory can already run code
+//!   as the user, so the cache is not defended against local attackers
+//!   beyond the per-load checks above. A library swapped between its
+//!   SHA-256 check and `dlopen` is out of scope for the same reason.
+//! - Grammars parse untrusted text (chat output, diffs). A parser crash
+//!   takes the process down; a panic in the highlighter is caught by the
+//!   worker. Packs come from pinned, hashed grammar sources built in CI.
 
+#[cfg(feature = "download")]
+mod download;
 #[cfg(feature = "engine")]
 mod engine;
+#[cfg(feature = "engine")]
+pub mod pack;
+mod store;
+#[cfg(feature = "engine")]
+#[doc(hidden)]
+pub mod testing;
 mod worker;
 
+use std::sync::Arc;
+
+#[cfg(feature = "download")]
+pub use download::{Downloads, default_cache_dir};
+#[cfg(feature = "download")]
+pub use quark_update::PublicKey;
+#[cfg(feature = "engine")]
+pub use store::StoreConfig;
+pub use store::{GrammarStore, LanguageStatus};
 pub use worker::{HighlightWorker, Highlighted, WorkerGone};
 
 /// What a highlighted run of source is.
@@ -82,100 +134,55 @@ impl HighlightSpan {
     }
 }
 
-/// A compiled-in language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LanguageId {
-    Bash,
-    Go,
-    JavaScript,
-    Json,
-    Python,
-    Rust,
-    TypeScript,
-}
+/// A language as a code block or file names it: a fence tag (```` ```rs ````)
+/// or a file extension, lowercased. Which grammar it means, if any, is up to
+/// the [`GrammarStore`]: packs list their aliases and extensions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LanguageId(Arc<str>);
 
 impl LanguageId {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Bash => "bash",
-            Self::Go => "go",
-            Self::JavaScript => "javascript",
-            Self::Json => "json",
-            Self::Python => "python",
-            Self::Rust => "rust",
-            Self::TypeScript => "typescript",
-        }
-    }
-
-    /// The language a Markdown fence tag (```` ```rs ````) names, matched
-    /// case-insensitively, when its grammar is compiled in.
+    /// `None` for tags no pack could match: empty, longer than 32 bytes, or
+    /// with characters other than ASCII letters, digits, and `+#._-`.
     pub fn from_fence(tag: &str) -> Option<Self> {
-        const TAGS: &[(&str, LanguageId)] = &[
-            ("sh", LanguageId::Bash),
-            ("bash", LanguageId::Bash),
-            ("shell", LanguageId::Bash),
-            ("zsh", LanguageId::Bash),
-            ("console", LanguageId::Bash),
-            ("go", LanguageId::Go),
-            ("golang", LanguageId::Go),
-            ("js", LanguageId::JavaScript),
-            ("javascript", LanguageId::JavaScript),
-            ("jsx", LanguageId::JavaScript),
-            ("mjs", LanguageId::JavaScript),
-            ("cjs", LanguageId::JavaScript),
-            ("json", LanguageId::Json),
-            ("jsonc", LanguageId::Json),
-            ("py", LanguageId::Python),
-            ("python", LanguageId::Python),
-            ("python3", LanguageId::Python),
-            ("rs", LanguageId::Rust),
-            ("rust", LanguageId::Rust),
-            ("ts", LanguageId::TypeScript),
-            ("typescript", LanguageId::TypeScript),
-            ("mts", LanguageId::TypeScript),
-            ("cts", LanguageId::TypeScript),
-        ];
-        // Called for every code block on every rebuild, so no lowercased
-        // copy of the tag.
-        let (_, language) = TAGS
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(tag))?;
-        language.is_compiled().then_some(*language)
+        let valid = !tag.is_empty()
+            && tag.len() <= 32
+            && tag.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'+' | b'#' | b'.' | b'_' | b'-')
+            });
+        valid.then(|| Self(Arc::from(tag.to_ascii_lowercase())))
     }
 
-    /// Whether this language's grammar feature is on.
-    pub const fn is_compiled(self) -> bool {
-        match self {
-            Self::Bash => cfg!(feature = "bash"),
-            Self::Go => cfg!(feature = "go"),
-            Self::JavaScript => cfg!(feature = "javascript"),
-            Self::Json => cfg!(feature = "json"),
-            Self::Python => cfg!(feature = "python"),
-            Self::Rust => cfg!(feature = "rust"),
-            Self::TypeScript => cfg!(feature = "typescript"),
-        }
+    /// The language a file path's extension names.
+    pub fn from_path(path: &str) -> Option<Self> {
+        let name = path.rsplit(['/', '\\']).next()?;
+        let (_, extension) = name.rsplit_once('.')?;
+        Self::from_fence(extension)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `tag` names this language, without allocating; for callers
+    /// that check a tag on every rebuild.
+    pub fn matches(&self, tag: &str) -> bool {
+        self.0.eq_ignore_ascii_case(tag)
     }
 }
 
 impl std::fmt::Display for LanguageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
+        f.write_str(&self.0)
     }
 }
 
-/// Highlights `source`. Empty when the language is not compiled in or its
-/// query fails to load; highlighting is best effort.
-pub fn highlight(language: LanguageId, source: &str) -> Vec<HighlightSpan> {
-    #[cfg(feature = "engine")]
-    {
-        engine::highlight(language, source)
-    }
-    #[cfg(not(feature = "engine"))]
-    {
-        let _ = (language, source);
-        Vec::new()
-    }
+/// Highlights `source` on the calling thread. Empty when `store` has no
+/// grammar for the language yet; highlighting is best effort. Resolving a
+/// language for the first time may load its pack from disk or start its
+/// download.
+pub fn highlight(store: &GrammarStore, language: &LanguageId, source: &str) -> Vec<HighlightSpan> {
+    store.highlight(language, source).spans
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "download"))]
 mod tests;

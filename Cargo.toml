@@ -13,6 +13,7 @@ members = [
   "crates/quark-terminal",
   "crates/quark-app",
   "crates/quark-update",
+  "tools/syntax-pack",
   # A member so CI's fmt, clippy, and tests cover the patch.
   "vendor/accesskit_unix",
 ]
