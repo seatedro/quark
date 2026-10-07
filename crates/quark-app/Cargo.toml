@@ -73,7 +73,10 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 quark-app = { path = ".", features = ["headless-render"] }
 
 [features]
-default = ["ui"]
+default = ["ui", "emoji-font", "cjk-font"]
+# Bundled fallback fonts; see quark-text's features of the same names.
+emoji-font = ["quark-text/emoji-font"]
+cjk-font = ["quark-text/cjk-font"]
 # The quark-ui element adapter (`quark_app::ui`). Lives here rather than in
 # quark-ui because the adapter implements `App`, and quark-ui must not
 # depend on the windowing runner.

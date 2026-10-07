@@ -2,8 +2,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use cosmic_text::{
-    Attrs, AttrsList, Buffer, BufferLine, CacheKey, CacheKeyFlags, Family, FontSystem, LineEnding,
-    Metrics, PhysicalGlyph, Shaping, Wrap, fontdb,
+    Attrs, AttrsList, AttrsOwned, Buffer, BufferLine, CacheKey, CacheKeyFlags, Family, FontSystem,
+    LineEnding, Metrics, PhysicalGlyph, Shaping, Wrap, fontdb,
 };
 use quark::scene::FontStyle;
 use quark::{FontKind, FontWeight, Rect};
@@ -386,8 +386,9 @@ impl TextLayout {
         fs: &mut FontSystem,
         params: &TextParams,
         synth: SyntheticItalic,
+        emoji: Option<&'static str>,
     ) -> Result<Self, TextError> {
-        Self::build_with(fs, params, synth, |_| true)
+        Self::build_with(fs, params, synth, emoji, |_| true)
     }
 
     /// [`Self::build`] keeping only the shaped runs `keep` accepts, so tests
@@ -396,6 +397,7 @@ impl TextLayout {
         fs: &mut FontSystem,
         params: &TextParams,
         synth: SyntheticItalic,
+        emoji: Option<&'static str>,
         keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
     ) -> Result<Self, TextError> {
         params.validate()?;
@@ -425,6 +427,9 @@ impl TextLayout {
                     }
                 }
                 let paragraph = text.get(range.clone()).unwrap_or_default();
+                if let Some(emoji) = emoji {
+                    emoji_spans(&mut attrs, paragraph, emoji);
+                }
                 BufferLine::new(paragraph, *ending, attrs, Shaping::Advanced)
             })
             .collect();
@@ -1155,6 +1160,27 @@ pub(crate) fn weight_value(kind: FontKind, weight: FontWeight) -> u16 {
     }
 }
 
+/// Points emoji-presentation clusters at the color emoji family, upright and
+/// at its one weight, keeping the span metadata that colors them.
+fn emoji_spans(attrs: &mut AttrsList, paragraph: &str, emoji: &'static str) {
+    if paragraph.is_ascii() {
+        return;
+    }
+    for (start, grapheme) in paragraph.grapheme_indices(true) {
+        if !crate::fonts::is_emoji_presentation(grapheme) {
+            continue;
+        }
+        let owned = AttrsOwned::new(&attrs.get_span(start));
+        let emoji_attrs = owned
+            .as_attrs()
+            .family(Family::Name(emoji))
+            .weight(cosmic_text::Weight::NORMAL)
+            .style(cosmic_text::Style::Normal)
+            .cache_key_flags(CacheKeyFlags::empty());
+        attrs.add_span(start..start + grapheme.len(), &emoji_attrs);
+    }
+}
+
 fn base_attrs(style: &TextStyle) -> Attrs<'static> {
     Attrs::new()
         .family(family(style.font_kind))
@@ -1263,8 +1289,8 @@ mod tests {
     }
 
     /// Left-to-right pieces: ligature candidates, multibyte chars, a
-    /// combining sequence, a ZWJ emoji sequence (all `.notdef` past Latin in
-    /// the vendored fonts), spaces, and every line ending.
+    /// combining sequence, ZWJ emoji sequences with and without a ligature,
+    /// spaces, and every line ending.
     const LTR_PIECES: &[&str] = &[
         "a",
         "b",
@@ -1283,6 +1309,7 @@ mod tests {
         "\u{65e5}",
         "\u{1f600}",
         "\u{1f469}\u{200d}\u{1f4bb}",
+        MULTI_GLYPH_CLUSTER,
         "\u{2029}",
     ];
     const RTL_PIECES: &[&str] = &["\u{5e9}\u{5dc}", "\u{5d5}\u{5dd} ", "\u{627}\u{644}"];
@@ -1550,13 +1577,23 @@ mod tests {
         assert_eq!(layout.selection_rects(3..11).count(), 1);
     }
 
-    // Regression: found by layout_hit_then_caret property. Without a color
-    // emoji font a ZWJ sequence is one cluster of three glyphs, and the caret
-    // after it sat after the first glyph.
+    /// A ZWJ sequence no font has a ligature for (crab, ZWJ, laptop): one
+    /// cluster of three glyphs.
+    const MULTI_GLYPH_CLUSTER: &str = "\u{1f980}\u{200d}\u{1f4bb}";
+
+    // Regression: found by layout_hit_then_caret property. A ZWJ sequence
+    // without a ligature is one cluster of three glyphs, and the caret after
+    // it sat after the first glyph.
     #[test]
     fn caret_after_multi_glyph_cluster_sits_at_its_last_glyph() {
-        let text = "a\u{1f469}\u{200d}\u{1f4bb}";
+        let text = format!("a{MULTI_GLYPH_CLUSTER}");
+        let text = text.as_str();
         let layout = layout(text, None);
+        assert_eq!(
+            layout.glyphs().len(),
+            4,
+            "fixture lost its multi-glyph cluster"
+        );
         let end = layout.caret(text.len());
         assert!((end.x - layout.size().0).abs() < 0.01, "{end:?}");
         assert_eq!(layout.hit(end.x, end.y + 1.0), text.len());
@@ -1567,7 +1604,7 @@ mod tests {
     // the same start byte.
     #[test]
     fn layout_cluster_wider_than_wrap_width_stays_on_one_line() {
-        let text = "\u{1f469}\u{200d}\u{1f4bb}";
+        let text = MULTI_GLYPH_CLUSTER;
         let layout = layout(text, Some(1.0));
         assert_eq!(layout.line_count(), 1);
         assert!(layout.caret(text.len()).x > layout.caret(0).x);
@@ -1616,7 +1653,7 @@ mod tests {
         let mut system = test_system();
         let fs = system.font_system_mut();
         let synth = SyntheticItalic::new(fs);
-        let layout = TextLayout::build_with(fs, &params, synth, |_| false).expect("layout");
+        let layout = TextLayout::build_with(fs, &params, synth, None, |_| false).expect("layout");
         assert_eq!(layout.line_count(), 1);
         assert_eq!(layout.hit(50.0, 50.0), 0);
         let caret = layout.caret(2);

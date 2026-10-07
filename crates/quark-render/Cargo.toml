@@ -26,6 +26,8 @@ wgpu = { workspace = true, features = ["gles"] }
 
 [dev-dependencies]
 image.workspace = true
+# The color glyph pixel probe draws an emoji.
+quark-text = { workspace = true, features = ["emoji-font"] }
 
 [features]
 # Enables the no-surface offscreen render path used by fixture renders, and

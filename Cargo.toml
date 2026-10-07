@@ -24,7 +24,9 @@ repository = "https://github.com/seatedro/quark"
 quark = { path = "crates/quark" }
 quark-macros = { path = "crates/quark-macros" }
 quark-render = { path = "crates/quark-render" }
-quark-text = { path = "crates/quark-text" }
+# Without the bundled emoji and CJK fonts (about 14 MB); quark-app turns
+# them on by default.
+quark-text = { path = "crates/quark-text", default-features = false }
 quark-syntax = { path = "crates/quark-syntax" }
 quark-ui = { path = "crates/quark-ui" }
 quark-components = { path = "crates/quark-components" }
