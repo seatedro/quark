@@ -33,6 +33,14 @@ struct HelloUi {
 }
 
 impl HelloUi {
+    fn new() -> Self {
+        Self {
+            name: TextField::new(""),
+            greeting: String::new(),
+            started: std::time::Instant::now(),
+        }
+    }
+
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
         div()
@@ -153,15 +161,37 @@ impl UiApp for HelloUi {
 
 fn main() -> Result<(), quark_app::RunError> {
     quark_app::run_ui(
-        HelloUi {
-            name: TextField::new(""),
-            greeting: String::new(),
-            started: std::time::Instant::now(),
-        },
+        HelloUi::new(),
         WindowOptions {
             title: "Hello Quark UI".into(),
             size: (640.0, 400.0),
             ..WindowOptions::default()
         },
     )
+}
+
+/// The form driven headlessly through `quark_app::testing`, as a user would
+/// drive it: find controls by role and name, click, and type.
+#[cfg(test)]
+mod tests {
+    use quark_app::testing::{By, UiTestHarness};
+
+    use super::*;
+
+    #[test]
+    fn greet_shows_the_typed_name() {
+        let mut ui = UiTestHarness::new(HelloUi::new(), (640.0, 400.0), 2.0);
+
+        ui.click_node(By::role_name(Role::TextInput, "Name"));
+        ui.type_text("Ada");
+        ui.click_node(By::role_name(Role::Button, "Greet"));
+
+        let greeting = ui.find(By::name("Hello, Ada!"));
+        assert_eq!(greeting.role, Some(Role::Label));
+        assert!(
+            ui.painted_text().lines().any(|line| line == "Hello, Ada!"),
+            "painted:\n{}",
+            ui.painted_text()
+        );
+    }
 }
