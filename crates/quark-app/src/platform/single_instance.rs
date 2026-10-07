@@ -4,7 +4,9 @@
 //! [`AppEvent::OpenUrls`] after [`EventContext::listen_for_instances`].
 //!
 //! On Unix the socket lives in `$XDG_RUNTIME_DIR`, falling back to a
-//! `0700` directory under the temp dir. On Windows it is a named pipe.
+//! `0700` directory under the temp dir, and the first instance holds an
+//! exclusive lock on `<socket>.lock` for as long as it runs. On Windows it is
+//! a named pipe.
 //!
 //! macOS delivers URL clicks for a running app as an Apple Event to that
 //! process rather than launching a second one, and winit 0.30 does not expose
@@ -113,14 +115,14 @@ fn read_args(stream: &mut impl Read) -> io::Result<Vec<String>> {
     if count > MAX_ARGS {
         return Err(invalid("too many arguments"));
     }
-    let mut total = 0;
+    let mut total = 0usize;
     let mut args = Vec::with_capacity(count);
     for _ in 0..count {
         let len = read_u32(stream)? as usize;
-        total += len;
-        if total > MAX_BYTES {
-            return Err(invalid("arguments too long"));
-        }
+        total = total
+            .checked_add(len)
+            .filter(|&total| total <= MAX_BYTES)
+            .ok_or_else(|| invalid("arguments too long"))?;
         let mut bytes = vec![0; len];
         stream.read_exact(&mut bytes)?;
         args.push(String::from_utf8(bytes).map_err(|_| invalid("argument is not UTF-8"))?);
@@ -154,17 +156,24 @@ fn sanitize(app_id: &str) -> String {
 
 #[cfg(unix)]
 mod imp {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::fs::{File, TryLockError};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
 
     use super::*;
 
-    pub(super) struct Listener(UnixListener);
+    pub(super) struct Listener {
+        socket: UnixListener,
+        /// Held for the primary's lifetime; the kernel drops it when the
+        /// process exits, crash included.
+        _lock: File,
+    }
 
     impl Listener {
         pub(super) fn accept(&self) -> io::Result<UnixStream> {
-            let (stream, _) = self.0.accept()?;
+            let (stream, _) = self.socket.accept()?;
             stream.set_read_timeout(Some(IO_TIMEOUT))?;
             stream.set_write_timeout(Some(IO_TIMEOUT))?;
             Ok(stream)
@@ -209,35 +218,60 @@ mod imp {
         Ok(dir.join(file))
     }
 
+    /// The exclusive lock on `<path>.lock` decides who is primary. Checking
+    /// for a live socket and then replacing it raced: two launches could
+    /// both find none, and the second to bind unlinked the first one's
+    /// socket, leaving two primaries.
     pub(super) fn acquire(path: &Path, args: &[String]) -> io::Result<Instance> {
-        match connect(path) {
-            Ok(stream) => {
-                forward(stream, args)?;
-                return Ok(Instance::Secondary);
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(lock_path)?;
+        match lock.try_lock() {
+            Ok(()) => {
+                // No other process holds the lock, so a socket file here
+                // is left over from a crash.
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                Ok(Instance::Primary(PrimaryInstance {
+                    listener: Listener {
+                        socket: UnixListener::bind(path)?,
+                        _lock: lock,
+                    },
+                }))
             }
-            // Nothing listening: no socket yet, or one left by a crash.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                ) => {}
-            Err(error) => return Err(error),
-        }
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        match UnixListener::bind(path) {
-            Ok(listener) => Ok(Instance::Primary(PrimaryInstance {
-                listener: Listener(listener),
-            })),
-            // Another launch bound it between our connect and bind.
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                forward(connect(path)?, args)?;
+            Err(TryLockError::WouldBlock) => {
+                forward(connect_to_primary(path)?, args)?;
                 Ok(Instance::Secondary)
             }
-            Err(error) => Err(error),
+            Err(TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    /// Connect to the lock holder, which may still be between taking the
+    /// lock and binding its socket.
+    fn connect_to_primary(path: &Path) -> io::Result<UnixStream> {
+        let deadline = Instant::now() + IO_TIMEOUT;
+        loop {
+            match connect(path) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => return result,
+            }
         }
     }
 
@@ -339,11 +373,38 @@ mod tests {
     fn runtime_dir_too_deep_for_a_socket_falls_back_to_temp_dir() {
         let deep = PathBuf::from(format!("/{}", "d".repeat(120)));
 
-        let path = imp::endpoint_in(Some(deep.clone()), "app").unwrap();
+        let path = imp::endpoint_in(Some(deep), "app").unwrap();
 
-        assert!(!path.starts_with(&deep), "{}", path.display());
-        let _ = std::fs::remove_file(&path);
-        assert!(UnixListener::bind(&path).is_ok());
-        let _ = std::fs::remove_file(&path);
+        let user = sanitize(&std::env::var("USER").unwrap_or_default());
+        let fallback = std::env::temp_dir().join(format!("quark-{user}"));
+        assert_eq!(path, fallback.join("app.sock"));
+    }
+
+    // Regression: acquire checked for a live socket, then unlinked and bound
+    // its own, so two simultaneous launches could both become primary.
+    #[test]
+    fn simultaneous_launches_elect_exactly_one_primary() {
+        let path = socket_path("race.sock");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (roles, results) = std::sync::mpsc::channel();
+        for _ in 0..2 {
+            let (path, start, roles) = (path.clone(), start.clone(), roles.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                match imp::acquire(&path, &strings(&["x"])).unwrap() {
+                    Instance::Primary(primary) => {
+                        roles.send("primary").unwrap();
+                        // Answer the other launch; this thread then idles
+                        // in accept until the test process exits.
+                        while primary.accept().is_ok() {}
+                    }
+                    Instance::Secondary => roles.send("secondary").unwrap(),
+                }
+            });
+        }
+
+        let mut seen = [results.recv().unwrap(), results.recv().unwrap()];
+        seen.sort_unstable();
+        assert_eq!(seen, ["primary", "secondary"]);
     }
 }
