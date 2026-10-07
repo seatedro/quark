@@ -143,6 +143,7 @@ impl TextSystem {
             params,
             self.synthetic_italic,
             self.emoji_family,
+            self.settings.ligatures,
         )
     }
 }

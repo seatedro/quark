@@ -18,6 +18,7 @@ pub mod dropdown;
 pub mod hover_card;
 pub mod kbd;
 mod list_nav;
+pub mod menu_bar;
 pub mod modal;
 pub mod palette;
 pub mod picker;
@@ -56,6 +57,7 @@ pub use dropdown::*;
 pub use hover_card::*;
 pub use kbd::*;
 pub use list_nav::TypeAhead;
+pub use menu_bar::{MenuBar, MenuBarMenu};
 pub use modal::{Modal, ModalAlign};
 pub use palette::{
     CommandPalette, FuzzyMatcher, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome,

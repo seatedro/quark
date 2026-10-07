@@ -15,8 +15,8 @@
 //! - [`text_input`] holds [`text_input::TextField`] and [`text_input::Editor`]
 //!   editing models, IME preedit, undo, and composer pieces (atoms,
 //!   triggers, completion, prompt history).
-//! - [`virtual_list`], [`transcript`], [`markdown`]: variable-height
-//!   virtual lists, a selectable block transcript, find, and streaming
+//! - [`virtual_list`], [`document`], [`markdown`]: variable-height
+//!   virtual lists, a selectable block document, find, and streaming
 //!   markdown.
 //! - [`accessibility`]: the AccessKit tree elements publish each frame.
 //! - [`animation`]: style transitions on the window's animation table.
@@ -107,12 +107,12 @@
 //!
 //! A [`virtual_list::VariableList`] keeps row heights and the scroll
 //! position, so a view builds only the rows in its window, and
-//! [`transcript::FindState`] searches block text by key, whether or not the
+//! [`document::FindState`] searches block text by key, whether or not the
 //! block is on screen:
 //!
 //! ```
 //! use quark::BlockKey;
-//! use quark_ui::transcript::FindState;
+//! use quark_ui::document::FindState;
 //! use quark_ui::virtual_list::{RowKey, VariableList};
 //!
 //! // 1,000 rows estimated at 20 points in a 100 point viewport. A new list
@@ -154,6 +154,7 @@ pub mod hud;
 pub mod icons;
 #[cfg(feature = "devtools")]
 pub mod inspector;
+pub mod key_context;
 pub mod markdown;
 pub mod palette;
 pub mod style;
@@ -170,3 +171,5 @@ pub mod test_alloc;
 static ALLOCATOR: test_alloc::Counting = test_alloc::Counting;
 
 pub use action::{Action, ActionPayload, FocusId};
+/// Localized messages and formats; see [`quark_i18n`].
+pub use quark_i18n as i18n;

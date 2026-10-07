@@ -218,21 +218,31 @@ macro_rules! profile_scope {
 
 #[cfg(feature = "devtools")]
 mod devtools;
+#[cfg(all(test, feature = "test-support"))]
+mod drag_out_tests;
 
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 pub mod input;
+#[cfg(all(test, feature = "test-support"))]
+mod key_context_tests;
 // Bindings are quark-ui's `Binding`, which the router matches too.
 #[cfg(all(test, feature = "test-support"))]
 mod frame_budget;
 #[cfg(feature = "ui")]
 pub mod keymap;
+#[cfg(all(test, feature = "test-support"))]
+mod layout_tests;
 #[cfg(target_os = "macos")]
 pub mod macos_window;
+#[cfg(all(test, feature = "test-support", feature = "components"))]
+mod menu_bar_tests;
 mod panic_hook;
 pub mod platform;
 #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
 mod profile;
+#[cfg(all(test, feature = "test-support"))]
+mod reorder_tests;
 mod runner;
 #[cfg(all(test, feature = "test-support"))]
 mod scroll_tests;

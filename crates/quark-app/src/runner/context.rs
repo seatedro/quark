@@ -481,6 +481,22 @@ impl EventContext<'_> {
         self.native()
     }
 
+    /// Drag `paths` out of the window as files, with the app as the
+    /// native drag source; call while the primary button is held. See
+    /// [`crate::platform::drag_out`] for what each platform does.
+    pub fn start_drag_out<P: AsRef<std::path::Path>>(
+        &mut self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Result<(), crate::platform::drag_out::DragOutError> {
+        use crate::platform::drag_out::{self, DragOutError};
+        let paths = drag_out::absolute_paths(paths)?;
+        if !drag_out::supported() {
+            return Err(DragOutError::Unsupported);
+        }
+        let window = self.native().ok_or(DragOutError::NoWindow)?;
+        drag_out::start(window, &paths)
+    }
+
     /// Another open window, by handle.
     pub fn window_by_handle(&self, window: WindowHandle) -> Option<&Window> {
         let state = self.windows.get(window)?.open()?;

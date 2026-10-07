@@ -20,7 +20,7 @@ builds a list and a find over block text:
 
 ```rust
 use quark::BlockKey;
-use quark_ui::transcript::FindState;
+use quark_ui::document::FindState;
 use quark_ui::virtual_list::{RowKey, VariableList};
 
 // 1,000 rows estimated at 20 points in a 100 point viewport. A new list
@@ -43,16 +43,17 @@ assert_eq!(find.status(), "1 of 2");
 `window(overscan)` returns the index range to build and the spacer heights
 above and below it. `scroll_to(key, align)` brings a row into view.
 
-## The block transcript
+## The block document
 
-`quark_ui::transcript` builds a chat transcript on `VariableList`. Every
-heading, paragraph, list item, quote, table, code block, and rule of every
-message is its own block, so selection runs across messages.
+`quark_ui::document` builds a virtualized block document on `VariableList`.
+Every heading, paragraph, list item, quote, table, code block, and rule of
+every row is its own block, so selection runs across rows. Apps draw
+per-row chrome (headers, backgrounds) through a `RowDecorator`.
 
-- `Transcript` is the app-owned state: rows, block order, selection, and
+- `Document` is the app-owned state: rows, block order, selection, and
   the geometry of the rows on screen. The text stays in the app's model,
-  read through `TranscriptSource`.
-- `MarkdownTranscript` wraps it for markdown messages: it parses, converts,
+  read through `DocumentSource`.
+- `MarkdownDocument` wraps it for markdown rows: it parses, converts,
   highlights code blocks on a `quark-syntax` worker (with the `syntax`
   feature), loads images on a worker (with `images`), and measures
   off-screen rows on a background thread so their heights become exact
@@ -61,9 +62,9 @@ message is its own block, so selection runs across messages.
   part after the last closed top-level code fence that a blank line
   follows.
 
-[transcript_demo.rs](../../crates/quark-app/examples/transcript_demo.rs)
-runs 5,000 messages with a streaming answer, drag selection, copy, select
-all, and find.
+[chat_demo.rs](../../crates/quark-app/examples/chat_demo.rs) assembles a
+chat on top of it (roles, author lines, jump to latest) with 5,000 messages,
+a streaming answer, drag selection, copy, select all, and find.
 
 ## Selection
 

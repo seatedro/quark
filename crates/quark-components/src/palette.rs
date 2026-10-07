@@ -468,7 +468,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
             open: false,
             restore_focus: None,
             query: TextField::new(""),
-            placeholder: "Search commands".to_owned(),
+            placeholder: quark_ui::i18n::tr("quark-search-commands"),
             matcher: FuzzyMatcher::default(),
             items: Vec::new(),
             hints: Vec::new(),
@@ -847,7 +847,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let shown = self.rows.len().clamp(1, PALETTE_VISIBLE_ROWS);
         let list_h = shown as f32 * row_h;
 
-        let input = text_input("Command palette", "")
+        let input = text_input(quark_ui::i18n::tr("quark-command-palette"), "")
             .field(&self.query)
             .placeholder(self.placeholder.clone())
             .focus_target(PALETTE_INPUT)
@@ -867,7 +867,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
             .semantic_role(SemanticRole::ScrollArea)
             .accessibility_role(accesskit::Role::ListBox)
             .accessibility_id("palette-results")
-            .accessibility_label("Results")
+            .accessibility_label(quark_ui::i18n::tr("quark-results"))
             .on_scroll(ScrollActionBuilder::new({
                 let scroll = on_event(PaletteEvent::Scroll(1));
                 let up = on_event(PaletteEvent::Scroll(-1));
@@ -888,7 +888,11 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                     .px((Sp::MD * scale).round())
                     .items_center()
                     .flex_row()
-                    .child(text("No results").text_sm().color(tc.text_muted)),
+                    .child(
+                        text(quark_ui::i18n::tr("quark-no-results"))
+                            .text_sm()
+                            .color(tc.text_muted),
+                    ),
             );
         }
         let end = (self.scroll_top + PALETTE_VISIBLE_ROWS).min(self.rows.len());
@@ -944,7 +948,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
             .trap_focus(true)
             .accessibility_role(accesskit::Role::Dialog)
             .accessibility_id("palette")
-            .accessibility_label("Command palette")
+            .accessibility_label(quark_ui::i18n::tr("quark-command-palette"))
             .child(
                 div()
                     .flex_row()

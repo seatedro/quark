@@ -22,16 +22,19 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use accesskit::{Action as AxAction, ActionData, ActionRequest, Affine, TreeUpdate};
+use quark::Rect;
+#[cfg(feature = "test-support")]
+use quark::SemanticFrame;
 use quark::hit::HitId;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
-use quark::{Rect, SemanticFrame};
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer, Politeness};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
     ScrollbarTrack, TextInputHitArea, TooltipRegion, WheelEvent, render_element,
 };
+use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
 };
@@ -193,7 +196,12 @@ impl ViewContext<'_, '_> {
 pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
     focus: &'a mut Option<FocusId>,
+    key_bindings: &'a mut KeyBindings,
+    /// Set when a drag out took the pointer from the adapter.
+    pointer_taken: &'a mut bool,
     announcer: &'a mut Announcer,
+    theme: &'a mut Theme,
+    theme_choice: &'a mut ThemeChoice,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
 }
@@ -201,6 +209,26 @@ pub struct UiContext<'a, 'w> {
 impl UiContext<'_, '_> {
     pub fn focus(&self) -> Option<FocusId> {
         *self.focus
+    }
+
+    /// The window's key bindings, resolved against the key contexts on
+    /// the focus path; see [`UiAdapter::with_key_bindings`]. Replace them
+    /// when the user edits the keymap.
+    pub fn key_bindings_mut(&mut self) -> &mut KeyBindings {
+        self.key_bindings
+    }
+
+    /// Drag `paths` out of the window as files
+    /// ([`EventContext::start_drag_out`]). The platform takes the pointer,
+    /// so the adapter ends its pointer capture: the drag that called this
+    /// gets its release right after.
+    pub fn start_drag_out<P: AsRef<std::path::Path>>(
+        &mut self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Result<(), crate::platform::drag_out::DragOutError> {
+        self.window.start_drag_out(paths)?;
+        *self.pointer_taken = true;
+        Ok(())
     }
 
     pub fn set_focus(&mut self, focus: Option<FocusId>) {
@@ -219,6 +247,53 @@ impl UiContext<'_, '_> {
         self.announcer.announce(text, politeness);
         // The announcement is published with the next frame's tree.
         self.window.request_redraw();
+    }
+
+    /// The theme the next frame paints with.
+    pub fn theme(&self) -> &Theme {
+        self.theme
+    }
+
+    /// Paint with `theme` from the next frame on, whatever the desktop
+    /// prefers. Cached elements rebuild in the new colors; text layouts
+    /// are reused unless the theme's font sizes changed.
+    pub fn set_theme(&mut self, theme: Theme) {
+        *self.theme_choice = ThemeChoice::Fixed;
+        self.apply_theme(theme);
+    }
+
+    /// Paint with `light` or `dark` as the desktop prefers, from the next
+    /// frame on (dark while the preference is unknown).
+    pub fn set_themes(&mut self, light: Theme, dark: Theme) {
+        let theme = match self.window.theme() {
+            Some(SystemTheme::Light) => light.clone(),
+            _ => dark.clone(),
+        };
+        *self.theme_choice = ThemeChoice::System {
+            light: Box::new(light),
+            dark: Box::new(dark),
+        };
+        self.apply_theme(theme);
+    }
+
+    fn apply_theme(&mut self, theme: Theme) {
+        if *self.theme != theme {
+            *self.theme = theme;
+            redraw(Redraw::Theme, self.window);
+        }
+    }
+
+    /// Change font families or ligatures live. Text is reshaped once with
+    /// the new fonts (layout caches drop the old shapes); editors reshape
+    /// on their next flush.
+    pub fn set_fonts(&mut self, fonts: &quark_text::FontSettings) {
+        let system = &mut self.window.text().system;
+        let before = system.generation();
+        system.set_font_settings(fonts);
+        if system.generation() != before {
+            // Every window shares the text system.
+            self.window.request_redraw_all();
+        }
     }
 
     /// A sender for this app's messages; `M` must be the app's
@@ -278,6 +353,9 @@ pub struct UiAdapter<U: UiApp> {
     hovered: Vec<HitId>,
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
+    key_bindings: KeyBindings,
+    /// A drag out took the pointer during the last dispatch.
+    pointer_taken: bool,
     accessibility: AccessibilityFrame,
     announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
@@ -335,6 +413,8 @@ impl<U: UiApp> UiAdapter<U> {
             pointer: None,
             hovered: Vec::new(),
             router: InputRouter::default(),
+            key_bindings: KeyBindings::new(),
+            pointer_taken: false,
             accessibility: AccessibilityFrame::default(),
             announcer: Announcer::default(),
             text_areas: Vec::new(),
@@ -378,6 +458,18 @@ impl<U: UiApp> UiAdapter<U> {
         self
     }
 
+    /// Resolve key presses against `bindings` as well as the elements'
+    /// own `on_key` handlers. A binding's predicate is tested against the
+    /// key contexts (`key_context("editor")`) on the focus path; see
+    /// [`quark_ui::key_context`]. A binding matched through a context
+    /// deeper than the element handling the key wins; otherwise the
+    /// element's handler does, and a binding without a predicate only gets
+    /// keys no element handles.
+    pub fn with_key_bindings(mut self, bindings: KeyBindings) -> Self {
+        self.key_bindings = bindings;
+        self
+    }
+
     pub fn app(&self) -> &U {
         &self.app
     }
@@ -397,7 +489,11 @@ impl<U: UiApp> UiAdapter<U> {
         let mut ucx = UiContext {
             window: cx,
             focus: &mut self.focus,
+            key_bindings: &mut self.key_bindings,
+            pointer_taken: &mut self.pointer_taken,
             announcer: &mut self.announcer,
+            theme: &mut self.theme,
+            theme_choice: &mut self.theme_choice,
             sender: &self.sender,
         };
         f(&mut self.app, &mut ucx)
@@ -429,6 +525,12 @@ impl<U: UiApp> UiAdapter<U> {
             self.with_app(cx, |app, ucx| app.update(action, ucx));
         }
         redraw(Redraw::Action, cx);
+        // The platform's drag loop gets the release, so the drag the app
+        // was tracking ends here instead.
+        if std::mem::take(&mut self.pointer_taken) {
+            let delivery = self.router.cancel_pointer();
+            self.deliver(delivery, cx);
+        }
     }
 
     /// Hand a routed event's actions to the app. A delivery without actions
@@ -510,6 +612,10 @@ impl<U: UiApp> UiAdapter<U> {
             }
         }
         let delivery = self.router.key_down(&binding, self.focus);
+        if let Some(action) = self.bound_action(&binding, delivery.node) {
+            self.dispatch(vec![action], cx);
+            return;
+        }
         if delivery.node.is_some() {
             self.deliver(delivery, cx);
             return;
@@ -534,6 +640,28 @@ impl<U: UiApp> UiAdapter<U> {
                 redraw(Redraw::Focus, cx);
             }
         }
+    }
+
+    /// The key binding `pressed` triggers, when it outranks the element
+    /// `handled_by` that routing found: it matched through a key context
+    /// inside that element, or no element handled the key.
+    fn bound_action(&self, pressed: &Binding, handled_by: Option<usize>) -> Option<Action> {
+        if self.key_bindings.is_empty() {
+            return None;
+        }
+        let semantic = &self.router.frame().semantic;
+        let path = context_path(semantic, self.focus);
+        let entries: Vec<_> = path.iter().map(|(_, entry)| entry.clone()).collect();
+        let found = self.key_bindings.resolve(pressed, &entries)?;
+        let context_node = found.depth.checked_sub(1).map(|i| path[i].0);
+        let wins = match (handled_by, context_node) {
+            (None, _) => true,
+            (Some(element), Some(context)) => {
+                context != element && semantic.is_within(context, element)
+            }
+            (Some(_), None) => false,
+        };
+        wins.then(|| found.binding.action.clone())
     }
 
     fn input(&mut self, input: UiInput, cx: &mut EventContext) {
@@ -944,13 +1072,6 @@ impl<U: UiApp> UiAdapter<U> {
         self.focus
     }
 
-    /// The last painted frame's accessibility tree, in points.
-    pub(crate) fn logical_accessibility_tree(&self) -> TreeUpdate {
-        let mut update = self.accessibility.tree_update(&self.name, self.focus);
-        self.announcer.publish(&mut update);
-        update
-    }
-
     pub(crate) fn accessibility_frame(&self) -> &AccessibilityFrame {
         &self.accessibility
     }
@@ -967,6 +1088,13 @@ impl<U: UiApp> UiAdapter<U> {
 }
 
 impl<U: UiApp> UiAdapter<U> {
+    /// The last painted frame's accessibility tree, in points.
+    pub(crate) fn logical_accessibility_tree(&self) -> TreeUpdate {
+        let mut update = self.accessibility.tree_update(&self.name, self.focus);
+        self.announcer.publish(&mut update);
+        update
+    }
+
     /// Keep `painted`'s input state for routing until the next frame, and
     /// return its scene with the IME changes for the caret it painted.
     fn finish_frame(&mut self, painted: Painted) -> (Scene, ImeRequest) {

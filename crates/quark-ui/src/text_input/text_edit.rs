@@ -4,6 +4,7 @@ use quark_text::TextOffset;
 
 use super::buffer::{TextBuffer, WordForward};
 use super::ime::{Composition, Preedit};
+use super::styles::InlineStyle;
 use super::view::HorizontalScroll;
 
 /// A text editing command, independent of which widget has focus.
@@ -53,6 +54,12 @@ pub enum TextEditCommand {
     SelectLineAt(usize),
     Undo,
     Redo,
+    /// Turn an inline style on over the selection, or off if all of it has
+    /// it already. With nothing selected, toggles it for the next typed
+    /// text.
+    ToggleStyle(InlineStyle),
+    /// Make the selection a link to the target, or plain text with `None`.
+    SetLink(Option<String>),
     /// Show `text` as the IME composition at the caret without touching
     /// the committed text; empty text cancels it. `cursor` is the IME's raw
     /// byte range inside `text`.
