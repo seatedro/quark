@@ -1,5 +1,6 @@
-//! Panic hook that records crashes through `tracing` and in a crash log file
-//! before handing the panic to the previously installed hook.
+//! Panic hook that records crashes through `tracing`, in a crash log file,
+//! and as a structured report (see [`crate::platform::crash`]) before
+//! handing the panic to the previously installed hook.
 
 use std::backtrace::Backtrace;
 use std::fs::OpenOptions;
@@ -9,20 +10,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::platform::crash::{self, CrashReport, CrashStore};
+
 static INSTALL: Once = Once::new();
 
 /// Install the hook once per process. Later calls are no-ops, so running
-/// several event loops does not stack hooks.
-pub(crate) fn install(app_name: &str) {
-    let app_name = sanitize(app_name);
+/// several event loops does not stack hooks. `title` names the app unless
+/// [`crash::set_app_info`] did.
+pub(crate) fn install(title: &str) {
+    let (name, version) = crash::app_info(title);
+    let app_name = sanitize(&name);
     INSTALL.call_once(move || {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let report = crash_report(info);
-            tracing::error!(target: "quark::panic", "{report}");
+            let report = crash_report(info, &name, &version);
+            let text = report.render();
+            tracing::error!(target: "quark::panic", "{text}");
             match crash_log_path(&app_name) {
                 Some(path) => {
-                    if let Err(error) = append(&path, &report) {
+                    if let Err(error) = append(&path, &text) {
                         eprintln!(
                             "quark: could not write crash log {}: {error}",
                             path.display()
@@ -31,12 +37,20 @@ pub(crate) fn install(app_name: &str) {
                 }
                 None => eprintln!("quark: no state directory for a crash log"),
             }
+            if let Some(store) = CrashStore::for_app(&app_name)
+                && let Err(error) = store.write(&report)
+            {
+                eprintln!(
+                    "quark: could not write crash report in {}: {error}",
+                    store.dir().display()
+                );
+            }
             previous(info);
         }));
     });
 }
 
-fn crash_report(info: &PanicHookInfo<'_>) -> String {
+fn crash_report(info: &PanicHookInfo<'_>, app: &str, version: &str) -> CrashReport {
     let message = info
         .payload()
         .downcast_ref::<&str>()
@@ -48,15 +62,22 @@ fn crash_report(info: &PanicHookInfo<'_>) -> String {
         .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
         .unwrap_or_else(|| "<unknown>".to_owned());
     let thread = std::thread::current();
-    let seconds = SystemTime::now()
+    let unix_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!(
-        "panic at unix time {seconds} on thread '{}': {message}\n  at {location}\nbacktrace:\n{}",
-        thread.name().unwrap_or("<unnamed>"),
-        Backtrace::force_capture(),
-    )
+    CrashReport {
+        app: app.to_owned(),
+        version: version.to_owned(),
+        os: std::env::consts::OS.to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+        os_version: crash::os_version(),
+        unix_time,
+        thread: thread.name().unwrap_or("<unnamed>").to_owned(),
+        message: message.to_owned(),
+        location,
+        backtrace: Backtrace::force_capture().to_string(),
+    }
 }
 
 fn append(path: &Path, report: &str) -> std::io::Result<()> {
@@ -107,7 +128,7 @@ fn home() -> Option<PathBuf> {
 }
 
 /// Keep the file name portable whatever the window title contains.
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     let name: String = name
         .chars()
         .map(|c| {
