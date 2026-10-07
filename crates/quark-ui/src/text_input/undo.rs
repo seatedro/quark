@@ -6,15 +6,19 @@
 //! within [`COALESCE_PAUSE_MS`] of each other, and (for typing) do not start
 //! a new word. Time comes from the caller as `now_ms`.
 
+use quark_text::TextOffset;
+
 /// A pause longer than this between edits starts a new undo step.
 pub const COALESCE_PAUSE_MS: u64 = 1000;
 /// Oldest steps are dropped beyond this many.
 const MAX_STEPS: usize = 500;
 
-/// `(anchor, cursor)` byte offsets.
-pub type Selection = (usize, usize);
+/// `(anchor, cursor)`.
+pub type Selection = (TextOffset, TextOffset);
 
-/// One replacement: `removed` at `at` became `inserted`.
+/// One replacement: `removed` at byte `at` became `inserted`. Replaying
+/// checks that the text still holds `removed` (or `inserted`) there before
+/// touching it, so `at` never slices text it was not recorded against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edit {
     pub at: usize,

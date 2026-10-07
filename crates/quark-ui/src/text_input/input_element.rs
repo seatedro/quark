@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::editor::syntax_layout_spans;
+use super::editor::{gutter_digits, gutter_width_in, syntax_layout_spans};
 use super::text_pointer_drag;
 use super::view::{FrameScale, caret_blink};
 use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind};
@@ -32,14 +32,16 @@ pub struct TextEditorElement {
     text_color: crate::theme::Color,
     mode: EditorMode,
     text: Arc<str>,
-    syntax_spans: Vec<SyntaxSpan>,
+    syntax_spans: Arc<[SyntaxSpan]>,
     /// The editor's own layout; painted as is so caret and selection math
     /// match the glyphs. Without one the element lays `text` out itself.
     layout: Option<Arc<TextLayout>>,
-    span_kinds: Vec<SyntaxTokenKind>,
+    span_kinds: Arc<[SyntaxTokenKind]>,
     preedit_rects: Vec<SelectionRect>,
     clause_rects: Vec<SelectionRect>,
-    line_tops: Vec<(usize, f32)>,
+    line_tops: Arc<[(usize, f32)]>,
+    /// The snapshotted editor's gutter, which its layout wraps beside.
+    gutter_width: Option<f32>,
     focus_target: FocusId,
     on_scroll: ScrollActionBuilder,
     /// The snapshotted editor's frame scale, set during paint.
@@ -66,12 +68,13 @@ pub fn text_editor_element(
         text_color: crate::theme::Color::rgba(255, 255, 255, 255),
         mode: EditorMode::ProseInput,
         text: Arc::from(""),
-        syntax_spans: Vec::new(),
+        syntax_spans: Arc::from([]),
         layout: None,
-        span_kinds: Vec::new(),
+        span_kinds: Arc::from([]),
         preedit_rects: Vec::new(),
         clause_rects: Vec::new(),
-        line_tops: Vec::new(),
+        line_tops: Arc::from([]),
+        gutter_width: None,
         focus_target,
         on_scroll,
         frame_scale: None,
@@ -135,14 +138,13 @@ impl TextEditorElement {
         self
     }
 
-    pub fn syntax_spans(mut self, spans: &[SyntaxSpan]) -> Self {
-        self.syntax_spans.clear();
-        self.syntax_spans.extend_from_slice(spans);
+    pub fn syntax_spans(mut self, spans: impl Into<Arc<[SyntaxSpan]>>) -> Self {
+        self.syntax_spans = spans.into();
         self
     }
 
-    pub fn line_tops(mut self, line_tops: Vec<(usize, f32)>) -> Self {
-        self.line_tops = line_tops;
+    pub fn line_tops(mut self, line_tops: impl Into<Arc<[(usize, f32)]>>) -> Self {
+        self.line_tops = line_tops.into();
         self
     }
 
@@ -160,9 +162,11 @@ impl TextEditorElement {
         self.content_height = editor.content_height();
         self.scroll_y = editor.scroll_y;
         self.mode = editor.mode();
+        // Shared, not copied: this runs every frame.
         self.text = editor.text_arc();
-        self.syntax_spans = editor.syntax_spans().to_vec();
-        self.line_tops = editor.logical_line_tops();
+        self.syntax_spans = editor.syntax_spans().clone();
+        self.line_tops = editor.logical_line_tops().clone();
+        self.gutter_width = Some(editor.gutter_width());
         self.frame_scale = Some(editor.frame_scale.clone());
         self
     }
@@ -223,14 +227,11 @@ impl Element for TextEditorElement {
         };
         let font_size = self.font_size;
         let line_height = font_size * 1.35;
-        let gutter_w = if self.mode.is_code() {
-            code_gutter_width(
-                font_size,
-                self.line_tops.last().map(|(line, _)| *line).unwrap_or(0),
-            )
-            .min((bounds.width * 0.35).max(0.0))
-        } else {
-            0.0
+        let lines = self.line_tops.last().map_or(0, |(line, _)| *line);
+        let gutter_w = match self.gutter_width {
+            Some(width) => width,
+            None if self.mode.is_code() => gutter_width_in(font_size, lines, bounds.width),
+            None => 0.0,
         };
         let text_area_w = (bounds.width - gutter_w).max(0.0);
         let text_x = bounds.x + gutter_w;
@@ -262,9 +263,8 @@ impl Element for TextEditorElement {
                 },
                 color: theme.colors.border_soft,
             });
-            let gutter_digits =
-                gutter_digits(self.line_tops.last().map(|(line, _)| *line).unwrap_or(0));
-            for (line_no, y) in &self.line_tops {
+            let gutter_digits = gutter_digits(lines);
+            for (line_no, y) in self.line_tops.iter() {
                 let painted_y = text_y - self.scroll_y + *y;
                 if painted_y + line_height < bounds.y || painted_y > bounds.bottom() {
                     continue;
@@ -351,7 +351,7 @@ impl Element for TextEditorElement {
                     let params = TextParams::new(self.text.clone(), style)
                         .spans(spans)
                         .wrap_width(Some(text_area_w.max(1.0)));
-                    (cx.layout_text(&params), kinds)
+                    (cx.layout_text(&params), kinds.into())
                 }
             };
             let span_colors: Vec<_> = kinds
@@ -444,18 +444,18 @@ impl Element for TextEditorElement {
         );
         cx.text_input_hit_areas.push(TextInputHitArea {
             bounds,
-            text_x,
-            text_y,
-            text_width: text_area_w,
-            text_height: bounds.height,
-            value: String::new(),
-            font_size,
             focus_target: target,
-            multiline: true,
-            layout: hit_layout,
-            scroll_x: 0.0,
-            scroll_y: self.scroll_y,
+            text_rect: Rect {
+                x: text_x,
+                y: text_y,
+                width: text_area_w,
+                height: bounds.height,
+            },
             caret,
+            content: TextHitContent::Multiline {
+                layout: hit_layout,
+                scroll_y: self.scroll_y,
+            },
         });
     }
 }
@@ -464,16 +464,6 @@ impl IntoAnyElement for TextEditorElement {
     fn into_any(self) -> AnyElement {
         AnyElement::new(self)
     }
-}
-
-fn code_gutter_width(font_size: f32, max_line: usize) -> f32 {
-    let digits = gutter_digits(max_line);
-    let char_w = (font_size * 0.62).max(1.0);
-    (digits as f32 * char_w + 18.0).ceil()
-}
-
-fn gutter_digits(max_line: usize) -> usize {
-    max_line.max(1).ilog10() as usize + 1
 }
 
 fn syntax_color(
@@ -593,5 +583,52 @@ mod tests {
 
         assert_eq!((before, shaped_at(&editor)), (Some(1.0), Some(2.0)));
         assert_eq!(repaint_at, Some(0), "a repaint picks up the new layout");
+    }
+
+    // Regression: code mode wrapped the editor's layout at the full width,
+    // so lines ran on under the clip past the text area beside the gutter.
+    #[test]
+    fn code_editor_wraps_its_text_within_the_area_beside_the_gutter() {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut editor = Editor::new(EditorMode::CodeInput);
+        editor.sync_size(200.0, 100.0);
+        // Lines from about 0.6 to 1.0 of the full width: some fit the whole
+        // view but not the part beside the gutter.
+        let lines: Vec<String> = (14..=24).map(|n| "x".repeat(n)).collect();
+        editor.set_text(&lines.join("\n"));
+        editor.flush(&mut text);
+
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+        let mut root = text_editor_element(
+            FocusId::from_key("e"),
+            ScrollActionBuilder::new(Action::new),
+        )
+        .editor_snapshot(&editor)
+        .w(200.0)
+        .h(100.0)
+        .into_any();
+        let mut scene = Scene::default();
+        render_element(&mut root, &mut scene, &mut cx, 200.0, 100.0);
+
+        let (area, layout) = scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::RichTextRun(run) => {
+                    Some((run.rect, run.layout.downcast_ref::<TextLayout>()?))
+                }
+                _ => None,
+            })
+            .expect("painted editor text");
+        assert!(area.x > 0.0, "a gutter is painted");
+        let widest = layout.lines().map(|l| l.width).fold(0.0, f32::max);
+        assert!(
+            widest <= area.width + 0.5,
+            "line {widest} wider than {}",
+            area.width
+        );
     }
 }

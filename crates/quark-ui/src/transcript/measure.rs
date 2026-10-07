@@ -67,7 +67,7 @@ impl BlockGeometry for TextGeometry {
     fn hit(&self, x: f32, y: f32) -> usize {
         let (ox, oy) = self.text_origin;
         match &self.layout {
-            Some(layout) => layout.hit(x - ox, y - oy),
+            Some(layout) => layout.hit(x - ox, y - oy).get(),
             None if x - ox >= self.width * 0.5 => self.text_len,
             None => 0,
         }

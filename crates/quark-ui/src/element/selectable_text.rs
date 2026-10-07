@@ -1,4 +1,8 @@
+// Byte slicing of strings lives in `quark_text::offset`.
+#![deny(clippy::string_slice, clippy::indexing_slicing)]
+
 use super::*;
+use quark_text::{TextOffset, ToTextOffset};
 
 // ---------------------------------------------------------------------------
 // SelectableText — multi-line, mouse-selectable static text
@@ -251,8 +255,8 @@ pub struct SelectableTextRegion {
 }
 
 impl SelectableTextRegion {
-    /// Byte offset (grapheme boundary) nearest to a scene-space point.
-    pub fn hit(&self, x: f32, y: f32) -> usize {
+    /// Grapheme boundary nearest to a scene-space point.
+    pub fn hit(&self, x: f32, y: f32) -> TextOffset {
         self.layout
             .hit(x - self.text_origin.0, y - self.text_origin.1)
     }
@@ -325,9 +329,11 @@ impl SelectableText {
         self.source_key = key;
         self
     }
-    /// Resolved (normalized) byte range to highlight, or `None` when this block
-    /// is not the selected one. Highlight is painted behind the text, so passing
-    /// a selection never alters layout (measure == render).
+    /// Resolved (normalized) byte range to highlight, or `None` when this
+    /// block is not the selected one. The bytes are snapped onto grapheme
+    /// boundaries of the laid-out text when painted. Highlight is painted
+    /// behind the text, so passing a selection never alters layout
+    /// (measure == render).
     pub fn selection(mut self, selection: Option<(usize, usize)>) -> Self {
         self.selection = selection;
         self
@@ -438,14 +444,20 @@ pub(super) fn paint_pills(
     }
 }
 
-pub(super) fn paint_selection(
+/// Paints a normalized `selection` (start before end; anything else paints
+/// nothing), snapped onto `layout`'s text.
+pub(super) fn paint_selection<O: ToTextOffset>(
     scene: &mut Scene,
     layout: &TextLayout,
-    selection: Option<(usize, usize)>,
+    selection: Option<(O, O)>,
     origin: (f32, f32),
     color: Color,
 ) {
-    let Some((lo, hi)) = selection.filter(|(a, b)| a < b) else {
+    let text = layout.text();
+    let Some((lo, hi)) = selection
+        .map(|(a, b)| (a.to_offset(text), b.to_offset(text)))
+        .filter(|(a, b)| a < b)
+    else {
         return;
     };
     for r in layout.selection_rects(lo..hi) {

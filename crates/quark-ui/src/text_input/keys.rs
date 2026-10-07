@@ -1,24 +1,42 @@
 use super::TextEditCommand;
+use crate::element::Binding;
 
-/// Editing command for a key binding in the keymap format (`"ctrl+z"`,
-/// `"cmd+shift+arrowleft"`). `cmd` takes macOS meanings (line start/end on
-/// arrows, line delete on backspace); `ctrl` and `alt` move by words.
-/// Paste is absent because it needs the clipboard, which the app reads.
-pub fn command_for_binding(binding: &str) -> Option<TextEditCommand> {
-    use TextEditCommand::*;
-    let mut parts: Vec<&str> = binding.split('+').collect();
-    let key = parts.pop()?;
-    let (mut cmd, mut ctrl, mut alt, mut shift) = (false, false, false, false);
-    for modifier in parts {
-        match modifier {
-            "cmd" => cmd = true,
-            "ctrl" => ctrl = true,
-            "alt" => alt = true,
-            "shift" => shift = true,
-            _ => return None,
-        }
+/// Something [`command_for_binding`] can read as a [`Binding`]: a binding,
+/// or a string in the keymap format, which is parsed.
+pub trait AsBinding {
+    fn as_binding(&self) -> Option<Binding>;
+}
+
+impl AsBinding for Binding {
+    fn as_binding(&self) -> Option<Binding> {
+        Some(self.clone())
     }
-    let primary = cmd || ctrl;
+}
+
+impl AsBinding for str {
+    fn as_binding(&self) -> Option<Binding> {
+        self.parse().ok()
+    }
+}
+
+impl AsBinding for String {
+    fn as_binding(&self) -> Option<Binding> {
+        self.parse().ok()
+    }
+}
+
+/// Editing command for a key binding (`ctrl+z`, `cmd+shift+arrowleft`).
+/// `cmd` takes macOS meanings (line start/end on arrows, line delete on
+/// backspace); `ctrl` and `alt` move by words; `mod` counts as either for
+/// undo, select all, copy, and cut. Paste is absent because it needs the
+/// clipboard, which the app reads.
+pub fn command_for_binding(binding: &(impl AsBinding + ?Sized)) -> Option<TextEditCommand> {
+    use TextEditCommand::*;
+    let binding = binding.as_binding()?;
+    let m = binding.mods;
+    let (cmd, ctrl, alt, shift) = (m.cmd, m.ctrl, m.alt, m.shift);
+    let key = binding.key.as_str();
+    let primary = cmd || ctrl || m.primary;
     let word = (ctrl || alt) && !cmd;
     let pick = |plain, select| if shift { select } else { plain };
     Some(match key {
@@ -66,6 +84,8 @@ mod tests {
             ("ctrl+backspace", Some(BackspaceWord)),
             ("cmd+backspace", Some(BackspaceLine)),
             ("shift+arrowleft", Some(SelectLeft)),
+            ("mod+z", Some(Undo)),
+            ("ctrl+q+z", None),
         ];
         for (binding, expected) in cases {
             assert_eq!(command_for_binding(binding), expected, "{binding}");
