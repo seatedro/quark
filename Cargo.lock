@@ -2830,6 +2830,7 @@ dependencies = [
  "taffy",
  "tracing",
  "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

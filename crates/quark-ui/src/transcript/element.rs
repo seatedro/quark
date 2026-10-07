@@ -2,8 +2,11 @@
 //! [`Transcript::prepare`] computed, painted through `SelectableText` and
 //! `CodeBlock`, with drag-select, wheel, and accessibility wiring.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use accesskit::Role as AccessibilityRole;
 use quark::hit::{CursorHint, HitFlags, HitId};
@@ -11,8 +14,10 @@ use quark::{SemanticActions, SemanticNode, SemanticRole};
 use quark_render::scene::Rect;
 use quark_render::{RoundedRectPrimitive, Scene};
 
+use quark::selection::BlockKey;
+
 use super::{
-    BlockContent, BlockGeometry, LIST_STEP, QUOTE_STEP, Transcript, TranscriptBlock,
+    BlockContent, BlockGeometry, LIST_STEP, Palette, QUOTE_STEP, Transcript, TranscriptBlock,
     TranscriptRole, TranscriptSource,
 };
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
@@ -20,8 +25,9 @@ use crate::action::Action;
 use crate::design::Alpha;
 use crate::element::{
     AnyElement, Bounds, ClickEvent, DragHandler, DragReleaseResult, DragStart, Element,
-    ElementContext, IntoAnyElement, LayoutEngine, LayoutId, ScrollActionBuilder, ScrollTarget,
-    SelectableText, code_block, div, selectable_rich_text, text,
+    ElementContext, IntoAnyElement, LayoutEngine, LayoutId, LinkClicked, LinkHandler,
+    ScrollActionBuilder, ScrollTarget, SelectableText, StyledSpan, code_block_joined, div,
+    selectable_rich_text, text,
 };
 use crate::style::Styled;
 use crate::theme::Theme;
@@ -42,6 +48,44 @@ pub enum TranscriptEvent {
 const AUTOSCROLL_FRAME_MS: u64 = 16;
 
 type EventMap = Rc<dyn Fn(TranscriptEvent) -> Action>;
+
+/// The link action of a built element. Its blocks are built before
+/// [`TranscriptElement::on_link`] can be called, so they share this slot.
+type LinkSlot = Rc<RefCell<Option<Rc<dyn Fn(&Arc<str>) -> Action>>>>;
+
+/// A block's spans with their tones resolved, kept while the block stays
+/// materialized and the theme stays the same.
+#[derive(Debug, Clone)]
+pub(super) struct PaintedSpans {
+    source: Arc<[StyledSpan]>,
+    palette: Palette,
+    spans: Arc<[StyledSpan]>,
+}
+
+/// `block`'s spans for painting with `palette`, from `cache` when they were
+/// resolved from the same spans and palette.
+fn painted_spans(
+    cache: &mut HashMap<BlockKey, PaintedSpans>,
+    kept: &mut HashMap<BlockKey, PaintedSpans>,
+    block: &TranscriptBlock,
+    palette: &Palette,
+) -> Option<Arc<[StyledSpan]>> {
+    let source = block.content.spans()?;
+    if block.tones().is_none() {
+        return Some(source.clone());
+    }
+    let entry = match cache.remove(&block.key) {
+        Some(entry) if Arc::ptr_eq(&entry.source, source) && entry.palette == *palette => entry,
+        _ => PaintedSpans {
+            source: source.clone(),
+            palette: *palette,
+            spans: block.painted_spans(palette)?,
+        },
+    };
+    let spans = entry.spans.clone();
+    kept.insert(block.key, entry);
+    Some(spans)
+}
 
 struct Placed {
     rect: Rect,
@@ -70,6 +114,7 @@ pub struct TranscriptElement {
     placed: Vec<Placed>,
     jump: Option<Placed>,
     on_event: EventMap,
+    on_link: LinkSlot,
     label: String,
     /// A drag is autoscrolling; ask for the next frame.
     animating: bool,
@@ -78,15 +123,25 @@ pub struct TranscriptElement {
 impl<G: BlockGeometry> Transcript<G> {
     /// The element for the rows materialized by the last
     /// [`Transcript::prepare`]. `on_event` wraps input into the app's
-    /// action type.
+    /// action type. Theme colors are resolved here, so a theme change shows
+    /// on the next element without rebuilding any block.
     pub fn element(
-        &self,
+        &mut self,
         source: &impl TranscriptSource,
         theme: &Theme,
         on_event: impl Fn(TranscriptEvent) -> Action + 'static,
     ) -> TranscriptElement {
         let style = self.style;
         let (width, height) = self.size;
+        let palette = Palette::new(theme);
+        let on_link: LinkSlot = Rc::default();
+        let link_slot = on_link.clone();
+        let links = LinkHandler::new(move |url| match &*link_slot.borrow() {
+            Some(f) => f(url),
+            None => LinkClicked { url: url.clone() }.into(),
+        });
+        let mut painted = std::mem::take(&mut self.painted);
+        let mut kept = HashMap::with_capacity(painted.len());
         let mut placed = Vec::with_capacity(self.rows.len() * 3);
         let mut rows = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
@@ -109,15 +164,20 @@ impl<G: BlockGeometry> Transcript<G> {
             let first = placed.len();
             let blocks = source.message(row.key).map_or(&[][..], |m| &m.blocks[..]);
             for visible in &self.blocks[row.blocks.clone()] {
-                let Some(block) = blocks.iter().find(|b| b.key == visible.key) else {
+                let Some(block) = blocks.get(visible.index).filter(|b| b.key == visible.key) else {
                     continue;
                 };
                 let selection = self.block_selection(block.key, visible.text_len);
+                let spans = painted_spans(&mut painted, &mut kept, block, &palette);
                 block_elements(
                     block,
-                    visible.rect,
-                    style.font_size,
-                    selection,
+                    spans,
+                    BlockPaint {
+                        rect: visible.rect,
+                        base_font_size: style.font_size,
+                        selection,
+                        links: &links,
+                    },
                     theme,
                     &mut placed,
                 );
@@ -138,6 +198,7 @@ impl<G: BlockGeometry> Transcript<G> {
             });
         }
 
+        self.painted = kept;
         let on_event: EventMap = Rc::new(on_event);
         let jump = self.unseen.then(|| {
             let (w, h) = (style.font_size * 10.0, style.font_size * 2.4);
@@ -181,22 +242,37 @@ impl<G: BlockGeometry> Transcript<G> {
             placed,
             jump,
             on_event,
+            on_link,
             label: "Transcript".to_owned(),
             animating: self.wants_frame(),
         }
     }
 }
 
-/// The elements of one block at `rect`: quote bars and the list marker in
-/// the inset, then the content to the right of it.
-fn block_elements(
-    block: &TranscriptBlock,
+/// Where and how one block is painted.
+struct BlockPaint<'a> {
     rect: Rect,
     base_font_size: f32,
     selection: Option<(usize, usize)>,
+    links: &'a LinkHandler,
+}
+
+/// The elements of one block at `rect`: quote bars and the list marker in
+/// the inset, then the content to the right of it. `spans` are the content
+/// spans with theme colors resolved.
+fn block_elements(
+    block: &TranscriptBlock,
+    spans: Option<Arc<[StyledSpan]>>,
+    paint: BlockPaint,
     theme: &Theme,
     placed: &mut Vec<Placed>,
 ) {
+    let BlockPaint {
+        rect,
+        base_font_size,
+        selection,
+        links,
+    } = paint;
     let style = &block.style;
     let font_size = base_font_size * style.scale;
     let inset = style.inset(base_font_size);
@@ -244,20 +320,24 @@ fn block_elements(
         width: (rect.width - inset).max(1.0),
         ..rect
     };
+    let spans = spans.unwrap_or_else(|| Arc::from([]));
     let element = match &block.content {
-        BlockContent::Prose(spans) => {
-            let mut el = selectable_rich_text(spans.to_vec())
+        BlockContent::Prose(_) => {
+            let mut el = selectable_rich_text(spans)
                 .width(content.width)
                 .size(font_size)
                 .weight(style.weight)
                 .source(block.key.0)
-                .selection(selection);
+                .selection(selection)
+                .link_handler(links.clone());
             if style.muted {
                 el = el.color(muted);
             }
             el.into_any()
         }
-        BlockContent::Code { lines, label } => code_block(lines.to_vec())
+        BlockContent::Code {
+            line_count, label, ..
+        } => code_block_joined(spans, *line_count)
             .label(label.clone())
             .width(content.width)
             .size(font_size)
@@ -284,6 +364,13 @@ fn block_elements(
 }
 
 impl TranscriptElement {
+    /// Action a link click in any block emits, given its URL. Defaults to
+    /// [`LinkClicked`].
+    pub fn on_link(self, f: impl Fn(&Arc<str>) -> Action + 'static) -> Self {
+        *self.on_link.borrow_mut() = Some(Rc::new(f));
+        self
+    }
+
     /// Accessible name of the list.
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();

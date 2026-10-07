@@ -263,7 +263,9 @@ impl SelectableTextRegion {
 /// string, which survive re-wrap); the element renders the highlight from a
 /// resolved `selection` range and registers a `SelectableTextRegion` for input.
 pub struct SelectableText {
-    spans: Vec<StyledSpan>,
+    /// Shared so a caller that keeps its spans (a transcript block) builds
+    /// the element every frame without copying their text.
+    spans: Arc<[StyledSpan]>,
     width: f32,
     font_size: f32,
     /// Base font for text outside any span's overrides.
@@ -283,9 +285,9 @@ pub fn selectable_text(text: impl Into<String>) -> SelectableText {
 /// Selectable text whose runs carry inline styles (code/bold/italic/link). The
 /// concatenation of the span texts is the plain body; selection/copy/a11y all
 /// operate on that string, so styling never changes what gets copied.
-pub fn selectable_rich_text(spans: Vec<StyledSpan>) -> SelectableText {
+pub fn selectable_rich_text(spans: impl Into<Arc<[StyledSpan]>>) -> SelectableText {
     SelectableText {
-        spans,
+        spans: spans.into(),
         width: 0.0,
         font_size: 0.0,
         font_kind: FontKind::Ui,
