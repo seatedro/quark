@@ -13,9 +13,10 @@ use quark_render::scene::Rect;
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
 use super::{
-    BlockContent, BlockGeometry, BlockMeasurer, MeasureSpec, RULE_HEIGHT, TranscriptBlock,
+    BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState, MeasureSpec,
+    RULE_HEIGHT, TranscriptBlock,
 };
-use crate::element::{CodeBlock, SelectableText};
+use crate::element::{CodeBlock, SelectableText, StyledSpan};
 
 /// Measures blocks with the frame's text system and layout cache.
 /// `font_size` is in logical points; `scale_factor` must be the one the
@@ -146,6 +147,40 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     text_len,
                 }
             }
+            BlockContent::Image {
+                state: ImageState::Failed,
+                ..
+            } => {
+                let spans = failed_image_spans(block.text());
+                let params = SelectableText::layout_params(
+                    &spans,
+                    font_size,
+                    FontKind::Ui,
+                    style.weight,
+                    width,
+                );
+                let layout = self.layout(params);
+                TextGeometry {
+                    height: SelectableText::measured_height(layout.as_deref(), font_size, None),
+                    layout,
+                    text_origin: (inset, 0.0),
+                    width,
+                    text_len,
+                }
+            }
+            BlockContent::Image { state, .. } => {
+                let height = match state.size() {
+                    Some(size) => image_extent(size, width).1,
+                    None => (self.font_size * IMAGE_PLACEHOLDER_HEIGHT).ceil(),
+                };
+                TextGeometry {
+                    layout: None,
+                    text_origin: (inset, 0.0),
+                    height,
+                    width,
+                    text_len,
+                }
+            }
             BlockContent::Rule => TextGeometry {
                 layout: None,
                 text_origin: (inset, 0.0),
@@ -155,4 +190,22 @@ impl BlockMeasurer for TextMeasurer<'_> {
             },
         }
     }
+}
+
+/// The size an image of intrinsic `(width, height)` pixels shows at in a
+/// column `max_width` wide: its own size, scaled down to fit the width.
+/// One image pixel is one logical point.
+pub(super) fn image_extent((width, height): (u32, u32), max_width: f32) -> (f32, f32) {
+    let (w, h) = (width.max(1) as f32, height as f32);
+    let shown = w.min(max_width.max(1.0));
+    (shown, (h * shown / w).ceil())
+}
+
+/// The alt text an image that failed to load shows, italic as inline
+/// image alt text is.
+pub(super) fn failed_image_spans(alt: &str) -> Arc<[StyledSpan]> {
+    Arc::from([StyledSpan {
+        italic: true,
+        ..StyledSpan::plain(alt)
+    }])
 }

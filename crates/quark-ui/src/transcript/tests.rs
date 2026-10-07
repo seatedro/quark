@@ -899,7 +899,12 @@ fn markdown_message_with(
         key: RowKey(row),
         role: TranscriptRole::Assistant,
         author: "assistant".into(),
-        blocks: markdown.blocks(&crate::markdown::MarkdownDoc::parse(source), syntax, keys),
+        blocks: markdown.blocks(
+            &crate::markdown::MarkdownDoc::parse(source),
+            syntax,
+            &mut ImageStore::new(),
+            keys,
+        ),
     }
 }
 
@@ -916,6 +921,7 @@ fn dump_blocks(message: &TranscriptMessage) -> String {
                     format!("code({})", label.as_deref().unwrap_or(""))
                 }
                 BlockContent::Rule => "rule".to_owned(),
+                BlockContent::Image { src, state } => format!("image({src}, {state:?})"),
             };
             let s = &block.style;
             format!(
@@ -1601,4 +1607,173 @@ fn find_paints_a_highlight_per_match_and_marks_the_current_one() {
 
     let count = |color: &str| frame.lines().filter(|l| l.ends_with(color)).count();
     assert_eq!((count(&current), count(&plain)), (1, 3));
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
+/// A loader that decodes `"<w>x<h>.png"` into a gray image of that size
+/// and fails on anything else.
+fn sized_loader() -> ImageLoader {
+    Arc::new(|src: &str| {
+        let (w, h) = src.strip_suffix(".png")?.split_once('x')?;
+        let (width, height) = (w.parse().ok()?, h.parse().ok()?);
+        Some(LoadedImage::Rgba {
+            width,
+            height,
+            pixels: vec![128; width as usize * height as usize * 4],
+        })
+    })
+}
+
+/// Prepares `md` at 400x300 with real text layouts.
+fn prepare_markdown(md: &mut MarkdownTranscript, text: &mut TextSystem, layouts: &mut LayoutCache) {
+    md.prepare(
+        400.0,
+        300.0,
+        0,
+        &mut TextMeasurer::new(text, layouts, 14.0, 1.0),
+    );
+}
+
+/// Height of the first image block on screen, and whether its pixels
+/// arrived.
+fn image_block(md: &MarkdownTranscript) -> (f32, bool) {
+    let t = md.transcript();
+    let visible = t
+        .visible_blocks()
+        .iter()
+        .find(|b| md.messages()[&b.row].blocks[b.index].content_kind() == "image")
+        .expect("an image block is on screen");
+    let block = &md.messages()[&visible.row].blocks[visible.index];
+    let ready = matches!(
+        block.content,
+        BlockContent::Image {
+            state: ImageState::Ready(_),
+            ..
+        }
+    );
+    (visible.rect.height, ready)
+}
+
+impl TranscriptBlock {
+    fn content_kind(&self) -> &'static str {
+        match self.content {
+            BlockContent::Image { .. } => "image",
+            _ => "text",
+        }
+    }
+}
+
+// Each case: the image's size, whether the app hinted it, and the block's
+// height before and after the pixels arrive (the column is 371 points
+// wide, so wider images scale down).
+#[test]
+fn image_blocks_reserve_their_height_and_scale_to_the_column() {
+    let placeholder = (14.0 * IMAGE_PLACEHOLDER_HEIGHT).ceil();
+    let cases: &[(&str, bool, f32, f32)] = &[
+        ("200x100.png", true, 100.0, 100.0),
+        ("742x100.png", true, 50.0, 50.0),
+        ("200x100.png", false, placeholder, 100.0),
+    ];
+    for &(src, hint, before, after) in cases {
+        let mut md = markdown_transcript(&format!("![chart]({src})"));
+        let (mut text, mut layouts) = (
+            TextSystem::vendored_only(&Default::default()),
+            LayoutCache::default(),
+        );
+        if hint {
+            let (w, h) = src.strip_suffix(".png").unwrap().split_once('x').unwrap();
+            md.hint_image_size(src, w.parse().unwrap(), h.parse().unwrap());
+        }
+        md.set_image_loader(sized_loader());
+        prepare_markdown(&mut md, &mut text, &mut layouts);
+        let loading = image_block(&md);
+        md.finish_images();
+        prepare_markdown(&mut md, &mut text, &mut layouts);
+        let loaded = image_block(&md);
+
+        assert_eq!(
+            (loading, loaded),
+            ((before, false), (after, true)),
+            "{src} hinted={hint}"
+        );
+    }
+}
+
+#[test]
+fn an_image_resolving_above_the_view_does_not_move_the_rows_on_screen() {
+    let mut md = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+    md.set_image_loader(sized_loader());
+    md.extend((0..40).map(|i| MarkdownEntry {
+        row: RowKey(i),
+        role: TranscriptRole::Assistant,
+        author: "assistant".into(),
+        markdown: if i == 10 {
+            "![tall](100x600.png)".to_owned()
+        } else {
+            format!("Message {i} with a line of text.")
+        },
+    }))
+    .unwrap();
+    let (mut text, mut layouts) = (
+        TextSystem::vendored_only(&Default::default()),
+        LayoutCache::default(),
+    );
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+    md.finish_measures();
+    // Put row 12 at the top: the image row sits in the overscan above.
+    let top = |md: &MarkdownTranscript, row: u64| {
+        let t = md.transcript();
+        t.list().rows().offset_of(RowKey(row)).unwrap() - t.scroll_offset()
+    };
+    let offset = md.transcript().list().rows().offset_of(RowKey(12)).unwrap() + 5.0;
+    md.transcript_mut().set_scroll_offset(offset);
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+    let image_row = md.transcript().list().rows().height_of(RowKey(10)).unwrap();
+    let before = top(&md, 12);
+
+    md.finish_images();
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+
+    let grown = md.transcript().list().rows().height_of(RowKey(10)).unwrap() - image_row;
+    assert_eq!((top(&md, 12), grown > 400.0), (before, true));
+}
+
+#[test]
+fn an_image_without_pixels_shows_its_alt_text_and_names_its_node() {
+    let mut no_loader = markdown_transcript("![a sales chart](chart.png)");
+    let mut loaded = markdown_transcript("![a sales chart](30x20.png)");
+    loaded.set_image_loader(sized_loader());
+    loaded.finish_images();
+    let theme = Theme::default_dark();
+
+    let (regions, _) = paint_markdown(&mut no_loader, &theme);
+    let alt_text: Vec<&str> = regions.iter().map(|r| &*r.text).collect();
+    let mut text = TextSystem::vendored_only(&Default::default());
+    let mut layouts = LayoutCache::default();
+    prepare_markdown(&mut loaded, &mut text, &mut layouts);
+    let element = loaded.element(&theme, |ev| Ev(ev).into());
+    let signals = SignalStore::new();
+    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+    cx.accessibility = AccessibilityFrame::new(400.0, 300.0);
+    cx.semantic = SemanticFrame::new(400.0, 300.0);
+    let mut scene = Scene::default();
+    render_element(&mut element.into_any(), &mut scene, &mut cx, 400.0, 300.0);
+    let update = cx.accessibility.tree_update("Test", None);
+    let image_name = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::Image)
+        .and_then(|(_, n)| n.label().map(str::to_owned));
+    let pixels = scene.primitives.iter().find_map(|p| match p {
+        quark_render::Primitive::Image(image) => Some((image.width, image.height)),
+        _ => None,
+    });
+
+    assert_eq!(
+        (alt_text, image_name.as_deref(), pixels),
+        (vec!["a sales chart"], Some("a sales chart"), Some((30, 20)))
+    );
 }

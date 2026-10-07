@@ -14,6 +14,7 @@ use std::sync::Arc;
 use quark::selection::BlockKey;
 
 use super::background::BackgroundMeasure;
+use super::images::{ImageLoader, ImageStore};
 use super::markdown::{BlockKeys, MarkdownMessage};
 use super::syntax::SyntaxHighlighter;
 use super::{
@@ -21,7 +22,7 @@ use super::{
     TranscriptMessage, TranscriptRole, TranscriptStyle,
 };
 use crate::action::Action;
-use crate::markdown::{IncrementalMarkdown, MarkdownDoc};
+use crate::markdown::{BlockKind, IncrementalMarkdown, MarkdownDoc};
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowKey, ScrollAlign};
 
@@ -58,6 +59,7 @@ pub struct MarkdownTranscript {
     /// Owner of every block key handed out, for routing highlights.
     block_rows: HashMap<BlockKey, RowKey>,
     syntax: SyntaxHighlighter,
+    images: ImageStore,
     keys: BlockKeys,
     background: BackgroundMeasure,
 }
@@ -70,6 +72,7 @@ impl MarkdownTranscript {
             entries: HashMap::new(),
             block_rows: HashMap::new(),
             syntax: SyntaxHighlighter::new(),
+            images: ImageStore::new(),
             keys: BlockKeys::new(),
             background: BackgroundMeasure::default(),
         }
@@ -177,6 +180,77 @@ impl MarkdownTranscript {
     pub fn finish_highlights(&mut self) -> bool {
         let keys = self.syntax.finish_pending();
         self.refresh_highlighted(keys)
+    }
+
+    /// Sets how image URLs become bytes; see [`ImageStore`]. Without a
+    /// loader, image blocks show their alt text.
+    pub fn set_image_loader(&mut self, loader: ImageLoader) {
+        self.images.set_loader(loader);
+        self.refresh_all_images();
+    }
+
+    /// The intrinsic size of the image at `src`, when the app knows it
+    /// before the pixels: its block reserves that height while it loads.
+    pub fn hint_image_size(&mut self, src: &str, width: u32, height: u32) {
+        self.images.hint_size(src, width, height);
+        self.refresh_images(&[Arc::from(src)]);
+    }
+
+    /// Takes decoded images and rebuilds the messages showing them.
+    /// Returns whether any message changed (draw a frame). Rows above the
+    /// first visible one that change height keep the view in place.
+    pub fn poll_images(&mut self) -> bool {
+        let srcs = self.images.poll();
+        self.refresh_images(&srcs)
+    }
+
+    /// Waits for every pending image and applies it. For tests and
+    /// screenshots.
+    pub fn finish_images(&mut self) -> bool {
+        let srcs = self.images.finish_pending();
+        self.refresh_images(&srcs)
+    }
+
+    /// Images are loading; keep drawing frames to pick them up.
+    pub fn is_loading_images(&self) -> bool {
+        self.images.is_loading()
+    }
+
+    /// Rebuilds the messages with an image block showing one of `srcs`.
+    fn refresh_images(&mut self, srcs: &[Arc<str>]) -> bool {
+        if srcs.is_empty() {
+            return false;
+        }
+        let mut rows: Vec<RowKey> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| {
+                (0..e.doc.len()).any(|b| {
+                    e.doc.kind(b) == BlockKind::Image
+                        && srcs.iter().any(|s| **s == *e.doc.image_src(b))
+                })
+            })
+            .map(|(row, _)| *row)
+            .collect();
+        rows.sort_unstable();
+        for row in &rows {
+            // The row is in `entries`, so it exists.
+            let _ = self.refresh(*row);
+        }
+        !rows.is_empty()
+    }
+
+    fn refresh_all_images(&mut self) {
+        let mut rows: Vec<RowKey> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| (0..e.doc.len()).any(|b| e.doc.kind(b) == BlockKind::Image))
+            .map(|(row, _)| *row)
+            .collect();
+        rows.sort_unstable();
+        for row in &rows {
+            let _ = self.refresh(*row);
+        }
     }
 
     /// See [`Transcript::prepare`]. Also applies the row heights measured
@@ -302,9 +376,12 @@ impl MarkdownTranscript {
         for key in &entry.markdown.keys()[entry.doc.len().min(before)..] {
             self.block_rows.remove(key);
         }
-        let blocks = entry
-            .markdown
-            .blocks(&entry.doc, &mut self.syntax, &mut self.keys);
+        let blocks = entry.markdown.blocks(
+            &entry.doc,
+            &mut self.syntax,
+            &mut self.images,
+            &mut self.keys,
+        );
         let keys = entry.markdown.keys();
         for key in &keys[before.min(keys.len())..] {
             self.block_rows.insert(*key, row);

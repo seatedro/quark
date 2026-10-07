@@ -25,6 +25,7 @@ mod background;
 mod element;
 mod facade;
 mod find;
+mod images;
 mod markdown;
 mod measure;
 mod syntax;
@@ -35,6 +36,7 @@ pub use background::MeasureSpec;
 pub use element::{TranscriptElement, TranscriptEvent};
 pub use facade::{MarkdownEntry, MarkdownTranscript};
 pub use find::{FindBarActions, FindMatch, FindState, find_bar};
+pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage};
 pub use markdown::{BlockKeys, CODE_SCALE, MarkdownMessage, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
@@ -71,6 +73,9 @@ const AUTOSCROLL_MAX_DT_MS: u64 = 50;
 
 /// Height of a rule block, in multiples of its font size.
 const RULE_HEIGHT: f32 = 1.0;
+/// Height of an image placeholder whose size is unknown, in multiples of
+/// the font size.
+const IMAGE_PLACEHOLDER_HEIGHT: f32 = 8.0;
 /// Width of one quote level's bar column, in multiples of the font size.
 const QUOTE_STEP: f32 = 1.0;
 /// Width of one list level's marker gutter, in multiples of the font size.
@@ -92,13 +97,17 @@ pub enum BlockContent {
     },
     /// A horizontal rule. Its text is `---`, so copy keeps it.
     Rule,
+    /// An image scaled to the block's width (never past its own width),
+    /// or a placeholder while it loads. The block's text is the alt text,
+    /// which copy and assistive tech read.
+    Image { src: Arc<str>, state: ImageState },
 }
 
 impl BlockContent {
     fn spans(&self) -> Option<&Arc<[StyledSpan]>> {
         match self {
             Self::Prose(spans) | Self::Code { spans, .. } => Some(spans),
-            Self::Rule => None,
+            Self::Rule | Self::Image { .. } => None,
         }
     }
 }
@@ -288,6 +297,18 @@ impl TranscriptBlock {
         }
     }
 
+    /// An image block showing `src` in `state`, with `alt` as its text.
+    pub fn image(key: BlockKey, src: Arc<str>, alt: &str, state: ImageState) -> Self {
+        Self {
+            key,
+            content: BlockContent::Image { src, state },
+            style: BlockStyle::default(),
+            text: Arc::from(alt),
+            tones: None,
+            revision: next_revision(),
+        }
+    }
+
     pub fn with_style(mut self, style: BlockStyle) -> Self {
         self.style = style;
         self.revision = next_revision();
@@ -392,6 +413,9 @@ impl TranscriptBlock {
                 },
             ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some(),
             (BlockContent::Rule, BlockContent::Rule) => true,
+            (BlockContent::Image { state: a, .. }, BlockContent::Image { state: b, .. }) => {
+                image_height_class(a) == image_height_class(b)
+            }
             _ => false,
         };
         content && self.style == other.style
@@ -409,6 +433,12 @@ impl TranscriptBlock {
                 .collect(),
         })
     }
+}
+
+/// What an image block's height depends on: its intrinsic size, or
+/// whether it shows a placeholder or its alt text.
+fn image_height_class(state: &ImageState) -> (Option<(u32, u32)>, bool) {
+    (state.size(), matches!(state, ImageState::Failed))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

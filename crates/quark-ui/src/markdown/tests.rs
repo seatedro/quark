@@ -39,6 +39,13 @@ fn blocks_dump_matches_commonmark_structure() {
         // An item holding only a sublist keeps its own marker.
         ("- - inner\n- b", "p -: \n  p -: inner\np -: b"),
         ("1. - inner", "p 1.: \n  p -: inner"),
+        // A paragraph of one image is an image block; its alt text keeps
+        // its styling.
+        ("![a *chart*](c.png)", "img(c.png): [img:a ][i,img:chart]"),
+        ("![](c.png)", "img(c.png): [img:image]"),
+        ("- ![shot](s.png)", "img(s.png) -: [img:shot]"),
+        ("![a](c.png) after", "p: [img:[a]] after"),
+        ("[![a](c.png)](https://x.y)", "p: [img,l=https://x.y:[a]]"),
     ];
     for (input, expected) in cases {
         let doc = MarkdownDoc::parse(input);
@@ -55,6 +62,7 @@ fn plain_text_keeps_source_markers() {
         ("7. seventh", "7. seventh"),
         ("> > deep\n> > two", "> > deep\n> > two"),
         ("```\nfn a() {}\nfn b() {}\n```", "fn a() {}\nfn b() {}"),
+        ("> ![alt](i.png)", "> ![alt](i.png)"),
         (
             "| a | b |\n|---|---|\n| 1 | 2 |",
             "| a | b |\n| --- | --- |\n| 1 | 2 |",

@@ -13,13 +13,14 @@ use accesskit::Role as AccessibilityRole;
 use quark::hit::{CursorHint, HitFlags, HitId};
 use quark::{SemanticActions, SemanticNode, SemanticRole};
 use quark_render::scene::Rect;
-use quark_render::{RoundedRectPrimitive, Scene};
+use quark_render::{ImagePrimitive, RoundedRectPrimitive, Scene};
 
 use quark::selection::BlockKey;
 
+use super::measure::{failed_image_spans, image_extent};
 use super::{
-    BlockContent, BlockGeometry, LIST_STEP, Palette, QUOTE_STEP, Transcript, TranscriptBlock,
-    TranscriptMessage, TranscriptRole, TranscriptSource, VisibleRow,
+    BlockContent, BlockGeometry, ImageState, LIST_STEP, Palette, QUOTE_STEP, Transcript,
+    TranscriptBlock, TranscriptMessage, TranscriptRole, TranscriptSource, VisibleRow,
 };
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
 use crate::action::Action;
@@ -166,6 +167,7 @@ struct RowColors {
     selection: Color,
     highlight: Color,
     current_highlight: Color,
+    placeholder: Color,
 }
 
 impl RowColors {
@@ -178,6 +180,7 @@ impl RowColors {
             selection: c.accent.with_alpha(Alpha::SOFT),
             highlight: c.search_match_bg,
             current_highlight: c.search_match_active_bg,
+            placeholder: c.element_background,
         }
     }
 
@@ -189,6 +192,7 @@ impl RowColors {
             self.selection,
             self.highlight,
             self.current_highlight,
+            self.placeholder,
         ] {
             (color.r, color.g, color.b, color.a).hash(hasher);
         }
@@ -688,6 +692,33 @@ fn block_elements(
             .source(block.key.0)
             .selection(selection)
             .into_any(),
+        BlockContent::Image {
+            state: ImageState::Failed,
+            ..
+        } => selectable_rich_text(failed_image_spans(&block.text))
+            .width(content.width)
+            .size(font_size)
+            .weight(style.weight)
+            .source(block.key.0)
+            .selection(selection)
+            .color(muted)
+            .into_any(),
+        BlockContent::Image { state, .. } => {
+            let (width, height) = match state.size() {
+                Some(size) => image_extent(size, content.width),
+                None => (content.width, content.height),
+            };
+            ImageBox {
+                key: block.key,
+                state: state.clone(),
+                alt: block.text.clone(),
+                size: (width, height),
+                font_size,
+                colors: *colors,
+                selected: selection.is_some(),
+            }
+            .into_any()
+        }
         BlockContent::Rule => {
             let mut el = div()
                 .w(content.width)
@@ -705,6 +736,102 @@ fn block_elements(
         rect: content,
         element,
     });
+}
+
+/// An image block's content: the pixels scaled to `size`, a placeholder
+/// while they load, or the alt text when they failed. Assistive tech reads
+/// the alt text as the image's name.
+struct ImageBox {
+    key: BlockKey,
+    state: ImageState,
+    alt: Arc<str>,
+    size: (f32, f32),
+    font_size: f32,
+    colors: RowColors,
+    selected: bool,
+}
+
+impl Element for ImageBox {
+    type LayoutState = ();
+    type PrepaintState = ();
+
+    fn request_layout(
+        &mut self,
+        engine: &mut LayoutEngine,
+        _cx: &mut ElementContext,
+    ) -> (LayoutId, ()) {
+        let id = engine.request_layout(
+            taffy::Style {
+                size: taffy::Size {
+                    width: taffy::Dimension::length(self.size.0),
+                    height: taffy::Dimension::length(self.size.1),
+                },
+                flex_shrink: 0.0,
+                ..Default::default()
+            },
+            &[],
+        );
+        (id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _bounds: Bounds,
+        _layout_state: &mut (),
+        _engine: &LayoutEngine,
+        _cx: &mut ElementContext,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        bounds: Bounds,
+        _layout_state: &mut (),
+        _prepaint_state: &mut (),
+        _engine: &LayoutEngine,
+        scene: &mut Scene,
+        cx: &mut ElementContext,
+    ) {
+        match &self.state {
+            ImageState::Ready(image) => scene.image(ImagePrimitive {
+                rect: bounds,
+                width: image.width,
+                height: image.height,
+                rgba: image.rgba.clone(),
+                cache_key: image.cache_key,
+            }),
+            ImageState::Pending { .. } => scene.rounded_rect(RoundedRectPrimitive::uniform(
+                bounds,
+                self.font_size * 0.4,
+                self.colors.placeholder,
+            )),
+            // Failed images are painted as their alt text instead.
+            ImageState::Failed => {}
+        }
+        if self.selected {
+            scene.rounded_rect(RoundedRectPrimitive::uniform(
+                bounds,
+                0.0,
+                self.colors.selection,
+            ));
+        }
+        if cx.accessibility_enabled() && !self.alt.is_empty() {
+            cx.push_accessibility(
+                AccessibilityNode::new(
+                    format!("transcript.image:{}", self.key.0),
+                    AccessibilityRole::Image,
+                    bounds,
+                )
+                .label(self.alt.clone()),
+            );
+        }
+    }
+}
+
+impl IntoAnyElement for ImageBox {
+    fn into_any(self) -> AnyElement {
+        AnyElement::new(self)
+    }
 }
 
 impl TranscriptElement {

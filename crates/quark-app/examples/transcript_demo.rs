@@ -8,7 +8,9 @@
 //! Enter and Shift+Enter step through them, Escape closes it. Escape
 //! without find open quits.
 //!
-//! Build with `--features syntax` for highlighted code blocks.
+//! Build with `--features syntax` for highlighted code blocks. Each answer
+//! shows an image block, decoded on the image worker from a generated
+//! gradient; it reserves a placeholder until its pixels arrive.
 //!
 //! The app keeps only markdown strings: `MarkdownTranscript` parses them
 //! (incrementally while streaming), converts them to blocks, allocates the
@@ -24,6 +26,7 @@
 //! `QUARK_TRANSCRIPT_SYNC=1` turns background measurement off, for
 //! comparing frame times.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use quark_app::quark_ui::accessibility::Politeness;
@@ -31,9 +34,9 @@ use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
 use quark_app::quark_ui::transcript::{
-    BlockMeasurer, FindBarActions, MarkdownEntry, MarkdownTranscript, TextGeometry, TextMeasurer,
-    TranscriptBlock, TranscriptCommand, TranscriptEvent, TranscriptRole, TranscriptStyle, find_bar,
-    key_command,
+    BlockMeasurer, FindBarActions, LoadedImage, MarkdownEntry, MarkdownTranscript, TextGeometry,
+    TextMeasurer, TranscriptBlock, TranscriptCommand, TranscriptEvent, TranscriptRole,
+    TranscriptStyle, find_bar, key_command,
 };
 use quark_app::quark_ui::virtual_list::RowKey;
 use quark_app::quark_ui::virtual_list::ScrollAlign;
@@ -213,11 +216,34 @@ fn history_markdown(i: u64, rng: &mut Rng) -> String {
 /// The scripted answer streamed at the bottom; `n` picks its code sample.
 fn answer_markdown(n: usize, rng: &mut Rng) -> String {
     format!(
-        "## Streaming answer {n}\n\n{}\n\n1. Rows are measured only inside the window.\n2. Selection names blocks by key, so it survives scrolling.\n   - nested markers copy too\n\n> Copying keeps `- `, `1. `, and `## ` prefixes.\n\n{}\n\n---\n\n{}",
+        "## Streaming answer {n}\n\n{}\n\n![A generated gradient](gradient-480x120)\n\n1. Rows are measured only inside the window.\n2. Selection names blocks by key, so it survives scrolling.\n   - nested markers copy too\n\n> Copying keeps `- `, `1. `, and `## ` prefixes.\n\n{}\n\n---\n\n{}",
         rng.sentence(24),
         fence(n),
         rng.sentence(30),
     )
+}
+
+/// The demo's image loader: `gradient-<w>x<h>` is a generated gradient of
+/// that size, standing in for an app fetching image bytes.
+fn gradient_image(src: &str) -> Option<LoadedImage> {
+    let (w, h) = src.strip_prefix("gradient-")?.split_once('x')?;
+    let (width, height): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.extend_from_slice(&[
+                (x * 255 / width.max(1)) as u8,
+                (y * 255 / height.max(1)) as u8,
+                200,
+                255,
+            ]);
+        }
+    }
+    Some(LoadedImage::Rgba {
+        width,
+        height,
+        pixels,
+    })
 }
 
 /// Sent by the timer thread every [`STREAM_TICK`].
@@ -298,6 +324,7 @@ impl Demo {
             })
             .collect();
         let mut transcript = MarkdownTranscript::new(TranscriptStyle::for_font_size(FONT_SIZE));
+        transcript.set_image_loader(Arc::new(gradient_image));
         transcript
             .extend(history)
             .unwrap_or_else(|e| eprintln!("{e:?}"));
@@ -436,6 +463,10 @@ impl UiApp for Demo {
         // Rebuild the messages whose code highlights arrived. Ticks redraw
         // often enough to pick them up while streaming.
         self.transcript.poll_highlights();
+        self.transcript.poll_images();
+        if self.transcript.is_loading_images() {
+            cx.frame.request_frame();
+        }
 
         let started = Instant::now();
         let header_h = 36.0;
