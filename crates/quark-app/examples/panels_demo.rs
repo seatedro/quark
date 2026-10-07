@@ -395,6 +395,16 @@ mod tests {
     }
 
     #[test]
+    fn a_middle_click_closes_a_tab() {
+        let mut ui = harness();
+        ui.middle_click_node(By::role_name(Role::Tab, "Diff"));
+        assert_eq!(
+            tab_names(&ui),
+            ["Preview", "Terminal", "Files", "Pull requests"]
+        );
+    }
+
+    #[test]
     fn closing_the_last_tab_hides_the_region() {
         let mut ui = harness();
         for name in ["Preview", "Terminal", "Diff", "Files", "Pull requests"] {

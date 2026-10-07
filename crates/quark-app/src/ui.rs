@@ -688,6 +688,17 @@ impl<U: UiApp> UiAdapter<U> {
                 let delivery = self.router.pointer_up();
                 self.deliver(delivery, cx);
             }
+            UiInput::PointerDown(PointerButton::Middle) => {
+                if let Some((x, y)) = self.pointer {
+                    self.router.middle_down(x, y);
+                }
+            }
+            UiInput::PointerUp(PointerButton::Middle) => {
+                if let Some((x, y)) = self.pointer {
+                    let delivery = self.router.middle_up(x, y);
+                    self.deliver(delivery, cx);
+                }
+            }
             UiInput::PointerDown(_) | UiInput::PointerUp(_) => {}
             UiInput::Wheel { dx, dy, ended } => {
                 let now_ms = cx.elapsed().as_millis() as u64;

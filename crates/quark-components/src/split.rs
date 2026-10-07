@@ -832,7 +832,11 @@ mod tests {
                 },
                 0,
             );
-            assert_eq!(state.resolve(850.0).as_slice(), expected, "dragged by {delta}");
+            assert_eq!(
+                state.resolve(850.0).as_slice(),
+                expected,
+                "dragged by {delta}"
+            );
         }
     }
 

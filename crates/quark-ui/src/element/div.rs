@@ -20,6 +20,7 @@ pub struct Div {
     children: pool::ChildList,
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
+    on_middle_click: Option<Action>,
     on_drag: Option<DragStart>,
     key_bindings: Vec<(String, Action)>,
     on_scroll: Option<ScrollActionBuilder>,
@@ -70,6 +71,7 @@ pub fn div() -> Div {
         children: pool::ChildList::new(),
         on_click: None,
         on_click_handler: None,
+        on_middle_click: None,
         on_drag: None,
         key_bindings: Vec::new(),
         on_scroll: None,
@@ -179,6 +181,13 @@ impl Div {
     pub fn on_click_handler(mut self, handler: ClickHandler) -> Self {
         self.on_click_handler = Some(handler);
         self.cursor = CursorHint::Pointer;
+        self
+    }
+
+    /// Emit `action` on a middle (auxiliary) button click: a press and a
+    /// release on this element. Primary clicks and drags are unaffected.
+    pub fn on_middle_click(mut self, action: impl Into<Action>) -> Self {
+        self.on_middle_click = Some(action.into());
         self
     }
 
@@ -536,6 +545,9 @@ impl Div {
         if let Some(click) = click {
             cx.handlers.on_click(node, click);
         }
+        if let Some(action) = self.on_middle_click.take() {
+            cx.handlers.on_middle_click(node, action);
+        }
         if let Some(start) = self.on_drag.take() {
             cx.handlers.on_drag(node, start);
         }
@@ -741,7 +753,10 @@ impl Element for Div {
         if self.hover_style.is_some() {
             flags |= HitFlags::HOVER;
         }
-        if self.on_click.is_some() || self.on_click_handler.is_some() {
+        if self.on_click.is_some()
+            || self.on_click_handler.is_some()
+            || self.on_middle_click.is_some()
+        {
             flags |= HitFlags::CLICK;
         }
         if self.on_drag.is_some() {

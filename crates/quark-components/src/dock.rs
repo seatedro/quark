@@ -568,6 +568,7 @@ impl<'a> Dock<'a> {
                 .accessibility_label(name.clone())
                 .accessibility_selected(selected)
                 .test_id("dock-tab")
+                .on_middle_click((self.map)(DockEvent::Close { region, index }))
                 .on_drag(move |press: ClickEvent| {
                     Box::new(TabDrag {
                         map: map.clone(),
