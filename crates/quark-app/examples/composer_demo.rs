@@ -20,6 +20,7 @@
 use std::path::Path;
 
 use accesskit::Role;
+use quark::view;
 use quark_app::quark_ui::element::{
     AnyElement, Binding, IntoAnyElement, ScrollActionBuilder, div, text,
 };
@@ -313,78 +314,55 @@ impl ComposerDemo {
 
     fn button(label: &str, msg: Msg, enabled: bool, theme: &Theme) -> AnyElement {
         let colors = &theme.colors;
-        let mut button = div()
-            .accessibility_role(Role::Button)
-            .accessibility_label(label)
-            .accessibility_disabled(!enabled)
-            .px(12.0)
-            .h(28.0)
-            .items_center()
-            .justify_center()
-            .rounded(6.0)
-            .child(text(label).text_sm().color(colors.text_strong));
-        if enabled {
-            button = button
-                .on_click(msg)
-                .bg(colors.accent)
-                .hover_bg(colors.accent_strong);
-        } else {
-            button = button.bg(colors.border_soft);
+        view! {
+            <div accessibility_role={Role::Button} aria-label={label} aria-disabled={!enabled}
+                 class="px-3 h-7 items-center justify-center rounded-[6]"
+                 @when {enabled} {
+                     on:click={msg} bg={colors.accent} hover_bg={colors.accent_strong}
+                 }
+                 @when {!enabled} { bg={colors.border_soft} }>
+                <text class="text-sm" color={colors.text_strong}>{label}</text>
+            </div>
         }
-        button.into_any()
     }
 
     fn approval_panel(theme: &Theme) -> AnyElement {
         let colors = &theme.colors;
-        div()
-            .accessibility_role(Role::Group)
-            .accessibility_label("Approval")
-            .flex_row()
-            .items_center()
-            .gap(8.0)
-            .p(8.0)
-            .rounded(8.0)
-            .bg(colors.background)
-            .child(
-                div()
-                    .flex_1()
-                    .child(text("Run `cargo test`?").text_sm().color(colors.text)),
-            )
-            .child(Self::button("Approve", Msg::Approve(true), true, theme))
-            .child(Self::button("Deny", Msg::Approve(false), true, theme))
-            .into_any()
+        view! {
+            <div accessibility_role={Role::Group} aria-label="Approval"
+                 class="flex-row items-center gap-2 p-2 rounded-[8] bg-[colors.background]">
+                <div class="flex-1">
+                    <text class="text-sm" color={colors.text}>"Run `cargo test`?"</text>
+                </div>
+                {Self::button("Approve", Msg::Approve(true), true, theme)}
+                {Self::button("Deny", Msg::Approve(false), true, theme)}
+            </div>
+        }
     }
 
     fn attachment_row(&self, theme: &Theme) -> AnyElement {
         let colors = &theme.colors;
-        let chips = self.attachments.items.iter().map(|a| {
-            let icon = match a.kind {
-                AttachmentKind::Image => "image",
-                AttachmentKind::File => "file",
-                AttachmentKind::Text(_) => "text",
-            };
-            div()
-                .accessibility_role(Role::Group)
-                .accessibility_label(a.name.clone())
-                .flex_row()
-                .items_center()
-                .gap(6.0)
-                .px(8.0)
-                .h(24.0)
-                .rounded(6.0)
-                .bg(colors.background)
-                .child(text(icon).text_xs().color(colors.text_muted))
-                .child(text(a.name.clone()).text_xs().color(colors.text))
-                .child(
-                    div()
-                        .accessibility_role(Role::Button)
-                        .accessibility_label(format!("Remove {}", a.name))
-                        .on_click(Msg::RemoveAttachment(a.id))
-                        .child(text("x").text_xs().color(colors.text_muted)),
-                )
-                .into_any()
-        });
-        div().flex_row().gap(6.0).children(chips).into_any()
+        view! {
+            <div class="flex-row gap-[6]">
+                for a in &self.attachments.items {
+                    <div accessibility_role={Role::Group} aria-label={a.name.clone()}
+                         class="flex-row items-center gap-[6] px-2 h-6 rounded-[6] bg-[colors.background]">
+                        <text class="text-xs" color={colors.text_muted}>
+                            {match a.kind {
+                                AttachmentKind::Image => "image",
+                                AttachmentKind::File => "file",
+                                AttachmentKind::Text(_) => "text",
+                            }}
+                        </text>
+                        <text class="text-xs" color={colors.text}>{a.name.clone()}</text>
+                        <div accessibility_role={Role::Button} aria-label={format!("Remove {}", a.name)}
+                             on:click={Msg::RemoveAttachment(a.id)}>
+                            <text class="text-xs" color={colors.text_muted}>"x"</text>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
     }
 }
 
@@ -406,22 +384,6 @@ impl UiApp for ComposerDemo {
         self.editor.sync_size(input_w, 72.0);
         self.editor.flush(&mut cx.frame.text().system);
 
-        let transcript = self.sent.iter().map(|sent| {
-            text(sent.text.clone())
-                .text_sm()
-                .color(colors.text)
-                .into_any()
-        });
-        let editor = text_editor_element(
-            INPUT,
-            ScrollActionBuilder::new(|lines| Msg::Scroll(lines).into()),
-        )
-        .editor_snapshot(&self.editor)
-        .placeholder("Ask anything, @ to mention a file")
-        .focused(cx.is_focused(INPUT))
-        .text_color(colors.text)
-        .w(input_w)
-        .h(72.0);
         let (label, msg) = if self.running {
             ("Stop", Msg::Stop)
         } else {
@@ -430,51 +392,47 @@ impl UiApp for ComposerDemo {
         let can_act = !self.approval_pending
             && (self.running || !self.editor.is_empty() || !self.attachments.items.is_empty());
 
-        let mut card = div()
-            .flex_col()
-            .gap(8.0)
-            .p(12.0)
-            .rounded(12.0)
-            .bg(colors.surface);
-        if self.approval_pending {
-            card = card.child(Self::approval_panel(theme));
+        view! {
+            <div w={width} h={height} class="flex-col p-3 gap-3 bg-[colors.background]">
+                <div class="flex-1 flex-col gap-[6]">
+                    for sent in &self.sent {
+                        <text class="text-sm" color={colors.text}>{sent.text.clone()}</text>
+                    }
+                </div>
+                <div class="flex-col gap-2 p-3 rounded-[12] bg-[colors.surface]">
+                    if self.approval_pending {
+                        {Self::approval_panel(theme)}
+                    }
+                    if let Some(list) =
+                        completion_list(&self.completion, theme, |i| Msg::Pick(i).into())
+                    {
+                        {list}
+                    }
+                    if !self.attachments.items.is_empty() {
+                        {self.attachment_row(theme)}
+                    }
+                    <text_editor_element(
+                        INPUT,
+                        ScrollActionBuilder::new(|lines| Msg::Scroll(lines).into()),
+                    )
+                        editor_snapshot={&self.editor}
+                        placeholder="Ask anything, @ to mention a file"
+                        focused={cx.is_focused(INPUT)}
+                        text_color={colors.text}
+                        w={input_w}
+                        h={72.0} />
+                    <div class="flex-row items-center">
+                        <div class="flex-1">
+                            <text class="text-xs" color={colors.text_muted}>
+                                "Enter to send, Shift+Enter for a newline"
+                            </text>
+                        </div>
+                        {Self::button(label, msg, can_act, theme)}
+                        {Self::button("Simulate approval", Msg::RequestApproval, true, theme)}
+                    </div>
+                </div>
+            </div>
         }
-        if let Some(list) = completion_list(&self.completion, theme, |i| Msg::Pick(i).into()) {
-            card = card.child(list);
-        }
-        if !self.attachments.items.is_empty() {
-            card = card.child(self.attachment_row(theme));
-        }
-        card = card.child(editor).child(
-            div()
-                .flex_row()
-                .items_center()
-                .child(
-                    div().flex_1().child(
-                        text("Enter to send, Shift+Enter for a newline")
-                            .text_xs()
-                            .color(colors.text_muted),
-                    ),
-                )
-                .child(Self::button(label, msg, can_act, theme))
-                .child(Self::button(
-                    "Simulate approval",
-                    Msg::RequestApproval,
-                    true,
-                    theme,
-                )),
-        );
-
-        div()
-            .w(width)
-            .h(height)
-            .flex_col()
-            .p(12.0)
-            .gap(12.0)
-            .bg(colors.background)
-            .child(div().flex_1().flex_col().gap(6.0).children(transcript))
-            .child(card)
-            .into_any()
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
