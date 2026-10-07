@@ -11,6 +11,8 @@ accesskit.workspace = true
 quark.workspace = true
 quark-render.workspace = true
 quark-ui.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 quark-text.workspace = true
+proptest.workspace = true
