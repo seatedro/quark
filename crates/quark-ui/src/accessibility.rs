@@ -162,7 +162,8 @@ impl AccessibilityNode {
             node.set_expanded(expanded);
         }
         if let Some((position, size)) = self.position_in_set {
-            node.set_position_in_set(position);
+            // AccessKit stores a 0-based index; its adapters add 1.
+            node.set_position_in_set(position.saturating_sub(1));
             node.set_size_of_set(size);
         }
         if let Some(size) = self.set_size {

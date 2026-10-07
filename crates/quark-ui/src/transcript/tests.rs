@@ -685,7 +685,8 @@ fn rows_publish_their_position_among_all_rows_and_their_block_text() {
     let item = update
         .nodes
         .iter()
-        .find(|(_, n)| n.role() == accesskit::Role::ListItem && n.position_in_set() == Some(2501))
+        // AccessKit's index is 0-based; screen readers announce 2501.
+        .find(|(_, n)| n.role() == accesskit::Role::ListItem && n.position_in_set() == Some(2500))
         .map(|(_, n)| n)
         .expect("row 2500 is published");
     let texts: Vec<&str> = item
