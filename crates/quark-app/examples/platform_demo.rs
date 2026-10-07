@@ -71,7 +71,6 @@ impl App for Demo {
 
     fn frame(&mut self, cx: &mut FrameContext) -> Scene {
         let (width, height) = cx.size();
-        let scale = cx.scale_factor();
         let (background, foreground) = match self.theme {
             Theme::Dark => (
                 Color::rgba(24, 24, 27, 255),
@@ -104,15 +103,13 @@ impl App for Demo {
             color: background,
         });
         let rect = Rect {
-            x: 16.0 * scale,
-            y: 16.0 * scale,
-            width: width - 32.0 * scale,
-            height: height - 32.0 * scale,
+            x: 16.0,
+            y: 16.0,
+            width: width - 32.0,
+            height: height - 32.0,
         };
-        let params =
-            TextParams::new(text, TextStyle::new(14.0 * scale)).wrap_width(Some(rect.width));
-        let app_text = cx.text();
-        if let Ok(layout) = app_text.layouts.layout(&mut app_text.system, &params) {
+        let params = TextParams::new(text, TextStyle::new(14.0)).wrap_width(Some(rect.width));
+        if let Ok(layout) = cx.layout_text(&params) {
             scene.text(TextPrimitive {
                 rect,
                 layout: ShapedText::new(layout),

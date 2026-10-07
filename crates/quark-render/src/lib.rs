@@ -8,7 +8,7 @@ mod text;
 pub use text::{push_text_decorations, text_decoration_rects};
 
 pub use quark_text::TextSystem;
-pub use renderer::{FrameStats, OffscreenTarget, RenderError, Renderer, TextMetrics};
+pub use renderer::{FrameStats, GpuContext, OffscreenTarget, RenderError, Renderer, TextMetrics};
 pub use scene::{
     BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive, EffectType, FontKind,
     FontStyle, FontWeight, ImagePrimitive, Primitive, Rect, RectPrimitive, RichTextPrimitive,

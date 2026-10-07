@@ -4,6 +4,9 @@ use super::*;
 // ElementContext
 // ---------------------------------------------------------------------------
 
+/// Everything elements see while laying out and painting. Element geometry
+/// is in logical points; `scale_factor` is the window's physical pixels per
+/// point, used only to shape text at physical size.
 pub struct ElementContext<'a> {
     pub theme: &'a Theme,
     pub scale_factor: f32,
@@ -19,6 +22,8 @@ pub struct ElementContext<'a> {
     pub focus: Option<FocusId>,
     pub signal_store: &'a SignalStore,
     pub clock_ms: u64,
+    /// Earliest clock time (ms) an element asked to be painted again at.
+    next_frame_ms: Option<u64>,
     pub debug_wireframe: bool,
     pub text_input_hit_areas: Vec<TextInputHitArea>,
     pub selectable_text_runs: Vec<SelectableTextRegion>,
@@ -57,6 +62,7 @@ impl<'a> ElementContext<'a> {
             focus: None,
             signal_store,
             clock_ms: 0,
+            next_frame_ms: None,
             debug_wireframe: false,
             text_input_hit_areas: Vec::new(),
             selectable_text_runs: Vec::new(),
@@ -78,8 +84,17 @@ impl<'a> ElementContext<'a> {
     /// Shaped layout from the frame's cache, shared with paint and
     /// hit-testing. `None` when quark-text rejects the params (e.g. a zero
     /// font size), which callers treat as empty text.
+    ///
+    /// The layout is shaped at the context's scale factor whatever
+    /// `params.scale_factor` says: its metrics stay logical while its glyphs
+    /// are physical, and a scale change misses the cache instead of reusing
+    /// a layout shaped for the old scale.
     pub fn layout_text(&mut self, params: &TextParams) -> Option<Arc<TextLayout>> {
-        self.layouts.layout(self.text, params).ok()
+        if params.scale_factor == self.scale_factor {
+            return self.layouts.layout(self.text, params).ok();
+        }
+        let params = params.clone().scale_factor(self.scale_factor);
+        self.layouts.layout(self.text, &params).ok()
     }
 
     /// Advance width of single-line text, rounded up to whole pixels.
@@ -133,6 +148,18 @@ impl<'a> ElementContext<'a> {
     pub fn with_clock(mut self, clock_ms: u64) -> Self {
         self.clock_ms = clock_ms;
         self
+    }
+
+    /// Ask for another paint once the clock reaches `at_ms` (a caret blink,
+    /// a toast expiring). The earliest request in a frame wins; the host
+    /// reads it with [`Self::next_frame_ms`] and schedules that window only.
+    pub fn request_frame_at_ms(&mut self, at_ms: u64) {
+        self.next_frame_ms = Some(self.next_frame_ms.map_or(at_ms, |next| next.min(at_ms)));
+    }
+
+    /// The earliest repaint an element asked for this frame, if any.
+    pub fn next_frame_ms(&self) -> Option<u64> {
+        self.next_frame_ms
     }
 
     pub fn is_focused(&self, target: FocusId) -> bool {
