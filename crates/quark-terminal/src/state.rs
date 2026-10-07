@@ -140,8 +140,6 @@ pub(crate) struct Frame {
     pub grid: Rc<Grid>,
     /// Height of the scrollable content: every row of the scrollback.
     pub content_h: f32,
-    /// Scroll offset the rows were snapshotted at.
-    pub scroll_y: f32,
     pub scroll: ScrollHandle,
     pub title: Rc<str>,
     /// Visible text for screen readers, and the cursor's byte in it.
@@ -196,6 +194,8 @@ pub struct TerminalState {
     synced_row: u64,
     /// An offset this state asked the handle for, applied by the next frame.
     pending_scroll: bool,
+    /// Bumped each frame the handle is moving, so the view rebuilds.
+    nonce: u64,
     /// The rows block's bounds in the window as of the last frame.
     bounds: Rc<Cell<Rect>>,
     drag: Option<SelectDrag>,
@@ -203,6 +203,8 @@ pub struct TerminalState {
     modifiers: ModifiersState,
     pointer: Option<(f32, f32)>,
     buttons_down: u8,
+    /// Wheel motion not yet sent as whole lines (touchpads send fractions).
+    wheel: f32,
     /// The key press just encoded typed text: skip the text event after it.
     swallow_text: bool,
     title: Rc<str>,
@@ -244,12 +246,14 @@ impl TerminalState {
             scroll: ScrollHandle::new(),
             synced_row: 0,
             pending_scroll: false,
+            nonce: 0,
             bounds: Rc::default(),
             drag: None,
             last_click: None,
             modifiers: ModifiersState::empty(),
             pointer: None,
             buttons_down: 0,
+            wheel: 0.0,
             swallow_text: false,
             title: Rc::from(""),
             signals: Vec::new(),
@@ -549,10 +553,17 @@ impl TerminalState {
                 let Some((x, y)) = self.pointer else {
                     return false;
                 };
-                if !self.contains(x, y) || lines == 0.0 {
+                let to_program = self.wants_pointer()
+                    || (self.vt.alternate_screen() && self.vt.mode(Mode::ALT_SCROLL));
+                if !self.contains(x, y) || !to_program {
+                    self.wheel = 0.0;
                     return false;
                 }
-                let steps = lines.abs().round().max(1.0) as usize;
+                self.wheel += lines;
+                let whole = self.wheel.trunc();
+                self.wheel -= whole;
+                let steps = whole.abs() as usize;
+                let lines = whole;
                 if self.wants_pointer() {
                     let button = if lines > 0.0 {
                         MouseButton::WheelUp
@@ -564,28 +575,25 @@ impl TerminalState {
                     }
                     return true;
                 }
-                if self.vt.alternate_screen() && self.vt.mode(Mode::ALT_SCROLL) {
-                    // Full-screen programs without mouse reporting get
-                    // arrow keys for the wheel (alternate scroll, 1007).
-                    let named = if lines > 0.0 {
-                        NamedKey::ArrowUp
-                    } else {
-                        NamedKey::ArrowDown
-                    };
-                    let key = input::key_from_named(named).expect("arrow key");
-                    for _ in 0..steps {
-                        self.vt.key(&KeyInput {
-                            key,
-                            mods: Mods::default(),
-                            text: None,
-                            unshifted: None,
-                            action: KeyAction::Press,
-                        });
-                    }
-                    self.flush();
-                    return true;
+                // Full-screen programs without mouse reporting get arrow
+                // keys for the wheel (alternate scroll, 1007).
+                let named = if lines > 0.0 {
+                    NamedKey::ArrowUp
+                } else {
+                    NamedKey::ArrowDown
+                };
+                let key = input::key_from_named(named).expect("arrow key");
+                for _ in 0..steps {
+                    self.vt.key(&KeyInput {
+                        key,
+                        mods: Mods::default(),
+                        text: None,
+                        unshifted: None,
+                        action: KeyAction::Press,
+                    });
                 }
-                false
+                self.flush();
+                true
             }
         }
     }
@@ -827,7 +835,6 @@ impl TerminalState {
             caret,
             grid,
             content_h: sb.total as f32 * m.cell_h + leftover,
-            scroll_y: sb.offset as f32 * m.cell_h,
             scroll: self.scroll.clone(),
             title: self.title.clone(),
             generation: self.generation,
@@ -838,6 +845,9 @@ impl TerminalState {
     /// a handle the user moved scrolls the terminal, and a terminal that
     /// moved (output while following the bottom) moves the handle.
     fn sync_scroll(&mut self, m: Metrics) {
+        if !self.scroll.is_settled() {
+            self.nonce += 1;
+        }
         let handle_row = (self.scroll.offset().1 / m.cell_h).round().max(0.0) as u64;
         if std::mem::take(&mut self.pending_scroll) {
             self.synced_row = handle_row;
@@ -853,6 +863,21 @@ impl TerminalState {
             self.pending_scroll = true;
             self.dirty = true;
         }
+    }
+
+    /// Where the rows block sits in the scroll content: the handle's offset,
+    /// or the one requested this frame, so rows stay pinned to the top of
+    /// the viewport.
+    pub(crate) fn scroll_top(&self) -> f32 {
+        if self.pending_scroll {
+            self.synced_row as f32 * self.metrics().cell_h
+        } else {
+            self.scroll.offset().1
+        }
+    }
+
+    pub(crate) fn nonce(&self) -> u64 {
+        self.nonce
     }
 
     pub(crate) fn frame(&self) -> Option<Rc<Frame>> {

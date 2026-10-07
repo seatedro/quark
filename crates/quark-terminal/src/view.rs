@@ -56,18 +56,18 @@ pub fn terminal_view(
     };
     let (width, height) = frame.viewport;
     let palette = palette(theme);
-    let settled = frame.scroll.is_settled();
+    let top = state.scroll_top();
     let hash = inputs_hash(&(
         frame.generation,
-        frame.scroll.offset().1.to_bits(),
-        settled,
+        top.to_bits(),
+        state.nonce(),
         env.accessible,
         palette,
         on_event as usize,
     ));
     let grid_frame = frame.clone();
     let grid = cached(frame.id, hash, move || {
-        build(&grid_frame, palette, env, on_event)
+        build(&grid_frame, top, palette, env, on_event)
     })
     .w(width)
     .h(height);
@@ -106,6 +106,7 @@ pub fn terminal_view(
 
 fn build(
     frame: &Rc<Frame>,
+    top: f32,
     palette: Palette,
     env: TerminalEnv,
     on_event: fn(TerminalEvent) -> Action,
@@ -120,7 +121,7 @@ fn build(
         .left(m.pad)
         // Pinned to the top of the viewport: the terminal, not the scroll
         // container, decides which rows show.
-        .top(frame.scroll_y + m.pad)
+        .top(top + m.pad)
         .w(grid_w)
         .h(grid_h)
         .flex_col()
