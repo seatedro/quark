@@ -11,6 +11,14 @@ pub struct WindowHandle {
     generation: u32,
 }
 
+impl WindowHandle {
+    /// A stable id for per-window bookkeeping (e.g. layout cache scopes);
+    /// unique among windows that ever existed in this table.
+    pub fn scope_id(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+}
+
 #[derive(Debug)]
 struct Slot<T> {
     generation: u32,

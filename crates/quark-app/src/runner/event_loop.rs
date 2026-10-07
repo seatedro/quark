@@ -202,6 +202,7 @@ impl<A: App> Runner<A> {
             let Some(entry) = self.windows.remove(handle) else {
                 continue;
             };
+            self.text.layouts.remove_scope(handle.scope_id());
             if let Some(state) = entry.open() {
                 state.persist();
             }
@@ -254,7 +255,9 @@ impl<A: App> Runner<A> {
         };
         let renderer = &mut state.renderer;
         let timing = state.frame_clock.tick(Instant::now(), self.launch_at);
-        self.text.layouts.begin_frame();
+        // Idle time counts in this window's own redraws, so a busy window
+        // doesn't evict layouts an idle one still shows.
+        self.text.layouts.begin_frame_for(handle.scope_id());
         let scale = state.scale_factor as f32;
         let text_metrics = logical_metrics(renderer.text_metrics(&mut self.text.system), scale);
         let mut cx = FrameContext {
