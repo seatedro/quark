@@ -57,6 +57,10 @@ impl Fenwick {
         self.tree.len() - 1
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Appends a value in O(log n): the new node covers
     /// `(i - lowbit(i), i]`, whose earlier part is a difference of prefixes.
     pub fn push(&mut self, value: i64) {
