@@ -1,6 +1,6 @@
 use crate::{
     FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, Rect, StyleState, TabStop, TestId,
-    UiEventBinding, UiEventPhase, UiEventRoute, UiKey, UiNodeId,
+    UiEventBinding, UiEventPhase, UiKey, UiNodeId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -235,16 +235,13 @@ impl SemanticFrame {
         self.nodes.clear();
     }
 
+    /// Indices from the root down to `target`. Built from
+    /// [`Self::ancestors_inclusive`], so a malformed parent link ends the
+    /// path instead of looping.
     pub fn node_path(&self, target: usize) -> Option<Vec<usize>> {
-        if target >= self.nodes.len() {
+        let mut path: Vec<usize> = self.ancestors_inclusive(target).collect();
+        if path.is_empty() {
             return None;
-        }
-        let mut path = Vec::new();
-        let mut current = Some(target);
-        while let Some(index) = current {
-            let node = self.nodes.get(index)?;
-            path.push(index);
-            current = node.parent;
         }
         path.reverse();
         Some(path)
@@ -301,17 +298,6 @@ impl SemanticFrame {
     /// Index of the node that owns focus target `focus`.
     pub fn node_for_focus(&self, focus: FocusId) -> Option<usize> {
         (0..self.nodes.len()).rfind(|i| self.focus_id(*i) == Some(focus))
-    }
-
-    pub fn event_route(&self, target: usize) -> Option<UiEventRoute> {
-        let path = self.node_path(target)?;
-        let target_id = self.stable_node_id(*path.last()?)?;
-        let ancestors = path
-            .iter()
-            .take(path.len().saturating_sub(1))
-            .filter_map(|index| self.stable_node_id(*index))
-            .collect::<Vec<_>>();
-        Some(UiEventRoute::new(target_id, ancestors))
     }
 
     pub fn focus_tree(&self) -> FocusTree {
@@ -381,89 +367,69 @@ pub fn dump_semantic(frame: &SemanticFrame) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::{UiEventKind, UiEventPhase};
-
     use super::*;
 
-    #[test]
-    fn semantic_frame_retains_tree_metadata() {
-        let mut frame = SemanticFrame::new(400.0, 300.0);
-        let parent = frame.push(
-            SemanticNode::new(Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 400.0,
-                height: 300.0,
-            })
-            .id("dialog")
-            .role(SemanticRole::Dialog)
-            .label("Settings"),
-        );
-        let mut child = SemanticNode::new(Rect {
-            x: 20.0,
-            y: 20.0,
-            width: 100.0,
-            height: 32.0,
+    fn node(id: &str, parent: Option<usize>) -> SemanticNode {
+        let mut node = SemanticNode::new(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
         })
-        .id("save")
-        .key("primary")
-        .test_id("save-button")
-        .role(SemanticRole::Button)
-        .label("Save");
-        child.parent = Some(parent);
-        child.actions = child.actions.clickable().focusable();
-        child.event_bindings.push(UiEventBinding::new(
-            UiEventKind::Click,
-            UiEventPhase::Target,
-        ));
-        frame.push(child);
-
-        assert_eq!(frame.nodes().len(), 2);
-        assert_eq!(frame.nodes()[1].parent, Some(0));
-        assert!(frame.nodes()[1].actions.click);
-        assert!(dump_semantic(&frame).contains("save-button"));
+        .id(id);
+        node.parent = parent;
+        node
     }
 
     #[test]
-    fn semantic_frame_derives_event_route_and_focus_tree() {
+    fn route_indices_capture_target_bubble() {
         let mut frame = SemanticFrame::new(400.0, 300.0);
-        let dialog = frame.push(
-            SemanticNode::new(Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 400.0,
-                height: 300.0,
-            })
-            .id("dialog")
-            .role(SemanticRole::Dialog),
+        let root = frame.push(node("root", None));
+        let dialog = frame.push(node("dialog", Some(root)));
+        let button = frame.push(node("save", Some(dialog)));
+        use UiEventPhase::*;
+        assert_eq!(
+            frame.route_indices(button),
+            Some(vec![
+                (root, Capture),
+                (dialog, Capture),
+                (button, Target),
+                (dialog, Bubble),
+                (root, Bubble),
+            ])
         );
-        let mut button = SemanticNode::new(Rect {
-            x: 20.0,
-            y: 20.0,
-            width: 100.0,
-            height: 32.0,
-        })
-        .id("save")
-        .role(SemanticRole::Button);
-        button.parent = Some(dialog);
+    }
+
+    /// Regression: a parent link pointing at itself or forward used to spin
+    /// `node_path` forever.
+    #[test]
+    fn node_path_ends_at_a_malformed_parent() {
+        let mut frame = SemanticFrame::new(400.0, 300.0);
+        frame.push(node("a", Some(1)));
+        frame.push(node("b", Some(0)));
+        frame.push(node("c", Some(2)));
+        assert_eq!(frame.node_path(0), Some(vec![0]));
+        assert_eq!(frame.node_path(1), Some(vec![0, 1]));
+        assert_eq!(frame.node_path(2), Some(vec![2]));
+        assert_eq!(frame.node_path(3), None);
+    }
+
+    #[test]
+    fn focus_tree_scopes_nodes_under_their_ancestor_scope() {
+        let mut frame = SemanticFrame::new(400.0, 300.0);
+        let mut dialog = node("dialog", None);
+        dialog.focus_scope = Some(FocusScopeId::from("dialog"));
+        let dialog = frame.push(dialog);
+        let mut button = node("save", Some(dialog));
         button.actions = SemanticActions::default().clickable().focusable();
-        button.focus_scope = Some(FocusScopeId::from("dialog"));
-        button.tab_stop = Some(TabStop::new(0));
-        let button_index = frame.push(button);
+        frame.push(button);
+        let mut outside = node("outside", None);
+        outside.actions = SemanticActions::default().focusable();
+        frame.push(outside);
 
-        let route = frame.event_route(button_index).expect("event route");
-        let steps: Vec<_> = route
-            .ordered_steps()
-            .into_iter()
-            .map(|step| (step.node.to_string(), step.phase))
-            .collect();
-        assert_eq!(steps[0].0, "dialog");
-        assert_eq!(steps[1].0, "save");
-
-        let scope = FocusScopeId::from("dialog");
-        let tree = frame.focus_tree();
-        let order: Vec<_> = tree
-            .tab_order(Some(&scope))
+        let order: Vec<_> = frame
+            .focus_tree()
+            .tab_order(Some(&FocusScopeId::from("dialog")))
             .into_iter()
             .map(|node| node.id)
             .collect();

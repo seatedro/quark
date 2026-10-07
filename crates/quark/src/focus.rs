@@ -33,69 +33,15 @@ impl From<UiNodeId> for FocusId {
     }
 }
 
-/// Stable identity for a focus scope. Scopes can own tab order and modal traps.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FocusScopeId(String);
+crate::identity::string_id!(
+    /// Stable identity for a focus scope. Scopes can own tab order and modal traps.
+    FocusScopeId
+);
 
-impl FocusScopeId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for FocusScopeId {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for FocusScopeId {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-impl std::fmt::Display for FocusScopeId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Named keyboard action context for routing shortcuts by UI surface.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyContext(String);
-
-impl KeyContext {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for KeyContext {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for KeyContext {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-impl std::fmt::Display for KeyContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+crate::identity::string_id!(
+    /// Named keyboard action context for routing shortcuts by UI surface.
+    KeyContext
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TabStop {

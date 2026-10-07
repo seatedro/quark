@@ -18,3 +18,4 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 # Dev-only cycle (quark depends on this crate) is allowed by cargo and gives
 # `{@sig}` integration coverage against the real `SignalStore`.
 quark = { path = "../quark" }
+trybuild = "1"

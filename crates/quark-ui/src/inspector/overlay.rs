@@ -445,7 +445,9 @@ fn outline_records(scene: &mut Scene, records: &[ElementRecord]) {
 /// whole declared region outlined.
 fn clipped_hit_regions(scene: &mut Scene, hits: &HitTable) {
     for id in hits.ids() {
-        let (bounds, clip) = (hits.bounds(id), hits.clip(id));
+        let (Some(bounds), Some(clip)) = (hits.bounds(id), hits.clip(id)) else {
+            continue;
+        };
         if contains_rect(clip, bounds) {
             continue;
         }

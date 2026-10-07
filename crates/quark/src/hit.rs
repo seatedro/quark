@@ -1,6 +1,8 @@
 //! Pointer hit testing: one table per frame, in paint order, that answers
 //! "what is under the pointer" for hover, click, wheel, and drag alike.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::geometry::Rect;
 
 /// Requested cursor shape for a hit region.
@@ -53,15 +55,18 @@ pub struct TooltipRegion {
     pub text: String,
 }
 
-/// Index of an entry in a [`HitTable`].
+/// An entry in one [`HitTable`]. Each table gets a fresh frame stamp, so
+/// an id kept past its frame resolves to nothing instead of aliasing the
+/// entry that reuses its index in a later table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HitId(u32);
-
-impl HitId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
+pub struct HitId {
+    frame: u32,
+    index: u32,
 }
+
+/// Source of [`HitTable`] frame stamps. Starts at 1 so a zeroed id never
+/// matches a table.
+static NEXT_FRAME: AtomicU32 = AtomicU32::new(1);
 
 /// What a hit entry responds to.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -136,8 +141,10 @@ pub enum HitTableIntegrityError {
 /// Every pointer-interactive rectangle of one frame, one row per entry,
 /// stored column-wise. Rows are in paint order; `push` order is the
 /// tiebreak between entries of equal z.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct HitTable {
+    /// Stamp carried by every [`HitId`] this table issues.
+    frame: u32,
     bounds: Vec<Rect>,
     /// Intersection of every ancestor clip, in the same space as `bounds`.
     clip: Vec<Rect>,
@@ -149,7 +156,35 @@ pub struct HitTable {
     identity: Vec<Option<HitIdentity>>,
 }
 
+impl Default for HitTable {
+    fn default() -> Self {
+        Self {
+            frame: NEXT_FRAME.fetch_add(1, Ordering::Relaxed),
+            bounds: Vec::new(),
+            clip: Vec::new(),
+            z: Vec::new(),
+            node: Vec::new(),
+            flags: Vec::new(),
+            cursor: Vec::new(),
+            identity: Vec::new(),
+        }
+    }
+}
+
 impl HitTable {
+    /// Row of `id` in this table, or `None` for an id another table issued.
+    pub fn row(&self, id: HitId) -> Option<usize> {
+        let index = id.index as usize;
+        (id.frame == self.frame && index < self.bounds.len()).then_some(index)
+    }
+
+    fn id(&self, index: usize) -> HitId {
+        HitId {
+            frame: self.frame,
+            index: index as u32,
+        }
+    }
+
     pub fn push(
         &mut self,
         bounds: Rect,
@@ -158,7 +193,7 @@ impl HitTable {
         flags: HitFlags,
         cursor: CursorHint,
     ) -> HitId {
-        let id = HitId(self.bounds.len() as u32);
+        let id = self.id(self.bounds.len());
         self.bounds.push(bounds);
         self.clip.push(clip);
         self.z.push(z);
@@ -171,14 +206,14 @@ impl HitTable {
     }
 
     pub fn set_node(&mut self, id: HitId, node: usize) {
-        if let Some(slot) = self.node.get_mut(id.index()) {
-            *slot = u32::try_from(node).unwrap_or(NO_NODE);
+        if let Some(row) = self.row(id) {
+            self.node[row] = u32::try_from(node).unwrap_or(NO_NODE);
         }
     }
 
     pub fn set_identity(&mut self, id: HitId, identity: Option<HitIdentity>) {
-        if let Some(slot) = self.identity.get_mut(id.index()) {
-            *slot = identity;
+        if let Some(row) = self.row(id) {
+            self.identity[row] = identity;
         }
     }
 
@@ -190,39 +225,39 @@ impl HitTable {
         self.bounds.is_empty()
     }
 
-    pub fn bounds(&self, id: HitId) -> Rect {
-        self.bounds[id.index()]
+    pub fn bounds(&self, id: HitId) -> Option<Rect> {
+        Some(self.bounds[self.row(id)?])
     }
 
     /// Every entry, in paint order.
-    pub fn ids(&self) -> impl Iterator<Item = HitId> + use<> {
-        (0..self.bounds.len() as u32).map(HitId)
+    pub fn ids(&self) -> impl Iterator<Item = HitId> + '_ {
+        (0..self.bounds.len()).map(|i| self.id(i))
     }
 
     /// Intersection of the entry's ancestor clips.
-    pub fn clip(&self, id: HitId) -> Rect {
-        self.clip[id.index()]
+    pub fn clip(&self, id: HitId) -> Option<Rect> {
+        Some(self.clip[self.row(id)?])
     }
 
-    pub fn z(&self, id: HitId) -> i32 {
-        self.z[id.index()]
+    pub fn z(&self, id: HitId) -> Option<i32> {
+        Some(self.z[self.row(id)?])
     }
 
     pub fn node(&self, id: HitId) -> Option<usize> {
-        let node = self.node[id.index()];
+        let node = self.node[self.row(id)?];
         (node != NO_NODE).then_some(node as usize)
     }
 
-    pub fn flags(&self, id: HitId) -> HitFlags {
-        self.flags[id.index()]
+    pub fn flags(&self, id: HitId) -> Option<HitFlags> {
+        Some(self.flags[self.row(id)?])
     }
 
-    pub fn cursor(&self, id: HitId) -> CursorHint {
-        self.cursor[id.index()]
+    pub fn cursor(&self, id: HitId) -> Option<CursorHint> {
+        Some(self.cursor[self.row(id)?])
     }
 
     pub fn identity(&self, id: HitId) -> Option<HitIdentity> {
-        self.identity[id.index()]
+        self.identity[self.row(id)?]
     }
 
     /// Entries under `(x, y)`, topmost first: higher z wins, then later
@@ -230,18 +265,17 @@ impl HitTable {
     /// contain it. The list ends at the first `BLOCKS_MOUSE` entry
     /// (inclusive), so nothing beneath a blocker is hovered or clicked.
     pub fn stack_at(&self, x: f32, y: f32) -> Vec<HitId> {
-        let mut stack: Vec<HitId> = (0..self.bounds.len())
+        let mut rows: Vec<usize> = (0..self.bounds.len())
             .filter(|&i| self.bounds[i].contains(x, y) && self.clip[i].contains(x, y))
-            .map(|i| HitId(i as u32))
             .collect();
-        stack.sort_unstable_by(|a, b| (self.z[b.index()], b.0).cmp(&(self.z[a.index()], a.0)));
-        if let Some(blocker) = stack
+        rows.sort_unstable_by(|&a, &b| (self.z[b], b).cmp(&(self.z[a], a)));
+        if let Some(blocker) = rows
             .iter()
-            .position(|id| self.flags(*id).contains(HitFlags::BLOCKS_MOUSE))
+            .position(|&i| self.flags[i].contains(HitFlags::BLOCKS_MOUSE))
         {
-            stack.truncate(blocker + 1);
+            rows.truncate(blocker + 1);
         }
-        stack
+        rows.into_iter().map(|i| self.id(i)).collect()
     }
 
     pub fn verify_integrity(&self) -> Result<(), HitTableIntegrityError> {
@@ -264,5 +298,113 @@ impl HitTable {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    /// `(bounds, clip, z, blocks_mouse)`.
+    type Row = (Rect, Rect, i32, bool);
+
+    /// Push `(bounds, clip, z, blocks_mouse)` rows and return the rows of
+    /// `stack_at(5, 5)`, topmost first.
+    fn stack(rows: &[Row]) -> Vec<usize> {
+        let mut table = HitTable::default();
+        for &(bounds, clip, z, blocks) in rows {
+            let flags = if blocks {
+                HitFlags::BLOCKS_MOUSE
+            } else {
+                HitFlags::HOVER
+            };
+            table.push(bounds, clip, z, flags, CursorHint::Default);
+        }
+        table
+            .stack_at(5.0, 5.0)
+            .into_iter()
+            .map(|id| table.row(id).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn stack_at_orders_by_z_then_paint_and_honors_clip_and_blockers() {
+        let on = rect(0.0, 0.0, 10.0, 10.0);
+        let off = rect(20.0, 20.0, 10.0, 10.0);
+        let cases: &[(&str, &[Row], &[usize])] = &[
+            (
+                "later paint wins at equal z",
+                &[(on, UNCLIPPED, 0, false), (on, UNCLIPPED, 0, false)],
+                &[1, 0],
+            ),
+            (
+                "higher z beats later paint",
+                &[(on, UNCLIPPED, 1, false), (on, UNCLIPPED, 0, false)],
+                &[0, 1],
+            ),
+            (
+                "bounds miss",
+                &[(off, UNCLIPPED, 0, false), (on, UNCLIPPED, 0, false)],
+                &[1],
+            ),
+            (
+                "clip excludes the point",
+                &[(on, off, 0, false), (on, UNCLIPPED, 0, false)],
+                &[1],
+            ),
+            (
+                "empty clip excludes its origin",
+                &[(on, EMPTY_CLIP, 0, false)],
+                &[],
+            ),
+            (
+                "blocker hides what is beneath",
+                &[
+                    (on, UNCLIPPED, 0, false),
+                    (on, UNCLIPPED, 0, true),
+                    (on, UNCLIPPED, 1, false),
+                ],
+                &[2, 1],
+            ),
+            (
+                "clipped blocker blocks nothing",
+                &[(on, UNCLIPPED, 0, false), (on, off, 1, true)],
+                &[0],
+            ),
+        ];
+        for (name, rows, expected) in cases {
+            assert_eq!(stack(rows), *expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn id_from_another_table_resolves_to_nothing() {
+        let mut old = HitTable::default();
+        let stale = old.push(
+            rect(0.0, 0.0, 1.0, 1.0),
+            UNCLIPPED,
+            0,
+            HitFlags::HOVER,
+            CursorHint::Pointer,
+        );
+        let mut new = HitTable::default();
+        new.push(
+            rect(0.0, 0.0, 1.0, 1.0),
+            UNCLIPPED,
+            0,
+            HitFlags::HOVER,
+            CursorHint::Text,
+        );
+        assert_eq!(new.cursor(stale), None);
+        assert_eq!(old.cursor(stale), Some(CursorHint::Pointer));
     }
 }

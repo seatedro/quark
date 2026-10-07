@@ -14,21 +14,16 @@
 
 use std::collections::HashMap;
 
-use crate::identity::UiKey;
+use crate::identity::{UiKey, stable_hash};
 
 /// Stable animation identity. Usually derived from a [`UiKey`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnimKey(pub u64);
 
 impl AnimKey {
-    /// FNV-1a over the key's bytes; stable across runs and platforms.
-    pub fn from_str_key(key: &str) -> Self {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in key.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        Self(hash)
+    /// [`stable_hash`] of `key`; stable across runs and platforms.
+    pub const fn from_str_key(key: &str) -> Self {
+        Self(stable_hash(key))
     }
 }
 

@@ -1,0 +1,5 @@
+error: class `w-1/2` does not name a builder method
+ --> tests/ui/class_not_an_ident.rs:4:32
+  |
+4 |     let _ = view! { <div class="flex-row w-1/2" /> };
+  |                                ^^^^^^^^^^^^^^^^

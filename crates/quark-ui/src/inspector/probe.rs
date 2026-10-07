@@ -213,7 +213,10 @@ impl InspectFrame {
 
     /// The topmost element under `(x, y)`.
     pub fn pick(&self, x: f32, y: f32) -> Option<usize> {
-        self.hits.stack_at(x, y).first().map(|id| id.index())
+        self.hits
+            .stack_at(x, y)
+            .first()
+            .and_then(|id| self.hits.row(*id))
     }
 
     /// The element that pushed semantic node `node`.
