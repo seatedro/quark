@@ -12,6 +12,7 @@ use crate::action::Action;
 use crate::element::{ElementContext, InputRouter, IntoAnyElement, div, render_element};
 use crate::style::Styled;
 use crate::theme::Theme;
+use crate::virtual_list::ScrollAlign;
 
 // ---------------------------------------------------------------------------
 // A monospace grid measurer: every char is 10px wide, every line 20px tall,
@@ -40,6 +41,20 @@ impl BlockGeometry for GridGeometry {
         let (start, end) = self.lines[line];
         let col = (x / CHAR_W).round().max(0.0) as usize;
         (start + col).min(end)
+    }
+
+    fn range_rects(&self, range: std::ops::Range<usize>, out: &mut Vec<Rect>) {
+        for (line, &(start, end)) in self.lines.iter().enumerate() {
+            let (a, b) = (range.start.max(start), range.end.min(end));
+            if a < b {
+                out.push(Rect {
+                    x: (a - start) as f32 * CHAR_W,
+                    y: line as f32 * LINE_H,
+                    width: (b - a) as f32 * CHAR_W,
+                    height: LINE_H,
+                });
+            }
+        }
     }
 }
 
@@ -1315,4 +1330,275 @@ fn strikethrough_markdown_paints_a_line_through_its_run() {
         (line.y - mid_y).abs() < 7.0,
         "{line:?} not across the text at {mid_y}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Cached rows
+// ---------------------------------------------------------------------------
+
+/// Paints transcripts frame after frame through one element cache, as a
+/// window does, and dumps what a frame published.
+struct CachedPainter {
+    text: TextSystem,
+    layouts: LayoutCache,
+    cache: crate::element::ElementCache,
+}
+
+impl CachedPainter {
+    fn new() -> Self {
+        Self {
+            text: TextSystem::vendored_only(&Default::default()),
+            layouts: LayoutCache::default(),
+            cache: crate::element::ElementCache::new(),
+        }
+    }
+
+    /// The text regions (`key "text" @x,y`) and the accessibility states
+    /// of one frame, painted with the cache or without it.
+    fn frame(
+        &mut self,
+        transcript: &mut Transcript,
+        messages: &HashMap<RowKey, TranscriptMessage>,
+        size: (f32, f32),
+        cached: bool,
+    ) -> String {
+        let font_size = transcript.style().font_size;
+        transcript.prepare(
+            size.0,
+            size.1,
+            0,
+            messages,
+            &mut TextMeasurer::new(&mut self.text, &mut self.layouts, font_size, 1.0),
+        );
+        let theme = Theme::default_dark();
+        let element = transcript.element(messages, &theme, |ev| Ev(ev).into());
+        let signals = SignalStore::new();
+        let mut cx = ElementContext::new(
+            &theme,
+            1.0,
+            &mut self.text,
+            &mut self.layouts,
+            None,
+            &signals,
+        );
+        if cached {
+            cx = cx.with_element_cache(&mut self.cache);
+        }
+        cx.accessibility = AccessibilityFrame::new(size.0, size.1);
+        cx.semantic = SemanticFrame::new(size.0, size.1);
+        let mut scene = Scene::default();
+        render_element(&mut element.into_any(), &mut scene, &mut cx, size.0, size.1);
+        let mut out = String::new();
+        // Filled rects: row backgrounds, selection, and find highlights.
+        for p in &scene.primitives {
+            let (r, c) = match p {
+                quark_render::Primitive::Rect(p) => (p.rect, p.color),
+                quark_render::Primitive::RoundedRect(p) => (p.rect, p.color),
+                _ => continue,
+            };
+            out.push_str(&format!(
+                "rect {:.0},{:.0} {:.0}x{:.0} {:?}\n",
+                r.x, r.y, r.width, r.height, c
+            ));
+        }
+        for r in &cx.selectable_text_runs {
+            out.push_str(&format!(
+                "{} {:?} @{:.0},{:.0}\n",
+                r.source_key, r.text, r.bounds.x, r.bounds.y
+            ));
+        }
+        // Author ids of some text nodes embed the position they were first
+        // painted at, which a replayed node keeps; compare the rest.
+        let update = cx.accessibility.tree_update("Test", None);
+        for line in crate::accessibility::dump_accessibility_states(&update).lines() {
+            out.push_str(line.split_once(" | ").map_or(line, |(_, rest)| rest));
+            out.push('\n');
+        }
+        out
+    }
+}
+
+// Catches a row replayed from the cache after something it shows changed:
+// each edit is followed by a cached frame that must match an uncached one.
+#[test]
+fn cached_rows_paint_exactly_what_an_uncached_frame_paints_after_each_edit() {
+    let mut messages = real_document(30);
+    let mut transcript = real_transcript(&messages);
+    transcript.set_scroll_offset(0.0);
+    let mut painter = CachedPainter::new();
+    let mut size = (400.0, 500.0);
+    painter.frame(&mut transcript, &messages, size, true);
+
+    type Edit = fn(&mut Transcript, &mut HashMap<RowKey, TranscriptMessage>, &mut (f32, f32));
+    let edits: &[(&str, Edit)] = &[
+        ("nothing", |_, _, _| {}),
+        ("stream into row 1", |t, m, _| {
+            let message = m.get_mut(&RowKey(1)).unwrap();
+            message.blocks[0] = TranscriptBlock::plain(BlockKey(10), "Streamed text for row one.");
+            t.update(message).unwrap();
+        }),
+        ("select inside row 2", |t, _, _| {
+            t.set_selection(Some(Selection::new(
+                SelectionPoint::new(BlockKey(20), 3),
+                SelectionPoint::new(BlockKey(20), 12),
+            )));
+        }),
+        ("scroll", |t, _, _| {
+            t.scroll_by(70.0);
+        }),
+        ("find", |t, m, _| t.set_find_query("lines", m)),
+        ("narrow", |_, _, size| size.0 = 300.0),
+        ("append a row", |t, m, _| {
+            let message = message_with(30, &["A new message at the end."]);
+            t.push(&message).unwrap();
+            m.insert(message.key, message);
+        }),
+    ];
+    for (name, edit) in edits {
+        edit(&mut transcript, &mut messages, &mut size);
+        let cached = painter.frame(&mut transcript, &messages, size, true);
+        let mut fresh = transcript.without_element_memory();
+        let uncached = painter.frame(&mut fresh, &messages, size, false);
+        assert_eq!(cached, uncached, "after {name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Find
+// ---------------------------------------------------------------------------
+
+impl Doc {
+    /// `"<block>:<start>..<end>"` per match, the current one starred.
+    fn find_dump(&self) -> String {
+        let Some(find) = self.transcript.find() else {
+            return "closed".to_owned();
+        };
+        find.matches()
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let star = if find.current_index() == Some(i) {
+                    "*"
+                } else {
+                    ""
+                };
+                format!("{star}{}:{}..{}", m.block.0, m.range.start, m.range.end)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn find(&mut self, query: &str) {
+        self.transcript.set_find_query(query, &self.messages);
+    }
+
+    /// Where the current match's block sits in the viewport, if it is
+    /// materialized.
+    fn current_match_top(&self) -> Option<f32> {
+        let m = self.transcript.find()?.current()?.clone();
+        let block = self
+            .transcript
+            .visible_blocks()
+            .iter()
+            .find(|b| b.key == m.block)?;
+        Some(block.rect.y + (m.range.start.get() / 40) as f32 * LINE_H)
+    }
+}
+
+#[test]
+fn find_matches_every_block_in_document_order_ignoring_case() {
+    let mut doc = Doc::new([
+        message_with(0, &["Second thoughts", "no"]),
+        message_with(1, &["a SECOND and a second"]),
+    ]);
+
+    doc.find("second");
+
+    assert_eq!(doc.find_dump(), "*0:0..6 10:2..8 10:15..21");
+}
+
+#[test]
+fn find_picks_up_matches_streaming_in_and_keeps_the_current_one() {
+    let mut doc = Doc::new([
+        message_with(0, &["one word"]),
+        message_with(1, &["growing"]),
+    ]);
+    doc.find("word");
+
+    doc.stream(1, 0, "growing word by word");
+    doc.frame();
+
+    assert_eq!(doc.find_dump(), "*0:4..8 10:8..12 10:16..20");
+}
+
+#[test]
+fn find_drops_matches_of_removed_blocks() {
+    let mut doc = Doc::new([
+        message_with(0, &["word"]),
+        message_with(1, &["word", "word"]),
+    ]);
+    doc.find("word");
+    doc.transcript.find_next(ScrollAlign::Center);
+    doc.transcript.find_next(ScrollAlign::Center);
+
+    let message = message_with(1, &["word"]);
+    doc.transcript.update(&message).unwrap();
+    doc.messages.insert(message.key, message);
+    doc.frame();
+
+    // The current match left with its block; the next one after it wraps.
+    assert_eq!(doc.find_dump(), "*0:0..4 10:0..4");
+}
+
+#[test]
+fn next_and_prev_wrap_and_scroll_the_match_to_the_viewport_center() {
+    let mut doc = Doc::rows(40);
+    doc.scroll_to(0.0);
+    doc.find("first");
+
+    // From the first match, previous wraps to the last row's block.
+    let prev = doc.transcript.find_prev(ScrollAlign::Center).unwrap();
+    doc.frame();
+    let at_last = doc.current_match_top();
+    let next = doc.transcript.find_next(ScrollAlign::Center).unwrap();
+    doc.frame();
+
+    assert_eq!(
+        (prev.block.0, next.block.0, doc.transcript.scroll_offset()),
+        (390, 0, 0.0)
+    );
+    // The last row cannot scroll to the center; it sits fully in view.
+    let top = at_last.unwrap();
+    assert!(top >= 0.0 && top + LINE_H <= doc.size.1, "{top}");
+}
+
+#[test]
+fn next_centers_a_match_in_the_middle_of_the_document() {
+    let mut doc = Doc::rows(40);
+    doc.scroll_to(0.0);
+    doc.find("m20 second");
+
+    doc.transcript.find_next(ScrollAlign::Center).unwrap();
+    doc.frame();
+
+    let top = doc.current_match_top().unwrap();
+    assert_eq!(top + LINE_H * 0.5, doc.size.1 * 0.5);
+}
+
+#[test]
+fn find_paints_a_highlight_per_match_and_marks_the_current_one() {
+    let messages = real_document(4);
+    let mut transcript = real_transcript(&messages);
+    transcript.set_scroll_offset(0.0);
+    transcript.set_find_query("Message", &messages);
+    let theme = Theme::default_dark();
+    let (plain, current) = (
+        format!("{:?}", theme.colors.search_match_bg),
+        format!("{:?}", theme.colors.search_match_active_bg),
+    );
+
+    let frame = CachedPainter::new().frame(&mut transcript, &messages, (400.0, 600.0), true);
+
+    let count = |color: &str| frame.lines().filter(|l| l.ends_with(color)).count();
+    assert_eq!((count(&current), count(&plain)), (1, 3));
 }

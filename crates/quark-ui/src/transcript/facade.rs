@@ -17,13 +17,13 @@ use super::background::BackgroundMeasure;
 use super::markdown::{BlockKeys, MarkdownMessage};
 use super::syntax::SyntaxHighlighter;
 use super::{
-    BlockMeasurer, TextGeometry, Transcript, TranscriptElement, TranscriptEvent, TranscriptMessage,
-    TranscriptRole, TranscriptStyle,
+    BlockMeasurer, FindMatch, TextGeometry, Transcript, TranscriptElement, TranscriptEvent,
+    TranscriptMessage, TranscriptRole, TranscriptStyle,
 };
 use crate::action::Action;
 use crate::markdown::{IncrementalMarkdown, MarkdownDoc};
 use crate::theme::Theme;
-use crate::virtual_list::{RowError, RowKey};
+use crate::virtual_list::{RowError, RowKey, ScrollAlign};
 
 /// A message to add to a [`MarkdownTranscript`].
 #[derive(Debug, Clone)]
@@ -228,6 +228,26 @@ impl MarkdownTranscript {
 
     pub fn handle(&mut self, event: TranscriptEvent) {
         self.transcript.handle(event);
+    }
+
+    /// See [`Transcript::set_find_query`].
+    pub fn set_find_query(&mut self, query: &str) {
+        self.transcript.set_find_query(query, &self.messages);
+    }
+
+    /// See [`Transcript::find_next`].
+    pub fn find_next(&mut self, align: ScrollAlign) -> Option<FindMatch> {
+        self.transcript.find_next(align)
+    }
+
+    /// See [`Transcript::find_prev`].
+    pub fn find_prev(&mut self, align: ScrollAlign) -> Option<FindMatch> {
+        self.transcript.find_prev(align)
+    }
+
+    /// See [`Transcript::close_find`].
+    pub fn close_find(&mut self) {
+        self.transcript.close_find();
     }
 
     /// See [`Transcript::selected_text`].

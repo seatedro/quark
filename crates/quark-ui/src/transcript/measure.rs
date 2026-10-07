@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use quark_render::FontKind;
+use quark_render::scene::Rect;
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
 use super::{
@@ -72,6 +73,21 @@ impl BlockGeometry for TextGeometry {
             Some(layout) => layout.hit(x - ox, y - oy).get(),
             None if x - ox >= self.width * 0.5 => self.text_len,
             None => 0,
+        }
+    }
+
+    fn range_rects(&self, range: std::ops::Range<usize>, out: &mut Vec<Rect>) {
+        let (ox, oy) = self.text_origin;
+        match &self.layout {
+            Some(layout) => out.extend(layout.selection_rects(range).map(|r| r.offset(ox, oy))),
+            // A block without text (a rule or an image) highlights whole.
+            None if range.start < range.end => out.push(Rect {
+                x: ox,
+                y: oy,
+                width: self.width,
+                height: self.height - oy,
+            }),
+            None => {}
         }
     }
 }

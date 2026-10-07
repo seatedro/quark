@@ -6,9 +6,13 @@
 
 use std::sync::Arc;
 
-use quark_ui::element::{AnyElement, IntoAnyElement, cached, div, text};
+use quark_ui::element::{AnyElement, IntoAnyElement, NoopAction, cached, div, text};
 use quark_ui::style::Styled;
 use quark_ui::test_alloc::{self, Counting};
+use quark_ui::transcript::{
+    MarkdownEntry, MarkdownTranscript, TextMeasurer, TranscriptRole, TranscriptStyle,
+};
+use quark_ui::virtual_list::RowKey;
 
 use crate::testing::UiTestHarness;
 use crate::ui::{UiApp, UiContext, ViewContext};
@@ -134,5 +138,139 @@ fn report_list_frame_allocations() {
         for (site, n) in sites.iter().take(12) {
             eprintln!("  {n:6}  {site}");
         }
+    }
+}
+
+/// Messages in the transcript budget tests.
+const MESSAGES: u64 = 2_000;
+
+/// A markdown transcript filling the window, as a chat view shows one.
+struct Chat {
+    transcript: MarkdownTranscript,
+}
+
+impl UiApp for Chat {
+    type Action = ();
+    type Message = ();
+
+    fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+        let (width, height) = cx.frame.size();
+        let scale = cx.frame.scale_factor();
+        let font_size = self.transcript.transcript().style().font_size;
+        let text = cx.frame.text();
+        let mut measurer = TextMeasurer::new(&mut text.system, &mut text.layouts, font_size, scale);
+        self.transcript.prepare(width, height, 0, &mut measurer);
+        self.transcript
+            .element(cx.theme, |_| NoopAction.into())
+            .into_any()
+    }
+
+    fn update(&mut self, _action: (), _cx: &mut UiContext) {}
+}
+
+fn chat_markdown(i: u64) -> String {
+    format!(
+        "Message {i} has a **bold** word and `code`.\n\n- a list item\n- another one\n\nA closing paragraph for message {i}."
+    )
+}
+
+/// The transcript in a harness past its warm-up frames, every row's
+/// height measured.
+fn chat(accessibility: bool) -> UiTestHarness<Chat> {
+    let mut transcript = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+    transcript
+        .extend((0..MESSAGES).map(|i| MarkdownEntry {
+            row: RowKey(i),
+            role: TranscriptRole::Assistant,
+            author: "Assistant".into(),
+            markdown: chat_markdown(i),
+        }))
+        .unwrap();
+    let mut ui = UiTestHarness::new(Chat { transcript }, (800.0, 600.0), 1.0);
+    ui.set_accessibility_active(accessibility);
+    ui.frame();
+    ui.app_mut().transcript.finish_measures();
+    for _ in 0..3 {
+        ui.frame();
+    }
+    ui
+}
+
+/// Allocations of a frame that repeats the last one, whatever the row
+/// count: the element's row list and event closures, the list's semantic
+/// label, the background measurer's font recipe, and the growth of the
+/// frame's selectable text list.
+const TRANSCRIPT_FRAME_BUDGET: u64 = 16;
+
+#[test]
+fn a_repeated_transcript_frame_allocates_a_constant_few() {
+    for accessibility in [false, true] {
+        let mut ui = chat(accessibility);
+        let ((), allocated) = test_alloc::count(|| {
+            ui.frame();
+        });
+        assert!(
+            allocated <= TRANSCRIPT_FRAME_BUDGET,
+            "{allocated} allocations (a11y={accessibility})"
+        );
+    }
+}
+
+/// Allocations of a frame after text streams into one message: parsing and
+/// converting its markdown, shaping the changed block, and rebuilding that
+/// row's subtree. The other rows on screen replay.
+const STREAMED_ROW_BUDGET: u64 = 320;
+
+#[test]
+fn a_streaming_transcript_frame_allocates_for_the_changed_row_only() {
+    for accessibility in [false, true] {
+        let mut ui = chat(accessibility);
+        // Twice the rows on screen must not cost more.
+        ui.resize(800.0, 1200.0);
+        ui.frame();
+        let last = RowKey(MESSAGES - 1);
+        let mut markdown = chat_markdown(MESSAGES - 1);
+        markdown.push_str(" streamed");
+        let ((), allocated) = test_alloc::count(|| {
+            ui.app_mut()
+                .transcript
+                .set_markdown(last, &markdown)
+                .unwrap();
+            ui.frame();
+        });
+        assert!(
+            allocated <= STREAMED_ROW_BUDGET,
+            "{allocated} allocations (a11y={accessibility})"
+        );
+    }
+}
+
+/// Allocation counts and top call sites of repeated transcript frames.
+/// Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement, prints a report"]
+fn report_transcript_frame_allocations() {
+    for accessibility in [false, true] {
+        let mut ui = chat(accessibility);
+        let ((), n) = test_alloc::count(|| {
+            ui.frame();
+        });
+        eprintln!("transcript a11y={accessibility}: {n} allocations");
+        let ((), sites) = test_alloc::profile(|| {
+            ui.frame();
+        });
+        for (site, n) in sites.iter().take(15) {
+            eprintln!("  {n:6}  {site}");
+        }
+        let last = RowKey(MESSAGES - 1);
+        let ((), n) = test_alloc::count(|| {
+            let markdown = format!("{} more", chat_markdown(MESSAGES - 1));
+            ui.app_mut()
+                .transcript
+                .set_markdown(last, &markdown)
+                .unwrap();
+            ui.frame();
+        });
+        eprintln!("transcript a11y={accessibility} streaming frame: {n} allocations");
     }
 }
