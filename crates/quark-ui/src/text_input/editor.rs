@@ -142,6 +142,9 @@ pub struct Editor {
     pub(crate) frame_scale: FrameScale,
     last_width: f32,
     last_height: f32,
+    /// The text system's font generation the layout was shaped with; the
+    /// next flush reshapes when the fonts change.
+    font_generation: Option<u64>,
 }
 
 impl Default for Editor {
@@ -309,6 +312,7 @@ impl Editor {
             frame_scale: FrameScale::default(),
             last_width: 0.0,
             last_height: 0.0,
+            font_generation: None,
         }
     }
 
@@ -471,6 +475,10 @@ impl Editor {
             self.set_scale_factor(scale);
         }
         self.refresh_syntax();
+        if self.font_generation != Some(text_system.generation()) {
+            self.font_generation = Some(text_system.generation());
+            self.dirty = true;
+        }
         let relayout = self.dirty || self.layout.is_none();
         if relayout {
             self.dirty = false;

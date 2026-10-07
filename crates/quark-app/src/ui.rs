@@ -194,6 +194,8 @@ pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
     focus: &'a mut Option<FocusId>,
     announcer: &'a mut Announcer,
+    theme: &'a mut Theme,
+    theme_choice: &'a mut ThemeChoice,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
 }
@@ -219,6 +221,53 @@ impl UiContext<'_, '_> {
         self.announcer.announce(text, politeness);
         // The announcement is published with the next frame's tree.
         self.window.request_redraw();
+    }
+
+    /// The theme the next frame paints with.
+    pub fn theme(&self) -> &Theme {
+        self.theme
+    }
+
+    /// Paint with `theme` from the next frame on, whatever the desktop
+    /// prefers. Cached elements rebuild in the new colors; text layouts
+    /// are reused unless the theme's font sizes changed.
+    pub fn set_theme(&mut self, theme: Theme) {
+        *self.theme_choice = ThemeChoice::Fixed;
+        self.apply_theme(theme);
+    }
+
+    /// Paint with `light` or `dark` as the desktop prefers, from the next
+    /// frame on (dark while the preference is unknown).
+    pub fn set_themes(&mut self, light: Theme, dark: Theme) {
+        let theme = match self.window.theme() {
+            Some(SystemTheme::Light) => light.clone(),
+            _ => dark.clone(),
+        };
+        *self.theme_choice = ThemeChoice::System {
+            light: Box::new(light),
+            dark: Box::new(dark),
+        };
+        self.apply_theme(theme);
+    }
+
+    fn apply_theme(&mut self, theme: Theme) {
+        if *self.theme != theme {
+            *self.theme = theme;
+            redraw(Redraw::Theme, self.window);
+        }
+    }
+
+    /// Change font families or ligatures live. Text is reshaped once with
+    /// the new fonts (layout caches drop the old shapes); editors reshape
+    /// on their next flush.
+    pub fn set_fonts(&mut self, fonts: &quark_text::FontSettings) {
+        let system = &mut self.window.text().system;
+        let before = system.generation();
+        system.set_font_settings(fonts);
+        if system.generation() != before {
+            // Every window shares the text system.
+            self.window.request_redraw_all();
+        }
     }
 
     /// A sender for this app's messages; `M` must be the app's
@@ -396,6 +445,8 @@ impl<U: UiApp> UiAdapter<U> {
             window: cx,
             focus: &mut self.focus,
             announcer: &mut self.announcer,
+            theme: &mut self.theme,
+            theme_choice: &mut self.theme_choice,
             sender: &self.sender,
         };
         f(&mut self.app, &mut ucx)

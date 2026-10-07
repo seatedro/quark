@@ -77,7 +77,7 @@ mod tests {
     use TextEditCommand::*;
 
     #[test]
-    fn undo_redo_and_word_bindings() {
+    fn editing_and_style_bindings() {
         let cases = [
             ("ctrl+z", Some(Undo)),
             ("cmd+z", Some(Undo)),
@@ -92,6 +92,9 @@ mod tests {
             ("cmd+backspace", Some(BackspaceLine)),
             ("shift+arrowleft", Some(SelectLeft)),
             ("mod+z", Some(Undo)),
+            ("cmd+b", Some(ToggleStyle(InlineStyle::BOLD))),
+            ("ctrl+shift+x", Some(ToggleStyle(InlineStyle::STRIKE))),
+            ("ctrl+shift+b", None),
             ("ctrl+q+z", None),
         ];
         for (binding, expected) in cases {

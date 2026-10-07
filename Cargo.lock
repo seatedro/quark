@@ -2877,6 +2877,7 @@ dependencies = [
  "quark-syntax",
  "quark-text",
  "serde",
+ "serde_json",
  "taffy",
  "tracing",
  "unicode-segmentation",
