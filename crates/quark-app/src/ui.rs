@@ -30,7 +30,7 @@ use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
-    TextInputHitArea, render_element,
+    TextInputHitArea, WheelEvent, render_element,
 };
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
@@ -46,6 +46,10 @@ use crate::{
 
 /// Lines scrolled per accessibility ScrollUp/ScrollDown request.
 const ACCESSIBILITY_SCROLL_LINES: i32 = 3;
+
+/// Whether the platform continues trackpad flings with momentum events of
+/// its own; elsewhere the adapter adds inertia when the fingers lift.
+const PLATFORM_MOMENTUM: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
 /// An app described as quark-ui elements.
 ///
@@ -242,6 +246,8 @@ enum Redraw {
     Action,
     /// A text field's text, selection, or composition changed.
     TextEdit,
+    /// Input moved a scroll handle.
+    Scroll,
     Theme,
 }
 
@@ -423,6 +429,8 @@ impl<U: UiApp> UiAdapter<U> {
     fn deliver(&mut self, delivery: Delivery, cx: &mut EventContext) {
         if !delivery.actions.is_empty() {
             self.dispatch(delivery.actions, cx);
+        } else if delivery.redraw {
+            redraw(Redraw::Scroll, cx);
         }
     }
 
@@ -506,6 +514,11 @@ impl<U: UiApp> UiAdapter<U> {
             self.deliver(delivery, cx);
             return;
         }
+        let delivery = self.router.scroll_key(&binding, self.focus);
+        if delivery.node.is_some() {
+            self.deliver(delivery, cx);
+            return;
+        }
         let mods = binding.mods;
         if binding.key == "tab" && !(mods.cmd || mods.ctrl || mods.alt) {
             let next = self.router.traverse_focus(self.focus, mods.shift);
@@ -536,10 +549,21 @@ impl<U: UiApp> UiAdapter<U> {
                 self.deliver(delivery, cx);
             }
             UiInput::PointerDown(_) | UiInput::PointerUp(_) => {}
-            UiInput::Wheel { dy, .. } => {
+            UiInput::Wheel { dx, dy, ended } => {
+                let now_ms = cx.elapsed().as_millis() as u64;
+                // Shift turns a plain vertical wheel sideways.
+                let (dx, dy) = if cx.modifiers().shift_key() && dx == 0.0 {
+                    (dy, 0.0)
+                } else {
+                    (dx, dy)
+                };
                 if let Some((x, y)) = self.pointer {
-                    let delivery = self.router.wheel(x, y, dy);
+                    let event = WheelEvent { dx, dy, now_ms };
+                    let delivery = self.router.scroll_wheel(x, y, event);
                     self.deliver(delivery, cx);
+                }
+                if ended && !PLATFORM_MOMENTUM && self.router.fling(now_ms) {
+                    redraw(Redraw::Scroll, cx);
                 }
             }
             UiInput::Key(binding) => self.key(binding, cx),
