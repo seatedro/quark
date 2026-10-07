@@ -13,4 +13,4 @@ quark-render.workspace = true
 quark-ui.workspace = true
 
 [dev-dependencies]
-glyphon.workspace = true
+quark-text.workspace = true

@@ -257,18 +257,35 @@ fn fs_quad(input: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let max_border = max(
-        max(input.border_widths.x, input.border_widths.y),
-        max(input.border_widths.z, input.border_widths.w)
-    );
-
+    // border_widths: top, right, bottom, left. The fill region is the outer
+    // rect inset by each side's width; each inner corner radius shrinks by
+    // the wider of its two adjacent sides (a circular stand-in for CSS's
+    // elliptical inner corner).
+    let bw = input.border_widths;
     var color: vec4<f32>;
-    if (max_border > 0.0) {
-        let bw = max_border;
-        let inner_half = half_size - vec2<f32>(bw);
-        let inner_radius = max(0.0, corner_radius - bw);
-        let inner_sdf = quad_sdf(p, inner_half, inner_radius);
-        let fill_blend = saturate(aa - inner_sdf);
+    if (max(max(bw.x, bw.y), max(bw.z, bw.w)) > 0.0) {
+        let inner_min = input.bounds.xy + vec2<f32>(bw.w, bw.x);
+        let inner_max = input.bounds.xy + input.bounds.zw - vec2<f32>(bw.y, bw.z);
+        let inner_size = inner_max - inner_min;
+        var fill_blend = 0.0;
+        if (inner_size.x > 0.0 && inner_size.y > 0.0) {
+            let inner_half = inner_size * 0.5;
+            let ip = input.position.xy - (inner_min + inner_half);
+            let inner_radii = max(
+                vec4<f32>(0.0),
+                input.corner_radii - vec4<f32>(
+                    max(bw.x, bw.w),
+                    max(bw.x, bw.y),
+                    max(bw.z, bw.y),
+                    max(bw.z, bw.w),
+                ),
+            );
+            let inner_radius = min(
+                pick_corner_radius(ip, inner_radii),
+                min(inner_half.x, inner_half.y),
+            );
+            fill_blend = saturate(aa - quad_sdf(ip, inner_half, inner_radius));
+        }
         let blended = over(input.background, input.border_color);
         color = mix(blended, input.background, fill_blend);
     } else {

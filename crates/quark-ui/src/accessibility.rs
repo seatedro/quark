@@ -34,8 +34,12 @@ pub struct AccessibilityNode {
     selected: Option<bool>,
     toggled: Option<bool>,
     expanded: Option<bool>,
+    /// 1-based position among siblings and the set size, for list items
+    /// whose set is larger than the materialized rows.
+    position_in_set: Option<(usize, usize)>,
     action: Option<AccessibilityAction>,
     author_id: String,
+    parent: Option<NodeId>,
 }
 
 impl AccessibilityNode {
@@ -52,8 +56,10 @@ impl AccessibilityNode {
             selected: None,
             toggled: None,
             expanded: None,
+            position_in_set: None,
             action: None,
             author_id: key.to_owned(),
+            parent: None,
         }
     }
 
@@ -103,6 +109,13 @@ impl AccessibilityNode {
         self
     }
 
+    /// `position` is 1-based; `size` is the whole set, including items that
+    /// are not in the tree (virtualized rows).
+    pub fn position_in_set(mut self, position: usize, size: usize) -> Self {
+        self.position_in_set = Some((position, size));
+        self
+    }
+
     pub fn action(mut self, action: AccessibilityAction) -> Self {
         self.action = Some(action);
         self
@@ -115,8 +128,12 @@ impl AccessibilityNode {
         if let Some(label) = &self.label {
             node.set_label(label.clone());
         }
-        if let Some(value) = &self.value {
-            node.set_value(value.clone());
+        // accesskit reads a Label node's name from its value, so static text
+        // with only a label would reach screen readers unnamed.
+        match (&self.value, &self.label) {
+            (Some(value), _) => node.set_value(value.clone()),
+            (None, Some(label)) if self.role == Role::Label => node.set_value(label.clone()),
+            (None, _) => {}
         }
         if let Some(description) = &self.description {
             node.set_description(description.clone());
@@ -132,6 +149,10 @@ impl AccessibilityNode {
         }
         if let Some(expanded) = self.expanded {
             node.set_expanded(expanded);
+        }
+        if let Some((position, size)) = self.position_in_set {
+            node.set_position_in_set(position);
+            node.set_size_of_set(size);
         }
         match &self.action {
             Some(AccessibilityAction::Click(_)) => node.add_action(AxAction::Click),
@@ -161,6 +182,9 @@ pub struct AccessibilityFrame {
     nodes: Vec<AccessibilityNode>,
     node_ids: HashSet<NodeId>,
     actions: HashMap<NodeId, AccessibilityAction>,
+    /// Semantic node index (in the frame's `SemanticFrame`) to the
+    /// accessibility node that represents it.
+    semantic_owners: HashMap<usize, NodeId>,
     focused: Option<NodeId>,
     root_bounds: Rect,
 }
@@ -178,8 +202,18 @@ impl AccessibilityFrame {
         }
     }
 
-    pub fn push(&mut self, mut node: AccessibilityNode) {
+    /// Push a direct child of the window. Returns the node's final id, which
+    /// differs from the key hash when the key collided.
+    pub fn push(&mut self, node: AccessibilityNode) -> NodeId {
+        self.push_child(node, None)
+    }
+
+    /// Push a node under `parent`, an id previously returned by this frame,
+    /// or under the window when `None`. Parents must be pushed first.
+    pub fn push_child(&mut self, mut node: AccessibilityNode, parent: Option<NodeId>) -> NodeId {
         self.ensure_unique_id(&mut node);
+        node.parent = parent.filter(|id| self.node_ids.contains(id) && *id != node.id);
+        let id = node.id;
         if let Some(action) = node.action.clone() {
             self.actions.insert(node.id, action);
         }
@@ -194,6 +228,17 @@ impl AccessibilityFrame {
             self.focused.get_or_insert(node.id);
         }
         self.nodes.push(node);
+        id
+    }
+
+    /// Record that `id` represents semantic node `semantic_index`, so nodes
+    /// emitted under that semantic node nest beneath it.
+    pub fn bind_semantic(&mut self, semantic_index: usize, id: NodeId) {
+        self.semantic_owners.insert(semantic_index, id);
+    }
+
+    pub fn semantic_owner(&self, semantic_index: usize) -> Option<NodeId> {
+        self.semantic_owners.get(&semantic_index).copied()
     }
 
     fn ensure_unique_id(&mut self, node: &mut AccessibilityNode) {
@@ -221,10 +266,18 @@ impl AccessibilityFrame {
 
     /// `app_name` labels the root window node.
     pub fn tree_update(&self, app_name: &str, focus: Option<FocusId>) -> TreeUpdate {
+        let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for node in &self.nodes {
+            children
+                .entry(node.parent.unwrap_or(ROOT_ID))
+                .or_default()
+                .push(node.id);
+        }
+
         let mut root = Node::new(Role::Window);
         root.set_bounds(ax_rect(self.root_bounds));
         root.set_label(app_name);
-        root.set_children(self.nodes.iter().map(|node| node.id).collect::<Vec<_>>());
+        root.set_children(children.remove(&ROOT_ID).unwrap_or_default());
 
         let mut nodes = Vec::with_capacity(self.nodes.len() + 1);
         nodes.push((ROOT_ID, root));
@@ -243,7 +296,11 @@ impl AccessibilityFrame {
                     focused = node.id;
                 }
             }
-            nodes.push((node.id, node.to_accesskit_node()));
+            let mut ax_node = node.to_accesskit_node();
+            if let Some(kids) = children.remove(&node.id) {
+                ax_node.set_children(kids);
+            }
+            nodes.push((node.id, ax_node));
         }
 
         TreeUpdate {
@@ -287,6 +344,35 @@ pub fn dump_accessibility(frame: &AccessibilityFrame) -> String {
     out
 }
 
+/// The tree shape: one line per node, `  ` per depth level, as
+/// `author_id | role | label`. Children follow their parent in push order.
+pub fn dump_accessibility_tree(frame: &AccessibilityFrame) -> String {
+    let mut children: HashMap<Option<NodeId>, Vec<usize>> = HashMap::new();
+    for (index, node) in frame.nodes.iter().enumerate() {
+        children.entry(node.parent).or_default().push(index);
+    }
+    let mut out = String::new();
+    // Depth-first; parents always precede children, so this terminates.
+    let mut stack: Vec<(usize, usize)> = children
+        .get(&None)
+        .map(|roots| roots.iter().rev().map(|&index| (index, 0)).collect())
+        .unwrap_or_default();
+    while let Some((index, depth)) = stack.pop() {
+        let node = &frame.nodes[index];
+        out.push_str(&format!(
+            "{}{} | {:?} | {}\n",
+            "  ".repeat(depth),
+            node.author_id,
+            node.role,
+            node.label.as_deref().unwrap_or("-"),
+        ));
+        if let Some(kids) = children.get(&Some(node.id)) {
+            stack.extend(kids.iter().rev().map(|&kid| (kid, depth + 1)));
+        }
+    }
+    out
+}
+
 fn ax_rect(rect: Rect) -> AxRect {
     AxRect::new(
         f64::from(rect.x),
@@ -296,13 +382,9 @@ fn ax_rect(rect: Rect) -> AxRect {
     )
 }
 
+/// Ids 0 and 1 are reserved for the runner's placeholder root and [`ROOT_ID`].
 fn stable_node_id(key: &str) -> NodeId {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in key.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    NodeId(hash.max(2))
+    NodeId(quark::stable_hash(key).max(2))
 }
 
 #[cfg(test)]
@@ -318,6 +400,33 @@ mod tests {
             width: 10.0,
             height: 10.0,
         }
+    }
+
+    #[test]
+    fn tree_update_publishes_children_under_their_parent() {
+        let mut frame = AccessibilityFrame::new(100.0, 100.0);
+        let dialog = frame.push(AccessibilityNode::new("dialog", Role::Dialog, rect()));
+        let ok = frame.push_child(AccessibilityNode::button("ok", "OK", rect()), Some(dialog));
+        let update = frame.tree_update("Test", None);
+        let children = |id: NodeId| {
+            update
+                .nodes
+                .iter()
+                .find(|(node_id, _)| *node_id == id)
+                .map(|(_, node)| node.children().to_vec())
+                .expect("node in update")
+        };
+        assert_eq!(children(ROOT_ID), vec![dialog]);
+        assert_eq!(children(dialog), vec![ok]);
+    }
+
+    #[test]
+    fn label_node_publishes_its_text_as_value() {
+        let mut frame = AccessibilityFrame::new(100.0, 100.0);
+        let id = frame.push(AccessibilityNode::new("text", Role::Label, rect()).label("Hello"));
+        let update = frame.tree_update("Test", None);
+        let node = update.nodes.iter().find(|(node_id, _)| *node_id == id);
+        assert_eq!(node.and_then(|(_, node)| node.value()), Some("Hello"));
     }
 
     #[test]

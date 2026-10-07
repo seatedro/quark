@@ -122,6 +122,7 @@ impl RenderOnce for Modal {
                  test_id={"modal"}
                  semantic_role={SemanticRole::Dialog}
                  focus_scope={accessibility_label.clone()}
+                 trap_focus={true}
                  accessibility_role={accesskit::Role::Dialog}
                  accessibility_id={format!("modal:{accessibility_label}")}
                  accessibility_label={accessibility_label}
@@ -146,6 +147,7 @@ impl RenderOnce for Modal {
                  id={"overlay.backdrop"}
                  test_id={"modal-backdrop"}
                  on_click={self.on_dismiss}
+                 block_mouse
                  hit_identity={HitIdentity::OverlayBackdrop}
                  @when {self.align == ModalAlign::Center} { justify_center }
                  @when {self.align == ModalAlign::Top} { pt={Sz::MODAL_TOP_OFFSET} }>

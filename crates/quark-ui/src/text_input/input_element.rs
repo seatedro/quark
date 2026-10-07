@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
+use super::editor::syntax_layout_spans;
+use super::view::caret_blink;
 use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind};
 use crate::FocusId;
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
 use crate::design::{Alpha, Sz};
 use crate::element::*;
 use crate::style::{ElementStyle, Styled};
-use quark_render::scene::{
-    FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, RichTextSpan, TextPrimitive,
-};
+use quark::{SemanticActions, SemanticNode, SemanticRole};
+use quark_render::scene::{FontKind, Rect, RichTextPrimitive, ShapedText, TextPrimitive};
 use quark_render::{RectPrimitive, RoundedRectPrimitive, Scene};
+use quark_text::{TextLayout, TextParams, TextStyle};
 
 pub struct CursorSnapshot {
     pub x: f32,
@@ -30,6 +32,12 @@ pub struct TextEditorElement {
     mode: EditorMode,
     text: Arc<str>,
     syntax_spans: Vec<SyntaxSpan>,
+    /// The editor's own layout; painted as is so caret and selection math
+    /// match the glyphs. Without one the element lays `text` out itself.
+    layout: Option<Arc<TextLayout>>,
+    span_kinds: Vec<SyntaxTokenKind>,
+    preedit_rects: Vec<SelectionRect>,
+    clause_rects: Vec<SelectionRect>,
     line_tops: Vec<(usize, f32)>,
     focus_target: FocusId,
     on_scroll: ScrollActionBuilder,
@@ -56,6 +64,10 @@ pub fn text_editor_element(
         mode: EditorMode::ProseInput,
         text: Arc::from(""),
         syntax_spans: Vec::new(),
+        layout: None,
+        span_kinds: Vec::new(),
+        preedit_rects: Vec::new(),
+        clause_rects: Vec::new(),
         line_tops: Vec::new(),
         focus_target,
         on_scroll,
@@ -132,11 +144,14 @@ impl TextEditorElement {
 
     pub fn editor_snapshot(mut self, editor: &Editor) -> Self {
         self.is_empty = editor.is_empty();
-        self.cursor = Some(CursorSnapshot {
+        self.cursor = editor.caret_visible().then_some(CursorSnapshot {
             x: editor.cursor_pos.x,
             y: editor.cursor_pos.y,
             moved_at_ms: editor.cursor_moved_at_ms,
         });
+        self.layout = editor.paint_layout();
+        self.span_kinds = editor.paint_span_kinds();
+        (self.preedit_rects, self.clause_rects) = editor.preedit_rects();
         self.selection_rects = editor.selection_rects();
         self.content_height = editor.content_height();
         self.scroll_y = editor.scroll_y;
@@ -161,7 +176,7 @@ impl Styled for TextEditorElement {
 
 impl Element for TextEditorElement {
     type LayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = HitId;
 
     fn request_layout(
         &mut self,
@@ -178,19 +193,15 @@ impl Element for TextEditorElement {
         _layout_state: &mut (),
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
-    ) {
-        cx.insert_hitbox(bounds, HitboxBehavior::Normal);
-        cx.scroll_regions.push(ScrollRegion {
-            bounds,
-            action_builder: self.on_scroll.clone(),
-        });
+    ) -> HitId {
+        cx.insert_hit(bounds, HitFlags::TEXT | HitFlags::SCROLL, CursorHint::Text)
     }
 
     fn paint(
         &mut self,
         bounds: Bounds,
         _layout_state: &mut (),
-        _prepaint_state: &mut (),
+        prepaint_state: &mut HitId,
         _engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
@@ -221,7 +232,7 @@ impl Element for TextEditorElement {
             FontKind::Ui
         };
 
-        scene.clip(bounds.into());
+        scene.clip(bounds);
 
         if gutter_w > 0.0 {
             scene.rect(RectPrimitive {
@@ -249,6 +260,13 @@ impl Element for TextEditorElement {
                 if painted_y + line_height < bounds.y || painted_y > bounds.bottom() {
                     continue;
                 }
+                let style = TextStyle::new(font_size)
+                    .kind(FontKind::Mono)
+                    .line_height(line_height);
+                let number = format!("{line_no:>gutter_digits$}");
+                let Some(layout) = cx.layout_text(&TextParams::new(number, style)) else {
+                    continue;
+                };
                 scene.text(TextPrimitive {
                     rect: Rect {
                         x: bounds.x,
@@ -256,11 +274,8 @@ impl Element for TextEditorElement {
                         width: (gutter_w - 8.0).max(1.0),
                         height: line_height,
                     },
-                    text: format!("{line_no:>gutter_digits$}").into(),
+                    layout: ShapedText::new(layout),
                     color: theme.colors.gutter_text,
-                    font_size,
-                    font_kind: FontKind::Mono,
-                    font_weight: FontWeight::Normal,
                 });
             }
         }
@@ -281,77 +296,126 @@ impl Element for TextEditorElement {
             }
         }
 
+        let style = TextStyle::new(font_size)
+            .kind(font_kind)
+            .line_height(line_height);
         if self.is_empty {
             let placeholder_color = theme.colors.text_muted.with_alpha(Alpha::PLACEHOLDER);
-            let content_h = line_height;
-            scene.text(quark_render::scene::TextPrimitive {
-                rect: Rect {
-                    x: text_x,
-                    y: text_y,
-                    width: text_area_w,
-                    height: content_h,
-                },
-                text: std::mem::take(&mut self.placeholder).into(),
-                color: placeholder_color,
-                font_size,
-                font_kind,
-                font_weight: FontWeight::Normal,
-            });
+            let params = TextParams::new(std::mem::take(&mut self.placeholder), style);
+            if let Some(layout) = cx.layout_text(&params) {
+                scene.text(TextPrimitive {
+                    rect: Rect {
+                        x: text_x,
+                        y: text_y,
+                        width: text_area_w,
+                        height: line_height,
+                    },
+                    layout: ShapedText::new(layout),
+                    color: placeholder_color,
+                });
+            }
         } else {
             let content_h = self.content_height.max(line_height);
-            scene.rich_text(RichTextPrimitive {
-                rect: Rect {
-                    x: text_x,
-                    y: text_y - self.scroll_y,
-                    width: text_area_w,
-                    height: content_h,
-                },
-                spans: build_editor_spans(
-                    self.text.as_ref(),
-                    &self.syntax_spans,
-                    self.text_color,
-                    theme,
-                ),
-                default_color: self.text_color,
-                font_size,
-                font_kind,
-                font_weight: FontWeight::Normal,
-            });
-        }
-
-        if self.focused {
-            if let Some(ref cur) = self.cursor {
-                let elapsed = cx.clock_ms.saturating_sub(cur.moved_at_ms);
-                let visible = elapsed < 530 || (elapsed / 530) % 2 == 0;
-                if visible {
-                    scene.rounded_rect(RoundedRectPrimitive::uniform(
-                        Rect {
-                            x: text_x + cur.x,
-                            y: text_y - self.scroll_y + cur.y + 1.0,
-                            width: Sz::CURSOR_WIDTH,
-                            height: line_height - Sz::CURSOR_WIDTH,
+            // The editor's layout is used only if it was shaped at this
+            // frame's scale; otherwise paint a fresh one until it catches up.
+            let scale = cx.scale_factor;
+            let own = self.layout.take().filter(|l| l.scale_factor() == scale);
+            let (layout, kinds) = match own {
+                Some(layout) => (Some(layout), std::mem::take(&mut self.span_kinds)),
+                None => {
+                    let (spans, kinds) = syntax_layout_spans(&self.text, &self.syntax_spans);
+                    let params = TextParams::new(self.text.clone(), style)
+                        .spans(spans)
+                        .wrap_width(Some(text_area_w.max(1.0)));
+                    (cx.layout_text(&params), kinds)
+                }
+            };
+            let span_colors: Vec<_> = kinds
+                .iter()
+                .map(|kind| syntax_color(*kind, self.text_color, theme))
+                .collect();
+            if let Some(layout) = layout {
+                scene.rich_text(RichTextPrimitive {
+                    rect: Rect {
+                        x: text_x,
+                        y: text_y - self.scroll_y,
+                        width: text_area_w,
+                        height: content_h,
+                    },
+                    layout: ShapedText::new(layout),
+                    default_color: self.text_color,
+                    span_colors: span_colors.into(),
+                });
+            }
+            // IME composition: thin underline under the preedit, thick under
+            // the clause the IME is converting.
+            let thin = theme.metrics.ui_scale().max(1.0);
+            for (rects, thickness) in [
+                (&self.preedit_rects, thin),
+                (&self.clause_rects, thin * 2.0),
+            ] {
+                for rect in rects {
+                    scene.rect(RectPrimitive {
+                        rect: Rect {
+                            x: text_x + rect.x,
+                            y: text_y - self.scroll_y + rect.y + rect.h - thickness,
+                            width: rect.w,
+                            height: thickness,
                         },
-                        1.0,
-                        theme.colors.text,
-                    ));
+                        color: self.text_color,
+                    });
                 }
             }
+        }
+
+        let caret = self
+            .cursor
+            .as_ref()
+            .filter(|_| self.focused)
+            .map(|cur| Rect {
+                x: text_x + cur.x,
+                y: text_y - self.scroll_y + cur.y + 1.0,
+                width: Sz::CURSOR_WIDTH,
+                height: line_height - Sz::CURSOR_WIDTH,
+            });
+        if let (Some(rect), Some(cur)) = (caret, &self.cursor) {
+            let (visible, next_toggle_ms) = caret_blink(cx.clock_ms, cur.moved_at_ms);
+            if visible {
+                scene.rounded_rect(RoundedRectPrimitive::uniform(rect, 1.0, theme.colors.text));
+            }
+            cx.request_frame_at_ms(next_toggle_ms);
         }
 
         scene.pop_clip();
 
         let target = self.focus_target;
-        cx.accessibility.push(
+        let mut semantic_node = SemanticNode::new(bounds)
+            .id(format!("text-editor:{target:?}"))
+            .role(SemanticRole::TextInput);
+        semantic_node.parent = cx.current_semantic_parent();
+        semantic_node.actions = SemanticActions::default().text_value().scrollable();
+        semantic_node.focus = Some(target);
+        let node = cx.semantic.push(semantic_node);
+        cx.bind_hit(*prepaint_state, node);
+        cx.handlers.on_scroll(
+            node,
+            ScrollTarget {
+                builder: self.on_scroll.clone(),
+                offset: self.scroll_y,
+                max: Some((self.content_height - bounds.height).max(0.0)),
+            },
+        );
+        cx.push_accessibility(
             AccessibilityNode::new(
                 format!("text-editor:{target:?}"),
                 accesskit::Role::MultilineTextInput,
-                bounds.into(),
+                bounds,
             )
             .label(accessibility_label)
             .action(AccessibilityAction::Focus(target)),
         );
         cx.text_input_hit_areas.push(TextInputHitArea {
-            bounds: bounds.into(),
+            bounds,
             text_x,
             text_y,
             text_width: text_area_w,
@@ -360,6 +424,9 @@ impl Element for TextEditorElement {
             font_size,
             focus_target: target,
             multiline: true,
+            layout: None,
+            scroll_x: 0.0,
+            caret,
         });
     }
 }
@@ -380,103 +447,13 @@ fn gutter_digits(max_line: usize) -> usize {
     max_line.max(1).ilog10() as usize + 1
 }
 
-fn build_editor_spans(
-    text: &str,
-    syntax_spans: &[SyntaxSpan],
-    default_color: crate::theme::Color,
-    theme: &crate::theme::Theme,
-) -> Arc<[RichTextSpan]> {
-    if text.is_empty() {
-        return Arc::from(Vec::new());
-    }
-    if syntax_spans.is_empty() {
-        return Arc::from(vec![RichTextSpan {
-            text: Arc::from(text),
-            color: default_color,
-            font_weight: None,
-            font_style: None,
-        }]);
-    }
-
-    let mut out = Vec::new();
-    let mut cursor = 0_usize;
-    for span in syntax_spans {
-        let raw_start = span.offset as usize;
-        let raw_end = raw_start
-            .saturating_add(span.length as usize)
-            .min(text.len());
-        let Some((start, end)) = valid_text_range(text, raw_start, raw_end) else {
-            continue;
-        };
-        if cursor < start {
-            push_editor_span(&mut out, &text[cursor..start], default_color, None, None);
-        }
-        let (color, weight, style) = syntax_style(span.kind, default_color, theme);
-        push_editor_span(&mut out, &text[start..end], color, weight, style);
-        cursor = cursor.max(end);
-    }
-    if cursor < text.len() {
-        push_editor_span(&mut out, &text[cursor..], default_color, None, None);
-    }
-
-    if out.is_empty() {
-        out.push(RichTextSpan {
-            text: Arc::from(text),
-            color: default_color,
-            font_weight: None,
-            font_style: None,
-        });
-    }
-    Arc::from(out)
-}
-
-fn valid_text_range(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
-    if start >= end || end > text.len() {
-        return None;
-    }
-    if text.is_char_boundary(start) && text.is_char_boundary(end) {
-        Some((start, end))
-    } else {
-        None
-    }
-}
-
-fn push_editor_span(
-    out: &mut Vec<RichTextSpan>,
-    text: &str,
-    color: crate::theme::Color,
-    font_weight: Option<FontWeight>,
-    font_style: Option<FontStyle>,
-) {
-    if text.is_empty() {
-        return;
-    }
-    if let Some(last) = out.last_mut()
-        && last.color == color
-        && last.font_weight == font_weight
-        && last.font_style == font_style
-    {
-        let mut merged = String::with_capacity(last.text.len() + text.len());
-        merged.push_str(last.text.as_ref());
-        merged.push_str(text);
-        last.text = Arc::from(merged);
-        return;
-    }
-    out.push(RichTextSpan {
-        text: Arc::from(text),
-        color,
-        font_weight,
-        font_style,
-    });
-}
-
-fn syntax_style(
+fn syntax_color(
     syntax_kind: SyntaxTokenKind,
     default_color: crate::theme::Color,
     theme: &crate::theme::Theme,
-) -> (crate::theme::Color, Option<FontWeight>, Option<FontStyle>) {
+) -> crate::theme::Color {
     use SyntaxTokenKind::*;
-    let color = match syntax_kind {
+    match syntax_kind {
         Keyword | Builtin => theme.colors.syntax_keyword,
         String => theme.colors.syntax_string,
         Comment | Label | Preprocessor => theme.colors.syntax_comment,
@@ -486,13 +463,74 @@ fn syntax_style(
         Attribute | Property => theme.colors.syntax_property,
         Operator | Punctuation => theme.colors.syntax_operator,
         Variable | Normal => default_color,
-    };
-    let (font_weight, font_style) = match syntax_kind {
-        Comment => (None, Some(FontStyle::Italic)),
-        Keyword | Builtin => (Some(FontWeight::Semibold), None),
-        Type | Function | Constant | Attribute | Tag | Property | Namespace | Label
-        | Preprocessor => (Some(FontWeight::Medium), None),
-        Normal | String | Number | Operator | Punctuation | Variable => (None, None),
-    };
-    (color, font_weight, font_style)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Action;
+    use crate::text_input::TextEditCommand::*;
+    use crate::theme::Theme;
+    use quark::reactive::SignalStore;
+    use quark_render::Primitive;
+
+    #[test]
+    fn caret_and_selection_sit_on_the_painted_glyphs_after_bold_tokens() {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut editor = Editor::new(EditorMode::CodeInput);
+        // Keywords are painted semibold, which used to shift the caret.
+        editor.set_syntax_highlighter(Arc::new(|text: &str| {
+            text.match_indices("fn")
+                .map(|(i, _)| SyntaxSpan {
+                    offset: i as u32,
+                    length: 2,
+                    kind: SyntaxTokenKind::Keyword,
+                })
+                .collect()
+        }));
+        editor.sync_size(400.0, 200.0);
+        editor.set_text("fn main() { fn inner() {} }\nlet s = \"日本\";");
+        editor.apply(SetTextCursor(5));
+        editor.apply(ExtendTextSelection(editor.byte_len() - 2));
+        editor.flush(&mut text);
+
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+        let target = FocusId::from_key("test.editor");
+        let mut root = text_editor_element(target, ScrollActionBuilder::new(Action::new))
+            .editor_snapshot(&editor)
+            .focused(true)
+            .w(400.0)
+            .h(200.0)
+            .into_any();
+        let mut scene = Scene::default();
+        render_element(&mut root, &mut scene, &mut cx, 400.0, 200.0);
+
+        let painted = scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::RichTextRun(run) => run.layout.downcast_ref::<TextLayout>(),
+                _ => None,
+            })
+            .expect("painted editor text");
+        let caret = painted.caret(editor.cursor());
+        assert_eq!(
+            (caret.x, caret.y),
+            (editor.cursor_pos.x, editor.cursor_pos.y)
+        );
+        let painted_rects: Vec<_> = painted
+            .selection_rects(editor.anchor()..editor.cursor())
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .collect();
+        let editor_rects: Vec<_> = editor
+            .selection_rects()
+            .iter()
+            .map(|r| (r.x, r.y, r.w, r.h))
+            .collect();
+        assert_eq!(editor_rects, painted_rects);
+    }
 }

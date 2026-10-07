@@ -24,13 +24,14 @@ impl ActivationHandler for AccessibilityActivation {
 /// accesskit calls this off the main thread; queue the request and wake the
 /// loop so the app handles it with an `EventContext`.
 pub(super) struct AccessibilityActions {
-    pub(super) sender: Sender<ActionRequest>,
+    pub(super) window: WindowId,
+    pub(super) sender: Sender<(WindowId, ActionRequest)>,
     pub(super) waker: Waker,
 }
 
 impl ActionHandler for AccessibilityActions {
     fn do_action(&mut self, request: ActionRequest) {
-        if self.sender.send(request).is_ok() {
+        if self.sender.send((self.window, request)).is_ok() {
             self.waker.wake();
         }
     }

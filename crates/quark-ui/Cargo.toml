@@ -9,8 +9,13 @@ repository.workspace = true
 [dependencies]
 quark.workspace = true
 quark-render.workspace = true
+quark-text.workspace = true
 accesskit.workspace = true
 glyphon.workspace = true
+pulldown-cmark.workspace = true
 serde.workspace = true
 taffy.workspace = true
 unicode-segmentation.workspace = true
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }

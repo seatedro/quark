@@ -1,9 +1,5 @@
-//! Pointer hit-testing primitives. Generic over the click-result payload so
-//! halogen stays independent of the hosting app's action enum.
-//!
-//! Diffy instantiates these with its own `ClickResult` enum via type aliases.
-
-use std::rc::Rc;
+//! Pointer hit testing: one table per frame, in paint order, that answers
+//! "what is under the pointer" for hover, click, wheel, and drag alike.
 
 use crate::geometry::Rect;
 
@@ -15,6 +11,19 @@ pub enum CursorHint {
     Pointer,
     Text,
     ResizeCol,
+    ResizeRow,
+    ResizeNs,
+    ResizeEw,
+    ResizeNesw,
+    ResizeNwse,
+    Move,
+    Grab,
+    Grabbing,
+    NotAllowed,
+    Wait,
+    Progress,
+    Crosshair,
+    Help,
 }
 
 /// Opaque identity payload for hover routing. Lets halogen-owned code
@@ -28,124 +37,11 @@ pub enum HitIdentity {
     OverlayBackdrop,
 }
 
-/// A pointer click at a specific position. Coordinates are in the same
-/// space as the HitRegion's rect.
+/// A pointer click at a specific position, in hit table coordinates.
 #[derive(Debug, Clone, Copy)]
 pub struct ClickEvent {
     pub x: f32,
     pub y: f32,
-}
-
-/// Click callback producing some app-defined result `R`. Stored as `Rc<Fn>`
-/// so it can be cheaply cloned and invoked multiple times (e.g. tests
-/// peeking the outcome without consuming).
-///
-/// `Clone` is a manual impl that doesn't require `R: Clone` — the internal
-/// `Rc` is always cheap to clone regardless of `R`.
-pub struct ClickHandler<R: 'static>(Rc<dyn Fn(ClickEvent) -> R>);
-
-impl<R: 'static> Clone for ClickHandler<R> {
-    fn clone(&self) -> Self {
-        Self(Rc::clone(&self.0))
-    }
-}
-
-impl<R: 'static> ClickHandler<R> {
-    pub fn new(f: impl Fn(ClickEvent) -> R + 'static) -> Self {
-        Self(Rc::new(f))
-    }
-
-    pub fn invoke(&self, event: ClickEvent) -> R {
-        (self.0)(event)
-    }
-}
-
-impl<R: 'static> std::fmt::Debug for ClickHandler<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ClickHandler(..)")
-    }
-}
-
-/// A pointer-interactive rectangle collected during paint. The app drains
-/// these off of the built UI frame each tick and dispatches through them.
-///
-/// `Clone` and `Debug` are implemented manually so callers can specialize
-/// `R` with types (like an app's `ClickResult`) that themselves don't
-/// implement those traits — the struct's cloneability comes from the
-/// internal `Rc`, not from `R`.
-pub struct HitRegion<R: 'static> {
-    pub rect: Rect,
-    pub cursor: CursorHint,
-    pub on_click: ClickHandler<R>,
-    pub identity: Option<HitIdentity>,
-}
-
-impl<R: 'static> Clone for HitRegion<R> {
-    fn clone(&self) -> Self {
-        Self {
-            rect: self.rect,
-            cursor: self.cursor,
-            on_click: self.on_click.clone(),
-            identity: self.identity,
-        }
-    }
-}
-
-impl<R: 'static> std::fmt::Debug for HitRegion<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HitRegion")
-            .field("rect", &self.rect)
-            .field("cursor", &self.cursor)
-            .field("identity", &self.identity)
-            .finish()
-    }
-}
-
-impl<R: 'static> HitRegion<R> {
-    pub fn new(rect: Rect, cursor: CursorHint, on_click: ClickHandler<R>) -> Self {
-        Self {
-            rect,
-            cursor,
-            on_click,
-            identity: None,
-        }
-    }
-
-    pub fn with_identity(mut self, identity: HitIdentity) -> Self {
-        self.identity = Some(identity);
-        self
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Hitbox — prepaint-phase interaction regions with z-ordering and blocking
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HitboxId(usize);
-
-impl HitboxId {
-    pub fn new(id: usize) -> Self {
-        Self(id)
-    }
-
-    pub fn raw(self) -> usize {
-        self.0
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum HitboxBehavior {
-    Normal,
-    BlockMouse,
-}
-
-#[derive(Debug, Clone)]
-pub struct Hitbox {
-    pub id: HitboxId,
-    pub bounds: Rect,
-    pub behavior: HitboxBehavior,
-    pub z_index: i32,
 }
 
 /// A tooltip-bearing rectangle collected during paint. The host app drains
@@ -157,43 +53,202 @@ pub struct TooltipRegion {
     pub text: String,
 }
 
-/// Resolve which hitboxes are hovered given the current mouse position.
-///
-/// Walks candidates whose bounds contain the mouse, orders them by z-index
-/// descending (with last-registered winning ties), then culls any hitbox
-/// behind a `BlockMouse` whose bounds overlap the blocker.
-pub fn resolve_hovered(hitboxes: &[Hitbox], mouse: Option<(f32, f32)>) -> Vec<HitboxId> {
-    let mouse = match mouse {
-        Some(pos) => pos,
-        None => return Vec::new(),
-    };
+/// Index of an entry in a [`HitTable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HitId(u32);
 
-    let mut candidates: Vec<(HitboxId, Rect, HitboxBehavior, i32)> = Vec::new();
-    for hb in hitboxes {
-        if hb.bounds.contains(mouse.0, mouse.1) {
-            candidates.push((hb.id, hb.bounds, hb.behavior, hb.z_index));
+impl HitId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// What a hit entry responds to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct HitFlags(u8);
+
+impl HitFlags {
+    pub const NONE: Self = Self(0);
+    /// Entries below this one (by z, then paint order) see neither hover nor
+    /// clicks at points this entry covers.
+    pub const BLOCKS_MOUSE: Self = Self(1);
+    pub const HOVER: Self = Self(1 << 1);
+    pub const CLICK: Self = Self(1 << 2);
+    pub const DRAG: Self = Self(1 << 3);
+    pub const SCROLL: Self = Self(1 << 4);
+    pub const TEXT: Self = Self(1 << 5);
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for HitFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        self.union(rhs)
+    }
+}
+
+impl std::ops::BitOrAssign for HitFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = self.union(rhs);
+    }
+}
+
+/// Clip of an entry with no clipping ancestor.
+pub const UNCLIPPED: Rect = Rect {
+    x: -1.0e9,
+    y: -1.0e9,
+    width: 2.0e9,
+    height: 2.0e9,
+};
+
+/// Clip of an entry whose ancestor clips do not overlap. `Rect::contains`
+/// is edge-inclusive, so a zero-size rect would still contain its origin.
+pub const EMPTY_CLIP: Rect = Rect {
+    x: 0.0,
+    y: 0.0,
+    width: -1.0,
+    height: -1.0,
+};
+
+const NO_NODE: u32 = u32::MAX;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HitTableIntegrityError {
+    ColumnLength {
+        column: &'static str,
+        len: usize,
+        expected: usize,
+    },
+}
+
+/// Every pointer-interactive rectangle of one frame, one row per entry,
+/// stored column-wise. Rows are in paint order; `push` order is the
+/// tiebreak between entries of equal z.
+#[derive(Debug, Clone, Default)]
+pub struct HitTable {
+    bounds: Vec<Rect>,
+    /// Intersection of every ancestor clip, in the same space as `bounds`.
+    clip: Vec<Rect>,
+    z: Vec<i32>,
+    /// Semantic node index, or `NO_NODE` until the owner binds it in paint.
+    node: Vec<u32>,
+    flags: Vec<HitFlags>,
+    cursor: Vec<CursorHint>,
+    identity: Vec<Option<HitIdentity>>,
+}
+
+impl HitTable {
+    pub fn push(
+        &mut self,
+        bounds: Rect,
+        clip: Rect,
+        z: i32,
+        flags: HitFlags,
+        cursor: CursorHint,
+    ) -> HitId {
+        let id = HitId(self.bounds.len() as u32);
+        self.bounds.push(bounds);
+        self.clip.push(clip);
+        self.z.push(z);
+        self.node.push(NO_NODE);
+        self.flags.push(flags);
+        self.cursor.push(cursor);
+        self.identity.push(None);
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        id
+    }
+
+    pub fn set_node(&mut self, id: HitId, node: usize) {
+        if let Some(slot) = self.node.get_mut(id.index()) {
+            *slot = u32::try_from(node).unwrap_or(NO_NODE);
         }
     }
 
-    candidates.reverse();
-    candidates.sort_by(|a, b| b.3.cmp(&a.3));
+    pub fn set_identity(&mut self, id: HitId, identity: Option<HitIdentity>) {
+        if let Some(slot) = self.identity.get_mut(id.index()) {
+            *slot = identity;
+        }
+    }
 
-    let mut hovered = Vec::new();
-    let mut blocked_regions: Vec<Rect> = Vec::new();
+    pub fn len(&self) -> usize {
+        self.bounds.len()
+    }
 
-    for &(id, bounds, behavior, _z) in &candidates {
-        let is_blocked = blocked_regions
+    pub fn is_empty(&self) -> bool {
+        self.bounds.is_empty()
+    }
+
+    pub fn bounds(&self, id: HitId) -> Rect {
+        self.bounds[id.index()]
+    }
+
+    pub fn node(&self, id: HitId) -> Option<usize> {
+        let node = self.node[id.index()];
+        (node != NO_NODE).then_some(node as usize)
+    }
+
+    pub fn flags(&self, id: HitId) -> HitFlags {
+        self.flags[id.index()]
+    }
+
+    pub fn cursor(&self, id: HitId) -> CursorHint {
+        self.cursor[id.index()]
+    }
+
+    pub fn identity(&self, id: HitId) -> Option<HitIdentity> {
+        self.identity[id.index()]
+    }
+
+    /// Entries under `(x, y)`, topmost first: higher z wins, then later
+    /// paint order. A point counts only when both the bounds and the clip
+    /// contain it. The list ends at the first `BLOCKS_MOUSE` entry
+    /// (inclusive), so nothing beneath a blocker is hovered or clicked.
+    pub fn stack_at(&self, x: f32, y: f32) -> Vec<HitId> {
+        let mut stack: Vec<HitId> = (0..self.bounds.len())
+            .filter(|&i| self.bounds[i].contains(x, y) && self.clip[i].contains(x, y))
+            .map(|i| HitId(i as u32))
+            .collect();
+        stack.sort_unstable_by(|a, b| (self.z[b.index()], b.0).cmp(&(self.z[a.index()], a.0)));
+        if let Some(blocker) = stack
             .iter()
-            .any(|blocker| blocker.intersection(bounds).is_some());
-
-        if !is_blocked {
-            hovered.push(id);
+            .position(|id| self.flags(*id).contains(HitFlags::BLOCKS_MOUSE))
+        {
+            stack.truncate(blocker + 1);
         }
-
-        if behavior == HitboxBehavior::BlockMouse {
-            blocked_regions.push(bounds);
-        }
+        stack
     }
 
-    hovered
+    pub fn verify_integrity(&self) -> Result<(), HitTableIntegrityError> {
+        let expected = self.bounds.len();
+        let columns = [
+            ("clip", self.clip.len()),
+            ("z", self.z.len()),
+            ("node", self.node.len()),
+            ("flags", self.flags.len()),
+            ("cursor", self.cursor.len()),
+            ("identity", self.identity.len()),
+        ];
+        for (column, len) in columns {
+            if len != expected {
+                return Err(HitTableIntegrityError::ColumnLength {
+                    column,
+                    len,
+                    expected,
+                });
+            }
+        }
+        Ok(())
+    }
 }

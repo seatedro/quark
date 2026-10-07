@@ -4,11 +4,12 @@
 use quark::Color;
 use quark::Rect;
 use quark::scene::{
-    FontKind, FontWeight, RoundedRectPrimitive, Scene, ShadowPrimitive, TextPrimitive,
+    FontWeight, RoundedRectPrimitive, Scene, ShadowPrimitive, ShapedText, TextPrimitive,
 };
 use quark_app::winit::event::{ElementState, MouseButton};
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{App, EventContext, FrameContext, InputEvent, WindowOptions};
+use quark_text::{TextParams, TextStyle};
 
 const COLORS: [Color; 3] = [
     Color::rgba(88, 101, 242, 255),
@@ -25,14 +26,13 @@ struct Hello {
 impl App for Hello {
     fn frame(&mut self, cx: &mut FrameContext) -> Scene {
         let (width, height) = cx.size();
-        let scale = cx.scale_factor();
         self.card = Rect {
             x: 0.0,
             y: 0.0,
             width,
-            height: height,
+            height,
         }
-        .center(320.0 * scale, 160.0 * scale);
+        .center(320.0, 160.0);
 
         let mut scene = Scene::default();
         scene.rect(quark::scene::RectPrimitive {
@@ -46,24 +46,27 @@ impl App for Hello {
         });
         scene.shadow(ShadowPrimitive {
             rect: self.card,
-            blur_radius: 24.0 * scale,
-            corner_radius: 16.0 * scale,
-            offset: [0.0, 8.0 * scale],
+            blur_radius: 24.0,
+            corner_radius: 16.0,
+            offset: [0.0, 8.0],
             color: Color::rgba(0, 0, 0, 160),
         });
         scene.rounded_rect(RoundedRectPrimitive::uniform(
             self.card,
-            16.0 * scale,
+            16.0,
             COLORS[self.color],
         ));
-        scene.text(TextPrimitive {
-            rect: self.card.inset(24.0 * scale),
-            text: "Hello from Quark. Click me, Esc quits.".into(),
-            color: Color::rgba(255, 255, 255, 255),
-            font_size: 20.0 * scale,
-            font_kind: FontKind::Ui,
-            font_weight: FontWeight::Semibold,
-        });
+        let label = self.card.inset(24.0);
+        let style = TextStyle::new(20.0).weight(FontWeight::Semibold);
+        let params = TextParams::new("Hello from Quark. Click me, Esc quits.", style)
+            .wrap_width(Some(label.width));
+        if let Ok(layout) = cx.layout_text(&params) {
+            scene.text(TextPrimitive {
+                rect: label,
+                layout: ShapedText::new(layout),
+                color: Color::rgba(255, 255, 255, 255),
+            });
+        }
         scene
     }
 

@@ -13,6 +13,8 @@ pub struct Div {
     children: Vec<AnyElement>,
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
+    on_drag: Option<DragStart>,
+    key_bindings: Vec<(String, Action)>,
     on_scroll: Option<ScrollActionBuilder>,
     cursor: CursorHint,
     scroll_y: f32,
@@ -28,6 +30,7 @@ pub struct Div {
     test_id: Option<TestId>,
     semantic_role: Option<SemanticRole>,
     focus_scope: Option<FocusScopeId>,
+    trap_focus: bool,
     tab_stop: Option<TabStop>,
     key_context: Option<KeyContext>,
     event_bindings: Vec<UiEventBinding>,
@@ -51,6 +54,8 @@ pub fn div() -> Div {
         children: Vec::new(),
         on_click: None,
         on_click_handler: None,
+        on_drag: None,
+        key_bindings: Vec::new(),
         on_scroll: None,
         cursor: CursorHint::Default,
         scroll_y: 0.0,
@@ -66,6 +71,7 @@ pub fn div() -> Div {
         test_id: None,
         semantic_role: None,
         focus_scope: None,
+        trap_focus: false,
         tab_stop: None,
         key_context: None,
         event_bindings: Vec::new(),
@@ -202,11 +208,23 @@ impl Div {
         self
     }
 
-    /// Make this element capture the mouse: its hitbox uses `HitboxBehavior::BlockMouse`,
-    /// so hover resolution culls any overlapping hitbox registered *behind* it (lower in
-    /// the paint order). Use on elevated surfaces (cards, popovers) so hovering them does
-    /// not also highlight elements underneath, and on the topmost of two overlapping
-    /// controls so only it reports hover. Registers a hitbox even without `on_click`.
+    /// Start a drag on pointer down. The handler `start` returns captures the
+    /// pointer and receives every move and the release until the button goes up.
+    pub fn on_drag(mut self, start: impl Fn(ClickEvent) -> Box<dyn DragHandler> + 'static) -> Self {
+        self.on_drag = Some(DragStart::new(start));
+        self
+    }
+
+    /// Emit `action` when `binding` (keymap format, e.g. `"enter"`) is pressed
+    /// while this element or a descendant has focus.
+    pub fn on_key(mut self, binding: impl Into<String>, action: impl Into<Action>) -> Self {
+        self.key_bindings.push((binding.into(), action.into()));
+        self
+    }
+
+    /// Make this element capture the mouse: hover and clicks stop at it, so
+    /// nothing beneath it (lower z, or earlier in paint order) is hovered or
+    /// clicked where it covers. Use on elevated surfaces and scrims.
     pub fn block_mouse(mut self) -> Self {
         self.block_mouse = true;
         self
@@ -311,6 +329,13 @@ impl Div {
         self
     }
 
+    /// Mark this element's focus scope modal: while it is painted, Tab
+    /// cycles only within it and clicks outside it leave focus alone.
+    pub fn trap_focus(mut self, trap: bool) -> Self {
+        self.trap_focus = trap;
+        self
+    }
+
     pub fn tab_stop(mut self, tab_stop: impl Into<TabStop>) -> Self {
         self.tab_stop = Some(tab_stop.into());
         self
@@ -407,6 +432,48 @@ impl Div {
         self
     }
 
+    // -- Internal: input registration --
+
+    /// Bind the hit entry to semantic node `node` and register its handlers.
+    /// A hit entry always comes with a semantic node (`hit_test` action).
+    fn register_input(
+        &mut self,
+        node: usize,
+        hit: Option<HitId>,
+        bounds: Bounds,
+        cx: &mut ElementContext,
+    ) {
+        if let Some(hit) = hit {
+            cx.bind_hit(hit, node);
+            cx.hit_table.set_identity(hit, self.hit_identity.take());
+        }
+        let click = self
+            .on_click_handler
+            .take()
+            .or_else(|| self.on_click.take().map(ClickHandler::from_action));
+        if let Some(click) = click {
+            cx.handlers.on_click(node, click);
+        }
+        if let Some(start) = self.on_drag.take() {
+            cx.handlers.on_drag(node, start);
+        }
+        if let Some(builder) = self.on_scroll.clone() {
+            let max = (self.scroll_total_height > 0.0)
+                .then(|| (self.scroll_total_height - bounds.height).max(0.0));
+            cx.handlers.on_scroll(
+                node,
+                ScrollTarget {
+                    builder,
+                    offset: self.scroll_y,
+                    max,
+                },
+            );
+        }
+        for (binding, action) in self.key_bindings.drain(..) {
+            cx.handlers.on_key(node, binding, action);
+        }
+    }
+
     // -- Internal: resolve style with overrides --
 
     fn resolve_style(&self, hovered: bool) -> ElementStyle {
@@ -420,9 +487,9 @@ impl Div {
     }
 }
 
-/// Div's prepaint state: an optional hitbox ID (registered when on_click is set).
+/// Div's prepaint state: its hit entry, when it responds to the pointer.
 pub struct DivPrepaintState {
-    hitbox_id: Option<HitboxId>,
+    hit: Option<HitId>,
 }
 
 impl Element for Div {
@@ -457,22 +524,30 @@ impl Element for Div {
             cx.push_z_index(z);
         }
 
-        let hitbox_id = if self.block_mouse {
-            Some(cx.insert_hitbox(bounds, HitboxBehavior::BlockMouse))
-        } else if self.on_click.is_some()
-            || self.on_click_handler.is_some()
-            || self.hover_style.is_some()
-        {
-            Some(cx.insert_hitbox(bounds, HitboxBehavior::Normal))
-        } else {
-            None
-        };
+        let mut flags = HitFlags::NONE;
+        if self.block_mouse {
+            flags |= HitFlags::BLOCKS_MOUSE;
+        }
+        if self.hover_style.is_some() {
+            flags |= HitFlags::HOVER;
+        }
+        if self.on_click.is_some() || self.on_click_handler.is_some() {
+            flags |= HitFlags::CLICK;
+        }
+        if self.on_drag.is_some() {
+            flags |= HitFlags::DRAG;
+        }
+        if self.on_scroll.is_some() {
+            flags |= HitFlags::SCROLL;
+        }
+        let hit = (!flags.is_empty() || self.hit_identity.is_some())
+            .then(|| cx.insert_hit(bounds, flags, self.cursor));
 
-        if let Some(ref builder) = self.on_scroll {
-            cx.scroll_regions.push(ScrollRegion {
-                bounds,
-                action_builder: builder.clone(),
-            });
+        let clips = self.clips
+            || self.base_style.layout.overflow.x != taffy::Overflow::Visible
+            || self.base_style.layout.overflow.y != taffy::Overflow::Visible;
+        if clips {
+            cx.push_clip(bounds);
         }
 
         if self.scroll_y != 0.0 {
@@ -485,11 +560,14 @@ impl Element for Div {
             }
         }
 
+        if clips {
+            cx.pop_clip();
+        }
         if z != 0 {
             cx.pop_z_index();
         }
 
-        DivPrepaintState { hitbox_id }
+        DivPrepaintState { hit }
     }
 
     fn paint(
@@ -501,11 +579,10 @@ impl Element for Div {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
-        let hovered = prepaint_state
-            .hitbox_id
-            .map_or(false, |id| cx.is_hovered(id));
+        let hovered = prepaint_state.hit.is_some_and(|id| cx.is_hovered(id));
         let mut style = self.resolve_style(hovered);
-        let r = style.corner_radius;
+        let radii = style.corner_radii;
+        let r = style.max_corner_radius();
         let z = style.z_index;
         let opacity = style.opacity;
 
@@ -578,7 +655,11 @@ impl Element for Div {
                 corner_radius: r,
             });
         } else if let Some(bg) = style.background {
-            scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, r, bg));
+            scene.rounded_rect(RoundedRectPrimitive {
+                rect: bounds,
+                corner_radii: radii,
+                color: bg,
+            });
         }
 
         // Border
@@ -587,7 +668,7 @@ impl Element for Div {
                 scene.border(BorderPrimitive {
                     rect: bounds,
                     widths: style.border_widths,
-                    corner_radii: [r; 4],
+                    corner_radii: radii,
                     color: border,
                 });
             }
@@ -605,7 +686,7 @@ impl Element for Div {
                 scene.border(BorderPrimitive {
                     rect: ring_bounds,
                     widths: [2.0; 4],
-                    corner_radii: [(r + 2.0); 4],
+                    corner_radii: radii.map(|c| c + 2.0),
                     color: cx.theme.colors.focus_border,
                 });
             }
@@ -643,7 +724,10 @@ impl Element for Div {
         if self.tooltip.is_some() {
             semantic_actions = semantic_actions.tooltip();
         }
-        if self.block_mouse || self.hit_identity.is_some() {
+        if self.on_drag.is_some() {
+            semantic_actions = semantic_actions.draggable();
+        }
+        if prepaint_state.hit.is_some() {
             semantic_actions = semantic_actions.hit_test();
         }
 
@@ -679,10 +763,13 @@ impl Element for Div {
             || semantic_role.is_some()
             || !semantic_actions.is_empty()
             || self.focus_scope.is_some()
+            || !self.key_bindings.is_empty()
             || self.tab_stop.is_some()
             || self.key_context.is_some()
             || !self.event_bindings.is_empty()
-            || !style_state.is_empty();
+            || !style_state.is_empty()
+            // Accessible divs need a semantic node so descendants nest under them.
+            || accessibility_role.is_some();
         let semantic_parent = if should_emit_semantic {
             let mut node = SemanticNode::new(bounds);
             node.id = semantic_id;
@@ -702,7 +789,9 @@ impl Element for Div {
                 expanded: self.accessibility_expanded,
                 style_state,
             };
+            node.focus = self.focus_target;
             node.focus_scope = self.focus_scope.clone();
+            node.modal = self.trap_focus;
             node.tab_stop = self.tab_stop;
             node.key_context = self.key_context.clone();
             node.event_bindings = self.event_bindings.clone();
@@ -751,21 +840,14 @@ impl Element for Div {
             } else if let Some(builder) = self.on_scroll.clone() {
                 node = node.action(AccessibilityAction::Scroll(builder));
             }
-            cx.accessibility.push(node);
+            match semantic_parent {
+                Some(index) => cx.push_accessibility_for_semantic(node, index),
+                None => cx.push_accessibility(node),
+            };
         }
 
-        // Register parent hit BEFORE children so that children's hit regions
-        // (pushed later) are found first by the reverse search in handle_left_click.
-        // This gives correct z-order: child clicks take priority over parent clicks.
-        let identity = self.hit_identity.take();
-        let handler = self
-            .on_click_handler
-            .take()
-            .or_else(|| self.on_click.take().map(ClickHandler::from_action));
-        if let Some(handler) = handler {
-            let mut region = HitRegion::new(bounds, self.cursor, handler);
-            region.identity = identity;
-            cx.hits.push(region);
+        if let Some(node) = semantic_parent {
+            self.register_input(node, prepaint_state.hit, bounds, cx);
         }
 
         if let Some(tip) = self.tooltip.take() {
@@ -778,7 +860,7 @@ impl Element for Div {
 
         if should_clip {
             if r > 0.0 {
-                scene.clip_rounded(bounds, [r; 4]);
+                scene.clip_rounded(bounds, radii);
             } else {
                 scene.clip(bounds);
             }
@@ -901,7 +983,7 @@ impl Element for Div {
             scene.border(BorderPrimitive {
                 rect: bounds,
                 widths: [1.0; 4],
-                corner_radii: [r; 4],
+                corner_radii: radii,
                 color: wire_color,
             });
         }

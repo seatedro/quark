@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 quark.workspace = true
 quark-render.workspace = true
+quark-text.workspace = true
+quark-ui = { workspace = true, optional = true }
 accesskit.workspace = true
 accesskit_winit.workspace = true
 arboard.workspace = true
@@ -20,16 +22,73 @@ tracing.workspace = true
 winit.workspace = true
 subsecond = { workspace = true, optional = true }
 tungstenite = { workspace = true, optional = true }
-serde_json = { version = "1.0", optional = true }
+serde_json = "1.0"
+# zbus (pure Rust D-Bus) on Linux instead of libdbus, so no C library or
+# system headers are needed. macOS and Windows use the crate's native backends.
+# The XDG portal backend on Linux talks D-Bus directly instead of linking GTK.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"], optional = true }
+pollster = { workspace = true, optional = true }
+notify-rust = { version = "4.18", default-features = false, features = ["z"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSButton", "NSControl", "NSResponder"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 
+# The desktop theme from the XDG settings portal. Both crates are already in
+# every Linux build through accesskit's AT-SPI backend, so they add no size.
+[target.'cfg(target_os = "linux")'.dependencies.zbus]
+version = "5"
+default-features = false
+features = ["async-io"]
+
+[target.'cfg(target_os = "linux")'.dependencies.futures-lite]
+version = "2"
+default-features = false
+features = ["std"]
+
+# On Linux the tray speaks StatusNotifierItem over D-Bus through ksni (zbus,
+# already in the tree for accesskit) instead of libappindicator, so it needs
+# no GTK. Menus are snapshotted for ksni rather than built as GTK widgets.
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"], optional = true }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.26", default-features = false, optional = true }
+
+# Named pipes for single instance handoff; Unix uses std's Unix sockets.
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "2.2", default-features = false }
+
 [dev-dependencies]
 quark-render = { workspace = true, features = ["headless-render"] }
 image.workspace = true
 
 [features]
-hot-reload = ["dep:subsecond", "dep:tungstenite", "dep:serde_json"]
+default = ["ui"]
+# The quark-ui element adapter (`quark_app::ui`). Lives here rather than in
+# quark-ui because the adapter implements `App`, and quark-ui must not
+# depend on the windowing runner.
+ui = ["dep:quark-ui"]
+hot-reload = ["dep:subsecond", "dep:tungstenite"]
+# Desktop notifications through `EventContext::notify`.
+notifications = ["dep:notify-rust"]
+# A system tray icon and menu through `EventContext::set_tray`. Off by
+# default: it adds tray-icon and muda to every build.
+tray = ["dep:tray-icon"]
+# Open and save dialogs through `EventContext::file_dialog`.
+dialogs = ["dep:rfd", "dep:pollster"]
+# Image get and set through `EventContext::clipboard_image`.
+clipboard-image = ["arboard/image-data"]
+
+[[example]]
+name = "hello_ui"
+required-features = ["ui"]
+
+[[example]]
+name = "transcript_demo"
+required-features = ["ui"]
+
+[[example]]
+name = "platform_demo"
+required-features = ["notifications"]

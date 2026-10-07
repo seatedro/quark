@@ -129,6 +129,8 @@ pub struct TextSpan {
     pub range: Range<usize>,
     pub weight: Option<FontWeight>,
     pub style: Option<FontStyle>,
+    /// Font family override, e.g. an inline code run in UI text.
+    pub kind: Option<FontKind>,
 }
 
 /// Everything a layout depends on. Sizes are logical pixels.
@@ -325,6 +327,20 @@ impl TextLayout {
 
         let paragraphs = split_paragraphs(text);
         let base = base_attrs(&style);
+        // Scanning the font database costs a pass over every face; skip it
+        // for the common case of text without italic spans.
+        let synth = if params
+            .spans
+            .iter()
+            .any(|s| s.style == Some(FontStyle::Italic))
+        {
+            SyntheticItalic::new(fs)
+        } else {
+            SyntheticItalic {
+                ui: false,
+                mono: false,
+            }
+        };
         buffer.lines = paragraphs
             .iter()
             .map(|(range, ending)| {
@@ -333,7 +349,7 @@ impl TextLayout {
                     let start = span.range.start.max(range.start);
                     let end = span.range.end.min(range.end);
                     if start < end {
-                        let span_attrs = span_attrs(&style, span, i);
+                        let span_attrs = span_attrs(&style, span, i, synth);
                         attrs.add_span(start - range.start..end - range.start, &span_attrs);
                     }
                 }
@@ -1060,15 +1076,63 @@ fn base_attrs(style: &TextStyle) -> Attrs<'static> {
         )))
 }
 
-fn span_attrs(style: &TextStyle, span: &TextSpan, index: usize) -> Attrs<'static> {
+/// Which generic families lack an italic face. Their italic spans are
+/// slanted by the rasterizer instead (cosmic-text only does that when asked),
+/// so italic stays visible with fonts such as Geist that ship no italic.
+#[derive(Debug, Clone, Copy)]
+struct SyntheticItalic {
+    ui: bool,
+    mono: bool,
+}
+
+impl SyntheticItalic {
+    fn new(fs: &FontSystem) -> Self {
+        let db = fs.db();
+        let lacks_italic = |generic: Family| {
+            let name = db.family_name(&generic);
+            !db.faces().any(|face| {
+                face.style != fontdb::Style::Normal
+                    && face.families.iter().any(|(family, _)| family == name)
+            })
+        };
+        Self {
+            ui: lacks_italic(Family::SansSerif),
+            mono: lacks_italic(Family::Monospace),
+        }
+    }
+
+    fn needed(self, kind: FontKind) -> bool {
+        match kind {
+            FontKind::Ui => self.ui,
+            FontKind::Mono => self.mono,
+        }
+    }
+}
+
+fn span_attrs(
+    style: &TextStyle,
+    span: &TextSpan,
+    index: usize,
+    synth: SyntheticItalic,
+) -> Attrs<'static> {
+    let kind = span.kind.unwrap_or(style.font_kind);
     let weight = span.weight.unwrap_or(style.font_weight);
-    let font_style = match span.style.unwrap_or(FontStyle::Normal) {
-        FontStyle::Normal => cosmic_text::Style::Normal,
-        FontStyle::Italic => cosmic_text::Style::Italic,
+    let italic = span.style == Some(FontStyle::Italic);
+    let font_style = if italic {
+        cosmic_text::Style::Italic
+    } else {
+        cosmic_text::Style::Normal
+    };
+    let flags = if italic && synth.needed(kind) {
+        CacheKeyFlags::FAKE_ITALIC
+    } else {
+        CacheKeyFlags::empty()
     };
     base_attrs(style)
-        .weight(cosmic_text::Weight(weight_value(style.font_kind, weight)))
+        .family(family(kind))
+        .weight(cosmic_text::Weight(weight_value(kind, weight)))
         .style(font_style)
+        .cache_key_flags(flags)
         .metadata(index + 1)
 }
 #[cfg(test)]
@@ -1358,6 +1422,7 @@ mod tests {
             range: 6..10,
             weight: Some(FontWeight::Bold),
             style: Some(FontStyle::Italic),
+            kind: None,
         }];
         let params = TextParams::new("plain bold plain", TextStyle::new(14.0)).spans(spans);
         let layout = test_system().layout(&params).expect("layout");
@@ -1470,6 +1535,7 @@ mod tests {
             range,
             weight: None,
             style: None,
+            kind: None,
         };
         let cases = [
             (

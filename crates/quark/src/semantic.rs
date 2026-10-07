@@ -1,6 +1,6 @@
 use crate::{
-    FocusNode, FocusScopeId, FocusTree, KeyContext, Rect, StyleState, TabStop, TestId,
-    UiEventBinding, UiEventRoute, UiKey, UiNodeId,
+    FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, Rect, StyleState, TabStop, TestId,
+    UiEventBinding, UiEventPhase, UiEventRoute, UiKey, UiNodeId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,7 +107,13 @@ pub struct SemanticNode {
     pub bounds: Rect,
     pub actions: SemanticActions,
     pub state: SemanticNodeState,
+    /// Focus target this node represents. Falls back to a hash of the
+    /// node's stable id when unset.
+    pub focus: Option<FocusId>,
     pub focus_scope: Option<FocusScopeId>,
+    /// With `focus_scope` set, traps Tab inside the scope and keeps clicks
+    /// outside the node from moving focus.
+    pub modal: bool,
     pub tab_stop: Option<TabStop>,
     pub key_context: Option<KeyContext>,
     pub event_bindings: Vec<UiEventBinding>,
@@ -128,7 +134,9 @@ impl SemanticNode {
             bounds,
             actions: SemanticActions::default(),
             state: SemanticNodeState::default(),
+            focus: None,
             focus_scope: None,
+            modal: false,
             tab_stop: None,
             key_context: None,
             event_bindings: Vec::new(),
@@ -242,6 +250,59 @@ impl SemanticFrame {
         Some(path)
     }
 
+    /// Node indices an event visits on its way to `target` and back:
+    /// ancestors root-first in capture, the target, then ancestors in bubble.
+    pub fn route_indices(&self, target: usize) -> Option<Vec<(usize, UiEventPhase)>> {
+        let path = self.node_path(target)?;
+        let (&target, ancestors) = path.split_last()?;
+        let mut steps = Vec::with_capacity(path.len() * 2 - 1);
+        steps.extend(ancestors.iter().map(|i| (*i, UiEventPhase::Capture)));
+        steps.push((target, UiEventPhase::Target));
+        steps.extend(ancestors.iter().rev().map(|i| (*i, UiEventPhase::Bubble)));
+        Some(steps)
+    }
+
+    /// `node` and its ancestors, innermost first.
+    pub fn ancestors_inclusive(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        // Parents are pushed before children; requiring a smaller index
+        // guarantees the walk ends even on a malformed frame.
+        std::iter::successors(Some(node).filter(|i| *i < self.nodes.len()), |i| {
+            self.nodes[*i].parent.filter(|parent| parent < i)
+        })
+    }
+
+    pub fn is_within(&self, node: usize, ancestor: usize) -> bool {
+        self.ancestors_inclusive(node).any(|i| i == ancestor)
+    }
+
+    /// The focus scope `node` belongs to: its own or its nearest ancestor's.
+    pub fn scope_of(&self, node: usize) -> Option<&FocusScopeId> {
+        self.ancestors_inclusive(node)
+            .find_map(|i| self.nodes[i].focus_scope.as_ref())
+    }
+
+    /// The topmost (last painted) modal focus scope root, if any.
+    pub fn modal_root(&self) -> Option<usize> {
+        self.nodes
+            .iter()
+            .rposition(|node| node.modal && node.focus_scope.is_some())
+    }
+
+    /// Focus target of `node`, when it can take focus.
+    pub fn focus_id(&self, node: usize) -> Option<FocusId> {
+        let n = self.nodes.get(node)?;
+        if !(n.actions.focus || n.actions.text_value || n.tab_stop.is_some()) {
+            return None;
+        }
+        n.focus
+            .or_else(|| self.stable_node_id(node).map(FocusId::from))
+    }
+
+    /// Index of the node that owns focus target `focus`.
+    pub fn node_for_focus(&self, focus: FocusId) -> Option<usize> {
+        (0..self.nodes.len()).rfind(|i| self.focus_id(*i) == Some(focus))
+    }
+
     pub fn event_route(&self, target: usize) -> Option<UiEventRoute> {
         let path = self.node_path(target)?;
         let target_id = self.stable_node_id(*path.last()?)?;
@@ -256,18 +317,21 @@ impl SemanticFrame {
     pub fn focus_tree(&self) -> FocusTree {
         let mut tree = FocusTree::default();
         for (index, node) in self.nodes.iter().enumerate() {
-            if !(node.actions.focus || node.actions.text_value || node.tab_stop.is_some()) {
-                continue;
-            }
-            let Some(id) = self.stable_node_id(index) else {
+            let Some(id) = self.focus_id(index) else {
                 continue;
             };
             tree.register(FocusNode {
                 id,
-                scope: node.focus_scope.clone(),
+                scope: self.scope_of(index).cloned(),
                 tab_stop: node.tab_stop.unwrap_or_else(|| TabStop::new(index as i32)),
                 key_context: node.key_context.clone(),
             });
+        }
+        if let Some(scope) = self
+            .modal_root()
+            .and_then(|root| self.nodes[root].focus_scope.clone())
+        {
+            tree.trap_modal_scope(scope);
         }
         tree
     }
@@ -401,8 +465,8 @@ mod tests {
         let order: Vec<_> = tree
             .tab_order(Some(&scope))
             .into_iter()
-            .map(|node| node.id.as_str().to_owned())
+            .map(|node| node.id)
             .collect();
-        assert_eq!(order, vec!["save"]);
+        assert_eq!(order, vec![FocusId::from_key("save")]);
     }
 }

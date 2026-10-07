@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 quark.workspace = true
+quark-text.workspace = true
 bytemuck.workspace = true
 glyphon.workspace = true
 image.workspace = true

@@ -4,23 +4,23 @@
 //! (Taffy) resolves concrete pixel coordinates. The lifecycle is:
 //!
 //! 1. **request_layout** — declare Taffy style and children.
-//! 2. **prepaint** — register hitboxes, resolve interaction state.
+//! 2. **prepaint** — register hit entries, resolve hover.
 //! 3. **paint** — emit scene primitives using resolved hover/hit state.
 
-use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
 use crate::action::{Action, FocusId};
 use crate::design::{Alpha, Sz};
 use crate::theme::Theme;
 use accesskit::Role as AccessibilityRole;
-pub use quark::hit::{ClickEvent, CursorHint, HitIdentity, Hitbox, HitboxBehavior, HitboxId};
+pub use quark::hit::{ClickEvent, CursorHint, HitFlags, HitId, HitIdentity, HitTable};
 use quark::reactive::{Signal, SignalStore};
 use quark::{
-    FocusScopeId, KeyContext, SemanticActions, SemanticFrame, SemanticNode, SemanticNodeState,
-    SemanticRole, StyleState, TabStop, TestId, UiEventBinding, UiEventKind, UiEventPhase,
-    UiEventResult, UiKey, UiNodeId,
+    FocusScopeId, FocusTree, KeyContext, SemanticActions, SemanticFrame, SemanticNode,
+    SemanticNodeState, SemanticRole, StyleState, TabStop, TestId, UiEventBinding, UiEventKind,
+    UiEventPhase, UiEventResult, UiKey, UiNodeId,
 };
 use quark_render::Scene;
 use quark_render::scene::{BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect};
@@ -36,8 +36,12 @@ pub use quark::style::{
     vignette,
 };
 
-use quark_render::scene::{FontStyle, RichTextPrimitive, RichTextSpan};
+use quark_render::push_text_decorations;
+use quark_render::scene::{
+    FontStyle, RichTextPrimitive, ShapedText, TextDecoration, TextDecorationKind,
+};
 use quark_render::{FontKind, TextPrimitive};
+use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 
 mod canvas;
 mod code_block;
@@ -48,6 +52,7 @@ mod image;
 mod layout;
 mod measure;
 mod render;
+mod router;
 mod selectable_text;
 mod spacer;
 mod text;
@@ -64,8 +69,9 @@ pub use div::*;
 pub use hit::*;
 pub use image::*;
 pub use layout::*;
-pub use measure::*;
+use measure::*;
 pub use render::*;
+pub use router::*;
 pub use selectable_text::*;
 pub use spacer::*;
 pub use text::*;
