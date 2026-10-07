@@ -888,7 +888,15 @@ impl Terminal {
             );
             sys::ghostty_key_event_set_key(ev, input.key.0);
             sys::ghostty_key_event_set_mods(ev, input.mods.0);
-            sys::ghostty_key_event_set_consumed_mods(ev, 0);
+            // macOS Option types characters (Ghostty's default, Option is
+            // not Alt): when it produced the text, it is spent on it, so
+            // the encoder sends the text instead of nothing.
+            let consumed = if cfg!(target_os = "macos") && text.is_some() {
+                input.mods.0 & sys::GHOSTTY_MODS_ALT as u16
+            } else {
+                0
+            };
+            sys::ghostty_key_event_set_consumed_mods(ev, consumed);
             sys::ghostty_key_event_set_composing(ev, false);
             match text {
                 Some(t) => sys::ghostty_key_event_set_utf8(ev, t.as_ptr().cast(), t.len()),
