@@ -26,6 +26,8 @@ pub struct TextEditorElement {
     focused: bool,
     cursor: Option<CursorSnapshot>,
     selection_rects: Vec<SelectionRect>,
+    /// Pills behind atom labels.
+    atom_rects: Vec<SelectionRect>,
     content_height: f32,
     scroll_y: f32,
     font_size: f32,
@@ -64,6 +66,7 @@ pub fn text_editor_element(
         focused: false,
         cursor: None,
         selection_rects: Vec::new(),
+        atom_rects: Vec::new(),
         content_height: 0.0,
         scroll_y: 0.0,
         font_size: 14.0,
@@ -162,6 +165,7 @@ impl TextEditorElement {
         self.span_kinds = editor.paint_span_kinds();
         (self.preedit_rects, self.clause_rects) = editor.preedit_rects();
         self.selection_rects = editor.selection_rects();
+        self.atom_rects = editor.atom_rects();
         self.content_height = editor.content_height();
         self.scroll_y = editor.scroll_y;
         self.mode = editor.mode();
@@ -290,6 +294,22 @@ impl Element for TextEditorElement {
                     layout: ShapedText::new(layout),
                     color: theme.colors.gutter_text,
                 });
+            }
+        }
+
+        if !self.is_empty {
+            let pill = theme.colors.accent.with_alpha(Alpha::DIM);
+            for rect in &self.atom_rects {
+                scene.rounded_rect(RoundedRectPrimitive::uniform(
+                    Rect {
+                        x: text_x + rect.x - 2.0,
+                        y: text_y - self.scroll_y + rect.y + 1.0,
+                        width: rect.w + 4.0,
+                        height: rect.h - 2.0,
+                    },
+                    4.0,
+                    pill,
+                ));
             }
         }
 

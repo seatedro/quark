@@ -9,6 +9,12 @@
 //! [`TextEditorElement`] paints an [`Editor`] snapshot (text, selection,
 //! cursor, gutter) as an element.
 //!
+//! For chat inputs the editor also keeps atomic inline spans
+//! ([`InlineAtom`]: mention chips that edit as one unit), lets the app
+//! intercept pastes and drops ([`InputHooks`]), finds trigger characters at
+//! the caret ([`TriggerRule`]) to drive a [`Completion`] popup, and recalls
+//! earlier prompts ([`PromptHistory`]).
+//!
 //! Positions are [`TextOffset`]s on grapheme boundaries; raw byte indices
 //! (in [`TextEditCommand`]s) are snapped onto the target's text on entry.
 
@@ -16,15 +22,29 @@
 #![deny(clippy::string_slice)]
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
+mod atoms;
 mod buffer;
+mod completion;
 mod editor;
+mod history;
+mod hooks;
 mod ime;
 mod input_element;
 mod keys;
 mod pointer;
 mod text_edit;
+mod trigger;
 mod undo;
 mod view;
+
+pub use atoms::{AtomId, AtomIntegrityError, InlineAtom, RichClipboard, RichText};
+pub use completion::{
+    Answer, Completion, CompletionItem, CompletionKey, CompletionProvider, CompletionQuery,
+    completion_list,
+};
+pub use history::PromptHistory;
+pub use hooks::{InputHooks, Insertion, NoHooks};
+pub use trigger::{TriggerBoundary, TriggerMatch, TriggerRule, find_trigger};
 
 pub use editor::{
     CursorState, Editor, EditorMode, SelectionRect, SyntaxHighlighter, SyntaxSpan, SyntaxTokenKind,
