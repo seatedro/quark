@@ -7,9 +7,9 @@ pub struct Waker(WakeTarget);
 #[derive(Debug, Clone)]
 enum WakeTarget {
     EventLoop(EventLoopProxy<()>),
-    /// No event loop: unit tests drive apps without one.
-    #[cfg(all(test, feature = "ui"))]
-    Detached,
+    /// No event loop: the headless test runner polls the flag instead.
+    #[cfg(feature = "test-support")]
+    Detached(Arc<std::sync::atomic::AtomicBool>),
 }
 
 impl Waker {
@@ -17,9 +17,18 @@ impl Waker {
         Self(WakeTarget::EventLoop(proxy))
     }
 
-    #[cfg(all(test, feature = "ui"))]
+    #[cfg(feature = "test-support")]
     pub(crate) fn detached() -> Self {
-        Self(WakeTarget::Detached)
+        Self(WakeTarget::Detached(Arc::default()))
+    }
+
+    /// Whether a detached waker was woken since the last call.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn take_detached_wake(&self) -> bool {
+        match &self.0 {
+            WakeTarget::Detached(woken) => woken.swap(false, std::sync::atomic::Ordering::AcqRel),
+            WakeTarget::EventLoop(_) => false,
+        }
     }
 
     pub fn wake(&self) {
@@ -27,19 +36,50 @@ impl Waker {
             WakeTarget::EventLoop(proxy) => {
                 let _ = proxy.send_event(());
             }
-            #[cfg(all(test, feature = "ui"))]
-            WakeTarget::Detached => {}
+            #[cfg(feature = "test-support")]
+            WakeTarget::Detached(woken) => woken.store(true, std::sync::atomic::Ordering::Release),
         }
     }
 
     /// The raw proxy, for code that speaks winit directly.
+    ///
+    /// # Panics
+    ///
+    /// Under the headless test harness, which has no event loop.
     pub fn proxy(&self) -> &EventLoopProxy<()> {
         match &self.0 {
             WakeTarget::EventLoop(proxy) => proxy,
-            #[cfg(all(test, feature = "ui"))]
-            WakeTarget::Detached => panic!("a detached test waker has no event loop"),
+            #[cfg(feature = "test-support")]
+            WakeTarget::Detached(_) => panic!("a detached test waker has no event loop"),
         }
     }
+}
+
+/// Where [`EventContext`]'s clipboard calls go.
+pub(super) enum Clipboard {
+    /// The system clipboard, opened on first use.
+    System(Option<arboard::Clipboard>),
+    /// In memory, so headless tests neither read nor clobber the desktop's.
+    #[cfg(feature = "test-support")]
+    Memory(MemoryClipboard),
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Default)]
+pub(crate) struct MemoryClipboard {
+    pub(crate) text: Option<String>,
+    #[cfg(feature = "clipboard-image")]
+    pub(crate) image: Option<ClipboardImage>,
+}
+
+/// What an [`EventContext`] reports about its window when no native window
+/// backs it: the headless test runner's pointer, modifiers, and scale.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HeadlessWindow {
+    pub(crate) pointer: Option<(f32, f32)>,
+    pub(crate) modifiers: ModifiersState,
+    pub(crate) scale_factor: f64,
 }
 
 /// Runner state that contexts mutate on the app's behalf.
@@ -216,10 +256,12 @@ pub struct EventContext<'a> {
     pub(super) window: Option<WindowHandle>,
     pub(super) text: &'a mut AppText,
     pub(super) flags: &'a mut Flags,
-    pub(super) clipboard: &'a mut Option<arboard::Clipboard>,
+    pub(super) clipboard: &'a mut Clipboard,
     pub(super) waker: &'a Waker,
     pub(super) events: &'a EventSink,
     pub(super) theme: Option<Theme>,
+    #[cfg(feature = "test-support")]
+    pub(super) headless: Option<HeadlessWindow>,
     /// When the callback started, measured from the runner's start.
     pub(super) elapsed: Duration,
     #[cfg(feature = "tray")]
@@ -286,10 +328,18 @@ impl EventContext<'_> {
     /// Last pointer position in logical points, if the pointer is inside the
     /// context's window.
     pub fn pointer_position(&self) -> Option<(f32, f32)> {
+        #[cfg(feature = "test-support")]
+        if let Some(headless) = self.headless {
+            return headless.pointer;
+        }
         self.state()?.input.pointer_position()
     }
 
     pub fn modifiers(&self) -> ModifiersState {
+        #[cfg(feature = "test-support")]
+        if let Some(headless) = self.headless {
+            return headless.modifiers;
+        }
         self.state()
             .map(|state| state.input.modifiers())
             .unwrap_or_default()
@@ -297,6 +347,10 @@ impl EventContext<'_> {
 
     /// Physical pixels per logical point for the context's window.
     pub fn scale_factor(&self) -> f32 {
+        #[cfg(feature = "test-support")]
+        if let Some(headless) = self.headless {
+            return headless.scale_factor as f32;
+        }
         self.state().map_or(1.0, |state| state.scale_factor as f32)
     }
 
@@ -339,10 +393,19 @@ impl EventContext<'_> {
     }
 
     pub fn clipboard_text(&mut self) -> Option<String> {
+        #[cfg(feature = "test-support")]
+        if let Clipboard::Memory(memory) = self.clipboard {
+            return memory.text.clone();
+        }
         self.clipboard()?.get_text().ok()
     }
 
     pub fn set_clipboard_text(&mut self, text: &str) {
+        #[cfg(feature = "test-support")]
+        if let Clipboard::Memory(memory) = self.clipboard {
+            memory.text = Some(text.to_owned());
+            return;
+        }
         if let Some(clipboard) = self.clipboard() {
             let _ = clipboard.set_text(text);
         }
@@ -351,6 +414,10 @@ impl EventContext<'_> {
     /// The clipboard's image, if it holds one.
     #[cfg(feature = "clipboard-image")]
     pub fn clipboard_image(&mut self) -> Option<ClipboardImage> {
+        #[cfg(feature = "test-support")]
+        if let Clipboard::Memory(memory) = self.clipboard {
+            return memory.image.clone();
+        }
         let image = self.clipboard()?.get_image().ok()?;
         Some(ClipboardImage {
             width: image.width,
@@ -365,6 +432,11 @@ impl EventContext<'_> {
     pub fn set_clipboard_image(&mut self, image: &ClipboardImage) -> bool {
         if image.rgba.len() != image.width * image.height * 4 {
             return false;
+        }
+        #[cfg(feature = "test-support")]
+        if let Clipboard::Memory(memory) = self.clipboard {
+            memory.image = Some(image.clone());
+            return true;
         }
         let Some(clipboard) = self.clipboard() else {
             return false;
@@ -455,10 +527,18 @@ impl EventContext<'_> {
         self.state().map(|state| &*state.window)
     }
 
+    /// The system clipboard; `None` when it cannot be opened or the
+    /// context uses an in-memory one.
     fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
-        if self.clipboard.is_none() {
-            *self.clipboard = arboard::Clipboard::new().ok();
+        match self.clipboard {
+            Clipboard::System(clipboard) => {
+                if clipboard.is_none() {
+                    *clipboard = arboard::Clipboard::new().ok();
+                }
+                clipboard.as_mut()
+            }
+            #[cfg(feature = "test-support")]
+            Clipboard::Memory(_) => None,
         }
-        self.clipboard.as_mut()
     }
 }

@@ -26,6 +26,8 @@ pub mod selection;
 pub mod semantic;
 pub mod style;
 pub mod style_state;
+#[cfg(test)]
+mod test_support;
 
 pub use animation::{AnimKey, AnimKind, AnimationTable, Curve, Motion, PropId, SpringParams};
 pub use color::Color;

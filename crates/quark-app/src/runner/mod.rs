@@ -39,7 +39,7 @@ mod event_loop;
 mod events;
 mod scale;
 mod table;
-#[cfg(all(test, feature = "ui"))]
+#[cfg(feature = "test-support")]
 mod testing;
 mod text;
 mod window;
@@ -52,7 +52,7 @@ pub use events::*;
 pub use scale::scene_to_physical;
 pub use table::WindowHandle;
 use table::WindowTable;
-#[cfg(all(test, feature = "ui"))]
-pub(crate) use testing::TestRunner;
+#[cfg(feature = "test-support")]
+pub(crate) use testing::HeadlessRunner;
 pub use text::AppText;
 use window::*;

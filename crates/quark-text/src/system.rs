@@ -13,6 +13,29 @@ pub struct TextSystem {
     /// out scans every face, so it runs when the fonts change rather than on
     /// every layout.
     synthetic_italic: SyntheticItalic,
+    /// Built by [`Self::vendored_only`]; another thread builds its twin the
+    /// same way.
+    vendored_only: bool,
+}
+
+/// How a [`TextSystem`] was built: enough for another thread to build one
+/// that shapes identically, since a `TextSystem` cannot be shared across
+/// threads. The vendored fonts are static bytes, so the copy costs only the
+/// database scan (plus the system fonts when the original loaded them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSystemRecipe {
+    settings: FontSettings,
+    vendored_only: bool,
+}
+
+impl TextSystemRecipe {
+    pub fn build(&self) -> TextSystem {
+        if self.vendored_only {
+            TextSystem::vendored_only(&self.settings)
+        } else {
+            TextSystem::with_settings(&self.settings)
+        }
+    }
 }
 
 impl TextSystem {
@@ -25,7 +48,7 @@ impl TextSystem {
     pub fn with_settings(settings: &FontSettings) -> Self {
         let mut font_system = FontSystem::new_with_fonts(vendored_font_sources());
         configure_generic_families(font_system.db_mut(), settings);
-        Self::from_parts(font_system, settings)
+        Self::from_parts(font_system, settings, false)
     }
 
     /// Loads only the vendored fonts, with a fixed locale, so shaping does
@@ -38,15 +61,25 @@ impl TextSystem {
         }
         configure_generic_families(&mut db, settings);
         let font_system = FontSystem::new_with_locale_and_db("en-US".to_owned(), db);
-        Self::from_parts(font_system, settings)
+        Self::from_parts(font_system, settings, true)
     }
 
-    fn from_parts(font_system: FontSystem, settings: &FontSettings) -> Self {
+    fn from_parts(font_system: FontSystem, settings: &FontSettings, vendored_only: bool) -> Self {
         Self {
             synthetic_italic: SyntheticItalic::new(&font_system),
             font_system,
             settings: settings.normalized(),
             generation: 0,
+            vendored_only,
+        }
+    }
+
+    /// How to build a system that shapes like this one, on another thread.
+    /// Changes made through [`Self::font_system_mut`] are not part of it.
+    pub fn recipe(&self) -> TextSystemRecipe {
+        TextSystemRecipe {
+            settings: self.settings.clone(),
+            vendored_only: self.vendored_only,
         }
     }
 
