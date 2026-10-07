@@ -324,4 +324,42 @@ mod tests {
             }
         }
     }
+
+    // Regression: the default vendored faces (Geist, Geist Mono) have no
+    // italic, so italic spans painted upright. They must be slanted
+    // synthetically, while a family that ships an italic face (JetBrains
+    // Mono) uses it instead of being slanted twice.
+    #[test]
+    fn italic_spans_without_an_italic_face_are_slanted() {
+        use quark::scene::FontStyle;
+        use quark_text::TextSpan;
+        use quark_text::cosmic_text::CacheKeyFlags;
+
+        let jetbrains = FontSettings {
+            mono_family: "JetBrains Mono".to_owned(),
+            ..FontSettings::default()
+        };
+        let cases = [
+            (FontSettings::default(), FontKind::Ui, true),
+            (FontSettings::default(), FontKind::Mono, true),
+            (jetbrains, FontKind::Mono, false),
+        ];
+        for (settings, kind, expected) in cases {
+            let mut system = TextSystem::vendored_only(&settings);
+            let span = TextSpan {
+                range: 0..6,
+                weight: None,
+                style: Some(FontStyle::Italic),
+                kind: Some(kind),
+            };
+            let params = TextParams::new("italic", TextStyle::new(14.0)).spans(vec![span]);
+            let layout = system.layout(&params).expect("layout");
+            let slanted = layout
+                .glyphs()
+                .flags
+                .iter()
+                .all(|f| f.contains(CacheKeyFlags::FAKE_ITALIC));
+            assert_eq!(slanted, expected, "{} {kind:?}", settings.mono_family);
+        }
+    }
 }
