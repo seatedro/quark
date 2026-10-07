@@ -366,7 +366,18 @@ fn grammar_store() -> quark_app::quark_ui::quark_syntax::GrammarStore {
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/syntax-packs")
         });
-    GrammarStore::new(StoreConfig::new().local_packs(root))
+    let config = StoreConfig::new().local_packs(root);
+    // With `syntax-download`, grammars missing locally come from quark's
+    // pack host, verified against its index key.
+    #[cfg(feature = "syntax-download")]
+    let config = {
+        use quark_app::quark_ui::quark_syntax::{Downloads, PublicKey};
+        const INDEX: &str = "https://quark.seated.ro/v1/{target}/index.json";
+        const KEY: &str = "2194429b3227f613ac19401deddbb0bdc2b4b283e1ecec0d0d38892c28d63955";
+        let key = PublicKey::from_hex(KEY).expect("valid pack index key");
+        config.downloads(Downloads::new("quark-demos", INDEX, &[key]))
+    };
+    GrammarStore::new(config)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
