@@ -344,8 +344,45 @@ impl SelectableText {
         self
     }
 
-    fn line_height(&self) -> f32 {
-        self.font_size * 1.35
+    /// Line height of selectable text at `font_size`.
+    pub fn line_height_for(font_size: f32) -> f32 {
+        font_size * 1.35
+    }
+
+    /// The text params `request_layout` shapes: `spans` over a base font
+    /// of `kind` and `weight`, wrapped to `width`. Measuring with these
+    /// through the frame's `LayoutCache` yields the layout the element
+    /// paints.
+    pub fn layout_params(
+        spans: &[StyledSpan],
+        font_size: f32,
+        kind: FontKind,
+        weight: FontWeight,
+        width: f32,
+    ) -> TextParams {
+        let style = TextStyle::new(font_size)
+            .kind(kind)
+            .weight(weight)
+            .line_height(Self::line_height_for(font_size));
+        styled_params(spans, style, Some(width.max(1.0)))
+    }
+
+    /// Height the element lays out at for `layout` (from
+    /// [`Self::layout_params`]), showing at most `max_lines`.
+    pub fn measured_height(
+        layout: Option<&TextLayout>,
+        font_size: f32,
+        max_lines: Option<usize>,
+    ) -> f32 {
+        let line_height = Self::line_height_for(font_size);
+        let height = match layout {
+            Some(layout) => match max_lines.and_then(|n| layout.line(n)) {
+                Some(first_hidden) => first_hidden.top,
+                None => layout.size().1,
+            },
+            None => line_height,
+        };
+        height.max(line_height).ceil()
     }
 }
 
@@ -449,25 +486,20 @@ impl Element for SelectableText {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
-        let line_height = self.line_height();
-        let style = TextStyle::new(self.font_size)
-            .kind(self.font_kind)
-            .weight(self.font_weight)
-            .line_height(line_height);
-        let params = styled_params(&self.spans, style, Some(self.width.max(1.0)));
+        let params = Self::layout_params(
+            &self.spans,
+            self.font_size,
+            self.font_kind,
+            self.font_weight,
+            self.width,
+        );
         let layout = cx.layout_text(&params);
-        let height = match &layout {
-            Some(layout) => match self.max_lines.and_then(|n| layout.line(n)) {
-                Some(first_hidden) => first_hidden.top,
-                None => layout.size().1,
-            },
-            None => line_height,
-        };
+        let height = Self::measured_height(layout.as_deref(), self.font_size, self.max_lines);
         let id = engine.request_layout(
             taffy::Style {
                 size: taffy::Size {
                     width: taffy::Dimension::length(self.width),
-                    height: taffy::Dimension::length(height.max(line_height).ceil()),
+                    height: taffy::Dimension::length(height),
                 },
                 flex_shrink: 0.0,
                 ..Default::default()

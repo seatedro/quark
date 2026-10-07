@@ -97,30 +97,8 @@ impl MarkdownView {
             .map(|(_, range)| *range)
     }
 
-    /// Span weights override the block's base weight in SelectableText, so
-    /// the base (heading, table header) is folded into every span here.
     fn styled(&self, spans: Range<usize>, base: FontWeight, theme: &Theme) -> Vec<StyledSpan> {
-        spans
-            .map(|s| {
-                let (text, flags, url) = self.doc.span(s);
-                let code = flags.contains(SpanFlags::CODE);
-                let image = flags.contains(SpanFlags::IMAGE);
-                StyledSpan {
-                    font_kind: if code { FontKind::Mono } else { FontKind::Ui },
-                    font_weight: if flags.contains(SpanFlags::BOLD) {
-                        FontWeight::Bold
-                    } else {
-                        base
-                    },
-                    italic: flags.contains(SpanFlags::ITALIC) || image,
-                    color: image.then_some(theme.colors.text_muted),
-                    pill: code.then_some(theme.colors.element_background),
-                    strikethrough: flags.contains(SpanFlags::STRIKE),
-                    link: url.cloned(),
-                    ..StyledSpan::plain(text)
-                }
-            })
-            .collect()
+        styled_spans(&self.doc, spans, base, theme)
     }
 
     fn build(&self, cx: &mut ElementContext) -> AnyElement {
@@ -159,13 +137,11 @@ impl MarkdownView {
 
         let content = match doc.kind(block) {
             BlockKind::Paragraph | BlockKind::Heading(_) => {
-                let (size, weight) = match doc.kind(block) {
-                    BlockKind::Heading(1) => (fs * 1.5, FontWeight::Bold),
-                    BlockKind::Heading(2) => (fs * 1.3, FontWeight::Bold),
-                    BlockKind::Heading(3) => (fs * 1.15, FontWeight::Semibold),
-                    BlockKind::Heading(_) => (fs, FontWeight::Semibold),
-                    _ => (fs, FontWeight::Normal),
+                let (scale, weight) = match doc.kind(block) {
+                    BlockKind::Heading(level) => heading_style(level),
+                    _ => (1.0, FontWeight::Normal),
                 };
+                let size = fs * scale;
                 let mut el = selectable_rich_text(self.styled(doc.spans(block), weight, theme))
                     .width(inner_w)
                     .size(size)
@@ -190,6 +166,7 @@ impl MarkdownView {
                     })
                     .collect();
                 code_block(lines)
+                    .label(Some(Arc::from(doc.lang(block))))
                     .width(inner_w)
                     .size(fs * 0.92)
                     .source(key)
@@ -351,6 +328,48 @@ impl MarkdownView {
             table = table.child(done);
         }
         table.into_any()
+    }
+}
+
+/// The spans `spans` of `doc` as styled runs. Span weights override the
+/// block's base weight in SelectableText, so the base (heading, table
+/// header) is folded into every span here.
+pub(crate) fn styled_spans(
+    doc: &MarkdownDoc,
+    spans: Range<usize>,
+    base: FontWeight,
+    theme: &Theme,
+) -> Vec<StyledSpan> {
+    spans
+        .map(|s| {
+            let (text, flags, url) = doc.span(s);
+            let code = flags.contains(SpanFlags::CODE);
+            let image = flags.contains(SpanFlags::IMAGE);
+            StyledSpan {
+                font_kind: if code { FontKind::Mono } else { FontKind::Ui },
+                font_weight: if flags.contains(SpanFlags::BOLD) {
+                    FontWeight::Bold
+                } else {
+                    base
+                },
+                italic: flags.contains(SpanFlags::ITALIC) || image,
+                color: image.then_some(theme.colors.text_muted),
+                pill: code.then_some(theme.colors.element_background),
+                strikethrough: flags.contains(SpanFlags::STRIKE),
+                link: url.cloned(),
+                ..StyledSpan::plain(text)
+            }
+        })
+        .collect()
+}
+
+/// Font size scale and base weight of a heading level.
+pub(crate) fn heading_style(level: u8) -> (f32, FontWeight) {
+    match level {
+        1 => (1.5, FontWeight::Bold),
+        2 => (1.3, FontWeight::Bold),
+        3 => (1.15, FontWeight::Semibold),
+        _ => (1.0, FontWeight::Semibold),
     }
 }
 
