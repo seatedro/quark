@@ -184,6 +184,13 @@ definition in the crate's `Cargo.toml`.
   `libghostty-vt.a`. [build.rs](crates/quark-terminal/build.rs) has the
   details. Nothing else in the workspace needs Zig: the terminal demo is
   `cargo run -p quark-terminal --example terminal_demo`.
+- **Nix.** [flake.nix](flake.nix) has a dev shell with the pinned Rust
+  toolchain, Zig, curl, and pkg-config, and puts the libraries winit, wgpu,
+  and AccessKit load at run time (Wayland, xkbcommon, the Vulkan loader,
+  libGL, X11, D-Bus) on `LD_LIBRARY_PATH`. Enter it with `nix develop`, or
+  run `direnv allow` once to load it on `cd` through
+  [.envrc](.envrc).
+
 ```bash
 cargo build --workspace
 cargo run -p quark-app --example hello_ui
