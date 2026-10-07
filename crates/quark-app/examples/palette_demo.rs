@@ -30,11 +30,13 @@ const UNDO_TIMEOUT_MS: u64 = 5_000;
 /// tested against it.
 const HOVER_ANCHOR: Rect = Rect {
     x: 40.0,
-    y: 320.0,
+    y: 360.0,
     width: 140.0,
     height: 32.0,
 };
-const MENU_AT: (f32, f32) = (40.0, 200.0);
+/// Where Ctrl+Shift+O opens the menu: under the buttons. A click on
+/// "Options" opens it at the pointer instead.
+const MENU_AT: (f32, f32) = (40.0, 220.0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sort {
@@ -134,6 +136,7 @@ struct PaletteDemo {
     wrap: bool,
     /// The clock as of the last event or frame; `edit_text` gets no context.
     now_ms: u64,
+    pointer: Option<(f32, f32)>,
 }
 
 impl PaletteDemo {
@@ -157,10 +160,11 @@ impl PaletteDemo {
             sort: Sort::Name,
             wrap: false,
             now_ms: 0,
+            pointer: None,
         }
     }
 
-    fn open_menu(&mut self) {
+    fn open_menu(&mut self, (x, y): (f32, f32)) {
         let entries = vec![
             ContextMenuEntry::item("Rename", Msg::Rename).binding(&binding("mod+r")),
             ContextMenuEntry::submenu(
@@ -178,7 +182,7 @@ impl PaletteDemo {
                 .destructive()
                 .disabled_if(self.note.is_none()),
         ];
-        self.menu.open(entries, MENU_AT.0, MENU_AT.1);
+        self.menu.open(entries, x, y);
     }
 
     fn run(&mut self, action: Action, cx: &mut UiContext) {
@@ -221,6 +225,7 @@ impl PaletteDemo {
     }
 
     fn pointer_moved(&mut self, pointer: Option<(f32, f32)>, cx: &mut UiContext) {
+        self.pointer = pointer;
         let mut changed = self.toasts.pointer_moved(pointer, self.now_ms);
         if let Some((x, y)) = pointer {
             changed |= self.menu.pointer_moved(x, y);
@@ -252,7 +257,7 @@ impl PaletteDemo {
             return true;
         }
         if binding("mod+shift+o").matches(pressed) {
-            self.open_menu();
+            self.open_menu(MENU_AT);
             cx.window.request_redraw();
             return true;
         }
@@ -313,9 +318,19 @@ impl UiApp for PaletteDemo {
             .p(40.0)
             .gap(12.0)
             .child(
+                text(
+                    "Ctrl+K opens the command palette. Delete note shows an undo toast. \
+                     Options (or Ctrl+Shift+O) opens a menu with a submenu. Rest the \
+                     pointer on Hover me for a hover card.",
+                )
+                .text_sm()
+                .wrap_width(window.0 - 80.0)
+                .color(colors.text_muted),
+            )
+            .child(
                 text_input("Notes", "")
                     .field(&self.notes)
-                    .placeholder("Notes")
+                    .placeholder("Type a note")
                     .focus_target(NOTES_FIELD)
                     .focused(cx.is_focused(NOTES_FIELD))
                     .w(360.0)
@@ -399,7 +414,7 @@ impl UiApp for PaletteDemo {
                     self.run(action, cx);
                 }
             }
-            Msg::OpenMenu => self.open_menu(),
+            Msg::OpenMenu => self.open_menu(self.pointer.unwrap_or(MENU_AT)),
             Msg::Rename => self.status = "Rename".into(),
             Msg::SortBy(sort) => {
                 self.sort = sort;

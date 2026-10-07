@@ -318,9 +318,6 @@ pub const PALETTE_VISIBLE_ROWS: usize = 9;
 /// Score added to a recent item when a query is typed, per place from the
 /// end of the recents list, so recent items rise among equal matches.
 const RECENT_BOOST: i32 = 2;
-/// Items `mod+1`..`mod+9` can pick.
-const QUICK_SELECT_COUNT: usize = 9;
-
 /// One row a provider offers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaletteItem {
@@ -442,7 +439,6 @@ pub struct CommandPalette<S: ?Sized + 'static> {
     /// First row in view.
     scroll_top: usize,
     recent: Vec<u64>,
-    quick_hints: [String; QUICK_SELECT_COUNT],
 }
 
 impl<S: ?Sized + 'static> Default for CommandPalette<S> {
@@ -453,16 +449,6 @@ impl<S: ?Sized + 'static> Default for CommandPalette<S> {
 
 impl<S: ?Sized + 'static> CommandPalette<S> {
     pub fn new() -> Self {
-        let quick_hints = std::array::from_fn(|i| {
-            let binding = Binding::new(
-                Mods {
-                    primary: true,
-                    ..Mods::default()
-                },
-                &(i + 1).to_string(),
-            );
-            binding_label(&binding)
-        });
         Self {
             providers: Vec::new(),
             open: false,
@@ -479,7 +465,6 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
             selected: 0,
             scroll_top: 0,
             recent: Vec::new(),
-            quick_hints,
         }
     }
 
@@ -896,10 +881,6 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
             );
         }
         let end = (self.scroll_top + PALETTE_VISIBLE_ROWS).min(self.rows.len());
-        let mut item_number = self.rows[..self.scroll_top.min(self.rows.len())]
-            .iter()
-            .filter(|row| matches!(row, Row::Item(_)))
-            .count();
         for row in self.scroll_top..end {
             let element = match self.rows[row] {
                 Row::Header(section) => {
@@ -917,16 +898,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                         .into_any()
                 }
                 Row::Item(m) => {
-                    let quick = (item_number < QUICK_SELECT_COUNT).then_some(item_number);
-                    item_number += 1;
-                    self.item_row(
-                        row,
-                        self.matches[m as usize],
-                        quick,
-                        row_h,
-                        theme,
-                        &on_event,
-                    )
+                    self.item_row(row, self.matches[m as usize], row_h, theme, &on_event)
                 }
             };
             list = list.child(element);
@@ -986,7 +958,6 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         &self,
         row: usize,
         found: Match,
-        quick: Option<usize>,
         row_h: f32,
         theme: &Theme,
         on_event: &impl Fn(PaletteEvent) -> Action,
@@ -996,9 +967,10 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let item = &self.items[found.item as usize];
         let selected = row == self.selected;
         let highlights = &self.positions[found.highlights.0 as usize..found.highlights.1 as usize];
-        let hint = self.hints[found.item as usize]
-            .as_deref()
-            .or_else(|| quick.map(|i| self.quick_hints[i].as_str()));
+        // Only the item's own shortcut: positional mod+1..9 hints next to
+        // real bindings read as more bindings (New thread showed Ctrl+N and
+        // the row under it Ctrl+2). Quick select still works unpainted.
+        let hint = self.hints[found.item as usize].as_deref();
         let base = if selected { tc.text_strong } else { tc.text };
 
         let mut el = div()
