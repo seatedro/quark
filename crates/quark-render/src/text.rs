@@ -52,7 +52,8 @@ pub(super) fn prepare_text_areas<'a>(
 fn text_area(layout: &TextLayout, origin: Rect, clip: Rect, color: Color) -> TextArea<'_> {
     TextArea {
         buffer: layout.buffer(),
-        left: origin.x,
+        // The layout's hit-testing and carets already include this shift.
+        left: origin.x + layout.buffer_x(),
         top: origin.y,
         // The buffer is already shaped at physical size.
         scale: 1.0,

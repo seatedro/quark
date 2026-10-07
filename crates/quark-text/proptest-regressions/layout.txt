@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 4f7241fbdc803d93a1a57d79883dcd115976d4e7002ad3558d66cd201d6fa73f # shrinks to text = "שלaום ", wrap = Some(1.0), a = 0, b = 5
+cc adb5f8ccc1e5183555d92c3cb856f66fa766a263acc0e5d7a1ac63dc6d6060e6 # shrinks to text = "😀שלaום é🦀\u{200d}💻éשל a", wrap = Some(1.0), a = 0, b = 35

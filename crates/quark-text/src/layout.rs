@@ -362,32 +362,37 @@ struct RunColumns {
     glyph_end: Vec<u32>,
 }
 
-const FIT_PASSES: usize = 4;
-
 /// Lay `buffer` out again at its widest line when a line runs right to
-/// left. cosmic-text aligns such a line against the buffer width (the wrap
-/// width, or each paragraph's own widest line without one), so it would
-/// paint outside the measured box, or at negative x past a cluster wider
-/// than the wrap. At the widest line's width every line still fits, and
-/// cosmic-text sums widths so that relaying out at a measured width keeps
-/// the wrapping; the one exception, a cluster wider than the wrap, already
-/// sets that width, so the layout stays as wide as it measured.
-fn fit_rtl_lines(fs: &mut FontSystem, buffer: &mut Buffer) {
-    for _ in 0..FIT_PASSES {
-        let mut widest = 0.0_f32;
-        let mut rtl = false;
-        for run in buffer.layout_runs() {
-            widest = widest.max(run.line_w);
-            rtl |= run.rtl;
-        }
-        if !rtl || buffer.size().0 == Some(widest) {
-            return;
-        }
-        buffer.set_size(fs, Some(widest), None);
+/// left, and return how far right (physical pixels) the buffer must be drawn
+/// so no line starts left of zero. cosmic-text aligns an RTL line against
+/// the buffer width (the wrap width, or each paragraph's own widest line
+/// without one), so it would paint outside the measured box.
+///
+/// When every line fits the buffer width, relaying out at the widest line
+/// keeps the wrapping (cosmic-text sums widths in the order it measures
+/// them), so each RTL line ends at the widest line's right edge. When a
+/// cluster wider than the wrap overflows a line, a wider buffer would let
+/// other lines take more words, so the layout keeps the wrap width and is
+/// shifted right instead, by the most any RTL line overflows it.
+fn fit_rtl_lines(fs: &mut FontSystem, buffer: &mut Buffer) -> f32 {
+    if !buffer.layout_runs().any(|run| run.rtl) {
+        return 0.0;
+    }
+    let w = buffer
+        .layout_runs()
+        .fold(0.0_f32, |widest, run| widest.max(run.line_w));
+    if buffer.size().0.is_none_or(|wrap| w <= wrap) {
+        buffer.set_size(fs, Some(w), None);
         for line_i in 0..buffer.lines.len() {
             buffer.line_layout(fs, line_i);
         }
     }
+    // Every RTL paragraph now aligns its lines' right edges to this width.
+    let align = buffer.size().0.unwrap_or(w);
+    buffer
+        .layout_runs()
+        .filter(|run| run.rtl)
+        .fold(0.0_f32, |shift, run| shift.max(run.line_w - align))
 }
 
 /// Immutable result of shaping + layout, shared via `Arc` by measurement,
@@ -404,6 +409,8 @@ pub struct TextLayout {
     glyphs: GlyphColumns,
     lines: LineColumns,
     runs: RunColumns,
+    /// Physical x at which `buffer` is drawn relative to the layout origin.
+    buffer_x: f32,
     // Kept so the renderer can hand it to glyphon's TextRenderer, which only
     // accepts Buffers. Shaped at physical size; draw it with `scale: 1.0`.
     buffer: Buffer,
@@ -468,7 +475,7 @@ impl TextLayout {
         for line_i in 0..buffer.lines.len() {
             buffer.line_layout(fs, line_i);
         }
-        fit_rtl_lines(fs, &mut buffer);
+        let buffer_x = fit_rtl_lines(fs, &mut buffer);
 
         let inv = 1.0 / scale;
         let mut glyphs = GlyphColumns::default();
@@ -502,7 +509,7 @@ impl TextLayout {
             };
             let glyph_start = glyphs.len() as u32;
             for g in run.glyphs {
-                glyphs.x.push(g.x * inv);
+                glyphs.x.push((g.x + buffer_x) * inv);
                 glyphs.advance.push(g.w * inv);
                 glyphs.line.push(line_index);
                 glyphs.byte_start.push((para_start + g.start) as u32);
@@ -514,12 +521,17 @@ impl TextLayout {
                 glyphs.font_size.push(g.font_size);
                 glyphs.font_weight.push(g.font_weight);
                 glyphs.flags.push(g.cache_key_flags);
-                glyphs.phys_x.push(g.x + g.font_size * g.x_offset);
+                glyphs
+                    .phys_x
+                    .push(buffer_x + g.x + g.font_size * g.x_offset);
                 glyphs
                     .phys_y
                     .push(run.line_y + g.y - g.font_size * g.y_offset);
             }
-            width = width.max(run.line_w * inv);
+            // RTL lines end at the shifted buffer's right edge, which is the
+            // widest RTL line's own; LTR lines start at the shift.
+            let shift = if run.rtl { 0.0 } else { buffer_x };
+            width = width.max((shift + run.line_w) * inv);
             height = height.max((run.line_top + run.line_height) * inv);
             if continuation {
                 let last = line_index as usize;
@@ -582,6 +594,7 @@ impl TextLayout {
             glyphs,
             lines,
             runs,
+            buffer_x,
             buffer,
         };
         debug_assert_eq!(layout.verify_integrity(), Ok(()));
@@ -823,8 +836,16 @@ impl TextLayout {
     }
 
     /// The shaped cosmic-text buffer (physical pixels), for glyphon.
+    /// Draw it [`Self::buffer_x`] right of the layout origin.
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
+    }
+
+    /// Physical x at which [`Self::buffer`] is drawn relative to the layout
+    /// origin. Nonzero only when a right-to-left line overflows the wrap
+    /// width; the glyph columns already include it.
+    pub fn buffer_x(&self) -> f32 {
+        self.buffer_x
     }
 
     /// Grapheme boundary nearest to the logical point. Points outside the
@@ -1654,6 +1675,21 @@ mod tests {
         let layout = layout(text, Some(1.0));
         assert_eq!(layout.line_count(), 1);
         assert!(layout.caret(text.len()).x > layout.caret(0).x);
+    }
+
+    // Regression: an RTL line overflowing the wrap width was fitted by
+    // relaying out at its width, which let the narrower letters share lines
+    // and never settled. The wrap must hold, shifted inside the box.
+    #[test]
+    fn rtl_cluster_wider_than_wrap_keeps_wrap_and_stays_in_bounds() {
+        let text = "\u{1f600}\u{5e9}\u{5dc}\u{5d5}";
+        let layout = layout(text, Some(1.0));
+        assert_eq!(layout.line_count(), 4);
+        let (width, _) = layout.size();
+        for b in grapheme_boundaries(text) {
+            let x = layout.caret(b).x;
+            assert!((-0.01..=width + 0.01).contains(&x), "caret {x} at {b}");
+        }
     }
 
     // Regression: found by layout_selection_rects property; an end offset
