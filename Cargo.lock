@@ -2814,6 +2814,7 @@ dependencies = [
  "quark-components",
  "quark-diff",
  "quark-render",
+ "quark-terminal",
  "quark-text",
  "quark-ui",
  "raw-window-handle",
