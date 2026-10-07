@@ -61,6 +61,9 @@ pub struct ElementContext<'a> {
     /// requests, running transitions), so a cache boundary does not keep it.
     volatile_reads: u32,
     z_index_stack: Vec<i32>,
+    /// Hit spaces of the transformed subtrees being prepainted, innermost
+    /// last.
+    hit_spaces: Vec<quark::HitSpace>,
     element_offset_stack: Vec<(f32, f32)>,
     text_color_stack: Vec<Color>,
     icon_color_stack: Vec<Color>,
@@ -118,6 +121,7 @@ impl<'a> ElementContext<'a> {
             focus_reads: Cell::new(0),
             volatile_reads: 0,
             z_index_stack: Vec::new(),
+            hit_spaces: Vec::new(),
             element_offset_stack: Vec::new(),
             text_color_stack: Vec::new(),
             icon_color_stack: Vec::new(),
@@ -509,6 +513,31 @@ impl<'a> ElementContext<'a> {
         self.clip_stack.pop();
     }
 
+    /// Hit entries inserted until [`Self::pop_transform`] are drawn through
+    /// `transform` (layout coordinates to where they land): the pointer is
+    /// mapped back through it before testing them. Clips pushed inside are
+    /// in layout coordinates; the current clip still clips the subtree.
+    pub fn push_transform(&mut self, transform: quark::Transform2D) {
+        let parent = self.hit_spaces.last().copied();
+        let space = self
+            .hit_table
+            .push_space(parent, transform, self.current_clip());
+        self.hit_spaces.push(space);
+        self.clip_stack.push(ClipEntry {
+            effective: quark::hit::UNCLIPPED,
+            local: quark::hit::UNCLIPPED,
+        });
+        // Cache boundaries replay hits without their spaces, so a subtree
+        // with a transform inside is painted fresh each frame.
+        self.volatile_reads += 1;
+    }
+
+    pub fn pop_transform(&mut self) {
+        if self.hit_spaces.pop().is_some() {
+            self.clip_stack.pop();
+        }
+    }
+
     /// Register a hit entry at the current z and clip. Bind it to its
     /// semantic node with [`Self::bind_hit`] once that node exists.
     pub fn insert_hit(&mut self, bounds: Bounds, flags: HitFlags, cursor: CursorHint) -> HitId {
@@ -528,7 +557,10 @@ impl<'a> ElementContext<'a> {
     ) -> HitId {
         let local = intersect(self.current_local_clip(), clip);
         let clip = intersect(self.current_clip(), clip);
-        let id = self.hit_table.push(bounds, clip, z, flags, cursor);
+        let space = self.hit_spaces.last().copied();
+        let id = self
+            .hit_table
+            .push_in(bounds, clip, z, flags, cursor, space);
         if self.hit_recordings > 0 {
             self.local_hit_clips.push(local);
             self.local_hit_ids.push(id);

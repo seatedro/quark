@@ -230,6 +230,12 @@ required-features = ["ui"]
 test = true
 
 [[example]]
+name = "visuals_demo"
+required-features = ["ui"]
+# Its test module drives the demo through `quark_app::testing`.
+test = true
+
+[[example]]
 name = "layout_demo"
 required-features = ["components"]
 

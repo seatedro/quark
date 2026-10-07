@@ -16,6 +16,9 @@ quark-text.workspace = true
 bytemuck.workspace = true
 glyphon.workspace = true
 image = { workspace = true, optional = true }
+# Path stroking and flattening. Already in every build through resvg's usvg,
+# so it adds no crates.
+kurbo = "0.11"
 pollster.workspace = true
 resvg.workspace = true
 thiserror.workspace = true

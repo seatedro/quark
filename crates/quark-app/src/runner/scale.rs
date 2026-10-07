@@ -2,12 +2,16 @@
 //! pixels.
 
 use quark::Rect;
-use quark::scene::{Primitive, Scene};
+use quark::scene::{EffectType, Primitive, Scene};
 
 /// Multiply every coordinate in `scene` by `scale`, turning logical points
 /// into physical pixels. Rect edges snap to whole pixels so quads stay sharp
 /// and neighbours tile without seams; a non-empty rect or border never
 /// snaps away to nothing. Radii, blur, and shadow offsets scale unsnapped.
+/// Path origins snap like rect edges, and their geometry scales through the
+/// primitive's `scale`. Layer transforms keep their rotation and scale and
+/// move by scaled pixels. Pixel-based effect parameters (noise frequency)
+/// scale so an effect looks the same at every scale factor.
 ///
 /// Text origins snap too. Glyphs are not resized here: a text layout must
 /// already be shaped at `scale` (see `FrameContext::layout_text`), which puts
@@ -43,18 +47,30 @@ fn scale_primitive(primitive: &mut Primitive, s: f32) {
         Primitive::EffectQuad(p) => {
             p.rect = snap(p.rect, s);
             p.corner_radius *= s;
+            // Noise is sampled per physical pixel; its frequency is per point.
+            if p.effect_type == EffectType::NoiseGradient && s > 0.0 {
+                p.params[0] /= s;
+            }
         }
         Primitive::BlurRegion(p) => {
             p.rect = snap(p.rect, s);
             p.blur_radius *= s;
-            p.corner_radius *= s;
+            p.corner_radii = p.corner_radii.map(|r| r * s);
         }
+        Primitive::Path(p) => {
+            p.origin = p.origin.map(|o| (o * s).round());
+            p.scale *= s;
+        }
+        Primitive::LayerStart(p) => p.transform = p.transform.in_scaled_space(s),
         Primitive::ClipStart(p) => {
             p.rect = snap(p.rect, s);
             p.corner_radii = p.corner_radii.map(|r| r * s);
         }
-        Primitive::ClipEnd | Primitive::ZIndexPush(_) | Primitive::ZIndexPop => {}
-        Primitive::LayerBoundary => {}
+        Primitive::ClipEnd
+        | Primitive::ZIndexPush(_)
+        | Primitive::ZIndexPop
+        | Primitive::LayerEnd
+        | Primitive::LayerBoundary => {}
     }
 }
 
@@ -89,8 +105,8 @@ fn snap_length(length: f32, s: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use quark::Color;
-    use quark::scene::{BorderPrimitive, RectPrimitive};
+    use quark::scene::{BorderPrimitive, EffectQuadPrimitive, LayerPrimitive, RectPrimitive};
+    use quark::{Color, Transform2D};
 
     use super::*;
 
@@ -157,5 +173,46 @@ mod tests {
                 rect(0.0, 0.0, 15.0, 15.0)
             )
         );
+    }
+
+    // A layer must land where its logical content would, scaled: mapping a
+    // point then scaling equals scaling then mapping with the physical map.
+    #[test]
+    fn layer_transform_maps_physical_points_like_logical_ones() {
+        let logical = Transform2D::rotate(0.6)
+            .then(Transform2D::scale(1.5, 0.75))
+            .around(40.0, 25.0);
+        let mut scene = Scene::default();
+        scene.push(Primitive::LayerStart(LayerPrimitive {
+            opacity: 1.0,
+            transform: logical,
+        }));
+        scene_to_physical(&mut scene, 2.0);
+        let Primitive::LayerStart(physical) = &scene.primitives[0] else {
+            panic!("layer start");
+        };
+        for (x, y) in [(0.0, 0.0), (40.0, 25.0), (13.0, -8.0)] {
+            let (lx, ly) = logical.apply(x, y);
+            let (px, py) = physical.transform.apply(x * 2.0, y * 2.0);
+            assert!((px - lx * 2.0).abs() < 1e-3 && (py - ly * 2.0).abs() < 1e-3);
+        }
+    }
+
+    // Regression guard: noise sampled per physical pixel doubled its
+    // frequency on a 2x display.
+    #[test]
+    fn noise_frequency_is_per_logical_point() {
+        let mut scene = Scene::default();
+        scene.effect_quad(EffectQuadPrimitive {
+            rect: rect(0.0, 0.0, 10.0, 10.0),
+            effect_type: EffectType::NoiseGradient,
+            params: [0.02, 0.0],
+            ..Default::default()
+        });
+        scene_to_physical(&mut scene, 2.0);
+        let Primitive::EffectQuad(effect) = &scene.primitives[0] else {
+            panic!("effect quad");
+        };
+        assert_eq!(effect.params, [0.01, 0.0]);
     }
 }

@@ -25,7 +25,8 @@ unicode-segmentation.workspace = true
 unicode-width = "0.2"
 spellbook = "0.4"
 quark-syntax = { workspace = true, optional = true }
-image = { workspace = true, optional = true }
+# GIF and WebP decoders for animated images (APNG comes with PNG).
+image = { workspace = true, optional = true, features = ["gif", "webp"] }
 profiling = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
@@ -35,9 +36,10 @@ default = []
 # (Rust, JS, TS, Python, Bash, JSON, Go). Off by default: the grammars add
 # several MB to the binary. Without it code blocks render plain.
 syntax = ["dep:quark-syntax", "quark-syntax/common"]
-# PNG and JPEG decoding of markdown image blocks on the image worker.
-# Without it, loaders must hand over decoded pixels, and encoded images
-# show their alt text.
+# PNG and JPEG decoding of markdown image blocks on the image worker, and
+# GIF, WebP, and APNG decoding for `AnimatedImage::decode`. Without it,
+# loaders must hand over decoded pixels, and encoded images show their alt
+# text.
 images = ["dep:image"]
 # The inspector overlay, the HUD view, and live style overrides
 # (`quark_ui::inspector`). Every hook into the element tree compiles out
@@ -56,6 +58,9 @@ profile = ["dep:profiling", "dep:tracing"]
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Animated image tests build GIFs and run the decoder without the `images`
+# feature.
+image = { workspace = true, features = ["gif", "webp"] }
 
 
 # Tests feed published trees through AccessKit's AT-SPI layer to check what

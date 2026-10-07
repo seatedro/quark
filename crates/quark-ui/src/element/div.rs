@@ -12,8 +12,9 @@ pub struct Div {
     base_style: ElementStyle,
     hover_style: Option<StyleOverride>,
     transitions: Transitions,
-    /// Paint-time offset of the div and its subtree; layout ignores it.
-    translate: (f32, f32),
+    /// Paint-time offset, rotation, and scale of the div and its subtree;
+    /// layout ignores them.
+    transform: PaintTransform,
     bg_effect: Option<BackgroundEffect>,
     blur_radius: Option<f32>,
     children: pool::ChildList,
@@ -63,7 +64,7 @@ pub fn div() -> Div {
         base_style: ElementStyle::default(),
         hover_style: None,
         transitions: Transitions::default(),
-        translate: (0.0, 0.0),
+        transform: PaintTransform::IDENTITY,
         bg_effect: None,
         blur_radius: None,
         children: pool::ChildList::new(),
@@ -276,7 +277,33 @@ impl Div {
     /// Offset the div and everything in it at paint time, for slides and
     /// nudges that should not reflow layout. Hit testing follows the offset.
     pub fn translate(mut self, x: f32, y: f32) -> Self {
-        self.translate = (x, y);
+        self.transform.translate = (x, y);
+        self
+    }
+
+    /// Rotate the div and everything in it about its center at paint time,
+    /// clockwise by `radians`. Text, images, clips, and hit testing turn
+    /// with it; layout ignores it. Animate it with
+    /// [`Prop::Transform`](crate::animation::Prop::Transform).
+    ///
+    /// A rotated or scaled div renders through an offscreen layer that is
+    /// rasterized unrotated at 1:1 and drawn with bilinear filtering, so
+    /// its edges are smooth and its text is slightly softer than upright
+    /// text. A translation alone always lands on whole pixels.
+    pub fn rotate(mut self, radians: f32) -> Self {
+        self.transform.rotate = radians;
+        self
+    }
+
+    /// Scale the div and its subtree about its center at paint time; see
+    /// [`Self::rotate`]. Content is rasterized at 1:1, so scales above one
+    /// magnify pixels.
+    pub fn scale(self, factor: f32) -> Self {
+        self.scale_xy(factor, factor)
+    }
+
+    pub fn scale_xy(mut self, x: f32, y: f32) -> Self {
+        self.transform.scale = (x, y);
         self
     }
 
@@ -665,6 +692,8 @@ impl Div {
 pub struct DivPrepaintState {
     hit: Option<HitId>,
     translate: (f32, f32),
+    /// Rotation and scale about the center, when the div has any.
+    matrix: Option<Transform2D>,
     scroll: (f32, f32),
     scrollbars: [Option<(Scrollbar, Option<HitId>)>; 2],
 }
@@ -696,10 +725,12 @@ impl Element for Div {
         engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> DivPrepaintState {
-        let translate = self
+        let transform = self
             .transitions
-            .translate(self.semantic_key.as_ref(), self.translate, cx);
+            .transform(self.semantic_key.as_ref(), self.transform, cx);
+        let translate = transform.translate;
         let bounds = offset_bounds(bounds, translate);
+        let matrix = transform.matrix(bounds);
         if let Some(key) = &self.semantic_key {
             cx.record_scroll_item(key, bounds);
         }
@@ -712,6 +743,9 @@ impl Element for Div {
         let z = self.base_style.z_index;
         if z != 0 {
             cx.push_z_index(z);
+        }
+        if let Some(matrix) = matrix {
+            cx.push_transform(matrix);
         }
 
         let mut flags = HitFlags::NONE;
@@ -761,6 +795,9 @@ impl Element for Div {
         if clips {
             cx.pop_clip();
         }
+        if matrix.is_some() {
+            cx.pop_transform();
+        }
         if z != 0 {
             cx.pop_z_index();
         }
@@ -768,6 +805,7 @@ impl Element for Div {
         DivPrepaintState {
             hit,
             translate,
+            matrix,
             scroll,
             scrollbars,
         }
@@ -795,24 +833,29 @@ impl Element for Div {
         let radii = style.corner_radii;
         let r = style.max_corner_radius();
         let z = style.z_index;
-        let opacity = style.opacity;
-        let background = style.background.map(|mut bg| {
-            if opacity < 1.0 {
-                bg.a = (bg.a as f32 * opacity) as u8;
-            }
-            bg
-        });
+        let opacity = style.opacity.clamp(0.0, 1.0);
+        let background = style.background;
 
         if z != 0 {
             scene.push_z_index(z);
         }
 
+        // Before the layer: the backdrop it blurs lies outside the group.
         if let Some(radius) = self.blur_radius {
             scene.blur_region(BlurRegionPrimitive {
                 rect: bounds,
                 blur_radius: radius,
-                corner_radius: r,
+                corner_radii: radii,
             });
+        }
+
+        // Everything the div paints fades and turns as one group.
+        let layered = opacity < 1.0 || prepaint_state.matrix.is_some();
+        if layered {
+            scene.push_layer(
+                opacity,
+                prepaint_state.matrix.unwrap_or(Transform2D::IDENTITY),
+            );
         }
 
         // Shadows
@@ -1185,6 +1228,9 @@ impl Element for Div {
             });
         }
 
+        if layered {
+            scene.pop_layer();
+        }
         if z != 0 {
             scene.pop_z_index();
         }

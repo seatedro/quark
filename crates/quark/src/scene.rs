@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use crate::color::Color;
 use crate::geometry::Rect;
+use crate::path::{FillRule, Path, StrokeStyle};
+use crate::transform::Transform2D;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FontKind {
@@ -80,6 +82,23 @@ impl Scene {
         self.push(Primitive::EffectQuad(effect));
     }
 
+    pub fn path(&mut self, path: PathPrimitive) {
+        self.push(Primitive::Path(path));
+    }
+
+    /// Start a layer: everything pushed until the matching
+    /// [`Self::pop_layer`] fades by `opacity` as one group and moves by
+    /// `transform`. The renderer skips the layer at zero opacity, draws it
+    /// in place when it is opaque and only translated, and otherwise
+    /// composites it from an offscreen texture.
+    pub fn push_layer(&mut self, opacity: f32, transform: Transform2D) {
+        self.push(Primitive::LayerStart(LayerPrimitive { opacity, transform }));
+    }
+
+    pub fn pop_layer(&mut self) {
+        self.push(Primitive::LayerEnd);
+    }
+
     pub fn clip(&mut self, rect: Rect) {
         self.push(Primitive::ClipStart(ClipPrimitive {
             rect,
@@ -127,8 +146,15 @@ pub enum Primitive {
     /// primitive (within the given bounds) will be blurred and composited
     /// as a backdrop before children are painted on top.
     BlurRegion(BlurRegionPrimitive),
+    /// A filled and/or stroked vector path.
+    Path(PathPrimitive),
     ClipStart(ClipPrimitive),
     ClipEnd,
+    /// Start a group that fades and transforms as one; see
+    /// [`Scene::push_layer`]. Z-indices inside a layer order its content
+    /// only, as a CSS stacking context does.
+    LayerStart(LayerPrimitive),
+    LayerEnd,
     /// Push a z-index context. Primitives inside render on top of lower z-indices.
     ZIndexPush(i32),
     /// Pop the current z-index context.
@@ -150,7 +176,16 @@ impl Primitive {
             Self::EffectQuad(p) => p.rect = p.rect.offset(dx, dy),
             Self::BlurRegion(p) => p.rect = p.rect.offset(dx, dy),
             Self::ClipStart(p) => p.rect = p.rect.offset(dx, dy),
-            Self::ClipEnd | Self::ZIndexPush(_) | Self::ZIndexPop | Self::LayerBoundary => {}
+            Self::Path(p) => {
+                p.origin[0] += dx;
+                p.origin[1] += dy;
+            }
+            Self::LayerStart(p) => p.transform = p.transform.offset(dx, dy),
+            Self::ClipEnd
+            | Self::ZIndexPush(_)
+            | Self::ZIndexPop
+            | Self::LayerBoundary
+            | Self::LayerEnd => {}
         }
     }
 }
@@ -312,7 +347,93 @@ pub struct ImagePrimitive {
 pub struct BlurRegionPrimitive {
     pub rect: Rect,
     pub blur_radius: f32,
-    pub corner_radius: f32,
+    /// Per-corner radii: [top-left, top-right, bottom-right, bottom-left].
+    /// Outside the rounded rect the backdrop stays sharp.
+    pub corner_radii: [f32; 4],
+}
+
+/// Group opacity and transform of a [`Primitive::LayerStart`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerPrimitive {
+    /// Multiplies the alpha of the composited group, so overlapping
+    /// children do not show through each other.
+    pub opacity: f32,
+    /// Maps the layer's content, painted in untransformed scene
+    /// coordinates, to where it lands; see [`Transform2D`].
+    pub transform: Transform2D,
+}
+
+/// How a [`PathPrimitive`] fills its interior.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathFill {
+    pub color: Color,
+    pub rule: FillRule,
+}
+
+/// How a [`PathPrimitive`] strokes its outline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathStroke {
+    pub color: Color,
+    pub style: StrokeStyle,
+}
+
+/// A vector path, filled then stroked, antialiased by the renderer. Path
+/// point `(x, y)` lands at `origin + scale * (x, y)` in scene pixels; the
+/// stroke width scales too. Painters use `scale` 1 and logical points;
+/// converting the scene to physical pixels multiplies it by the window
+/// scale, so a shared `Arc<Path>` never needs rebuilding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathPrimitive {
+    pub path: Arc<Path>,
+    pub origin: [f32; 2],
+    pub scale: f32,
+    pub fill: Option<PathFill>,
+    pub stroke: Option<PathStroke>,
+}
+
+impl PathPrimitive {
+    pub fn new(path: Arc<Path>, origin: [f32; 2]) -> Self {
+        Self {
+            path,
+            origin,
+            scale: 1.0,
+            fill: None,
+            stroke: None,
+        }
+    }
+
+    pub fn fill(mut self, color: Color) -> Self {
+        self.fill = Some(PathFill {
+            color,
+            rule: FillRule::NonZero,
+        });
+        self
+    }
+
+    pub fn fill_rule(mut self, rule: FillRule) -> Self {
+        if let Some(fill) = &mut self.fill {
+            fill.rule = rule;
+        }
+        self
+    }
+
+    pub fn stroke(mut self, color: Color, style: StrokeStyle) -> Self {
+        self.stroke = Some(PathStroke { color, style });
+        self
+    }
+
+    /// Scene bounds of everything the primitive can paint.
+    pub fn bounds(&self) -> Rect {
+        let b = self.path.bounds();
+        let reach = self.stroke.map_or(0.0, |s| s.style.reach());
+        let s = self.scale;
+        Rect {
+            x: self.origin[0] + (b.x - reach) * s,
+            y: self.origin[1] + (b.y - reach) * s,
+            width: (b.width + reach * 2.0) * s,
+            height: (b.height + reach * 2.0) * s,
+        }
+    }
 }
 
 /// Effect type for procedural background quads.
