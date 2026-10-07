@@ -766,6 +766,127 @@ fn item_offset(
 // Scrollbars
 // ---------------------------------------------------------------------------
 
+thread_local! {
+    /// The app-owned scrollbar whose thumb is held, by axis and track. An
+    /// app-owned offset has no retained state of its own, and the track
+    /// stays put through a drag, so it identifies the bar across frames.
+    static HELD_THUMB: Cell<Option<(Axis, Rect)>> = const { Cell::new(None) };
+}
+
+/// Scrollbars of one scrolling container for a frame: geometry, hit
+/// entries, and where their input goes. Every scrolling view uses this, so
+/// thumbs drag, tracks page, and bars hover, hide, and size alike whether
+/// the offset lives in a [`ScrollHandle`] or in app state.
+#[derive(Default)]
+pub(crate) struct Scrollbars([Option<BarSlot>; 2]);
+
+struct BarSlot {
+    bar: Scrollbar,
+    /// Where input goes; a bar without one only shows the offset.
+    sink: Option<ScrollSink>,
+    hit: Option<HitId>,
+}
+
+impl BarSlot {
+    fn held(&self) -> bool {
+        match &self.sink {
+            Some(ScrollSink::Handle(handle)) => handle.dragging() == Some(self.bar.axis),
+            Some(ScrollSink::Builder(_)) => {
+                HELD_THUMB.with(Cell::get) == Some((self.bar.axis, self.bar.track))
+            }
+            None => false,
+        }
+    }
+}
+
+/// What a scrolling container shows scrollbars for.
+pub(crate) struct ScrollbarInput {
+    /// The container, in window points.
+    pub bounds: Rect,
+    pub content: (f32, f32),
+    pub offset: (f32, f32),
+    pub axes: ScrollAxes,
+    /// Input target of each axis's bar: `[x, y]`.
+    pub sinks: [Option<ScrollSink>; 2],
+    /// Show the bars only while the pointer is over the container, a thumb
+    /// is held, or (with a handle) it scrolled recently.
+    pub auto_hide: bool,
+}
+
+impl Scrollbars {
+    /// Lay out the bars and give the visible ones with a sink hit entries.
+    /// Call after the content's prepaint, under the container's clip, so
+    /// the bars sit above the content.
+    pub(crate) fn prepaint(input: ScrollbarInput, cx: &mut ElementContext) -> Self {
+        let ScrollbarInput {
+            bounds,
+            content,
+            offset,
+            axes,
+            mut sinks,
+            auto_hide,
+        } = input;
+        let bars = scrollbars(bounds, content, offset, axes);
+        if bars.iter().all(Option::is_none) {
+            return Self::default();
+        }
+        let mut slots = bars.map(|bar| {
+            bar.map(|bar| BarSlot {
+                sink: sinks[bar.axis.index()].take(),
+                bar,
+                hit: None,
+            })
+        });
+        if auto_hide {
+            let pointer_inside = cx
+                .mouse_position
+                .is_some_and(|(x, y)| bounds.contains(x, y) && cx.current_clip().contains(x, y));
+            let visible = pointer_inside || slots.iter().flatten().any(|slot| {
+                slot.held()
+                    || matches!(&slot.sink, Some(ScrollSink::Handle(h)) if h.recently_scrolled(cx))
+            });
+            if !visible {
+                return Self::default();
+            }
+        }
+        for slot in slots.iter_mut().flatten() {
+            if slot.sink.is_some() {
+                slot.hit = Some(cx.insert_hit(
+                    slot.bar.hit,
+                    HitFlags::DRAG | HitFlags::HOVER,
+                    CursorHint::Default,
+                ));
+            }
+        }
+        Self(slots)
+    }
+
+    /// Give each interactive bar a draggable semantic node under `parent`
+    /// and route its presses. Call before painting the content, so a bar's
+    /// node keeps its position (and its identity for drag capture) as the
+    /// content changes.
+    pub(crate) fn register(&self, parent: usize, cx: &mut ElementContext) {
+        for slot in self.0.iter().flatten() {
+            if let (Some(hit), Some(sink)) = (slot.hit, &slot.sink) {
+                let mut node = SemanticNode::new(slot.bar.hit);
+                node.parent = Some(parent);
+                node.actions = SemanticActions::default().draggable();
+                let node = cx.semantic.push(node);
+                cx.bind_hit(hit, node);
+                cx.handlers.on_scrollbar(node, slot.bar, sink.clone());
+            }
+        }
+    }
+
+    /// Paint the bars, brighter while hovered and brightest while held.
+    pub(crate) fn paint(&self, scene: &mut Scene, cx: &ElementContext) {
+        for slot in self.0.iter().flatten() {
+            let hovered = slot.hit.is_some_and(|hit| cx.is_hovered(hit));
+            slot.bar.paint(scene, cx.theme, hovered, slot.held());
+        }
+    }
+}
+
 /// One scrollbar's geometry for a frame, in window points.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Scrollbar {
@@ -781,7 +902,7 @@ pub(crate) struct Scrollbar {
 
 /// Scrollbars of a container at `bounds`, on each axis in `axes` whose
 /// `content` overflows. A vertical bar leaves room for a horizontal one.
-pub(crate) fn scrollbars(
+fn scrollbars(
     bounds: Rect,
     content: (f32, f32),
     offset: (f32, f32),
@@ -864,14 +985,21 @@ pub(crate) fn scrollbars(
 
 impl Scrollbar {
     /// The offset that puts the thumb's grab point (`grab` points from its
-    /// start) under the pointer at `pointer` along the axis.
+    /// start) under the pointer at `pointer` along the axis. A thumb at the
+    /// end of its track asks for `f32::MAX`, which sinks clamp to their
+    /// current end: content that grew since the press (a streaming
+    /// transcript) is still reached, so a drag to the bottom stays there.
     pub fn offset_for_pointer(&self, pointer: f32, grab: f32) -> f32 {
         let (start, len) = self.axis.span(self.track);
         let range = len - self.axis.span(self.thumb).1;
         if range <= 0.0 {
             return 0.0;
         }
-        (pointer - start - grab).clamp(0.0, range) / range * self.max
+        let travel = (pointer - start - grab).clamp(0.0, range);
+        if travel >= range {
+            return f32::MAX;
+        }
+        travel / range * self.max
     }
 
     /// Paint the track and thumb; `hovered` and `active` brighten the thumb.
@@ -942,23 +1070,33 @@ impl DragHandler for ScrollbarDrag {
     fn on_press(&mut self) -> Vec<Action> {
         let bar = &self.bar;
         if self.grab.is_some() {
-            if let ScrollSink::Handle(handle) = &self.sink {
-                handle.set_dragging(Some(bar.axis));
+            match &self.sink {
+                ScrollSink::Handle(handle) => handle.set_dragging(Some(bar.axis)),
+                ScrollSink::Builder(_) => {
+                    HELD_THUMB.with(|held| held.set(Some((bar.axis, bar.track))));
+                    // Redraw for the held thumb's styling.
+                    bump_epoch();
+                }
             }
             return Vec::new();
         }
         let (thumb_start, _) = bar.axis.span(bar.thumb);
         let forward = self.press > thumb_start;
-        let page = KeyScroll::Page(bar.axis, forward);
+        let to = KeyScroll::Page(bar.axis, forward).target(bar.offset, bar.viewport, bar.max);
         match &self.sink {
             ScrollSink::Handle(handle) => {
-                handle.set_axis(bar.axis, page.target(bar.offset, bar.viewport, bar.max));
+                handle.set_axis(bar.axis, to);
                 Vec::new()
             }
-            ScrollSink::Builder(builder) => {
-                let lines = (page_px(bar.viewport) / WHEEL_LINE_PX).round() as i32;
-                vec![builder.build(if forward { lines } else { -lines })]
-            }
+            // An absolute offset when the app takes one: its wheel lines
+            // need not be `WHEEL_LINE_PX` long.
+            ScrollSink::Builder(builder) => match builder.build_to_px(to as u32) {
+                Some(action) => vec![action],
+                None => {
+                    let lines = (page_px(bar.viewport) / WHEEL_LINE_PX).round() as i32;
+                    vec![builder.build(if forward { lines } else { -lines })]
+                }
+            },
         }
     }
 
@@ -982,9 +1120,15 @@ impl DragHandler for ScrollbarDrag {
                 handle.set_dragging(None);
                 DragReleaseResult::empty()
             }
-            ScrollSink::Builder(builder) => DragReleaseResult {
-                actions: builder.on_drag_end.iter().cloned().collect(),
-            },
+            ScrollSink::Builder(builder) => {
+                if self.grab.is_some() {
+                    HELD_THUMB.with(|held| held.set(None));
+                    bump_epoch();
+                }
+                DragReleaseResult {
+                    actions: builder.on_drag_end.iter().cloned().collect(),
+                }
+            }
         }
     }
 }

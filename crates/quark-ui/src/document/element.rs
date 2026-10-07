@@ -28,8 +28,9 @@ use crate::design::Alpha;
 use crate::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, DragHandler, DragReleaseResult, DragStart, Element,
     ElementContext, IntoAnyElement, LayoutEngine, LayoutId, LinkClicked, LinkHandler,
-    ScrollActionBuilder, ScrollHandle, ScrollTarget, SelectableText, StyledSpan, cached,
-    code_block_joined, div, inputs_hash, selectable_rich_text, text,
+    ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink, ScrollTarget, ScrollbarInput,
+    Scrollbars, SelectableText, StyledSpan, cached, code_block_joined, div, inputs_hash,
+    selectable_rich_text, text,
 };
 use crate::style::Styled;
 use crate::theme::Theme;
@@ -61,10 +62,19 @@ fn list_label(label: &'static str) -> Arc<str> {
 /// left. Pass each to [`Document::handle`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DocumentEvent {
-    PointerDown { x: f32, y: f32 },
-    PointerDrag { x: f32, y: f32 },
+    PointerDown {
+        x: f32,
+        y: f32,
+    },
+    PointerDrag {
+        x: f32,
+        y: f32,
+    },
     PointerUp,
     Wheel(i32),
+    /// The scrollbar moved the view to this offset (`f32::MAX` for the
+    /// end); landing at the bottom pins the view there.
+    ScrollTo(f32),
 }
 
 /// Frame interval requested while a drag autoscrolls.
@@ -878,25 +888,12 @@ impl DocumentElement {
         self
     }
 
-    fn paint_scroll_thumb(&self, bounds: Bounds, scene: &mut Scene, cx: &ElementContext) {
-        if self.total_extent <= bounds.height || self.max_scroll <= 0.0 {
-            return;
-        }
-        let width = 4.0 * cx.scale_factor.max(1.0);
-        let thumb = (bounds.height / self.total_extent * bounds.height)
-            .max(24.0)
-            .min(bounds.height);
-        let y = (self.scroll / self.max_scroll).clamp(0.0, 1.0) * (bounds.height - thumb);
-        scene.rounded_rect(RoundedRectPrimitive::uniform(
-            Rect {
-                x: bounds.x + bounds.width - width * 2.0,
-                y: bounds.y + y,
-                width,
-                height: thumb,
-            },
-            width * 0.5,
-            cx.theme.colors.scrollbar_thumb,
-        ));
+    /// Input from the wheel and the scrollbar.
+    fn scroll_builder(&self) -> ScrollActionBuilder {
+        let lines = self.on_event.clone();
+        let to = self.on_event.clone();
+        ScrollActionBuilder::new(move |n| lines(DocumentEvent::Wheel(n)))
+            .with_to_px(move |px| to(DocumentEvent::ScrollTo(px as f32)))
     }
 }
 
@@ -917,9 +914,16 @@ fn absolute(rect: Rect) -> taffy::Style {
     }
 }
 
+/// The document's prepaint state: the list's hit entry and its scrollbar.
+pub struct DocumentPrepaint {
+    hit: HitId,
+    builder: ScrollActionBuilder,
+    scrollbars: Scrollbars,
+}
+
 impl Element for DocumentElement {
     type LayoutState = ();
-    type PrepaintState = HitId;
+    type PrepaintState = DocumentPrepaint;
 
     fn request_layout(
         &mut self,
@@ -951,21 +955,39 @@ impl Element for DocumentElement {
         _layout_state: &mut (),
         engine: &LayoutEngine,
         cx: &mut ElementContext,
-    ) -> HitId {
+    ) -> DocumentPrepaint {
         let hit = cx.insert_hit(bounds, HitFlags::DRAG | HitFlags::SCROLL, CursorHint::Text);
         cx.push_clip(bounds);
         for placed in &mut self.rows {
             placed.element.prepaint(engine, cx);
         }
+        // The list owns its offset (through the app), so the bar's input
+        // becomes document events like the wheel's.
+        let builder = self.scroll_builder();
+        let scrollbars = Scrollbars::prepaint(
+            ScrollbarInput {
+                bounds,
+                content: (bounds.width, self.total_extent),
+                offset: (0.0, self.scroll),
+                axes: ScrollAxes { x: false, y: true },
+                sinks: [None, Some(ScrollSink::Builder(builder.clone()))],
+                auto_hide: false,
+            },
+            cx,
+        );
         cx.pop_clip();
-        hit
+        DocumentPrepaint {
+            hit,
+            builder,
+            scrollbars,
+        }
     }
 
     fn paint(
         &mut self,
         bounds: Bounds,
         _layout_state: &mut (),
-        hit: &mut HitId,
+        prepaint: &mut DocumentPrepaint,
         engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
@@ -982,12 +1004,10 @@ impl Element for DocumentElement {
         node.label = Some(Arc::from(&*self.label));
         node.actions = SemanticActions::default().scrollable().draggable();
         let list = cx.semantic.push(node);
-        cx.bind_hit(*hit, list);
+        cx.bind_hit(prepaint.hit, list);
 
         let on_event = self.on_event.clone();
-        let scroll_events = on_event.clone();
-        let builder =
-            ScrollActionBuilder::new(move |lines| scroll_events(DocumentEvent::Wheel(lines)));
+        let builder = prepaint.builder.clone();
         cx.handlers.on_scroll(
             list,
             ScrollTarget {
@@ -1019,12 +1039,13 @@ impl Element for DocumentElement {
             list,
         );
         cx.push_semantic_parent(list);
+        prepaint.scrollbars.register(list, cx);
 
         for row in &mut self.rows {
             row.element.paint(engine, scene, cx);
         }
 
-        self.paint_scroll_thumb(bounds, scene, cx);
+        prepaint.scrollbars.paint(scene, cx);
 
         cx.pop_semantic_parent();
         scene.pop_clip();
