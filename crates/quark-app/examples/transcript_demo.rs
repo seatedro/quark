@@ -3,9 +3,14 @@
 //! tables, and fenced code blocks, each its own selectable block. Drag to
 //! select across messages (list markers and heading hashes survive the
 //! copy), Ctrl/Cmd+C to copy, Ctrl/Cmd+A to select all, wheel to scroll.
-//! Scrolling up while text streams shows "Jump to latest". Escape quits.
+//! Scrolling up while text streams shows "Jump to latest". Ctrl/Cmd+F
+//! opens find: type to highlight matches (they follow the streaming text),
+//! Enter and Shift+Enter step through them, Escape closes it. Escape
+//! without find open quits.
 //!
-//! Build with `--features syntax` for highlighted code blocks.
+//! Build with `--features syntax` for highlighted code blocks. Each answer
+//! shows an image block, decoded on the image worker from a generated
+//! gradient; it reserves a placeholder until its pixels arrive.
 //!
 //! The app keeps only markdown strings: `MarkdownTranscript` parses them
 //! (incrementally while streaming), converts them to blocks, allocates the
@@ -21,17 +26,21 @@
 //! `QUARK_TRANSCRIPT_SYNC=1` turns background measurement off, for
 //! comparing frame times.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use quark_app::quark_ui::Action;
 use quark_app::quark_ui::accessibility::Politeness;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
+use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
 use quark_app::quark_ui::transcript::{
-    BlockMeasurer, MarkdownEntry, MarkdownTranscript, TextGeometry, TextMeasurer, TranscriptBlock,
-    TranscriptCommand, TranscriptEvent, TranscriptRole, TranscriptStyle, key_command,
+    BlockMeasurer, FindBarActions, LoadedImage, MarkdownEntry, MarkdownTranscript, TextGeometry,
+    TextMeasurer, TranscriptBlock, TranscriptCommand, TranscriptEvent, TranscriptRole,
+    TranscriptStyle, find_bar, key_command,
 };
 use quark_app::quark_ui::virtual_list::RowKey;
+use quark_app::quark_ui::virtual_list::ScrollAlign;
+use quark_app::quark_ui::{Action, FocusId};
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
 
@@ -40,6 +49,7 @@ const STREAM_TICK: Duration = Duration::from_millis(60);
 /// Bytes of the scripted answer revealed per tick.
 const STREAM_CHUNK: usize = 7;
 const FONT_SIZE: f32 = 14.0;
+const FIND_FIELD: FocusId = FocusId::from_key("transcript.find");
 const WORDS: &[&str] = &[
     "virtualized",
     "rows",
@@ -124,6 +134,9 @@ const SAMPLES: &[(&str, &str)] = &[
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
     Transcript(TranscriptEvent),
+    FindNext,
+    FindPrev,
+    CloseFind,
 }
 
 impl From<Msg> for Action {
@@ -203,11 +216,34 @@ fn history_markdown(i: u64, rng: &mut Rng) -> String {
 /// The scripted answer streamed at the bottom; `n` picks its code sample.
 fn answer_markdown(n: usize, rng: &mut Rng) -> String {
     format!(
-        "## Streaming answer {n}\n\n{}\n\n1. Rows are measured only inside the window.\n2. Selection names blocks by key, so it survives scrolling.\n   - nested markers copy too\n\n> Copying keeps `- `, `1. `, and `## ` prefixes.\n\n{}\n\n---\n\n{}",
+        "## Streaming answer {n}\n\n{}\n\n![A generated gradient](gradient-480x120)\n\n1. Rows are measured only inside the window.\n2. Selection names blocks by key, so it survives scrolling.\n   - nested markers copy too\n\n> Copying keeps `- `, `1. `, and `## ` prefixes.\n\n{}\n\n---\n\n{}",
         rng.sentence(24),
         fence(n),
         rng.sentence(30),
     )
+}
+
+/// The demo's image loader: `gradient-<w>x<h>` is a generated gradient of
+/// that size, standing in for an app fetching image bytes.
+fn gradient_image(src: &str) -> Option<LoadedImage> {
+    let (w, h) = src.strip_prefix("gradient-")?.split_once('x')?;
+    let (width, height): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.extend_from_slice(&[
+                (x * 255 / width.max(1)) as u8,
+                (y * 255 / height.max(1)) as u8,
+                200,
+                255,
+            ]);
+        }
+    }
+    Some(LoadedImage::Rgba {
+        width,
+        height,
+        pixels,
+    })
 }
 
 /// Sent by the timer thread every [`STREAM_TICK`].
@@ -261,6 +297,8 @@ struct Demo {
     frames: u64,
     all_exact: bool,
     started: Instant,
+    /// The find query field, while find is open.
+    find: Option<TextField>,
 }
 
 impl Demo {
@@ -286,6 +324,7 @@ impl Demo {
             })
             .collect();
         let mut transcript = MarkdownTranscript::new(TranscriptStyle::for_font_size(FONT_SIZE));
+        transcript.set_image_loader(Arc::new(gradient_image));
         transcript
             .extend(history)
             .unwrap_or_else(|e| eprintln!("{e:?}"));
@@ -302,6 +341,7 @@ impl Demo {
             frames: 0,
             all_exact: false,
             started: Instant::now(),
+            find: None,
         }
     }
 
@@ -381,6 +421,14 @@ impl Demo {
     }
 }
 
+impl Demo {
+    fn close_find(&mut self, cx: &mut UiContext) {
+        self.find = None;
+        self.transcript.close_find();
+        cx.set_focus(None);
+    }
+}
+
 impl UiApp for Demo {
     type Action = Msg;
     /// A stream tick from the timer thread.
@@ -415,6 +463,10 @@ impl UiApp for Demo {
         // Rebuild the messages whose code highlights arrived. Ticks redraw
         // often enough to pick them up while streaming.
         self.transcript.poll_highlights();
+        self.transcript.poll_images();
+        if self.transcript.is_loading_images() {
+            cx.frame.request_frame();
+        }
 
         let started = Instant::now();
         let header_h = 36.0;
@@ -443,6 +495,20 @@ impl UiApp for Demo {
             cx.frame.request_frame();
         }
 
+        let find = self.find.as_ref().map(|field| {
+            find_bar(
+                self.transcript.transcript().find(),
+                field,
+                FIND_FIELD,
+                cx.is_focused(FIND_FIELD),
+                FindBarActions {
+                    next: Msg::FindNext.into(),
+                    prev: Msg::FindPrev.into(),
+                    close: Msg::CloseFind.into(),
+                },
+                cx.theme,
+            )
+        });
         let colors = &cx.theme.colors;
         let view = self.transcript.transcript();
         let status = format!(
@@ -473,7 +539,10 @@ impl UiApp for Demo {
                     .px(12.0)
                     .items_center()
                     .bg(colors.panel)
-                    .child(text(status).size(12.0).color(colors.text_muted)),
+                    .flex_row()
+                    .justify_between()
+                    .child(text(status).size(12.0).color(colors.text_muted))
+                    .children(find),
             )
             .child(element)
             .into_any()
@@ -482,14 +551,58 @@ impl UiApp for Demo {
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
         match msg {
             Msg::Transcript(event) => self.transcript.handle(event),
+            Msg::FindNext => {
+                self.transcript.find_next(ScrollAlign::Center);
+            }
+            Msg::FindPrev => {
+                self.transcript.find_prev(ScrollAlign::Center);
+            }
+            Msg::CloseFind => self.close_find(cx),
         }
         cx.window.request_redraw();
+    }
+
+    fn edit_text(&mut self, target: FocusId, command: TextEditCommand) -> TextEditOutcome {
+        let Some(field) = self.find.as_mut().filter(|_| target == FIND_FIELD) else {
+            return TextEditOutcome::default();
+        };
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        let outcome = field.apply_at(command, now_ms);
+        self.transcript.set_find_query(field.text());
+        // Typing jumps to the first match, as browsers do.
+        self.transcript.reveal_current_match(ScrollAlign::Center);
+        outcome
+    }
+
+    fn set_text_value(&mut self, target: FocusId, value: String, _cx: &mut UiContext) {
+        if let Some(field) = self.find.as_mut().filter(|_| target == FIND_FIELD) {
+            field.set_text(value);
+            self.transcript.set_find_query(field.text());
+        }
     }
 
     fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
         let InputEvent::KeyPress(chord) = event else {
             return false;
         };
+        if self.find.is_some() && cx.focus() == Some(FIND_FIELD) {
+            match chord.named() {
+                Some(NamedKey::Escape) => {
+                    self.close_find(cx);
+                    return true;
+                }
+                Some(NamedKey::Enter) => {
+                    if chord.shift() {
+                        self.transcript.find_prev(ScrollAlign::Center);
+                    } else {
+                        self.transcript.find_next(ScrollAlign::Center);
+                    }
+                    cx.window.request_redraw();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if chord.named() == Some(NamedKey::Escape) {
             cx.window.exit();
             return true;
@@ -507,6 +620,12 @@ impl UiApp for Demo {
             }
             Some(TranscriptCommand::SelectAll) => {
                 self.transcript.transcript_mut().select_all();
+                cx.window.request_redraw();
+                true
+            }
+            Some(TranscriptCommand::Find) => {
+                self.find.get_or_insert_with(|| TextField::new(""));
+                cx.set_focus(Some(FIND_FIELD));
                 cx.window.request_redraw();
                 true
             }

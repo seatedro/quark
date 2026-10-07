@@ -9,12 +9,14 @@
 use std::sync::Arc;
 
 use quark_render::FontKind;
+use quark_render::scene::Rect;
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
 use super::{
-    BlockContent, BlockGeometry, BlockMeasurer, MeasureSpec, RULE_HEIGHT, TranscriptBlock,
+    BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState, MeasureSpec,
+    RULE_HEIGHT, TranscriptBlock,
 };
-use crate::element::{CodeBlock, SelectableText};
+use crate::element::{CodeBlock, SelectableText, StyledSpan};
 
 /// Measures blocks with the frame's text system and layout cache.
 /// `font_size` is in logical points; `scale_factor` must be the one the
@@ -59,6 +61,8 @@ pub struct TextGeometry {
     /// end.
     width: f32,
     text_len: usize,
+    /// Unwrapped content width from the inset (code), padding included.
+    natural_width: Option<f32>,
 }
 
 impl BlockGeometry for TextGeometry {
@@ -73,6 +77,25 @@ impl BlockGeometry for TextGeometry {
             None if x - ox >= self.width * 0.5 => self.text_len,
             None => 0,
         }
+    }
+
+    fn range_rects(&self, range: std::ops::Range<usize>, out: &mut Vec<Rect>) {
+        let (ox, oy) = self.text_origin;
+        match &self.layout {
+            Some(layout) => out.extend(layout.selection_rects(range).map(|r| r.offset(ox, oy))),
+            // A block without text (a rule or an image) highlights whole.
+            None if range.start < range.end => out.push(Rect {
+                x: ox,
+                y: oy,
+                width: self.width,
+                height: self.height - oy,
+            }),
+            None => {}
+        }
+    }
+
+    fn natural_width(&self) -> Option<f32> {
+        self.natural_width
     }
 }
 
@@ -113,6 +136,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     text_origin: (inset, 0.0),
                     width,
                     text_len,
+                    natural_width: None,
                 }
             }
             BlockContent::Code {
@@ -122,12 +146,52 @@ impl BlockMeasurer for TextMeasurer<'_> {
             } => {
                 let layout = self.layout(CodeBlock::joined_layout_params(spans, font_size));
                 let metrics = CodeBlock::metrics(font_size, *line_count, label.is_some());
+                let natural_width = layout
+                    .as_ref()
+                    .map(|l| (l.size().0 + metrics.text_origin.0 * 2.0).ceil());
                 TextGeometry {
+                    natural_width,
                     layout,
                     text_origin: (inset + metrics.text_origin.0, metrics.text_origin.1),
                     height: metrics.height,
                     width,
                     text_len,
+                }
+            }
+            BlockContent::Image {
+                state: ImageState::Failed,
+                ..
+            } => {
+                let spans = failed_image_spans(block.text());
+                let params = SelectableText::layout_params(
+                    &spans,
+                    font_size,
+                    FontKind::Ui,
+                    style.weight,
+                    width,
+                );
+                let layout = self.layout(params);
+                TextGeometry {
+                    height: SelectableText::measured_height(layout.as_deref(), font_size, None),
+                    layout,
+                    text_origin: (inset, 0.0),
+                    width,
+                    text_len,
+                    natural_width: None,
+                }
+            }
+            BlockContent::Image { state, .. } => {
+                let height = match state.size() {
+                    Some(size) => image_extent(size, width).1,
+                    None => (self.font_size * IMAGE_PLACEHOLDER_HEIGHT).ceil(),
+                };
+                TextGeometry {
+                    layout: None,
+                    text_origin: (inset, 0.0),
+                    height,
+                    width,
+                    text_len,
+                    natural_width: None,
                 }
             }
             BlockContent::Rule => TextGeometry {
@@ -136,7 +200,26 @@ impl BlockMeasurer for TextMeasurer<'_> {
                 height: (font_size * RULE_HEIGHT).ceil(),
                 width,
                 text_len,
+                natural_width: None,
             },
         }
     }
+}
+
+/// The size an image of intrinsic `(width, height)` pixels shows at in a
+/// column `max_width` wide: its own size, scaled down to fit the width.
+/// One image pixel is one logical point.
+pub(super) fn image_extent((width, height): (u32, u32), max_width: f32) -> (f32, f32) {
+    let (w, h) = (width.max(1) as f32, height as f32);
+    let shown = w.min(max_width.max(1.0));
+    (shown, (h * shown / w).ceil())
+}
+
+/// The alt text an image that failed to load shows, italic as inline
+/// image alt text is.
+pub(super) fn failed_image_spans(alt: &str) -> Arc<[StyledSpan]> {
+    Arc::from([StyledSpan {
+        italic: true,
+        ..StyledSpan::plain(alt)
+    }])
 }

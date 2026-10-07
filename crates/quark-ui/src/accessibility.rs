@@ -372,9 +372,9 @@ pub struct AccessibilityNode {
     id: NodeId,
     role: Role,
     bounds: Rect,
-    label: Option<String>,
-    value: Option<String>,
-    description: Option<String>,
+    label: Option<Arc<str>>,
+    value: Option<Arc<str>>,
+    description: Option<Arc<str>>,
     disabled: bool,
     selected: Option<bool>,
     toggled: Option<Toggled>,
@@ -397,15 +397,23 @@ pub struct AccessibilityNode {
     set_size: Option<usize>,
     collection: CollectionInfo,
     action: Option<AccessibilityAction>,
-    author_id: String,
+    author_id: Arc<str>,
     parent: Option<NodeId>,
 }
 
 impl AccessibilityNode {
+    /// A node keyed by `key`. Pass an `Arc<str>` the element keeps between
+    /// frames (see [`Self::shared`]) to build the node without allocating.
     pub fn new(key: impl AsRef<str>, role: Role, bounds: Rect) -> Self {
-        let key = key.as_ref();
+        Self::shared(Arc::from(key.as_ref()), role, bounds)
+    }
+
+    /// Like [`Self::new`], taking the key as a shared string. Every string a
+    /// node holds is shared, so a node cloned out of an element cache costs
+    /// no allocation.
+    pub fn shared(key: Arc<str>, role: Role, bounds: Rect) -> Self {
         Self {
-            id: stable_node_id(key),
+            id: stable_node_id(&key),
             role,
             bounds,
             label: None,
@@ -427,16 +435,16 @@ impl AccessibilityNode {
             set_size: None,
             collection: CollectionInfo::default(),
             action: None,
-            author_id: key.to_owned(),
+            author_id: key,
             parent: None,
         }
     }
 
-    pub fn button(key: impl AsRef<str>, label: impl Into<String>, bounds: Rect) -> Self {
+    pub fn button(key: impl AsRef<str>, label: impl Into<Arc<str>>, bounds: Rect) -> Self {
         Self::new(key, Role::Button, bounds).label(label)
     }
 
-    pub fn label(mut self, label: impl Into<String>) -> Self {
+    pub fn label(mut self, label: impl Into<Arc<str>>) -> Self {
         let label = label.into();
         if !label.is_empty() {
             self.label = Some(label);
@@ -444,13 +452,12 @@ impl AccessibilityNode {
         self
     }
 
-    pub fn value(mut self, value: impl Into<String>) -> Self {
-        let value = value.into();
-        self.value = Some(value);
+    pub fn value(mut self, value: impl Into<Arc<str>>) -> Self {
+        self.value = Some(value.into());
         self
     }
 
-    pub fn description(mut self, description: impl Into<String>) -> Self {
+    pub fn description(mut self, description: impl Into<Arc<str>>) -> Self {
         let description = description.into();
         if !description.is_empty() {
             self.description = Some(description);
@@ -574,19 +581,19 @@ impl AccessibilityNode {
     fn to_accesskit_node(&self) -> Node {
         let mut node = Node::new(self.role);
         node.set_bounds(ax_rect(self.bounds));
-        node.set_author_id(self.author_id.clone());
+        node.set_author_id(&*self.author_id);
         if let Some(label) = &self.label {
-            node.set_label(label.clone());
+            node.set_label(&**label);
         }
         // accesskit reads a Label node's name from its value, so static text
         // with only a label would reach screen readers unnamed.
         match (&self.value, &self.label) {
-            (Some(value), _) => node.set_value(value.clone()),
-            (None, Some(label)) if self.role == Role::Label => node.set_value(label.clone()),
+            (Some(value), _) => node.set_value(&**value),
+            (None, Some(label)) if self.role == Role::Label => node.set_value(&**label),
             (None, _) => {}
         }
         if let Some(description) = &self.description {
-            node.set_description(description.clone());
+            node.set_description(&**description);
         }
         if self.disabled {
             node.set_disabled();
@@ -687,7 +694,7 @@ impl AccessibilityNode {
             return Vec::new();
         };
         let runs = text_runs(&text.text);
-        let owner = self.author_id.as_str();
+        let owner = &*self.author_id;
         if let Some((anchor, focus)) = text.selection {
             node.set_text_selection(TextSelection {
                 anchor: text_position(owner, &runs, anchor),
@@ -898,6 +905,23 @@ impl AccessibilityFrame {
         }
     }
 
+    /// Empty the frame for a `width` x `height` window, keeping its
+    /// buffers, so a window that reuses one frame builds its tree without
+    /// allocating once the buffers have grown.
+    pub fn reset(&mut self, width: f32, height: f32) {
+        self.nodes.clear();
+        self.node_ids.clear();
+        self.actions.clear();
+        self.semantic_owners.clear();
+        self.focused = None;
+        self.root_bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        };
+    }
+
     /// Push a direct child of the window. Returns the node's final id, which
     /// differs from the key hash when the key collided.
     pub fn push(&mut self, node: AccessibilityNode) -> NodeId {
@@ -949,7 +973,7 @@ impl AccessibilityFrame {
             let id = stable_node_id(&author_id);
             if self.node_ids.insert(id) {
                 node.id = id;
-                node.author_id = author_id;
+                node.author_id = author_id.into();
                 return;
             }
             suffix += 1;

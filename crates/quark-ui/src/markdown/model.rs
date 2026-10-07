@@ -21,6 +21,10 @@ pub enum BlockKind {
     /// Cells live in the cell columns; the block's spans are empty.
     Table,
     Rule,
+    /// A paragraph holding nothing but one image. The block text is the
+    /// alt text and [`MarkdownDoc::image_src`] the image's URL. Images
+    /// inside other text stay inline as their alt text.
+    Image,
 }
 
 /// The list marker shown before a block. Only the first block of a list
@@ -78,7 +82,8 @@ pub struct MarkdownDoc {
     block_quote: Vec<u8>,
     block_indent: Vec<u8>,
     block_marker: Vec<ListMarker>,
-    /// Code block language (first word of the fence info); empty otherwise.
+    /// Code block language (first word of the fence info) or image URL;
+    /// empty otherwise.
     block_lang: Vec<Range<u32>>,
     block_cells: Vec<Range<u32>>,
     block_columns: Vec<u32>,
@@ -194,7 +199,18 @@ impl MarkdownDoc {
     }
 
     pub fn lang(&self, block: usize) -> &str {
-        self.slice(&self.block_lang[block])
+        match self.block_kind[block] {
+            BlockKind::CodeBlock => self.slice(&self.block_lang[block]),
+            _ => "",
+        }
+    }
+
+    /// The URL of an [`BlockKind::Image`] block; empty for other blocks.
+    pub fn image_src(&self, block: usize) -> &str {
+        match self.block_kind[block] {
+            BlockKind::Image => self.slice(&self.block_lang[block]),
+            _ => "",
+        }
     }
 
     /// Hash of everything the block renders from. Unchanged leading blocks
@@ -253,6 +269,13 @@ impl MarkdownDoc {
                 body.push_str(self.text(block));
             }
             BlockKind::Rule => body.push_str("---"),
+            BlockKind::Image => {
+                body.push_str("![");
+                body.push_str(self.text(block));
+                body.push_str("](");
+                body.push_str(self.image_src(block));
+                body.push(')');
+            }
             BlockKind::Table => self.table_plain_text(block, &mut body),
             BlockKind::Paragraph | BlockKind::CodeBlock => body.push_str(self.text(block)),
         }
@@ -471,6 +494,9 @@ struct Builder {
     strike: u32,
     image: u32,
     image_text_start: u32,
+    /// An image that opened its paragraph, with where it ended once it has:
+    /// if nothing follows it, the paragraph becomes an image block.
+    lone_image: Option<(String, Option<u32>)>,
     links: Vec<u32>,
     table: Option<TableState>,
 }
@@ -611,8 +637,16 @@ impl Builder {
                 self.links.push(len_u32(self.doc.link_url.len()));
                 self.doc.link_url.push(Arc::from(dest_url.as_ref()));
             }
-            Tag::Image { .. } => {
+            Tag::Image { dest_url, .. } => {
                 self.ensure_open();
+                let opens_paragraph = self.open.is_some_and(|o| {
+                    o.kind == BlockKind::Paragraph && o.text_start == len_u32(self.doc.text.len())
+                });
+                self.lone_image = (opens_paragraph
+                    && self.image == 0
+                    && self.links.is_empty()
+                    && self.table.is_none())
+                .then(|| (dest_url.to_string(), None));
                 self.image += 1;
                 self.push_text("[", SpanFlags::NONE);
                 self.image_text_start = len_u32(self.doc.text.len());
@@ -676,6 +710,11 @@ impl Builder {
                 }
                 self.push_text("]", SpanFlags::NONE);
                 self.image = self.image.saturating_sub(1);
+                if self.image == 0
+                    && let Some((_, end)) = &mut self.lone_image
+                {
+                    end.get_or_insert(len_u32(self.doc.text.len()));
+                }
             }
             _ => {}
         }
@@ -708,9 +747,16 @@ impl Builder {
         if self.table.is_some() {
             return;
         }
-        if let Some(open) = self.open.take() {
+        let lone_image = self.lone_image.take();
+        if let Some(mut open) = self.open.take() {
             if open.kind == BlockKind::CodeBlock {
                 self.trim_final_newline(open);
+            }
+            if let Some((src, Some(end))) = lone_image
+                && open.kind == BlockKind::Paragraph
+                && end == len_u32(self.doc.text.len())
+            {
+                self.make_image(&mut open, &src);
             }
             self.push_block(open);
             let block = self.doc.block_kind.len() - 1;
@@ -732,6 +778,44 @@ impl Builder {
         d.block_cells.push(0..0);
         d.block_columns.push(0);
         d.block_hash.push(0);
+    }
+
+    /// Turns the open paragraph, `[alt]` and nothing else, into an image
+    /// block: the URL goes into the arena ahead of the alt text, and the
+    /// alt text loses its brackets.
+    fn make_image(&mut self, open: &mut Open, src: &str) {
+        let d = &mut self.doc;
+        let start = open.text_start as usize;
+        let text = &d.text[start..];
+        let alt = text
+            .strip_prefix('[')
+            .and_then(|t| t.strip_suffix(']'))
+            .unwrap_or(text)
+            .to_owned();
+        d.text.truncate(start);
+        d.text.push_str(src);
+        self.lang = open.text_start..len_u32(d.text.len());
+        let alt_start = len_u32(d.text.len());
+        d.text.push_str(&alt);
+        let alt_end = len_u32(d.text.len());
+        // Spans covered `[alt]` from `start`; move them onto the alt text.
+        let shift = |at: u32| (alt_start + at.saturating_sub(open.text_start + 1)).min(alt_end);
+        let mut kept = open.span_start as usize;
+        for i in open.span_start as usize..d.span_range.len() {
+            let range = shift(d.span_range[i].start)..shift(d.span_range[i].end);
+            if range.is_empty() {
+                continue;
+            }
+            d.span_range[kept] = range;
+            d.span_flags[kept] = d.span_flags[i];
+            d.span_link[kept] = d.span_link[i];
+            kept += 1;
+        }
+        d.span_range.truncate(kept);
+        d.span_flags.truncate(kept);
+        d.span_link.truncate(kept);
+        open.kind = BlockKind::Image;
+        open.text_start = alt_start;
     }
 
     /// Fenced code always ends with a line ending; it is not part of the code.
@@ -825,7 +909,8 @@ impl Builder {
         d.block_quote[block].hash(&mut h);
         d.block_indent[block].hash(&mut h);
         d.block_marker[block].hash(&mut h);
-        d.lang(block).hash(&mut h);
+        // The language of code, or the URL of an image.
+        d.slice(&d.block_lang[block]).hash(&mut h);
         d.text(block).hash(&mut h);
         self.hash_spans(d.spans(block), d.block_text[block].start, &mut h);
         h.finish()
@@ -881,6 +966,7 @@ impl MarkdownDoc {
                 BlockKind::CodeBlock => format!("code({})", self.lang(block)),
                 BlockKind::Table => format!("table{}", self.table_columns(block)),
                 BlockKind::Rule => "hr".to_owned(),
+                BlockKind::Image => format!("img({})", self.image_src(block)),
             };
             out.push_str(&kind);
             match self.marker(block) {

@@ -12,6 +12,7 @@ use crate::action::Action;
 use crate::element::{ElementContext, InputRouter, IntoAnyElement, div, render_element};
 use crate::style::Styled;
 use crate::theme::Theme;
+use crate::virtual_list::ScrollAlign;
 
 // ---------------------------------------------------------------------------
 // A monospace grid measurer: every char is 10px wide, every line 20px tall,
@@ -40,6 +41,20 @@ impl BlockGeometry for GridGeometry {
         let (start, end) = self.lines[line];
         let col = (x / CHAR_W).round().max(0.0) as usize;
         (start + col).min(end)
+    }
+
+    fn range_rects(&self, range: std::ops::Range<usize>, out: &mut Vec<Rect>) {
+        for (line, &(start, end)) in self.lines.iter().enumerate() {
+            let (a, b) = (range.start.max(start), range.end.min(end));
+            if a < b {
+                out.push(Rect {
+                    x: (a - start) as f32 * CHAR_W,
+                    y: line as f32 * LINE_H,
+                    width: (b - a) as f32 * CHAR_W,
+                    height: LINE_H,
+                });
+            }
+        }
     }
 }
 
@@ -884,7 +899,12 @@ fn markdown_message_with(
         key: RowKey(row),
         role: TranscriptRole::Assistant,
         author: "assistant".into(),
-        blocks: markdown.blocks(&crate::markdown::MarkdownDoc::parse(source), syntax, keys),
+        blocks: markdown.blocks(
+            &crate::markdown::MarkdownDoc::parse(source),
+            syntax,
+            &mut ImageStore::new(),
+            keys,
+        ),
     }
 }
 
@@ -901,6 +921,7 @@ fn dump_blocks(message: &TranscriptMessage) -> String {
                     format!("code({})", label.as_deref().unwrap_or(""))
                 }
                 BlockContent::Rule => "rule".to_owned(),
+                BlockContent::Image { src, state } => format!("image({src}, {state:?})"),
             };
             let s = &block.style;
             format!(
@@ -1315,4 +1336,485 @@ fn strikethrough_markdown_paints_a_line_through_its_run() {
         (line.y - mid_y).abs() < 7.0,
         "{line:?} not across the text at {mid_y}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Cached rows
+// ---------------------------------------------------------------------------
+
+/// Paints transcripts frame after frame through one element cache, as a
+/// window does, and dumps what a frame published.
+struct CachedPainter {
+    text: TextSystem,
+    layouts: LayoutCache,
+    cache: crate::element::ElementCache,
+}
+
+impl CachedPainter {
+    fn new() -> Self {
+        Self {
+            text: TextSystem::vendored_only(&Default::default()),
+            layouts: LayoutCache::default(),
+            cache: crate::element::ElementCache::new(),
+        }
+    }
+
+    /// The text regions (`key "text" @x,y`) and the accessibility states
+    /// of one frame, painted with the cache or without it.
+    fn frame(
+        &mut self,
+        transcript: &mut Transcript,
+        messages: &HashMap<RowKey, TranscriptMessage>,
+        size: (f32, f32),
+        cached: bool,
+    ) -> String {
+        let font_size = transcript.style().font_size;
+        transcript.prepare(
+            size.0,
+            size.1,
+            0,
+            messages,
+            &mut TextMeasurer::new(&mut self.text, &mut self.layouts, font_size, 1.0),
+        );
+        let theme = Theme::default_dark();
+        let element = transcript.element(messages, &theme, |ev| Ev(ev).into());
+        let signals = SignalStore::new();
+        let mut cx = ElementContext::new(
+            &theme,
+            1.0,
+            &mut self.text,
+            &mut self.layouts,
+            None,
+            &signals,
+        );
+        if cached {
+            cx = cx.with_element_cache(&mut self.cache);
+        }
+        cx.accessibility = AccessibilityFrame::new(size.0, size.1);
+        cx.semantic = SemanticFrame::new(size.0, size.1);
+        let mut scene = Scene::default();
+        render_element(&mut element.into_any(), &mut scene, &mut cx, size.0, size.1);
+        let mut out = String::new();
+        // Filled rects: row backgrounds, selection, and find highlights.
+        for p in &scene.primitives {
+            let (r, c) = match p {
+                quark_render::Primitive::Rect(p) => (p.rect, p.color),
+                quark_render::Primitive::RoundedRect(p) => (p.rect, p.color),
+                _ => continue,
+            };
+            out.push_str(&format!(
+                "rect {:.0},{:.0} {:.0}x{:.0} {:?}\n",
+                r.x, r.y, r.width, r.height, c
+            ));
+        }
+        for r in &cx.selectable_text_runs {
+            out.push_str(&format!(
+                "{} {:?} @{:.0},{:.0}\n",
+                r.source_key, r.text, r.bounds.x, r.bounds.y
+            ));
+        }
+        // Author ids of some text nodes embed the position they were first
+        // painted at, which a replayed node keeps; compare the rest.
+        let update = cx.accessibility.tree_update("Test", None);
+        for line in crate::accessibility::dump_accessibility_states(&update).lines() {
+            out.push_str(line.split_once(" | ").map_or(line, |(_, rest)| rest));
+            out.push('\n');
+        }
+        out
+    }
+}
+
+// Catches a row replayed from the cache after something it shows changed:
+// each edit is followed by a cached frame that must match an uncached one.
+#[test]
+fn cached_rows_paint_exactly_what_an_uncached_frame_paints_after_each_edit() {
+    let mut messages = real_document(30);
+    let mut transcript = real_transcript(&messages);
+    transcript.set_scroll_offset(0.0);
+    let mut painter = CachedPainter::new();
+    let mut size = (400.0, 500.0);
+    painter.frame(&mut transcript, &messages, size, true);
+
+    type Edit = fn(&mut Transcript, &mut HashMap<RowKey, TranscriptMessage>, &mut (f32, f32));
+    let edits: &[(&str, Edit)] = &[
+        ("nothing", |_, _, _| {}),
+        ("stream into row 1", |t, m, _| {
+            let message = m.get_mut(&RowKey(1)).unwrap();
+            message.blocks[0] = TranscriptBlock::plain(BlockKey(10), "Streamed text for row one.");
+            t.update(message).unwrap();
+        }),
+        ("select inside row 2", |t, _, _| {
+            t.set_selection(Some(Selection::new(
+                SelectionPoint::new(BlockKey(20), 3),
+                SelectionPoint::new(BlockKey(20), 12),
+            )));
+        }),
+        ("scroll", |t, _, _| {
+            t.scroll_by(70.0);
+        }),
+        ("find", |t, m, _| t.set_find_query("lines", m)),
+        ("narrow", |_, _, size| size.0 = 300.0),
+        ("append a row", |t, m, _| {
+            let message = message_with(30, &["A new message at the end."]);
+            t.push(&message).unwrap();
+            m.insert(message.key, message);
+        }),
+    ];
+    for (name, edit) in edits {
+        edit(&mut transcript, &mut messages, &mut size);
+        let cached = painter.frame(&mut transcript, &messages, size, true);
+        let mut fresh = transcript.without_element_memory();
+        let uncached = painter.frame(&mut fresh, &messages, size, false);
+        assert_eq!(cached, uncached, "after {name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Find
+// ---------------------------------------------------------------------------
+
+impl Doc {
+    /// `"<block>:<start>..<end>"` per match, the current one starred.
+    fn find_dump(&self) -> String {
+        let Some(find) = self.transcript.find() else {
+            return "closed".to_owned();
+        };
+        find.matches()
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let star = if find.current_index() == Some(i) {
+                    "*"
+                } else {
+                    ""
+                };
+                format!("{star}{}:{}..{}", m.block.0, m.range.start, m.range.end)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn find(&mut self, query: &str) {
+        self.transcript.set_find_query(query, &self.messages);
+    }
+
+    /// Where the current match's block sits in the viewport, if it is
+    /// materialized.
+    fn current_match_top(&self) -> Option<f32> {
+        let m = self.transcript.find()?.current()?.clone();
+        let block = self
+            .transcript
+            .visible_blocks()
+            .iter()
+            .find(|b| b.key == m.block)?;
+        Some(block.rect.y + (m.range.start.get() / 40) as f32 * LINE_H)
+    }
+}
+
+#[test]
+fn find_matches_every_block_in_document_order_ignoring_case() {
+    let mut doc = Doc::new([
+        message_with(0, &["Second thoughts", "no"]),
+        message_with(1, &["a SECOND and a second"]),
+    ]);
+
+    doc.find("second");
+
+    assert_eq!(doc.find_dump(), "*0:0..6 10:2..8 10:15..21");
+}
+
+#[test]
+fn find_picks_up_matches_streaming_in_and_keeps_the_current_one() {
+    let mut doc = Doc::new([
+        message_with(0, &["one word"]),
+        message_with(1, &["growing"]),
+    ]);
+    doc.find("word");
+
+    doc.stream(1, 0, "growing word by word");
+    doc.frame();
+
+    assert_eq!(doc.find_dump(), "*0:4..8 10:8..12 10:16..20");
+}
+
+#[test]
+fn find_drops_matches_of_removed_blocks() {
+    let mut doc = Doc::new([
+        message_with(0, &["word"]),
+        message_with(1, &["word", "word"]),
+    ]);
+    doc.find("word");
+    doc.transcript.find_next(ScrollAlign::Center);
+    doc.transcript.find_next(ScrollAlign::Center);
+
+    let message = message_with(1, &["word"]);
+    doc.transcript.update(&message).unwrap();
+    doc.messages.insert(message.key, message);
+    doc.frame();
+
+    // The current match left with its block; the next one after it wraps.
+    assert_eq!(doc.find_dump(), "*0:0..4 10:0..4");
+}
+
+#[test]
+fn next_and_prev_wrap_and_scroll_the_match_to_the_viewport_center() {
+    let mut doc = Doc::rows(40);
+    doc.scroll_to(0.0);
+    doc.find("first");
+
+    // From the first match, previous wraps to the last row's block.
+    let prev = doc.transcript.find_prev(ScrollAlign::Center).unwrap();
+    doc.frame();
+    let at_last = doc.current_match_top();
+    let next = doc.transcript.find_next(ScrollAlign::Center).unwrap();
+    doc.frame();
+
+    assert_eq!(
+        (prev.block.0, next.block.0, doc.transcript.scroll_offset()),
+        (390, 0, 0.0)
+    );
+    // The last row cannot scroll to the center; it sits fully in view.
+    let top = at_last.unwrap();
+    assert!(top >= 0.0 && top + LINE_H <= doc.size.1, "{top}");
+}
+
+#[test]
+fn next_centers_a_match_in_the_middle_of_the_document() {
+    let mut doc = Doc::rows(40);
+    doc.scroll_to(0.0);
+    doc.find("m20 second");
+
+    doc.transcript.find_next(ScrollAlign::Center).unwrap();
+    doc.frame();
+
+    let top = doc.current_match_top().unwrap();
+    assert_eq!(top + LINE_H * 0.5, doc.size.1 * 0.5);
+}
+
+#[test]
+fn find_paints_a_highlight_per_match_and_marks_the_current_one() {
+    let messages = real_document(4);
+    let mut transcript = real_transcript(&messages);
+    transcript.set_scroll_offset(0.0);
+    transcript.set_find_query("Message", &messages);
+    let theme = Theme::default_dark();
+    let (plain, current) = (
+        format!("{:?}", theme.colors.search_match_bg),
+        format!("{:?}", theme.colors.search_match_active_bg),
+    );
+
+    let frame = CachedPainter::new().frame(&mut transcript, &messages, (400.0, 600.0), true);
+
+    let count = |color: &str| frame.lines().filter(|l| l.ends_with(color)).count();
+    assert_eq!((count(&current), count(&plain)), (1, 3));
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
+/// A loader that decodes `"<w>x<h>.png"` into a gray image of that size
+/// and fails on anything else.
+fn sized_loader() -> ImageLoader {
+    Arc::new(|src: &str| {
+        let (w, h) = src.strip_suffix(".png")?.split_once('x')?;
+        let (width, height) = (w.parse().ok()?, h.parse().ok()?);
+        Some(LoadedImage::Rgba {
+            width,
+            height,
+            pixels: vec![128; width as usize * height as usize * 4],
+        })
+    })
+}
+
+/// Prepares `md` at 400x300 with real text layouts.
+fn prepare_markdown(md: &mut MarkdownTranscript, text: &mut TextSystem, layouts: &mut LayoutCache) {
+    md.prepare(
+        400.0,
+        300.0,
+        0,
+        &mut TextMeasurer::new(text, layouts, 14.0, 1.0),
+    );
+}
+
+/// Height of the first image block on screen, and whether its pixels
+/// arrived.
+fn image_block(md: &MarkdownTranscript) -> (f32, bool) {
+    let t = md.transcript();
+    let visible = t
+        .visible_blocks()
+        .iter()
+        .find(|b| md.messages()[&b.row].blocks[b.index].content_kind() == "image")
+        .expect("an image block is on screen");
+    let block = &md.messages()[&visible.row].blocks[visible.index];
+    let ready = matches!(
+        block.content,
+        BlockContent::Image {
+            state: ImageState::Ready(_),
+            ..
+        }
+    );
+    (visible.rect.height, ready)
+}
+
+impl TranscriptBlock {
+    fn content_kind(&self) -> &'static str {
+        match self.content {
+            BlockContent::Image { .. } => "image",
+            _ => "text",
+        }
+    }
+}
+
+// Each case: the image's size, whether the app hinted it, and the block's
+// height before and after the pixels arrive (the column is 371 points
+// wide, so wider images scale down).
+#[test]
+fn image_blocks_reserve_their_height_and_scale_to_the_column() {
+    let placeholder = (14.0 * IMAGE_PLACEHOLDER_HEIGHT).ceil();
+    let cases: &[(&str, bool, f32, f32)] = &[
+        ("200x100.png", true, 100.0, 100.0),
+        ("742x100.png", true, 50.0, 50.0),
+        ("200x100.png", false, placeholder, 100.0),
+    ];
+    for &(src, hint, before, after) in cases {
+        let mut md = markdown_transcript(&format!("![chart]({src})"));
+        let (mut text, mut layouts) = (
+            TextSystem::vendored_only(&Default::default()),
+            LayoutCache::default(),
+        );
+        if hint {
+            let (w, h) = src.strip_suffix(".png").unwrap().split_once('x').unwrap();
+            md.hint_image_size(src, w.parse().unwrap(), h.parse().unwrap());
+        }
+        md.set_image_loader(sized_loader());
+        prepare_markdown(&mut md, &mut text, &mut layouts);
+        let loading = image_block(&md);
+        md.finish_images();
+        prepare_markdown(&mut md, &mut text, &mut layouts);
+        let loaded = image_block(&md);
+
+        assert_eq!(
+            (loading, loaded),
+            ((before, false), (after, true)),
+            "{src} hinted={hint}"
+        );
+    }
+}
+
+#[test]
+fn an_image_resolving_above_the_view_does_not_move_the_rows_on_screen() {
+    let mut md = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+    md.set_image_loader(sized_loader());
+    md.extend((0..40).map(|i| MarkdownEntry {
+        row: RowKey(i),
+        role: TranscriptRole::Assistant,
+        author: "assistant".into(),
+        markdown: if i == 10 {
+            "![tall](100x600.png)".to_owned()
+        } else {
+            format!("Message {i} with a line of text.")
+        },
+    }))
+    .unwrap();
+    let (mut text, mut layouts) = (
+        TextSystem::vendored_only(&Default::default()),
+        LayoutCache::default(),
+    );
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+    md.finish_measures();
+    // Put row 12 at the top: the image row sits in the overscan above.
+    let top = |md: &MarkdownTranscript, row: u64| {
+        let t = md.transcript();
+        t.list().rows().offset_of(RowKey(row)).unwrap() - t.scroll_offset()
+    };
+    let offset = md.transcript().list().rows().offset_of(RowKey(12)).unwrap() + 5.0;
+    md.transcript_mut().set_scroll_offset(offset);
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+    let image_row = md.transcript().list().rows().height_of(RowKey(10)).unwrap();
+    let before = top(&md, 12);
+
+    md.finish_images();
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+
+    let grown = md.transcript().list().rows().height_of(RowKey(10)).unwrap() - image_row;
+    assert_eq!((top(&md, 12), grown > 400.0), (before, true));
+}
+
+#[test]
+fn an_image_without_pixels_shows_its_alt_text_and_names_its_node() {
+    let mut no_loader = markdown_transcript("![a sales chart](chart.png)");
+    let mut loaded = markdown_transcript("![a sales chart](30x20.png)");
+    loaded.set_image_loader(sized_loader());
+    loaded.finish_images();
+    let theme = Theme::default_dark();
+
+    let (regions, _) = paint_markdown(&mut no_loader, &theme);
+    let alt_text: Vec<&str> = regions.iter().map(|r| &*r.text).collect();
+    let mut text = TextSystem::vendored_only(&Default::default());
+    let mut layouts = LayoutCache::default();
+    prepare_markdown(&mut loaded, &mut text, &mut layouts);
+    let element = loaded.element(&theme, |ev| Ev(ev).into());
+    let signals = SignalStore::new();
+    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+    cx.accessibility = AccessibilityFrame::new(400.0, 300.0);
+    cx.semantic = SemanticFrame::new(400.0, 300.0);
+    let mut scene = Scene::default();
+    render_element(&mut element.into_any(), &mut scene, &mut cx, 400.0, 300.0);
+    let update = cx.accessibility.tree_update("Test", None);
+    let image_name = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::Image)
+        .and_then(|(_, n)| n.label().map(str::to_owned));
+    let pixels = scene.primitives.iter().find_map(|p| match p {
+        quark_render::Primitive::Image(image) => Some((image.width, image.height)),
+        _ => None,
+    });
+
+    assert_eq!(
+        (alt_text, image_name.as_deref(), pixels),
+        (vec!["a sales chart"], Some("a sales chart"), Some((30, 20)))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Wide blocks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_wide_code_block_scrolls_sideways_and_pointer_hits_follow_it() {
+    let long = format!("let row = \"{}\";", "x".repeat(150));
+    let mut message = message_with(0, &["Above the code."]);
+    message.blocks.push(TranscriptBlock::code(
+        BlockKey(5),
+        vec![vec![crate::element::StyledSpan::plain(long.as_str())]],
+    ));
+    let messages: HashMap<RowKey, TranscriptMessage> = [(message.key, message)].into();
+    let mut transcript = real_transcript(&messages);
+    let mut painter = CachedPainter::new();
+    let size = (300.0, 400.0);
+    painter.frame(&mut transcript, &messages, size, true);
+    let hit = |t: &Transcript| {
+        let code = t
+            .visible_blocks()
+            .iter()
+            .find(|b| b.key == BlockKey(5))
+            .unwrap();
+        let (x, y) = (code.rect.x + 60.0, code.rect.y + code.rect.height * 0.5);
+        t.point_at(x, y).unwrap().byte
+    };
+    let before = hit(&transcript);
+
+    transcript.scroll_handles[&BlockKey(5)].set_offset(200.0, 0.0);
+    painter.frame(&mut transcript, &messages, size, true);
+    let cached = painter.frame(&mut transcript, &messages, size, true);
+    let mut fresh = transcript.without_element_memory();
+    let uncached = painter.frame(&mut fresh, &messages, size, false);
+    let after = hit(&transcript);
+
+    assert_eq!(transcript.scroll_handles[&BlockKey(5)].offset().0, 200.0);
+    assert_eq!(cached, uncached);
+    // 200 points of monospace at this size is well over 15 characters.
+    assert!(after > before + 15, "{before} -> {after}");
 }

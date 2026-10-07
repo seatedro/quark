@@ -19,7 +19,7 @@ use quark_render::{FontKind, FontWeight};
 use unicode_width::UnicodeWidthStr;
 
 use super::syntax::{CodeLine, SyntaxHighlighter};
-use super::{BlockStyle, SpanTone, TranscriptBlock};
+use super::{BlockStyle, ImageState, ImageStore, SpanTone, TranscriptBlock};
 use crate::element::StyledSpan;
 use crate::markdown::{BlockKind, ListMarker, MarkdownDoc, SpanFlags};
 
@@ -99,10 +99,15 @@ impl MarkdownMessage {
     /// match the previous call is returned as before (its spans shared,
     /// not rebuilt). New blocks get keys from `keys`; blocks past the end
     /// of `doc` give up their keys and highlights.
+    ///
+    /// Image blocks take their pixels from `images`, which starts loading
+    /// each image the first time it is asked for it; a block whose image
+    /// state changed is rebuilt like one whose markdown did.
     pub fn blocks(
         &mut self,
         doc: &MarkdownDoc,
         syntax: &mut SyntaxHighlighter,
+        images: &mut ImageStore,
         keys: &mut BlockKeys,
     ) -> Vec<TranscriptBlock> {
         for key in self.keys.drain(doc.len().min(self.keys.len())..) {
@@ -115,8 +120,14 @@ impl MarkdownMessage {
         for index in 0..doc.len() {
             let key = self.keys[index];
             let hash = doc.hash(index);
+            let mut image = None;
             let highlight = match doc.kind(index) {
                 BlockKind::CodeBlock => syntax.version(key, doc.lang(index), doc.text(index)),
+                BlockKind::Image => {
+                    let (state, version) = images.state(doc.image_src(index));
+                    image = Some(state);
+                    version
+                }
                 _ => 0,
             };
             let fresh = self
@@ -129,7 +140,7 @@ impl MarkdownMessage {
             let converted = Converted {
                 hash,
                 highlight,
-                block: convert(doc, index, key, syntax),
+                block: convert(doc, index, key, syntax, image),
             };
             match self.converted.get_mut(index) {
                 Some(slot) => *slot = converted,
@@ -145,6 +156,7 @@ fn convert(
     index: usize,
     key: BlockKey,
     syntax: &SyntaxHighlighter,
+    image: Option<ImageState>,
 ) -> TranscriptBlock {
     let style = block_style(doc, index);
     let block = match doc.kind(index) {
@@ -157,6 +169,12 @@ fn convert(
         }
         BlockKind::Table => TranscriptBlock::toned_code(key, table_lines(doc, index)),
         BlockKind::Rule => TranscriptBlock::rule(key),
+        BlockKind::Image => TranscriptBlock::image(
+            key,
+            Arc::from(doc.image_src(index)),
+            doc.text(index),
+            image.unwrap_or(ImageState::Failed),
+        ),
     };
     block.with_style(style)
 }

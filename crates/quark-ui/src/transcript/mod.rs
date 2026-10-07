@@ -24,6 +24,8 @@
 mod background;
 mod element;
 mod facade;
+mod find;
+mod images;
 mod markdown;
 mod measure;
 mod syntax;
@@ -33,12 +35,15 @@ mod tests;
 pub use background::MeasureSpec;
 pub use element::{TranscriptElement, TranscriptEvent};
 pub use facade::{MarkdownEntry, MarkdownTranscript};
+pub use find::{FindBarActions, FindIntegrityError, FindMatch, FindState, find_bar};
+pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage};
 pub use markdown::{BlockKeys, CODE_SCALE, MarkdownMessage, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use quark::selection::{
     BlockKey, BlockOrder, FULL_INTEGRITY_CHECKS, Selection, SelectionPoint, SelectionText,
@@ -47,9 +52,9 @@ use quark::selection::{
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
-use crate::element::{Binding, StyledSpan, join_code_lines};
+use crate::element::{Binding, ScrollHandle, StyledSpan, join_code_lines};
 use crate::theme::Theme;
-use crate::virtual_list::{RowError, RowIntegrityError, RowKey, VariableList};
+use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
 use quark::Color;
 
 /// What separates blocks in copied text.
@@ -68,6 +73,9 @@ const AUTOSCROLL_MAX_DT_MS: u64 = 50;
 
 /// Height of a rule block, in multiples of its font size.
 const RULE_HEIGHT: f32 = 1.0;
+/// Height of an image placeholder whose size is unknown, in multiples of
+/// the font size.
+const IMAGE_PLACEHOLDER_HEIGHT: f32 = 8.0;
 /// Width of one quote level's bar column, in multiples of the font size.
 const QUOTE_STEP: f32 = 1.0;
 /// Width of one list level's marker gutter, in multiples of the font size.
@@ -89,13 +97,17 @@ pub enum BlockContent {
     },
     /// A horizontal rule. Its text is `---`, so copy keeps it.
     Rule,
+    /// An image scaled to the block's width (never past its own width),
+    /// or a placeholder while it loads. The block's text is the alt text,
+    /// which copy and assistive tech read.
+    Image { src: Arc<str>, state: ImageState },
 }
 
 impl BlockContent {
     fn spans(&self) -> Option<&Arc<[StyledSpan]>> {
         match self {
             Self::Prose(spans) | Self::Code { spans, .. } => Some(spans),
-            Self::Rule => None,
+            Self::Rule | Self::Image { .. } => None,
         }
     }
 }
@@ -153,6 +165,13 @@ impl Palette {
                 c.syntax_property,
                 c.syntax_operator,
             ],
+        }
+    }
+
+    fn hash_into(&self, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        for c in [self.muted, self.pill].iter().chain(&self.syntax) {
+            (c.r, c.g, c.b, c.a).hash(hasher);
         }
     }
 
@@ -218,8 +237,21 @@ impl BlockStyle {
     }
 }
 
+/// A revision no block has had yet. Revisions are process-wide so a block
+/// rebuilt under a reused key never repeats an earlier revision.
+fn next_revision() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// One selectable text block of a message. Markdown rendering produces a
 /// list of these per message.
+///
+/// Every constructor and `with_` method gives the block a new
+/// [`revision`](Self::revision), and clones share it; the element caches a
+/// row while the revisions of its blocks stay the same. Change a block by
+/// building a new one (or through a `with_` method), not by assigning its
+/// fields.
 #[derive(Debug, Clone)]
 pub struct TranscriptBlock {
     pub key: BlockKey,
@@ -228,6 +260,7 @@ pub struct TranscriptBlock {
     text: Arc<str>,
     /// One per content span, when any span takes its color from the theme.
     tones: Option<Arc<[SpanTone]>>,
+    revision: u64,
 }
 
 impl TranscriptBlock {
@@ -243,6 +276,7 @@ impl TranscriptBlock {
             style: BlockStyle::default(),
             text: text.into(),
             tones: None,
+            revision: next_revision(),
         }
     }
 
@@ -259,11 +293,25 @@ impl TranscriptBlock {
             style: BlockStyle::default(),
             text: Arc::from("---"),
             tones: None,
+            revision: next_revision(),
+        }
+    }
+
+    /// An image block showing `src` in `state`, with `alt` as its text.
+    pub fn image(key: BlockKey, src: Arc<str>, alt: &str, state: ImageState) -> Self {
+        Self {
+            key,
+            content: BlockContent::Image { src, state },
+            style: BlockStyle::default(),
+            text: Arc::from(alt),
+            tones: None,
+            revision: next_revision(),
         }
     }
 
     pub fn with_style(mut self, style: BlockStyle) -> Self {
         self.style = style;
+        self.revision = next_revision();
         self
     }
 
@@ -272,6 +320,7 @@ impl TranscriptBlock {
         if let BlockContent::Code { label: slot, .. } = &mut self.content {
             *slot = label.filter(|l| !l.is_empty());
         }
+        self.revision = next_revision();
         self
     }
 
@@ -290,6 +339,7 @@ impl TranscriptBlock {
             style: BlockStyle::default(),
             text: text.into(),
             tones: None,
+            revision: next_revision(),
         }
     }
 
@@ -326,12 +376,18 @@ impl TranscriptBlock {
             .iter()
             .any(|tone| *tone != SpanTone::Plain)
             .then(|| tones.into());
+        self.revision = next_revision();
         self
     }
 
     /// The plain text selection and copy operate on.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Changes whenever the block's content or style does; equal for clones.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The tone of each content span, or `None` when all are plain.
@@ -357,6 +413,9 @@ impl TranscriptBlock {
                 },
             ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some(),
             (BlockContent::Rule, BlockContent::Rule) => true,
+            (BlockContent::Image { state: a, .. }, BlockContent::Image { state: b, .. }) => {
+                image_height_class(a) == image_height_class(b)
+            }
             _ => false,
         };
         content && self.style == other.style
@@ -374,6 +433,12 @@ impl TranscriptBlock {
                 .collect(),
         })
     }
+}
+
+/// What an image block's height depends on: its intrinsic size, or
+/// whether it shows a placeholder or its alt text.
+fn image_height_class(state: &ImageState) -> (Option<(u32, u32)>, bool) {
+    (state.size(), matches!(state, ImageState::Failed))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -450,6 +515,20 @@ pub trait BlockGeometry: Clone {
     fn height(&self) -> f32;
     /// Byte offset nearest to a point relative to the block's top left.
     fn hit(&self, x: f32, y: f32) -> usize;
+
+    /// Appends rectangles covering the text in `range`, relative to the
+    /// block's top left, for highlights and scrolling to a match. The
+    /// default appends none.
+    fn range_rects(&self, range: std::ops::Range<usize>, out: &mut Vec<Rect>) {
+        let _ = (range, out);
+    }
+
+    /// Width of the block's content from its left inset when it does not
+    /// wrap (code), or `None` when it fits any width. Content wider than
+    /// the column scrolls horizontally.
+    fn natural_width(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// Measures blocks; [`TextMeasurer`] does it with the shared text layouts
@@ -533,6 +612,9 @@ pub struct VisibleBlock<G> {
     /// Position of the block in its message's `blocks`.
     pub index: usize,
     pub rect: Rect,
+    /// Top of the block below its row's top; `rect.y` is the row's top
+    /// plus this, so it does not change while the row scrolls.
+    pub offset_in_row: f32,
     pub text_len: usize,
     pub geometry: G,
 }
@@ -564,14 +646,17 @@ pub enum TranscriptIntegrityError {
 pub enum TranscriptCommand {
     Copy,
     SelectAll,
+    /// Open find (see [`Transcript::set_find_query`] and [`find_bar`]).
+    Find,
 }
 
-/// The command a pressed key triggers. Bound to `mod+c` and `mod+a`, so
-/// Cmd and Ctrl both work and one table serves every platform.
+/// The command a pressed key triggers. Bound to `mod+c`, `mod+a`, and
+/// `mod+f`, so Cmd and Ctrl both work and one table serves every platform.
 pub fn key_command(pressed: &Binding) -> Option<TranscriptCommand> {
     [
         ("mod+c", TranscriptCommand::Copy),
         ("mod+a", TranscriptCommand::SelectAll),
+        ("mod+f", TranscriptCommand::Find),
     ]
     .into_iter()
     .find(|(pattern, _)| pattern.parse::<Binding>().is_ok_and(|p| p.matches(pressed)))
@@ -595,8 +680,38 @@ pub struct Transcript<G = TextGeometry> {
     /// Geometry of the blocks measured for the current window; materialize
     /// reuses it instead of measuring every visible block every frame.
     measured: HashMap<BlockKey, Measured<G>>,
-    /// Theme-resolved spans of the blocks the last element painted.
+    /// Last frame's `measured` map, empty, kept for its capacity.
+    measured_spare: HashMap<BlockKey, Measured<G>>,
+    /// Theme-resolved spans of the blocks the last element painted, and
+    /// last frame's map kept for its capacity.
     painted: HashMap<BlockKey, element::PaintedSpans>,
+    painted_spare: HashMap<BlockKey, element::PaintedSpans>,
+    /// What the last element built each row's cached subtree from, by the
+    /// hash of its inputs, and last frame's map kept for its capacity.
+    row_builds: HashMap<RowKey, element::RowEntry>,
+    row_builds_spare: HashMap<RowKey, element::RowEntry>,
+    /// The find query and its matches, while find is open.
+    find: Option<FindState>,
+    /// The document changed since find last scanned it.
+    find_stale: bool,
+    /// A match to bring into view once the next prepare has its geometry.
+    reveal: Option<Reveal>,
+    /// Horizontal scroll of each block wider than its column, kept while
+    /// the block is in the document.
+    scroll_handles: HashMap<BlockKey, ScrollHandle>,
+    /// Elements built so far; rows whose scroll is still moving hash it so
+    /// they rebuild every frame until it settles.
+    elements_built: u64,
+}
+
+#[derive(Debug, Clone)]
+struct Reveal {
+    block: BlockKey,
+    range: std::ops::Range<usize>,
+    align: ScrollAlign,
+    /// The range was out of view: align it even once the row scroll has
+    /// brought it into view.
+    align_always: bool,
 }
 
 impl<G: BlockGeometry> Transcript<G> {
@@ -615,7 +730,16 @@ impl<G: BlockGeometry> Transcript<G> {
             rows: Vec::new(),
             blocks: Vec::new(),
             measured: HashMap::new(),
+            measured_spare: HashMap::new(),
             painted: HashMap::new(),
+            painted_spare: HashMap::new(),
+            row_builds: HashMap::new(),
+            row_builds_spare: HashMap::new(),
+            find: None,
+            find_stale: false,
+            reveal: None,
+            scroll_handles: HashMap::new(),
+            elements_built: 0,
         }
     }
 
@@ -756,6 +880,7 @@ impl<G: BlockGeometry> Transcript<G> {
     }
 
     fn adopt(&mut self, row: RowKey, blocks: Vec<BlockKey>) {
+        self.find_stale = true;
         for block in &blocks {
             self.block_row.insert(*block, row);
         }
@@ -763,6 +888,8 @@ impl<G: BlockGeometry> Transcript<G> {
     }
 
     fn forget_block(&mut self, block: BlockKey) {
+        self.find_stale = true;
+        self.scroll_handles.remove(&block);
         self.block_row.remove(&block);
         let Some(pos) = self.order.remove(block) else {
             return;
@@ -933,6 +1060,160 @@ impl<G: BlockGeometry> Transcript<G> {
         (lo < hi).then_some((lo, hi))
     }
 
+    // -- Find --
+
+    /// Opens find with `query`, or changes its query, and scans the
+    /// document. The current match is the first one; call
+    /// [`Self::find_next`] to scroll to it. Matches stay current as the
+    /// document changes: each prepare rescans the blocks that changed.
+    pub fn set_find_query(&mut self, query: &str, source: &impl TranscriptSource) {
+        self.find
+            .get_or_insert_with(FindState::default)
+            .set_query(query);
+        self.refresh_find(source);
+    }
+
+    /// Closes find; highlights go away on the next element.
+    pub fn close_find(&mut self) {
+        self.find = None;
+        self.reveal = None;
+    }
+
+    /// The open find, if any.
+    pub fn find(&self) -> Option<&FindState> {
+        self.find.as_ref()
+    }
+
+    /// Moves to the next match, wrapping past the last, and scrolls it into
+    /// view at `align` on the next prepare.
+    pub fn find_next(&mut self, align: ScrollAlign) -> Option<FindMatch> {
+        let found = self.find.as_mut()?.next_match().cloned()?;
+        self.reveal(
+            found.block,
+            found.range.start.get()..found.range.end.get(),
+            align,
+        );
+        Some(found)
+    }
+
+    /// Scrolls the current match into view at `align` on the next prepare,
+    /// as after typing into a find field.
+    pub fn reveal_current_match(&mut self, align: ScrollAlign) -> Option<FindMatch> {
+        let found = self.find.as_ref()?.current().cloned()?;
+        self.reveal(
+            found.block,
+            found.range.start.get()..found.range.end.get(),
+            align,
+        );
+        Some(found)
+    }
+
+    /// Moves to the previous match, wrapping before the first, and scrolls
+    /// it into view at `align` on the next prepare.
+    pub fn find_prev(&mut self, align: ScrollAlign) -> Option<FindMatch> {
+        let found = self.find.as_mut()?.prev_match().cloned()?;
+        self.reveal(
+            found.block,
+            found.range.start.get()..found.range.end.get(),
+            align,
+        );
+        Some(found)
+    }
+
+    /// Scrolls so bytes `range` of `block` sit at `align` in the viewport,
+    /// unless they are already in full view. The block's row is scrolled
+    /// to now; the next prepare, which has the block's geometry, places the
+    /// range itself.
+    pub fn reveal(&mut self, block: BlockKey, range: std::ops::Range<usize>, align: ScrollAlign) {
+        let Some(row) = self.block_row.get(&block).copied() else {
+            return;
+        };
+        let in_view = self
+            .blocks
+            .iter()
+            .find(|b| b.key == block)
+            .and_then(|b| self.range_extent(b, range.clone()))
+            .is_some_and(|(top, bottom)| top >= 0.0 && bottom <= self.size.1);
+        if !in_view {
+            let _ = self.list.scroll_to(row, align);
+            if self.list.is_stuck_to_bottom() {
+                self.unseen = false;
+            }
+        }
+        self.reveal = Some(Reveal {
+            block,
+            range,
+            align,
+            align_always: !in_view,
+        });
+    }
+
+    /// Top and bottom of `range` of a materialized block, in viewport
+    /// coordinates.
+    fn range_extent(
+        &self,
+        block: &VisibleBlock<G>,
+        range: std::ops::Range<usize>,
+    ) -> Option<(f32, f32)> {
+        let mut rects = Vec::new();
+        block.geometry.range_rects(range, &mut rects);
+        let top = rects.iter().map(|r| r.y).reduce(f32::min)?;
+        let bottom = rects.iter().map(|r| r.y + r.height).reduce(f32::max)?;
+        Some((block.rect.y + top, block.rect.y + bottom))
+    }
+
+    /// Rescans the blocks that changed since the last scan.
+    fn refresh_find(&mut self, source: &impl TranscriptSource) {
+        self.find_stale = false;
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        let block_row = &self.block_row;
+        let blocks = self.list.rows().keys().iter().flat_map(|row| {
+            owned_blocks(source, block_row, *row)
+                .map(|(_, block)| (block.key, block.revision(), block.text()))
+        });
+        find.update(blocks);
+    }
+
+    /// Places a pending reveal now that the window has geometry.
+    fn place_reveal<M: BlockMeasurer<Geometry = G>>(
+        &mut self,
+        source: &impl TranscriptSource,
+        measurer: &mut M,
+    ) {
+        let Some(reveal) = self.reveal.take() else {
+            return;
+        };
+        // Measuring rows that scroll in can move the range again; two
+        // passes settle it.
+        let mut align_always = reveal.align_always;
+        for _ in 0..2 {
+            let Some((top, bottom)) = self
+                .blocks
+                .iter()
+                .find(|b| b.key == reveal.block)
+                .and_then(|b| self.range_extent(b, reveal.range.clone()))
+            else {
+                return;
+            };
+            let height = self.size.1;
+            let delta = match reveal.align {
+                ScrollAlign::Top => top,
+                ScrollAlign::Center => (top + bottom - height) * 0.5,
+                ScrollAlign::Bottom => bottom - height,
+            };
+            let in_view = top >= 0.0 && bottom <= height;
+            if (in_view && !align_always) || delta.abs() < 0.5 {
+                return;
+            }
+            align_always = false;
+            self.scroll_by(delta);
+            self.measure_window(source, measurer);
+            self.materialize(source, measurer);
+        }
+    }
+
     // -- Input --
 
     /// Applies one input event from the element. Coordinates are relative
@@ -1015,9 +1296,25 @@ impl<G: BlockGeometry> Transcript<G> {
         } else if y >= rect.y + rect.height {
             block.text_len
         } else {
-            block.geometry.hit(x - rect.x, y - rect.y)
+            // Content scrolled left sits under the pointer further right.
+            block
+                .geometry
+                .hit(x - rect.x + self.scroll_x(block.key), y - rect.y)
         };
         Some(SelectionPoint::new(block.key, byte))
+    }
+
+    /// How far block `key`'s content is scrolled left.
+    fn scroll_x(&self, key: BlockKey) -> f32 {
+        self.scroll_handles.get(&key).map_or(0.0, |h| h.offset().0)
+    }
+
+    /// Whether block `key` scrolls sideways and its offset may still change
+    /// during the next frame (a requested jump, a smooth scroll, a fling).
+    fn scroll_unsettled(&self, key: BlockKey) -> bool {
+        self.scroll_handles
+            .get(&key)
+            .is_some_and(|h| !h.is_settled())
     }
 
     // -- Frame --
@@ -1039,7 +1336,31 @@ impl<G: BlockGeometry> Transcript<G> {
         self.size = (width, height);
         self.autoscroll(now_ms);
 
+        self.measure_window(source, measurer);
+        if self.list.is_stuck_to_bottom() {
+            self.unseen = false;
+        }
+        self.materialize(source, measurer);
+        if self.find_stale {
+            self.refresh_find(source);
+        }
+        self.place_reveal(source, measurer);
+
+        // Rows moved under a held pointer (autoscroll, streaming); keep the
+        // selection end under it.
+        if let Some(drag) = self.drag {
+            self.extend_selection_to(drag.pointer.0, drag.pointer.1);
+        }
+    }
+
+    /// Measures the unmeasured rows of the overscanned window.
+    fn measure_window<M: BlockMeasurer<Geometry = G>>(
+        &mut self,
+        source: &impl TranscriptSource,
+        measurer: &mut M,
+    ) {
         let style = self.style;
+        let width = self.size.0;
         let block_row = &self.block_row;
         let cache = &mut self.measured;
         self.list
@@ -1049,16 +1370,6 @@ impl<G: BlockGeometry> Transcript<G> {
                     measure_cached(cache, measurer, block, block_width).height()
                 })
             });
-        if self.list.is_stuck_to_bottom() {
-            self.unseen = false;
-        }
-        self.materialize(source, measurer);
-
-        // Rows moved under a held pointer (autoscroll, streaming); keep the
-        // selection end under it.
-        if let Some(drag) = self.drag {
-            self.extend_selection_to(drag.pointer.0, drag.pointer.1);
-        }
     }
 
     fn autoscroll(&mut self, now_ms: u64) {
@@ -1090,14 +1401,14 @@ impl<G: BlockGeometry> Transcript<G> {
         let rows = self.list.rows();
         self.rows.clear();
         self.blocks.clear();
-        let mut kept = HashMap::with_capacity(self.measured.len());
+        let mut kept = std::mem::take(&mut self.measured_spare);
         for index in window.range {
             let key = rows.keys()[index];
             let top = rows.offset_of_index(index) - scroll;
             let height = rows.height_of(key).unwrap_or(0.0);
             let message = source.message(key);
             let first = self.blocks.len();
-            let mut y = top + style.pad_y + style.header_height;
+            let mut y = style.pad_y + style.header_height;
             for (n, (i, block)) in owned_blocks(source, &self.block_row, key).enumerate() {
                 y += gap_before(&style, n, block);
                 let geometry = measure_cached(&mut self.measured, measurer, block, block_width);
@@ -1105,16 +1416,21 @@ impl<G: BlockGeometry> Transcript<G> {
                     kept.insert(block.key, entry);
                 }
                 let block_height = geometry.height();
+                let column = block_width - block.style.inset(style.font_size);
+                if geometry.natural_width().is_some_and(|w| w > column) {
+                    self.scroll_handles.entry(block.key).or_default();
+                }
                 self.blocks.push(VisibleBlock {
                     key: block.key,
                     row: key,
                     index: i,
                     rect: Rect {
                         x: style.pad_x,
-                        y,
+                        y: top + y,
                         width: block_width,
                         height: block_height,
                     },
+                    offset_in_row: y,
                     text_len: block.text().len(),
                     geometry,
                 });
@@ -1130,7 +1446,8 @@ impl<G: BlockGeometry> Transcript<G> {
             });
         }
         // Only the window's geometry is kept.
-        self.measured = kept;
+        self.measured_spare = std::mem::replace(&mut self.measured, kept);
+        self.measured_spare.clear();
     }
 
     /// Rows materialized by the last prepare, top to bottom.
@@ -1200,6 +1517,16 @@ impl<G: BlockGeometry> Transcript<G> {
             return false;
         }
         self.list.set_height(row, height).is_ok()
+    }
+
+    /// A copy that builds its next element from scratch, for comparing
+    /// cached frames against fresh ones.
+    #[cfg(test)]
+    fn without_element_memory(&self) -> Self {
+        let mut copy = self.clone();
+        copy.row_builds.clear();
+        copy.painted.clear();
+        copy
     }
 
     // -- Integrity --
