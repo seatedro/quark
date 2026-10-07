@@ -61,6 +61,90 @@ jobs:
         # turns on quark's too); cheap debug checks run without it.
         run: cargo test --workspace --features quark-ui/integrity-checks
 
+  # macOS (Apple silicon) and Windows: the Linux job's clippy and tests, then
+  # a smoke launch of hello_ui. Formatting and feature combinations are
+  # platform independent and stay on Linux.
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            backend: metal
+          - os: windows-latest
+            # No GPU on hosted Windows runners: DX12 picks WARP, the
+            # software adapter.
+            backend: dx12
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      QUARK_REQUIRE_GPU: "1"
+      WGPU_BACKEND: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --features quark-ui/integrity-checks
+
+      # QUARK_EXIT_AFTER_FRAMES (debug builds only) quits after that many
+      # presented frames, so a zero exit means a window opened and drew.
+      - name: Smoke run hello_ui
+        run: |
+          cargo build -p quark-app --example hello_ui
+          bin=target/debug/examples/hello_ui
+          mkdir -p target/smoke
+          QUARK_EXIT_AFTER_FRAMES=1 "$bin" >target/smoke/hello_ui.log 2>&1 &
+          pid=$!
+          for _ in $(seq 120); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            cat target/smoke/hello_ui.log
+            echo "hello_ui did not exit within 120 s"
+            exit 1
+          fi
+          wait "$pid" || { status=$?; cat target/smoke/hello_ui.log; echo "hello_ui exited with $status"; exit 1; }
+          cat target/smoke/hello_ui.log
+
+      - name: Screenshot hello_ui
+        continue-on-error: true
+        run: |
+          target/debug/examples/hello_ui &
+          pid=$!
+          sleep 10
+          if [ "$RUNNER_OS" = macOS ]; then
+            screencapture -x target/smoke/hello_ui.png
+          else
+            powershell -NoProfile -Command '
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+              $bmp.Save("target/smoke/hello_ui.png")'
+          fi
+          kill "$pid"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: smoke-${{ matrix.os }}
+          path: target/smoke/
+          if-no-files-found: ignore
+
   fuzz:
     runs-on: ubuntu-latest
     steps:
