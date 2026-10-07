@@ -205,6 +205,19 @@ impl<U: UiApp> UiAdapter<U> {
             CursorHint::Pointer => CursorIcon::Pointer,
             CursorHint::Text => CursorIcon::Text,
             CursorHint::ResizeCol => CursorIcon::ColResize,
+            CursorHint::ResizeRow => CursorIcon::RowResize,
+            CursorHint::ResizeNs => CursorIcon::NsResize,
+            CursorHint::ResizeEw => CursorIcon::EwResize,
+            CursorHint::ResizeNesw => CursorIcon::NeswResize,
+            CursorHint::ResizeNwse => CursorIcon::NwseResize,
+            CursorHint::Move => CursorIcon::Move,
+            CursorHint::Grab => CursorIcon::Grab,
+            CursorHint::Grabbing => CursorIcon::Grabbing,
+            CursorHint::NotAllowed => CursorIcon::NotAllowed,
+            CursorHint::Wait => CursorIcon::Wait,
+            CursorHint::Progress => CursorIcon::Progress,
+            CursorHint::Crosshair => CursorIcon::Crosshair,
+            CursorHint::Help => CursorIcon::Help,
         });
     }
 }
