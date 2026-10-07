@@ -539,6 +539,10 @@ impl TextLayout {
         let len = self.text.len();
         let a = range.start.min(range.end).min(len);
         let b = range.end.max(range.start).min(len);
+        // Callers may pass offsets inside a multibyte char; snap down so the
+        // glyph/line byte comparisons below stay on char boundaries.
+        let a = self.text.floor_char_boundary(a);
+        let b = self.text.floor_char_boundary(b);
         let mut rects = Vec::new();
         if a == b {
             return rects.into_iter();
