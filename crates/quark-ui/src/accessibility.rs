@@ -1,3 +1,31 @@
+//! The accessibility tree elements build each frame, published through
+//! AccessKit.
+//!
+//! Nodes take any `accesskit::Role` ([`AccessibilityRole`]) and publish
+//! name, description, disabled, selected, checked (including mixed),
+//! expanded, invalid, required, read-only, modal, range values, live
+//! politeness, and focus. Text fields, the editor, and selectable text
+//! publish their text as `TextRun` children with the caret and selection;
+//! assistive tech can select text (`SetTextSelection`), replace the
+//! selection, and set a field's value. [`Announcer`] speaks text nothing
+//! on screen shows.
+//!
+//! What Linux screen readers get depends on accesskit_unix 0.22 /
+//! accesskit_atspi_common 0.19. Served: roles, names, descriptions, the
+//! states above except invalid and expanded, the Text interface (text,
+//! caret, selection, set selection, word and line boundaries), the Value
+//! interface for range values, focus, and `Announcement` events. Not
+//! served: EditableText (so AT-SPI clients cannot replace or set text,
+//! though macOS and Windows clients can), the invalid and expanded states,
+//! and character extents, since runs publish no glyph positions.
+//!
+//! Keyboard gaps: a clickable div needs a stable id (`id`, `test_id`,
+//! `accessibility_id`) or a `focus_ring` to be a Tab stop. Groups (radio
+//! groups, tab lists, menus, list boxes) have no arrow-key navigation, so
+//! each item is its own Tab stop. Drag-only interactions have no keyboard
+//! alternative. Selectable text publishes its selection but ignores
+//! selection requests, since the app owns it.
+
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;

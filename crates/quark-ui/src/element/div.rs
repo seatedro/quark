@@ -655,7 +655,23 @@ impl Element for Div {
             });
         }
 
-        if let Some(target) = self.focus_target
+        // A clickable div with a stable id takes Tab focus without a
+        // `focus_ring` (`SemanticFrame::focus_id`), so it gets the ring too.
+        let clickable = self.on_click_handler.is_some()
+            || self
+                .on_click
+                .as_ref()
+                .is_some_and(|a| !a.is::<NoopAction>());
+        let ring_target = self.focus_target.or_else(|| {
+            let id = self
+                .semantic_id
+                .clone()
+                .or_else(|| self.accessibility_id.clone().map(UiNodeId::from))
+                .or_else(|| self.test_id.as_ref().map(|id| UiNodeId::from(id.as_str())));
+            id.filter(|_| clickable || self.tab_stop.is_some())
+                .map(FocusId::from)
+        });
+        if let Some(target) = ring_target
             && cx.is_focused(target)
         {
             let ring_inset = -2.0;
@@ -716,7 +732,7 @@ impl Element for Div {
         if hovered {
             style_state.insert(StyleState::HOVER);
         }
-        if let Some(target) = self.focus_target
+        if let Some(target) = ring_target
             && cx.is_focused(target)
         {
             style_state.insert(StyleState::FOCUS_VISIBLE);

@@ -1,18 +1,19 @@
 //! Components publish the roles and states screen readers expect, and
 //! everything a pointer can press is reachable from the keyboard.
 
+use quark::StyleState;
 use quark::reactive::SignalStore;
 use quark_components::{
     DropdownItem, SegmentedControl, SegmentedItem, TabItem, Toast, ToastKind, ToastStack, checkbox,
     dropdown, progress_bar, tab_bar, toggle,
 };
 use quark_render::Scene;
-use quark_ui::Action;
 use quark_ui::accessibility::dump_accessibility_states;
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{AnyElement, ElementContext, IntoAnyElement, div, render_element};
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
+use quark_ui::{Action, FocusId};
 
 #[derive(Debug, Clone, PartialEq)]
 struct Pick(&'static str);
@@ -26,11 +27,16 @@ impl From<Pick> for Action {
 /// Paint `root` at 800x600 and return the frame's semantic and
 /// accessibility output.
 fn paint(root: AnyElement) -> ElementOutput {
+    paint_focused(root, None)
+}
+
+fn paint_focused(root: AnyElement, focus: Option<FocusId>) -> ElementOutput {
     let mut text = quark_text::TextSystem::vendored_only(&Default::default());
     let mut layouts = quark_text::LayoutCache::default();
     let store = SignalStore::new();
     let theme = Theme::default_dark();
-    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &store);
+    let mut cx =
+        ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &store).with_focus(focus);
     cx.accessibility = quark_ui::accessibility::AccessibilityFrame::new(800.0, 600.0);
     let mut root = root;
     render_element(&mut root, &mut Scene::default(), &mut cx, 800.0, 600.0);
@@ -144,4 +150,24 @@ fn every_clickable_component_is_in_the_tab_order() {
         })
         .collect();
     assert_eq!(unreachable, Vec::<String>::new());
+}
+
+// Keyboard focus is visible: the focused checkbox paints its focus ring
+// (FOCUS_VISIBLE), and nothing else does.
+#[test]
+fn keyboard_focus_rings_the_focused_component() {
+    let frame = paint(gallery()).semantic;
+    let checkbox = (0..frame.nodes().len())
+        .find(|&i| frame.nodes()[i].label.as_deref() == Some("Remember me"))
+        .and_then(|i| frame.focus_id(i))
+        .expect("checkbox focus target");
+
+    let focused = paint_focused(gallery(), Some(checkbox)).semantic;
+    let ringed: Vec<_> = focused
+        .nodes()
+        .iter()
+        .filter(|node| node.state.style_state.contains(StyleState::FOCUS_VISIBLE))
+        .map(|node| node.label.clone())
+        .collect();
+    assert_eq!(ringed, [Some("Remember me".to_owned())]);
 }
