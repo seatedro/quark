@@ -9,6 +9,7 @@ members = [
   "crates/quark-syntax",
   "crates/quark-ui",
   "crates/quark-components",
+  "crates/quark-terminal",
   "crates/quark-app",
   # A member so CI's fmt, clippy, and tests cover the patch.
   "vendor/accesskit_unix",
@@ -34,6 +35,7 @@ quark-syntax = { path = "crates/quark-syntax" }
 quark-diff = { path = "crates/quark-diff" }
 quark-ui = { path = "crates/quark-ui" }
 quark-components = { path = "crates/quark-components" }
+quark-terminal = { path = "crates/quark-terminal" }
 quark-app = { path = "crates/quark-app" }
 accesskit = "0.24"
 accesskit_winit = "0.33"
