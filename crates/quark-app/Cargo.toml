@@ -83,3 +83,7 @@ clipboard-image = ["arboard/image-data"]
 [[example]]
 name = "hello_ui"
 required-features = ["ui"]
+
+[[example]]
+name = "platform_demo"
+required-features = ["notifications"]
