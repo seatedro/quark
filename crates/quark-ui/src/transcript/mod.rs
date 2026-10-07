@@ -28,7 +28,8 @@ pub use measure::{TextGeometry, TextMeasurer};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use quark::selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText, copy_text};
+use quark::selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText};
+use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
 use crate::element::StyledSpan;
@@ -46,6 +47,13 @@ const AUTOSCROLL_MAX: f32 = 4.0;
 /// not jump the view.
 const AUTOSCROLL_MAX_DT_MS: u64 = 50;
 
+/// Height of a rule block, in multiples of its font size.
+const RULE_HEIGHT: f32 = 1.0;
+/// Width of one quote level's bar column, in multiples of the font size.
+const QUOTE_STEP: f32 = 1.0;
+/// Width of one list level's marker gutter, in multiples of the font size.
+const LIST_STEP: f32 = 1.75;
+
 /// The styled content of one block. The concatenation of the span texts
 /// (code lines joined with `\n`) is the plain text that selection offsets
 /// index and copy reads.
@@ -53,8 +61,63 @@ const AUTOSCROLL_MAX_DT_MS: u64 = 50;
 pub enum BlockContent {
     /// Wrapped text, painted by `SelectableText`.
     Prose(Arc<[StyledSpan]>),
-    /// Unwrapped monospace lines, painted by `CodeBlock`.
-    Code(Arc<[Vec<StyledSpan>]>),
+    /// Unwrapped monospace lines, painted by `CodeBlock`, with an optional
+    /// label (the fence language) above them.
+    Code {
+        lines: Arc<[Vec<StyledSpan>]>,
+        label: Option<Arc<str>>,
+    },
+    /// A horizontal rule. Its text is `---`, so copy keeps it.
+    Rule,
+}
+
+/// How a block sits in its message: size, indent, list marker, quote bars,
+/// and the markdown prefixes copy restores. Display never draws the
+/// prefixes; the marker is painted in a gutter outside the selectable text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockStyle {
+    /// Font size relative to the transcript's.
+    pub scale: f32,
+    /// Base weight of prose.
+    pub weight: FontWeight,
+    /// List nesting depth; each level indents one marker gutter.
+    pub list_depth: u8,
+    /// Quote nesting depth; each level indents one bar column.
+    pub quote_depth: u8,
+    /// Drawn right-aligned in the innermost list gutter on the first line.
+    pub marker: Option<Arc<str>>,
+    /// Paints prose in the muted text color (block quotes).
+    pub muted: bool,
+    /// Half the block gap above, for consecutive list items.
+    pub tight: bool,
+    /// Copied before the block's first line when the selection covers the
+    /// block's start, as `"- "`, `"> 1. "`, or `"## "`.
+    pub copy_prefix: Arc<str>,
+    /// Copied after every line break inside the block, as `"> "`.
+    pub copy_line_prefix: Arc<str>,
+}
+
+impl Default for BlockStyle {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            weight: FontWeight::Normal,
+            list_depth: 0,
+            quote_depth: 0,
+            marker: None,
+            muted: false,
+            tight: false,
+            copy_prefix: Arc::from(""),
+            copy_line_prefix: Arc::from(""),
+        }
+    }
+}
+
+impl BlockStyle {
+    /// Left inset of the block's content, in pixels at `font_size`.
+    pub fn inset(&self, font_size: f32) -> f32 {
+        (self.quote_depth as f32 * QUOTE_STEP + self.list_depth as f32 * LIST_STEP) * font_size
+    }
 }
 
 /// One selectable text block of a message. Markdown rendering produces a
@@ -63,6 +126,7 @@ pub enum BlockContent {
 pub struct TranscriptBlock {
     pub key: BlockKey,
     pub content: BlockContent,
+    pub style: BlockStyle,
     text: Arc<str>,
 }
 
@@ -76,8 +140,31 @@ impl TranscriptBlock {
         Self {
             key,
             content: BlockContent::Prose(spans.into()),
+            style: BlockStyle::default(),
             text: text.into(),
         }
+    }
+
+    pub fn rule(key: BlockKey) -> Self {
+        Self {
+            key,
+            content: BlockContent::Rule,
+            style: BlockStyle::default(),
+            text: Arc::from("---"),
+        }
+    }
+
+    pub fn with_style(mut self, style: BlockStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    /// Sets the label of a code block; other blocks are unchanged.
+    pub fn with_label(mut self, label: Option<Arc<str>>) -> Self {
+        if let BlockContent::Code { label: slot, .. } = &mut self.content {
+            *slot = label.filter(|l| !l.is_empty());
+        }
+        self
     }
 
     /// Each inner `Vec` is one source line.
@@ -93,7 +180,11 @@ impl TranscriptBlock {
         }
         Self {
             key,
-            content: BlockContent::Code(lines.into()),
+            content: BlockContent::Code {
+                lines: lines.into(),
+                label: None,
+            },
+            style: BlockStyle::default(),
             text: text.into(),
         }
     }
@@ -515,16 +606,58 @@ impl<G: BlockGeometry> Transcript<G> {
     }
 
     /// The selected text from the app's model, blocks joined with blank
-    /// lines. Empty when nothing is selected.
+    /// lines. Empty when nothing is selected. A block whose start is
+    /// selected gets its [`BlockStyle::copy_prefix`], and every line break
+    /// inside a block its `copy_line_prefix`, so list markers, heading
+    /// hashes, and quote marks survive the copy.
     pub fn selected_text(&self, source: &impl TranscriptSource) -> String {
-        let Some(selection) = self.selection else {
-            return String::new();
+        let mut out = String::new();
+        let Some((start, end)) = self.selection.and_then(|s| s.ordered(&self.order)) else {
+            return out;
         };
+        if start == end {
+            return out;
+        }
         let texts = SourceText {
             source,
             block_row: &self.block_row,
         };
-        copy_text(&selection, &self.order, &texts, BLOCK_SEPARATOR)
+        let keys = self.order.range(start.block, end.block);
+        let last = keys.len().saturating_sub(1);
+        for (i, key) in keys.iter().enumerate() {
+            let Some(block) = texts.block(*key) else {
+                continue;
+            };
+            let text = block.text();
+            let from = if i == 0 {
+                text.floor_char_boundary(start.byte)
+            } else {
+                0
+            };
+            let to = if i == last {
+                text.floor_char_boundary(end.byte)
+            } else {
+                text.len()
+            };
+            if i > 0 {
+                out.push_str(BLOCK_SEPARATOR);
+            }
+            if from >= to {
+                continue;
+            }
+            if from == 0 {
+                out.push_str(&block.style.copy_prefix);
+            }
+            let line_prefix = &block.style.copy_line_prefix;
+            for (n, line) in text[from..to].split('\n').enumerate() {
+                if n > 0 {
+                    out.push('\n');
+                    out.push_str(line_prefix);
+                }
+                out.push_str(line);
+            }
+        }
+        out
     }
 
     /// Selected byte range within `block`, clamped to `len`, or `None`
@@ -652,9 +785,7 @@ impl<G: BlockGeometry> Transcript<G> {
                     .map_or(&[][..], |m| m.blocks.as_slice());
                 let mut height = style.pad_y * 2.0 + style.header_height;
                 for (i, block) in blocks.iter().enumerate() {
-                    if i > 0 {
-                        height += style.block_gap;
-                    }
+                    height += gap_before(&style, i, block);
                     height += measurer.measure(block, block_width).height();
                 }
                 height
@@ -708,9 +839,7 @@ impl<G: BlockGeometry> Transcript<G> {
             let first = self.blocks.len();
             let mut y = top + style.pad_y + style.header_height;
             for (i, block) in message.iter().flat_map(|m| m.blocks.iter()).enumerate() {
-                if i > 0 {
-                    y += style.block_gap;
-                }
+                y += gap_before(&style, i, block);
                 let geometry = measurer.measure(block, block_width);
                 let block_height = geometry.height();
                 self.blocks.push(VisibleBlock {
@@ -792,6 +921,15 @@ impl<G: BlockGeometry> Transcript<G> {
     }
 }
 
+/// Space above the `index`-th block of a message.
+fn gap_before(style: &TranscriptStyle, index: usize, block: &TranscriptBlock) -> f32 {
+    match index {
+        0 => 0.0,
+        _ if block.style.tight => (style.block_gap * 0.5).round(),
+        _ => style.block_gap,
+    }
+}
+
 fn block_width(style: &TranscriptStyle, width: f32) -> f32 {
     (width - style.pad_x * 2.0).max(1.0)
 }
@@ -812,15 +950,14 @@ struct SourceText<'a, S> {
     block_row: &'a HashMap<BlockKey, RowKey>,
 }
 
-impl<S: TranscriptSource> SelectionText for SourceText<'_, S> {
-    fn text(&self, key: BlockKey) -> Option<&str> {
+impl<'a, S: TranscriptSource> SourceText<'a, S> {
+    fn block(&self, key: BlockKey) -> Option<&'a TranscriptBlock> {
         let row = self.block_row.get(&key)?;
         self.source
             .message(*row)?
             .blocks
             .iter()
             .find(|block| block.key == key)
-            .map(TranscriptBlock::text)
     }
 }
 
