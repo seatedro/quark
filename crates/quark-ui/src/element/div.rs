@@ -49,6 +49,7 @@ pub struct Div {
     accessibility_toggled: Option<bool>,
     accessibility_expanded: Option<bool>,
     accessibility_disabled: bool,
+    pub(crate) accessibility_extra: AccessibilityExtra,
 }
 
 pub fn div() -> Div {
@@ -92,6 +93,7 @@ pub fn div() -> Div {
         accessibility_toggled: None,
         accessibility_expanded: None,
         accessibility_disabled: false,
+        accessibility_extra: AccessibilityExtra::default(),
     }
 }
 
@@ -114,55 +116,6 @@ fn role_labels_descendant_text(role: AccessibilityRole) -> bool {
             | AccessibilityRole::ComboBox
             | AccessibilityRole::EditableComboBox
     )
-}
-
-fn semantic_role_to_accessibility(role: SemanticRole) -> Option<AccessibilityRole> {
-    match role {
-        SemanticRole::Button => Some(AccessibilityRole::Button),
-        SemanticRole::Dialog => Some(AccessibilityRole::Dialog),
-        SemanticRole::CheckBox => Some(AccessibilityRole::CheckBox),
-        SemanticRole::Switch => Some(AccessibilityRole::Switch),
-        SemanticRole::RadioButton => Some(AccessibilityRole::RadioButton),
-        SemanticRole::Tab => Some(AccessibilityRole::Tab),
-        SemanticRole::TreeItem => Some(AccessibilityRole::TreeItem),
-        SemanticRole::ListItem => Some(AccessibilityRole::ListItem),
-        SemanticRole::ListBoxOption => Some(AccessibilityRole::ListBoxOption),
-        SemanticRole::MenuItem => Some(AccessibilityRole::MenuItem),
-        SemanticRole::ComboBox => Some(AccessibilityRole::ComboBox),
-        SemanticRole::TextInput => Some(AccessibilityRole::TextInput),
-        SemanticRole::Label => Some(AccessibilityRole::Label),
-        SemanticRole::ScrollArea | SemanticRole::Group => None,
-    }
-}
-
-fn accessibility_role_to_semantic(role: AccessibilityRole) -> Option<SemanticRole> {
-    match role {
-        AccessibilityRole::Button | AccessibilityRole::DefaultButton => Some(SemanticRole::Button),
-        AccessibilityRole::Dialog => Some(SemanticRole::Dialog),
-        AccessibilityRole::CheckBox | AccessibilityRole::MenuItemCheckBox => {
-            Some(SemanticRole::CheckBox)
-        }
-        AccessibilityRole::Switch => Some(SemanticRole::Switch),
-        AccessibilityRole::RadioButton | AccessibilityRole::MenuItemRadio => {
-            Some(SemanticRole::RadioButton)
-        }
-        AccessibilityRole::Tab => Some(SemanticRole::Tab),
-        AccessibilityRole::TreeItem => Some(SemanticRole::TreeItem),
-        AccessibilityRole::ListItem => Some(SemanticRole::ListItem),
-        AccessibilityRole::ListBoxOption | AccessibilityRole::MenuListOption => {
-            Some(SemanticRole::ListBoxOption)
-        }
-        AccessibilityRole::MenuItem => Some(SemanticRole::MenuItem),
-        AccessibilityRole::ComboBox | AccessibilityRole::EditableComboBox => {
-            Some(SemanticRole::ComboBox)
-        }
-        AccessibilityRole::TextInput
-        | AccessibilityRole::SearchInput
-        | AccessibilityRole::PasswordInput => Some(SemanticRole::TextInput),
-        AccessibilityRole::Label => Some(SemanticRole::Label),
-        AccessibilityRole::ScrollView => Some(SemanticRole::ScrollArea),
-        _ => None,
-    }
 }
 
 impl Styled for Div {
@@ -261,9 +214,7 @@ impl Div {
     }
 
     pub fn semantic_role(mut self, role: SemanticRole) -> Self {
-        self.accessibility_role = self
-            .accessibility_role
-            .or(semantic_role_to_accessibility(role));
+        self.accessibility_role = self.accessibility_role.or(accessibility_role_for(role));
         self.semantic_role = Some(role);
         self
     }
@@ -735,7 +686,24 @@ impl Element for Div {
             || style.layout.overflow.y != taffy::Overflow::Visible;
         drop(style);
 
-        if let Some(target) = self.focus_target
+        // A clickable div with a stable id takes Tab focus without a
+        // `focus_ring` (`SemanticFrame::focus_id`), so it gets the ring too.
+        let clickable = self.on_click_handler.is_some()
+            || self
+                .on_click
+                .as_ref()
+                .is_some_and(|a| !a.is::<NoopAction>());
+        let ring_target = self.focus_target.or_else(|| {
+            let id = self
+                .semantic_id
+                .as_ref()
+                .map(UiNodeId::as_str)
+                .or(self.accessibility_id.as_deref())
+                .or(self.test_id.as_ref().map(TestId::as_str));
+            id.filter(|_| clickable || self.tab_stop.is_some())
+                .map(FocusId::from_key)
+        });
+        if let Some(target) = ring_target
             && cx.is_focused(target)
         {
             let ring_inset = -2.0;
@@ -767,7 +735,7 @@ impl Element for Div {
         });
         let semantic_role = self
             .semantic_role
-            .or_else(|| accessibility_role.and_then(accessibility_role_to_semantic))
+            .or_else(|| accessibility_role.and_then(semantic_role_for))
             .or_else(|| self.on_scroll.is_some().then_some(SemanticRole::ScrollArea));
         let suppress_descendant_accessibility_text =
             accessibility_role.is_some_and(role_labels_descendant_text);
@@ -796,7 +764,7 @@ impl Element for Div {
         if hovered {
             style_state.insert(StyleState::HOVER);
         }
-        if let Some(target) = self.focus_target
+        if let Some(target) = ring_target
             && cx.is_focused(target)
         {
             style_state.insert(StyleState::FOCUS_VISIBLE);
@@ -821,8 +789,9 @@ impl Element for Div {
             .filter(|_| cx.accessibility_enabled())
             .map(|role| {
                 let key = self.accessibility_key(role, accessibility_label.as_deref());
-                let mut node =
-                    AccessibilityNode::new(key, role, bounds).disabled(self.accessibility_disabled);
+                let mut node = AccessibilityNode::new(key, role, bounds)
+                    .disabled(self.accessibility_disabled)
+                    .modal(self.trap_focus && self.focus_scope.is_some());
                 if let Some(label) = &accessibility_label {
                     node = node.label(label.clone());
                 }
@@ -841,6 +810,7 @@ impl Element for Div {
                 if let Some(expanded) = self.accessibility_expanded {
                     node = node.expanded(expanded);
                 }
+                node = self.accessibility_extra.apply(node);
                 if !self.accessibility_disabled
                     && let Some(action) = click_action
                     && !action.is::<NoopAction>()
@@ -886,6 +856,8 @@ impl Element for Div {
                 selected: self.accessibility_selected,
                 toggled: self.accessibility_toggled,
                 expanded: self.accessibility_expanded,
+                invalid: self.accessibility_extra.invalid(),
+                required: self.accessibility_extra.required(),
                 style_state,
             };
             node.focus = self.focus_target;
@@ -899,7 +871,10 @@ impl Element for Div {
             None
         };
 
-        if let Some(node) = accessibility {
+        if let Some(mut node) = accessibility {
+            if let Some(focus) = semantic_parent.and_then(|index| cx.semantic.focus_id(index)) {
+                node = node.focus(focus);
+            }
             match semantic_parent {
                 Some(index) => cx.push_accessibility_for_semantic(node, index),
                 None => cx.push_accessibility(node),

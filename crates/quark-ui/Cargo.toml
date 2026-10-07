@@ -45,3 +45,9 @@ profile = ["dep:profiling", "dep:tracing"]
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
 
+
+# Tests feed published trees through AccessKit's AT-SPI layer to check what
+# Linux screen readers receive. Already in every Linux build through
+# accesskit_winit, so it adds nothing to the dependency tree.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+accesskit_atspi_common = "0.19"

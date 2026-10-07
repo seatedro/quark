@@ -315,7 +315,15 @@ mod imp {
             Ok(listener) => Ok(Instance::Primary(PrimaryInstance {
                 listener: Listener(listener),
             })),
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+            // Another launch created the pipe after our connect failed. The
+            // listener asks for the first pipe instance, which Windows
+            // refuses with ERROR_ACCESS_DENIED rather than an in use error.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+                ) =>
+            {
                 forward(Stream::connect(ns_name()?)?, args)?;
                 Ok(Instance::Secondary)
             }
@@ -324,19 +332,29 @@ mod imp {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::net::UnixListener;
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     use super::*;
 
+    #[cfg(unix)]
     fn socket_path(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("quark-si-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create test dir");
         let path = dir.join(name);
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    /// Pipe names are global to the session, so the pid keeps parallel test
+    /// runs apart.
+    #[cfg(windows)]
+    fn socket_path(name: &str) -> String {
+        format!("quark-si-test-{}-{name}", std::process::id())
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
@@ -358,6 +376,7 @@ mod tests {
         assert_eq!(receiver.join().unwrap(), forwarded);
     }
 
+    #[cfg(unix)]
     #[test]
     fn socket_left_by_crashed_instance_does_not_block_next_launch() {
         let path = socket_path("stale.sock");
@@ -369,6 +388,7 @@ mod tests {
         assert!(matches!(launch, Instance::Primary(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_dir_too_deep_for_a_socket_falls_back_to_temp_dir() {
         let deep = PathBuf::from(format!("/{}", "d".repeat(120)));

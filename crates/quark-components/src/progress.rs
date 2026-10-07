@@ -1,5 +1,6 @@
 use quark::view;
 
+use quark_ui::accessibility::NumericValue;
 use quark_ui::design::{Sp, Sz};
 use quark_ui::element::{AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, text};
 use quark_ui::style::Styled;
@@ -69,6 +70,13 @@ impl RenderOnce for ProgressBar {
             .bg(bg_color)
             .rounded(h / 2.0)
             .overflow_hidden()
+            .accessibility_role(accesskit::Role::ProgressIndicator)
+            .accessibility_numeric(NumericValue {
+                value: f64::from((v * 100.0).round()),
+                min: 0.0,
+                max: 100.0,
+                step: None,
+            })
             .child(fill)
             .child(empty);
 

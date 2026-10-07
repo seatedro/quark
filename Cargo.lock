@@ -2734,6 +2734,8 @@ dependencies = [
  "proptest",
  "puffin_http",
  "quark",
+ "quark-app",
+ "quark-components",
  "quark-render",
  "quark-text",
  "quark-ui",
@@ -2822,6 +2824,7 @@ name = "quark-ui"
 version = "0.1.0"
 dependencies = [
  "accesskit",
+ "accesskit_atspi_common",
  "glyphon",
  "profiling",
  "proptest",

@@ -544,6 +544,37 @@ impl InputRouter {
             .unwrap_or_default()
     }
 
+    /// Enter or Space with no modifiers on the focused node clicks it, at
+    /// its center, when it has a click handler. Ancestors are not tried: a
+    /// key on a focused field must not press the card around it.
+    pub fn activate(&self, pressed: &Binding, focus: Option<FocusId>) -> Delivery {
+        let m = pressed.mods;
+        if !matches!(pressed.key.as_str(), "enter" | "space") || m.cmd || m.ctrl || m.alt || m.shift
+        {
+            return Delivery::default();
+        }
+        let semantic = &self.frame.semantic;
+        let Some(node) = focus.and_then(|focus| semantic.node_for_focus(focus)) else {
+            return Delivery::default();
+        };
+        let (Some(handler), Some(target)) =
+            (self.frame.handlers.click(node), semantic.nodes().get(node))
+        else {
+            return Delivery::default();
+        };
+        if target.state.disabled {
+            return Delivery::default();
+        }
+        let b = target.bounds;
+        Delivery {
+            node: Some(node),
+            actions: handler.invoke(ClickEvent {
+                x: b.x + b.width / 2.0,
+                y: b.y + b.height / 2.0,
+            }),
+        }
+    }
+
     /// Next focus along the tab order, wrapping at either end. Inside a
     /// modal scope, only that scope's targets are in the order.
     pub fn traverse_focus(&self, focus: Option<FocusId>, backwards: bool) -> Option<FocusId> {
@@ -1238,5 +1269,47 @@ mod tests {
         router.pointer_down(10.0, 10.0, &mut focus);
 
         assert_eq!(focus, Some(inside));
+    }
+
+    // Keyboard parity: a focused button that binds no keys was unreachable
+    // by keyboard; Enter or Space now clicks it, and only it.
+    #[test]
+    fn enter_and_space_click_the_focused_node_only() {
+        let root = div()
+            .w(200.0)
+            .h(100.0)
+            .test_id("card")
+            .on_click(Msg::Click("card"))
+            .child(button("save", 50.0, 20.0))
+            .child(
+                button("off", 50.0, 20.0)
+                    .accessibility_role(accesskit::Role::Button)
+                    .accessibility_disabled(true),
+            )
+            .child(
+                div()
+                    .w(50.0)
+                    .h(20.0)
+                    .test_id("label")
+                    .focus_ring(FocusId::from_key("label")),
+            );
+        let router = routed(root, 200.0, 100.0);
+
+        let save = Some(FocusId::from_key("save"));
+        let cases = [
+            ("enter", save, r#"save [Click("save")]"#),
+            ("space", save, r#"save [Click("save")]"#),
+            ("shift+enter", save, "-"),
+            ("a", save, "-"),
+            ("enter", Some(FocusId::from_key("off")), "-"),
+            // Focus inside the card on a node without a click handler.
+            ("enter", Some(FocusId::from_key("label")), "-"),
+            ("enter", None, "-"),
+        ];
+        for (pressed, focus, expected) in cases {
+            let pressed: Binding = pressed.parse().unwrap();
+            let delivery = router.activate(&pressed, focus);
+            assert_eq!(dump(&router, delivery), expected, "{pressed} on {focus:?}");
+        }
     }
 }

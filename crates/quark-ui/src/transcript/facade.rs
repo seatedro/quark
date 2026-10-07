@@ -4,13 +4,16 @@
 //! Without it an app keeps the markdown sources, a [`MarkdownMessage`] per
 //! message, the converted messages, the [`Transcript`], and a
 //! [`SyntaxHighlighter`] in step by hand: parse, convert, update, store,
-//! and route arriving highlights back to their messages every frame.
+//! and route arriving highlights back to their messages every frame. It
+//! also measures the rows outside the window on a background thread, so
+//! their heights become exact while the app idles.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use quark::selection::BlockKey;
 
+use super::background::BackgroundMeasure;
 use super::markdown::{BlockKeys, MarkdownMessage};
 use super::syntax::SyntaxHighlighter;
 use super::{
@@ -46,7 +49,8 @@ struct Entry {
 /// block keys, and streaming sources are parsed incrementally.
 ///
 /// Each frame: [`Self::poll_highlights`], [`Self::prepare`], then
-/// [`Self::element`]; pass the element's events to [`Self::handle`].
+/// [`Self::element`]; pass the element's events to [`Self::handle`]. While
+/// [`Self::is_measuring`], keep drawing frames so background heights land.
 pub struct MarkdownTranscript {
     transcript: Transcript,
     messages: HashMap<RowKey, TranscriptMessage>,
@@ -55,6 +59,7 @@ pub struct MarkdownTranscript {
     block_rows: HashMap<BlockKey, RowKey>,
     syntax: SyntaxHighlighter,
     keys: BlockKeys,
+    background: BackgroundMeasure,
 }
 
 impl MarkdownTranscript {
@@ -66,6 +71,7 @@ impl MarkdownTranscript {
             block_rows: HashMap::new(),
             syntax: SyntaxHighlighter::new(),
             keys: BlockKeys::new(),
+            background: BackgroundMeasure::default(),
         }
     }
 
@@ -149,6 +155,7 @@ impl MarkdownTranscript {
     pub fn remove(&mut self, row: RowKey) -> Result<(), RowError> {
         self.transcript.remove(row)?;
         self.messages.remove(&row);
+        self.background.forget(row);
         if let Some(mut entry) = self.entries.remove(&row) {
             for key in entry.markdown.keys() {
                 self.block_rows.remove(key);
@@ -172,7 +179,10 @@ impl MarkdownTranscript {
         self.refresh_highlighted(keys)
     }
 
-    /// See [`Transcript::prepare`].
+    /// See [`Transcript::prepare`]. Also applies the row heights measured
+    /// in the background since the last frame and requests more, when the
+    /// measurer offers a [`super::MeasureSpec`] ([`super::TextMeasurer`]
+    /// does). A width or font change drops the requests in flight.
     pub fn prepare<M: BlockMeasurer<Geometry = TextGeometry>>(
         &mut self,
         width: f32,
@@ -180,8 +190,31 @@ impl MarkdownTranscript {
         now_ms: u64,
         measurer: &mut M,
     ) {
+        let style = *self.transcript.style();
+        self.background.configure(measurer, style, width);
+        self.background.apply(&mut self.transcript);
         self.transcript
             .prepare(width, height, now_ms, &self.messages, measurer);
+        self.background.request(&self.transcript, &self.messages);
+    }
+
+    /// Rows are being measured in the background; draw another frame to
+    /// pick their heights up.
+    pub fn is_measuring(&self) -> bool {
+        self.background.is_busy()
+    }
+
+    /// Measures every row still holding an estimate under the last
+    /// prepare's width and fonts, and applies the heights, blocking until
+    /// done. Positions of materialized rows update on the next prepare. For
+    /// tests and screenshots. Returns whether any height changed.
+    pub fn finish_measures(&mut self) -> bool {
+        self.background.finish(&mut self.transcript, &self.messages)
+    }
+
+    #[cfg(test)]
+    pub(super) fn background_mut(&mut self) -> (&mut BackgroundMeasure, &mut Transcript) {
+        (&mut self.background, &mut self.transcript)
     }
 
     /// See [`Transcript::element`].
@@ -265,6 +298,7 @@ impl MarkdownTranscript {
         };
         let message = self.convert(row, &mut entry);
         self.entries.insert(row, entry);
+        self.background.forget(row);
         let result = self.transcript.update(&message);
         self.messages.insert(row, message);
         result

@@ -33,6 +33,14 @@ struct HelloUi {
 }
 
 impl HelloUi {
+    fn new() -> Self {
+        Self {
+            name: TextField::new(""),
+            greeting: String::new(),
+            started: std::time::Instant::now(),
+        }
+    }
+
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
         div()
@@ -153,15 +161,81 @@ impl UiApp for HelloUi {
 
 fn main() -> Result<(), quark_app::RunError> {
     quark_app::run_ui(
-        HelloUi {
-            name: TextField::new(""),
-            greeting: String::new(),
-            started: std::time::Instant::now(),
-        },
+        HelloUi::new(),
         WindowOptions {
             title: "Hello Quark UI".into(),
             size: (640.0, 400.0),
             ..WindowOptions::default()
         },
     )
+}
+
+/// The form driven headlessly through `quark_app::testing`, as a user would
+/// drive it: find controls by role and name, click, and type.
+#[cfg(test)]
+mod tests {
+    use quark_app::quark_ui::test_alloc::{self, Counting};
+    use quark_app::testing::{By, UiTestHarness};
+
+    use super::*;
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// Allocations of a repeated frame with no screen reader connected.
+    fn repeated_frame_allocations() -> u64 {
+        let mut ui = UiTestHarness::new(HelloUi::new(), (640.0, 400.0), 2.0);
+        ui.set_accessibility_active(false);
+        for _ in 0..3 {
+            ui.frame();
+        }
+        let ((), allocated) = test_alloc::count(|| {
+            ui.frame();
+        });
+        allocated
+    }
+
+    #[test]
+    #[ignore = "measurement, prints a report"]
+    fn report_frame_allocations() {
+        let mut ui = UiTestHarness::new(HelloUi::new(), (640.0, 400.0), 2.0);
+        ui.set_accessibility_active(false);
+        for _ in 0..3 {
+            ui.frame();
+        }
+        let ((), sites) = test_alloc::profile(|| {
+            ui.frame();
+        });
+        for (site, n) in sites {
+            eprintln!("  {n:4}  {site}");
+        }
+    }
+
+    // The view rebuilds every frame without a cache boundary, so what its
+    // builders own is allocated again: about 21 of the 27 are its strings,
+    // actions, and click handlers, and the rest the text field's semantic
+    // id and value. Layout, paint, hit testing, and routing reuse their
+    // buffers.
+    #[test]
+    fn a_repeated_frame_allocates_only_what_the_view_builds() {
+        let allocated = repeated_frame_allocations();
+        assert!(allocated <= 30, "{allocated} allocations");
+    }
+
+    #[test]
+    fn greet_shows_the_typed_name() {
+        let mut ui = UiTestHarness::new(HelloUi::new(), (640.0, 400.0), 2.0);
+
+        ui.click_node(By::role_name(Role::TextInput, "Name"));
+        ui.type_text("Ada");
+        ui.click_node(By::role_name(Role::Button, "Greet"));
+
+        let greeting = ui.find(By::name("Hello, Ada!"));
+        assert_eq!(greeting.role, Some(Role::Label));
+        assert!(
+            ui.painted_text().lines().any(|line| line == "Hello, Ada!"),
+            "painted:\n{}",
+            ui.painted_text()
+        );
+    }
 }

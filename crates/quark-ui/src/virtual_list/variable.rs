@@ -117,6 +117,16 @@ impl RowTable {
         self.index_of(key).map(|i| self.measured[i])
     }
 
+    /// Whether the row at `index` holds a measured height. O(1).
+    pub fn is_measured_at(&self, index: usize) -> bool {
+        self.measured[index]
+    }
+
+    /// Number of rows holding a measured height. O(1).
+    pub fn measured_count(&self) -> usize {
+        self.measured_count
+    }
+
     /// Height given to new rows: the caller's override, else the average
     /// measured height, else the default. Existing estimated rows keep the
     /// estimate they were given so a changing average does not move them.

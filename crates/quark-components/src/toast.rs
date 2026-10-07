@@ -1,5 +1,6 @@
 use quark::view;
 use quark_ui::Action;
+use quark_ui::accessibility::Politeness;
 use quark_ui::animation::{AnimKey, AnimationTable, Curve, Motion, PropId};
 use quark_ui::design::{Alpha, Ico, Rad, Shadow, Sp, Sz};
 use quark_ui::element::CursorHint;
@@ -191,6 +192,10 @@ fn severity_icon(kind: ToastKind) -> &'static str {
 /// Per-toast visual props, built by the stack.
 struct ToastVisuals {
     index: usize,
+    id: u64,
+    /// Unwrapped text, for assistive tech.
+    message: String,
+    description: Option<String>,
     dismiss: Action,
     kind: ToastKind,
     title_lines: Vec<String>,
@@ -252,6 +257,13 @@ impl RenderOnce for ToastVisuals {
             .collect();
 
         let has_description = !desc_children.is_empty();
+        // A live region: screen readers speak the message when the toast
+        // appears, interrupting for errors.
+        let (role, politeness) = match self.kind {
+            ToastKind::Info => (accesskit::Role::Status, Politeness::Polite),
+            ToastKind::Error => (accesskit::Role::Alert, Politeness::Assertive),
+        };
+        let toast_id = self.id;
 
         view! { scale,
             <div class="absolute"
@@ -267,6 +279,11 @@ impl RenderOnce for ToastVisuals {
                 hit_identity={HitIdentity::Toast(self.index)}
                 cursor={CursorHint::Pointer}
                 z_index={self.z}
+                accessibility_id={format!("toast:{toast_id}")}
+                accessibility_role={role}
+                accessibility_label={self.message}
+                accessibility_description={self.description.unwrap_or_default()}
+                live={politeness}
             >
                 // Main row: leading badge | stacked title/description | close.
                 <div class="flex-row items-center h-full w-full"
@@ -299,6 +316,9 @@ impl RenderOnce for ToastVisuals {
                         on_click={self.dismiss.clone()}
                         hit_identity={HitIdentity::Toast(self.index)}
                         cursor={CursorHint::Pointer}
+                        accessibility_id={format!("toast-dismiss:{toast_id}")}
+                        accessibility_role={accesskit::Role::Button}
+                        accessibility_label={"Dismiss"}
                     >
                         <icon svg={lucide::X} size={Ico::XS} color={tc.text_muted} />
                     </div>
@@ -473,6 +493,9 @@ impl<'a> ToastStack<'a> {
 
             container = container.child(ToastVisuals {
                 index: toast_idx,
+                id: toast.id,
+                message: toast.message.clone(),
+                description: toast.description.clone(),
                 dismiss: (self.on_dismiss)(toast_idx),
                 kind: toast.kind,
                 title_lines: layout.title_lines,

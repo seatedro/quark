@@ -22,7 +22,7 @@ mod devtools;
 pub mod hot_reload;
 pub mod input;
 // Bindings are quark-ui's `Binding`, which the router matches too.
-#[cfg(all(test, feature = "ui"))]
+#[cfg(all(test, feature = "test-support"))]
 mod frame_budget;
 #[cfg(feature = "ui")]
 pub mod keymap;
@@ -33,6 +33,8 @@ pub mod platform;
 #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
 mod profile;
 mod runner;
+#[cfg(feature = "test-support")]
+pub mod testing;
 #[cfg(feature = "ui")]
 pub mod ui;
 

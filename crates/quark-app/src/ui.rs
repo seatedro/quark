@@ -22,11 +22,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use accesskit::{Action as AxAction, ActionData, ActionRequest, Affine, TreeUpdate};
-use quark::Rect;
 use quark::hit::HitId;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
-use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame};
+use quark::{Rect, SemanticFrame};
+use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer, Politeness};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
@@ -189,6 +189,7 @@ impl ViewContext<'_, '_> {
 pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
     focus: &'a mut Option<FocusId>,
+    announcer: &'a mut Announcer,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
 }
@@ -203,6 +204,17 @@ impl UiContext<'_, '_> {
             *self.focus = focus;
             redraw(Redraw::Focus, self.window);
         }
+    }
+
+    /// Have assistive tech speak `text`, for changes nothing on screen
+    /// names: a finished response, a background save. Each call is spoken
+    /// once, even when it repeats the last text. For text that is on
+    /// screen (a toast), make its element a live region instead
+    /// (`Div::live`).
+    pub fn announce(&mut self, text: impl Into<String>, politeness: Politeness) {
+        self.announcer.announce(text, politeness);
+        // The announcement is published with the next frame's tree.
+        self.window.request_redraw();
     }
 
     /// A sender for this app's messages; `M` must be the app's
@@ -261,6 +273,7 @@ pub struct UiAdapter<U: UiApp> {
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
     accessibility: AccessibilityFrame,
+    announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
     text_areas: Vec<TextInputHitArea>,
     text_pointer: TextPointer,
@@ -313,6 +326,7 @@ impl<U: UiApp> UiAdapter<U> {
             hovered: Vec::new(),
             router: InputRouter::default(),
             accessibility: AccessibilityFrame::default(),
+            announcer: Announcer::default(),
             text_areas: Vec::new(),
             text_pointer: TextPointer::default(),
             edit_focus: None,
@@ -370,6 +384,7 @@ impl<U: UiApp> UiAdapter<U> {
         let mut ucx = UiContext {
             window: cx,
             focus: &mut self.focus,
+            announcer: &mut self.announcer,
             sender: &self.sender,
         };
         f(&mut self.app, &mut ucx)
@@ -480,6 +495,13 @@ impl<U: UiApp> UiAdapter<U> {
             }
         }
         let delivery = self.router.key_down(&binding, self.focus);
+        if delivery.node.is_some() {
+            self.deliver(delivery, cx);
+            return;
+        }
+        // Enter or Space on a focused clickable that binds neither clicks it,
+        // so everything a pointer can press is reachable from the keyboard.
+        let delivery = self.router.activate(&binding, self.focus);
         if delivery.node.is_some() {
             self.deliver(delivery, cx);
             return;
@@ -677,9 +699,22 @@ enum Routed {
     Dispatch(Action),
     Focus(FocusId),
     SetValue(FocusId, String),
+    /// Select from `anchor` to `focus`, byte offsets into the field's text.
+    Select {
+        target: FocusId,
+        anchor: usize,
+        focus: usize,
+    },
+    Edit(FocusId, TextEditCommand),
 }
 
 fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> Option<Routed> {
+    // Any node standing for a focus target takes focus, action or not.
+    if request.action == AxAction::Focus {
+        return frame
+            .focus_target_of(request.target_node)
+            .map(Routed::Focus);
+    }
     let target = frame.action_for(request.target_node)?;
     let scroll_lines = match request.action {
         AxAction::ScrollUp => -ACCESSIBILITY_SCROLL_LINES,
@@ -689,17 +724,29 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
         (AxAction::Click, AccessibilityAction::Click(action)) => {
             Some(Routed::Dispatch(action.clone()))
         }
-        (
-            AxAction::Focus,
-            AccessibilityAction::Focus(focus)
-            | AccessibilityAction::TextValue(focus)
-            | AccessibilityAction::EditorViewport { focus, .. },
-        ) => Some(Routed::Focus(*focus)),
-        (
-            AxAction::SetValue | AxAction::ReplaceSelectedText,
-            AccessibilityAction::TextValue(focus),
-        ) => match &request.data {
+        (AxAction::SetValue, AccessibilityAction::TextValue(focus)) => match &request.data {
             Some(ActionData::Value(value)) => Some(Routed::SetValue(*focus, value.to_string())),
+            _ => None,
+        },
+        (
+            AxAction::ReplaceSelectedText,
+            AccessibilityAction::TextValue(focus)
+            | AccessibilityAction::EditorViewport { focus, .. },
+        ) => match &request.data {
+            Some(ActionData::Value(value)) => Some(Routed::Edit(
+                *focus,
+                TextEditCommand::InsertText(value.to_string()),
+            )),
+            _ => None,
+        },
+        (AxAction::SetTextSelection, _) => match &request.data {
+            Some(ActionData::SetTextSelection(selection)) => frame
+                .text_selection_for(request.target_node, selection)
+                .map(|(target, anchor, focus)| Routed::Select {
+                    target,
+                    anchor,
+                    focus,
+                }),
             _ => None,
         },
         (
@@ -828,7 +875,7 @@ impl<U: UiApp> App for UiAdapter<U> {
 
     fn accessibility(&mut self) -> Option<TreeUpdate> {
         // A full tree; accesskit diffs it against the last one.
-        let mut update = self.accessibility.tree_update(&self.name, self.focus);
+        let mut update = self.logical_accessibility_tree();
         scale_tree(&mut update, self.scale_factor);
         Some(update)
     }
@@ -836,6 +883,39 @@ impl<U: UiApp> App for UiAdapter<U> {
     fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
         self.handle_accessibility_action(request, cx);
         self.after_input(false, cx);
+    }
+}
+
+/// What [`crate::testing`] reads from the adapter.
+#[cfg(feature = "test-support")]
+impl<U: UiApp> UiAdapter<U> {
+    pub(crate) fn app_mut(&mut self) -> &mut U {
+        &mut self.app
+    }
+
+    pub(crate) fn focus(&self) -> Option<FocusId> {
+        self.focus
+    }
+
+    /// The last painted frame's accessibility tree, in points.
+    pub(crate) fn logical_accessibility_tree(&self) -> TreeUpdate {
+        let mut update = self.accessibility.tree_update(&self.name, self.focus);
+        self.announcer.publish(&mut update);
+        update
+    }
+
+    pub(crate) fn accessibility_frame(&self) -> &AccessibilityFrame {
+        &self.accessibility
+    }
+
+    pub(crate) fn semantic_frame(&self) -> &SemanticFrame {
+        &self.router.frame().semantic
+    }
+
+    /// The semantic node of the topmost hit region at a point that has one.
+    pub(crate) fn semantic_node_at(&self, x: f32, y: f32) -> Option<usize> {
+        let hits = &self.router.frame().hits;
+        hits.stack_at(x, y).into_iter().find_map(|id| hits.node(id))
     }
 }
 
@@ -881,6 +961,18 @@ impl<U: UiApp> UiAdapter<U> {
                 self.with_app(cx, |app, ucx| app.set_text_value(target, value, ucx));
                 redraw(Redraw::TextEdit, cx);
             }
+            Some(Routed::Select {
+                target,
+                anchor,
+                focus,
+            }) => {
+                self.app
+                    .edit_text(target, TextEditCommand::SetTextCursor(anchor));
+                self.edit(target, TextEditCommand::ExtendTextSelection(focus), cx);
+                // The cursor move alone may have changed the selection.
+                redraw(Redraw::TextEdit, cx);
+            }
+            Some(Routed::Edit(target, command)) => self.edit(target, command, cx),
             None => tracing::debug!("unhandled accessibility request: {request:?}"),
         }
     }
@@ -895,12 +987,9 @@ mod tests {
     use quark_ui::element::{IntoAnyElement, div, text_input};
     use quark_ui::style::Styled;
     use quark_ui::text_input::TextField;
-    use winit::event::{ElementState, MouseButton};
-    use winit::keyboard::ModifiersState;
 
     use super::*;
-    use crate::input::{KeyChord, KeyKind};
-    use crate::runner::TestRunner;
+    use crate::testing::UiTestHarness;
 
     #[derive(Debug, Clone, PartialEq)]
     enum Msg {
@@ -1211,7 +1300,6 @@ mod tests {
         saved: usize,
         events: Vec<String>,
         messages: Vec<(String, ThreadId)>,
-        copied: Vec<String>,
     }
 
     impl UiApp for ComposerApp {
@@ -1259,54 +1347,17 @@ mod tests {
             assert_eq!(target, FIELD);
             self.field.apply(command)
         }
-
-        fn read_clipboard(&mut self, _cx: &mut UiContext) -> Option<String> {
-            Some("pasted".to_owned())
-        }
-
-        fn write_clipboard(&mut self, text: String, _cx: &mut UiContext) {
-            self.copied.push(text);
-        }
     }
 
-    /// A composer adapter with one frame painted.
-    fn composer(text: &str) -> (UiAdapter<ComposerApp>, TestRunner) {
-        let mut adapter = UiAdapter::new(
-            ComposerApp {
-                field: TextField::new(text),
-                saved: 0,
-                events: Vec::new(),
-                messages: Vec::new(),
-                copied: Vec::new(),
-            },
-            "Test",
-        );
-        let mut runner = TestRunner::new();
-        App::init(&mut adapter, &mut runner.event_cx(0));
-        runner.frame(&mut adapter, 0);
-        runner.take_redraw();
-        (adapter, runner)
-    }
-
-    fn send(adapter: &mut UiAdapter<ComposerApp>, runner: &mut TestRunner, event: InputEvent) {
-        App::event(adapter, event, &mut runner.event_cx(0));
-    }
-
-    fn click(adapter: &mut UiAdapter<ComposerApp>, runner: &mut TestRunner, x: f32, y: f32) {
-        send(adapter, runner, InputEvent::PointerMoved { x, y });
-        for state in [ElementState::Pressed, ElementState::Released] {
-            let button = MouseButton::Left;
-            send(adapter, runner, InputEvent::PointerButton { button, state });
-        }
-    }
-
-    fn ctrl(key: &str) -> InputEvent {
-        InputEvent::KeyPress(KeyChord {
-            logical: KeyKind::Character(key.to_owned()),
-            physical: None,
-            modifiers: ModifiersState::CONTROL,
-            repeat: false,
-        })
+    /// A composer in a 400x300 point window, first frame painted.
+    fn composer(text: &str) -> UiTestHarness<ComposerApp> {
+        let app = ComposerApp {
+            field: TextField::new(text),
+            saved: 0,
+            events: Vec::new(),
+            messages: Vec::new(),
+        };
+        UiTestHarness::new(app, (400.0, 300.0), 1.0)
     }
 
     /// The color of the window-sized background quad.
@@ -1325,20 +1376,13 @@ mod tests {
     // run_ui app never saw theme changes, URLs, or notification clicks.
     #[test]
     fn app_event_reaches_the_app_and_the_theme_follows() {
-        let (mut adapter, mut runner) = composer("");
+        let mut ui = composer("");
 
-        App::app_event(
-            &mut adapter,
-            AppEvent::ThemeChanged(SystemTheme::Light),
-            &mut runner.event_cx(0),
-        );
-        let redrawn = runner.take_redraw();
-        let scene = runner.frame(&mut adapter, 10);
+        ui.app_event(AppEvent::ThemeChanged(SystemTheme::Light));
 
-        assert_eq!(adapter.app.events, ["ThemeChanged(Light)"]);
-        assert!(redrawn, "a theme change repaints");
+        assert_eq!(ui.app().events, ["ThemeChanged(Light)"]);
         assert_eq!(
-            background(&scene),
+            background(ui.scene()),
             Some(Theme::default_light().colors.background)
         );
     }
@@ -1347,8 +1391,8 @@ mod tests {
     // value they had, so apps shared state behind locks to pass data in.
     #[test]
     fn messages_from_a_worker_arrive_in_order_on_the_ui_thread() {
-        let (mut adapter, mut runner) = composer("");
-        let sender = adapter.sender();
+        let mut ui = composer("");
+        let sender = ui.sender();
 
         thread::spawn(move || {
             sender.send("connected".to_owned());
@@ -1356,12 +1400,15 @@ mod tests {
         })
         .join()
         .unwrap();
-        App::wake(&mut adapter, &mut runner.event_cx(5));
+        ui.run_until_idle();
 
-        let ui = thread::current().id();
+        let ui_thread = thread::current().id();
         assert_eq!(
-            adapter.app.messages,
-            [("connected".to_owned(), ui), ("line 1".to_owned(), ui)]
+            ui.app().messages,
+            [
+                ("connected".to_owned(), ui_thread),
+                ("line 1".to_owned(), ui_thread)
+            ]
         );
     }
 
@@ -1369,12 +1416,13 @@ mod tests {
     // element where no hover style can change.
     #[test]
     fn pointer_moves_redraw_only_when_the_hovered_elements_change() {
-        let (mut adapter, mut runner) = composer("");
+        let mut ui = composer("");
 
         let moves = [(10.0, 10.0), (12.0, 14.0), (10.0, 200.0), (30.0, 250.0)];
-        let redraws = moves.map(|(x, y)| {
-            send(&mut adapter, &mut runner, InputEvent::PointerMoved { x, y });
-            runner.take_redraw()
+        let redraws = moves.map(|at| {
+            let before = ui.frame_count();
+            ui.pointer_move(at);
+            ui.frame_count() > before
         });
 
         assert_eq!(redraws, [true, false, true, false]);
@@ -1382,26 +1430,24 @@ mod tests {
 
     // The composer needs no input code of its own: typed text, editing
     // keys, copy, and paste reach the focused field through edit_text and
-    // the clipboard hooks, and clicking Save keeps the field focused.
+    // the clipboard, and clicking Save keeps the field focused.
     #[test]
     fn focused_field_gets_text_keys_and_clipboard_without_app_code() {
-        let (mut adapter, mut runner) = composer("");
+        let mut ui = composer("");
 
-        click(&mut adapter, &mut runner, 10.0, 50.0);
-        send(
-            &mut adapter,
-            &mut runner,
-            InputEvent::TextInput("hi".into()),
-        );
-        for key in ["a", "c", "v"] {
-            send(&mut adapter, &mut runner, ctrl(key));
-        }
-        click(&mut adapter, &mut runner, 10.0, 10.0);
+        ui.click((10.0, 50.0));
+        ui.type_text("hi");
+        ui.key("mod+a");
+        ui.key("mod+c");
+        let copied = ui.clipboard_text();
+        ui.set_clipboard_text("pasted");
+        ui.key("mod+v");
+        ui.click((10.0, 10.0));
 
-        assert_eq!(adapter.app.field.text(), "pasted");
-        assert_eq!(adapter.app.copied, ["hi"]);
-        assert_eq!(adapter.app.saved, 1);
-        assert_eq!(adapter.focus, Some(FIELD), "Save kept the field focused");
+        assert_eq!(copied.as_deref(), Some("hi"));
+        assert_eq!(ui.app().field.text(), "pasted");
+        assert_eq!(ui.app().saved, 1);
+        assert_eq!(ui.focus(), Some(FIELD), "Save kept the field focused");
     }
 
     // Regression: a selection drag held past a field's edge kept
@@ -1414,38 +1460,92 @@ mod tests {
             ("window blurred", true, false),
         ];
         for (name, blur, grows) in cases {
-            let (mut adapter, mut runner) = composer(text);
-            click(&mut adapter, &mut runner, 5.0, 50.0);
-            runner.frame(&mut adapter, 10);
-            let press = ElementState::Pressed;
-            let button = MouseButton::Left;
-            send(
-                &mut adapter,
-                &mut runner,
-                InputEvent::PointerButton {
-                    button,
-                    state: press,
-                },
-            );
-            send(
-                &mut adapter,
-                &mut runner,
-                InputEvent::PointerMoved { x: 260.0, y: 50.0 },
-            );
+            let mut ui = composer(text);
+            ui.click((5.0, 50.0));
+            // Long enough that the next press is not a double click.
+            ui.advance(1_000);
+            ui.pointer_down((5.0, 50.0));
+            ui.pointer_move((260.0, 50.0));
             if blur {
-                send(&mut adapter, &mut runner, InputEvent::Focused(false));
+                ui.focus_loss();
             }
-            let before = adapter.app.field.cursor();
-            for ms in [100, 200, 300, 400] {
-                runner.frame(&mut adapter, ms);
-            }
-            let grew = adapter.app.field.cursor() > before;
-            assert_eq!(
-                grew,
-                grows,
-                "{name}: cursor {before} -> {}",
-                adapter.app.field.cursor()
-            );
+            let before = ui.app().field.cursor();
+            ui.advance(400);
+            let after = ui.app().field.cursor();
+            assert_eq!(after > before, grows, "{name}: cursor {before} -> {after}");
         }
+    }
+
+    /// The published text field as assistive tech sees it, without its id.
+    fn field_state(ui: &UiTestHarness<ComposerApp>) -> String {
+        quark_ui::accessibility::dump_accessibility_states(&ui.accessibility_update())
+            .lines()
+            .find(|line| line.contains("| TextInput |"))
+            .and_then(|line| line.split_once(" | "))
+            .map(|(_, rest)| rest.to_owned())
+            .expect("text field in the tree")
+    }
+
+    #[test]
+    fn edits_publish_the_fields_text_caret_and_selection() {
+        let mut ui = composer("");
+
+        ui.click((10.0, 50.0));
+        ui.type_text("hello");
+        let typed = field_state(&ui);
+        ui.key("mod+a");
+
+        assert_eq!(typed, r#"TextInput | Message | text="hello" | caret=5"#);
+        assert_eq!(
+            field_state(&ui),
+            r#"TextInput | Message | text="hello" | caret=5 | sel=0..5"#
+        );
+    }
+
+    // AT-SPI's set_selection and set_caret_offset arrive as
+    // SetTextSelection; ReplaceSelectedText replaces only the selection.
+    #[test]
+    fn text_actions_from_assistive_tech_reach_the_field() {
+        use accesskit::{
+            Action as AxAction, ActionData, ActionRequest, TextPosition, TextSelection, TreeId,
+        };
+        let mut ui = composer("hello world");
+        let update = ui.accessibility_update();
+        let with_role = |role| {
+            update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == role)
+                .map(|(id, _)| *id)
+                .expect("node with role")
+        };
+        let (field, run) = (with_role(Role::TextInput), with_role(Role::TextRun));
+        let request = |action, data| ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: field,
+            data: Some(data),
+        };
+        let at = |character_index| TextPosition {
+            node: run,
+            character_index,
+        };
+
+        ui.accessibility_action(request(
+            AxAction::SetTextSelection,
+            ActionData::SetTextSelection(TextSelection {
+                anchor: at(6),
+                focus: at(11),
+            }),
+        ));
+        let field_text = ui.app().field.text().to_owned();
+        let range = ui.app().field.selection_range().expect("selection");
+        assert_eq!(&field_text[range.start.get()..range.end.get()], "world");
+
+        ui.accessibility_action(request(
+            AxAction::ReplaceSelectedText,
+            ActionData::Value("there".into()),
+        ));
+        assert_eq!(ui.app().field.text(), "hello there");
     }
 }

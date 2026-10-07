@@ -11,7 +11,10 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
+use crate::accessibility::{
+    AccessibilityAction, AccessibilityExtra, AccessibilityFrame, AccessibilityNode, AccessibleText,
+    accessibility_role_for, semantic_role_for,
+};
 use crate::action::{Action, FocusId};
 use crate::animation::{Motion, PropSet};
 use crate::design::{Alpha, Sz};

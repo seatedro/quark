@@ -121,6 +121,8 @@ impl RenderOnce for Dropdown {
                     <div class="flex-col w-full"
                          id={format!("dropdown-menu:{trigger_label}")}
                          test_id={"dropdown-menu"}
+                         semantic_role={SemanticRole::Menu}
+                         accessibility_id={format!("dropdown-menu:{trigger_label}")}
                          focus_scope={trigger_label.clone()}
                          key_context={"dropdown"}
                          py={m.spacing_xs}

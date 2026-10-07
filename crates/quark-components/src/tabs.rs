@@ -68,7 +68,8 @@ impl RenderOnce for TabBar {
 
         view! {
             <div class="flex-row items-end" border_b={tc.border_variant}
-                 id={"tab-bar"} test_id={"tab-bar"}>
+                 id={"tab-bar"} test_id={"tab-bar"}
+                 semantic_role={SemanticRole::TabList} accessibility_id={"tab-bar"}>
                 for item in self.items {
                     <div class="flex-col items-center"
                          id={format!("tab:{:?}:{}", item.action, item.label)}
@@ -129,6 +130,8 @@ impl RenderOnce for SegmentedTabs {
             <div class="flex-row items-center"
                  id={"segmented-tabs"}
                  test_id={"segmented-tabs"}
+                 semantic_role={SemanticRole::TabList}
+                 accessibility_id={"segmented-tabs"}
                  gap={seg_gap} p={seg_gap}
                  bg={tc.element_background} rounded={m.control_radius}>
                 for item in self.items {

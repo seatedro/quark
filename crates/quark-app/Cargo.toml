@@ -65,8 +65,12 @@ interprocess = { version = "2.2", default-features = false }
 [dev-dependencies]
 quark-ui = { workspace = true, features = ["test-alloc"] }
 quark-render = { workspace = true, features = ["headless-render"] }
+# The a11y_demo example's checkbox, switch, and toasts.
+quark-components.workspace = true
 image.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Tests and examples always get the headless harness (`quark_app::testing`).
+quark-app = { path = ".", features = ["headless-render"] }
 
 [features]
 default = ["ui"]
@@ -91,6 +95,11 @@ clipboard-image = ["arboard/image-data"]
 # ctrl+shift+h, ctrl+shift+i, and ctrl+shift+l, or start with
 # QUARK_DEVTOOLS=hud,inspector,layout.
 devtools = ["ui", "quark-ui/devtools"]
+# `quark_app::testing`: drive a UiApp headlessly with a fake clock, fake
+# clipboard, simulated input, and accessibility and scene queries.
+test-support = ["ui"]
+# Pixel readback for `quark_app::testing` through a headless GPU device.
+headless-render = ["test-support", "quark-render/headless-render"]
 # Profiler scopes around frame phases and text shaping, plus tracing spans.
 # puffin serves on 127.0.0.1:8585 (connect with puffin_viewer); tracy
 # connects to the Tracy profiler. Enable one at a time.
@@ -100,9 +109,15 @@ profile-tracy = ["dep:profiling", "profiling/profile-with-tracy", "quark-ui?/pro
 [[example]]
 name = "hello_ui"
 required-features = ["ui"]
+# Its test module drives the app through `quark_app::testing`.
+test = true
 
 [[example]]
 name = "animation_demo"
+required-features = ["ui"]
+
+[[example]]
+name = "a11y_demo"
 required-features = ["ui"]
 
 [[example]]
