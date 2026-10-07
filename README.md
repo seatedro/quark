@@ -9,10 +9,6 @@ stable identity. Subtrees inside cache boundaries replay their layout and
 paint, and tests hold a repeated frame of a cached list to zero
 allocations.
 
-Quark targets apps with long, live documents: chat transcripts, diffs,
-trees and tables, editors. The workspace is at version 0.1.0 and is not
-published to crates.io; see [docs/publish-readiness.md](docs/publish-readiness.md).
-
 ## Crates
 
 | Crate | Contents | Quark crates it uses |
