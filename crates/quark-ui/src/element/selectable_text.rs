@@ -17,6 +17,12 @@ pub struct StyledSpan {
     pub color: Option<Color>,
     /// `Some(bg)` paints a rounded background pill behind the run (inline code).
     pub pill: Option<Color>,
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// Link target. Adjacent spans with the same URL form one link: one
+    /// click target, underlined together on hover. Without an explicit
+    /// `color`, link text paints in the theme's accent text color.
+    pub link: Option<Arc<str>>,
 }
 
 impl StyledSpan {
@@ -28,6 +34,203 @@ impl StyledSpan {
             italic: false,
             color: None,
             pill: None,
+            underline: false,
+            strikethrough: false,
+            link: None,
+        }
+    }
+}
+
+/// Emitted when a link inside selectable text is clicked and the element
+/// has no [`SelectableText::on_link`] mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkClicked {
+    pub url: Arc<str>,
+}
+
+impl From<LinkClicked> for Action {
+    fn from(value: LinkClicked) -> Self {
+        Action::new(value)
+    }
+}
+
+/// Maps a clicked link's URL to the app action it emits.
+type LinkFn = dyn Fn(&Arc<str>) -> Action;
+
+#[derive(Clone)]
+pub struct LinkHandler(Rc<LinkFn>);
+
+impl LinkHandler {
+    pub fn new(f: impl Fn(&Arc<str>) -> Action + 'static) -> Self {
+        Self(Rc::new(f))
+    }
+
+    fn action(&self, url: &Arc<str>) -> Action {
+        (self.0)(url)
+    }
+}
+
+impl Default for LinkHandler {
+    fn default() -> Self {
+        Self::new(|url| LinkClicked { url: url.clone() }.into())
+    }
+}
+
+/// One link of a text block: the byte range it covers, its URL, and the hit
+/// entries registered for each line segment it occupies.
+pub struct LinkHits {
+    range: std::ops::Range<usize>,
+    url: Arc<str>,
+    rects: Vec<Rect>,
+    hits: Vec<HitId>,
+}
+
+/// Groups adjacent spans that share a URL into links (byte range + URL).
+pub(super) fn link_ranges(
+    spans: &[StyledSpan],
+    layout: &TextLayout,
+) -> Vec<(std::ops::Range<usize>, Arc<str>)> {
+    let mut out: Vec<(std::ops::Range<usize>, Arc<str>)> = Vec::new();
+    for (span, text_span) in spans.iter().zip(layout.spans().iter()) {
+        let Some(url) = &span.link else {
+            continue;
+        };
+        let range = text_span.range.clone();
+        match out.last_mut() {
+            Some((last, last_url)) if last.end == range.start && last_url == url => {
+                last.end = range.end;
+            }
+            _ => out.push((range, url.clone())),
+        }
+    }
+    out
+}
+
+/// Registers one pointer hit per line segment of every link.
+pub(super) fn register_link_hits(
+    spans: &[StyledSpan],
+    layout: &TextLayout,
+    origin: (f32, f32),
+    cx: &mut ElementContext,
+) -> Vec<LinkHits> {
+    link_ranges(spans, layout)
+        .into_iter()
+        .map(|(range, url)| {
+            let rects: Vec<Rect> = layout
+                .selection_rects(range.clone())
+                .map(|r| r.offset(origin.0, origin.1))
+                .collect();
+            let hits = rects
+                .iter()
+                .map(|r| cx.insert_hit(*r, HitFlags::CLICK | HitFlags::HOVER, CursorHint::Pointer))
+                .collect();
+            LinkHits {
+                range,
+                url,
+                rects,
+                hits,
+            }
+        })
+        .collect()
+}
+
+/// Decorations for spans that ask for them plus hovered links.
+pub(super) fn span_decorations(
+    spans: &[StyledSpan],
+    layout: &TextLayout,
+    colors: &[Color],
+    links: &[LinkHits],
+    cx: &ElementContext,
+) -> Vec<TextDecoration> {
+    let mut out = Vec::new();
+    for ((span, text_span), color) in spans.iter().zip(layout.spans().iter()).zip(colors) {
+        let range = text_span.range.clone();
+        if span.underline {
+            out.push(TextDecoration {
+                range: range.clone(),
+                kind: TextDecorationKind::Underline,
+                color: *color,
+            });
+        }
+        if span.strikethrough {
+            out.push(TextDecoration {
+                range,
+                kind: TextDecorationKind::Strikethrough,
+                color: *color,
+            });
+        }
+    }
+    for link in links {
+        if !link.hits.iter().any(|hit| cx.is_hovered(*hit)) {
+            continue;
+        }
+        let color = layout
+            .spans()
+            .iter()
+            .position(|s| s.range.start == link.range.start)
+            .and_then(|i| colors.get(i).copied())
+            .unwrap_or(cx.theme.colors.text_accent);
+        out.push(TextDecoration {
+            range: link.range.clone(),
+            kind: TextDecorationKind::Underline,
+            color,
+        });
+    }
+    out
+}
+
+/// Binds each link's hits to its own clickable semantic node and click
+/// handler, and exposes it to assistive tech as a link.
+pub(super) fn register_link_input(
+    links: &[LinkHits],
+    text: &str,
+    handler: &LinkHandler,
+    source_key: u64,
+    cx: &mut ElementContext,
+) {
+    for link in links {
+        let Some(first) = link.rects.first() else {
+            continue;
+        };
+        let (x0, y0, x1, y1) = link.rects.iter().fold(
+            (first.x, first.y, first.right(), first.bottom()),
+            |(x0, y0, x1, y1), r| {
+                (
+                    x0.min(r.x),
+                    y0.min(r.y),
+                    x1.max(r.right()),
+                    y1.max(r.bottom()),
+                )
+            },
+        );
+        let bounds = Rect {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        };
+        let label = text.get(link.range.clone()).unwrap_or_default().to_owned();
+        let action = handler.action(&link.url);
+        let mut node = SemanticNode::new(bounds).label(label.clone());
+        node.parent = cx.current_semantic_parent();
+        node.actions = SemanticActions::default().clickable().hit_test();
+        let index = cx.semantic.push(node);
+        for hit in &link.hits {
+            cx.bind_hit(*hit, index);
+        }
+        cx.handlers
+            .on_click(index, ClickHandler::from_action(action.clone()));
+        if !cx.accessibility_text_hidden() {
+            cx.push_accessibility(
+                AccessibilityNode::new(
+                    format!("link:{source_key}:{}:{}", link.range.start, link.url),
+                    AccessibilityRole::Link,
+                    bounds,
+                )
+                .label(label)
+                .value(link.url.to_string())
+                .action(AccessibilityAction::Click(action)),
+            );
         }
     }
 }
@@ -70,6 +273,7 @@ pub struct SelectableText {
     max_lines: Option<usize>,
     source_key: u64,
     selection: Option<(usize, usize)>,
+    on_link: LinkHandler,
 }
 
 pub fn selectable_text(text: impl Into<String>) -> SelectableText {
@@ -90,6 +294,7 @@ pub fn selectable_rich_text(spans: Vec<StyledSpan>) -> SelectableText {
         max_lines: None,
         source_key: 0,
         selection: None,
+        on_link: LinkHandler::default(),
     }
 }
 
@@ -128,6 +333,17 @@ impl SelectableText {
         self
     }
 
+    /// Action a link click emits, given its URL. Defaults to [`LinkClicked`].
+    pub fn on_link(mut self, f: impl Fn(&Arc<str>) -> Action + 'static) -> Self {
+        self.on_link = LinkHandler::new(f);
+        self
+    }
+
+    pub fn link_handler(mut self, handler: LinkHandler) -> Self {
+        self.on_link = handler;
+        self
+    }
+
     fn line_height(&self) -> f32 {
         self.font_size * 1.35
     }
@@ -136,7 +352,7 @@ impl SelectableText {
 /// One layout for the concatenated span texts, each span's font applied to
 /// its byte range. Span `i` of the layout is `spans[i]`, which is how paint
 /// maps glyphs back to span colors.
-pub(super) fn styled_params(
+pub(crate) fn styled_params(
     spans: &[StyledSpan],
     style: TextStyle,
     wrap_width: Option<f32>,
@@ -209,16 +425,24 @@ pub(super) fn paint_selection(
     }
 }
 
-pub(super) fn span_colors(spans: &[StyledSpan], default_color: Color) -> Arc<[Color]> {
+pub(super) fn span_colors(
+    spans: &[StyledSpan],
+    default_color: Color,
+    link_color: Color,
+) -> Arc<[Color]> {
     spans
         .iter()
-        .map(|span| span.color.unwrap_or(default_color))
+        .map(|span| match (span.color, &span.link) {
+            (Some(color), _) => color,
+            (None, Some(_)) => link_color,
+            (None, None) => default_color,
+        })
         .collect()
 }
 
 impl Element for SelectableText {
     type LayoutState = Option<Arc<TextLayout>>;
-    type PrepaintState = ();
+    type PrepaintState = Vec<LinkHits>;
 
     fn request_layout(
         &mut self,
@@ -255,18 +479,22 @@ impl Element for SelectableText {
 
     fn prepaint(
         &mut self,
-        _bounds: Bounds,
-        _layout_state: &mut Self::LayoutState,
+        bounds: Bounds,
+        layout_state: &mut Self::LayoutState,
         _engine: &LayoutEngine,
-        _cx: &mut ElementContext,
-    ) {
+        cx: &mut ElementContext,
+    ) -> Vec<LinkHits> {
+        match layout_state {
+            Some(layout) => register_link_hits(&self.spans, layout, (bounds.x, bounds.y), cx),
+            None => Vec::new(),
+        }
     }
 
     fn paint(
         &mut self,
         bounds: Bounds,
         state: &mut Option<Arc<TextLayout>>,
-        _prepaint_state: &mut (),
+        links: &mut Vec<LinkHits>,
         _engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
@@ -290,6 +518,8 @@ impl Element for SelectableText {
 
         // Italic glyphs ink past their advance; widen the text rect (which
         // the renderer clips to) so the last glyph of a line is not shaved.
+        let colors = span_colors(&self.spans, default_color, cx.theme.colors.text_accent);
+        let decorations = span_decorations(&self.spans, &layout, &colors, links, cx);
         scene.rich_text(RichTextPrimitive {
             rect: Rect {
                 width: bounds.width + self.font_size * 0.5,
@@ -297,8 +527,9 @@ impl Element for SelectableText {
             },
             layout: ShapedText::new(layout.clone()),
             default_color,
-            span_colors: span_colors(&self.spans, default_color),
+            span_colors: colors,
         });
+        push_text_decorations(scene, &layout, origin, &decorations);
 
         if clipped {
             scene.pop_clip();
@@ -322,6 +553,8 @@ impl Element for SelectableText {
                 .label(text.to_string()),
             );
         }
+
+        register_link_input(links, &text, &self.on_link, self.source_key, cx);
 
         cx.selectable_text_runs.push(SelectableTextRegion {
             bounds,
