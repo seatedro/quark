@@ -142,7 +142,9 @@ pub enum TreeEvent {
     /// The disclosure chevron was clicked.
     Toggle(NodeId),
     /// The pointer moved `dy` points since the press on a row.
-    DragMove { dy: f32 },
+    DragMove {
+        dy: f32,
+    },
     DragEnd,
     Key(TreeKey),
     TypeAhead(char),
@@ -1177,8 +1179,7 @@ impl TreeData {
             return Err(TreeIntegrityError::Unreachable { reached, nodes: n });
         }
         let flagged = self.flags.iter().filter(|f| *f & SELECTED != 0).count();
-        if flagged != self.selected.len() || self.selected.iter().any(|&s| !self.has(s, SELECTED))
-        {
+        if flagged != self.selected.len() || self.selected.iter().any(|&s| !self.has(s, SELECTED)) {
             return Err(TreeIntegrityError::Selection {
                 flagged,
                 listed: self.selected.len(),
@@ -1251,14 +1252,32 @@ impl TreeData {
 /// A broken invariant of a [`TreeState`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeIntegrityError {
-    ColumnLength { column: &'static str },
-    Link { node: u32, what: &'static str },
-    ChildCount { node: u32, counted: u32, stored: u32 },
+    ColumnLength {
+        column: &'static str,
+    },
+    Link {
+        node: u32,
+        what: &'static str,
+    },
+    ChildCount {
+        node: u32,
+        counted: u32,
+        stored: u32,
+    },
     /// Walking from the root reached `reached` of `nodes` (a cycle when
     /// more, a detached node when fewer).
-    Unreachable { reached: usize, nodes: usize },
-    Selection { flagged: usize, listed: usize },
-    Rows { row: usize, what: &'static str },
+    Unreachable {
+        reached: usize,
+        nodes: usize,
+    },
+    Selection {
+        flagged: usize,
+        listed: usize,
+    },
+    Rows {
+        row: usize,
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for TreeIntegrityError {
@@ -1354,10 +1373,12 @@ pub fn tree_view(
     let colors = TreeColors::of(theme);
     let height = data.viewport_height;
     let hash = inputs_hash(&(data.revision, env, on_event as usize));
-    cached(data.id, hash, move || build_tree(&data, colors, env, on_event))
-        .w_full()
-        .h(height)
-        .into_any()
+    cached(data.id, hash, move || {
+        build_tree(&data, colors, env, on_event)
+    })
+    .w_full()
+    .h(height)
+    .into_any()
 }
 
 fn build_tree(
@@ -1494,7 +1515,12 @@ fn tree_row(
             );
         }
         row = row.child(div().w(depth * indent).h(h).flex_shrink_0());
-        let chevron = div().w(16.0).h(16.0).flex_shrink_0().items_center().justify_center();
+        let chevron = div()
+            .w(16.0)
+            .h(16.0)
+            .flex_shrink_0()
+            .items_center()
+            .justify_center();
         row = row.child(if spec.expandable {
             let svg = if spec.expanded {
                 lucide::CHEVRON_DOWN

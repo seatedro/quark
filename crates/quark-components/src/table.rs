@@ -92,12 +92,20 @@ pub enum TableEvent {
     /// A data row was clicked.
     PressRow(usize),
     /// The pointer moved `dx` points since pressing on `column`'s header.
-    HeaderDrag { column: u32, dx: f32 },
+    HeaderDrag {
+        column: u32,
+        dx: f32,
+    },
     /// The header press on `column` ended: a sort when it never moved, a
     /// column move otherwise.
-    HeaderRelease { column: u32 },
+    HeaderRelease {
+        column: u32,
+    },
     /// The resize handle of `column` was dragged to `width`.
-    Resize { column: u32, width: f32 },
+    Resize {
+        column: u32,
+        width: f32,
+    },
     Key(TableKey),
     Scroll(i32),
     ScrollTo(f32),
@@ -570,8 +578,11 @@ impl TableState {
         out.push('\n');
         for display in t.row_window().range {
             let row = t.view[display] as usize;
-            let cells: Vec<Cow<'_, str>> =
-                t.order.iter().map(|&c| data.cell_text(row, c as usize)).collect();
+            let cells: Vec<Cow<'_, str>> = t
+                .order
+                .iter()
+                .map(|&c| data.cell_text(row, c as usize))
+                .collect();
             if t.selected_flags[row] {
                 out.push_str("* ");
             }
@@ -768,7 +779,10 @@ impl TableInner {
         }
         let flagged = self.selected_flags.iter().filter(|&&s| s).count();
         if flagged != self.selected.len()
-            || self.selected.iter().any(|&r| !self.selected_flags[r as usize])
+            || self
+                .selected
+                .iter()
+                .any(|&r| !self.selected_flags[r as usize])
         {
             return Err(TableIntegrityError::Selection);
         }
@@ -797,13 +811,21 @@ impl TableInner {
 pub enum TableIntegrityError {
     ColumnLength,
     /// `order` is not a permutation of the columns.
-    ColumnOrder { column: u32 },
-    Width { column: u32 },
+    ColumnOrder {
+        column: u32,
+    },
+    Width {
+        column: u32,
+    },
     RowLength,
     /// `view` and `pos_of` are not inverse permutations.
-    RowMap { display: usize },
+    RowMap {
+        display: usize,
+    },
     Selection,
-    Unsorted { display: usize },
+    Unsorted {
+        display: usize,
+    },
 }
 
 impl fmt::Display for TableIntegrityError {
@@ -932,7 +954,14 @@ fn build_table<D: TableData>(
     for pos in columns.clone() {
         header = header.child(header_cell(t, pos, reorder_target, colors, env, on_event));
     }
-    table = table.child(div().w_full().h(t.header_height).flex_shrink_0().clip().child(header));
+    table = table.child(
+        div()
+            .w_full()
+            .h(t.header_height)
+            .flex_shrink_0()
+            .clip()
+            .child(header),
+    );
 
     let mut body = div()
         .w_full()
@@ -946,7 +975,15 @@ fn build_table<D: TableData>(
         );
     body = body.child(div().w_full().h(window.top_spacer).flex_shrink_0());
     for display in window.range {
-        body = body.child(table_row(t, data, display, columns.clone(), colors, env, on_event));
+        body = body.child(table_row(
+            t,
+            data,
+            display,
+            columns.clone(),
+            colors,
+            env,
+            on_event,
+        ));
     }
     body = body.child(div().w_full().h(window.bottom_spacer).flex_shrink_0());
     table.child(body).into_any()
@@ -1003,7 +1040,12 @@ fn header_cell(
         && dragged != column
     {
         let from = t.position_of(dragged);
-        let bar = div().absolute().top(0.0).w(2.0).h(t.header_height).bg(colors.accent);
+        let bar = div()
+            .absolute()
+            .top(0.0)
+            .w(2.0)
+            .h(t.header_height)
+            .bg(colors.accent);
         cell = cell.child(if from < to {
             bar.right(0.0)
         } else {
