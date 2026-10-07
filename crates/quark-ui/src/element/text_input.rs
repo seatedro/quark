@@ -109,6 +109,10 @@ pub struct TextInputHitArea {
     pub font_size: f32,
     pub focus_target: FocusId,
     pub multiline: bool,
+    /// Painted layout of the displayed value (bullets when masked), with its
+    /// origin at `(text_x, text_y)`. `None` for placeholders and multiline
+    /// editors.
+    pub layout: Option<Arc<TextLayout>>,
 }
 
 impl Element for TextInput {
@@ -193,19 +197,22 @@ impl Element for TextInput {
             let pad = (Sz::INPUT_SIDE_PAD * scale).round();
             let top_pad = (Sz::INPUT_TOP_PAD * scale).round();
 
-            scene.text(TextPrimitive {
-                rect: Rect {
-                    x: bounds.x + pad,
-                    y: bounds.y + top_pad,
-                    width: bounds.width - pad * 2.0,
-                    height: label_lh,
-                },
-                text: std::mem::take(&mut self.label).into(),
-                color: theme.colors.text_muted,
-                font_size: label_size,
-                font_kind: FontKind::Ui,
-                font_weight: FontWeight::Medium,
-            });
+            let label_style = TextStyle::new(label_size)
+                .weight(FontWeight::Medium)
+                .line_height(label_lh);
+            let label_params = TextParams::new(std::mem::take(&mut self.label), label_style);
+            if let Some(layout) = cx.layout_text(&label_params) {
+                scene.text(TextPrimitive {
+                    rect: Rect {
+                        x: bounds.x + pad,
+                        y: bounds.y + top_pad,
+                        width: bounds.width - pad * 2.0,
+                        height: label_lh,
+                    },
+                    layout: ShapedText::new(layout),
+                    color: theme.colors.text_muted,
+                });
+            }
 
             text_x = bounds.x + pad;
             text_y = bounds.y + top_pad + label_lh + 2.0;
@@ -219,11 +226,6 @@ impl Element for TextInput {
         } else {
             String::new()
         };
-        let measure_text: &str = if self.masked {
-            bullet_str.as_str()
-        } else {
-            self.value.as_str()
-        };
         let byte_to_measure_byte = |offset: usize| -> usize {
             if !self.masked {
                 return offset.min(self.value.len());
@@ -235,7 +237,7 @@ impl Element for TextInput {
         let display = if is_placeholder {
             std::mem::take(&mut self.placeholder)
         } else if self.masked {
-            bullet_str.clone()
+            bullet_str
         } else {
             self.value.clone()
         };
@@ -244,28 +246,20 @@ impl Element for TextInput {
         } else {
             theme.colors.text
         };
+        let value_style = TextStyle::new(value_size).line_height(value_lh);
+        // One layout for the displayed text: painted, and used for the caret
+        // and selection so they sit on the painted glyph edges.
+        let layout = cx.layout_text(&TextParams::new(display, value_style));
+        let value_layout = layout.as_ref().filter(|_| !is_placeholder);
 
         // Selection highlight (render before text so it appears behind)
         if self.focused && !is_placeholder {
             let sel_start = self.cursor.min(self.anchor);
             let sel_end = self.cursor.max(self.anchor);
             if sel_start != sel_end && sel_end <= self.value.len() {
-                let measure_start = byte_to_measure_byte(sel_start);
-                let measure_end = byte_to_measure_byte(sel_end);
-                let x_start = measure_text_width(
-                    cx.font_system,
-                    &measure_text[..measure_start],
-                    value_size,
-                    FontKind::Ui,
-                    FontWeight::Normal,
-                );
-                let x_end = measure_text_width(
-                    cx.font_system,
-                    &measure_text[..measure_end],
-                    value_size,
-                    FontKind::Ui,
-                    FontWeight::Normal,
-                );
+                let caret_x = |byte| value_layout.map_or(0.0, |l| l.caret(byte).x);
+                let x_start = caret_x(byte_to_measure_byte(sel_start));
+                let x_end = caret_x(byte_to_measure_byte(sel_end));
                 scene.rounded_rect(RoundedRectPrimitive::uniform(
                     Rect {
                         x: text_x + x_start,
@@ -280,37 +274,26 @@ impl Element for TextInput {
         }
 
         // Value text
-        scene.text(TextPrimitive {
-            rect: Rect {
-                x: text_x,
-                y: text_y,
-                width: text_area_w,
-                height: value_lh,
-            },
-            text: display.into(),
-            color: text_color,
-            font_size: value_size,
-            font_kind: FontKind::Ui,
-            font_weight: FontWeight::Normal,
-        });
+        if let Some(layout) = &layout {
+            scene.text(TextPrimitive {
+                rect: Rect {
+                    x: text_x,
+                    y: text_y,
+                    width: text_area_w,
+                    height: value_lh,
+                },
+                layout: ShapedText::new(layout.clone()),
+                color: text_color,
+            });
+        }
 
         // Cursor caret
         if self.focused && !is_placeholder || (self.focused && self.value.is_empty()) {
             let elapsed = cx.clock_ms.saturating_sub(self.cursor_moved_at_ms);
             let cursor_visible = elapsed < 530 || (elapsed / 530) % 2 == 0;
             if cursor_visible {
-                let cursor_x = if self.cursor > 0 && !self.value.is_empty() {
-                    let measure_byte = byte_to_measure_byte(self.cursor);
-                    measure_text_width(
-                        cx.font_system,
-                        &measure_text[..measure_byte],
-                        value_size,
-                        FontKind::Ui,
-                        FontWeight::Normal,
-                    )
-                } else {
-                    0.0
-                };
+                let cursor_x =
+                    value_layout.map_or(0.0, |l| l.caret(byte_to_measure_byte(self.cursor)).x);
                 scene.rounded_rect(RoundedRectPrimitive::uniform(
                     Rect {
                         x: text_x + cursor_x,
@@ -384,6 +367,7 @@ impl Element for TextInput {
                 font_size: value_size,
                 focus_target: target,
                 multiline: false,
+                layout: value_layout.cloned(),
             });
         }
     }

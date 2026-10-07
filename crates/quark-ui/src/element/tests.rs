@@ -20,20 +20,31 @@ impl From<TestAction> for Action {
 const FOCUS_LIST: FocusId = FocusId::new(1);
 const FOCUS_EDITOR: FocusId = FocusId::new(2);
 
-fn test_cx<'a>(
-    font_system: &'a mut glyphon::FontSystem,
-    store: &'a mut SignalStore,
-) -> ElementContext<'a> {
-    quark_render::fonts::configure_font_system(font_system);
+/// Vendored fonts only, so measurements do not depend on the machine.
+struct TestText {
+    system: TextSystem,
+    layouts: LayoutCache,
+}
+
+impl TestText {
+    fn new() -> Self {
+        Self {
+            system: TextSystem::vendored_only(&Default::default()),
+            layouts: LayoutCache::default(),
+        }
+    }
+}
+
+fn test_cx<'a>(ts: &'a mut TestText, store: &'a mut SignalStore) -> ElementContext<'a> {
     let theme = Box::leak(Box::new(Theme::default_dark()));
-    ElementContext::new(theme, 1.0, font_system, None, store)
+    ElementContext::new(theme, 1.0, &mut ts.system, &mut ts.layouts, None, store)
 }
 
 #[test]
 fn div_with_fixed_children_lays_out() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -54,9 +65,9 @@ fn div_with_fixed_children_lays_out() {
 
 #[test]
 fn div_with_background_emits_rounded_rect() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -73,9 +84,9 @@ fn div_with_background_emits_rounded_rect() {
 
 #[test]
 fn nested_divs_resolve_absolute_positions() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
 
     let mut engine = LayoutEngine::new();
     let inner_w = 50.0;
@@ -113,9 +124,9 @@ fn nested_divs_resolve_absolute_positions() {
 
 #[test]
 fn text_element_emits_text_primitive() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -141,9 +152,9 @@ fn text_element_emits_text_primitive() {
 
 #[test]
 fn string_as_child_works() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div().w(300.0).h(40.0).child("bare string child").into_any();
@@ -160,9 +171,9 @@ fn string_as_child_works() {
 
 #[test]
 fn text_element_has_intrinsic_width() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
 
     let mut engine = LayoutEngine::new();
     let mut txt = text("ABCDE").size(10.0);
@@ -186,9 +197,9 @@ fn text_element_has_intrinsic_width() {
 
 #[test]
 fn on_click_registers_hit_region() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -210,9 +221,9 @@ fn on_click_registers_hit_region() {
 
 #[test]
 fn hover_bg_applies_when_mouse_inside() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     cx.mouse_position = Some((100.0, 25.0)); // inside the 200x50 div
 
     let mut scene = Scene::default();
@@ -242,9 +253,9 @@ fn hover_bg_applies_when_mouse_inside() {
 
 #[test]
 fn hover_bg_applies_when_rendered_at_offset() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     // Global mouse inside a 200x50 div offset by (400, 300).
     cx.mouse_position = Some((500.0, 325.0));
 
@@ -279,9 +290,9 @@ fn hover_bg_applies_when_rendered_at_offset() {
 
 #[test]
 fn hover_bg_does_not_apply_when_mouse_outside() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     cx.mouse_position = Some((999.0, 999.0)); // outside
 
     let mut scene = Scene::default();
@@ -305,9 +316,9 @@ fn hover_bg_does_not_apply_when_mouse_outside() {
 
 #[test]
 fn realistic_title_bar_layout() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let theme = cx.theme;
@@ -381,19 +392,13 @@ fn realistic_title_bar_layout() {
 
 #[test]
 fn truncate_text_to_fit_accounts_for_font_weight() {
-    let mut font_system = glyphon::FontSystem::new();
-    quark_render::fonts::configure_font_system(&mut font_system);
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
     let text = "Open Compare With Repository";
     let font_size = 12.0;
-    let max_width = measure_text_width(
-        &mut font_system,
-        "Open Compare",
-        font_size,
-        FontKind::Ui,
-        FontWeight::Medium,
-    );
-    let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let max_width =
+        cx.measure_text_width("Open Compare", font_size, FontKind::Ui, FontWeight::Medium);
     let full_width = cx.measure_text_width(text, font_size, FontKind::Ui, FontWeight::Medium);
 
     let (truncated, truncated_width) = truncate_text_to_fit(
@@ -422,9 +427,9 @@ fn truncate_text_to_fit_accounts_for_font_weight() {
 
 #[test]
 fn truncated_text_primitive_fits_bounds_for_medium_weight() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -449,33 +454,30 @@ fn truncated_text_primitive_fits_bounds_for_medium_weight() {
             _ => None,
         })
         .expect("expected a text primitive");
+    let layout = text
+        .layout
+        .downcast_ref::<TextLayout>()
+        .expect("text layout");
 
     assert!(
-        text.text.ends_with('\u{2026}'),
+        layout.text().ends_with('\u{2026}'),
         "rendered text should be truncated: {:?}",
-        text.text,
+        layout.text(),
     );
-
-    let measured = measure_text_width(
-        cx.font_system,
-        &text.text,
-        text.font_size,
-        text.font_kind,
-        text.font_weight,
-    );
+    let measured = layout.size().0;
     assert!(
         measured <= text.rect.width + 1.0,
         "measured width {measured} should fit rendered bounds {} for {:?}",
         text.rect.width,
-        text.text,
+        layout.text(),
     );
 }
 
 #[test]
 fn realistic_file_list_with_scroll() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let theme = cx.theme;
@@ -531,9 +533,9 @@ fn realistic_file_list_with_scroll() {
 
 #[test]
 fn scroll_y_offsets_nested_descendant_text() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
 
     let build_scene = |scroll_y: f32, cx: &mut ElementContext<'_>| {
         let mut scene = Scene::default();
@@ -574,9 +576,9 @@ fn scroll_y_offsets_nested_descendant_text() {
 
 #[test]
 fn scroll_y_clips_and_offsets_children() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -621,9 +623,9 @@ fn scroll_y_clips_and_offsets_children() {
 
 #[test]
 fn overflow_hidden_clips_children() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -654,9 +656,9 @@ fn overflow_hidden_clips_children() {
 
 #[test]
 fn rounded_overflow_hidden_emits_rounded_clip() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -693,9 +695,9 @@ fn rounded_overflow_hidden_emits_rounded_clip() {
 
 #[test]
 fn canvas_element_emits_custom_primitives() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let green = Color::rgba(0, 255, 0, 255);
@@ -743,13 +745,14 @@ fn hitbox_blocking_modal_prevents_hover_behind() {
     // Scenario: a background div and a modal div that blocks mouse events.
     // The mouse is at a position inside both. The background div should NOT
     // be hovered because the modal's BlockMouse hitbox blocks it.
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
     let theme = Box::leak(Box::new(Theme::default_dark()));
     let mut cx = ElementContext::new(
         theme,
         1.0,
-        &mut font_system,
+        &mut ts.system,
+        &mut ts.layouts,
         Some((100.0, 100.0)),
         &mut store,
     );
@@ -806,9 +809,9 @@ fn render_once_component_renders_correctly() {
         }
     }
 
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let blue = Color::rgba(0, 0, 255, 255);
@@ -845,12 +848,13 @@ fn render_once_component_renders_correctly() {
 
 #[test]
 fn hover_style_override_changes_border() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
     let mut cx = ElementContext::new(
         Box::leak(Box::new(Theme::default_dark())),
         1.0,
-        &mut font_system,
+        &mut ts.system,
+        &mut ts.layouts,
         Some((100.0, 25.0)), // inside
         &mut store,
     );
@@ -901,9 +905,9 @@ fn hover_style_override_changes_border() {
 
 #[test]
 fn when_conditional_applies() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -926,9 +930,9 @@ fn when_conditional_applies() {
 
 #[test]
 fn on_scroll_registers_scroll_region() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -950,12 +954,13 @@ fn on_scroll_registers_scroll_region() {
 
 #[test]
 fn focus_tracking_query() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
     let cx = ElementContext::new(
         Box::leak(Box::new(Theme::default_dark())),
         1.0,
-        &mut font_system,
+        &mut ts.system,
+        &mut ts.layouts,
         None,
         &mut store,
     )
@@ -967,9 +972,9 @@ fn focus_tracking_query() {
 
 #[test]
 fn text_input_renders_label_and_value() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = text_input("Branch", "main")
@@ -995,9 +1000,9 @@ fn text_input_renders_label_and_value() {
 
 #[test]
 fn when_conditional_skips() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -1020,9 +1025,9 @@ fn when_conditional_skips() {
 
 #[test]
 fn bg_effect_noise_gradient_emits_effect_quad() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let a = Color::rgba(255, 0, 0, 255);
@@ -1065,9 +1070,9 @@ fn bg_effect_noise_gradient_emits_effect_quad() {
 
 #[test]
 fn bg_effect_linear_gradient_emits_effect_quad() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let a = Color::rgba(0, 255, 0, 255);
@@ -1099,9 +1104,9 @@ fn bg_effect_linear_gradient_emits_effect_quad() {
 
 #[test]
 fn bg_effect_replaces_solid_bg() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -1137,9 +1142,9 @@ fn bg_effect_replaces_solid_bg() {
 
 #[test]
 fn blur_emits_blur_region_primitive() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -1187,9 +1192,9 @@ fn blur_emits_blur_region_primitive() {
 
 #[test]
 fn radial_gradient_emits_correct_effect_type() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let a = Color::rgba(255, 255, 255, 255);
@@ -1212,9 +1217,9 @@ fn radial_gradient_emits_correct_effect_type() {
 
 #[test]
 fn shimmer_emits_correct_effect_type() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let base = Color::rgba(40, 40, 40, 255);
@@ -1238,9 +1243,9 @@ fn shimmer_emits_correct_effect_type() {
 
 #[test]
 fn vignette_emits_correct_effect_type() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let dark = Color::rgba(0, 0, 0, 128);
@@ -1263,9 +1268,9 @@ fn vignette_emits_correct_effect_type() {
 
 #[test]
 fn color_tint_emits_correct_effect_type() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let tint = Color::rgba(0, 100, 255, 80);
@@ -1288,9 +1293,9 @@ fn color_tint_emits_correct_effect_type() {
 
 #[test]
 fn glow_adds_shadow_with_zero_offset() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let accent = Color::rgba(0, 128, 255, 200);
@@ -1326,9 +1331,9 @@ fn glow_adds_shadow_with_zero_offset() {
 
 #[test]
 fn z_index_emits_push_pop_primitives() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let red = Color::rgba(255, 0, 0, 255);
@@ -1351,9 +1356,9 @@ fn z_index_emits_push_pop_primitives() {
 
 #[test]
 fn z_index_zero_emits_no_push_pop() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -1373,10 +1378,17 @@ fn z_index_zero_emits_no_push_pop() {
 
 #[test]
 fn z_index_hitbox_priority() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
     let theme = Box::leak(Box::new(Theme::default_dark()));
-    let mut cx = ElementContext::new(theme, 1.0, &mut font_system, Some((50.0, 50.0)), &mut store);
+    let mut cx = ElementContext::new(
+        theme,
+        1.0,
+        &mut ts.system,
+        &mut ts.layouts,
+        Some((50.0, 50.0)),
+        &mut store,
+    );
 
     // Register a z=0 hitbox covering (0,0)-(100,100).
     cx.push_z_index(0);
@@ -1412,9 +1424,9 @@ fn z_index_hitbox_priority() {
 
 #[test]
 fn focus_tree_registers_focus_ring_and_text_input_targets() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
     const SEARCH: FocusId = FocusId::from_key("search");
 
@@ -1440,9 +1452,9 @@ fn focus_tree_registers_focus_ring_and_text_input_targets() {
 
 #[test]
 fn accessibility_tree_nests_buttons_under_their_dialog() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let button = |id: &str, label: &str| {
@@ -1487,9 +1499,9 @@ fn accessibility_tree_nests_buttons_under_their_dialog() {
 // [r; 4], so per-corner rounding could not reach the scene.
 #[test]
 fn div_rounded_corners_paints_background_with_per_corner_radii() {
-    let mut font_system = glyphon::FontSystem::new();
+    let mut ts = TestText::new();
     let mut store = SignalStore::new();
-    let mut cx = test_cx(&mut font_system, &mut store);
+    let mut cx = test_cx(&mut ts, &mut store);
     let mut scene = Scene::default();
 
     let mut root = div()
@@ -1505,4 +1517,115 @@ fn div_rounded_corners_paints_background_with_per_corner_radii() {
         _ => None,
     });
     assert_eq!(radii, Some([8.0, 0.0, 4.0, 0.0]));
+}
+
+fn rich_text_runs(scene: &Scene) -> Vec<RichTextPrimitive> {
+    scene
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            quark_render::Primitive::RichTextRun(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn paint_one(cx: &mut ElementContext, element: impl IntoAnyElement) -> Scene {
+    let mut scene = Scene::default();
+    let mut root = div().w(400.0).h(3000.0).child(element).into_any();
+    render_element(&mut root, &mut scene, cx, 400.0, 3000.0);
+    scene
+}
+
+fn bold(text: &str) -> StyledSpan {
+    StyledSpan {
+        font_weight: FontWeight::Bold,
+        ..StyledSpan::plain(text)
+    }
+}
+
+// Regression: SelectableText capped its layout at 64 lines and folded the
+// rest into the last line, so long comments lost lines and hit the wrong row.
+#[test]
+fn selectable_text_lays_out_every_line_of_long_text() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let body = (0..100)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    paint_one(
+        &mut cx,
+        selectable_text(body.clone()).width(300.0).size(14.0),
+    );
+
+    let region = &cx.selectable_text_runs[0];
+    assert_eq!(region.layout.line_count(), 100);
+    let bottom = region.bounds.y + region.bounds.height - 1.0;
+    let hit = region.hit(region.bounds.x + 1.0, bottom);
+    assert_eq!(&body[hit..], "line 99");
+}
+
+// Regression: pointer hit-testing re-shaped selectable text as plain sans, so
+// inside bold and code spans the byte under the pointer drifted from the
+// glyph painted there.
+#[test]
+fn selectable_text_hit_inside_bold_span_lands_on_painted_glyph() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let code = StyledSpan {
+        font_kind: FontKind::Mono,
+        ..StyledSpan::plain("fn main()")
+    };
+    let spans = vec![
+        StyledSpan::plain("Call "),
+        code,
+        StyledSpan::plain(" then "),
+        bold("WWWWWWWWWWWW"),
+    ];
+    let target = "Call fn main() then WWWWWWWW".len();
+    let scene = paint_one(&mut cx, selectable_rich_text(spans).width(390.0).size(14.0));
+
+    let painted = &rich_text_runs(&scene)[0];
+    let layout = painted.layout.downcast_ref::<TextLayout>().expect("layout");
+    let g = layout.glyphs();
+    let i = (0..g.len())
+        .find(|&i| g.byte_start[i] as usize == target)
+        .expect("glyph at target byte");
+    let line = layout.line(0).expect("line");
+    let x = painted.rect.x + g.x[i] + g.advance[i] * 0.25;
+    let y = painted.rect.y + line.top + line.height * 0.5;
+
+    let region = &cx.selectable_text_runs[0];
+    assert_eq!(region.hit(x, y), target);
+    let caret_x = region.text_origin.0 + region.layout.caret(target).x;
+    assert!((caret_x - (painted.rect.x + g.x[i])).abs() < 0.01);
+}
+
+// Colors are applied at paint, so recoloring a block (hover, theme switch)
+// must reuse its cached layout instead of shaping it again.
+#[test]
+fn selectable_text_color_change_reuses_layout() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let block = |color| {
+        selectable_rich_text(vec![
+            StyledSpan::plain("see "),
+            StyledSpan {
+                color: Some(color),
+                ..StyledSpan::plain("the link")
+            },
+        ])
+        .width(300.0)
+        .size(14.0)
+    };
+    let red = rich_text_runs(&paint_one(&mut cx, block(Color::rgba(255, 0, 0, 255))));
+    cx.layouts.begin_frame();
+    let blue = rich_text_runs(&paint_one(&mut cx, block(Color::rgba(0, 0, 255, 255))));
+
+    assert_eq!(red[0].layout, blue[0].layout, "recolor shaped a new layout");
+    assert_ne!(red[0].span_colors, blue[0].span_colors);
 }

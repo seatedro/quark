@@ -70,12 +70,10 @@ impl EditorMode {
         }
     }
 
+    // Matches quark-text, which paints this text: Basic shaping skips font
+    // fallback and ligatures, so the caret would drift from the glyphs.
     fn shaping(self) -> Shaping {
-        if self.is_code() {
-            Shaping::Basic
-        } else {
-            Shaping::Advanced
-        }
+        Shaping::Advanced
     }
 }
 
@@ -1319,12 +1317,11 @@ impl Editor {
 mod tests {
     use super::*;
 
-    fn make_editor(width: f32, height: f32) -> (glyphon::FontSystem, Editor) {
-        let mut font_system = glyphon::FontSystem::new();
-        quark_render::fonts::configure_font_system(&mut font_system);
+    fn make_editor(width: f32, height: f32) -> (quark_text::TextSystem, Editor) {
+        let mut font_system = quark_text::TextSystem::vendored_only(&Default::default());
 
         let mut editor = Editor::default();
-        editor.sync_size(&mut font_system, width, height);
+        editor.sync_size(font_system.font_system_mut(), width, height);
 
         (font_system, editor)
     }
@@ -1350,13 +1347,13 @@ mod tests {
         let (mut font_system, mut editor) = make_editor(220.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
 
         editor.insert_text("line0\nline1\nline2\nline3");
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         let line_height = editor.scroll_line_height_px();
         assert!((editor.scroll_y - line_height * 2.0).abs() < 0.5);
 
         editor.scroll(-line_height);
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         assert!(
             (editor.scroll_y - line_height).abs() < 0.5,
@@ -1370,14 +1367,14 @@ mod tests {
         let (mut font_system, mut editor) = make_editor(220.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
 
         editor.insert_text("line0\nline1\nline2\nline3");
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         let line_height = editor.scroll_line_height_px();
         editor.scroll(-line_height);
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         editor.click(0, 0);
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         assert_eq!(editor.cursor, "line0\n".len());
         assert_eq!(editor.anchor, "line0\n".len());
@@ -1388,7 +1385,7 @@ mod tests {
         let (mut font_system, mut editor) = make_editor(160.0, 2.0 * 14.0 * LINE_HEIGHT_FACTOR);
 
         editor.insert_text("first line\nsecond line\n");
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         let line_height = editor.scroll_line_height_px();
         let cursor_bottom = editor.cursor_pos.y + line_height;
@@ -1411,7 +1408,7 @@ mod tests {
              asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf \
              sdaf asdf asdf asdf asd fasdf asdf asdf asdf asdf",
         );
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         let line_height = editor.scroll_line_height_px();
         let cursor_bottom = editor.cursor_pos.y + line_height;
@@ -1443,7 +1440,7 @@ mod tests {
             "asdf asf asdf asdf fasd fasd fasdf sdaf asdf sadf \
              sdaf asdf asdf asdf asd fasdf asdf asdf asdf asdf",
         );
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         let line_height = editor.scroll_line_height_px();
         let buffer = editor.buffer().expect("buffer");
@@ -1459,7 +1456,7 @@ mod tests {
         let click_y = (target_y - editor.scroll_y + line_height * 0.5) as i32;
 
         editor.click(click_x, click_y);
-        editor.flush(&mut font_system);
+        editor.flush(font_system.font_system_mut());
 
         assert_eq!(editor.cursor, target_offset);
     }

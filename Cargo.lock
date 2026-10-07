@@ -2415,6 +2415,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "quark",
  "quark-render",
+ "quark-text",
  "quark-ui",
  "raw-window-handle",
  "serde",
@@ -2431,9 +2432,9 @@ name = "quark-components"
 version = "0.1.0"
 dependencies = [
  "accesskit",
- "glyphon",
  "quark",
  "quark-render",
+ "quark-text",
  "quark-ui",
 ]
 
@@ -2485,6 +2486,7 @@ dependencies = [
  "glyphon",
  "quark",
  "quark-render",
+ "quark-text",
  "serde",
  "taffy",
  "unicode-segmentation",

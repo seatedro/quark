@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 quark.workspace = true
 quark-render.workspace = true
+quark-text.workspace = true
 accesskit.workspace = true
 glyphon.workspace = true
 serde.workspace = true

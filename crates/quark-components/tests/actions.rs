@@ -38,11 +38,11 @@ impl PickerItem for Item {
 }
 
 fn hit_actions(mut root: AnyElement) -> (Vec<Action>, Vec<Action>) {
-    let mut font_system = glyphon::FontSystem::new();
-    quark_render::fonts::configure_font_system(&mut font_system);
+    let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+    let mut layouts = quark_text::LayoutCache::default();
     let mut store = SignalStore::new();
     let theme = Box::leak(Box::new(Theme::default_dark()));
-    let mut cx = ElementContext::new(theme, 1.0, &mut font_system, None, &mut store);
+    let mut cx = ElementContext::new(theme, 1.0, &mut text, &mut layouts, None, &mut store);
     let mut scene = Scene::default();
     render_element(&mut root, &mut scene, &mut cx, 800.0, 600.0);
     let clicks = cx

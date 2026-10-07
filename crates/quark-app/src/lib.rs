@@ -15,8 +15,8 @@ pub use input::{InputEvent, InputNormalizer, KeyChord, KeyKind};
 #[cfg(feature = "ui")]
 pub use quark_ui;
 pub use runner::{
-    App, EventContext, FrameContext, RunError, TrafficLights, Waker, WindowChrome, WindowOptions,
-    run,
+    App, AppText, EventContext, FrameContext, RunError, TrafficLights, Waker, WindowChrome,
+    WindowOptions, run,
 };
 #[cfg(feature = "ui")]
 pub use ui::{UiAdapter, UiApp, UiContext, ViewContext, run_ui};

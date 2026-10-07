@@ -33,7 +33,7 @@ pub struct FrameContext<'a> {
     pub(super) size: PhysicalSize<u32>,
     pub(super) scale_factor: f64,
     pub(super) text_metrics: TextMetrics,
-    pub(super) font_system: &'a mut FontSystem,
+    pub(super) text: &'a mut AppText,
     pub(super) elapsed: Duration,
     pub(super) flags: &'a mut Flags,
     pub(super) waker: &'a Waker,
@@ -64,7 +64,13 @@ impl FrameContext<'_> {
     }
 
     pub fn font_system(&mut self) -> &mut FontSystem {
-        self.font_system
+        self.text.system.font_system_mut()
+    }
+
+    /// The text system and layout cache this frame's scene must be shaped
+    /// with.
+    pub fn text(&mut self) -> &mut AppText {
+        self.text
     }
 
     /// Time since the runner started.
@@ -88,7 +94,7 @@ impl FrameContext<'_> {
 
 pub struct EventContext<'a> {
     pub(super) window: &'a Window,
-    pub(super) renderer: &'a mut Renderer,
+    pub(super) text: &'a mut AppText,
     pub(super) flags: &'a mut Flags,
     pub(super) clipboard: &'a mut Option<arboard::Clipboard>,
     pub(super) input: &'a InputNormalizer,
@@ -123,7 +129,11 @@ impl EventContext<'_> {
     }
 
     pub fn font_system(&mut self) -> &mut FontSystem {
-        self.renderer.font_system_mut()
+        self.text.system.font_system_mut()
+    }
+
+    pub fn text(&mut self) -> &mut AppText {
+        self.text
     }
 
     pub fn set_cursor(&mut self, cursor: CursorIcon) {

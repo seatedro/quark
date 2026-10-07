@@ -1,101 +1,53 @@
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use glyphon::{Color as GlyphonColor, TextArea, TextBounds};
+use quark::{Color, FontKind};
+use quark_text::{TextLayout, TextParams, TextStyle, TextSystem};
 
-use glyphon::{
-    Attrs, Buffer, Color as GlyphonColor, Family, FontSystem, Metrics, Shaping, TextArea,
-    TextBounds,
-};
+use crate::renderer::{ClippedRichText, ClippedText};
+use crate::scene::Rect;
 
-use crate::scene::{FontKind, FontStyle, FontWeight, Rect, RichTextPrimitive, TextPrimitive};
-use quark::Color;
-
-use crate::renderer::{CachedTextBuffer, ClippedRichText, ClippedText};
-
+/// Builds glyphon areas straight from the shaped layouts; nothing is shaped
+/// here. Layouts must come from the `TextSystem` passed to glyphon's prepare,
+/// because glyph cache keys carry that font database's face ids.
 pub(super) fn prepare_text_areas<'a>(
-    font_system: &mut FontSystem,
-    text_cache: &'a mut HashMap<u64, CachedTextBuffer>,
-    text_cache_frame: &mut u64,
-    texts: &[ClippedText],
-    rich_texts: &[ClippedRichText],
-    scale_factor: f64,
+    texts: &'a [ClippedText],
+    rich_texts: &'a [ClippedRichText],
 ) -> Vec<TextArea<'a>> {
-    *text_cache_frame = text_cache_frame.wrapping_add(1);
-    let frame = *text_cache_frame;
-    let mut placements = Vec::with_capacity(texts.len() + rich_texts.len());
-
+    let mut areas = Vec::with_capacity(texts.len() + rich_texts.len());
     for text in texts {
-        let key = plain_text_cache_key(&text.primitive, scale_factor);
-        if !text_cache.contains_key(&key) {
-            let prepared =
-                build_plain_text_buffer(font_system, &text.primitive, scale_factor, frame);
-            text_cache.insert(key, prepared);
-        }
-        if let Some(entry) = text_cache.get_mut(&key) {
-            entry.last_used_frame = frame;
-        }
-        placements.push(TextPlacement {
-            key,
-            rect: text.primitive.rect,
-            clip: text.clip,
-            default_color: text.primitive.color,
-        });
+        let primitive = &text.primitive;
+        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
+            continue;
+        };
+        areas.push(text_area(
+            layout,
+            primitive.rect,
+            text.clip,
+            primitive.color,
+        ));
     }
-
     for text in rich_texts {
-        let key = rich_text_cache_key(&text.primitive, scale_factor);
-        if !text_cache.contains_key(&key) {
-            let prepared =
-                build_rich_text_buffer(font_system, &text.primitive, scale_factor, frame);
-            text_cache.insert(key, prepared);
-        }
-        if let Some(entry) = text_cache.get_mut(&key) {
-            entry.last_used_frame = frame;
-        }
-        placements.push(TextPlacement {
-            key,
-            rect: text.primitive.rect,
-            clip: text.clip,
-            default_color: text.primitive.default_color,
-        });
+        let primitive = &text.primitive;
+        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
+            continue;
+        };
+        push_rich_text_areas(
+            &mut areas,
+            layout,
+            primitive.rect,
+            text.clip,
+            primitive.default_color,
+            &primitive.span_colors,
+        );
     }
-
-    if frame % 240 == 0 {
-        trim_text_cache(text_cache, frame);
-    }
-
-    placements
-        .iter()
-        .filter_map(|placement| {
-            text_cache.get(&placement.key).map(|prepared| {
-                text_area_from_cache(
-                    prepared,
-                    placement.rect,
-                    placement.clip,
-                    placement.default_color,
-                )
-            })
-        })
-        .collect()
+    areas
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TextPlacement {
-    key: u64,
-    rect: Rect,
-    clip: Rect,
-    default_color: Color,
-}
-
-fn text_area_from_cache(
-    prepared: &CachedTextBuffer,
-    rect: Rect,
-    clip: Rect,
-    default_color: Color,
-) -> TextArea<'_> {
+fn text_area(layout: &TextLayout, origin: Rect, clip: Rect, color: Color) -> TextArea<'_> {
     TextArea {
-        buffer: &prepared.buffer,
-        left: rect.x,
-        top: rect.y,
+        buffer: layout.buffer(),
+        left: origin.x,
+        top: origin.y,
+        // The buffer is already shaped at physical size.
         scale: 1.0,
         bounds: TextBounds {
             left: clip.x.round() as i32,
@@ -103,247 +55,119 @@ fn text_area_from_cache(
             right: clip.right().round() as i32,
             bottom: clip.bottom().round() as i32,
         },
-        default_color: glyphon_color(default_color),
+        default_color: glyphon_color(color),
         custom_glyphs: &[],
     }
 }
 
-fn build_plain_text_buffer(
-    font_system: &mut FontSystem,
-    primitive: &TextPrimitive,
-    scale_factor: f64,
-    last_used_frame: u64,
-) -> CachedTextBuffer {
-    let metrics = Metrics::new(primitive.font_size, primitive.font_size * 1.35);
-    let mut buffer = Buffer::new(font_system, metrics);
-    buffer.set_size(
-        font_system,
-        Some((primitive.rect.width * scale_factor as f32).max(1.0)),
-        Some((primitive.rect.height * scale_factor as f32).max(1.0)),
-    );
-    let attrs = attrs_for_font(
-        primitive.font_kind,
-        primitive.font_weight,
-        FontStyle::Normal,
-        primitive.color,
-    );
-    buffer.set_text(
-        font_system,
-        primitive.text.as_ref(),
-        &attrs,
-        shaping_for_font(primitive.font_kind),
-        None,
-    );
-    buffer.shape_until_scroll(font_system, false);
-    CachedTextBuffer {
-        buffer,
-        last_used_frame,
+fn span_color(span: u32, default_color: Color, span_colors: &[Color]) -> Color {
+    match span.checked_sub(1) {
+        Some(i) => span_colors
+            .get(i as usize)
+            .copied()
+            .unwrap_or(default_color),
+        None => default_color,
     }
 }
 
-fn build_rich_text_buffer(
-    font_system: &mut FontSystem,
-    primitive: &RichTextPrimitive,
-    scale_factor: f64,
-    last_used_frame: u64,
-) -> CachedTextBuffer {
-    let metrics = Metrics::new(primitive.font_size, primitive.font_size * 1.35);
-    let mut buffer = Buffer::new(font_system, metrics);
-    buffer.set_size(
-        font_system,
-        Some((primitive.rect.width * scale_factor as f32).max(1.0)),
-        Some((primitive.rect.height * scale_factor as f32).max(1.0)),
-    );
-    let default_attrs = attrs_for_font(
-        primitive.font_kind,
-        primitive.font_weight,
-        FontStyle::Normal,
-        primitive.default_color,
-    );
-    let spans = primitive
-        .spans
-        .iter()
-        .map(|span| {
-            let font_weight = span.font_weight.unwrap_or(primitive.font_weight);
-            let font_style = span.font_style.unwrap_or(FontStyle::Normal);
-            (
-                span.text.as_ref(),
-                attrs_for_font(primitive.font_kind, font_weight, font_style, span.color),
-            )
-        })
-        .collect::<Vec<_>>();
-    if spans.is_empty() {
-        buffer.set_text(
-            font_system,
-            "",
-            &default_attrs,
-            shaping_for_font(primitive.font_kind),
-            None,
-        );
-    } else {
-        buffer.set_rich_text(
-            font_system,
-            spans.iter().map(|(text, attrs)| (*text, attrs.clone())),
-            &default_attrs,
-            shaping_for_font(primitive.font_kind),
-            None,
-        );
+/// glyphon colors a whole area with one default color, and the layout's
+/// buffer is shared and immutable, so per-span colors are drawn as one area
+/// per same-colored stretch of a line, each clipped to that stretch. Bounds
+/// clip partial glyphs, so neighbouring stretches tile without gaps or
+/// double drawing.
+fn push_rich_text_areas<'a>(
+    areas: &mut Vec<TextArea<'a>>,
+    layout: &'a TextLayout,
+    origin: Rect,
+    clip: Rect,
+    default_color: Color,
+    span_colors: &[Color],
+) {
+    let mut runs = layout.glyph_runs();
+    let first = runs.next().map_or(default_color, |run| {
+        span_color(run.span, default_color, span_colors)
+    });
+    if runs.all(|run| span_color(run.span, default_color, span_colors) == first) {
+        areas.push(text_area(layout, origin, clip, first));
+        return;
     }
-    buffer.shape_until_scroll(font_system, false);
-    CachedTextBuffer {
-        buffer,
-        last_used_frame,
-    }
-}
 
-fn trim_text_cache(cache: &mut HashMap<u64, CachedTextBuffer>, frame: u64) {
-    const KEEP_UNUSED_FRAMES: u64 = 240;
-    cache.retain(|_, entry| frame.saturating_sub(entry.last_used_frame) <= KEEP_UNUSED_FRAMES);
-}
-
-fn plain_text_cache_key(primitive: &TextPrimitive, scale_factor: f64) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    hasher.write_u8(0);
-    hash_rect_size(&mut hasher, primitive.rect);
-    hasher.write_u32(primitive.font_size.to_bits());
-    hasher.write_u64(scale_factor.to_bits());
-    hasher.write_u8(font_kind_tag(primitive.font_kind));
-    hasher.write_u8(font_weight_tag(primitive.font_weight));
-    hash_color(&mut hasher, primitive.color);
-    primitive.text.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn rich_text_cache_key(primitive: &RichTextPrimitive, scale_factor: f64) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    hasher.write_u8(1);
-    hash_rect_size(&mut hasher, primitive.rect);
-    hasher.write_u32(primitive.font_size.to_bits());
-    hasher.write_u64(scale_factor.to_bits());
-    hasher.write_u8(font_kind_tag(primitive.font_kind));
-    hasher.write_u8(font_weight_tag(primitive.font_weight));
-    hash_color(&mut hasher, primitive.default_color);
-    hasher.write_usize(primitive.spans.len());
-    for span in primitive.spans.iter() {
-        span.text.hash(&mut hasher);
-        hash_color(&mut hasher, span.color);
-        hasher.write_u8(optional_font_weight_tag(span.font_weight));
-        hasher.write_u8(optional_font_style_tag(span.font_style));
-    }
-    hasher.finish()
-}
-
-fn hash_rect_size(hasher: &mut DefaultHasher, rect: Rect) {
-    hasher.write_u32(rect.width.to_bits());
-    hasher.write_u32(rect.height.to_bits());
-}
-
-fn hash_color(hasher: &mut DefaultHasher, color: Color) {
-    hasher.write_u8(color.r);
-    hasher.write_u8(color.g);
-    hasher.write_u8(color.b);
-    hasher.write_u8(color.a);
-}
-
-fn font_kind_tag(kind: FontKind) -> u8 {
-    match kind {
-        FontKind::Ui => 0,
-        FontKind::Mono => 1,
-    }
-}
-
-fn font_weight_tag(weight: FontWeight) -> u8 {
-    match weight {
-        FontWeight::Normal => 0,
-        FontWeight::Medium => 1,
-        FontWeight::Semibold => 2,
-        FontWeight::Bold => 3,
-    }
-}
-
-fn optional_font_weight_tag(weight: Option<FontWeight>) -> u8 {
-    weight.map(font_weight_tag).unwrap_or(255)
-}
-
-fn font_style_tag(style: FontStyle) -> u8 {
-    match style {
-        FontStyle::Normal => 0,
-        FontStyle::Italic => 1,
-    }
-}
-
-fn optional_font_style_tag(style: Option<FontStyle>) -> u8 {
-    style.map(font_style_tag).unwrap_or(255)
-}
-
-fn attrs_for_font(
-    font_kind: FontKind,
-    font_weight: FontWeight,
-    font_style: FontStyle,
-    color: Color,
-) -> Attrs<'static> {
-    let family = match font_kind {
-        FontKind::Ui => Family::SansSerif,
-        FontKind::Mono => Family::Monospace,
-    };
-    let weight = glyphon_weight_for_font(font_kind, font_weight);
-    let style = match font_style {
-        FontStyle::Normal => glyphon::Style::Normal,
-        FontStyle::Italic => glyphon::Style::Italic,
-    };
-    Attrs::new()
-        .family(family)
-        .style(style)
-        .weight(weight)
-        .color(glyphon_text_color(color))
-}
-
-fn shaping_for_font(font_kind: FontKind) -> Shaping {
-    match font_kind {
-        FontKind::Ui => Shaping::Advanced,
-        FontKind::Mono => Shaping::Basic,
-    }
-}
-
-fn glyphon_weight_for_font(font_kind: FontKind, font_weight: FontWeight) -> glyphon::Weight {
-    match (font_kind, font_weight) {
-        (FontKind::Ui, FontWeight::Normal) => glyphon::Weight(450),
-        (_, FontWeight::Normal) => glyphon::Weight::NORMAL,
-        (_, FontWeight::Medium) => glyphon::Weight(500),
-        (_, FontWeight::Semibold) => glyphon::Weight(600),
-        (_, FontWeight::Bold) => glyphon::Weight::BOLD,
-    }
-}
-
-pub(super) fn measure_mono_char_width(font_system: &mut FontSystem, font_size: f32) -> f32 {
-    let metrics = Metrics::new(font_size, font_size * 1.35);
-    let mut buffer = Buffer::new(font_system, metrics);
-    buffer.set_size(font_system, Some(font_size * 100.0), Some(font_size * 2.0));
-    let attrs = Attrs::new().family(Family::Monospace);
-    let sample = "0000000000";
-    buffer.set_text(font_system, sample, &attrs, Shaping::Basic, None);
-    buffer.shape_until_scroll(font_system, false);
-    let mut total_w = 0.0_f32;
-    let mut glyph_count = 0_u32;
-    for run in buffer.layout_runs() {
-        for glyph in run.glyphs.iter() {
-            total_w += glyph.w;
-            glyph_count += 1;
+    let glyphs = layout.glyphs();
+    let scale = layout.scale_factor();
+    let line_count = layout.line_count();
+    // (x0, x1, color) per run of the current line, in logical pixels.
+    let mut stretches: Vec<(f32, f32, Color)> = Vec::new();
+    let mut runs = layout.glyph_runs().peekable();
+    while let Some(line) = runs.peek().map(|run| run.line) {
+        stretches.clear();
+        while let Some(run) = runs.next_if(|run| run.line == line) {
+            let (x0, x1) = run
+                .glyphs
+                .clone()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), i| {
+                    (lo.min(glyphs.x[i]), hi.max(glyphs.x[i] + glyphs.advance[i]))
+                });
+            stretches.push((x0, x1, span_color(run.span, default_color, span_colors)));
+        }
+        stretches.sort_by(|a, b| a.0.total_cmp(&b.0));
+        stretches.dedup_by(|next, prev| {
+            let same = next.2 == prev.2;
+            if same {
+                prev.1 = prev.1.max(next.1);
+            }
+            same
+        });
+        let Some(info) = layout.line(line) else {
+            continue;
+        };
+        // Outer edges extend to the clip so overhanging ink is not cut.
+        let top = if line == 0 {
+            clip.y
+        } else {
+            origin.y + info.top * scale
+        };
+        let bottom = if line + 1 == line_count {
+            clip.bottom()
+        } else {
+            origin.y + (info.top + info.height) * scale
+        };
+        for (k, &(x0, _, color)) in stretches.iter().enumerate() {
+            let left = if k == 0 {
+                clip.x
+            } else {
+                origin.x + x0 * scale
+            };
+            let right = stretches
+                .get(k + 1)
+                .map_or(clip.right(), |next| origin.x + next.0 * scale);
+            let stretch = Rect {
+                x: left,
+                y: top,
+                width: right - left,
+                height: bottom - top,
+            };
+            if let Some(bounds) = stretch.intersection(clip) {
+                areas.push(text_area(layout, origin, bounds, color));
+            }
         }
     }
-    if glyph_count > 0 {
-        total_w / glyph_count as f32
-    } else {
-        8.0
+}
+
+/// Average advance of a digit in the monospace face, in physical pixels.
+pub(super) fn measure_mono_char_width(text: &mut TextSystem, font_size: f32) -> f32 {
+    let params = TextParams::new("0000000000", TextStyle::new(font_size).kind(FontKind::Mono));
+    let Ok(layout) = text.layout(&params) else {
+        return 8.0;
+    };
+    let advances = &layout.glyphs().advance;
+    if advances.is_empty() {
+        return 8.0;
     }
+    advances.iter().sum::<f32>() / advances.len() as f32
 }
 
 pub(super) fn glyphon_color(color: Color) -> GlyphonColor {
     GlyphonColor::rgba(color.r, color.g, color.b, color.a)
-}
-
-fn glyphon_text_color(color: Color) -> glyphon::Color {
-    glyphon::Color::rgba(color.r, color.g, color.b, color.a)
 }
 
 pub(super) fn color_to_linear(color: Color) -> [f32; 4] {

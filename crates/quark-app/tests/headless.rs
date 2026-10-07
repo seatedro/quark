@@ -1,17 +1,18 @@
 //! Renders a scene of the primitives apps draw through quark-app (shadow,
 //! rounded rect, text) offscreen. Skips when no wgpu adapter exists.
 
-use quark::scene::{
-    FontKind, FontWeight, RoundedRectPrimitive, Scene, ShadowPrimitive, TextPrimitive,
-};
+use std::sync::Arc;
+
+use quark::scene::{RoundedRectPrimitive, Scene, ShadowPrimitive, ShapedText, TextPrimitive};
 use quark::{Color, Rect};
 use quark_render::fonts::FontSettings;
 use quark_render::{RenderError, Renderer};
+use quark_text::{TextParams, TextStyle, TextSystem};
 
 #[test]
 fn renders_scene_offscreen() {
     let (width, height) = (200, 120);
-    let mut renderer = match Renderer::new_headless(width, height, 1.0, &FontSettings::default()) {
+    let mut renderer = match Renderer::new_headless(width, height, 1.0) {
         Ok(renderer) => renderer,
         Err(RenderError::NoAdapter) => {
             // A skip reports as a pass, so CI sets QUARK_REQUIRE_GPU to turn a
@@ -45,6 +46,10 @@ fn renders_scene_offscreen() {
         8.0,
         Color::rgba(255, 0, 0, 255),
     ));
+    let mut text = TextSystem::vendored_only(&FontSettings::default());
+    let layout = text
+        .layout(&TextParams::new("quark", TextStyle::new(14.0)))
+        .expect("layout");
     scene.text(TextPrimitive {
         rect: Rect {
             x: 4.0,
@@ -52,11 +57,8 @@ fn renders_scene_offscreen() {
             width: 192.0,
             height: 20.0,
         },
-        text: "quark".into(),
+        layout: ShapedText::new(Arc::new(layout)),
         color: Color::rgba(255, 255, 255, 255),
-        font_size: 14.0,
-        font_kind: FontKind::Ui,
-        font_weight: FontWeight::Normal,
     });
 
     // QUARK_HEADLESS_OUT keeps the rendered PNG for visual inspection.
@@ -65,7 +67,7 @@ fn renders_scene_offscreen() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = keep.clone().unwrap_or_else(|| dir.join("scene.png"));
     renderer
-        .render_to_png(&scene, width, height, 1.0, &path)
+        .render_to_png(&scene, &mut text, width, height, &path)
         .expect("offscreen render");
 
     let image = image::open(&path).expect("decode png").into_rgba8();

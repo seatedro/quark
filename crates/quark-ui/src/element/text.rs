@@ -21,6 +21,7 @@ pub struct TextElement {
     font_weight: FontWeight,
     align: TextAlign,
     truncate: bool,
+    wrap_width: Option<f32>,
 }
 
 pub fn text(content: impl Into<String>) -> TextElement {
@@ -33,6 +34,7 @@ pub fn text(content: impl Into<String>) -> TextElement {
         font_weight: FontWeight::Normal,
         align: TextAlign::Left,
         truncate: false,
+        wrap_width: None,
     }
 }
 
@@ -102,6 +104,22 @@ impl TextElement {
         self
     }
 
+    /// Wraps lines at `width` pixels; the element is `width` wide and as tall
+    /// as the wrapped text. Alignment and truncation apply to unwrapped text
+    /// only.
+    pub fn wrap_width(mut self, width: f32) -> Self {
+        self.wrap_width = Some(width.max(1.0));
+        self
+    }
+
+    fn params(&self, content: &str, font_size: f32) -> TextParams {
+        let style = TextStyle::new(font_size)
+            .kind(self.font_kind)
+            .weight(self.font_weight)
+            .line_height(font_size * self.line_height_factor);
+        TextParams::new(content, style).wrap_width(self.wrap_width)
+    }
+
     fn resolve_font_size(&self, theme: &Theme) -> f32 {
         match self.font_size.to_bits() {
             _ if self.font_size > 0.0 => self.font_size,
@@ -113,8 +131,16 @@ impl TextElement {
     }
 }
 
+/// Resolved font size, the shaped content (shared with paint), and its
+/// natural width.
+pub struct TextLayoutState {
+    font_size: f32,
+    layout: Option<Arc<TextLayout>>,
+    natural_width: f32,
+}
+
 impl Element for TextElement {
-    type LayoutState = (f32, f32, f32); // (resolved_font_size, line_height, natural_width)
+    type LayoutState = TextLayoutState;
     type PrepaintState = ();
 
     fn request_layout(
@@ -124,9 +150,13 @@ impl Element for TextElement {
     ) -> (LayoutId, Self::LayoutState) {
         let font_size = self.resolve_font_size(cx.theme);
         let line_height = font_size * self.line_height_factor;
-
-        let text_width =
-            cx.measure_text_width(&self.content, font_size, self.font_kind, self.font_weight);
+        let layout = cx.layout_text(&self.params(&self.content, font_size));
+        let (layout_width, layout_height) = layout.as_ref().map_or((0.0, 0.0), |l| l.size());
+        let text_width = layout_width.ceil();
+        let (width, height) = match self.wrap_width {
+            Some(wrap) => (wrap, layout_height.max(line_height).ceil()),
+            None => (text_width, line_height),
+        };
 
         // Only allow shrinking when `.truncate()` is set; otherwise the text
         // holds its natural width so it isn't crushed next to flex_shrink:0 siblings
@@ -136,15 +166,20 @@ impl Element for TextElement {
         let id = engine.request_layout(
             taffy::Style {
                 size: taffy::Size {
-                    width: taffy::Dimension::length(text_width),
-                    height: taffy::Dimension::length(line_height),
+                    width: taffy::Dimension::length(width),
+                    height: taffy::Dimension::length(height),
                 },
                 flex_shrink: shrink,
                 ..Default::default()
             },
             &[],
         );
-        (id, (font_size, line_height, text_width))
+        let state = TextLayoutState {
+            font_size,
+            layout,
+            natural_width: text_width,
+        };
+        (id, state)
     }
 
     fn prepaint(
@@ -159,22 +194,25 @@ impl Element for TextElement {
     fn paint(
         &mut self,
         bounds: Bounds,
-        state: &mut (f32, f32, f32),
+        state: &mut TextLayoutState,
         _prepaint_state: &mut (),
         _engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
-        let (font_size, _line_height, natural_width) = *state;
+        let font_size = state.font_size;
+        let natural_width = state.natural_width;
         let color = cx
             .text_color_override()
             .or(self.color)
             .unwrap_or(cx.theme.colors.text);
 
         let mut content = std::mem::take(&mut self.content);
+        let mut layout = state.layout.take();
         let mut text_width = natural_width;
 
-        if self.truncate && bounds.width > 0.0 {
+        let wraps = self.wrap_width.is_some();
+        if self.truncate && !wraps && bounds.width > 0.0 && natural_width > bounds.width {
             let (truncated, truncated_width) = truncate_text_to_fit(
                 cx,
                 &content,
@@ -184,31 +222,28 @@ impl Element for TextElement {
                 natural_width,
                 bounds.width,
             );
+            layout = cx.layout_text(&self.params(&truncated, font_size));
             content = truncated;
             text_width = truncated_width;
         }
 
-        if matches!(self.align, TextAlign::Center | TextAlign::Right) && !self.truncate {
-            text_width = natural_width;
-        }
-
         let x_offset = match self.align {
+            _ if wraps => 0.0,
             TextAlign::Left => 0.0,
             TextAlign::Center => ((bounds.width - text_width) * 0.5).max(0.0),
             TextAlign::Right => (bounds.width - text_width).max(0.0),
         };
 
-        scene.text(TextPrimitive {
-            rect: Rect {
-                x: bounds.x + x_offset,
-                ..bounds
-            },
-            text: content.clone().into(),
-            color,
-            font_size,
-            font_kind: self.font_kind,
-            font_weight: self.font_weight,
-        });
+        if let Some(layout) = layout {
+            scene.text(TextPrimitive {
+                rect: Rect {
+                    x: bounds.x + x_offset,
+                    ..bounds
+                },
+                layout: ShapedText::new(layout),
+                color,
+            });
+        }
 
         if !content.is_empty()
             && !cx.accessibility_text_hidden()

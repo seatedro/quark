@@ -4,11 +4,12 @@
 use quark::Color;
 use quark::Rect;
 use quark::scene::{
-    FontKind, FontWeight, RoundedRectPrimitive, Scene, ShadowPrimitive, TextPrimitive,
+    FontWeight, RoundedRectPrimitive, Scene, ShadowPrimitive, ShapedText, TextPrimitive,
 };
 use quark_app::winit::event::{ElementState, MouseButton};
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{App, EventContext, FrameContext, InputEvent, WindowOptions};
+use quark_text::{TextParams, TextStyle};
 
 const COLORS: [Color; 3] = [
     Color::rgba(88, 101, 242, 255),
@@ -56,14 +57,18 @@ impl App for Hello {
             16.0 * scale,
             COLORS[self.color],
         ));
-        scene.text(TextPrimitive {
-            rect: self.card.inset(24.0 * scale),
-            text: "Hello from Quark. Click me, Esc quits.".into(),
-            color: Color::rgba(255, 255, 255, 255),
-            font_size: 20.0 * scale,
-            font_kind: FontKind::Ui,
-            font_weight: FontWeight::Semibold,
-        });
+        let label = self.card.inset(24.0 * scale);
+        let style = TextStyle::new(20.0 * scale).weight(FontWeight::Semibold);
+        let params = TextParams::new("Hello from Quark. Click me, Esc quits.", style)
+            .wrap_width(Some(label.width));
+        let text = cx.text();
+        if let Ok(layout) = text.layouts.layout(&mut text.system, &params) {
+            scene.text(TextPrimitive {
+                rect: label,
+                layout: ShapedText::new(layout),
+                color: Color::rgba(255, 255, 255, 255),
+            });
+        }
         scene
     }
 

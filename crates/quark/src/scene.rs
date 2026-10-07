@@ -3,6 +3,8 @@
 //! Pure data: a `Vec<Primitive>` plus convenience builders. The renderer
 //! consumes the scene; halogen itself does not render.
 
+use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::color::Color;
@@ -203,32 +205,55 @@ pub struct ShadowPrimitive {
     pub color: Color,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+/// A shaped text layout (`quark_text::TextLayout`). Opaque here because
+/// quark-text depends on quark; the renderer downcasts it. Equality is
+/// identity, so an unchanged cached layout compares equal across frames.
+#[derive(Clone)]
+pub struct ShapedText(Arc<dyn Any + Send + Sync>);
+
+impl ShapedText {
+    pub fn new<T: Any + Send + Sync>(layout: Arc<T>) -> Self {
+        Self(layout)
+    }
+
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl fmt::Debug for ShapedText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ShapedText")
+            .field(&Arc::as_ptr(&self.0))
+            .finish()
+    }
+}
+
+impl PartialEq for ShapedText {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Single-color text. `rect.x`/`rect.y` is the layout origin in scene pixels;
+/// glyphs are clipped by the clip stack, not by `rect`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextPrimitive {
     pub rect: Rect,
-    pub text: Arc<str>,
+    pub layout: ShapedText,
     pub color: Color,
-    pub font_size: f32,
-    pub font_kind: FontKind,
-    pub font_weight: FontWeight,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RichTextSpan {
-    pub text: Arc<str>,
-    pub color: Color,
-    pub font_weight: Option<FontWeight>,
-    pub font_style: Option<FontStyle>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Text whose spans have their own colors. `span_colors[i]` colors the glyphs
+/// of the layout's span `i` (`TextParams::spans[i]`); spans without an entry
+/// use `default_color`. Colors never affect shaping, so changing them reuses
+/// the same layout.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RichTextPrimitive {
     pub rect: Rect,
-    pub spans: Arc<[RichTextSpan]>,
+    pub layout: ShapedText,
     pub default_color: Color,
-    pub font_size: f32,
-    pub font_kind: FontKind,
-    pub font_weight: FontWeight,
+    pub span_colors: Arc<[Color]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

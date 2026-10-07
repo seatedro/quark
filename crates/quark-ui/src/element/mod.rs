@@ -7,8 +7,8 @@
 //! 2. **prepaint** — register hitboxes, resolve interaction state.
 //! 3. **paint** — emit scene primitives using resolved hover/hit state.
 
-use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::accessibility::{AccessibilityAction, AccessibilityFrame, AccessibilityNode};
 use crate::action::{Action, FocusId};
@@ -36,8 +36,9 @@ pub use quark::style::{
     vignette,
 };
 
-use quark_render::scene::{FontStyle, RichTextPrimitive, RichTextSpan};
+use quark_render::scene::{FontStyle, RichTextPrimitive, ShapedText};
 use quark_render::{FontKind, TextPrimitive};
+use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 
 mod canvas;
 mod code_block;
@@ -64,7 +65,7 @@ pub use div::*;
 pub use hit::*;
 pub use image::*;
 pub use layout::*;
-pub use measure::*;
+use measure::*;
 pub use render::*;
 pub use selectable_text::*;
 pub use spacer::*;
