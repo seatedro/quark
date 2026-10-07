@@ -267,7 +267,7 @@ impl SelectableTextRegion {
 /// string, which survive re-wrap); the element renders the highlight from a
 /// resolved `selection` range and registers a `SelectableTextRegion` for input.
 pub struct SelectableText {
-    /// Shared so a caller that keeps its spans (a transcript block) builds
+    /// Shared so a caller that keeps its spans (a document block) builds
     /// the element every frame without copying their text.
     spans: Arc<[StyledSpan]>,
     width: f32,

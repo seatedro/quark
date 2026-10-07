@@ -60,6 +60,8 @@ impl StyleEdit {
 #[derive(Debug, Clone, Default)]
 pub struct StyleOverrides {
     edits: HashMap<UiKey, StyleEdit>,
+    /// Bumped by every change, so cached subtrees rebuild under new edits.
+    revision: u64,
 }
 
 impl StyleOverrides {
@@ -75,6 +77,11 @@ impl StyleOverrides {
         self.edits.get(key)
     }
 
+    /// Changes so far; zero while no edit was ever made.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Change the override for `key`; an edit left empty is dropped.
     pub fn edit(&mut self, key: UiKey, f: impl FnOnce(&mut StyleEdit)) {
         let edit = self.edits.entry(key.clone()).or_default();
@@ -82,14 +89,20 @@ impl StyleOverrides {
         if edit.is_empty() {
             self.edits.remove(&key);
         }
+        self.revision += 1;
     }
 
     pub fn clear(&mut self, key: &UiKey) {
-        self.edits.remove(key);
+        if self.edits.remove(key).is_some() {
+            self.revision += 1;
+        }
     }
 
     pub fn clear_all(&mut self) {
-        self.edits.clear();
+        if !self.edits.is_empty() {
+            self.edits.clear();
+            self.revision += 1;
+        }
     }
 
     pub fn apply(&self, key: &UiKey, style: &mut ElementStyle) {

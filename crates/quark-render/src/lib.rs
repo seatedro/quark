@@ -1,3 +1,15 @@
+//! The wgpu renderer for Quark scenes.
+//!
+//! A [`GpuContext`] holds the GPU state every window shares (instance,
+//! adapter, device, queue, pipelines, image cache); each window's
+//! [`Renderer`] draws `quark::Scene`s into its surface or into
+//! [`OffscreenTarget`]s. Backends are Vulkan, Metal, and DX12, plus GLES on
+//! Linux for machines without a Vulkan driver; the `WGPU_BACKEND`
+//! environment variable picks one. The `headless-render` feature renders
+//! without a window, for tests that read pixels back.
+//!
+//! Apps normally reach this crate through `quark-app`, which owns the
+//! renderers.
 pub mod icons;
 pub mod renderer;
 mod shaders;

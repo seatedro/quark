@@ -6,12 +6,13 @@
 
 use std::sync::Arc;
 
+use quark_ui::document::{
+    DocumentStyle, MarkdownDocument, MarkdownEntry, RowChrome, RowDecorator, TextMeasurer,
+};
 use quark_ui::element::{AnyElement, IntoAnyElement, NoopAction, ScrollHandle, cached, div, text};
 use quark_ui::style::Styled;
 use quark_ui::test_alloc::{self, Counting};
-use quark_ui::transcript::{
-    MarkdownEntry, MarkdownTranscript, TextMeasurer, TranscriptRole, TranscriptStyle,
-};
+use quark_ui::theme::Theme;
 use quark_ui::virtual_list::RowKey;
 
 use crate::testing::UiTestHarness;
@@ -32,6 +33,8 @@ struct List {
     rows: Vec<(Arc<str>, u64)>,
     /// Scroll through a handle (with scrollbars) instead of a fixed offset.
     tracked: Option<ScrollHandle>,
+    /// Give each row a tooltip, an accessible label, and a test id.
+    labeled: bool,
 }
 
 impl UiApp for List {
@@ -45,11 +48,19 @@ impl UiApp for List {
             Some(handle) => list.track_scroll(handle).overflow_y_scroll(),
             None => list.scroll_y(0.0),
         };
+        let labeled = self.labeled;
         list.children(self.rows.iter().enumerate().map(|(i, (body, revision))| {
             let body = body.clone();
             cached(i as u64, *revision, move || {
-                div()
-                    .w_full()
+                let row = div();
+                let row = if labeled {
+                    row.tooltip(&*body)
+                        .accessibility_label(&*body)
+                        .test_id(format!("row-{i}"))
+                } else {
+                    row
+                };
+                row.w_full()
                     .flex_col()
                     .p(4.0)
                     .bg(surface)
@@ -66,14 +77,19 @@ impl UiApp for List {
 
 /// The list in a harness with no assistive tech, past its warm-up frames.
 fn list() -> UiTestHarness<List> {
-    harness(None)
+    harness(None, false)
 }
 
-fn harness(tracked: Option<ScrollHandle>) -> UiTestHarness<List> {
+fn harness(tracked: Option<ScrollHandle>, labeled: bool) -> UiTestHarness<List> {
     let rows = (0..ROWS)
         .map(|i| (Arc::from(format!("Message {i} with a few words")), 0))
         .collect();
-    let mut ui = UiTestHarness::new(List { rows, tracked }, (800.0, 600.0), 1.0);
+    let list = List {
+        rows,
+        tracked,
+        labeled,
+    };
+    let mut ui = UiTestHarness::new(list, (800.0, 600.0), 1.0);
     ui.set_accessibility_active(false);
     for _ in 0..3 {
         ui.frame();
@@ -95,7 +111,7 @@ fn a_repeated_list_frame_allocates_nothing() {
 // memory.
 #[test]
 fn a_repeated_tracked_scroll_frame_allocates_nothing() {
-    let mut ui = harness(Some(ScrollHandle::new()));
+    let mut ui = harness(Some(ScrollHandle::new()), false);
     ui.pointer_move((795.0, 20.0));
     ui.frame();
     let ((), allocated) = test_alloc::count(|| {
@@ -109,6 +125,20 @@ fn a_repeated_list_frame_with_a_screen_reader_allocates_nothing() {
     let mut ui = list();
     ui.set_accessibility_active(true);
     // The first frame with assistive tech builds every row's nodes.
+    ui.frame();
+    ui.frame();
+    let ((), allocated) = test_alloc::count(|| {
+        ui.frame();
+    });
+    assert_eq!(allocated, 0);
+}
+
+// Replayed rows hand their recorded tooltip, label, and id strings to the
+// frame as shared strings instead of copying them.
+#[test]
+fn a_repeated_frame_of_labeled_rows_allocates_nothing() {
+    let mut ui = harness(None, true);
+    ui.set_accessibility_active(true);
     ui.frame();
     ui.frame();
     let ((), allocated) = test_alloc::count(|| {
@@ -167,7 +197,17 @@ const MESSAGES: u64 = 2_000;
 
 /// A markdown transcript filling the window, as a chat view shows one.
 struct Chat {
-    transcript: MarkdownTranscript,
+    transcript: MarkdownDocument,
+}
+
+/// Chat chrome: the row's label as an author line above its blocks.
+struct AuthorLine;
+
+impl RowDecorator for AuthorLine {
+    fn header(&self, chrome: &RowChrome, _width: f32, _theme: &Theme) -> Option<AnyElement> {
+        let label = chrome.label.as_deref()?;
+        Some(text(label.to_owned()).semibold().into_any())
+    }
 }
 
 impl UiApp for Chat {
@@ -177,7 +217,7 @@ impl UiApp for Chat {
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
         let scale = cx.frame.scale_factor();
-        let font_size = self.transcript.transcript().style().font_size;
+        let font_size = self.transcript.document().style().font_size;
         let text = cx.frame.text();
         let mut measurer = TextMeasurer::new(&mut text.system, &mut text.layouts, font_size, scale);
         self.transcript.prepare(width, height, 0, &mut measurer);
@@ -200,12 +240,16 @@ fn chat_markdown(i: u64) -> String {
 /// The transcript in a harness past its warm-up frames, every row's
 /// height measured.
 fn chat(accessibility: bool) -> UiTestHarness<Chat> {
-    let mut transcript = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+    let mut transcript = MarkdownDocument::new(DocumentStyle::for_font_size(14.0));
+    transcript.set_decorator(AuthorLine);
     transcript
         .extend((0..MESSAGES).map(|i| MarkdownEntry {
             row: RowKey(i),
-            role: TranscriptRole::Assistant,
-            author: "Assistant".into(),
+            chrome: RowChrome {
+                header_height: 22.0,
+                label: Some("Assistant".into()),
+                kind: 0,
+            },
             markdown: chat_markdown(i),
         }))
         .unwrap();

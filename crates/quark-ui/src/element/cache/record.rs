@@ -75,6 +75,8 @@ pub(super) struct PaintRecord {
     selectable: Vec<SelectableTextRegion>,
     scrollbars: Vec<ScrollbarTrack>,
     transitions: Vec<AnimKey>,
+    /// Scroll handles the subtree painted, viewports relative.
+    scroll: Vec<ScrollWatch>,
 }
 
 impl PaintRecord {
@@ -99,6 +101,12 @@ impl PaintRecord {
         self.selectable.clear();
         self.scrollbars.clear();
         self.transitions.clear();
+        self.scroll.clear();
+    }
+
+    /// Whether every scroll handle the subtree painted is where it was.
+    pub(super) fn scroll_unchanged(&self) -> bool {
+        self.scroll.iter().all(ScrollWatch::unchanged)
     }
 }
 
@@ -151,6 +159,8 @@ pub(super) struct Recording {
     hash: u64,
     origin: (f32, f32),
     hit_start: usize,
+    /// Scroll watches before the subtree's.
+    scroll_start: usize,
     z: i32,
     phase: PhaseStart,
     volatile: u32,
@@ -171,6 +181,7 @@ impl Recording {
             hash,
             origin: (bounds.x, bounds.y),
             hit_start: cx.begin_hit_recording(),
+            scroll_start: cx.scroll_watches().len(),
             z: cx.current_z_index(),
             phase: PhaseStart::of(cx),
             volatile: 0,
@@ -210,6 +221,11 @@ impl Recording {
             record.hit_cursor.push(table.cursor(id).unwrap_or_default());
             record.hit_ids.push(id);
         }
+        record.scroll.extend(
+            cx.scroll_watches()[self.scroll_start..]
+                .iter()
+                .map(|w| w.offset(-ox, -oy)),
+        );
         put_record(cx, self.row, record);
         cx.end_hit_recording(self.hit_start);
     }
@@ -404,6 +420,11 @@ pub(super) fn replay_prepaint(row: u32, bounds: Bounds, cx: &mut ElementContext)
             record.hit_cursor[i],
         );
         record.hit_ids.push(id);
+    }
+    for watch in &record.scroll {
+        let watch = watch.offset(ox, oy);
+        watch.replayed();
+        cx.watch_scroll(|| watch);
     }
     put_record(cx, row, record);
     true

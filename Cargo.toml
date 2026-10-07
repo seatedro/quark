@@ -11,6 +11,7 @@ members = [
   "crates/quark-ui",
   "crates/quark-components",
   "crates/quark-app",
+  "crates/quark-update",
   # A member so CI's fmt, clippy, and tests cover the patch.
   "vendor/accesskit_unix",
 ]
@@ -37,6 +38,7 @@ quark-i18n = { path = "crates/quark-i18n" }
 quark-ui = { path = "crates/quark-ui" }
 quark-components = { path = "crates/quark-components" }
 quark-app = { path = "crates/quark-app" }
+quark-update = { path = "crates/quark-update" }
 accesskit = "0.24"
 accesskit_winit = "0.33"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }

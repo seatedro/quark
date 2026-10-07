@@ -1,6 +1,6 @@
 //! Markdown parsed into a column-oriented block model with pulldown-cmark,
-//! plus an incremental parser for streaming sources. The transcript
-//! renders it (see `crate::transcript::MarkdownMessage`).
+//! plus an incremental parser for streaming sources. The document
+//! renders it (see `crate::document::MarkdownBlocks`).
 
 mod incremental;
 mod model;

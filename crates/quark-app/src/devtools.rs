@@ -23,7 +23,7 @@ pub(crate) fn intercept(devtools: &mut Devtools, input: &UiInput, cx: &mut Event
         UiInput::PointerLeave => DevtoolsInput::PointerLeft,
         UiInput::PointerDown(PointerButton::Primary) => DevtoolsInput::PointerDown,
         UiInput::PointerUp(PointerButton::Primary) => DevtoolsInput::PointerUp,
-        UiInput::Wheel { .. } => DevtoolsInput::Wheel,
+        UiInput::Wheel { dx, dy, .. } => DevtoolsInput::Wheel { dx: *dx, dy: *dy },
         UiInput::Key(key) => {
             binding = key.to_string();
             DevtoolsInput::Key(&binding)

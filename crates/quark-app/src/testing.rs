@@ -252,7 +252,7 @@ impl<U: UiApp> UiTestHarness<U> {
     /// # Panics
     ///
     /// When `binding` does not parse or names a key the runner cannot
-    /// report, such as a function key.
+    /// report, such as F13.
     #[track_caller]
     pub fn key(&mut self, binding: &str) {
         let parsed: Binding = binding
@@ -595,8 +595,8 @@ impl<U: UiApp> UiTestHarness<U> {
             }
             nodes.push(Node {
                 role: None,
-                name: semantic.label.clone(),
-                value: semantic.value.clone(),
+                name: semantic.label.as_deref().map(str::to_owned),
+                value: semantic.value.as_deref().map(str::to_owned),
                 id: None,
                 test_id: Some(test_id),
                 bounds: semantic.bounds,
@@ -683,6 +683,18 @@ fn key_press(binding: &Binding) -> Option<(KeyChord, Option<String>)> {
         "end" => Some(NamedKey::End),
         "backspace" => Some(NamedKey::Backspace),
         "delete" => Some(NamedKey::Delete),
+        "f1" => Some(NamedKey::F1),
+        "f2" => Some(NamedKey::F2),
+        "f3" => Some(NamedKey::F3),
+        "f4" => Some(NamedKey::F4),
+        "f5" => Some(NamedKey::F5),
+        "f6" => Some(NamedKey::F6),
+        "f7" => Some(NamedKey::F7),
+        "f8" => Some(NamedKey::F8),
+        "f9" => Some(NamedKey::F9),
+        "f10" => Some(NamedKey::F10),
+        "f11" => Some(NamedKey::F11),
+        "f12" => Some(NamedKey::F12),
         _ => None,
     };
     let (logical, text) = match named {

@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/quark-syntax"
+keywords = ["syntax", "highlighting", "tree-sitter"]
+categories = ["text-processing", "parsing"]
 
 # Every grammar is optional and off by default: each one compiles a C parser
 # into the binary (from about 30 KB for JSON to over 1 MB for TypeScript and

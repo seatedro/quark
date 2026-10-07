@@ -1,3 +1,13 @@
+//! Procedural macros for Quark, re-exported by the `quark` crate.
+//!
+//! - `view!` lowers JSX-like markup to builder calls on whatever `div()`,
+//!   `text()`, and component constructors are in scope (quark-ui's
+//!   `element` module provides them). The syntax is summarized in
+//!   `crates/quark/ARCHITECTURE.md`, and `tests/view_macro.rs` covers each
+//!   lowering rule.
+//! - `#[derive(Store)]` generates a `FooStore` with one
+//!   `quark::reactive::Signal` per field of `Foo`; `#[store(flatten)]`
+//!   nests another store and `#[store(skip)]` leaves a field out.
 use std::cell::RefCell;
 
 use proc_macro::TokenStream;

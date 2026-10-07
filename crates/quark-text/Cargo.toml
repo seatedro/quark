@@ -3,8 +3,13 @@ name = "quark-text"
 description = "Shared text shaping, layout, hit-testing, and layout caching for Quark."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# The bundled fonts in assets/fonts are OFL-1.1.
+license = "MIT AND OFL-1.1"
 repository.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/quark-text"
+keywords = ["text", "font", "shaping", "layout", "gui"]
+categories = ["gui", "text-processing"]
 
 [dependencies]
 quark.workspace = true

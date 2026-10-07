@@ -1,7 +1,11 @@
 use std::ops::Range;
 
+mod reorder;
 mod variable;
 
+pub use reorder::{
+    KEY_MOVE_DOWN, KEY_MOVE_UP, Reorder, ReorderEvent, ReorderMsg, RowGeometry, UniformRows,
+};
 pub use variable::{
     RowError, RowIntegrityError, RowKey, RowTable, STICK_EPSILON_PX, ScrollAlign, VariableList,
 };
