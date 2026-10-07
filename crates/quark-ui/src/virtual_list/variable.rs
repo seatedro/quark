@@ -597,3 +597,288 @@ impl VariableList {
         self.scroll_offset - old
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{RowKey, RowTable, ScrollAlign, VariableList};
+    use proptest::prelude::*;
+
+    /// Rows keyed `0..n`, all measured at the given heights.
+    fn table(heights: &[f32]) -> RowTable {
+        let mut rows = RowTable::new(10.0);
+        for (i, &h) in heights.iter().enumerate() {
+            rows.append(RowKey(i as u64)).unwrap();
+            rows.set_height(RowKey(i as u64), h).unwrap();
+        }
+        rows
+    }
+
+    fn list(heights: &[f32], viewport: f32) -> VariableList {
+        let mut list = VariableList::new(10.0, viewport);
+        for (i, &h) in heights.iter().enumerate() {
+            list.append(RowKey(i as u64)).unwrap();
+            list.set_height(RowKey(i as u64), h).unwrap();
+        }
+        list
+    }
+
+    /// Where `key`'s top sits relative to the viewport top.
+    fn screen_top(list: &VariableList, key: u64) -> f32 {
+        list.rows().offset_of(RowKey(key)).unwrap() - list.scroll_offset()
+    }
+
+    fn anchor_key(list: &VariableList) -> u64 {
+        let index = list.rows().row_at(list.scroll_offset()).unwrap();
+        list.rows().keys()[index].0
+    }
+
+    /// Quarter-pixel heights are exact in the fixed-point tree, so a naive
+    /// f64 model can be compared without tolerance.
+    fn quarter_px(max_quarters: u16) -> impl Strategy<Value = f32> {
+        (0..=max_quarters).prop_map(|q| f32::from(q) / 4.0)
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Append,
+        Prepend(usize),
+        Insert(usize),
+        Remove(usize),
+        SetHeight(usize, f32),
+        Invalidate(usize),
+        InvalidateAll,
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            Just(Op::Append),
+            (0..6usize).prop_map(Op::Prepend),
+            any::<usize>().prop_map(Op::Insert),
+            any::<usize>().prop_map(Op::Remove),
+            (any::<usize>(), quarter_px(800)).prop_map(|(i, h)| Op::SetHeight(i, h)),
+            any::<usize>().prop_map(Op::Invalidate),
+            Just(Op::InvalidateAll),
+        ]
+    }
+
+    const ESTIMATE: f32 = 12.5;
+
+    proptest! {
+        #[test]
+        fn random_ops_keep_offsets_equal_to_naive_prefix_sums(
+            ops in prop::collection::vec(op(), 1..60)
+        ) {
+            let mut rows = RowTable::new(1.0);
+            rows.set_estimate(Some(ESTIMATE));
+            // Model: (key, height) in display order.
+            let mut model: Vec<(u64, f32)> = Vec::new();
+            let mut next_key = 0u64;
+            let mut fresh = || {
+                next_key += 1;
+                next_key
+            };
+            for op in ops {
+                match op {
+                    Op::Append => {
+                        let key = fresh();
+                        rows.append(RowKey(key)).unwrap();
+                        model.push((key, ESTIMATE));
+                    }
+                    Op::Prepend(count) => {
+                        let keys: Vec<u64> = (0..count).map(|_| fresh()).collect();
+                        let row_keys: Vec<RowKey> = keys.iter().map(|&k| RowKey(k)).collect();
+                        rows.prepend(&row_keys).unwrap();
+                        model.splice(0..0, keys.iter().map(|&k| (k, ESTIMATE)));
+                    }
+                    Op::Insert(seed) => {
+                        let index = seed % (model.len() + 1);
+                        let key = fresh();
+                        rows.insert(index, RowKey(key)).unwrap();
+                        model.insert(index, (key, ESTIMATE));
+                    }
+                    Op::Remove(seed) if !model.is_empty() => {
+                        let (key, _) = model.remove(seed % model.len());
+                        rows.remove(RowKey(key)).unwrap();
+                    }
+                    Op::SetHeight(seed, height) if !model.is_empty() => {
+                        let index = seed % model.len();
+                        model[index].1 = height;
+                        rows.set_height(RowKey(model[index].0), height).unwrap();
+                    }
+                    Op::Invalidate(seed) if !model.is_empty() => {
+                        rows.invalidate(RowKey(model[seed % model.len()].0)).unwrap();
+                    }
+                    Op::InvalidateAll => rows.invalidate_all(),
+                    _ => {}
+                }
+                prop_assert_eq!(rows.verify_integrity(), Ok(()));
+                let keys: Vec<u64> = rows.keys().iter().map(|k| k.0).collect();
+                let model_keys: Vec<u64> = model.iter().map(|r| r.0).collect();
+                prop_assert_eq!(keys, model_keys);
+                let mut top = 0.0f64;
+                for &(key, height) in &model {
+                    prop_assert_eq!(rows.offset_of(RowKey(key)), Some(top as f32));
+                    top += f64::from(height);
+                }
+                prop_assert_eq!(rows.total_extent(), top as f32);
+            }
+        }
+
+        #[test]
+        fn row_at_inverts_offset_of(
+            heights in prop::collection::vec(quarter_px(800).prop_map(|h| h + 0.25), 1..80)
+        ) {
+            let rows = table(&heights);
+            for (i, &h) in heights.iter().enumerate() {
+                let top = rows.offset_of(RowKey(i as u64)).unwrap();
+                prop_assert_eq!(rows.row_at(top), Some(i));
+                prop_assert_eq!(rows.row_at(top + h - 0.25), Some(i));
+            }
+            prop_assert_eq!(rows.row_at(rows.total_extent()), None);
+        }
+
+        #[test]
+        fn visible_range_is_exactly_the_rows_crossing_the_window(
+            heights in prop::collection::vec(quarter_px(400), 0..60),
+            scroll in quarter_px(8000),
+            viewport in quarter_px(2000),
+            overscan in quarter_px(400),
+        ) {
+            let rows = table(&heights);
+            let window = rows.visible_range(scroll, viewport, overscan);
+            let lo = (f64::from(scroll) - f64::from(overscan)).max(0.0);
+            let hi = f64::from(scroll) + f64::from(viewport) + f64::from(overscan);
+            let mut top = 0.0f64;
+            let mut start = heights.len();
+            let mut end = 0;
+            for (i, &h) in heights.iter().enumerate() {
+                let bottom = top + f64::from(h);
+                if bottom > lo && start == heights.len() {
+                    start = i;
+                }
+                if top < hi {
+                    end = i + 1;
+                }
+                top = bottom;
+            }
+            prop_assert_eq!(window.range, start..end.max(start));
+        }
+
+        #[test]
+        fn anchor_holds_when_rows_above_change_height(
+            heights in prop::collection::vec(1.0f32..200.0, 20..60),
+            scroll_frac in 0.2f32..0.7,
+            changes in prop::collection::vec((any::<usize>(), 0.0f32..400.0), 1..10),
+        ) {
+            let mut list = list(&heights, 300.0);
+            let max = list.max_scroll_offset();
+            prop_assume!(max > 10.0);
+            list.set_scroll_offset(max * scroll_frac);
+            let anchor = anchor_key(&list);
+            let anchor_index = list.rows().index_of(RowKey(anchor)).unwrap();
+            prop_assume!(anchor_index > 0);
+            let before = screen_top(&list, anchor);
+            for (seed, height) in changes {
+                list.set_height(RowKey((seed % anchor_index) as u64), height).unwrap();
+                prop_assert!((screen_top(&list, anchor) - before).abs() <= 0.5);
+            }
+        }
+    }
+
+    #[test]
+    fn prepending_history_keeps_the_first_visible_row_in_place() {
+        let mut list = list(&[30.0; 10], 100.0);
+        list.set_scroll_offset(125.0);
+        let before = screen_top(&list, 4);
+
+        let history: Vec<RowKey> = (100..105).map(RowKey).collect();
+        let delta = list.prepend(&history).unwrap();
+
+        assert_eq!(delta, 150.0);
+        assert_eq!(screen_top(&list, 4), before);
+    }
+
+    #[test]
+    fn measuring_estimated_rows_above_keeps_the_view_still() {
+        let mut list = VariableList::new(20.0, 200.0);
+        for key in 0..50 {
+            list.append(RowKey(key)).unwrap();
+        }
+        list.set_scroll_offset(400.0);
+        let before = screen_top(&list, 20);
+
+        // The overscan pulls estimated rows above the viewport into the
+        // window, and each measures larger than its estimate.
+        list.measure_visible(320.0, 100.0, |key, _| 30.0 + key as f32);
+
+        assert!(list.rows().is_measured(RowKey(16)).unwrap());
+        assert!((screen_top(&list, 20) - before).abs() <= 0.5);
+    }
+
+    #[test]
+    fn width_change_remeasures_visible_rows() {
+        let mut list = list(&[], 200.0);
+        for key in 0..5 {
+            list.append(RowKey(key)).unwrap();
+        }
+        list.measure_visible(400.0, 0.0, |_, width| 8000.0 / width);
+        list.measure_visible(200.0, 0.0, |_, width| 8000.0 / width);
+
+        assert_eq!(list.rows().height_of(RowKey(4)), Some(40.0));
+    }
+
+    #[test]
+    fn streaming_growth_stays_pinned_to_the_bottom() {
+        let mut list = list(&[40.0, 40.0], 100.0);
+        for key in 2..6 {
+            list.append(RowKey(key)).unwrap();
+            for step in 1..20 {
+                list.set_height(RowKey(key), step as f32 * 7.0).unwrap();
+                assert_eq!(list.scroll_offset(), list.max_scroll_offset());
+            }
+        }
+        assert!(list.max_scroll_offset() > 0.0);
+    }
+
+    #[test]
+    fn scrolling_up_releases_the_bottom_pin() {
+        let mut list = list(&[40.0; 10], 100.0);
+        list.set_scroll_offset(list.max_scroll_offset() - 50.0);
+        let offset = list.scroll_offset();
+
+        list.append(RowKey(10)).unwrap();
+        list.set_height(RowKey(10), 300.0).unwrap();
+        list.set_height(RowKey(9), 120.0).unwrap();
+
+        assert_eq!(list.scroll_offset(), offset);
+    }
+
+    #[test]
+    fn scrolling_back_to_the_bottom_pins_again() {
+        let mut list = list(&[40.0; 10], 100.0);
+        list.set_scroll_offset(0.0);
+        list.set_scroll_offset(list.max_scroll_offset() - 0.5);
+
+        list.append(RowKey(10)).unwrap();
+        list.set_height(RowKey(10), 300.0).unwrap();
+
+        assert_eq!(list.scroll_offset(), list.max_scroll_offset());
+    }
+
+    #[test]
+    fn scroll_to_aligns_and_clamps() {
+        // Ten 100px rows in a 250px viewport: max offset 750.
+        let cases = [
+            (5, ScrollAlign::Top, 500.0),
+            (5, ScrollAlign::Center, 425.0),
+            (5, ScrollAlign::Bottom, 350.0),
+            (9, ScrollAlign::Top, 750.0),
+            (0, ScrollAlign::Bottom, 0.0),
+        ];
+        for (key, align, expected) in cases {
+            let mut list = list(&[100.0; 10], 250.0);
+            list.scroll_to(RowKey(key), align).unwrap();
+            assert_eq!(list.scroll_offset(), expected, "{key} {align:?}");
+        }
+    }
+}
