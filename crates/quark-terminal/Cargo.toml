@@ -1,0 +1,30 @@
+[package]
+name = "quark-terminal"
+description = "Terminal element for Quark: libghostty-vt terminal state, a PTY, and a virtualized cell grid view."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "ghostty-vt"
+
+[dependencies]
+accesskit.workspace = true
+quark.workspace = true
+quark-render.workspace = true
+quark-text.workspace = true
+quark-ui.workspace = true
+# Key, modifier, and mouse button types: what quark-app's input events
+# carry, so apps pass them through unchanged.
+winit.workspace = true
+# Unix PTYs and Windows ConPTY behind one interface.
+portable-pty = "0.9"
+
+[features]
+default = ["zig-build"]
+# Build libghostty-vt from the pinned Ghostty source with Zig 0.16 (see
+# build.rs). Off, the build links a prebuilt libghostty-vt.a from
+# QUARK_GHOSTTY_VT_LIB_DIR instead.
+zig-build = []
+
+[dev-dependencies]
+proptest.workspace = true
