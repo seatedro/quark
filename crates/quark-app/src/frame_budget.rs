@@ -80,6 +80,19 @@ fn a_repeated_list_frame_allocates_nothing() {
 }
 
 #[test]
+fn a_repeated_list_frame_with_a_screen_reader_allocates_nothing() {
+    let mut ui = list();
+    ui.set_accessibility_active(true);
+    // The first frame with assistive tech builds every row's nodes.
+    ui.frame();
+    ui.frame();
+    let ((), allocated) = test_alloc::count(|| {
+        ui.frame();
+    });
+    assert_eq!(allocated, 0);
+}
+
+#[test]
 fn a_streaming_frame_allocates_for_the_changed_rows_only() {
     let mut ui = list();
     let mut change = |rows: usize| {

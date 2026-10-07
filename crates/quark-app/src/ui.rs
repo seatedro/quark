@@ -290,8 +290,9 @@ pub struct UiAdapter<U: UiApp> {
     element_cache: ElementCache,
     /// Buffers of the frame before last, reused by the next frame: the
     /// scene the runner handed back, the input frame routing let go of,
-    /// and the text input areas.
+    /// the text input areas, and the accessibility frame.
     spare_scene: Scene,
+    spare_accessibility: AccessibilityFrame,
     spare_input: quark_ui::element::InputFrame,
     spare_text_areas: Vec<TextInputHitArea>,
     sender: UiSender<U::Message>,
@@ -336,6 +337,7 @@ impl<U: UiApp> UiAdapter<U> {
             animations: AnimationTable::new(),
             element_cache: ElementCache::new(),
             spare_scene: Scene::default(),
+            spare_accessibility: AccessibilityFrame::default(),
             spare_input: Default::default(),
             spare_text_areas: Vec::new(),
             sender: UiSender {
@@ -664,7 +666,7 @@ fn paint(
     height: f32,
 ) -> Painted {
     scene.primitives.clear();
-    ecx.accessibility = AccessibilityFrame::new(width, height);
+    ecx.accessibility.reset(width, height);
     ecx.semantic.reset(width, height);
     render_element(root, &mut scene, ecx, width, height);
     ecx.finish_frame();
@@ -805,6 +807,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         .with_input_frame(std::mem::take(&mut self.spare_input));
         ecx.text_input_hit_areas = std::mem::take(&mut self.spare_text_areas);
         ecx.text_input_hit_areas.clear();
+        ecx.accessibility = std::mem::take(&mut self.spare_accessibility);
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let scene = std::mem::take(&mut self.spare_scene);
@@ -927,7 +930,8 @@ impl<U: UiApp> UiAdapter<U> {
         // This frame painted hover for the current pointer; later moves
         // compare against it.
         self.hovered = self.hovered_at(self.pointer);
-        self.accessibility = painted.accessibility;
+        self.spare_accessibility =
+            std::mem::replace(&mut self.accessibility, painted.accessibility);
         let ime = self.ime_request(&painted.text_areas);
         self.spare_text_areas = std::mem::replace(&mut self.text_areas, painted.text_areas);
         (painted.scene, ime)
