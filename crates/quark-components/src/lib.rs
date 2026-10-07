@@ -11,6 +11,7 @@ pub mod breadcrumb;
 pub mod button;
 pub mod checkbox;
 pub mod context_menu;
+pub mod dock;
 pub mod dropdown;
 pub mod kbd;
 pub mod modal;
@@ -20,6 +21,7 @@ pub mod progress;
 pub mod search_field;
 pub mod segmented;
 pub mod sidebar_skeleton;
+pub mod split;
 pub mod stat_summary;
 pub mod tabs;
 pub mod toast;
@@ -33,6 +35,10 @@ pub use breadcrumb::*;
 pub use button::{Button, ButtonSize, ButtonStyle};
 pub use checkbox::*;
 pub use context_menu::*;
+pub use dock::{
+    Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockSplit, DockState, PanelId,
+    RegionSnapshot,
+};
 pub use dropdown::*;
 pub use kbd::*;
 pub use modal::{Modal, ModalAlign};
@@ -42,6 +48,9 @@ pub use progress::*;
 pub use search_field::*;
 pub use segmented::{SegmentedControl, SegmentedItem};
 pub use sidebar_skeleton::sidebar_skeleton;
+pub use split::{
+    Axis, Pane, PaneSizes, Split, SplitEvent, SplitIntegrityError, SplitSnapshot, SplitState,
+};
 pub use stat_summary::*;
 pub use tabs::*;
 pub use toast::{
