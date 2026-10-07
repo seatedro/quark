@@ -148,7 +148,7 @@ impl InputRouter {
             .hits
             .stack_at(x, y)
             .into_iter()
-            .map(|id| self.frame.hits.cursor(id))
+            .filter_map(|id| self.frame.hits.cursor(id))
             .find(|cursor| *cursor != CursorHint::Default)
             .unwrap_or_default()
     }
