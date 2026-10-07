@@ -1,5 +1,7 @@
 use super::*;
-use crate::text_input::{HorizontalScroll, Preedit, TextField, compose, reveal_offset};
+use crate::text_input::{
+    HorizontalScroll, Preedit, TextField, caret_blink, compose, reveal_offset,
+};
 use quark_render::RectPrimitive;
 
 // ---------------------------------------------------------------------------
@@ -417,10 +419,11 @@ impl Element for TextInput {
             height: value_lh - Sz::CURSOR_WIDTH,
         });
         if let Some(rect) = caret {
-            let elapsed = cx.clock_ms.saturating_sub(self.cursor_moved_at_ms);
-            if elapsed < 530 || (elapsed / 530).is_multiple_of(2) {
+            let (visible, next_toggle_ms) = caret_blink(cx.clock_ms, self.cursor_moved_at_ms);
+            if visible {
                 scene.rounded_rect(RoundedRectPrimitive::uniform(rect, 1.0, theme.colors.text));
             }
+            cx.request_frame_at_ms(next_toggle_ms);
         }
         scene.pop_clip();
 

@@ -129,6 +129,9 @@ pub struct Editor {
     pub cursor_pos: CursorState,
     pub cursor_moved_at_ms: u64,
     font_size: f32,
+    /// Window scale factor; the layout is shaped at it so it can be painted
+    /// as is (see `ElementContext::layout_text`).
+    scale_factor: f32,
     last_width: f32,
     last_height: f32,
 }
@@ -159,6 +162,7 @@ impl Default for Editor {
             cursor_pos: CursorState::default(),
             cursor_moved_at_ms: 0,
             font_size: 14.0,
+            scale_factor: 1.0,
             last_width: 0.0,
             last_height: 0.0,
         }
@@ -423,6 +427,14 @@ impl Editor {
         self.dirty = true;
     }
 
+    /// Shape at the window's scale factor (pass the element context's).
+    pub fn set_scale_factor(&mut self, scale_factor: f32) {
+        if scale_factor.is_finite() && scale_factor > 0.0 && scale_factor != self.scale_factor {
+            self.scale_factor = scale_factor;
+            self.dirty = true;
+        }
+    }
+
     pub fn invalidate_font(&mut self) {
         self.layout = None;
         self.display = None;
@@ -475,7 +487,10 @@ impl Editor {
             .kind(self.mode.font_kind())
             .line_height(self.line_height());
         let wrap = (self.last_width > 0.0).then_some(self.last_width.max(1.0));
-        TextParams::new(text, style).spans(spans).wrap_width(wrap)
+        TextParams::new(text, style)
+            .spans(spans)
+            .wrap_width(wrap)
+            .scale_factor(self.scale_factor)
     }
 
     /// Rebuild the layout after changes, place the caret, and scroll it

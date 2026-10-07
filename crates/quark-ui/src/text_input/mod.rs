@@ -28,4 +28,6 @@ pub use text_edit::{
     next_word_end, prev_grapheme_boundary, prev_word_boundary, word_range_at,
 };
 pub use undo::COALESCE_PAUSE_MS;
-pub use view::{ClickCounter, HorizontalScroll, MULTI_CLICK_MS, reveal_offset};
+pub use view::{
+    CARET_BLINK_MS, ClickCounter, HorizontalScroll, MULTI_CLICK_MS, caret_blink, reveal_offset,
+};

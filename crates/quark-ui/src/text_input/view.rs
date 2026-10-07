@@ -64,3 +64,16 @@ impl ClickCounter {
         self.count
     }
 }
+
+/// Caret on and off phase length.
+pub const CARET_BLINK_MS: u64 = 530;
+
+/// Whether the caret is shown at `clock_ms`, and when it next toggles. It
+/// stays on for the first phase after it moved.
+pub fn caret_blink(clock_ms: u64, moved_at_ms: u64) -> (bool, u64) {
+    let phase = clock_ms.saturating_sub(moved_at_ms) / CARET_BLINK_MS;
+    (
+        phase.is_multiple_of(2),
+        moved_at_ms + (phase + 1) * CARET_BLINK_MS,
+    )
+}

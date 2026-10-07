@@ -4,12 +4,15 @@
 //! and handle your action type; [`run_ui`] (or [`UiAdapter`] with [`run`])
 //! does layout, paint, hit testing, focus, and accessibility publishing.
 //!
-//! The element tree is laid out in physical pixels, matching the runner's
-//! scene coordinates.
+//! The element tree is laid out in logical points, like the runner's scenes
+//! and pointer events; text is shaped at the window's scale factor so it
+//! rasterizes at physical size. Accessibility bounds stay logical under a
+//! root transform that scales them to the physical pixels accesskit expects.
 
 use std::any::Any;
+use std::time::Duration;
 
-use accesskit::{Action as AxAction, ActionData, ActionRequest, TreeUpdate};
+use accesskit::{Action as AxAction, ActionData, ActionRequest, Affine, TreeUpdate};
 use quark::Rect;
 use quark::SemanticFrame;
 use quark::reactive::SignalStore;
@@ -28,7 +31,7 @@ use crate::{App, EventContext, FrameContext, InputEvent, RunError, WindowOptions
 
 /// Lines scrolled per accessibility ScrollUp/ScrollDown request.
 const ACCESSIBILITY_SCROLL_LINES: i32 = 3;
-/// Pixels per line when a trackpad reports pixel deltas.
+/// Points per line when a trackpad reports pixel deltas.
 const PIXELS_PER_LINE: f32 = 20.0;
 
 /// An app described as quark-ui elements.
@@ -112,6 +115,8 @@ pub struct UiAdapter<U: UiApp> {
     text_targets: Vec<(FocusId, Option<Rect>)>,
     ime_allowed: bool,
     ime_area: Option<Rect>,
+    /// Scale factor of the last painted frame, for accessibility bounds.
+    scale_factor: f32,
 }
 
 /// Open a window titled by `options` and run `app` in it.
@@ -135,6 +140,7 @@ impl<U: UiApp> UiAdapter<U> {
             text_targets: Vec::new(),
             ime_allowed: false,
             ime_area: None,
+            scale_factor: 1.0,
         }
     }
 
@@ -251,6 +257,51 @@ impl<U: UiApp> UiAdapter<U> {
     }
 }
 
+/// One painted frame, with the scene still in logical points.
+struct Painted {
+    scene: Scene,
+    input: quark_ui::element::InputFrame,
+    accessibility: AccessibilityFrame,
+    next_frame_ms: Option<u64>,
+    /// Text fields with their caret rects, for IME.
+    text_targets: Vec<(FocusId, Option<Rect>)>,
+}
+
+/// Lay out and paint `root` into a `width` x `height` point viewport.
+fn paint(root: &mut AnyElement, ecx: &mut ElementContext, width: f32, height: f32) -> Painted {
+    let mut scene = Scene::default();
+    ecx.accessibility = AccessibilityFrame::new(width, height);
+    ecx.semantic = SemanticFrame::new(width, height);
+    render_element(root, &mut scene, ecx, width, height);
+    Painted {
+        scene,
+        input: ecx.take_input_frame(),
+        accessibility: std::mem::take(&mut ecx.accessibility),
+        next_frame_ms: ecx.next_frame_ms(),
+        text_targets: ecx
+            .text_input_hit_areas
+            .iter()
+            .map(|area| (area.focus_target, area.caret))
+            .collect(),
+    }
+}
+
+/// accesskit wants bounds in physical pixels once every transform is
+/// applied. The tree is built in points, so one scale on the root converts
+/// the whole tree.
+fn scale_tree(update: &mut TreeUpdate, scale: f32) {
+    let Some(root) = update.tree.as_ref().map(|tree| tree.root) else {
+        return;
+    };
+    // accesskit asks for no transform rather than an identity one.
+    if scale == 1.0 {
+        return;
+    }
+    if let Some((_, node)) = update.nodes.iter_mut().find(|(id, _)| *id == root) {
+        node.set_transform(Affine::scale(f64::from(scale)));
+    }
+}
+
 /// What an accessibility request asks the app to do.
 #[derive(Debug)]
 enum Routed {
@@ -310,30 +361,30 @@ impl<U: UiApp> App for UiAdapter<U> {
             focus: self.focus,
         });
 
-        let mut scene = Scene::default();
         let text = cx.text();
-        let mut ecx = ElementContext::new(
-            &self.theme,
-            scale,
-            &mut text.system,
-            &mut text.layouts,
-            self.pointer,
-            &self.signals,
-        )
-        .with_focus(self.focus)
-        .with_clock(clock_ms);
-        ecx.accessibility = AccessibilityFrame::new(width, height);
-        ecx.semantic = SemanticFrame::new(width, height);
-        render_element(&mut root, &mut scene, &mut ecx, width, height);
-
-        self.router.set_frame(ecx.take_input_frame());
-        self.accessibility = std::mem::take(&mut ecx.accessibility);
-        self.text_targets = ecx
-            .text_input_hit_areas
-            .iter()
-            .map(|area| (area.focus_target, area.caret))
-            .collect();
-        scene
+        let painted = paint(
+            &mut root,
+            &mut ElementContext::new(
+                &self.theme,
+                scale,
+                &mut text.system,
+                &mut text.layouts,
+                self.pointer,
+                &self.signals,
+            )
+            .with_focus(self.focus)
+            .with_clock(clock_ms),
+            width,
+            height,
+        );
+        self.router.set_frame(painted.input);
+        self.accessibility = painted.accessibility;
+        self.text_targets = painted.text_targets;
+        self.scale_factor = scale;
+        if let Some(at_ms) = painted.next_frame_ms {
+            cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
+        }
+        painted.scene
     }
 
     fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
@@ -352,7 +403,9 @@ impl<U: UiApp> App for UiAdapter<U> {
 
     fn accessibility(&mut self) -> Option<TreeUpdate> {
         // A full tree every frame; accesskit diffs it against the last one.
-        Some(self.accessibility.tree_update(&self.name, self.focus))
+        let mut update = self.accessibility.tree_update(&self.name, self.focus);
+        scale_tree(&mut update, self.scale_factor);
+        Some(update)
     }
 
     fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
@@ -435,6 +488,7 @@ impl<U: UiApp> UiAdapter<U> {
 #[cfg(test)]
 mod tests {
     use accesskit::{NodeId, Role, TreeId};
+    use quark::scene::ShapedText;
     use quark_ui::element::{IntoAnyElement, ScrollActionBuilder, div, text_input};
     use quark_ui::style::Styled;
 
@@ -489,6 +543,182 @@ mod tests {
             .find(|(_, node)| node.role() == role)
             .map(|(id, _)| *id)
             .expect("node with role")
+    }
+
+    /// Long-lived text state, so tests can paint twice through one cache.
+    struct Fixture {
+        text: quark_text::TextSystem,
+        layouts: quark_text::LayoutCache,
+        theme: Theme,
+        signals: SignalStore,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                text: quark_text::TextSystem::vendored_only(&Default::default()),
+                layouts: quark_text::LayoutCache::default(),
+                theme: Theme::default_dark(),
+                signals: SignalStore::new(),
+            }
+        }
+
+        /// Paint `root` into a 400x300 point window at `scale`.
+        fn paint(&mut self, mut root: AnyElement, scale: f32) -> Painted {
+            self.layouts.begin_frame();
+            let mut ecx = ElementContext::new(
+                &self.theme,
+                scale,
+                &mut self.text,
+                &mut self.layouts,
+                None,
+                &self.signals,
+            );
+            paint(&mut root, &mut ecx, 400.0, 300.0)
+        }
+    }
+
+    const MARK: quark::Color = quark::Color::rgba(1, 2, 3, 255);
+
+    /// A 100x50 point box, offset by (`x`, `y`) points, holding "Hi".
+    fn marked_box(x: f32, y: f32) -> AnyElement {
+        div()
+            .w(400.0)
+            .h(300.0)
+            .child(
+                div()
+                    .absolute()
+                    .left(x)
+                    .top(y)
+                    .w(100.0)
+                    .h(50.0)
+                    .bg(MARK)
+                    .accessibility_id("box")
+                    .accessibility_role(Role::Button)
+                    .accessibility_label("Box")
+                    .on_click(Msg::Save)
+                    .child(quark_ui::element::text("Hi")),
+            )
+            .into_any()
+    }
+
+    fn marked_quad(scene: &Scene) -> Option<quark::Rect> {
+        scene
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                quark::scene::Primitive::Rect(p) if p.color == MARK => Some(p.rect),
+                quark::scene::Primitive::RoundedRect(p) if p.color == MARK => Some(p.rect),
+                _ => None,
+            })
+    }
+
+    /// The first text run's origin and shaped layout.
+    fn text_run(scene: &Scene) -> (quark::Rect, ShapedText) {
+        scene
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                quark::scene::Primitive::TextRun(p) => Some((p.rect, p.layout.clone())),
+                _ => None,
+            })
+            .expect("a text run")
+    }
+
+    fn layout_of(shaped: &ShapedText) -> &quark_text::TextLayout {
+        shaped.downcast_ref().expect("a quark-text layout")
+    }
+
+    // Regression: elements laid out in physical pixels, so UI did not scale
+    // on HiDPI screens, and text was shaped at logical size and blurred.
+    #[test]
+    fn logical_element_at_scale_two_paints_physical_quad_and_text() {
+        let mut fixture = Fixture::new();
+        let mut scene = fixture.paint(marked_box(10.0, 20.0), 2.0).scene;
+        crate::scene_to_physical(&mut scene, 2.0);
+
+        let quad = marked_quad(&scene).expect("the box's background");
+        assert_eq!(
+            (quad.x, quad.y, quad.width, quad.height),
+            (20.0, 40.0, 200.0, 100.0)
+        );
+        let (origin, shaped) = text_run(&scene);
+        let layout = layout_of(&shaped);
+        assert!(origin.x >= 20.0 && origin.y >= 40.0, "{origin:?}");
+        let logical_size = layout.style().font_size;
+        assert_eq!(layout.glyphs().font_size[0], logical_size * 2.0);
+    }
+
+    // Regression: the pointer stayed in physical pixels while hit regions
+    // were logical, so clicks on HiDPI screens landed at twice the offset.
+    #[test]
+    fn physical_pointer_at_scale_two_hits_element_at_logical_point() {
+        let mut input = crate::input::InputNormalizer::new(2.0);
+        let moved = input.normalize(winit::event::WindowEvent::CursorMoved {
+            device_id: winit::event::DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(200.0, 100.0),
+        });
+        let [InputEvent::PointerMoved { x, y }] = moved[..] else {
+            panic!("expected one pointer move, got {moved:?}");
+        };
+
+        // The box covers points 99..199 x 49..99; (100, 50) is just inside
+        // and the unconverted (200, 100) is outside.
+        let mut fixture = Fixture::new();
+        let mut router = InputRouter::default();
+        router.set_frame(fixture.paint(marked_box(99.0, 49.0), 2.0).input);
+        let delivery = router.pointer_down(x, y, &mut None);
+        let actions: Vec<_> = delivery
+            .actions
+            .iter()
+            .filter_map(|action| action.downcast_ref::<Msg>().cloned())
+            .collect();
+        assert_eq!(actions, vec![Msg::Save], "pointer at ({x}, {y})");
+    }
+
+    // Regression: a layout shaped for the old scale was served from the
+    // cache after the window moved to a display with another scale.
+    #[test]
+    fn scale_change_reshapes_cached_text() {
+        let mut fixture = Fixture::new();
+        let (_, before) = text_run(&fixture.paint(marked_box(0.0, 0.0), 1.0).scene);
+        let (_, after) = text_run(&fixture.paint(marked_box(0.0, 0.0), 2.0).scene);
+        let (before, after) = (layout_of(&before), layout_of(&after));
+        assert_eq!((before.scale_factor(), after.scale_factor()), (1.0, 2.0));
+        assert_eq!(
+            after.glyphs().font_size[0],
+            before.glyphs().font_size[0] * 2.0
+        );
+    }
+
+    // accesskit expects physical pixels after transforms; the tree is built
+    // in points, so the root must carry the scale.
+    #[test]
+    fn accessibility_bounds_reach_accesskit_in_physical_pixels() {
+        let mut fixture = Fixture::new();
+        let painted = fixture.paint(marked_box(10.0, 20.0), 2.0);
+        let mut update = painted.accessibility.tree_update("Test", None);
+        scale_tree(&mut update, 2.0);
+
+        let root = update.tree.as_ref().expect("tree").root;
+        let transform = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == root)
+            .and_then(|(_, node)| node.transform().copied())
+            .unwrap_or(Affine::IDENTITY);
+        let button = node_with_role(&update, Role::Button);
+        let bounds = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == button)
+            .and_then(|(_, node)| node.bounds())
+            .expect("button bounds");
+        let physical = transform.transform_rect_bbox(bounds);
+        assert_eq!(
+            (physical.x0, physical.y0, physical.x1, physical.y1),
+            (20.0, 40.0, 220.0, 140.0)
+        );
     }
 
     #[test]

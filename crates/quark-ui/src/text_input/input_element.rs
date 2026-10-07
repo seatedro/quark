@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::editor::syntax_layout_spans;
+use super::view::caret_blink;
 use super::{Editor, EditorMode, SelectionRect, SyntaxSpan, SyntaxTokenKind};
 use crate::FocusId;
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
@@ -315,7 +316,11 @@ impl Element for TextEditorElement {
             }
         } else {
             let content_h = self.content_height.max(line_height);
-            let (layout, kinds) = match self.layout.take() {
+            // The editor's layout is used only if it was shaped at this
+            // frame's scale; otherwise paint a fresh one until it catches up.
+            let scale = cx.scale_factor;
+            let own = self.layout.take().filter(|l| l.scale_factor() == scale);
+            let (layout, kinds) = match own {
                 Some(layout) => (Some(layout), std::mem::take(&mut self.span_kinds)),
                 None => {
                     let (spans, kinds) = syntax_layout_spans(&self.text, &self.syntax_spans);
@@ -374,10 +379,11 @@ impl Element for TextEditorElement {
                 height: line_height - Sz::CURSOR_WIDTH,
             });
         if let (Some(rect), Some(cur)) = (caret, &self.cursor) {
-            let elapsed = cx.clock_ms.saturating_sub(cur.moved_at_ms);
-            if elapsed < 530 || (elapsed / 530).is_multiple_of(2) {
+            let (visible, next_toggle_ms) = caret_blink(cx.clock_ms, cur.moved_at_ms);
+            if visible {
                 scene.rounded_rect(RoundedRectPrimitive::uniform(rect, 1.0, theme.colors.text));
             }
+            cx.request_frame_at_ms(next_toggle_ms);
         }
 
         scene.pop_clip();

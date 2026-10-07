@@ -1,4 +1,6 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
@@ -57,6 +59,20 @@ pub enum RenderError {
     RenderText(#[from] glyphon::RenderError),
     #[error("surface acquisition failed")]
     SurfaceAcquire,
+    /// The surface was lost or outdated and has been reconfigured; nothing
+    /// was drawn, so draw the frame again.
+    #[error("the surface was lost or outdated and has been reconfigured")]
+    SurfaceReconfigured,
+    /// The next surface texture did not arrive in time; skip this frame.
+    #[error("timed out acquiring the next surface texture")]
+    SurfaceTimeout,
+    /// The GPU ran out of memory for the next frame. Not recoverable.
+    #[error("the GPU is out of memory")]
+    OutOfMemory,
+    #[error("the renderer has no window surface; use the headless render path")]
+    NoSurface,
+    #[error("no surface format matches the GPU's pipelines")]
+    IncompatibleSurface,
     #[error("buffer map failed")]
     BufferMap,
     #[error("png encode/write failed: {0}")]
@@ -273,182 +289,100 @@ impl TexturePool {
     }
 }
 
-pub struct Renderer {
+/// GPU images shared by every renderer on one [`GpuContext`], keyed by
+/// content hash, with the frame counter that ages them out.
+#[derive(Default)]
+struct SharedImages {
+    cache: ImageCache,
+    frame: u64,
+}
+
+/// The GPU state every window shares: one instance, adapter, device, and
+/// queue, the pipelines built for one surface format, glyphon's pipeline
+/// cache, and the uploaded-image cache. Cloning is cheap and shares it.
+///
+/// Each [`Renderer`] keeps only per-window state on top: its surface, frame
+/// buffers, offscreen targets, and glyph atlas. The atlas stays per window
+/// because glyphon trims it after every frame, which would evict glyphs
+/// another window still draws and re-upload them every frame.
+#[derive(Clone)]
+pub struct GpuContext {
+    inner: Arc<GpuShared>,
+}
+
+struct GpuShared {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    surface: Option<wgpu::Surface<'static>>,
-    surface_config: wgpu::SurfaceConfiguration,
-    size: PhysicalSize<u32>,
-    scale_factor: f64,
+    /// Every pipeline targets this format, so every surface uses it.
+    format: wgpu::TextureFormat,
     quad_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     effect_quad_pipeline: wgpu::RenderPipeline,
     blit_pipeline: wgpu::RenderPipeline,
     blur_pipeline: wgpu::RenderPipeline,
+    viewport_bind_group_layout: wgpu::BindGroupLayout,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    texture_pool: TexturePool,
-    instance_buffer_pool: TransientBufferPool,
-    image_cache: ImageCache,
-    image_frame: u64,
-    viewport_buffer: wgpu::Buffer,
-    viewport_bind_group: wgpu::BindGroup,
-    swash_cache: SwashCache,
-    viewport: Viewport,
-    atlas: TextAtlas,
-    /// One text renderer per text segment of the frame, grown on demand.
-    text_renderers: Vec<TextRenderer>,
-    /// `(font size, TextSystem generation, width)` of the last measurement.
-    cached_mono_char_width: Option<(f32, u64, f32)>,
-    flattener: Flattener,
-    flat: FlattenedScene,
-    batches: FrameBatches,
+    glyph_cache: Cache,
+    images: Arc<Mutex<SharedImages>>,
 }
 
-impl Renderer {
-    pub fn new(window: Arc<Window>) -> Result<Self, RenderError> {
-        pollster::block_on(Self::new_async(window))
-    }
-
-    async fn new_async(window: Arc<Window>) -> Result<Self, RenderError> {
-        let size = window.inner_size();
-        let scale_factor = window.scale_factor();
-
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
-        let surface = instance.create_surface(window.clone())?;
-        let adapter = match instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                ..wgpu::RequestAdapterOptions::default()
-            })
-            .await
-        {
-            Ok(adapter) => adapter,
-            Err(_) => instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    force_fallback_adapter: true,
-                    ..wgpu::RequestAdapterOptions::default()
-                })
-                .await
-                .map_err(|_| RenderError::NoAdapter)?,
-        };
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await?;
-
-        let surface_capabilities = surface.get_capabilities(&adapter);
-        let surface_format = surface_capabilities
+impl GpuContext {
+    /// Context for a window: the adapter is chosen to present to `surface`,
+    /// which must come from `instance`.
+    async fn for_surface(
+        instance: wgpu::Instance,
+        surface: &wgpu::Surface<'static>,
+    ) -> Result<Self, RenderError> {
+        let adapter = request_adapter(&instance, Some(surface)).await?;
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = capabilities
             .formats
             .iter()
             .copied()
             .find(wgpu::TextureFormat::is_srgb)
-            .unwrap_or(surface_capabilities.formats[0]);
-        let surface_config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .unwrap_or(wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: size.width.max(1),
-                height: size.height.max(1),
-                desired_maximum_frame_latency: 2,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-                view_formats: vec![],
-            });
-        surface.configure(&device, &surface_config);
-
-        Self::assemble(
-            device,
-            queue,
-            surface_format,
-            surface_config,
-            size,
-            scale_factor,
-            Some(surface),
-        )
+            .or_else(|| capabilities.formats.first().copied())
+            .ok_or(RenderError::IncompatibleSurface)?;
+        Self::build(instance, adapter, format).await
     }
 
-    /// Build a windowless renderer that targets `OffscreenTarget`s only. Requests
-    /// an adapter with no compatible surface, creates a device+queue, and shares
-    /// the same pipeline/atlas setup as the windowed path. No swapchain is created.
+    /// Context with no window, rendering into sRGB offscreen targets.
     #[cfg(any(test, feature = "headless-render"))]
-    pub fn new_headless(width: u32, height: u32, scale_factor: f64) -> Result<Self, RenderError> {
-        pollster::block_on(Self::new_headless_async(width, height, scale_factor))
+    pub fn headless() -> Result<Self, RenderError> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+            let adapter = request_adapter(&instance, None).await?;
+            // Match the on-screen path: an sRGB target so colors and PNG bytes agree.
+            Self::build(instance, adapter, wgpu::TextureFormat::Rgba8UnormSrgb).await
+        })
     }
 
-    #[cfg(any(test, feature = "headless-render"))]
-    async fn new_headless_async(
-        width: u32,
-        height: u32,
-        scale_factor: f64,
+    /// True when both handles share one device (and so every GPU resource).
+    pub fn same_device(&self, other: &GpuContext) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Whether this context's adapter can present to `surface` in the format
+    /// its pipelines were built for.
+    fn supports(&self, surface: &wgpu::Surface<'_>) -> bool {
+        let gpu = &*self.inner;
+        gpu.adapter.is_surface_supported(surface)
+            && surface
+                .get_capabilities(&gpu.adapter)
+                .formats
+                .contains(&gpu.format)
+    }
+
+    async fn build(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        surface_format: wgpu::TextureFormat,
     ) -> Result<Self, RenderError> {
-        let size = PhysicalSize::new(width.max(1), height.max(1));
-
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
-        let adapter = match instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: None,
-                ..wgpu::RequestAdapterOptions::default()
-            })
-            .await
-        {
-            Ok(adapter) => adapter,
-            Err(_) => instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    force_fallback_adapter: true,
-                    compatible_surface: None,
-                    ..wgpu::RequestAdapterOptions::default()
-                })
-                .await
-                .map_err(|_| RenderError::NoAdapter)?,
-        };
-
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await?;
-
-        // Match the on-screen path: an sRGB target so colors and PNG bytes agree.
-        let surface_format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            desired_maximum_frame_latency: 2,
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-            view_formats: vec![],
-        };
-
-        Self::assemble(
-            device,
-            queue,
-            surface_format,
-            surface_config,
-            size,
-            scale_factor,
-            None,
-        )
-    }
-
-    /// Shared pipeline/atlas/font setup for both the windowed and headless paths.
-    #[allow(clippy::too_many_arguments)]
-    fn assemble(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        surface_format: wgpu::TextureFormat,
-        surface_config: wgpu::SurfaceConfiguration,
-        size: PhysicalSize<u32>,
-        scale_factor: f64,
-        surface: Option<wgpu::Surface<'static>>,
-    ) -> Result<Self, RenderError> {
-        let viewport_uniform = ViewportUniform::new(surface_config.width, surface_config.height);
-        let viewport_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("diffy_viewport_uniform"),
-            contents: bytemuck::bytes_of(&viewport_uniform),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
         let viewport_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("diffy_viewport_bind_group_layout"),
@@ -463,14 +397,6 @@ impl Renderer {
                     count: None,
                 }],
             });
-        let viewport_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("diffy_viewport_bind_group"),
-            layout: &viewport_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: viewport_buffer.as_entire_binding(),
-            }],
-        });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("diffy_quad_shader"),
@@ -700,33 +626,244 @@ impl Renderer {
             cache: None,
         });
 
-        let texture_pool = TexturePool::new(surface_format);
-
-        let swash_cache = SwashCache::new();
         let glyph_cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &glyph_cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &glyph_cache, surface_format);
+        Ok(Self {
+            inner: Arc::new(GpuShared {
+                instance,
+                adapter,
+                device,
+                queue,
+                format: surface_format,
+                quad_pipeline,
+                shadow_pipeline,
+                effect_quad_pipeline,
+                blit_pipeline,
+                blur_pipeline,
+                viewport_bind_group_layout,
+                texture_bind_group_layout,
+                sampler,
+                glyph_cache,
+                images: Arc::default(),
+            }),
+        })
+    }
+}
+
+async fn request_adapter(
+    instance: &wgpu::Instance,
+    compatible_surface: Option<&wgpu::Surface<'static>>,
+) -> Result<wgpu::Adapter, RenderError> {
+    let preferred = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface,
+            ..wgpu::RequestAdapterOptions::default()
+        })
+        .await;
+    match preferred {
+        Ok(adapter) => Ok(adapter),
+        Err(_) => instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                force_fallback_adapter: true,
+                compatible_surface,
+                ..wgpu::RequestAdapterOptions::default()
+            })
+            .await
+            .map_err(|_| RenderError::NoAdapter),
+    }
+}
+
+/// Locks the shared image cache. A panic while holding it can only leave
+/// stale cache entries, so a poisoned lock is still usable.
+fn lock_images(images: &Mutex<SharedImages>) -> MutexGuard<'_, SharedImages> {
+    images
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Draws scenes into one window's surface (or offscreen targets) using a
+/// [`GpuContext`] that may be shared with other windows.
+pub struct Renderer {
+    gpu: GpuContext,
+    // Handles cloned out of `gpu` (wgpu handles are reference counted) so
+    // the drawing code reads them as plain fields.
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: Option<wgpu::Surface<'static>>,
+    surface_config: wgpu::SurfaceConfiguration,
+    size: PhysicalSize<u32>,
+    scale_factor: f64,
+    quad_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
+    effect_quad_pipeline: wgpu::RenderPipeline,
+    blit_pipeline: wgpu::RenderPipeline,
+    blur_pipeline: wgpu::RenderPipeline,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    texture_pool: TexturePool,
+    instance_buffer_pool: TransientBufferPool,
+    images: Arc<Mutex<SharedImages>>,
+    viewport_buffer: wgpu::Buffer,
+    viewport_bind_group: wgpu::BindGroup,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    /// One text renderer per text segment of the frame, grown on demand.
+    text_renderers: Vec<TextRenderer>,
+    /// `(font size, TextSystem generation, width)` of the last measurement.
+    cached_mono_char_width: Option<(f32, u64, f32)>,
+    flattener: Flattener,
+    flat: FlattenedScene,
+    batches: FrameBatches,
+}
+
+impl Renderer {
+    /// A renderer for `window` with a new [`GpuContext`] chosen for it.
+    pub fn new(window: Arc<Window>) -> Result<Self, RenderError> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+            let surface = instance.create_surface(window.clone())?;
+            let gpu = GpuContext::for_surface(instance, &surface).await?;
+            Self::for_surface(gpu, surface, &window)
+        })
+    }
+
+    /// A renderer for another window on an existing context.
+    ///
+    /// The context's adapter was picked for the first window's surface. If it
+    /// cannot present to this window's surface (another GPU's display, or no
+    /// surface format matching the shared pipelines), the window gets a new
+    /// context chosen for its own surface instead; that window then shares
+    /// nothing with the others. Compare with [`GpuContext::same_device`].
+    pub fn with_gpu(gpu: &GpuContext, window: Arc<Window>) -> Result<Self, RenderError> {
+        let surface = gpu.inner.instance.create_surface(window.clone())?;
+        if gpu.supports(&surface) {
+            return Self::for_surface(gpu.clone(), surface, &window);
+        }
+        tracing::warn!("the shared GPU adapter cannot present to this window; using a new device");
+        pollster::block_on(async {
+            let fresh = GpuContext::for_surface(gpu.inner.instance.clone(), &surface).await?;
+            Self::for_surface(fresh, surface, &window)
+        })
+    }
+
+    /// The context this renderer draws with; pass it to [`Self::with_gpu`]
+    /// to share it with another window.
+    pub fn gpu(&self) -> &GpuContext {
+        &self.gpu
+    }
+
+    fn for_surface(
+        gpu: GpuContext,
+        surface: wgpu::Surface<'static>,
+        window: &Window,
+    ) -> Result<Self, RenderError> {
+        let size = window.inner_size();
+        let shared = &*gpu.inner;
+        let surface_config = surface
+            .get_default_config(&shared.adapter, size.width.max(1), size.height.max(1))
+            .map(|config| wgpu::SurfaceConfiguration {
+                format: shared.format,
+                ..config
+            })
+            .unwrap_or(wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: shared.format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                desired_maximum_frame_latency: 2,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                view_formats: vec![],
+            });
+        surface.configure(&shared.device, &surface_config);
+        Ok(Self::assemble(
+            gpu,
+            surface_config,
+            size,
+            window.scale_factor(),
+            Some(surface),
+        ))
+    }
+
+    /// Build a windowless renderer that targets `OffscreenTarget`s only, on a
+    /// new headless [`GpuContext`]. No swapchain is created.
+    #[cfg(any(test, feature = "headless-render"))]
+    pub fn new_headless(width: u32, height: u32, scale_factor: f64) -> Result<Self, RenderError> {
+        Ok(Self::headless_with_gpu(
+            &GpuContext::headless()?,
+            width,
+            height,
+            scale_factor,
+        ))
+    }
+
+    /// A windowless renderer on an existing context.
+    #[cfg(any(test, feature = "headless-render"))]
+    pub fn headless_with_gpu(gpu: &GpuContext, width: u32, height: u32, scale_factor: f64) -> Self {
+        let size = PhysicalSize::new(width.max(1), height.max(1));
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: gpu.inner.format,
+            width: size.width,
+            height: size.height,
+            desired_maximum_frame_latency: 2,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+        };
+        Self::assemble(gpu.clone(), surface_config, size, scale_factor, None)
+    }
+
+    /// Per-window state on top of the shared context.
+    fn assemble(
+        gpu: GpuContext,
+        surface_config: wgpu::SurfaceConfiguration,
+        size: PhysicalSize<u32>,
+        scale_factor: f64,
+        surface: Option<wgpu::Surface<'static>>,
+    ) -> Self {
+        let shared = &*gpu.inner;
+        let device = shared.device.clone();
+        let queue = shared.queue.clone();
+        let viewport_uniform = ViewportUniform::new(surface_config.width, surface_config.height);
+        let viewport_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("diffy_viewport_uniform"),
+            contents: bytemuck::bytes_of(&viewport_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let viewport_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("diffy_viewport_bind_group"),
+            layout: &shared.viewport_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: viewport_buffer.as_entire_binding(),
+            }],
+        });
+
+        let texture_pool = TexturePool::new(shared.format);
+        let swash_cache = SwashCache::new();
+        let viewport = Viewport::new(&device, &shared.glyph_cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
-        Ok(Self {
+        Self {
             device,
             queue,
             surface,
             surface_config,
             size,
             scale_factor,
-            quad_pipeline,
-            shadow_pipeline,
-            effect_quad_pipeline,
-            blit_pipeline,
-            blur_pipeline,
-            texture_bind_group_layout,
-            sampler,
+            quad_pipeline: shared.quad_pipeline.clone(),
+            shadow_pipeline: shared.shadow_pipeline.clone(),
+            effect_quad_pipeline: shared.effect_quad_pipeline.clone(),
+            blit_pipeline: shared.blit_pipeline.clone(),
+            blur_pipeline: shared.blur_pipeline.clone(),
+            texture_bind_group_layout: shared.texture_bind_group_layout.clone(),
+            sampler: shared.sampler.clone(),
             texture_pool,
             instance_buffer_pool: TransientBufferPool::default(),
-            image_cache: HashMap::new(),
-            image_frame: 0,
+            images: Arc::clone(&shared.images),
             viewport_buffer,
             viewport_bind_group,
             swash_cache,
@@ -737,7 +874,8 @@ impl Renderer {
             flattener: Flattener::default(),
             flat: FlattenedScene::default(),
             batches: FrameBatches::default(),
-        })
+            gpu,
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32, scale_factor: f64) {
@@ -997,18 +1135,17 @@ impl Renderer {
 
         self.flatten(scene, sw, sh);
 
-        let surface = self
-            .surface
-            .as_ref()
-            .expect("render() requires a window surface; use render_to_png for headless");
+        let surface = self.surface.as_ref().ok_or(RenderError::NoSurface)?;
         let acquire_started_at = Instant::now();
         let frame = match surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
                 surface.configure(&self.device, &self.surface_config);
-                return Err(RenderError::SurfaceAcquire);
+                return Err(RenderError::SurfaceReconfigured);
             }
-            Err(_) => return Err(RenderError::SurfaceAcquire),
+            Err(wgpu::SurfaceError::Timeout) => return Err(RenderError::SurfaceTimeout),
+            Err(wgpu::SurfaceError::OutOfMemory) => return Err(RenderError::OutOfMemory),
+            Err(wgpu::SurfaceError::Other) => return Err(RenderError::SurfaceAcquire),
         };
         let acquire_us = acquire_started_at.elapsed().as_micros() as u64;
 
@@ -1057,10 +1194,11 @@ impl Renderer {
             width: width as f32,
             height: height as f32,
         };
+        let images = lock_images(&self.images);
         flatten_scene_into(
             scene,
             viewport,
-            &self.image_cache,
+            &images.cache,
             &mut self.flattener,
             &mut self.flat,
         );
@@ -1098,7 +1236,7 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<(), RenderError> {
-        self.image_frame += 1;
+        lock_images(&self.images).frame += 1;
         for image in &flat.images {
             self.ensure_image_uploaded(&image.primitive);
         }
@@ -1171,8 +1309,10 @@ impl Renderer {
             self.texture_pool.release(targets.h);
             self.texture_pool.release(targets.v);
         }
-        let frame = self.image_frame;
-        self.image_cache
+        let mut images = lock_images(&self.images);
+        let frame = images.frame;
+        images
+            .cache
             .retain(|_, image| frame - image.last_used_frame <= KEEP_UNUSED_IMAGE_FRAMES);
         result
     }
@@ -1393,6 +1533,7 @@ impl Renderer {
                 let Some(buffer) = &buffers.image else {
                     return Ok(());
                 };
+                let images = lock_images(&self.images);
                 pass.set_pipeline(&self.blit_pipeline);
                 pass.set_bind_group(0, &self.viewport_bind_group, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
@@ -1400,7 +1541,7 @@ impl Renderer {
                     // The cache lookup is the gate: icons resolved from a prior
                     // frame carry an empty `rgba` but still draw via their
                     // uploaded texture. Images that were never uploadable miss.
-                    let Some(entry) = self.image_cache.get(&command.cache_key) else {
+                    let Some(entry) = images.cache.get(&command.cache_key) else {
                         continue;
                     };
                     let Some((sx, sy, sw, sh)) = scissor_rect(command.clip, width, height) else {
@@ -1438,8 +1579,10 @@ impl Renderer {
     /// and mark the entry used this frame.
     fn ensure_image_uploaded(&mut self, image: &crate::scene::ImagePrimitive) {
         let key = image.cache_key;
-        if let Some(cached) = self.image_cache.get_mut(&key) {
-            cached.last_used_frame = self.image_frame;
+        let mut images = lock_images(&self.images);
+        let frame = images.frame;
+        if let Some(cached) = images.cache.get_mut(&key) {
+            cached.last_used_frame = frame;
             return;
         }
         if key == 0 || image.rgba.is_empty() || image.width == 0 || image.height == 0 {
@@ -1471,12 +1614,12 @@ impl Renderer {
             &view,
             &self.sampler,
         );
-        self.image_cache.insert(
+        images.cache.insert(
             key,
             CachedImage {
                 _texture: texture,
                 bind_group,
-                last_used_frame: self.image_frame,
+                last_used_frame: frame,
             },
         );
     }
@@ -3126,6 +3269,44 @@ mod tests {
             return;
         };
         assert!(image.get_pixel(16, 16).0[0] > 200, "image missing");
+    }
+
+    // Two windows share one device: an image uploaded while drawing one
+    // window draws in another from its cache key alone, which only works
+    // when both use the same device and texture cache.
+    #[test]
+    fn image_uploaded_by_one_renderer_draws_in_another_on_the_same_gpu() {
+        let gpu = match GpuContext::headless() {
+            Ok(gpu) => gpu,
+            Err(_) => {
+                assert!(
+                    std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                    "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+                );
+                return;
+            }
+        };
+        let image = |rgba: Arc<[u8]>| {
+            let mut scene = Scene::default();
+            scene.push(Primitive::Image(crate::scene::ImagePrimitive {
+                rect: rect(0.0, 0.0, 16.0, 16.0),
+                width: 1,
+                height: 1,
+                rgba,
+                cache_key: 42,
+            }));
+            scene
+        };
+        let mut first = Renderer::headless_with_gpu(&gpu, 16, 16, 1.0);
+        let mut second = Renderer::headless_with_gpu(&gpu, 16, 16, 1.0);
+        let mut text = test_text();
+        first
+            .render_to_rgba(&image(Arc::from(vec![0, 255, 0, 255])), &mut text, 16, 16)
+            .expect("first render");
+        let pixels = second
+            .render_to_rgba(&image(empty_rgba()), &mut text, 16, 16)
+            .expect("second render");
+        assert_eq!(&pixels[..4], &[0, 255, 0, 255]);
     }
 }
 
