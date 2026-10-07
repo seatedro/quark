@@ -21,7 +21,6 @@ pub mod geometry;
 pub mod hit;
 pub mod identity;
 pub mod reactive;
-pub mod retained;
 pub mod scene;
 pub mod selection;
 pub mod semantic;
@@ -30,10 +29,7 @@ pub mod style_state;
 
 pub use animation::{AnimKey, AnimKind, AnimationTable, Curve, Motion, PropId, SpringParams};
 pub use color::Color;
-pub use event::{
-    DragSession, PointerCapture, RoutedEventStep, UiEventBinding, UiEventKind, UiEventPhase,
-    UiEventPropagation, UiEventResult, UiEventRoute,
-};
+pub use event::{UiEventBinding, UiEventKind, UiEventPhase, UiEventPropagation, UiEventResult};
 pub use focus::{FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, TabStop};
 pub use geometry::Rect;
 pub use hit::{
@@ -41,7 +37,6 @@ pub use hit::{
     UNCLIPPED,
 };
 pub use identity::{TestId, UiKey, UiNodeId, stable_hash};
-pub use retained::{DisposedNode, RetainedNode, RetainedTree};
 pub use scene::{
     BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive, EffectType, FontKind,
     FontWeight, IconPrimitive, ImagePrimitive, Primitive, RectPrimitive, RichTextPrimitive,
@@ -52,4 +47,4 @@ pub use semantic::{
     SemanticActions, SemanticFrame, SemanticNode, SemanticNodeState, SemanticRole, dump_semantic,
 };
 pub use style::{BackgroundEffect, ElementStyle, ShadowStyle, StyleOverride, apply_override};
-pub use style_state::{StyleInvalidation, StyleInvalidationReason, StyleState};
+pub use style_state::StyleState;

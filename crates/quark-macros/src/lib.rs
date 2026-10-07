@@ -1,10 +1,13 @@
+use std::cell::RefCell;
+
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Expr, ExprIf, ExprMatch, Ident, LitStr, Pat, Result, Token, braced};
+use syn::{Expr, ExprIf, ExprMatch, Ident, LitStr, Pat, Result, Token, braced, parenthesized};
 
 // ---------------------------------------------------------------------------
 // #[derive(Store)] — generate a parallel `XStore` struct where each field is a
@@ -60,6 +63,25 @@ fn parse_store_field_attr(attrs: &[syn::Attribute]) -> Result<FieldKind> {
         })?;
     }
     Ok(kind.map(|(k, _)| k).unwrap_or(FieldKind::Leaf))
+}
+
+/// Struct-level `#[store(default)]`: returns whether `new_default` is wanted.
+fn parse_store_struct_attr(attrs: &[syn::Attribute]) -> Result<bool> {
+    let mut default = false;
+    for attr in attrs {
+        if !attr.path().is_ident("store") {
+            continue;
+        }
+        attr.parse_nested_meta(|m| {
+            if m.path.is_ident("default") {
+                default = true;
+                Ok(())
+            } else {
+                Err(m.error("unknown struct-level `#[store(...)]` attribute; supported: `default`"))
+            }
+        })?;
+    }
+    Ok(default)
 }
 
 fn flatten_store_type(ty: &syn::Type) -> Result<syn::Type> {
@@ -177,16 +199,17 @@ fn derive_store_impl(input: syn::DeriveInput) -> Result<TokenStream2> {
         }
     };
 
-    // `new_default` is only callable when the original struct is `Default`.
-    // The `where` bound lets the impl compile even when it isn't.
-    let new_default_impl = quote! {
-        /// Create a store initialized from `Original::default()`.
-        pub fn new_default(store: &::quark::reactive::SignalStore) -> Self
-        where
-            #name: Default,
-        {
-            Self::new(store, <#name as Default>::default())
+    // `new_default` is opt-in: an unconditional `where Name: Default` bound
+    // is trivially false on a non-`Default` struct and fails to compile.
+    let new_default_impl = if parse_store_struct_attr(&input.attrs)? {
+        quote! {
+            /// Create a store initialized from `Original::default()`.
+            pub fn new_default(store: &::quark::reactive::SignalStore) -> Self {
+                Self::new(store, <#name as ::core::default::Default>::default())
+            }
         }
+    } else {
+        quote! {}
     };
 
     Ok(quote! {
@@ -221,10 +244,21 @@ pub fn view(input: TokenStream) -> TokenStream {
     };
     let ctx = EmitCtx {
         scale: view_input.scale,
+        errors: RefCell::new(None),
     };
-    match ctx.emit_node(&view_input.root) {
-        ChildMode::Child(t) | ChildMode::Optional(t) => t.into(),
-        ChildMode::Spread(t) => quote! { div().children(#t).into_any() }.into(),
+    let tokens = match ctx.emit_node(&view_input.root) {
+        ChildMode::Child(t) | ChildMode::Optional(t) => t,
+        ChildMode::Spread(t) => quote! { div().children(#t).into_any() },
+    };
+    // Any error replaces the whole expansion, so a rejected input never
+    // compiles into partial or silently altered UI.
+    match ctx.errors.into_inner() {
+        Some(err) => {
+            // A block, so several `compile_error!`s still form one expression.
+            let errors = err.to_compile_error();
+            quote! {{ #errors }}.into()
+        }
+        None => tokens.into(),
     }
 }
 
@@ -240,15 +274,9 @@ struct ViewInput {
 impl Parse for ViewInput {
     fn parse(input: ParseStream) -> Result<Self> {
         let scale = if input.peek(Ident::peek_any) && input.peek2(Token![,]) {
-            let fork = input.fork();
-            let ident: Ident = fork.parse()?;
-            if ident == "scale" || !ident.to_string().starts_with('<') {
-                let ident: Ident = input.parse()?;
-                input.parse::<Token![,]>()?;
-                Some(ident)
-            } else {
-                None
-            }
+            let ident: Ident = input.parse()?;
+            input.parse::<Token![,]>()?;
+            Some(ident)
         } else {
             None
         };
@@ -291,6 +319,8 @@ struct MatchNode {
 
 struct ElementNode {
     tag: Tag,
+    /// `<Component(a, b)>`: arguments for `Component::new`.
+    ctor_args: Option<Punctuated<Expr, Token![,]>>,
     attrs: Vec<Attr>,
     children: Vec<Node>,
 }
@@ -303,6 +333,8 @@ enum Tag {
     Spacer,
     Fragment,
     Component(syn::Path),
+    /// `<.method>` inside a component: each child becomes `.method(child)`.
+    Slot(Ident),
 }
 
 enum Attr {
@@ -314,6 +346,19 @@ enum Attr {
     Class(LitStr),
     IfAttr(Ident, ExprIf),
     When(Expr, Vec<Attr>),
+}
+
+impl Attr {
+    fn span(&self) -> Span {
+        match self {
+            Attr::Flag(name)
+            | Attr::KeyValue(name, _)
+            | Attr::ReactiveKeyValue(name, _)
+            | Attr::IfAttr(name, _) => name.span(),
+            Attr::Class(lit) => lit.span(),
+            Attr::When(cond, _) => cond.span(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +466,17 @@ impl Parse for ElementNode {
 
         let tag = parse_tag(input)?;
 
+        let ctor_args = if input.peek(syn::token::Paren) {
+            if !matches!(tag, Tag::Component(_)) {
+                return Err(input.error("only component tags take constructor arguments"));
+            }
+            let content;
+            parenthesized!(content in input);
+            Some(content.parse_terminated(Expr::parse, Token![,])?)
+        } else {
+            None
+        };
+
         let mut attrs = Vec::new();
         while !input.peek(Token![>]) && !input.peek(Token![/]) {
             attrs.push(input.parse::<Attr>()?);
@@ -431,6 +487,7 @@ impl Parse for ElementNode {
             input.parse::<Token![>]>()?;
             return Ok(ElementNode {
                 tag,
+                ctor_args,
                 attrs,
                 children: Vec::new(),
             });
@@ -447,6 +504,7 @@ impl Parse for ElementNode {
 
         Ok(ElementNode {
             tag,
+            ctor_args,
             attrs,
             children,
         })
@@ -454,6 +512,10 @@ impl Parse for ElementNode {
 }
 
 fn parse_tag(input: ParseStream) -> Result<Tag> {
+    if input.peek(Token![.]) {
+        input.parse::<Token![.]>()?;
+        return Ok(Tag::Slot(input.call(Ident::parse_any)?));
+    }
     let ident: Ident = input.parse()?;
     match ident.to_string().as_str() {
         "div" => Ok(Tag::Div),
@@ -480,30 +542,20 @@ fn is_closing_tag(input: ParseStream) -> bool {
 fn parse_closing_tag(input: ParseStream, open_tag: &Tag) -> Result<()> {
     input.parse::<Token![<]>()?;
     input.parse::<Token![/]>()?;
-    let close_ident: Ident = input.parse()?;
     let expected = match open_tag {
-        Tag::Div => "div",
-        Tag::Text => "text",
-        Tag::Icon => "icon",
-        Tag::Spacer => "spacer",
-        Tag::Fragment => "fragment",
-        Tag::Component(p) => {
-            let last = p
-                .segments
-                .last()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default();
-            if close_ident != last.as_str() {
-                return Err(syn::Error::new(
-                    close_ident.span(),
-                    format!("expected closing tag `{last}`, found `{close_ident}`"),
-                ));
-            }
-            input.parse::<Token![>]>()?;
-            return Ok(());
+        Tag::Slot(name) => {
+            input.parse::<Token![.]>()?;
+            name.to_string()
         }
+        Tag::Component(p) => p
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default(),
+        _ => tag_name(open_tag),
     };
-    if close_ident != expected {
+    let close_ident = input.call(Ident::parse_any)?;
+    if close_ident != expected.as_str() {
         return Err(syn::Error::new(
             close_ident.span(),
             format!("expected closing tag `{expected}`, found `{close_ident}`"),
@@ -575,6 +627,8 @@ impl Parse for Attr {
 
 struct EmitCtx {
     scale: Option<Ident>,
+    /// Errors found while emitting; any error replaces the expansion.
+    errors: RefCell<Option<syn::Error>>,
 }
 
 enum ChildMode {
@@ -583,26 +637,34 @@ enum ChildMode {
     Spread(TokenStream2),
 }
 
-#[derive(Clone, Copy)]
-enum ComponentSlotKind {
-    Value,
-    Child,
-}
-
-struct ComponentSlot {
-    method: Ident,
-    kind: ComponentSlotKind,
-}
-
 const SPATIAL_ATTRS: &[&str] = &[
     "gap", "gap_x", "gap_y", "p", "px", "py", "pt", "pb", "pl", "pr", "rounded",
 ];
 
 impl EmitCtx {
+    fn error(&self, span: Span, message: impl std::fmt::Display) {
+        let err = syn::Error::new(span, message);
+        let mut errors = self.errors.borrow_mut();
+        match errors.as_mut() {
+            Some(existing) => existing.combine(err),
+            None => *errors = Some(err),
+        }
+    }
+
     fn emit_node(&self, node: &Node) -> ChildMode {
         match node {
-            Node::Element(el) => match el.tag {
-                Tag::Fragment => ChildMode::Spread(self.emit_children_spread(&el.children)),
+            Node::Element(el) => match &el.tag {
+                Tag::Fragment => {
+                    self.reject_attrs(el, "fragment");
+                    ChildMode::Spread(self.emit_children_spread(&el.children))
+                }
+                Tag::Slot(name) => {
+                    self.error(
+                        name.span(),
+                        format!("slot `<.{name}>` must be a direct child of a component"),
+                    );
+                    ChildMode::Child(quote! { () })
+                }
                 _ => ChildMode::Child(self.emit_element(el)),
             },
             Node::Expr(expr) => ChildMode::Child(quote! { #expr }),
@@ -615,87 +677,95 @@ impl EmitCtx {
         }
     }
 
-    fn emit_if_chain(&self, chain: &IfChainNode) -> ChildMode {
-        // If any branch body holds multiple children, emit a Spread so they
-        // flow into the parent inline. Wrapping them in a bare `div()` (the
-        // old path) inserted an unstyled flex item, which broke percentage
-        // sizing (`h_full` / `w_full`) for descendants whose layout was
-        // supposed to resolve against an ancestor further up the tree.
-        let then_multi = chain.then_children.len() > 1;
-        let else_multi = chain.else_children.as_ref().is_some_and(|c| c.len() > 1);
-        if then_multi || else_multi {
-            return self.emit_if_chain_spread(chain);
-        }
-
-        let cond = &chain.cond;
-        let then_body = self.emit_children_fragment(&chain.then_children);
-
-        let has_else = chain.else_if.is_some() || chain.else_children.is_some();
-
-        if !has_else {
-            let tokens = quote! {
-                if #cond { Some(#then_body) } else { None }
-            };
-            ChildMode::Optional(tokens)
-        } else {
-            let else_branch = if let Some(ref else_if) = chain.else_if {
-                match self.emit_if_chain(else_if) {
-                    ChildMode::Optional(t) => {
-                        quote! { else { (#t).unwrap_or_else(|| spacer().into_any()) } }
-                    }
-                    ChildMode::Child(t) | ChildMode::Spread(t) => quote! { else { #t } },
-                }
-            } else if let Some(ref else_children) = chain.else_children {
-                let else_body = self.emit_children_fragment(else_children);
-                quote! { else { #else_body } }
-            } else {
-                unreachable!()
-            };
-
-            ChildMode::Child(quote! {
-                if #cond { #then_body } #else_branch
-            })
+    fn reject_attrs(&self, el: &ElementNode, tag: &str) {
+        for attr in &el.attrs {
+            self.error(attr.span(), format!("`<{tag}>` takes no attributes"));
         }
     }
 
-    /// Emit an if/else-if/else chain whose bodies can contain multiple
-    /// children. Produces a `Spread` whose underlying expression iterates
-    /// over `AnyElement` values — no wrapping `div()`, so descendants with
-    /// `h_full`/`w_full` continue to resolve against the real ancestor.
-    ///
-    /// We normalize each branch to a `Vec<AnyElement>` (what
-    /// `emit_children_spread` already produces) so the if/else is a single
-    /// well-typed expression. The no-else path uses `Option<Vec>` + `flatten`
-    /// to get the empty-branch type for free.
-    fn emit_if_chain_spread(&self, chain: &IfChainNode) -> ChildMode {
-        let cond = &chain.cond;
-        let then_body = self.emit_children_spread(&chain.then_children);
-
-        if chain.else_if.is_none() && chain.else_children.is_none() {
-            return ChildMode::Spread(quote! {
-                (if #cond { Some(#then_body) } else { None })
-                    .into_iter()
-                    .flatten()
-            });
+    /// Lower `if` / `else if` / `else` to one Rust `if` chain. The chain's
+    /// mode is the widest any branch needs: `Spread` when a branch holds
+    /// zero or several children or spreads (each branch becomes a `Vec`,
+    /// so children flow into the parent with no wrapper node), `Optional`
+    /// when a branch is optional or there is no final `else` (a missing
+    /// branch yields no child), and `Child` otherwise.
+    fn emit_if_chain(&self, chain: &IfChainNode) -> ChildMode {
+        let mut conds = Vec::new();
+        let mut bodies: Vec<&[Node]> = Vec::new();
+        let mut link = Some(chain);
+        let mut else_body = None;
+        while let Some(c) = link {
+            conds.push(&c.cond);
+            bodies.push(&c.then_children);
+            else_body = c.else_children.as_deref();
+            link = c.else_if.as_deref();
+        }
+        if let Some(body) = else_body {
+            bodies.push(body);
         }
 
-        let else_body = if let Some(else_if) = &chain.else_if {
-            match self.emit_if_chain(else_if) {
-                ChildMode::Spread(t) => quote! { (#t).into_iter().collect::<Vec<_>>() },
-                ChildMode::Child(t) => quote! { vec![#t] },
-                ChildMode::Optional(t) => {
-                    quote! { (#t).into_iter().collect::<Vec<_>>() }
-                }
-            }
-        } else if let Some(else_children) = &chain.else_children {
-            self.emit_children_spread(else_children)
-        } else {
-            unreachable!()
-        };
+        let singles: Vec<Option<ChildMode>> = bodies
+            .iter()
+            .map(|body| match body {
+                [only] => match self.emit_node(only) {
+                    ChildMode::Spread(_) => None,
+                    mode => Some(mode),
+                },
+                _ => None,
+            })
+            .collect();
 
-        ChildMode::Spread(quote! {
-            if #cond { #then_body } else { #else_body }
-        })
+        let branches: Vec<TokenStream2>;
+        let missing: TokenStream2;
+        let wrap: fn(TokenStream2) -> ChildMode;
+        if singles.iter().any(Option::is_none) {
+            branches = bodies
+                .iter()
+                .map(|body| self.emit_children_spread(body))
+                .collect();
+            missing = quote! { ::std::vec::Vec::new() };
+            wrap = ChildMode::Spread;
+        } else if else_body.is_none()
+            || singles
+                .iter()
+                .any(|m| matches!(m, Some(ChildMode::Optional(_))))
+        {
+            branches = singles
+                .into_iter()
+                .map(|mode| match mode {
+                    Some(ChildMode::Child(t)) => quote! { ::core::option::Option::Some(#t) },
+                    Some(ChildMode::Optional(t)) => t,
+                    _ => unreachable!("spread branches take the Vec path"),
+                })
+                .collect();
+            missing = quote! { ::core::option::Option::None };
+            wrap = ChildMode::Optional;
+        } else {
+            branches = singles
+                .into_iter()
+                .map(|mode| match mode {
+                    Some(ChildMode::Child(t)) => t,
+                    _ => unreachable!("only plain children reach the Child path"),
+                })
+                .collect();
+            missing = TokenStream2::new();
+            wrap = ChildMode::Child;
+        }
+
+        let mut branches = branches.into_iter();
+        let mut tokens = TokenStream2::new();
+        for (i, cond) in conds.iter().enumerate() {
+            let body = branches.next().expect("one branch per condition");
+            if i > 0 {
+                tokens.extend(quote! { else });
+            }
+            tokens.extend(quote! { if #cond { #body } });
+        }
+        let tail = branches.next().unwrap_or(missing);
+        if !tail.is_empty() {
+            tokens.extend(quote! { else { #tail } });
+        }
+        wrap(tokens)
     }
 
     fn emit_for_loop(&self, fl: &ForLoopNode) -> TokenStream2 {
@@ -713,20 +783,6 @@ impl EmitCtx {
     fn emit_match(&self, m: &MatchNode) -> TokenStream2 {
         let expr = &m.expr;
         quote! { #expr }
-    }
-
-    fn emit_children_fragment(&self, children: &[Node]) -> TokenStream2 {
-        if children.len() == 1 {
-            match self.emit_node(&children[0]) {
-                ChildMode::Child(t) | ChildMode::Optional(t) | ChildMode::Spread(t) => t,
-            }
-        } else {
-            let mut chain = quote! { div() };
-            for child in children {
-                chain = self.append_child(chain, child);
-            }
-            quote! { #chain.into_any() }
-        }
     }
 
     fn emit_children_spread(&self, children: &[Node]) -> TokenStream2 {
@@ -760,9 +816,19 @@ impl EmitCtx {
             Tag::Div => self.emit_div(el),
             Tag::Text => self.emit_text(el),
             Tag::Icon => self.emit_icon(el),
-            Tag::Spacer => quote! { spacer().into_any() },
-            Tag::Fragment => unreachable!("fragments are handled in emit_node"),
+            Tag::Spacer => {
+                self.reject_attrs(el, "spacer");
+                self.reject_children(el, "`<spacer>` takes no children");
+                quote! { spacer().into_any() }
+            }
+            Tag::Fragment | Tag::Slot(_) => unreachable!("handled in emit_node"),
             Tag::Component(path) => self.emit_component(path, el),
+        }
+    }
+
+    fn reject_children(&self, el: &ElementNode, message: &str) {
+        for child in &el.children {
+            self.error(node_span(child), message);
         }
     }
 
@@ -789,283 +855,104 @@ impl EmitCtx {
     }
 
     fn emit_text(&self, el: &ElementNode) -> TokenStream2 {
-        let content = el.children.first().map(|c| match c {
-            Node::Expr(e) | Node::OptionalExpr(e) | Node::SpreadExpr(e) => quote! { #e },
-            Node::Text(lit) => quote! { #lit },
-            _ => quote! { "" },
-        });
-
-        let ctor = match content {
-            Some(c) => quote! { text(#c) },
-            None => quote! { text("") },
+        let content = match el.children.as_slice() {
+            [] => quote! { "" },
+            [Node::Expr(e), rest @ ..] => {
+                self.reject_extra_text(rest);
+                quote! { #e }
+            }
+            [Node::Text(lit), rest @ ..] => {
+                self.reject_extra_text(rest);
+                quote! { #lit }
+            }
+            [first, ..] => {
+                self.error(
+                    node_span(first),
+                    "`<text>` content must be a \"string\" or a {expression}",
+                );
+                quote! { "" }
+            }
         };
 
-        let mut chain = ctor;
+        let mut chain = quote! { text(#content) };
         for attr in &el.attrs {
-            chain = self.emit_text_attr(chain, attr);
+            chain = self.emit_plain_attr(chain, attr);
         }
 
         quote! { #chain.into_any() }
     }
 
-    fn emit_icon(&self, el: &ElementNode) -> TokenStream2 {
-        let mut svg_expr = None;
-        let mut size_expr = None;
-        let mut extra = Vec::new();
+    fn reject_extra_text(&self, rest: &[Node]) {
+        for child in rest {
+            self.error(
+                node_span(child),
+                "`<text>` takes one child; join the pieces with format!()",
+            );
+        }
+    }
 
-        let mut svg_reactive = false;
-        let mut size_reactive = false;
+    fn emit_icon(&self, el: &ElementNode) -> TokenStream2 {
+        self.reject_children(el, "`<icon>` takes no children; pass `svg={...}`");
+        let mut svg = quote! { "" };
+        let mut size = quote! { 16.0 };
+        let mut extra = Vec::new();
         for attr in &el.attrs {
             match attr {
-                Attr::KeyValue(name, expr) if name == "svg" => svg_expr = Some(expr.clone()),
-                Attr::KeyValue(name, expr) if name == "size" => size_expr = Some(expr.clone()),
+                Attr::KeyValue(name, expr) if name == "svg" => svg = quote! { #expr },
+                Attr::KeyValue(name, expr) if name == "size" => size = quote! { #expr },
                 Attr::ReactiveKeyValue(name, expr) if name == "svg" => {
-                    svg_expr = Some(expr.clone());
-                    svg_reactive = true;
+                    svg = quote! { cx.read(#expr) };
                 }
                 Attr::ReactiveKeyValue(name, expr) if name == "size" => {
-                    size_expr = Some(expr.clone());
-                    size_reactive = true;
+                    size = quote! { cx.read(#expr) };
                 }
                 other => extra.push(other),
             }
         }
 
-        let svg = match (svg_expr, svg_reactive) {
-            (Some(e), true) => quote! { cx.read(#e) },
-            (Some(e), false) => quote! { #e },
-            (None, _) => quote! { "" },
-        };
-        let size = match (size_expr, size_reactive) {
-            (Some(e), true) => quote! { cx.read(#e) },
-            (Some(e), false) => quote! { #e },
-            (None, _) => quote! { 16.0 },
-        };
-
         let mut chain = quote! { svg_icon(#svg, #size) };
-        for attr in &extra {
-            match attr {
-                Attr::KeyValue(name, expr) => {
-                    chain = quote! { #chain.#name(#expr) };
-                }
-                Attr::ReactiveKeyValue(name, expr) => {
-                    chain = quote! { #chain.#name(cx.read(#expr)) };
-                }
-                Attr::Flag(name) => {
-                    chain = quote! { #chain.#name() };
-                }
-                Attr::Class(_) | Attr::IfAttr(_, _) | Attr::When(_, _) => {}
-            }
+        for attr in extra {
+            chain = self.emit_plain_attr(chain, attr);
         }
-
         quote! { #chain.into_any() }
     }
 
     fn emit_component(&self, path: &syn::Path, el: &ElementNode) -> TokenStream2 {
-        let constructor_arg_names = constructor_arg_order(path);
-        let mut required_args = vec![None; constructor_arg_names.len()];
-        let mut builder_calls = Vec::new();
-        let mut errors = Vec::new();
+        let args = el.ctor_args.iter().flatten();
+        let mut chain = quote! { #path::new(#(#args),*) };
 
         for attr in &el.attrs {
-            match attr {
-                Attr::KeyValue(name, expr) => {
-                    if let Some(index) = constructor_arg_index(path, name) {
-                        if required_args[index].is_some() {
-                            errors.push(
-                                syn::Error::new_spanned(
-                                    name,
-                                    format!(
-                                        "duplicate constructor arg `{}` for component `{}`",
-                                        name,
-                                        path.segments
-                                            .last()
-                                            .map(|segment| segment.ident.to_string())
-                                            .unwrap_or_default()
-                                    ),
-                                )
-                                .to_compile_error(),
-                            );
-                        } else {
-                            required_args[index] = Some(quote! { #expr });
-                        }
-                    } else {
-                        builder_calls.push(quote! { .#name(#expr) });
-                    }
-                }
-                Attr::ReactiveKeyValue(name, expr) => {
-                    if let Some(index) = constructor_arg_index(path, name) {
-                        if required_args[index].is_some() {
-                            errors.push(
-                                syn::Error::new_spanned(
-                                    name,
-                                    format!(
-                                        "duplicate constructor arg `{}` for component `{}`",
-                                        name,
-                                        path.segments
-                                            .last()
-                                            .map(|segment| segment.ident.to_string())
-                                            .unwrap_or_default()
-                                    ),
-                                )
-                                .to_compile_error(),
-                            );
-                        } else {
-                            required_args[index] = Some(quote! { cx.read(#expr) });
-                        }
-                    } else {
-                        builder_calls.push(quote! { .#name(cx.read(#expr)) });
-                    }
-                }
-                Attr::Flag(name) => {
-                    builder_calls.push(quote! { .#name() });
-                }
-                Attr::Class(lit) => {
-                    for call in self.class_to_calls(lit) {
-                        builder_calls.push(call);
-                    }
-                }
-                Attr::IfAttr(_, _) => {}
-                Attr::When(_, _) => {} // handled in second pass below
-            }
-        }
-
-        for (index, arg_name) in constructor_arg_names.iter().enumerate() {
-            if required_args[index].is_none() {
-                errors.push(
-                    syn::Error::new_spanned(
-                        path,
-                        format!(
-                            "missing constructor arg `{}` for component `{}`",
-                            arg_name,
-                            path.segments
-                                .last()
-                                .map(|segment| segment.ident.to_string())
-                                .unwrap_or_default()
-                        ),
-                    )
-                    .to_compile_error(),
-                );
-            }
-        }
-
-        if !errors.is_empty() {
-            return quote! {{
-                #(#errors)*
-                unreachable!()
-            }};
-        }
-
-        let mut chain = if required_args.is_empty() {
-            quote! { #path::new() }
-        } else {
-            let required_args = required_args.into_iter().flatten();
-            quote! { #path::new(#(#required_args),*) }
-        };
-
-        for call in &builder_calls {
-            chain = quote! { #chain #call };
-        }
-
-        // Apply @when directives
-        for attr in &el.attrs {
-            if let Attr::When(cond, inner_attrs) = attr {
-                let mut inner = quote! { __w };
-                for a in inner_attrs {
-                    match a {
-                        Attr::Flag(name) => {
-                            inner = quote! { #inner.#name() };
-                        }
-                        Attr::KeyValue(name, expr) => {
-                            inner = quote! { #inner.#name(#expr) };
-                        }
-                        Attr::ReactiveKeyValue(name, expr) => {
-                            inner = quote! { #inner.#name(cx.read(#expr)) };
-                        }
-                        Attr::Class(lit) => {
-                            for call in self.class_to_calls(lit) {
-                                inner = quote! { #inner #call };
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                chain = quote! { { let __w = #chain; if #cond { #inner } else { __w } } };
-            }
+            chain = self.emit_plain_attr(chain, attr);
         }
 
         for child in &el.children {
-            chain = self.emit_component_child(chain, child);
+            chain = match child {
+                Node::Element(ElementNode {
+                    tag: Tag::Slot(method),
+                    attrs,
+                    children,
+                    ..
+                }) => {
+                    for attr in attrs {
+                        self.error(
+                            attr.span(),
+                            "slot tags take no attributes; put builder calls on the component",
+                        );
+                    }
+                    if children.is_empty() {
+                        self.error(method.span(), format!("slot `<.{method}>` has no children"));
+                    }
+                    self.emit_slot(chain, method, children)
+                }
+                _ => self.append_child(chain, child),
+            };
         }
 
         quote! { #chain.into_any() }
     }
 
-    fn emit_component_child(&self, chain: TokenStream2, child: &Node) -> TokenStream2 {
-        let Node::Element(slot_el) = child else {
-            return self.append_child(chain, child);
-        };
-        let Some(slot) = component_slot(&slot_el.tag) else {
-            return self.append_child(chain, child);
-        };
-
-        if !slot_el.attrs.is_empty() {
-            let err = syn::Error::new_spanned(
-                tag_tokens(&slot_el.tag),
-                "slot tags do not support attributes; use the parent component attributes for builder methods",
-            )
-            .to_compile_error();
-            return quote! {{ #err #chain }};
-        }
-
-        match slot.kind {
-            ComponentSlotKind::Value => {
-                self.emit_component_value_slot(chain, &slot.method, &slot_el.children, &slot_el.tag)
-            }
-            ComponentSlotKind::Child => {
-                self.emit_component_child_slot(chain, &slot.method, &slot_el.children)
-            }
-        }
-    }
-
-    fn emit_component_value_slot(
-        &self,
-        chain: TokenStream2,
-        method: &Ident,
-        children: &[Node],
-        tag: &Tag,
-    ) -> TokenStream2 {
-        let [child] = children else {
-            let err = syn::Error::new_spanned(
-                tag_tokens(tag),
-                "value slot tags require exactly one child expression or node",
-            )
-            .to_compile_error();
-            return quote! {{ #err #chain }};
-        };
-
-        match self.emit_node(child) {
-            ChildMode::Child(tokens) => quote! { #chain.#method(#tokens) },
-            ChildMode::Optional(tokens) => quote! {{
-                let __quark_slot = #chain;
-                if let Some(__quark_value) = (#tokens) {
-                    __quark_slot.#method(__quark_value)
-                } else {
-                    __quark_slot
-                }
-            }},
-            ChildMode::Spread(_) => {
-                let err = syn::Error::new_spanned(
-                    tag_tokens(tag),
-                    "value slot tags do not support spread children",
-                )
-                .to_compile_error();
-                quote! {{ #err #chain }}
-            }
-        }
-    }
-
-    fn emit_component_child_slot(
+    /// Call `.method(child)` once per child of a `<.method>` slot.
+    fn emit_slot(
         &self,
         mut chain: TokenStream2,
         method: &Ident,
@@ -1099,31 +986,38 @@ impl EmitCtx {
     // -----------------------------------------------------------------------
 
     fn class_to_calls(&self, lit: &LitStr) -> Vec<TokenStream2> {
-        let value = lit.value();
-        let mut calls = Vec::new();
-        for class in value.split_whitespace() {
-            calls.push(self.class_token_to_call(class, lit.span()));
-        }
-        calls
+        lit.value()
+            .split_whitespace()
+            .filter_map(|class| self.class_token_to_call(class, lit.span()))
+            .collect()
     }
 
-    fn class_token_to_call(&self, class: &str, span: Span) -> TokenStream2 {
+    fn class_token_to_call(&self, class: &str, span: Span) -> Option<TokenStream2> {
         let mapped = match class {
             "shrink-0" => "flex_shrink_0",
-            "shrink" => "flex_shrink_0",
             "grow" => "flex_grow",
-            "grow-0" => "flex_grow",
+            "grow-0" => return Some(quote_spanned! { span=> .flex_grow_val(0.0) }),
             "font-bold" => "bold",
             "font-semibold" => "semibold",
             "font-medium" => "medium",
             "font-mono" => "mono",
-            other => {
-                let method = Ident::new(&other.replace('-', "_"), span);
-                return quote! { .#method() };
-            }
+            other => &other.replace('-', "_"),
         };
-        let method = Ident::new(mapped, span);
-        quote! { .#method() }
+        // `syn::parse_str` rejects keywords and non-identifier characters
+        // (`w-1/2`) instead of panicking like `Ident::new`.
+        match syn::parse_str::<Ident>(mapped) {
+            Ok(mut method) => {
+                method.set_span(span);
+                Some(quote! { .#method() })
+            }
+            Err(_) => {
+                self.error(
+                    span,
+                    format!("class `{class}` does not name a builder method"),
+                );
+                None
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1132,7 +1026,6 @@ impl EmitCtx {
 
     fn emit_styled_attr(&self, chain: TokenStream2, attr: &Attr) -> TokenStream2 {
         match attr {
-            Attr::Flag(name) => quote! { #chain.#name() },
             Attr::KeyValue(name, expr) => {
                 if let Expr::Tuple(tup) = expr {
                     let elems = &tup.elems;
@@ -1144,19 +1037,10 @@ impl EmitCtx {
                     quote! { #chain.#name(#expr) }
                 }
             }
-            Attr::ReactiveKeyValue(name, expr) => {
-                if self.should_autoscale(name) {
-                    let scale = self.scale.as_ref().unwrap();
-                    quote! { #chain.#name((cx.read(#expr) * #scale).round()) }
-                } else {
-                    quote! { #chain.#name(cx.read(#expr)) }
-                }
+            Attr::ReactiveKeyValue(name, expr) if self.should_autoscale(name) => {
+                let scale = self.scale.as_ref().unwrap();
+                quote! { #chain.#name((cx.read(#expr) * #scale).round()) }
             }
-            Attr::Class(lit) => {
-                let calls = self.class_to_calls(lit);
-                quote! { #chain #(#calls)* }
-            }
-            Attr::IfAttr(name, if_expr) => self.emit_if_attr(chain, name, if_expr),
             Attr::When(cond, attrs) => {
                 let mut inner = quote! { __w };
                 for a in attrs {
@@ -1164,6 +1048,7 @@ impl EmitCtx {
                 }
                 quote! { { let __w = #chain; if #cond { #inner } else { __w } } }
             }
+            _ => self.emit_plain_attr(chain, attr),
         }
     }
 
@@ -1201,7 +1086,9 @@ impl EmitCtx {
         }
     }
 
-    fn emit_text_attr(&self, chain: TokenStream2, attr: &Attr) -> TokenStream2 {
+    /// Builder calls with no auto-scaling or tuple splatting: text, icon,
+    /// and component attributes.
+    fn emit_plain_attr(&self, chain: TokenStream2, attr: &Attr) -> TokenStream2 {
         match attr {
             Attr::Flag(name) => quote! { #chain.#name() },
             Attr::KeyValue(name, expr) => quote! { #chain.#name(#expr) },
@@ -1214,7 +1101,7 @@ impl EmitCtx {
             Attr::When(cond, attrs) => {
                 let mut inner = quote! { __w };
                 for a in attrs {
-                    inner = self.emit_text_attr(inner, a);
+                    inner = self.emit_plain_attr(inner, a);
                 }
                 quote! { { let __w = #chain; if #cond { #inner } else { __w } } }
             }
@@ -1231,349 +1118,42 @@ impl EmitCtx {
 }
 
 fn unwrap_block_expr(expr: &Expr) -> TokenStream2 {
-    if let Expr::Block(block) = expr {
-        if block.block.stmts.len() == 1 {
-            let stmt = &block.block.stmts[0];
-            return quote! { #stmt };
-        }
+    if let Expr::Block(block) = expr
+        && block.block.stmts.len() == 1
+    {
+        let stmt = &block.block.stmts[0];
+        return quote! { #stmt };
     }
     quote! { #expr }
 }
 
-fn constructor_arg_order(path: &syn::Path) -> &'static [&'static str] {
-    let Some(last) = path.segments.last() else {
-        return &[];
-    };
-    match last.ident.to_string().as_str() {
-        "Button" => &["action"],
-        "DropdownItem" => &["label", "action"],
-        "TabItem" => &["label", "action"],
-        "SegmentedItem" => &["label", "action", "selected"],
-        "Modal" => &[
-            "title",
-            "subtitle",
-            "icon",
-            "max_width",
-            "window_width",
-            "window_height",
-        ],
-        _ => &[],
-    }
-}
-
-fn constructor_arg_index(path: &syn::Path, name: &Ident) -> Option<usize> {
-    let name = name.to_string();
-    constructor_arg_order(path)
-        .iter()
-        .position(|candidate| *candidate == name)
-}
-
-fn component_slot(tag: &Tag) -> Option<ComponentSlot> {
-    let Tag::Component(path) = tag else {
-        return None;
-    };
-    if path.leading_colon.is_some() || path.segments.len() != 1 {
-        return None;
-    }
-
-    let ident = &path.segments[0].ident;
-    let (method, kind) = match ident.to_string().as_str() {
-        "Icon" => ("icon", ComponentSlotKind::Value),
-        "Label" => ("label", ComponentSlotKind::Value),
-        "Tooltip" => ("tooltip", ComponentSlotKind::Value),
-        "Description" => ("description", ComponentSlotKind::Value),
-        "Count" => ("count", ComponentSlotKind::Value),
-        "Shortcut" => ("shortcut", ComponentSlotKind::Value),
-        "Body" => ("body_child", ComponentSlotKind::Child),
-        "Footer" => ("footer_child", ComponentSlotKind::Child),
-        "Left" => ("left_child", ComponentSlotKind::Child),
-        "Right" => ("right_child", ComponentSlotKind::Child),
-        _ => return None,
-    };
-
-    Some(ComponentSlot {
-        method: Ident::new(method, ident.span()),
-        kind,
-    })
-}
-
-fn tag_tokens(tag: &Tag) -> TokenStream2 {
+fn tag_name(tag: &Tag) -> String {
     match tag {
-        Tag::Div => quote! { div },
-        Tag::Text => quote! { text },
-        Tag::Icon => quote! { icon },
-        Tag::Spacer => quote! { spacer },
-        Tag::Fragment => quote! { fragment },
-        Tag::Component(path) => quote! { #path },
+        Tag::Div => "div".into(),
+        Tag::Text => "text".into(),
+        Tag::Icon => "icon".into(),
+        Tag::Spacer => "spacer".into(),
+        Tag::Fragment => "fragment".into(),
+        Tag::Component(path) => quote!(#path).to_string(),
+        Tag::Slot(name) => format!(".{name}"),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn emit(input: &str) -> String {
-        let view_input: ViewInput = syn::parse_str(input).expect("parse view input");
-        let ctx = EmitCtx {
-            scale: view_input.scale,
-        };
-        match ctx.emit_node(&view_input.root) {
-            ChildMode::Child(tokens) | ChildMode::Optional(tokens) | ChildMode::Spread(tokens) => {
-                tokens.to_string()
-            }
-        }
-    }
-
-    #[test]
-    fn component_slots_lower_to_builder_calls() {
-        let actual = emit(
-            r#"
-            <Button action={Action::ShowWorkingTree} active={is_active} tooltip={"Show working tree changes"}>
-                <Icon>{lucide::FOLDER_GIT}</Icon>
-                <Label>{"Working tree"}</Label>
-            </Button>
-            "#,
-        );
-
-        let expected = quote! {
-            Button::new(Action::ShowWorkingTree)
-                .active(is_active)
-                .tooltip("Show working tree changes")
-                .icon(lucide::FOLDER_GIT)
-                .label("Working tree")
-                .into_any()
-        }
-        .to_string();
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn child_slots_expand_to_repeated_child_builder_calls() {
-        let actual = emit(
-            r#"
-            <Toolbar>
-                <Left>
-                    <Button action={Action::ToggleSidebar} />
-                    if show_search {
-                        <Button action={Action::CloseSearch} />
-                    }
-                </Left>
-                <Right>
-                    for action in actions {
-                        <Button action={action} />
-                    }
-                </Right>
-            </Toolbar>
-            "#,
-        );
-
-        let expected = quote! {
-            ((actions)
-                .into_iter()
-                .flat_map(|action| {
-                    let mut __quark_children = Vec::new();
-                    __quark_children.push(Button::new(action).into_any());
-                    __quark_children
-                })
-                .collect::<Vec<_>>())
-                .into_iter()
-                .fold(
-                    {
-                        let __quark_slot = Toolbar::new()
-                            .left_child(Button::new(Action::ToggleSidebar).into_any());
-                        if let Some(__quark_child) =
-                            (if show_search {
-                                Some(Button::new(Action::CloseSearch).into_any())
-                            } else {
-                                None
-                            })
-                        {
-                            __quark_slot.left_child(__quark_child)
-                        } else {
-                            __quark_slot
-                        }
-                    },
-                    |__quark_slot, __quark_child| {
-                        __quark_slot.right_child(__quark_child)
-                    }
-                )
-                .into_any()
-        }
-        .to_string();
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn non_slot_component_children_still_use_child() {
-        let actual = emit(
-            r#"
-            <Parent>
-                <Avatar />
-                <Button action={Action::ToggleSidebar} />
-            </Parent>
-            "#,
-        );
-
-        let expected = quote! {
-            Parent::new()
-                .child(Avatar::new().into_any())
-                .child(Button::new(Action::ToggleSidebar).into_any())
-                .into_any()
-        }
-        .to_string();
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn modal_constructor_args_are_ordered_by_signature() {
-        let actual = emit(
-            r#"
-            <Modal window_height={height}
-                   title={"Keyboard Shortcuts"}
-                   icon={lucide::COMMAND}
-                   max_width={max_width}
-                   subtitle={"Press ? to dismiss"}
-                   window_width={width}
-                   gap={Sp::XL}>
-                <Body>{body}</Body>
-                <Footer>
-                    <Button action={Action::CloseOverlay} />
-                </Footer>
-            </Modal>
-            "#,
-        );
-
-        let expected = quote! {
-            Modal::new(
-                "Keyboard Shortcuts",
-                "Press ? to dismiss",
-                lucide::COMMAND,
-                max_width,
-                width,
-                height
-            )
-            .gap(Sp::XL)
-            .body_child(body)
-            .footer_child(Button::new(Action::CloseOverlay).into_any())
-            .into_any()
-        }
-        .to_string();
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn for_loops_flatten_multiple_children() {
-        let actual = emit(
-            r#"
-            <div>
-                for item in items {
-                    if show_separators {
-                        <text>{"|"}</text>
-                    }
-                    <text>{item}</text>
-                }
-            </div>
-            "#,
-        );
-
-        let expected = quote! {
-            div()
-                .children(
-                    (items)
-                        .into_iter()
-                        .flat_map(|item| {
-                            let mut __quark_children = Vec::new();
-                            if let Some(__quark_child) =
-                                (if show_separators {
-                                    Some(text("|").into_any())
-                                } else {
-                                    None
-                                })
-                            {
-                                __quark_children.push(__quark_child);
-                            }
-                            __quark_children.push(text(item).into_any());
-                            __quark_children
-                        })
-                        .collect::<Vec<_>>()
-                )
-                .into_any()
-        }
-        .to_string();
-
-        assert_eq!(actual, expected);
-    }
-
-    // Regression: an `if` whose body holds multiple children used to be
-    // wrapped in a bare `div()`, which became an unstyled flex item in the
-    // parent and broke percentage sizing (e.g. `h_full`) for descendants.
-    // The fix emits a `Spread` instead so the branch's children flow into
-    // the parent inline.
-    #[test]
-    fn multi_child_if_body_spreads_instead_of_wrapping_in_div() {
-        let actual = emit(
-            r#"
-            <div>
-                if picker_open {
-                    <text>{"divider"}</text>
-                    <text>{"compare"}</text>
-                }
-            </div>
-            "#,
-        );
-
-        let expected = quote! {
-            div()
-                .children(
-                    (if picker_open {
-                        Some({
-                            let mut __quark_children = Vec::new();
-                            __quark_children.push(text("divider").into_any());
-                            __quark_children.push(text("compare").into_any());
-                            __quark_children
-                        })
-                    } else {
-                        None
-                    })
-                        .into_iter()
-                        .flatten()
-                )
-                .into_any()
-        }
-        .to_string();
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn fragment_flattens_children_into_parent() {
-        let actual = emit(
-            r#"
-            <div>
-                <fragment>
-                    <text>{"left"}</text>
-                    <text>{"right"}</text>
-                </fragment>
-            </div>
-            "#,
-        );
-
-        let expected = quote! {
-            div()
-                .children({
-                    let mut __quark_children = Vec::new();
-                    __quark_children.push(text("left").into_any());
-                    __quark_children.push(text("right").into_any());
-                    __quark_children
-                })
-                .into_any()
-        }
-        .to_string();
-
-        assert_eq!(actual, expected);
+fn node_span(node: &Node) -> Span {
+    match node {
+        Node::Element(el) => match &el.tag {
+            Tag::Component(path) => path.span(),
+            Tag::Slot(name) => name.span(),
+            _ => el
+                .attrs
+                .first()
+                .map(Attr::span)
+                .unwrap_or_else(Span::call_site),
+        },
+        Node::Expr(e) | Node::OptionalExpr(e) | Node::SpreadExpr(e) => e.span(),
+        Node::Text(lit) => lit.span(),
+        Node::IfChain(chain) => chain.cond.span(),
+        Node::ForLoop(fl) => fl.iter.span(),
+        Node::MatchExpr(m) => m.expr.span(),
     }
 }

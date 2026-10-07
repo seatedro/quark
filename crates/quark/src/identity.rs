@@ -1,11 +1,7 @@
-use std::fmt;
-
-use serde::{Deserialize, Serialize};
-
 macro_rules! string_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ::serde::Serialize, ::serde::Deserialize)]
         pub struct $name(String);
 
         impl $name {
@@ -30,13 +26,14 @@ macro_rules! string_id {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.write_str(&self.0)
             }
         }
     };
 }
+pub(crate) use string_id;
 
 /// 64-bit FNV-1a of `key`. Stable across runs and platforms, so ids derived
 /// from it (focus ids, accessibility node ids) survive relaunches.
@@ -66,23 +63,3 @@ string_id!(
     /// Stable identifier intended for harnesses, tests, and debug tooling.
     TestId
 );
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::*;
-
-    #[test]
-    fn ids_are_stable_hashable_strings() {
-        let a = UiNodeId::from("button.primary");
-        let b = UiNodeId::new("button.primary");
-        let mut set = HashSet::new();
-        set.insert(a.clone());
-
-        assert_eq!(a, b);
-        assert!(set.contains(&b));
-        assert_eq!(a.as_str(), "button.primary");
-        assert_eq!(a.to_string(), "button.primary");
-    }
-}

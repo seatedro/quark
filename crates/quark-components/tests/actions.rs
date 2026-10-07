@@ -84,7 +84,11 @@ fn hit_actions(root: AnyElement) -> (Vec<Action>, Vec<Action>) {
         .collect();
     let scrolls = scroll_points
         .into_iter()
-        .flat_map(|(x, y)| router.wheel(x, y, 2).actions)
+        .flat_map(|(x, y)| {
+            router
+                .wheel(x, y, 2.0 * quark_ui::element::WHEEL_LINE_PX)
+                .actions
+        })
         .collect();
     (clicks, scrolls)
 }

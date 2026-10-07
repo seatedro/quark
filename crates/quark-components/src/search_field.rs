@@ -21,10 +21,8 @@ pub fn search_field(
     let trailing = if has_value {
         on_clear.map(|action| {
             view! {
-                <Button action={action}
-                        tooltip={"Clear"}
-                        size={ButtonSize::Compact}>
-                    <Icon>{lucide::X}</Icon>
+                <Button(action) tooltip={"Clear"} size={ButtonSize::Compact}>
+                    <.icon>{lucide::X}</.icon>
                 </Button>
             }
         })

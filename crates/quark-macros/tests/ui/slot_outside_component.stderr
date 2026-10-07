@@ -1,0 +1,5 @@
+error: slot `<.label>` must be a direct child of a component
+ --> tests/ui/slot_outside_component.rs:4:28
+  |
+4 |     let _ = view! { <div><.label>"x"</.label></div> };
+  |                            ^^^^^

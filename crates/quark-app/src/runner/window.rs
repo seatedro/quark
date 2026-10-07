@@ -31,7 +31,7 @@ pub(super) struct WindowState {
     // Declared before `window` so the surface goes first on drop.
     pub(super) renderer: Renderer,
     pub(super) accessibility: AccessibilityAdapter,
-    pub(super) accessibility_tree: Arc<Mutex<TreeUpdate>>,
+    pub(super) accessibility_state: Arc<AccessibilityState>,
     pub(super) window: Arc<Window>,
     pub(super) input: InputNormalizer,
     pub(super) scale_factor: f64,
@@ -56,12 +56,12 @@ impl WindowState {
             return;
         };
         let size = self.window.inner_size();
-        let geometry = WindowGeometry {
-            position: self.window.outer_position().ok().map(|p| (p.x, p.y)),
-            width: size.width,
-            height: size.height,
-            maximized: self.window.is_maximized(),
-        };
+        let geometry = WindowGeometry::from_physical(
+            self.window.outer_position().ok().map(|p| (p.x, p.y)),
+            (size.width, size.height),
+            self.window.scale_factor(),
+            self.window.is_maximized(),
+        );
         if let Err(error) = geometry.save_to(&path) {
             tracing::warn!("could not save window state to {}: {error}", path.display());
         }
@@ -142,12 +142,7 @@ pub(super) fn window_attributes(
         .with_window_icon(options.icon.clone())
         // Shown once the renderer exists, so the first paint isn't blank.
         .with_visible(false);
-    if let Some(saved) = options
-        .persist_key
-        .as_deref()
-        .and_then(state_path)
-        .and_then(|path| WindowGeometry::load_from(&path))
-    {
+    if let Some(path) = options.persist_key.as_deref().and_then(state_path) {
         let monitors: Vec<MonitorArea> = event_loop
             .available_monitors()
             .map(|monitor| {
@@ -158,15 +153,18 @@ pub(super) fn window_attributes(
                     y: position.y,
                     width: size.width,
                     height: size.height,
+                    scale_factor: monitor.scale_factor(),
                 }
             })
             .collect();
-        let geometry = saved.clamped_to(&monitors);
-        attrs = attrs
-            .with_inner_size(PhysicalSize::new(geometry.width, geometry.height))
-            .with_maximized(geometry.maximized);
-        if let Some((x, y)) = geometry.position {
-            attrs = attrs.with_position(PhysicalPosition::new(x, y));
+        if let Some(saved) = WindowGeometry::load_from(&path, &monitors) {
+            let geometry = saved.clamped_to(&monitors);
+            attrs = attrs
+                .with_inner_size(LogicalSize::new(geometry.width, geometry.height))
+                .with_maximized(geometry.maximized);
+            if let Some((x, y)) = geometry.position {
+                attrs = attrs.with_position(LogicalPosition::new(x, y));
+            }
         }
     }
     if let Some((width, height)) = options.min_size {
@@ -202,3 +200,72 @@ pub(super) fn position_traffic_lights(window: &Window, lights: Option<TrafficLig
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn position_traffic_lights(_window: &Window, _lights: Option<TrafficLights>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the clock answers at each step, as text.
+    fn run(steps: &[Step]) -> Vec<String> {
+        let launch = Instant::now();
+        let at = |ms: u64| launch + Duration::from_millis(ms);
+        let mut clock = FrameClock::default();
+        steps
+            .iter()
+            .filter_map(|step| match *step {
+                Step::Schedule(ms) => {
+                    clock.schedule(at(ms));
+                    None
+                }
+                Step::Poll(ms) => Some(match clock.poll(at(ms)) {
+                    Ok(()) => format!("poll {ms}: due"),
+                    Err(Some(next)) => format!("poll {ms}: wait {}", (next - launch).as_millis()),
+                    Err(None) => format!("poll {ms}: idle"),
+                }),
+                Step::Tick(ms) => {
+                    let timing = clock.tick(at(ms), launch);
+                    Some(format!(
+                        "tick {ms}: elapsed {} delta {}",
+                        timing.elapsed.as_millis(),
+                        timing.delta.as_millis()
+                    ))
+                }
+            })
+            .collect()
+    }
+
+    enum Step {
+        Schedule(u64),
+        Poll(u64),
+        Tick(u64),
+    }
+
+    #[test]
+    fn frame_clock_schedules_and_times_frames() {
+        use Step::*;
+        let cases: [(&str, &[Step], &[&str]); 4] = [
+            ("idle until asked", &[Poll(5)], &["poll 5: idle"]),
+            (
+                "a request is due once",
+                &[Schedule(10), Poll(5), Poll(10), Poll(11)],
+                &["poll 5: wait 10", "poll 10: due", "poll 11: idle"],
+            ),
+            (
+                "the earliest request wins",
+                &[Schedule(30), Schedule(10), Schedule(20), Poll(0)],
+                &["poll 0: wait 10"],
+            ),
+            (
+                "the first frame has no delta",
+                &[Tick(16), Tick(40)],
+                &[
+                    "tick 16: elapsed 16 delta 0",
+                    "tick 40: elapsed 40 delta 24",
+                ],
+            ),
+        ];
+        for (name, steps, expected) in cases {
+            assert_eq!(run(steps), expected, "{name}");
+        }
+    }
+}

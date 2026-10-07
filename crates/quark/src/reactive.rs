@@ -4,14 +4,17 @@
 //! Values live in a slot arena. Reads are automatically tracked by the current
 //! observer scope; writes mark subscribers for lazy recomputation.
 //!
-//! The reactive graph has three states per node: `Clean`, `Check`, `Dirty`.
-//! Writes mark the source `Dirty` and all transitive subscribers `Check`.
-//! Memos recompute lazily on read; if their recomputed value equals the
-//! previous value (`PartialEq`), dependents stay `Clean` — no wasted work.
+//! Memos carry one of three states: `Clean`, `Check`, `Dirty`. A write marks
+//! the signal's direct subscribers `Dirty` and every memo further downstream
+//! `Check`; raw signals carry no state, so no read can consume a change
+//! before the memos see it. Memos recompute lazily on read. A recomputed
+//! value equal to the previous one (`PartialEq`) leaves `Check` dependents to
+//! settle back to `Clean` without running.
 
 use std::any::Any;
 use std::cell::RefCell;
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // SignalId — stable arena index + generation for use-after-free detection
@@ -116,35 +119,41 @@ thread_local! {
 
 fn track_read(id: SignalId) {
     OBSERVER.with(|obs| {
-        if let Some(scope) = obs.borrow_mut().as_mut() {
-            if !scope.dependencies.contains(&id) {
-                scope.dependencies.push(id);
-            }
+        if let Some(scope) = obs.borrow_mut().as_mut()
+            && !scope.dependencies.contains(&id)
+        {
+            scope.dependencies.push(id);
         }
     });
+}
+
+/// Restores the enclosing tracking scope when dropped, so a panic inside a
+/// tracked closure does not leave the thread recording into a dead scope.
+struct ScopeRestore {
+    prev: Option<TrackingScope>,
+}
+
+impl Drop for ScopeRestore {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        OBSERVER.with(|obs| *obs.borrow_mut() = prev);
+    }
 }
 
 /// Run `f` with dependency tracking enabled. Returns the result plus the list
 /// of signal IDs that were read during `f`.
 pub fn with_tracking<R>(f: impl FnOnce() -> R) -> (R, Vec<SignalId>) {
-    let prev = OBSERVER.with(|obs| obs.borrow_mut().take());
-
-    OBSERVER.with(|obs| {
-        *obs.borrow_mut() = Some(TrackingScope {
+    let prev = OBSERVER.with(|obs| {
+        obs.borrow_mut().replace(TrackingScope {
             dependencies: Vec::new(),
-        });
+        })
     });
-
+    let restore = ScopeRestore { prev };
     let result = f();
-
     let scope = OBSERVER
         .with(|obs| obs.borrow_mut().take())
         .expect("tracking scope disappeared during with_tracking");
-
-    OBSERVER.with(|obs| {
-        *obs.borrow_mut() = prev;
-    });
-
+    drop(restore);
     (result, scope.dependencies)
 }
 
@@ -152,36 +161,150 @@ pub fn with_tracking<R>(f: impl FnOnce() -> R) -> (R, Vec<SignalId>) {
 // Internal state
 // ---------------------------------------------------------------------------
 
+/// Freshness of a memo. Raw signals are always `Clean`: a write pushes the
+/// change into the subscribers' state instead of keeping it on the source,
+/// so no read of the source can consume it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlotState {
+enum NodeState {
     Clean,
+    /// A transitive source changed; a direct source may or may not have.
     Check,
+    /// A direct source changed (or the memo never ran): must recompute.
     Dirty,
 }
 
-struct Slot {
-    value: Option<Box<dyn Any>>,
-    generation: u32,
+type ComputeFn = Rc<dyn Fn(&SignalStore) -> Box<dyn Any>>;
+
+struct Memo {
+    compute: ComputeFn,
+    /// `PartialEq` on the erased values; equal results stop propagation.
+    eq: fn(&dyn Any, &dyn Any) -> bool,
 }
 
-/// Compute callback for a memo. Given the store and an optional reference to
-/// the previous value, returns the new value plus a bool indicating whether
-/// the value actually changed (`true`) or stayed equal (`false`).
-type MemoFn = Box<dyn Fn(&SignalStore, Option<&dyn Any>) -> (Box<dyn Any>, bool)>;
+struct Node {
+    value: Option<Box<dyn Any>>,
+    generation: u32,
+    memo: Option<Memo>,
+    state: NodeState,
+    /// Set while the memo's compute runs; a read that reaches it is a cycle.
+    computing: bool,
+    /// Downstream edges: memos that read this node.
+    subscribers: Vec<u32>,
+    /// Upstream edges (memos only): nodes this memo read on its last run.
+    sources: Vec<u32>,
+}
+
+impl Node {
+    fn reset(&mut self, value: Option<Box<dyn Any>>, memo: Option<Memo>) {
+        debug_assert!(self.subscribers.is_empty() && self.sources.is_empty());
+        self.state = if memo.is_some() {
+            NodeState::Dirty
+        } else {
+            NodeState::Clean
+        };
+        self.value = value;
+        self.memo = memo;
+        self.computing = false;
+    }
+}
 
 struct Inner {
-    slots: Vec<Slot>,
+    nodes: Vec<Node>,
     free_list: Vec<u32>,
-    /// Downstream edges: `subscribers[i]` = slots that depend on `i`.
-    subscribers: Vec<Vec<u32>>,
-    /// Upstream edges (memos only): `sources[i]` = slots `i` depends on.
-    sources: Vec<Vec<u32>>,
-    state: Vec<SlotState>,
-    memo_fns: Vec<Option<MemoFn>>,
-    /// Any signal ever written since the last `clear_dirty()` — used by the
-    /// frame loop to decide whether to rerender. Separate from per-slot state
-    /// because states can return to Clean during realize().
+    /// Any signal written since the last `clear_dirty()`. The frame loop
+    /// uses it to decide whether to rerender.
     any_dirty: bool,
+    /// Reused traversal stack for dirty propagation, so writes do not
+    /// allocate once the graph has warmed up.
+    scratch: Vec<u32>,
+    /// Memos currently computing, outermost first. Used for cycle reports.
+    compute_stack: Vec<u32>,
+}
+
+impl Inner {
+    fn live(&self, id: SignalId) -> bool {
+        self.nodes.get(id.index as usize).is_some_and(|n| {
+            n.generation == id.generation && (n.value.is_some() || n.memo.is_some())
+        })
+    }
+
+    fn node_checked(&mut self, id: SignalId) -> &mut Node {
+        assert!(self.live(id), "stale signal handle (generation mismatch)");
+        &mut self.nodes[id.index as usize]
+    }
+
+    /// Mark `idx`'s direct subscribers `Dirty` and every node further
+    /// downstream `Check`. A node that is already `Check` or `Dirty` has all
+    /// of its downstream at least `Check`, so the walk stops there; node
+    /// state doubles as the visited mark.
+    fn mark_subscribers(&mut self, idx: usize) {
+        let Inner { nodes, scratch, .. } = self;
+        scratch.clear();
+        for i in 0..nodes[idx].subscribers.len() {
+            let sub = nodes[idx].subscribers[i] as usize;
+            let was = std::mem::replace(&mut nodes[sub].state, NodeState::Dirty);
+            if was == NodeState::Clean {
+                scratch.extend_from_slice(&nodes[sub].subscribers);
+            }
+        }
+        while let Some(n) = scratch.pop() {
+            let node = &mut nodes[n as usize];
+            if node.state == NodeState::Clean {
+                node.state = NodeState::Check;
+                scratch.extend_from_slice(&node.subscribers);
+            }
+        }
+    }
+
+    fn rewire_sources(&mut self, idx: u32, deps: Vec<SignalId>) {
+        for src in std::mem::take(&mut self.nodes[idx as usize].sources) {
+            self.nodes[src as usize].subscribers.retain(|&s| s != idx);
+        }
+        let mut sources = Vec::with_capacity(deps.len());
+        for dep in deps {
+            // A dependency disposed during the compute has no node to subscribe to.
+            if !self.live(dep) || sources.contains(&dep.index) {
+                continue;
+            }
+            sources.push(dep.index);
+            self.nodes[dep.index as usize].subscribers.push(idx);
+        }
+        self.nodes[idx as usize].sources = sources;
+    }
+
+    fn cycle_message(&self, idx: u32) -> String {
+        let start = self
+            .compute_stack
+            .iter()
+            .position(|&i| i == idx)
+            .unwrap_or(0);
+        let path: Vec<String> = self.compute_stack[start..]
+            .iter()
+            .chain(std::iter::once(&idx))
+            .map(|i| format!("#{i}"))
+            .collect();
+        format!(
+            "memo cycle: memo #{idx} read itself while computing ({})",
+            path.join(" -> ")
+        )
+    }
+}
+
+/// Clears the computing mark when a compute finishes or unwinds.
+struct ComputeGuard<'a> {
+    store: &'a SignalStore,
+    id: SignalId,
+}
+
+impl Drop for ComputeGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.store.inner.try_borrow_mut() {
+            inner.compute_stack.pop();
+            if inner.live(self.id) {
+                inner.nodes[self.id.index as usize].computing = false;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,10 +321,7 @@ impl std::fmt::Debug for SignalStore {
         match self.inner.try_borrow() {
             Ok(inner) => f
                 .debug_struct("SignalStore")
-                .field(
-                    "len",
-                    &inner.slots.iter().filter(|s| s.value.is_some()).count(),
-                )
+                .field("len", &(inner.nodes.len() - inner.free_list.len()))
                 .field("any_dirty", &inner.any_dirty)
                 .finish(),
             Err(_) => f.write_str("SignalStore { <borrowed> }"),
@@ -213,13 +333,11 @@ impl SignalStore {
     pub fn new() -> Self {
         Self {
             inner: RefCell::new(Inner {
-                slots: Vec::new(),
+                nodes: Vec::new(),
                 free_list: Vec::new(),
-                subscribers: Vec::new(),
-                sources: Vec::new(),
-                state: Vec::new(),
-                memo_fns: Vec::new(),
                 any_dirty: false,
+                scratch: Vec::new(),
+                compute_stack: Vec::new(),
             }),
         }
     }
@@ -239,35 +357,38 @@ impl SignalStore {
             .expect("signal store re-entrancy: tried to write while another access is in progress")
     }
 
+    fn alloc(&self, value: Option<Box<dyn Any>>, memo: Option<Memo>) -> SignalId {
+        let mut inner = self.inner_mut();
+        if let Some(index) = inner.free_list.pop() {
+            let node = &mut inner.nodes[index as usize];
+            node.reset(value, memo);
+            return SignalId {
+                index,
+                generation: node.generation,
+            };
+        }
+        let index = inner.nodes.len() as u32;
+        let mut node = Node {
+            value: None,
+            generation: 0,
+            memo: None,
+            state: NodeState::Clean,
+            computing: false,
+            subscribers: Vec::new(),
+            sources: Vec::new(),
+        };
+        node.reset(value, memo);
+        inner.nodes.push(node);
+        SignalId {
+            index,
+            generation: 0,
+        }
+    }
+
     /// Create a new signal with the given initial value.
     pub fn create<T: 'static>(&self, value: T) -> Signal<T> {
-        let boxed: Box<dyn Any> = Box::new(value);
-        let mut inner = self.inner_mut();
-        let inner = &mut *inner;
-
-        let (index, generation) = if let Some(idx) = inner.free_list.pop() {
-            let slot = &mut inner.slots[idx as usize];
-            slot.value = Some(boxed);
-            inner.subscribers[idx as usize].clear();
-            inner.sources[idx as usize].clear();
-            inner.state[idx as usize] = SlotState::Clean;
-            inner.memo_fns[idx as usize] = None;
-            (idx, slot.generation)
-        } else {
-            let idx = inner.slots.len() as u32;
-            inner.slots.push(Slot {
-                value: Some(boxed),
-                generation: 0,
-            });
-            inner.subscribers.push(Vec::new());
-            inner.sources.push(Vec::new());
-            inner.state.push(SlotState::Clean);
-            inner.memo_fns.push(None);
-            (idx, 0)
-        };
-
         Signal {
-            id: SignalId { index, generation },
+            id: self.alloc(Some(Box::new(value)), None),
             _marker: PhantomData,
         }
     }
@@ -279,48 +400,17 @@ impl SignalStore {
         &self,
         compute: impl Fn(&SignalStore) -> T + 'static,
     ) -> Signal<T> {
-        // Allocate an empty slot; value is produced on first read.
-        let signal: Signal<T> = {
-            let mut inner = self.inner_mut();
-            let inner = &mut *inner;
-            let (index, generation) = if let Some(idx) = inner.free_list.pop() {
-                let slot = &mut inner.slots[idx as usize];
-                slot.value = None;
-                inner.subscribers[idx as usize].clear();
-                inner.sources[idx as usize].clear();
-                inner.state[idx as usize] = SlotState::Dirty;
-                inner.memo_fns[idx as usize] = None;
-                (idx, slot.generation)
-            } else {
-                let idx = inner.slots.len() as u32;
-                inner.slots.push(Slot {
-                    value: None,
-                    generation: 0,
-                });
-                inner.subscribers.push(Vec::new());
-                inner.sources.push(Vec::new());
-                inner.state.push(SlotState::Dirty);
-                inner.memo_fns.push(None);
-                (idx, 0)
-            };
-            Signal {
-                id: SignalId { index, generation },
-                _marker: PhantomData,
-            }
+        fn eq_erased<T: 'static + PartialEq>(a: &dyn Any, b: &dyn Any) -> bool {
+            a.downcast_ref::<T>() == b.downcast_ref::<T>()
+        }
+        let memo = Memo {
+            compute: Rc::new(move |store| Box::new(compute(store)) as Box<dyn Any>),
+            eq: eq_erased::<T>,
         };
-
-        // Wrap compute with PartialEq comparison against the prior cached value.
-        let memo_fn: MemoFn = Box::new(move |store, prev: Option<&dyn Any>| {
-            let new_value = compute(store);
-            let changed = match prev.and_then(|p| p.downcast_ref::<T>()) {
-                Some(old) => *old != new_value,
-                None => true,
-            };
-            (Box::new(new_value) as Box<dyn Any>, changed)
-        });
-
-        self.inner_mut().memo_fns[signal.id.index as usize] = Some(memo_fn);
-        signal
+        Signal {
+            id: self.alloc(None, Some(memo)),
+            _marker: PhantomData,
+        }
     }
 
     /// Read a signal's value (clones it). Registers this signal with the
@@ -342,14 +432,20 @@ impl SignalStore {
     }
 
     fn with_untracked<T: 'static, R>(&self, signal: Signal<T>, f: impl FnOnce(&T) -> R) -> R {
+        {
+            let inner = self.inner_ref();
+            assert!(
+                inner.live(signal.id),
+                "stale signal handle (generation mismatch)"
+            );
+            let node = &inner.nodes[signal.id.index as usize];
+            if node.computing {
+                panic!("{}", inner.cycle_message(signal.id.index));
+            }
+        }
         self.realize(signal.id.index as usize);
         let inner = self.inner_ref();
-        let slot = &inner.slots[signal.id.index as usize];
-        assert_eq!(
-            slot.generation, signal.id.generation,
-            "stale signal handle (generation mismatch)"
-        );
-        let value = slot
+        let value = inner.nodes[signal.id.index as usize]
             .value
             .as_ref()
             .expect("signal slot is empty")
@@ -360,53 +456,34 @@ impl SignalStore {
 
     /// Replace a signal's value and propagate dirtiness to subscribers.
     pub fn write<T: 'static>(&self, signal: Signal<T>, value: T) {
-        let idx = signal.id.index as usize;
-        {
-            let mut inner = self.inner_mut();
-            let slot = &mut inner.slots[idx];
-            assert_eq!(
-                slot.generation, signal.id.generation,
-                "stale signal handle (generation mismatch)"
-            );
-            slot.value = Some(Box::new(value));
-        }
-        self.mark_source_dirty(idx);
+        self.inner_mut().node_checked(signal.id).value = Some(Box::new(value));
+        self.notify(signal.id.index as usize);
     }
 
     /// Write only if the new value differs from the current one (`PartialEq`).
     /// Returns `true` if the write happened. Use when pushing values that may
     /// be equal frame-to-frame so stable values don't re-dirty subscribers.
     pub fn set_if_changed<T: 'static + PartialEq>(&self, signal: Signal<T>, value: T) -> bool {
-        let idx = signal.id.index as usize;
         {
             let mut inner = self.inner_mut();
-            let slot = &mut inner.slots[idx];
-            assert_eq!(
-                slot.generation, signal.id.generation,
-                "stale signal handle (generation mismatch)"
-            );
-            if let Some(cur) = slot.value.as_ref().and_then(|b| b.downcast_ref::<T>())
+            let node = inner.node_checked(signal.id);
+            if let Some(cur) = node.value.as_ref().and_then(|b| b.downcast_ref::<T>())
                 && *cur == value
             {
                 return false;
             }
-            slot.value = Some(Box::new(value));
+            node.value = Some(Box::new(value));
         }
-        self.mark_source_dirty(idx);
+        self.notify(signal.id.index as usize);
         true
     }
 
     /// Mutate a signal's value in place and propagate dirtiness to subscribers.
     pub fn update<T: 'static>(&self, signal: Signal<T>, f: impl FnOnce(&mut T)) {
-        let idx = signal.id.index as usize;
         {
             let mut inner = self.inner_mut();
-            let slot = &mut inner.slots[idx];
-            assert_eq!(
-                slot.generation, signal.id.generation,
-                "stale signal handle (generation mismatch)"
-            );
-            let value = slot
+            let value = inner
+                .node_checked(signal.id)
                 .value
                 .as_mut()
                 .expect("signal slot is empty")
@@ -414,41 +491,47 @@ impl SignalStore {
                 .expect("signal type mismatch");
             f(value);
         }
-        self.mark_source_dirty(idx);
+        self.notify(signal.id.index as usize);
     }
 
-    /// Dispose a signal, freeing its slot for reuse.
+    /// Dispose a signal, freeing its slot for reuse. Costs O(own edges):
+    /// the node detaches from its sources and subscribers only.
     pub fn dispose<T>(&self, signal: Signal<T>) {
-        let idx = signal.id.index as usize;
         let mut inner = self.inner_mut();
-        let inner = &mut *inner;
-        let slot = &mut inner.slots[idx];
-        if slot.generation == signal.id.generation {
-            slot.value = None;
-            slot.generation = slot.generation.wrapping_add(1);
-            inner.memo_fns[idx] = None;
-            for subs in &mut inner.subscribers {
-                subs.retain(|&s| s != signal.id.index);
-            }
-            for srcs in &mut inner.sources {
-                srcs.retain(|&s| s != signal.id.index);
-            }
-            inner.subscribers[idx].clear();
-            inner.sources[idx].clear();
-            inner.state[idx] = SlotState::Clean;
-            inner.free_list.push(signal.id.index);
+        if !inner.live(signal.id) {
+            return;
+        }
+        let idx = signal.id.index;
+        let node = &mut inner.nodes[idx as usize];
+        let subscribers = std::mem::take(&mut node.subscribers);
+        let sources = std::mem::take(&mut node.sources);
+        node.value = None;
+        node.memo = None;
+        node.state = NodeState::Clean;
+        node.computing = false;
+        node.generation = node.generation.wrapping_add(1);
+        for src in sources {
+            inner.nodes[src as usize].subscribers.retain(|&s| s != idx);
+        }
+        for sub in subscribers {
+            inner.nodes[sub as usize].sources.retain(|&s| s != idx);
+        }
+        inner.free_list.push(idx);
+    }
+
+    /// Notify `signal_id`'s subscribers as if it had been written. A stale
+    /// or unknown id is ignored.
+    pub fn mark_dirty(&self, signal_id: SignalId) {
+        if self.inner_ref().live(signal_id) {
+            self.notify(signal_id.index as usize);
         }
     }
 
-    pub fn mark_dirty(&self, signal_id: SignalId) {
-        self.mark_source_dirty(signal_id.index as usize);
-    }
-
+    /// True when `signal_id` is a memo whose cached value may be stale.
+    /// Raw signals are never dirty; a stale or unknown id is not dirty.
     pub fn is_dirty(&self, signal_id: SignalId) -> bool {
-        !matches!(
-            self.inner_ref().state[signal_id.index as usize],
-            SlotState::Clean
-        )
+        let inner = self.inner_ref();
+        inner.live(signal_id) && inner.nodes[signal_id.index as usize].state != NodeState::Clean
     }
 
     /// Returns true if any signal has been written since the last `clear_dirty()`.
@@ -461,21 +544,16 @@ impl SignalStore {
         self.inner_mut().any_dirty = false;
     }
 
-    /// Returns true if the given signal is a memo.
+    /// Returns true if the given signal is a live memo.
     pub fn is_memo(&self, signal_id: SignalId) -> bool {
-        self.inner_ref()
-            .memo_fns
-            .get(signal_id.index as usize)
-            .is_some_and(|f| f.is_some())
+        let inner = self.inner_ref();
+        inner.live(signal_id) && inner.nodes[signal_id.index as usize].memo.is_some()
     }
 
     /// Number of live signals.
     pub fn len(&self) -> usize {
-        self.inner_ref()
-            .slots
-            .iter()
-            .filter(|s| s.value.is_some())
-            .count()
+        let inner = self.inner_ref();
+        inner.nodes.len() - inner.free_list.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -486,136 +564,102 @@ impl SignalStore {
     // Internal: dirty propagation & lazy realization
     // -----------------------------------------------------------------------
 
-    /// Mark a raw signal `Dirty` and all transitive subscribers `Check`.
-    fn mark_source_dirty(&self, idx: usize) {
+    fn notify(&self, idx: usize) {
         let mut inner = self.inner_mut();
-        let inner = &mut *inner;
-        inner.state[idx] = SlotState::Dirty;
         inner.any_dirty = true;
-
-        // BFS: mark all transitive subscribers Check (unless already Dirty).
-        let mut queue: Vec<u32> = inner.subscribers[idx].clone();
-        let mut visited: Vec<bool> = vec![false; inner.slots.len()];
-        while let Some(sub) = queue.pop() {
-            let sub_idx = sub as usize;
-            if visited[sub_idx] {
-                continue;
-            }
-            visited[sub_idx] = true;
-            if inner.state[sub_idx] == SlotState::Clean {
-                inner.state[sub_idx] = SlotState::Check;
-            }
-            for &t in &inner.subscribers[sub_idx] {
-                if !visited[t as usize] {
-                    queue.push(t);
-                }
-            }
-        }
+        inner.mark_subscribers(idx);
     }
 
-    /// Ensure the slot's value is up-to-date. Returns `true` if the slot's
-    /// value changed as a result of this call (a fresh write for raw signals,
-    /// or a PartialEq-distinct recomputation for memos).
-    fn realize(&self, idx: usize) -> bool {
-        let state = self.inner_ref().state[idx];
-        let is_memo = self.inner_ref().memo_fns[idx].is_some();
-        match state {
-            SlotState::Clean => false,
-            SlotState::Dirty => {
-                if is_memo {
-                    self.recompute_memo(idx)
-                } else {
-                    // Raw signal: Dirty = "recently written" = value changed.
-                    self.inner_mut().state[idx] = SlotState::Clean;
-                    true
+    /// Bring a memo up to date; raw signals are always current. Walks `Check`
+    /// sources with an explicit stack so deep memo chains do not recurse.
+    /// A memo whose value changes marks its subscribers `Dirty`, which is
+    /// what tells a `Check` parent further up the stack to recompute.
+    fn realize(&self, idx: usize) {
+        if self.inner_ref().nodes[idx].state == NodeState::Clean {
+            return;
+        }
+        // (node, index of the next source to check)
+        let mut stack: Vec<(usize, usize)> = vec![(idx, 0)];
+        while let Some(&(node, pos)) = stack.last() {
+            let next = {
+                let mut inner = self.inner_mut();
+                match inner.nodes[node].state {
+                    NodeState::Clean => None,
+                    NodeState::Dirty => Some(None),
+                    NodeState::Check => match inner.nodes[node].sources.get(pos) {
+                        Some(&src) => Some(Some(src as usize)),
+                        None => {
+                            // No source changed: the cached value stands.
+                            inner.nodes[node].state = NodeState::Clean;
+                            None
+                        }
+                    },
                 }
-            }
-            SlotState::Check => {
-                // Only memos can be Check.
-                debug_assert!(is_memo, "raw signal in Check state");
-                let srcs = self.inner_ref().sources[idx].clone();
-                let mut any_source_changed = false;
-                for src in srcs {
-                    if self.realize(src as usize) {
-                        any_source_changed = true;
+            };
+            match next {
+                None => {
+                    stack.pop();
+                }
+                Some(None) => {
+                    stack.pop();
+                    self.recompute(node);
+                }
+                Some(Some(src)) => {
+                    stack.last_mut().expect("non-empty").1 += 1;
+                    let inner = self.inner_ref();
+                    let src_node = &inner.nodes[src];
+                    if src_node.computing {
+                        panic!("{}", inner.cycle_message(src as u32));
                     }
-                }
-                if any_source_changed {
-                    self.recompute_memo(idx)
-                } else {
-                    self.inner_mut().state[idx] = SlotState::Clean;
-                    false
-                }
-            }
-        }
-    }
-
-    /// Recompute a memo. Captures new dependencies via `with_tracking`; updates
-    /// subscriber/source edges; PartialEq-compares result to previous value.
-    /// When the value changes, escalates all transitive subscribers to Dirty so
-    /// their own realize() will actually recompute instead of short-circuiting.
-    /// Returns `true` if the new value differs from the cached one.
-    fn recompute_memo(&self, idx: usize) -> bool {
-        let memo_fn = self.inner_mut().memo_fns[idx]
-            .take()
-            .expect("recompute_memo on non-memo slot");
-        let prev = self.inner_mut().slots[idx].value.take();
-
-        let (result, new_deps) = with_tracking(|| memo_fn(self, prev.as_deref()));
-        let (new_value, changed) = result;
-
-        {
-            let mut inner = self.inner_mut();
-            inner.slots[idx].value = Some(new_value);
-            inner.memo_fns[idx] = Some(memo_fn);
-            inner.state[idx] = SlotState::Clean;
-        }
-
-        self.rewire_sources(idx as u32, new_deps);
-
-        if changed {
-            // This memo's value actually changed — promote Check subs to Dirty.
-            let mut inner = self.inner_mut();
-            let mut queue: Vec<u32> = inner.subscribers[idx].clone();
-            let mut visited = vec![false; inner.slots.len()];
-            while let Some(sub) = queue.pop() {
-                let si = sub as usize;
-                if visited[si] {
-                    continue;
-                }
-                visited[si] = true;
-                inner.state[si] = SlotState::Dirty;
-                for &t in &inner.subscribers[si] {
-                    if !visited[t as usize] {
-                        queue.push(t);
+                    if src_node.state != NodeState::Clean {
+                        stack.push((src, 0));
                     }
                 }
             }
         }
-
-        changed
     }
 
-    fn rewire_sources(&self, idx: u32, new_deps: Vec<SignalId>) {
+    /// Run a `Dirty` memo's compute, rewire its sources, and mark its
+    /// subscribers `Dirty` when the value changed. If the compute panics the
+    /// memo stays `Dirty` with its old value, so the next read retries.
+    fn recompute(&self, idx: usize) {
+        let (id, compute) = {
+            let mut inner = self.inner_mut();
+            if inner.nodes[idx].computing {
+                let msg = inner.cycle_message(idx as u32);
+                drop(inner);
+                panic!("{msg}");
+            }
+            inner.compute_stack.push(idx as u32);
+            let node = &mut inner.nodes[idx];
+            node.computing = true;
+            let compute = Rc::clone(&node.memo.as_ref().expect("recompute on non-memo").compute);
+            let id = SignalId {
+                index: idx as u32,
+                generation: node.generation,
+            };
+            (id, compute)
+        };
+        let guard = ComputeGuard { store: self, id };
+        let (new_value, deps) = with_tracking(|| compute(self));
+        drop(guard);
+
         let mut inner = self.inner_mut();
-        // Remove `idx` from every old source's subscriber list.
-        let old_sources = std::mem::take(&mut inner.sources[idx as usize]);
-        for src in old_sources {
-            inner.subscribers[src as usize].retain(|&s| s != idx);
+        if !inner.live(id) {
+            return; // disposed by its own compute
         }
-        // Install new sources + register self as subscriber on each.
-        let mut new_src_indices = Vec::with_capacity(new_deps.len());
-        for dep in new_deps {
-            let di = dep.index;
-            if !new_src_indices.contains(&di) {
-                new_src_indices.push(di);
-                let subs = &mut inner.subscribers[di as usize];
-                if !subs.contains(&idx) {
-                    subs.push(idx);
-                }
-            }
+        let node = &mut inner.nodes[idx];
+        let eq = node.memo.as_ref().expect("memo").eq;
+        let changed = node
+            .value
+            .as_deref()
+            .is_none_or(|old| !eq(old, &*new_value));
+        node.value = Some(new_value);
+        node.state = NodeState::Clean;
+        inner.rewire_sources(id.index, deps);
+        if changed {
+            inner.mark_subscribers(idx);
         }
-        inner.sources[idx as usize] = new_src_indices;
     }
 }
 
@@ -632,63 +676,25 @@ impl Default for SignalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
-    #[test]
-    fn create_and_read_signal() {
-        let mut store = SignalStore::new();
-        let sig = store.create(42i32);
-        assert_eq!(store.read(sig), 42);
-    }
-
-    #[test]
-    fn write_signal() {
-        let mut store = SignalStore::new();
-        let sig = store.create(0i32);
-        store.write(sig, 99);
-        assert_eq!(store.read(sig), 99);
-    }
-
-    #[test]
-    fn update_signal_in_place() {
-        let mut store = SignalStore::new();
-        let sig = store.create(vec![1, 2, 3]);
-        store.update(sig, |v| v.push(4));
-        assert_eq!(store.read(sig), vec![1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn with_avoids_clone() {
-        let mut store = SignalStore::new();
-        let sig = store.create(String::from("hello"));
-        let len = store.with(sig, |s| s.len());
-        assert_eq!(len, 5);
-    }
-
-    #[test]
-    fn signal_is_copy() {
-        let mut store = SignalStore::new();
-        let sig = store.create(10u32);
-        let sig2 = sig;
-        let sig3 = sig;
-        assert_eq!(store.read(sig2), 10);
-        assert_eq!(store.read(sig3), 10);
-    }
-
-    #[test]
-    fn multiple_signals_independent() {
-        let mut store = SignalStore::new();
-        let a = store.create(1i32);
-        let b = store.create(2i32);
-        let c = store.create(3i32);
-        store.write(b, 20);
-        assert_eq!(store.read(a), 1);
-        assert_eq!(store.read(b), 20);
-        assert_eq!(store.read(c), 3);
+    /// A memo over `f` that counts how often it runs.
+    fn counted<T: 'static + Clone + PartialEq>(
+        store: &SignalStore,
+        f: impl Fn(&SignalStore) -> T + 'static,
+    ) -> (Signal<T>, Rc<Cell<u32>>) {
+        let runs = Rc::new(Cell::new(0));
+        let r = Rc::clone(&runs);
+        let memo = store.create_memo(move |s| {
+            r.set(r.get() + 1);
+            f(s)
+        });
+        (memo, runs)
     }
 
     #[test]
     fn dispose_and_reuse_slot() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let sig1 = store.create(100i32);
         let old_index = sig1.id.index;
         let old_gen = sig1.id.generation;
@@ -702,7 +708,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "stale signal handle")]
     fn stale_handle_panics_on_read() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let sig = store.create(1i32);
         store.dispose(sig);
         let _new = store.create(2i32);
@@ -710,51 +716,8 @@ mod tests {
     }
 
     #[test]
-    fn different_types_coexist() {
-        let mut store = SignalStore::new();
-        let int_sig = store.create(42i32);
-        let str_sig = store.create(String::from("hello"));
-        let bool_sig = store.create(true);
-        assert_eq!(store.read(int_sig), 42);
-        assert_eq!(store.read(str_sig), "hello");
-        assert!(store.read(bool_sig));
-    }
-
-    #[test]
-    fn len_tracks_live_signals() {
-        let mut store = SignalStore::new();
-        assert_eq!(store.len(), 0);
-        let a = store.create(1);
-        let b = store.create(2);
-        assert_eq!(store.len(), 2);
-        store.dispose(a);
-        assert_eq!(store.len(), 1);
-        store.dispose(b);
-        assert_eq!(store.len(), 0);
-    }
-
-    #[test]
-    fn signal_with_struct() {
-        #[derive(Clone, Debug, PartialEq)]
-        struct FileEntry {
-            path: String,
-            selected: bool,
-        }
-
-        let mut store = SignalStore::new();
-        let sig = store.create(FileEntry {
-            path: "src/main.rs".into(),
-            selected: false,
-        });
-        store.update(sig, |f| f.selected = true);
-        let entry = store.read(sig);
-        assert!(entry.selected);
-        assert_eq!(entry.path, "src/main.rs");
-    }
-
-    #[test]
     fn with_tracking_captures_reads() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let a = store.create(1i32);
         let b = store.create(2i32);
         let c = store.create(3i32);
@@ -768,7 +731,7 @@ mod tests {
 
     #[test]
     fn nested_tracking_scopes_independent() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let a = store.create(10i32);
         let b = store.create(20i32);
         let (_, outer_deps) = with_tracking(|| {
@@ -786,7 +749,7 @@ mod tests {
 
     #[test]
     fn read_untracked_not_captured() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let a = store.create(1i32);
         let b = store.create(2i32);
         let (_, deps) = with_tracking(|| {
@@ -799,29 +762,8 @@ mod tests {
     }
 
     #[test]
-    fn write_marks_dirty_bit() {
-        let mut store = SignalStore::new();
-        let a = store.create(1i32);
-        let b = store.create(2i32);
-        assert!(!store.any_dirty());
-        store.write(a, 10);
-        assert!(store.any_dirty());
-        let _ = b; // keep alive
-    }
-
-    #[test]
-    fn clear_dirty_resets_any_dirty() {
-        let mut store = SignalStore::new();
-        let a = store.create(1i32);
-        store.write(a, 10);
-        assert!(store.any_dirty());
-        store.clear_dirty();
-        assert!(!store.any_dirty());
-    }
-
-    #[test]
     fn duplicate_reads_deduped() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let a = store.create(1i32);
         let (_, deps) = with_tracking(|| {
             store.read(a);
@@ -833,18 +775,19 @@ mod tests {
     }
 
     #[test]
-    fn memo_computes_initial_value() {
-        let mut store = SignalStore::new();
-        let a = store.create(3i32);
-        let b = store.create(7i32);
-        let sum = store.create_memo(move |s| s.read(a) + s.read(b));
-        assert_eq!(store.read(sum), 10);
-        assert!(store.is_memo(sum.id));
+    fn any_dirty_set_by_write_and_reset_by_clear() {
+        let store = SignalStore::new();
+        let a = store.create(1i32);
+        assert!(!store.any_dirty());
+        store.write(a, 2);
+        assert!(store.any_dirty());
+        store.clear_dirty();
+        assert!(!store.any_dirty());
     }
 
     #[test]
     fn memo_recomputes_when_dependency_changes() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let a = store.create(1i32);
         let b = store.create(2i32);
         let sum = store.create_memo(move |s| s.read(a) + s.read(b));
@@ -855,7 +798,7 @@ mod tests {
 
     #[test]
     fn memo_tracks_new_dependencies() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let flag = store.create(true);
         let a = store.create(100i32);
         let b = store.create(200i32);
@@ -869,32 +812,73 @@ mod tests {
 
     #[test]
     fn chained_memos() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let base = store.create(2i32);
         let doubled = store.create_memo(move |s| s.read(base) * 2);
         let quadrupled = store.create_memo(move |s| s.read(doubled) * 2);
-        assert_eq!(store.read(base), 2);
-        assert_eq!(store.read(doubled), 4);
         assert_eq!(store.read(quadrupled), 8);
         store.write(base, 3);
         assert_eq!(store.read(doubled), 6);
         assert_eq!(store.read(quadrupled), 12);
     }
 
+    /// Regression: reading the written signal, or an intermediate memo, before
+    /// the downstream memo used to consume the change and leave it stale.
     #[test]
-    fn any_dirty_reflects_state() {
-        let mut store = SignalStore::new();
+    fn earlier_reads_do_not_hide_a_change_from_memos() {
+        let store = SignalStore::new();
         let a = store.create(1i32);
-        assert!(!store.any_dirty());
+        let m = store.create_memo(move |s| s.read(a) + 1);
+        let m2 = store.create_memo(move |s| s.read(m) * 10);
+        assert_eq!(store.read(m2), 20);
+
         store.write(a, 2);
-        assert!(store.any_dirty());
-        store.clear_dirty();
-        assert!(!store.any_dirty());
+        assert_eq!(store.read(a), 2);
+        assert_eq!(store.read(m), 3);
+        assert_eq!(store.read(m2), 30);
+
+        store.write(a, 5);
+        assert_eq!(store.read(m), 6);
+        assert_eq!(store.read(m2), 60);
+    }
+
+    #[test]
+    fn diamond_recomputes_the_join_once() {
+        let store = SignalStore::new();
+        let a = store.create(1i32);
+        let left = store.create_memo(move |s| s.read(a) + 1);
+        let right = store.create_memo(move |s| s.read(a) * 2);
+        let (join, runs) = counted(&store, move |s| s.read(left) + s.read(right));
+        assert_eq!(store.read(join), 4);
+        store.write(a, 3);
+        assert_eq!(store.read(join), 10);
+        assert_eq!(runs.get(), 2);
+    }
+
+    #[test]
+    fn memo_does_not_recompute_when_source_returns_same_value() {
+        let store = SignalStore::new();
+        let a = store.create(5i32);
+        let sign = store.create_memo(move |s| s.read(a).signum());
+        let (dependent, runs) = counted(&store, move |s| s.read(sign) * 10);
+        assert_eq!(store.read(dependent), 10);
+
+        store.write(a, 7);
+        assert_eq!(store.read(dependent), 10);
+        assert_eq!(
+            runs.get(),
+            1,
+            "dependent re-ran though its source stayed equal"
+        );
+
+        store.write(a, -3);
+        assert_eq!(store.read(dependent), -10);
+        assert_eq!(runs.get(), 2);
     }
 
     #[test]
     fn dispose_memo_does_not_leak() {
-        let mut store = SignalStore::new();
+        let store = SignalStore::new();
         let a = store.create(1i32);
         let m = store.create_memo(move |s| s.read(a) + 1);
         assert_eq!(store.read(m), 2);
@@ -902,39 +886,47 @@ mod tests {
         store.write(a, 10); // must not panic
     }
 
-    /// When a memo recomputes unchanged, its subscribers that were Check
-    /// stay Clean after their own realize — no downstream work.
+    /// Disposing a source detaches its memos: a new signal that reuses the
+    /// slot must not dirty them into recomputing against the dead handle.
     #[test]
-    fn memo_does_not_recompute_when_source_returns_same_value() {
-        use std::cell::Cell;
-        use std::rc::Rc;
+    fn disposed_source_does_not_wake_its_memo_through_slot_reuse() {
+        let store = SignalStore::new();
+        let a = store.create(1i32);
+        let m = store.create_memo(move |s| s.read(a) + 1);
+        assert_eq!(store.read(m), 2);
+        store.dispose(a);
+        let b = store.create(7i32);
+        assert_eq!(b.id.index, a.id.index);
+        store.write(b, 8);
+        assert_eq!(store.read(m), 2);
+    }
 
-        let mut store = SignalStore::new();
-        let a = store.create(5i32);
-        let sign = store.create_memo(move |s| s.read(a).signum());
+    #[test]
+    #[should_panic(expected = "memo cycle: memo #1 read itself while computing (#1 -> #2 -> #1)")]
+    fn memo_cycle_reports_the_path() {
+        let store = SignalStore::new();
+        let slot: Rc<Cell<Option<Signal<i32>>>> = Rc::new(Cell::new(None));
+        let _pad = store.create(0i32);
+        let s2 = Rc::clone(&slot);
+        let a = store.create_memo(move |s| s.read(s2.get().unwrap()) + 1);
+        let b = store.create_memo(move |s| s.read(a) + 1);
+        slot.set(Some(b));
+        store.read(a);
+    }
 
-        let run_count = Rc::new(Cell::new(0u32));
-        let rc2 = Rc::clone(&run_count);
-        let dependent = store.create_memo(move |s| {
-            rc2.set(rc2.get() + 1);
-            s.read(sign) * 10
+    #[test]
+    fn memo_recovers_after_its_compute_panics() {
+        let store = SignalStore::new();
+        let fail = store.create(true);
+        let m = store.create_memo(move |s| {
+            assert!(!s.read(fail), "compute failed");
+            1i32
         });
-
-        assert_eq!(store.read(dependent), 10);
-        assert_eq!(run_count.get(), 1);
-
-        // Change a 5→7: sign unchanged → dependent should NOT rerun.
-        store.write(a, 7);
-        assert_eq!(store.read(dependent), 10);
-        assert_eq!(
-            run_count.get(),
-            1,
-            "dependent memo re-ran despite source PartialEq-equal"
-        );
-
-        // Change a 7→-3: sign changes to -1 → dependent MUST rerun.
-        store.write(a, -3);
-        assert_eq!(store.read(dependent), -10);
-        assert_eq!(run_count.get(), 2);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.read(m)));
+        assert!(r.is_err());
+        store.write(fail, false);
+        let (v, deps) = with_tracking(|| store.read(m));
+        assert_eq!(v, 1);
+        assert_eq!(deps, vec![m.id], "tracking scope leaked from the panic");
     }
 }

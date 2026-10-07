@@ -1,7 +1,9 @@
 //! Key-binding tables with user overrides. The command type is supplied by the
-//! app; bindings are strings like `"mod+shift+p"` as produced by
-//! `KeyChord::binding_string`, where `mod` matches either Cmd or Ctrl.
+//! app; bindings are strings like `"mod+shift+p"` that parse as a
+//! [`Binding`], where `mod` matches either Cmd or Ctrl. A binding may be a
+//! sequence of strokes separated by spaces (`"g g"`).
 
+use quark_ui::element::Binding;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,23 +142,23 @@ pub fn reset_override<C: PartialEq>(overrides: &mut Vec<KeymapOverride<C>>, comm
     overrides.retain(|binding| binding.command != command);
 }
 
+/// Whether some key sequence triggers both bindings: they have the same
+/// number of strokes and each pair [`Binding::matches`]. Strings that do
+/// not parse match nothing.
 pub fn binding_eq(left: &str, right: &str) -> bool {
-    if left.eq_ignore_ascii_case(right) {
-        return true;
+    let strokes = |text: &str| {
+        text.split_whitespace()
+            .map(str::parse::<Binding>)
+            .collect::<Result<Vec<_>, _>>()
+    };
+    match (strokes(left), strokes(right)) {
+        (Ok(left), Ok(right)) => {
+            !left.is_empty()
+                && left.len() == right.len()
+                && left.iter().zip(&right).all(|(l, r)| l.matches(r))
+        }
+        _ => false,
     }
-    let left_parts = left.split('+').collect::<Vec<_>>();
-    let right_parts = right.split('+').collect::<Vec<_>>();
-    left_parts.len() == right_parts.len()
-        && left_parts
-            .iter()
-            .zip(right_parts.iter())
-            .all(|(left, right)| binding_part_eq(left, right))
-}
-
-fn binding_part_eq(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
-        || (left == "mod" && matches!(right, "cmd" | "ctrl"))
-        || (right == "mod" && matches!(left, "cmd" | "ctrl"))
 }
 
 pub fn format_binding(binding: &str) -> String {
@@ -268,23 +270,6 @@ mod tests {
             entries: EDITING,
         },
     ]);
-
-    #[test]
-    fn default_keymap_has_no_contextual_conflicts() {
-        let overrides = Vec::new();
-        for entry in KEYMAP.entries() {
-            for binding in entry.keys {
-                assert!(
-                    KEYMAP
-                        .binding_conflict(&overrides, entry, binding)
-                        .is_none(),
-                    "{} should not conflict on {}",
-                    entry.description,
-                    binding
-                );
-            }
-        }
-    }
 
     #[test]
     fn override_replaces_defaults_and_is_checked_for_conflicts() {

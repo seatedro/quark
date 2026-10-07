@@ -150,17 +150,49 @@ impl<T> WindowTable<T> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
-    #[test]
-    fn handle_of_closed_window_stays_stale_after_slot_reuse() {
-        let mut table = WindowTable::default();
-        let first = table.insert("first");
-        assert_eq!(table.remove(first), Some("first"));
+    #[derive(Debug, Clone)]
+    enum Op {
+        Insert,
+        /// Remove the n-th handle ever issued, live or not.
+        Remove(usize),
+    }
 
-        let second = table.insert("second");
-        assert_eq!(table.get(first), None);
-        assert_eq!(table.remove(first), None);
-        assert_eq!(table.get(second), Some(&"second"));
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![Just(Op::Insert), (0usize..16).prop_map(Op::Remove)]
+    }
+
+    proptest! {
+        // Every issued handle finds its own value while its window is open
+        // and nothing once it closed, however slots are reused.
+        #[test]
+        fn handles_find_only_their_own_live_window(ops in prop::collection::vec(op(), 0..64)) {
+            let mut table = WindowTable::default();
+            let mut issued: Vec<(WindowHandle, usize, bool)> = Vec::new();
+            for op in ops {
+                match op {
+                    Op::Insert => {
+                        let value = issued.len();
+                        issued.push((table.insert(value), value, true));
+                    }
+                    Op::Remove(n) => {
+                        if let Some((handle, value, live)) = issued.get_mut(n) {
+                            let expected = std::mem::replace(live, false).then_some(*value);
+                            prop_assert_eq!(table.remove(*handle), expected);
+                        }
+                    }
+                }
+                prop_assert_eq!(table.verify_integrity(), Ok(()));
+                for (handle, value, live) in &issued {
+                    prop_assert_eq!(table.get(*handle), live.then_some(value));
+                }
+                let open = issued.iter().filter(|(_, _, live)| *live).count();
+                prop_assert_eq!(table.handles().len(), open);
+                prop_assert_eq!(table.is_empty(), open == 0);
+            }
+        }
     }
 }
