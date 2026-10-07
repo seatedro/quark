@@ -212,7 +212,10 @@ impl ComboboxState {
 
     /// Labels of the current matches, best first.
     pub fn match_labels(&self) -> impl Iterator<Item = &str> {
-        self.matches.options.iter().map(|&i| self.options[i].as_str())
+        self.matches
+            .options
+            .iter()
+            .map(|&i| self.options[i].as_str())
     }
 
     /// The highlighted match's label while the list is open.
@@ -564,7 +567,10 @@ mod tests {
     #[test]
     fn fuzzy_match_ranks_word_starts_and_runs_above_scattered_hits() {
         let labels = ["Gooseberry", "Grape", "Grapefruit", "Pomegranate", "Guava"];
-        assert_eq!(ranked("gra", &labels), ["Grape", "Grapefruit", "Pomegranate"]);
+        assert_eq!(
+            ranked("gra", &labels),
+            ["Grape", "Grapefruit", "Pomegranate"]
+        );
         assert_eq!(ranked("gf", &labels), ["Grapefruit"]);
         assert_eq!(ranked("xyz", &labels), Vec::<String>::new());
     }

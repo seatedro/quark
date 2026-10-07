@@ -7,8 +7,8 @@
 //! to [`radio_focus_id`], so screen readers follow.
 
 use quark::TabStop;
-use quark_ui::element::{AnyElement, CursorHint, ElementContext, IntoAnyElement, RenderOnce, div};
 use quark_ui::element::text;
+use quark_ui::element::{AnyElement, CursorHint, ElementContext, IntoAnyElement, RenderOnce, div};
 use quark_ui::style::Styled;
 use quark_ui::theme::Color;
 use quark_ui::{Action, FocusId};
@@ -149,11 +149,15 @@ impl RenderOnce for RadioGroup {
                 .accessibility_toggled(checked)
                 .accessibility_disabled(option.disabled)
                 .child(circle)
-                .child(text(option.label.clone()).text_sm().color(if option.disabled {
-                    tc.text_muted
-                } else {
-                    tc.text
-                }));
+                .child(
+                    text(option.label.clone())
+                        .text_sm()
+                        .color(if option.disabled {
+                            tc.text_muted
+                        } else {
+                            tc.text
+                        }),
+                );
             if !option.disabled {
                 item = item
                     .focus_ring(list_nav::item_focus(base, i))

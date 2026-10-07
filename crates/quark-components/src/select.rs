@@ -145,7 +145,9 @@ impl SelectState {
         let enabled = |i: usize| i < options.len() && !options[i].disabled;
         let mut out = SelectOutcome::default();
         match msg {
-            SelectMsg::Toggle if self.open => return self.update(SelectMsg::Close, options, now_ms),
+            SelectMsg::Toggle if self.open => {
+                return self.update(SelectMsg::Close, options, now_ms);
+            }
             SelectMsg::Open | SelectMsg::Toggle => {
                 self.open = true;
                 self.highlighted = self
@@ -321,7 +323,11 @@ impl RenderOnce for Select {
             .py(m.spacing_xs + (Sp::XXS * scale).round())
             .rounded(m.control_radius)
             .bg(tc.element_background)
-            .border(if open { tc.focus_border } else { tc.border_variant })
+            .border(if open {
+                tc.focus_border
+            } else {
+                tc.border_variant
+            })
             .accessibility_id(&*self.id)
             .test_id("select-trigger")
             .focus_ring(self.focus)
@@ -331,16 +337,15 @@ impl RenderOnce for Select {
             .accessibility_expanded(open)
             .accessibility_disabled(self.disabled)
             .child(
-                div().flex_1().child(
-                    text(shown.to_owned())
-                        .text_sm()
-                        .truncate()
-                        .color(if chosen.is_some() && !self.disabled {
+                div()
+                    .flex_1()
+                    .child(text(shown.to_owned()).text_sm().truncate().color(
+                        if chosen.is_some() && !self.disabled {
                             tc.text
                         } else {
                             tc.text_muted
-                        }),
-                ),
+                        },
+                    )),
             )
             .child(
                 svg_icon(
@@ -491,38 +496,38 @@ fn option_row(
     let tc = &theme.colors;
     let m = &theme.metrics;
     let scale = m.ui_scale();
-    let mut row = div()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .gap(m.spacing_sm)
-        .px(m.spacing_md)
-        .py(m.spacing_xs + (Sp::XXS * scale).round())
-        .accessibility_id(format!("{id}-option-{index}"))
-        .test_id("select-option")
-        .accessibility_role(accesskit::Role::ListBoxOption)
-        .accessibility_label(option.label.clone())
-        .accessibility_selected(selected)
-        .accessibility_disabled(option.disabled)
-        .bg(if highlighted {
-            tc.ghost_element_selected
-        } else {
-            Color::TRANSPARENT
-        })
-        .child(
-            div().flex_1().child(
-                text(option.label.clone())
-                    .text_sm()
-                    .truncate()
-                    .color(if option.disabled {
-                        tc.text_muted
-                    } else if selected {
-                        tc.text_strong
-                    } else {
-                        tc.text
-                    }),
-            ),
-        );
+    let mut row =
+        div()
+            .flex_row()
+            .items_center()
+            .w_full()
+            .gap(m.spacing_sm)
+            .px(m.spacing_md)
+            .py(m.spacing_xs + (Sp::XXS * scale).round())
+            .accessibility_id(format!("{id}-option-{index}"))
+            .test_id("select-option")
+            .accessibility_role(accesskit::Role::ListBoxOption)
+            .accessibility_label(option.label.clone())
+            .accessibility_selected(selected)
+            .accessibility_disabled(option.disabled)
+            .bg(if highlighted {
+                tc.ghost_element_selected
+            } else {
+                Color::TRANSPARENT
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .child(text(option.label.clone()).text_sm().truncate().color(
+                        if option.disabled {
+                            tc.text_muted
+                        } else if selected {
+                            tc.text_strong
+                        } else {
+                            tc.text
+                        },
+                    )),
+            );
     if !option.disabled {
         row = row
             .focus_ring(focus)

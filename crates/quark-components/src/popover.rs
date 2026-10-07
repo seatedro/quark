@@ -15,8 +15,7 @@ use quark::{Rect, SemanticRole};
 use quark_render::Scene;
 use quark_ui::design::{Shadow, Sp, Sz};
 use quark_ui::element::{
-    AnyElement, Bounds, Div, Element, ElementContext, IntoAnyElement, LayoutEngine,
-    LayoutId, div,
+    AnyElement, Bounds, Div, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId, div,
 };
 use quark_ui::style::{ElementStyle, Styled};
 use quark_ui::theme::Theme;
@@ -76,8 +75,7 @@ pub fn place_popover(
         PopoverSide::Top | PopoverSide::Bottom => h,
         PopoverSide::Left | PopoverSide::Right => w,
     };
-    let side = if room(preferred) < need(preferred)
-        && room(preferred.opposite()) > room(preferred)
+    let side = if room(preferred) < need(preferred) && room(preferred.opposite()) > room(preferred)
     {
         preferred.opposite()
     } else {
@@ -267,19 +265,54 @@ mod tests {
         use PopoverSide::*;
         let cases = [
             // Fits below: stays below, left-aligned with the anchor.
-            (rect(10.0, 10.0, 100.0, 20.0), (120.0, 80.0), Bottom, (10.0, 34.0, Bottom)),
+            (
+                rect(10.0, 10.0, 100.0, 20.0),
+                (120.0, 80.0),
+                Bottom,
+                (10.0, 34.0, Bottom),
+            ),
             // Near the bottom edge: flips above.
-            (rect(10.0, 250.0, 100.0, 20.0), (120.0, 80.0), Bottom, (10.0, 166.0, Top)),
+            (
+                rect(10.0, 250.0, 100.0, 20.0),
+                (120.0, 80.0),
+                Bottom,
+                (10.0, 166.0, Top),
+            ),
             // Near the top edge, preferring top: flips below.
-            (rect(10.0, 20.0, 100.0, 20.0), (120.0, 80.0), Top, (10.0, 44.0, Bottom)),
+            (
+                rect(10.0, 20.0, 100.0, 20.0),
+                (120.0, 80.0),
+                Top,
+                (10.0, 44.0, Bottom),
+            ),
             // Too tall for either side: stays on the roomier side, clamped.
-            (rect(10.0, 100.0, 100.0, 20.0), (120.0, 280.0), Bottom, (10.0, 20.0, Bottom)),
+            (
+                rect(10.0, 100.0, 100.0, 20.0),
+                (120.0, 280.0),
+                Bottom,
+                (10.0, 20.0, Bottom),
+            ),
             // Taller than the viewport: pinned to the top edge.
-            (rect(10.0, 100.0, 100.0, 20.0), (120.0, 500.0), Bottom, (10.0, 0.0, Bottom)),
+            (
+                rect(10.0, 100.0, 100.0, 20.0),
+                (120.0, 500.0),
+                Bottom,
+                (10.0, 0.0, Bottom),
+            ),
             // Near the right edge: slides left to stay inside.
-            (rect(350.0, 10.0, 40.0, 20.0), (120.0, 80.0), Bottom, (280.0, 34.0, Bottom)),
+            (
+                rect(350.0, 10.0, 40.0, 20.0),
+                (120.0, 80.0),
+                Bottom,
+                (280.0, 34.0, Bottom),
+            ),
             // Preferring right at the right edge: flips left.
-            (rect(330.0, 10.0, 40.0, 20.0), (120.0, 80.0), Right, (206.0, 10.0, Left)),
+            (
+                rect(330.0, 10.0, 40.0, 20.0),
+                (120.0, 80.0),
+                Right,
+                (206.0, 10.0, Left),
+            ),
         ];
         for (anchor, size, side, expected) in cases {
             let placed = place_popover(anchor, size, (400.0, 300.0), side, 4.0);

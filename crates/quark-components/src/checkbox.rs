@@ -1,12 +1,12 @@
 use quark::{SemanticRole, view};
 
 use quark_ui::Action;
+use quark_ui::animation::{Curve, Motion, Prop};
 use quark_ui::design::{Shadow, Sp, Sz};
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, div, svg_icon, text,
 };
 use quark_ui::icons::lucide;
-use quark_ui::animation::{Curve, Motion, Prop};
 use quark_ui::style::Styled;
 use quark_ui::theme::Color;
 

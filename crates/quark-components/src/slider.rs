@@ -240,11 +240,11 @@ impl RenderOnce for Slider {
                 bounds: probe,
             });
         if self.show_value {
-            row = row.child(
-                text(value_text)
-                    .text_sm()
-                    .color(if self.disabled { tc.text_muted } else { tc.text }),
-            );
+            row = row.child(text(value_text).text_sm().color(if self.disabled {
+                tc.text_muted
+            } else {
+                tc.text
+            }));
         }
         row.into_any()
     }
@@ -266,8 +266,7 @@ struct SliderDrag {
 impl SliderDrag {
     fn value_at(&self, x: f32) -> f32 {
         let span = (self.track.width - self.thumb).max(1.0);
-        self.range
-            .at((x - self.track.x - self.thumb / 2.0) / span)
+        self.range.at((x - self.track.x - self.thumb / 2.0) / span)
     }
 
     fn emit(&mut self, x: f32) -> Vec<Action> {
@@ -309,7 +308,11 @@ impl Element for BoundsProbe {
     type LayoutState = ();
     type PrepaintState = ();
 
-    fn request_layout(&mut self, engine: &mut LayoutEngine, cx: &mut ElementContext) -> (LayoutId, ()) {
+    fn request_layout(
+        &mut self,
+        engine: &mut LayoutEngine,
+        cx: &mut ElementContext,
+    ) -> (LayoutId, ()) {
         // The child's node is this element's node: the probe adds no box.
         (self.child.request_layout(engine, cx), ())
     }
