@@ -814,6 +814,15 @@ fn conditional_event_handler_is_set_only_when_present() {
     assert!(make(None).calls.is_empty());
 }
 
+// Catches `<icon svg={if ..}>` being rejected: svg and size are
+// constructor arguments, so they need the value of the whole `if`.
+#[test]
+fn icon_takes_a_conditional_svg() {
+    let make = |open: bool| view! { <icon svg={if open { "up" } else { "down" }} size={8.0} /> };
+    assert_eq!(make(true).value.as_deref(), Some("up@8"));
+    assert_eq!(make(false).value.as_deref(), Some("down@8"));
+}
+
 // Catches `@for` not applying its attributes once per item, in order.
 #[test]
 fn for_attribute_applies_its_attributes_per_item() {

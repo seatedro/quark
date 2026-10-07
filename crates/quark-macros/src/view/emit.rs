@@ -775,6 +775,7 @@ impl Emit {
                     let v = match value {
                         AttrValue::Expr(e) => quote!(#e),
                         AttrValue::Reactive(e) => quote!(cx.read(#e)),
+                        AttrValue::If(e) if e.else_branch.is_some() => quote!(#e),
                         _ => {
                             self.error(
                                 name.first.span(),
