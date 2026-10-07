@@ -356,6 +356,28 @@ impl<U: UiApp> UiTestHarness<U> {
         self.click(node.center());
     }
 
+    /// Press and release the middle button at `at`.
+    pub fn middle_click(&mut self, at: (f32, f32)) {
+        self.move_to(at);
+        for state in [ElementState::Pressed, ElementState::Released] {
+            self.send_event(InputEvent::PointerButton {
+                button: MouseButton::Middle,
+                state,
+            });
+        }
+    }
+
+    /// Middle click the center of the one node `by` finds.
+    ///
+    /// # Panics
+    ///
+    /// When no node or more than one matches.
+    #[track_caller]
+    pub fn middle_click_node(&mut self, by: impl Into<By>) {
+        let node = self.find(by);
+        self.middle_click(node.center());
+    }
+
     /// Press at `from`, move to `to` in a few steps, and release there.
     pub fn drag(&mut self, from: (f32, f32), to: (f32, f32)) {
         self.pointer_down(from);

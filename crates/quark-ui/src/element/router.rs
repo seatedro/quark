@@ -213,6 +213,8 @@ pub struct WheelEvent {
 pub struct InputHandlers {
     click_node: Vec<usize>,
     click: Vec<ClickHandler>,
+    middle_click_node: Vec<usize>,
+    middle_click: Vec<Action>,
     drag_node: Vec<usize>,
     drag: Vec<DragStart>,
     scroll_node: Vec<usize>,
@@ -234,6 +236,13 @@ impl InputHandlers {
     pub fn on_click(&mut self, node: usize, handler: ClickHandler) {
         self.click_node.push(node);
         self.click.push(handler);
+    }
+
+    /// A click of the middle (auxiliary) button: a press and release on the
+    /// same handler.
+    pub fn on_middle_click(&mut self, node: usize, action: Action) {
+        self.middle_click_node.push(node);
+        self.middle_click.push(action);
     }
 
     pub fn on_drag(&mut self, node: usize, start: DragStart) {
@@ -286,6 +295,8 @@ impl InputHandlers {
     pub fn clear(&mut self) {
         self.click_node.clear();
         self.click.clear();
+        self.middle_click_node.clear();
+        self.middle_click.clear();
         self.drag_node.clear();
         self.drag.clear();
         self.scroll_node.clear();
@@ -304,6 +315,7 @@ impl InputHandlers {
     pub(super) fn marks(&self) -> HandlerMarks {
         HandlerMarks {
             click: self.click.len(),
+            middle_click: self.middle_click.len(),
             drag: self.drag.len(),
             scroll: self.scroll.len(),
             scroll_x: self.scroll_x.len(),
@@ -331,6 +343,10 @@ impl InputHandlers {
             &self.click_node[marks.click..],
             node_base,
             &mut out.click_node,
+        ) & nodes(
+            &self.middle_click_node[marks.middle_click..],
+            node_base,
+            &mut out.middle_click_node,
         ) & nodes(&self.drag_node[marks.drag..], node_base, &mut out.drag_node)
             & nodes(
                 &self.scroll_node[marks.scroll..],
@@ -358,6 +374,10 @@ impl InputHandlers {
             out.extend_from_slice(from);
         }
         copy(&self.click[marks.click..], &mut out.click);
+        copy(
+            &self.middle_click[marks.middle_click..],
+            &mut out.middle_click,
+        );
         copy(&self.drag[marks.drag..], &mut out.drag);
         copy(&self.scroll[marks.scroll..], &mut out.scroll);
         copy(&self.scroll_x[marks.scroll_x..], &mut out.scroll_x);
@@ -375,6 +395,9 @@ impl InputHandlers {
         }
         self.click_node.extend(shift(&from.click_node, node_base));
         self.click.extend_from_slice(&from.click);
+        self.middle_click_node
+            .extend(shift(&from.middle_click_node, node_base));
+        self.middle_click.extend_from_slice(&from.middle_click);
         self.drag_node.extend(shift(&from.drag_node, node_base));
         self.drag.extend_from_slice(&from.drag);
         self.scroll_node.extend(shift(&from.scroll_node, node_base));
@@ -395,6 +418,11 @@ impl InputHandlers {
     fn click(&self, node: usize) -> Option<&ClickHandler> {
         let i = self.click_node.iter().position(|n| *n == node)?;
         self.click.get(i)
+    }
+
+    fn middle_click(&self, node: usize) -> Option<&Action> {
+        let i = self.middle_click_node.iter().position(|n| *n == node)?;
+        self.middle_click.get(i)
     }
 
     fn drag(&self, node: usize) -> Option<&DragStart> {
@@ -441,6 +469,7 @@ impl InputHandlers {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct HandlerMarks {
     click: usize,
+    middle_click: usize,
     drag: usize,
     scroll: usize,
     scroll_x: usize,
@@ -488,6 +517,8 @@ pub struct InputRouter {
     wheel_lines: [f32; 2],
     /// The handle wheel input last moved: the one a fling continues.
     wheel_handle: Option<ScrollHandle>,
+    /// Identity of the node a middle press landed on, until its release.
+    middle_press: Option<u64>,
 }
 
 impl InputRouter {
@@ -584,6 +615,51 @@ impl InputRouter {
                 .click(node)
                 .map(|handler| handler.invoke(ClickEvent { x, y }))
         })
+    }
+
+    /// The innermost node on the route at `(x, y)` with a middle click
+    /// handler.
+    fn middle_target(&self, x: f32, y: f32) -> Option<usize> {
+        let target = self.target_at(x, y)?;
+        let handlers = &self.frame.handlers;
+        self.walk(target, UiEventKind::Click, |node| {
+            handlers.middle_click(node).map(|_| Vec::new())
+        })
+        .node
+        .filter(|&node| handlers.middle_click(node).is_some())
+    }
+
+    /// Middle button press: remember which handler it landed on.
+    pub fn middle_down(&mut self, x: f32, y: f32) {
+        self.middle_press = self
+            .middle_target(x, y)
+            .map(|node| node_identities(&self.frame.semantic)[node]);
+    }
+
+    /// Middle button release: a click when it lands on the handler the
+    /// press did, as in browsers' `auxclick`, so a press dragged off a tab
+    /// does not close it.
+    pub fn middle_up(&mut self, x: f32, y: f32) -> Delivery {
+        let Some(pressed) = self.middle_press.take() else {
+            return Delivery::default();
+        };
+        let Some(node) = self.middle_target(x, y) else {
+            return Delivery::default();
+        };
+        if node_identities(&self.frame.semantic)[node] != pressed {
+            return Delivery::default();
+        }
+        Delivery {
+            node: Some(node),
+            actions: self
+                .frame
+                .handlers
+                .middle_click(node)
+                .cloned()
+                .into_iter()
+                .collect(),
+            redraw: false,
+        }
     }
 
     /// Moves go to the capturing drag, wherever the pointer is.
@@ -1289,6 +1365,40 @@ mod tests {
         let moved = router.pointer_move(300.0, 300.0);
 
         assert_eq!(dump(&router, moved), "handle [Move(300, 300)]");
+    }
+
+    // A tab strip: tabs close on a middle click, the strip only takes
+    // primary clicks.
+    #[test]
+    fn a_middle_click_needs_press_and_release_on_one_handler() {
+        let tab = |name: &'static str| {
+            div()
+                .w(100.0)
+                .h(40.0)
+                .test_id(name)
+                .on_click(Msg::Click(name))
+                .on_middle_click(Msg::Click("close"))
+        };
+        let strip = div()
+            .w(300.0)
+            .h(40.0)
+            .flex_row()
+            .test_id("strip")
+            .on_click(Msg::Click("strip"))
+            .child(tab("a"))
+            .child(tab("b"));
+        let mut router = routed(strip, 300.0, 40.0);
+        // (press x, release x, delivery)
+        let cases = [
+            (50.0, 60.0, r#"a [Click("close")]"#),
+            (50.0, 150.0, "-"),
+            (250.0, 250.0, "-"),
+        ];
+        for (down, up, expected) in cases {
+            router.middle_down(down, 20.0);
+            let delivery = router.middle_up(up, 20.0);
+            assert_eq!(dump(&router, delivery), expected, "{down} -> {up}");
+        }
     }
 
     // Regression: `.on_key("mod+s")` was compared as text against the

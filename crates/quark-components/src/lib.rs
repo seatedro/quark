@@ -22,6 +22,7 @@ mod list_nav;
 pub mod menu_bar;
 pub mod modal;
 pub mod palette;
+pub mod pane_tree;
 pub mod picker;
 pub mod popover;
 pub mod progress;
@@ -52,8 +53,8 @@ pub use diff_view::{
     CopySide, DiffEvent, DiffKey, DiffOutcome, DiffStyle, DiffViewState, diff_view,
 };
 pub use dock::{
-    Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockSplit, DockState, PanelId,
-    RegionSnapshot,
+    Dock, DockEvent, DockIntegrityError, DockLayout, DockRegion, DockSnapshot, DockSplit,
+    DockState, PaneDividerEvent, PanelId, TabPolicy,
 };
 pub use dropdown::*;
 pub use hover_card::*;
@@ -65,6 +66,7 @@ pub use palette::{
     CommandPalette, FuzzyMatcher, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome,
     PaletteProvider, binding_label,
 };
+pub use pane_tree::{DropZone, PaneDrop, PaneId, PaneNode, PaneSplit, TabGroup};
 pub use picker::{PickerItem, PickerLabelStyle, picker_list};
 pub use popover::*;
 pub use progress::*;
