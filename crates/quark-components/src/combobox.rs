@@ -21,10 +21,11 @@
 use std::ops::Range;
 use std::rc::Rc;
 
+use quark::view;
+
 use quark_ui::design::Sp;
 use quark_ui::element::{
-    AnyElement, CursorHint, ElementContext, IntoAnyElement, RenderOnce, TextInput, div, text,
-    text_input,
+    AnyElement, ElementContext, IntoAnyElement, RenderOnce, TextInput, div, text, text_input,
 };
 use quark_ui::style::Styled;
 use quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
@@ -441,64 +442,63 @@ impl RenderOnce for Combobox {
         let open = self.open && focused;
         let field_h = (m.ui_row_height * 1.6).round();
 
-        let mut root = div()
-            .relative()
-            .flex_col()
-            .w(width)
-            .accessibility_id(&*self.id)
-            .test_id("combobox")
-            .accessibility_role(accesskit::Role::ComboBox)
-            .accessibility_label(self.label.clone())
-            .accessibility_expanded(open)
-            .on_key("alt+arrowdown", msg(ComboboxMsg::Open))
-            .child(
-                self.input
-                    .placeholder(self.placeholder)
-                    .focused(focused)
-                    .w_full()
-                    .h(field_h),
-            );
-        if open {
-            root = root
-                .on_key("enter", msg(ComboboxMsg::CommitHighlighted))
-                .on_key("escape", msg(ComboboxMsg::Close));
-            let list = popover_panel(theme)
-                .w(width)
-                .py(m.spacing_xs)
-                .accessibility_id(format!("{}-listbox", self.id))
-                .test_id("combobox-listbox")
-                .accessibility_role(accesskit::Role::ListBox)
-                .accessibility_label(self.label.clone())
-                .children(self.matches.options.iter().enumerate().map(|(i, &option)| {
-                    let label = &self.options[option];
-                    let ranges = &self.matches.ranges[self.matches.spans[i].clone()];
-                    match_row(
-                        label,
-                        ranges,
-                        self.highlighted == Some(i),
-                        self.selected == Some(option),
-                        msg(ComboboxMsg::Commit(i)),
-                        theme,
-                    )
-                }))
-                .when(self.loading || self.matches.options.is_empty(), |list| {
-                    let note = quark_ui::i18n::tr(if self.loading {
-                        "quark-loading"
-                    } else {
-                        "quark-find-no-matches"
-                    });
-                    list.child(
-                        div()
-                            .px(m.spacing_md)
-                            .py(m.spacing_xs + (Sp::XXS * scale).round())
-                            .accessibility_role(accesskit::Role::Label)
-                            .accessibility_label(note.clone())
-                            .child(text(note).text_sm().color(theme.colors.text_muted)),
-                    )
-                });
-            root = root.child(anchored(list, PopoverSide::Bottom, self.viewport));
+        view! {
+            <div class="relative flex-col" w={width} accessibility_id={&*self.id}
+                 test_id="combobox" accessibility_role={accesskit::Role::ComboBox}
+                 aria-label={self.label.clone()} aria-expanded={open}
+                 on_key={("alt+arrowdown", msg(ComboboxMsg::Open))}
+                 @when {open} {
+                     on_key={("enter", msg(ComboboxMsg::CommitHighlighted))}
+                     on_key={("escape", msg(ComboboxMsg::Close))}
+                 }>
+                <{self.input} placeholder={self.placeholder} focused={focused} class="w-full"
+                              h={field_h} />
+                if open {
+                    <anchored(
+                        view! {
+                            <popover_panel(theme) w={width} py={m.spacing_xs}
+                                accessibility_id={format!("{}-listbox", self.id)}
+                                test_id="combobox-listbox"
+                                accessibility_role={accesskit::Role::ListBox}
+                                aria-label={self.label.clone()}>
+                                for (i, &option) in self.matches.options.iter().enumerate() {
+                                    {match_row(
+                                        &self.options[option],
+                                        &self.matches.ranges[self.matches.spans[i].clone()],
+                                        self.highlighted == Some(i),
+                                        self.selected == Some(option),
+                                        msg(ComboboxMsg::Commit(i)),
+                                        theme,
+                                    )}
+                                }
+                                if self.loading || self.matches.options.is_empty() {
+                                    {status_row(self.loading, theme)}
+                                }
+                            </popover_panel>
+                        },
+                        PopoverSide::Bottom,
+                        self.viewport,
+                    ) />
+                }
+            </div>
         }
-        root.into_any()
+    }
+}
+
+/// The list's only row while options load or when none match.
+fn status_row(loading: bool, theme: &Theme) -> AnyElement {
+    let m = &theme.metrics;
+    let scale = m.ui_scale();
+    let note = quark_ui::i18n::tr(if loading {
+        "quark-loading"
+    } else {
+        "quark-find-no-matches"
+    });
+    view! {
+        <div px={m.spacing_md} py={m.spacing_xs + (Sp::XXS * scale).round()}
+             accessibility_role={accesskit::Role::Label} aria-label={note.clone()}>
+            <text class="text-sm" color={theme.colors.text_muted}>{note}</text>
+        </div>
     }
 }
 
@@ -516,42 +516,33 @@ fn match_row(
     let tc = &theme.colors;
     let m = &theme.metrics;
     let scale = m.ui_scale();
-    let mut segments = div().flex_row().flex_1().overflow_hidden();
-    let mut at = 0;
-    for &(start, end) in ranges {
-        if start > at {
-            segments = segments.child(text(label[at..start].to_owned()).text_sm().color(tc.text));
-        }
-        segments = segments.child(
-            text(label[start..end].to_owned())
-                .text_sm()
-                .semibold()
-                .color(tc.text_accent),
-        );
-        at = end;
+    // Each range with where the plain text before it starts.
+    let runs = ranges.iter().scan(0, |at, &(start, end)| {
+        Some((std::mem::replace(at, end), start, end))
+    });
+    let tail = ranges.last().map_or(0, |&(_, end)| end);
+    view! {
+        <div class="flex-row items-center w-full" px={m.spacing_md}
+             py={m.spacing_xs + (Sp::XXS * scale).round()}
+             accessibility_role={accesskit::Role::ListBoxOption}
+             aria-label={label.to_owned()} aria-selected={highlighted || selected}
+             bg={if highlighted { tc.ghost_element_selected } else { Color::TRANSPARENT }}
+             hover_bg={tc.ghost_element_hover} class="cursor-pointer" on:click={commit}>
+            <div class="flex-row flex-1 overflow-hidden">
+                for (at, start, end) in runs {
+                    if start > at {
+                        <text class="text-sm" color={tc.text}>{label[at..start].to_owned()}</text>
+                    }
+                    <text class="text-sm font-semibold" color={tc.text_accent}>
+                        {label[start..end].to_owned()}
+                    </text>
+                }
+                if tail < label.len() {
+                    <text class="text-sm" color={tc.text}>{label[tail..].to_owned()}</text>
+                }
+            </div>
+        </div>
     }
-    if at < label.len() {
-        segments = segments.child(text(label[at..].to_owned()).text_sm().color(tc.text));
-    }
-    div()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .px(m.spacing_md)
-        .py(m.spacing_xs + (Sp::XXS * scale).round())
-        .accessibility_role(accesskit::Role::ListBoxOption)
-        .accessibility_label(label.to_owned())
-        .accessibility_selected(highlighted || selected)
-        .bg(if highlighted {
-            tc.ghost_element_selected
-        } else {
-            Color::TRANSPARENT
-        })
-        .hover_bg(tc.ghost_element_hover)
-        .cursor(CursorHint::Pointer)
-        .on_click(commit)
-        .child(segments)
-        .into_any()
 }
 
 #[cfg(test)]
