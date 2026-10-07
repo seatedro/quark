@@ -941,7 +941,7 @@ fn rust_code_block_is_colored_once_its_highlight_arrives() {
         ),
         (
             vec![],
-            true,
+            vec![markdown_block_key(RowKey(0), 0)],
             vec!["fn".into(), "main".into(), "let".into(), "\"hi\"".into()]
         )
     );

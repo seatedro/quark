@@ -41,30 +41,31 @@ impl SyntaxHighlighter {
         Self::default()
     }
 
-    /// Takes finished highlights. `true` when any arrived; rebuild the
-    /// markdown messages then so their code blocks pick them up.
-    pub fn poll(&mut self) -> bool {
+    /// Takes finished highlights and returns the code blocks they are
+    /// for; rebuild those blocks' messages (see
+    /// [`super::markdown_block_row`]) so they pick the colors up.
+    pub fn poll(&mut self) -> Vec<BlockKey> {
         #[cfg(feature = "syntax")]
         {
             self.inner.poll()
         }
         #[cfg(not(feature = "syntax"))]
         {
-            false
+            Vec::new()
         }
     }
 
     /// Blocks until every requested highlight has arrived and been taken.
     /// For tests and screenshots, which need the colored state at once.
-    /// `true` when any arrived, as for [`Self::poll`].
-    pub fn finish_pending(&mut self) -> bool {
+    /// Returns the blocks that got a highlight, as [`Self::poll`] does.
+    pub fn finish_pending(&mut self) -> Vec<BlockKey> {
         #[cfg(feature = "syntax")]
         {
             self.inner.finish_pending()
         }
         #[cfg(not(feature = "syntax"))]
         {
-            false
+            Vec::new()
         }
     }
 
@@ -182,18 +183,18 @@ mod imp {
             }
         }
 
-        pub(super) fn poll(&mut self) -> bool {
+        pub(super) fn poll(&mut self) -> Vec<BlockKey> {
+            let mut changed = Vec::new();
             let Some(worker) = &self.worker else {
-                return false;
+                return changed;
             };
-            let mut changed = false;
             while let Some(result) = worker.try_recv() {
-                changed |= take(&mut self.slots, result);
+                changed.extend(take(&mut self.slots, result));
             }
             changed
         }
 
-        pub(super) fn finish_pending(&mut self) -> bool {
+        pub(super) fn finish_pending(&mut self) -> Vec<BlockKey> {
             let mut changed = self.poll();
             loop {
                 let pending = self.slots.values().any(|slot| {
@@ -207,7 +208,7 @@ mod imp {
                 let Some(result) = worker.recv() else {
                     return changed;
                 };
-                changed |= take(&mut self.slots, result);
+                changed.extend(take(&mut self.slots, result));
             }
         }
     }
@@ -216,23 +217,25 @@ mod imp {
     /// older than the newest request is still kept: it applies while the
     /// source only grew, and the newest one may be dropped by the worker's
     /// coalescing in favor of an even newer one.
-    fn take(slots: &mut HashMap<BlockKey, Slot>, result: quark_syntax::Highlighted) -> bool {
-        let Some(slot) = slots.get_mut(&BlockKey(result.slot)) else {
-            return false;
-        };
+    fn take(
+        slots: &mut HashMap<BlockKey, Slot>,
+        result: quark_syntax::Highlighted,
+    ) -> Option<BlockKey> {
+        let key = BlockKey(result.slot);
+        let slot = slots.get_mut(&key)?;
         if slot
             .done
             .as_ref()
             .is_some_and(|done| done.generation >= result.generation)
         {
-            return false;
+            return None;
         }
         slot.done = Some(Done {
             generation: result.generation,
             source: result.source,
             spans: result.spans.into(),
         });
-        true
+        Some(key)
     }
 
     fn color(kind: HighlightKind, theme: &Theme) -> Option<quark::Color> {

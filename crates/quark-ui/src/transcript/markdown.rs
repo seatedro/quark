@@ -29,6 +29,11 @@ pub fn markdown_block_key(row: RowKey, index: usize) -> BlockKey {
     BlockKey((row.0 << 16) | (index as u64 & 0xffff))
 }
 
+/// The message a [`markdown_block_key`] belongs to.
+pub fn markdown_block_row(key: BlockKey) -> RowKey {
+    RowKey(key.0 >> 16)
+}
+
 struct Converted {
     hash: u64,
     highlight: u64,

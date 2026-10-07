@@ -25,7 +25,7 @@ mod syntax;
 mod tests;
 
 pub use element::{TranscriptElement, TranscriptEvent};
-pub use markdown::{MarkdownMessage, markdown_block_key};
+pub use markdown::{MarkdownMessage, markdown_block_key, markdown_block_row};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
 
