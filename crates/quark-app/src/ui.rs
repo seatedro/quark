@@ -13,6 +13,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use accesskit::{Action as AxAction, ActionData, ActionRequest, Affine, TreeUpdate};
+use quark::Rect;
 use quark::SemanticFrame;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
@@ -110,6 +111,10 @@ pub struct UiAdapter<U: UiApp> {
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
     accessibility: AccessibilityFrame,
+    /// Text fields of the last frame with their caret rects, for IME.
+    text_targets: Vec<(FocusId, Option<Rect>)>,
+    ime_allowed: bool,
+    ime_area: Option<Rect>,
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
 }
@@ -132,6 +137,9 @@ impl<U: UiApp> UiAdapter<U> {
             pointer: None,
             router: InputRouter::default(),
             accessibility: AccessibilityFrame::default(),
+            text_targets: Vec::new(),
+            ime_allowed: false,
+            ime_area: None,
             scale_factor: 1.0,
         }
     }
@@ -201,6 +209,27 @@ impl<U: UiApp> UiAdapter<U> {
         self.deliver(delivery, cx);
     }
 
+    /// Allow IME only while a text field has focus, and point the
+    /// candidate window at its caret. Frames cannot reach the window, so
+    /// this runs after events with the last frame's caret.
+    fn sync_ime(&mut self, cx: &mut EventContext) {
+        let target = self
+            .focus
+            .and_then(|focus| self.text_targets.iter().find(|(t, _)| *t == focus));
+        let allowed = target.is_some();
+        if allowed != self.ime_allowed {
+            cx.set_ime_allowed(allowed);
+            self.ime_allowed = allowed;
+            self.ime_area = None;
+        }
+        if let Some(caret) = target.and_then(|(_, caret)| *caret)
+            && self.ime_area != Some(caret)
+        {
+            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
+            self.ime_area = Some(caret);
+        }
+    }
+
     fn update_cursor(&self, cx: &mut EventContext) {
         let hint = self
             .pointer
@@ -234,6 +263,8 @@ struct Painted {
     input: quark_ui::element::InputFrame,
     accessibility: AccessibilityFrame,
     next_frame_ms: Option<u64>,
+    /// Text fields with their caret rects, for IME.
+    text_targets: Vec<(FocusId, Option<Rect>)>,
 }
 
 /// Lay out and paint `root` into a `width` x `height` point viewport.
@@ -247,6 +278,11 @@ fn paint(root: &mut AnyElement, ecx: &mut ElementContext, width: f32, height: f3
         input: ecx.take_input_frame(),
         accessibility: std::mem::take(&mut ecx.accessibility),
         next_frame_ms: ecx.next_frame_ms(),
+        text_targets: ecx
+            .text_input_hit_areas
+            .iter()
+            .map(|area| (area.focus_target, area.caret))
+            .collect(),
     }
 }
 
@@ -343,6 +379,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         );
         self.router.set_frame(painted.input);
         self.accessibility = painted.accessibility;
+        self.text_targets = painted.text_targets;
         self.scale_factor = scale;
         if let Some(at_ms) = painted.next_frame_ms {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
@@ -351,6 +388,34 @@ impl<U: UiApp> App for UiAdapter<U> {
     }
 
     fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
+        self.handle_event(event, cx);
+        self.sync_ime(cx);
+    }
+
+    fn wake(&mut self, cx: &mut EventContext) {
+        let mut ucx = UiContext {
+            window: cx,
+            focus: &mut self.focus,
+        };
+        self.app.wake(&mut ucx);
+        self.sync_ime(cx);
+    }
+
+    fn accessibility(&mut self) -> Option<TreeUpdate> {
+        // A full tree every frame; accesskit diffs it against the last one.
+        let mut update = self.accessibility.tree_update(&self.name, self.focus);
+        scale_tree(&mut update, self.scale_factor);
+        Some(update)
+    }
+
+    fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
+        self.handle_accessibility_action(request, cx);
+        self.sync_ime(cx);
+    }
+}
+
+impl<U: UiApp> UiAdapter<U> {
+    fn handle_event(&mut self, event: InputEvent, cx: &mut EventContext) {
         let mut ucx = UiContext {
             window: cx,
             focus: &mut self.focus,
@@ -400,22 +465,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         }
     }
 
-    fn wake(&mut self, cx: &mut EventContext) {
-        let mut ucx = UiContext {
-            window: cx,
-            focus: &mut self.focus,
-        };
-        self.app.wake(&mut ucx);
-    }
-
-    fn accessibility(&mut self) -> Option<TreeUpdate> {
-        // A full tree every frame; accesskit diffs it against the last one.
-        let mut update = self.accessibility.tree_update(&self.name, self.focus);
-        scale_tree(&mut update, self.scale_factor);
-        Some(update)
-    }
-
-    fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
+    fn handle_accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
         match route_accessibility(&self.accessibility, &request) {
             Some(Routed::Dispatch(action)) => self.dispatch(vec![action], cx),
             Some(Routed::Focus(focus)) => {

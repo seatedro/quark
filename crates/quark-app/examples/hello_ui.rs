@@ -5,7 +5,7 @@
 use accesskit::Role;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text, text_input};
 use quark_app::quark_ui::style::Styled;
-use quark_app::quark_ui::text_input::TextField;
+use quark_app::quark_ui::text_input::{TextEditCommand, TextField, command_for_binding};
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
@@ -27,6 +27,8 @@ impl From<Msg> for Action {
 struct HelloUi {
     name: TextField,
     greeting: String,
+    /// The example's clock for undo coalescing; the field never reads time.
+    started: std::time::Instant,
 }
 
 impl HelloUi {
@@ -85,12 +87,11 @@ impl UiApp for HelloUi {
                             .child(text("Hello from Quark").text_lg().bold()),
                     )
                     .child(
-                        text_input("Name", self.name.text())
+                        text_input("Name", "")
+                            .field(&self.name)
                             .placeholder("Your name")
                             .focus_target(NAME_FIELD)
                             .focused(cx.is_focused(NAME_FIELD))
-                            .cursor(self.name.cursor())
-                            .anchor(self.name.anchor())
                             .w_full()
                             .h(52.0),
                     )
@@ -131,19 +132,41 @@ impl UiApp for HelloUi {
                 true
             }
             InputEvent::TextInput(text) if editing => {
-                self.name.insert_text(text);
+                self.edit(TextEditCommand::InsertText(text.clone()), cx);
+                true
+            }
+            InputEvent::ImePreedit(text, cursor) if editing => {
+                self.name.set_preedit(text.clone(), *cursor);
                 cx.window.request_redraw();
                 true
             }
-            InputEvent::KeyPress(chord)
-                if editing && chord.named() == Some(NamedKey::Backspace) =>
-            {
-                self.name.backspace();
-                cx.window.request_redraw();
-                true
+            InputEvent::KeyPress(chord) if editing => {
+                let binding = chord.binding_string().unwrap_or_default();
+                let command = match binding.as_str() {
+                    "ctrl+v" | "cmd+v" => cx.window.clipboard_text().map(TextEditCommand::Paste),
+                    other => command_for_binding(other),
+                };
+                match command {
+                    Some(command) => {
+                        self.edit(command, cx);
+                        true
+                    }
+                    None => false,
+                }
             }
             _ => false,
         }
+    }
+}
+
+impl HelloUi {
+    fn edit(&mut self, command: TextEditCommand, cx: &mut UiContext) {
+        let now_ms = self.started.elapsed().as_millis() as u64;
+        let outcome = self.name.apply_at(command, now_ms);
+        if let Some(text) = outcome.clipboard_write {
+            cx.window.set_clipboard_text(&text);
+        }
+        cx.window.request_redraw();
     }
 }
 
@@ -152,6 +175,7 @@ fn main() -> Result<(), quark_app::RunError> {
         HelloUi {
             name: TextField::new(""),
             greeting: String::new(),
+            started: std::time::Instant::now(),
         },
         WindowOptions {
             title: "Hello Quark UI".into(),
