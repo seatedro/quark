@@ -52,7 +52,7 @@ use quark::selection::{
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
-use crate::element::{Binding, StyledSpan, join_code_lines};
+use crate::element::{Binding, ScrollHandle, StyledSpan, join_code_lines};
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
 use quark::Color;
@@ -522,6 +522,13 @@ pub trait BlockGeometry: Clone {
     fn range_rects(&self, range: std::ops::Range<usize>, out: &mut Vec<Rect>) {
         let _ = (range, out);
     }
+
+    /// Width of the block's content from its left inset when it does not
+    /// wrap (code), or `None` when it fits any width. Content wider than
+    /// the column scrolls horizontally.
+    fn natural_width(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// Measures blocks; [`TextMeasurer`] does it with the shared text layouts
@@ -689,6 +696,12 @@ pub struct Transcript<G = TextGeometry> {
     find_stale: bool,
     /// A match to bring into view once the next prepare has its geometry.
     reveal: Option<Reveal>,
+    /// Horizontal scroll of each block wider than its column, kept while
+    /// the block is in the document.
+    scroll_handles: HashMap<BlockKey, ScrollHandle>,
+    /// Elements built so far; rows whose scroll is still moving hash it so
+    /// they rebuild every frame until it settles.
+    elements_built: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -725,6 +738,8 @@ impl<G: BlockGeometry> Transcript<G> {
             find: None,
             find_stale: false,
             reveal: None,
+            scroll_handles: HashMap::new(),
+            elements_built: 0,
         }
     }
 
@@ -874,6 +889,7 @@ impl<G: BlockGeometry> Transcript<G> {
 
     fn forget_block(&mut self, block: BlockKey) {
         self.find_stale = true;
+        self.scroll_handles.remove(&block);
         self.block_row.remove(&block);
         let Some(pos) = self.order.remove(block) else {
             return;
@@ -1280,9 +1296,25 @@ impl<G: BlockGeometry> Transcript<G> {
         } else if y >= rect.y + rect.height {
             block.text_len
         } else {
-            block.geometry.hit(x - rect.x, y - rect.y)
+            // Content scrolled left sits under the pointer further right.
+            block
+                .geometry
+                .hit(x - rect.x + self.scroll_x(block.key), y - rect.y)
         };
         Some(SelectionPoint::new(block.key, byte))
+    }
+
+    /// How far block `key`'s content is scrolled left.
+    fn scroll_x(&self, key: BlockKey) -> f32 {
+        self.scroll_handles.get(&key).map_or(0.0, |h| h.offset().0)
+    }
+
+    /// Whether block `key` scrolls sideways and its offset may still change
+    /// during the next frame (a requested jump, a smooth scroll, a fling).
+    fn scroll_unsettled(&self, key: BlockKey) -> bool {
+        self.scroll_handles
+            .get(&key)
+            .is_some_and(|h| !h.is_settled())
     }
 
     // -- Frame --
@@ -1384,6 +1416,10 @@ impl<G: BlockGeometry> Transcript<G> {
                     kept.insert(block.key, entry);
                 }
                 let block_height = geometry.height();
+                let column = block_width - block.style.inset(style.font_size);
+                if geometry.natural_width().is_some_and(|w| w > column) {
+                    self.scroll_handles.entry(block.key).or_default();
+                }
                 self.blocks.push(VisibleBlock {
                     key: block.key,
                     row: key,

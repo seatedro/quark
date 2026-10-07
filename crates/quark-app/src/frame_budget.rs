@@ -191,7 +191,9 @@ impl UiApp for Chat {
 
 fn chat_markdown(i: u64) -> String {
     format!(
-        "Message {i} has a **bold** word and `code`.\n\n- a list item\n- another one\n\nA closing paragraph for message {i}."
+        "Message {i} has a **bold** word and `code`.\n\n- a list item\n- another one\n\n```\nlet wide = \"{}\";\n```\n\nA closing paragraph for message {i}.",
+        // Wider than the window: the code block scrolls sideways.
+        "w".repeat(120)
     )
 }
 

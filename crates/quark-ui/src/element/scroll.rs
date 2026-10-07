@@ -405,6 +405,14 @@ impl ScrollHandle {
         });
     }
 
+    /// Whether the offset is final until new input: no request waits for
+    /// the next frame and no smooth scroll or fling is moving the content.
+    /// A cached subtree holding the handle must rebuild while it is not.
+    pub fn is_settled(&self) -> bool {
+        let s = self.0.borrow();
+        s.request.is_none() && s.smooth.is_none() && s.fling.is_none()
+    }
+
     /// Whether a smooth scroll or fling is moving the content.
     pub fn is_moving(&self) -> bool {
         let s = self.0.borrow();

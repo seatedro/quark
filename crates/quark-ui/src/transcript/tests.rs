@@ -1777,3 +1777,44 @@ fn an_image_without_pixels_shows_its_alt_text_and_names_its_node() {
         (vec!["a sales chart"], Some("a sales chart"), Some((30, 20)))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Wide blocks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_wide_code_block_scrolls_sideways_and_pointer_hits_follow_it() {
+    let long = format!("let row = \"{}\";", "x".repeat(150));
+    let mut message = message_with(0, &["Above the code."]);
+    message.blocks.push(TranscriptBlock::code(
+        BlockKey(5),
+        vec![vec![crate::element::StyledSpan::plain(long.as_str())]],
+    ));
+    let messages: HashMap<RowKey, TranscriptMessage> = [(message.key, message)].into();
+    let mut transcript = real_transcript(&messages);
+    let mut painter = CachedPainter::new();
+    let size = (300.0, 400.0);
+    painter.frame(&mut transcript, &messages, size, true);
+    let hit = |t: &Transcript| {
+        let code = t
+            .visible_blocks()
+            .iter()
+            .find(|b| b.key == BlockKey(5))
+            .unwrap();
+        let (x, y) = (code.rect.x + 60.0, code.rect.y + code.rect.height * 0.5);
+        t.point_at(x, y).unwrap().byte
+    };
+    let before = hit(&transcript);
+
+    transcript.scroll_handles[&BlockKey(5)].set_offset(200.0, 0.0);
+    painter.frame(&mut transcript, &messages, size, true);
+    let cached = painter.frame(&mut transcript, &messages, size, true);
+    let mut fresh = transcript.without_element_memory();
+    let uncached = painter.frame(&mut fresh, &messages, size, false);
+    let after = hit(&transcript);
+
+    assert_eq!(transcript.scroll_handles[&BlockKey(5)].offset().0, 200.0);
+    assert_eq!(cached, uncached);
+    // 200 points of monospace at this size is well over 15 characters.
+    assert!(after > before + 15, "{before} -> {after}");
+}

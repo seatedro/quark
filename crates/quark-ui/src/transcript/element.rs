@@ -28,8 +28,8 @@ use crate::design::Alpha;
 use crate::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, DragHandler, DragReleaseResult, DragStart, Element,
     ElementContext, IntoAnyElement, LayoutEngine, LayoutId, LinkClicked, LinkHandler,
-    ScrollActionBuilder, ScrollTarget, SelectableText, StyledSpan, cached, code_block_joined, div,
-    inputs_hash, selectable_rich_text, text,
+    ScrollActionBuilder, ScrollHandle, ScrollTarget, SelectableText, StyledSpan, cached,
+    code_block_joined, div, inputs_hash, selectable_rich_text, text,
 };
 use crate::style::Styled;
 use crate::theme::Theme;
@@ -121,7 +121,7 @@ struct Placed {
 #[derive(Clone)]
 pub(super) struct RowEntry {
     hash: u64,
-    build: Arc<RowBuild>,
+    build: Rc<RowBuild>,
 }
 
 impl std::fmt::Debug for RowEntry {
@@ -156,6 +156,9 @@ struct BlockBuild {
     spans: Option<Arc<[StyledSpan]>>,
     rect: Rect,
     selection: Option<(usize, usize)>,
+    /// The horizontal scroll and unwrapped width of content wider than
+    /// the column.
+    scroll: Option<(ScrollHandle, f32)>,
 }
 
 /// The theme colors a row paints with besides its spans' own.
@@ -238,6 +241,7 @@ impl<G: BlockGeometry> Transcript<G> {
         theme: &Theme,
         on_event: impl Fn(TranscriptEvent) -> Action + 'static,
     ) -> TranscriptElement {
+        self.elements_built += 1;
         let style = self.style;
         let (width, height) = self.size;
         let palette = Palette::new(theme);
@@ -268,7 +272,7 @@ impl<G: BlockGeometry> Transcript<G> {
             let hash = self.row_hash(row, message, blocks, theme_hash, row_count);
             let build = match builds.remove(&row.key) {
                 Some(entry) if entry.hash == hash => entry.build,
-                _ => Arc::new(self.row_build(
+                _ => Rc::new(self.row_build(
                     row,
                     message,
                     blocks,
@@ -374,6 +378,12 @@ impl<G: BlockGeometry> Transcript<G> {
                 continue;
             };
             (block.revision(), visible.offset_in_row.to_bits()).hash(&mut hasher);
+            self.scroll_x(block.key).to_bits().hash(&mut hasher);
+            if self.scroll_unsettled(block.key) {
+                // The offset resolves while the row paints; a replay would
+                // skip that.
+                self.elements_built.hash(&mut hasher);
+            }
             (visible.rect.height.to_bits(), visible.rect.width.to_bits()).hash(&mut hasher);
             self.block_selection(block.key, visible.text_len)
                 .hash(&mut hasher);
@@ -410,11 +420,29 @@ impl<G: BlockGeometry> Transcript<G> {
                 y: visible.offset_in_row,
                 ..visible.rect
             };
+            let scroll = self
+                .scroll_handles
+                .get(&block.key)
+                .and_then(|handle| Some((handle.clone(), visible.geometry.natural_width()?)));
+            let scroll_x = self.scroll_x(block.key);
             if let Some(find) = &self.find {
                 for (range, current) in find.block_matches(block.key) {
                     rects.clear();
                     visible.geometry.range_rects(range, &mut rects);
-                    highlights.extend(rects.iter().map(|r| (r.offset(rect.x, rect.y), current)));
+                    // Matches scrolled out of a wide block's column hide.
+                    highlights.extend(rects.iter().filter_map(|r| {
+                        let r = r.offset(rect.x - scroll_x, rect.y);
+                        let left = r.x.max(rect.x);
+                        let right = (r.x + r.width).min(rect.x + rect.width);
+                        (left < right).then_some((
+                            Rect {
+                                x: left,
+                                width: right - left,
+                                ..r
+                            },
+                            current,
+                        ))
+                    }));
                 }
             }
             built.push(BlockBuild {
@@ -422,6 +450,7 @@ impl<G: BlockGeometry> Transcript<G> {
                 spans: painted_spans(painted, kept, block, palette),
                 rect,
                 selection: self.block_selection(block.key, visible.text_len),
+                scroll,
             });
         }
         RowBuild {
@@ -449,13 +478,13 @@ impl<G: BlockGeometry> Transcript<G> {
 /// row's list item node. Built inside the row's cached boundary, so it
 /// paints relative to the row's top left.
 struct RowElement {
-    build: Arc<RowBuild>,
+    build: Rc<RowBuild>,
     header: AnyElement,
     children: Vec<Placed>,
 }
 
 impl RowElement {
-    fn new(build: Arc<RowBuild>, links: &LinkHandler) -> Self {
+    fn new(build: Rc<RowBuild>, links: &LinkHandler) -> Self {
         let header = text(build.author.to_string())
             .size(build.font_size * 0.85)
             .semibold()
@@ -471,6 +500,7 @@ impl RowElement {
                     selection: b.selection,
                     links,
                     colors: &build.colors,
+                    scroll: b.scroll.as_ref(),
                 },
                 &mut children,
             );
@@ -603,6 +633,7 @@ struct BlockPaint<'a> {
     selection: Option<(usize, usize)>,
     links: &'a LinkHandler,
     colors: &'a RowColors,
+    scroll: Option<&'a (ScrollHandle, f32)>,
 }
 
 /// The elements of one block at `rect`: quote bars and the list marker in
@@ -620,6 +651,7 @@ fn block_elements(
         selection,
         links,
         colors,
+        scroll,
     } = paint;
     let style = &block.style;
     let font_size = base_font_size * style.scale;
@@ -685,13 +717,34 @@ fn block_elements(
         }
         BlockContent::Code {
             line_count, label, ..
-        } => code_block_joined(spans, *line_count)
-            .label(label.clone())
-            .width(content.width)
-            .size(font_size)
-            .source(block.key.0)
-            .selection(selection)
-            .into_any(),
+        } => {
+            let code = |width: f32| {
+                code_block_joined(spans.clone(), *line_count)
+                    .label(label.clone())
+                    .width(width)
+                    .size(font_size)
+                    .source(block.key.0)
+                    .selection(selection)
+            };
+            match scroll {
+                // Wider than the column: the block scrolls sideways under
+                // its own scrollbar.
+                Some((handle, natural)) => div()
+                    .w(content.width)
+                    .h(content.height)
+                    .track_scroll(handle)
+                    .overflow_x_scroll()
+                    .scrollbar_auto_hide()
+                    .child(
+                        div()
+                            .w(natural.max(content.width))
+                            .flex_shrink_0()
+                            .child(code(natural.max(content.width))),
+                    )
+                    .into_any(),
+                None => code(content.width).into_any(),
+            }
+        }
         BlockContent::Image {
             state: ImageState::Failed,
             ..

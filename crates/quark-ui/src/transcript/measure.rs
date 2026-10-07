@@ -61,6 +61,8 @@ pub struct TextGeometry {
     /// end.
     width: f32,
     text_len: usize,
+    /// Unwrapped content width from the inset (code), padding included.
+    natural_width: Option<f32>,
 }
 
 impl BlockGeometry for TextGeometry {
@@ -90,6 +92,10 @@ impl BlockGeometry for TextGeometry {
             }),
             None => {}
         }
+    }
+
+    fn natural_width(&self) -> Option<f32> {
+        self.natural_width
     }
 }
 
@@ -130,6 +136,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     text_origin: (inset, 0.0),
                     width,
                     text_len,
+                    natural_width: None,
                 }
             }
             BlockContent::Code {
@@ -139,7 +146,11 @@ impl BlockMeasurer for TextMeasurer<'_> {
             } => {
                 let layout = self.layout(CodeBlock::joined_layout_params(spans, font_size));
                 let metrics = CodeBlock::metrics(font_size, *line_count, label.is_some());
+                let natural_width = layout
+                    .as_ref()
+                    .map(|l| (l.size().0 + metrics.text_origin.0 * 2.0).ceil());
                 TextGeometry {
+                    natural_width,
                     layout,
                     text_origin: (inset + metrics.text_origin.0, metrics.text_origin.1),
                     height: metrics.height,
@@ -166,6 +177,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     text_origin: (inset, 0.0),
                     width,
                     text_len,
+                    natural_width: None,
                 }
             }
             BlockContent::Image { state, .. } => {
@@ -179,6 +191,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     height,
                     width,
                     text_len,
+                    natural_width: None,
                 }
             }
             BlockContent::Rule => TextGeometry {
@@ -187,6 +200,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                 height: (font_size * RULE_HEIGHT).ceil(),
                 width,
                 text_len,
+                natural_width: None,
             },
         }
     }
