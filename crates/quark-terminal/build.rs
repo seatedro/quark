@@ -35,7 +35,11 @@ const GHOSTTY_HASH: &str = "ghostty-1.3.2-dev-5UdBC4gaYwVruUDKYxdTyGQF6L_6LjdKdJ
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    for var in ["ZIG", "QUARK_GHOSTTY_VT_LIB_DIR", "QUARK_GHOSTTY_VT_OPTIMIZE"] {
+    for var in [
+        "ZIG",
+        "QUARK_GHOSTTY_VT_LIB_DIR",
+        "QUARK_GHOSTTY_VT_OPTIMIZE",
+    ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
     println!("cargo:rustc-check-cfg=cfg(ghostty_vt)");
@@ -152,5 +156,8 @@ fn run(command: &mut Command) {
             command.get_program()
         )
     });
-    assert!(status.success(), "quark-terminal: {command:?} failed: {status}");
+    assert!(
+        status.success(),
+        "quark-terminal: {command:?} failed: {status}"
+    );
 }
