@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use accesskit::Role;
 use quark::selection::{FULL_INTEGRITY_CHECKS, count_integrity_steps};
+use quark::view;
 use quark_ui::element::{
     AnyElement, CacheKey, ClickEvent, DragHandler, DragReleaseResult, IntoAnyElement,
     ScrollActionBuilder, WHEEL_LINE_PX, cached, div, inputs_hash, svg_icon, text,
@@ -1373,12 +1374,10 @@ pub fn tree_view(
     let colors = TreeColors::of(theme);
     let height = data.viewport_height;
     let hash = inputs_hash(&(data.revision, env, on_event as usize));
-    cached(data.id, hash, move || {
-        build_tree(&data, colors, env, on_event)
-    })
-    .w_full()
-    .h(height)
-    .into_any()
+    view! {
+        <cached(data.id, hash, move || build_tree(&data, colors, env, on_event))
+                class="w-full" h={height} />
+    }
 }
 
 fn build_tree(
@@ -1395,65 +1394,63 @@ fn build_tree(
         0.0,
         OVERSCAN,
     );
-    let mut list = div()
-        .w_full()
-        .h(d.viewport_height)
-        .flex_col()
-        .track_focus(d.focus)
-        .scroll_y(d.scroll)
-        .scroll_total(window.total_extent)
-        .on_scroll(
-            ScrollActionBuilder::new(move |lines| on_event(TreeEvent::Scroll(lines)))
-                .with_to_px(move |px| on_event(TreeEvent::ScrollTo(px as f32))),
-        );
-    if env.accessible {
-        list = list
-            .accessibility_id(d.id)
-            .accessibility_role(Role::Tree)
-            .accessibility_label(d.label)
-            .accessibility_multiselectable(d.mode == SelectionMode::Multi);
+    view! {
+        <div class="w-full" h={d.viewport_height} class="flex-col" track_focus={d.focus}
+             scroll_y={d.scroll} scroll_total={window.total_extent}
+             on:scroll={ScrollActionBuilder::new(move |lines| on_event(TreeEvent::Scroll(lines)))
+                 .with_to_px(move |px| on_event(TreeEvent::ScrollTo(px as f32)))}
+             @when {env.accessible} {
+                 accessibility_id={d.id} accessibility_role={Role::Tree} aria-label={d.label}
+                 aria-multiselectable={d.mode == SelectionMode::Multi}
+             }
+             @for &(binding, key) in KEYS { on_key={(binding, on_event(TreeEvent::Key(key)))} }
+             @for (i, ch) in TYPE_AHEAD_KEYS.char_indices() {
+                 on_key={(&TYPE_AHEAD_KEYS[i..i + 1], on_event(TreeEvent::TypeAhead(ch)))}
+             }>
+            <div class="w-full shrink-0" h={window.top_spacer} />
+            for row in window.range {
+                {visible_row(d, row, colors, env, on_event)}
+            }
+            <div class="w-full shrink-0" h={window.bottom_spacer} />
+        </div>
     }
-    for &(binding, key) in KEYS {
-        list = list.on_key(binding, on_event(TreeEvent::Key(key)));
-    }
-    for (i, ch) in TYPE_AHEAD_KEYS.char_indices() {
-        list = list.on_key(
-            &TYPE_AHEAD_KEYS[i..i + 1],
-            on_event(TreeEvent::TypeAhead(ch)),
-        );
-    }
-    list = list.child(div().w_full().h(window.top_spacer).flex_shrink_0());
-    for row in window.range {
-        let node = d.rows[row];
-        let n = node as usize;
-        let spec = RowSpec {
-            node,
-            depth: d.row_depth[row],
-            pos: d.row_pos[row],
-            set_size: d.child_count[d.parent[n] as usize],
-            expandable: d.expandable(node),
-            expanded: d.has(node, EXPANDED),
-            selected: d.has(node, SELECTED),
-            cursor: env.focused && d.cursor == node,
-            drop: d
-                .drop
-                .filter(|t| t.node.0 == node)
-                .map(|target| target.position),
-            accessible: env.accessible,
-            row_height: d.row_height.to_bits(),
-            indent: d.indent.to_bits(),
-        };
-        list = list.child(tree_row(
-            d.id,
-            spec,
-            d.labels[n].clone(),
-            d.icons[n],
-            colors,
-            on_event,
-        ));
-    }
-    list.child(div().w_full().h(window.bottom_spacer).flex_shrink_0())
-        .into_any()
+}
+
+/// Row `row` of the flattened tree.
+fn visible_row(
+    d: &TreeData,
+    row: usize,
+    colors: TreeColors,
+    env: CollectionEnv,
+    on_event: fn(TreeEvent) -> Action,
+) -> AnyElement {
+    let node = d.rows[row];
+    let n = node as usize;
+    let spec = RowSpec {
+        node,
+        depth: d.row_depth[row],
+        pos: d.row_pos[row],
+        set_size: d.child_count[d.parent[n] as usize],
+        expandable: d.expandable(node),
+        expanded: d.has(node, EXPANDED),
+        selected: d.has(node, SELECTED),
+        cursor: env.focused && d.cursor == node,
+        drop: d
+            .drop
+            .filter(|t| t.node.0 == node)
+            .map(|target| target.position),
+        accessible: env.accessible,
+        row_height: d.row_height.to_bits(),
+        indent: d.indent.to_bits(),
+    };
+    tree_row(
+        d.id,
+        spec,
+        d.labels[n].clone(),
+        d.icons[n],
+        colors,
+        on_event,
+    )
 }
 
 fn tree_row(
@@ -1471,110 +1468,70 @@ fn tree_row(
         icon.map(|s| s.as_ptr() as usize),
         on_event as usize,
     ));
-    cached(CacheKey(key), hash, move || {
+    let build = move || {
         let node = NodeId(spec.node);
         let h = f32::from_bits(spec.row_height);
         let indent = f32::from_bits(spec.indent);
         let depth = f32::from(spec.depth);
-        let mut row = div()
-            .w_full()
-            .h(h)
-            .flex_shrink_0()
-            .flex_row()
-            .items_center()
-            .relative()
-            .gap(4.0)
-            .pr(8.0)
-            .on_click(on_event(TreeEvent::Press(node)))
-            .on_drag(move |press: ClickEvent| {
-                Box::new(RowDrag {
-                    node,
-                    press_y: press.y,
-                    on_event,
-                }) as Box<dyn DragHandler>
-            });
-        row = if spec.selected {
-            row.bg(colors.selected)
-        } else {
-            row.hover_bg(colors.hover)
-        };
-        if spec.cursor {
-            row = row.border(colors.focus);
+        view! {
+            <div class="w-full" h={h} class="shrink-0 flex-row items-center relative" gap={4.0}
+                 pr={8.0} on:click={on_event(TreeEvent::Press(node))}
+                 on:drag={move |press: ClickEvent| {
+                     Box::new(RowDrag {
+                         node,
+                         press_y: press.y,
+                         on_event,
+                     }) as Box<dyn DragHandler>
+                 }}
+                 @when {spec.selected} { bg={colors.selected} }
+                 @when {!spec.selected} { hover_bg={colors.hover} }
+                 @when {spec.cursor} { border={colors.focus} }
+                 @when {spec.accessible} {
+                     accessibility_id={format!("{id}.item.{}", spec.node)}
+                     accessibility_role={Role::TreeItem} aria-label={&*label}
+                     aria-level={usize::from(spec.depth) + 1}
+                     accessibility_position_in_set={(spec.pos as usize, spec.set_size as usize)}
+                     aria-selected={spec.selected}
+                     @when {spec.expandable} { aria-expanded={spec.expanded} }
+                 }>
+                // Indent guides: one hairline per ancestor level, through the
+                // chevron column of that level.
+                for level in 0..spec.depth {
+                    <div class="absolute top-0" left={f32::from(level) * indent + 4.0 + 8.0}
+                         w={1.0} h={h} bg={colors.guide} />
+                }
+                <div w={depth * indent} h={h} class="shrink-0" />
+                <div w={16.0} h={16.0} class="shrink-0 items-center justify-center"
+                     @when {spec.expandable} { on:click={on_event(TreeEvent::Toggle(node))} }>
+                    if spec.expandable {
+                        <icon svg={if spec.expanded { lucide::CHEVRON_DOWN } else { lucide::CHEVRON_RIGHT }}
+                              size={12.0} color={colors.icon} />
+                    }
+                </div>
+                if let Some(svg) = icon {
+                    <icon svg={svg} size={14.0} color={colors.icon} />
+                }
+                <text class="text-sm" color={colors.text} class="truncate">{&*label}</text>
+                match spec.drop {
+                    Some(DropPosition::Before) => {
+                        <div class="absolute" left={depth * indent + 4.0} class="right-0"
+                             h={2.0} bg={colors.accent} class="top-0" />
+                    }
+                    Some(DropPosition::After) => {
+                        <div class="absolute" left={depth * indent + 4.0} class="right-0"
+                             h={2.0} bg={colors.accent} class="bottom-0" />
+                    }
+                    Some(DropPosition::Inside) => {
+                        <div class="absolute inset-0" rounded={4.0} border={colors.accent} />
+                    }
+                    None => {}
+                }
+            </div>
         }
-        // Indent guides: one hairline per ancestor level, through the
-        // chevron column of that level.
-        for level in 0..spec.depth {
-            row = row.child(
-                div()
-                    .absolute()
-                    .top(0.0)
-                    .left(f32::from(level) * indent + 4.0 + 8.0)
-                    .w(1.0)
-                    .h(h)
-                    .bg(colors.guide),
-            );
-        }
-        row = row.child(div().w(depth * indent).h(h).flex_shrink_0());
-        let chevron = div()
-            .w(16.0)
-            .h(16.0)
-            .flex_shrink_0()
-            .items_center()
-            .justify_center();
-        row = row.child(if spec.expandable {
-            let svg = if spec.expanded {
-                lucide::CHEVRON_DOWN
-            } else {
-                lucide::CHEVRON_RIGHT
-            };
-            chevron
-                .on_click(on_event(TreeEvent::Toggle(node)))
-                .child(svg_icon(svg, 12.0).color(colors.icon))
-        } else {
-            chevron
-        });
-        if let Some(svg) = icon {
-            row = row.child(svg_icon(svg, 14.0).color(colors.icon));
-        }
-        row = row.child(text(&*label).text_sm().color(colors.text).truncate());
-        let line = |top: bool| {
-            let bar = div()
-                .absolute()
-                .left(depth * indent + 4.0)
-                .right(0.0)
-                .h(2.0)
-                .bg(colors.accent);
-            if top { bar.top(0.0) } else { bar.bottom(0.0) }
-        };
-        row = match spec.drop {
-            Some(DropPosition::Before) => row.child(line(true)),
-            Some(DropPosition::After) => row.child(line(false)),
-            Some(DropPosition::Inside) => row.child(
-                div()
-                    .absolute()
-                    .inset(0.0)
-                    .rounded(4.0)
-                    .border(colors.accent),
-            ),
-            None => row,
-        };
-        if spec.accessible {
-            row = row
-                .accessibility_id(format!("{id}.item.{}", spec.node))
-                .accessibility_role(Role::TreeItem)
-                .accessibility_label(&*label)
-                .accessibility_level(usize::from(spec.depth) + 1)
-                .accessibility_position_in_set(spec.pos as usize, spec.set_size as usize)
-                .accessibility_selected(spec.selected);
-            if spec.expandable {
-                row = row.accessibility_expanded(spec.expanded);
-            }
-        }
-        row
-    })
-    .w_full()
-    .h(f32::from_bits(spec.row_height))
-    .into_any()
+    };
+    view! {
+        <cached(CacheKey(key), hash, build) class="w-full" h={f32::from_bits(spec.row_height)} />
+    }
 }
 
 /// A press on a row: selects on press, then reports pointer travel so
