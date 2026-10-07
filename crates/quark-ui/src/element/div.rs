@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
+
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -497,12 +500,34 @@ impl Div {
 
     // -- Internal: resolve style with overrides --
 
-    fn resolve_style(&self, hovered: bool) -> ElementStyle {
-        let mut resolved = self.base_style.clone();
-        if hovered && let Some(ref ov) = self.hover_style {
-            apply_override(&mut resolved, ov);
+    /// The base style, copied only when a hover override applies.
+    fn resolve_style(&self, hovered: bool) -> Cow<'_, ElementStyle> {
+        match &self.hover_style {
+            Some(ov) if hovered => {
+                let mut resolved = self.base_style.clone();
+                apply_override(&mut resolved, ov);
+                Cow::Owned(resolved)
+            }
+            _ => Cow::Borrowed(&self.base_style),
         }
-        resolved
+    }
+
+    /// Author id of the div's accessibility node: its stable id or key
+    /// when it has one, else a hash of its role and label. Equal fallbacks
+    /// get `#2`, `#3`, ... in paint order, so ids do not move with layout.
+    fn accessibility_key(&self, role: AccessibilityRole, label: Option<&str>) -> Cow<'_, str> {
+        let stable = self
+            .accessibility_id
+            .as_deref()
+            .or(self.semantic_id.as_ref().map(UiNodeId::as_str))
+            .or(self.semantic_key.as_ref().map(UiKey::as_str))
+            .or(self.test_id.as_ref().map(TestId::as_str));
+        if let Some(key) = stable {
+            return Cow::Borrowed(key);
+        }
+        let mut hasher = std::hash::DefaultHasher::new();
+        (role as u8, label).hash(&mut hasher);
+        Cow::Owned(format!("div:{:016x}", hasher.finish()))
     }
 }
 
@@ -513,7 +538,7 @@ pub struct DivPrepaintState {
 }
 
 impl Element for Div {
-    type LayoutState = Vec<LayoutId>;
+    type LayoutState = ();
     type PrepaintState = DivPrepaintState;
 
     fn request_layout(
@@ -521,15 +546,14 @@ impl Element for Div {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
-        // Layout children first, collecting their IDs.
-        let child_ids: Vec<LayoutId> = self
-            .children
-            .iter_mut()
-            .map(|child| child.request_layout(engine, cx))
-            .collect();
-
-        let id = engine.request_layout(self.base_style.layout.clone(), &child_ids);
-        (id, child_ids)
+        // Layout children first, collecting their IDs on the engine's stack.
+        let mark = engine.begin_children();
+        for child in &mut self.children {
+            let id = child.request_layout(engine, cx);
+            engine.push_child(id);
+        }
+        let id = engine.finish_children(self.base_style.layout.clone(), mark);
+        (id, ())
     }
 
     fn prepaint(
@@ -609,18 +633,20 @@ impl Element for Div {
         let (child_dx, child_dy) = (translate.0, translate.1 - self.scroll_y);
         let hovered = prepaint_state.hit.is_some_and(|id| cx.is_hovered(id));
         let mut style = self.resolve_style(hovered);
-        self.transitions
-            .apply(self.semantic_key.as_ref(), &mut style, cx);
+        if !self.transitions.is_empty() {
+            self.transitions
+                .apply(self.semantic_key.as_ref(), style.to_mut(), cx);
+        }
         let radii = style.corner_radii;
         let r = style.max_corner_radius();
         let z = style.z_index;
         let opacity = style.opacity;
-
-        if opacity < 1.0
-            && let Some(ref mut bg) = style.background
-        {
-            bg.a = (bg.a as f32 * opacity) as u8;
-        }
+        let background = style.background.map(|mut bg| {
+            if opacity < 1.0 {
+                bg.a = (bg.a as f32 * opacity) as u8;
+            }
+            bg
+        });
 
         if z != 0 {
             scene.push_z_index(z);
@@ -684,7 +710,7 @@ impl Element for Div {
                 params,
                 corner_radius: r,
             });
-        } else if let Some(bg) = style.background {
+        } else if let Some(bg) = background {
             scene.rounded_rect(RoundedRectPrimitive {
                 rect: bounds,
                 corner_radii: radii,
@@ -703,6 +729,11 @@ impl Element for Div {
                 color: border,
             });
         }
+
+        let should_clip = self.clips
+            || style.layout.overflow.x != taffy::Overflow::Visible
+            || style.layout.overflow.y != taffy::Overflow::Visible;
+        drop(style);
 
         if let Some(target) = self.focus_target
             && cx.is_focused(target)
@@ -831,17 +862,7 @@ impl Element for Div {
         };
 
         if let Some(role) = accessibility_role {
-            let key = self.accessibility_id.clone().unwrap_or_else(|| {
-                format!(
-                    "div:{role:?}:{:?}:{:?}:{:.0}:{:.0}:{:.0}:{:.0}",
-                    accessibility_label,
-                    click_action,
-                    bounds.x,
-                    bounds.y,
-                    bounds.width,
-                    bounds.height
-                )
-            });
+            let key = self.accessibility_key(role, accessibility_label.as_deref());
             let mut node =
                 AccessibilityNode::new(key, role, bounds).disabled(self.accessibility_disabled);
             if let Some(label) = accessibility_label {
@@ -883,10 +904,6 @@ impl Element for Div {
         if let Some(tip) = self.tooltip.take() {
             cx.tooltip_regions.push(TooltipRegion { bounds, text: tip });
         }
-
-        let should_clip = self.clips
-            || style.layout.overflow.x != taffy::Overflow::Visible
-            || style.layout.overflow.y != taffy::Overflow::Visible;
 
         if should_clip {
             if r > 0.0 {

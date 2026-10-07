@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use super::*;
 use crate::animation::{AnimKey, AnimationTable, Motion, PropId};
 
@@ -41,7 +43,23 @@ pub struct ElementContext<'a> {
     pub devtools: crate::inspector::FrameProbe,
     hovered: Vec<HitId>,
     /// Intersections of the clips pushed so far; the last one is current.
-    clip_stack: Vec<Rect>,
+    clip_stack: Vec<ClipEntry>,
+    /// The window's element cache, when the host keeps one.
+    pub(super) cache: Option<&'a mut ElementCache>,
+    /// Cache boundaries recording hits right now (they nest).
+    hit_recordings: u32,
+    /// Clip of each hit inserted while recording, relative to the
+    /// innermost recording boundary; row `i` is hit row `local_hit_base + i`.
+    local_hit_clips: Vec<Rect>,
+    /// Ids of the same hits, so the boundary can read them back.
+    local_hit_ids: Vec<HitId>,
+    local_hit_base: usize,
+    /// Reads of focus state, so a cache boundary knows its output depends
+    /// on focus.
+    focus_reads: Cell<u32>,
+    /// Requests that make painted output depend on the clock (repaint
+    /// requests, running transitions), so a cache boundary does not keep it.
+    volatile_reads: u32,
     z_index_stack: Vec<i32>,
     element_offset_stack: Vec<(f32, f32)>,
     text_color_stack: Vec<Color>,
@@ -84,6 +102,13 @@ impl<'a> ElementContext<'a> {
             devtools: Default::default(),
             hovered: Vec::new(),
             clip_stack: Vec::new(),
+            cache: None,
+            hit_recordings: 0,
+            local_hit_clips: Vec::new(),
+            local_hit_ids: Vec::new(),
+            local_hit_base: 0,
+            focus_reads: Cell::new(0),
+            volatile_reads: 0,
             z_index_stack: vec![0],
             element_offset_stack: vec![(0.0, 0.0)],
             text_color_stack: Vec::new(),
@@ -166,6 +191,7 @@ impl<'a> ElementContext<'a> {
     /// a toast expiring). The earliest request in a frame wins; the host
     /// reads it with [`Self::next_frame_ms`] and schedules that window only.
     pub fn request_frame_at_ms(&mut self, at_ms: u64) {
+        self.volatile_reads += 1;
         self.next_frame_ms = Some(self.next_frame_ms.map_or(at_ms, |next| next.min(at_ms)));
     }
 
@@ -182,6 +208,13 @@ impl<'a> ElementContext<'a> {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+
+    /// Attach the window's element cache so [`cached`] boundaries reuse
+    /// their output across frames and layout reuses one engine.
+    pub fn with_element_cache(mut self, cache: &'a mut ElementCache) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Attach the window's animation table so divs can run transitions.
@@ -222,13 +255,35 @@ impl<'a> ElementContext<'a> {
             self.transition_keys.push(key);
         }
         table.animate_to(key, prop, target, motion, self.clock_ms);
-        (
-            table.get(key, prop).unwrap_or(target),
-            table.is_animating(key, prop),
-        )
+        let animating = table.is_animating(key, prop);
+        if animating {
+            self.volatile_reads += 1;
+        }
+        (table.get(key, prop).unwrap_or(target), animating)
+    }
+
+    /// Keep transition rows of `keys` through this frame's sweep: a
+    /// replayed cache boundary paints them without calling `transition`.
+    pub(super) fn keep_transition_keys(&mut self, keys: &[AnimKey]) {
+        if self.animations.is_some() {
+            self.transition_keys.extend_from_slice(keys);
+        }
+    }
+
+    pub(super) fn transition_keys(&self) -> &[AnimKey] {
+        &self.transition_keys
+    }
+
+    pub(super) fn focus_reads(&self) -> u32 {
+        self.focus_reads.get()
+    }
+
+    pub(super) fn volatile_reads(&self) -> u32 {
+        self.volatile_reads
     }
 
     pub fn is_focused(&self, target: FocusId) -> bool {
+        self.focus_reads.set(self.focus_reads.get().wrapping_add(1));
         self.focus == Some(target)
     }
 
@@ -322,7 +377,7 @@ impl<'a> ElementContext<'a> {
         id
     }
 
-    fn accessible_semantic_ancestor(&self) -> Option<accesskit::NodeId> {
+    pub(super) fn accessible_semantic_ancestor(&self) -> Option<accesskit::NodeId> {
         let mut current = self.current_semantic_parent();
         while let Some(index) = current {
             if let Some(id) = self.accessibility.semantic_owner(index) {
@@ -359,18 +414,22 @@ impl<'a> ElementContext<'a> {
     pub fn current_clip(&self) -> Rect {
         self.clip_stack
             .last()
-            .copied()
-            .unwrap_or(quark::hit::UNCLIPPED)
+            .map_or(quark::hit::UNCLIPPED, |entry| entry.effective)
+    }
+
+    fn current_local_clip(&self) -> Rect {
+        self.clip_stack
+            .last()
+            .map_or(quark::hit::UNCLIPPED, |entry| entry.local)
     }
 
     /// Clip later hit entries to `rect`, intersected with the current clip,
     /// mirroring `Scene::clip` for hit testing.
     pub fn push_clip(&mut self, rect: Rect) {
-        let clip = self
-            .current_clip()
-            .intersection(rect)
-            .unwrap_or(quark::hit::EMPTY_CLIP);
-        self.clip_stack.push(clip);
+        self.clip_stack.push(ClipEntry {
+            effective: intersect(self.current_clip(), rect),
+            local: intersect(self.current_local_clip(), rect),
+        });
     }
 
     pub fn pop_clip(&mut self) {
@@ -380,8 +439,65 @@ impl<'a> ElementContext<'a> {
     /// Register a hit entry at the current z and clip. Bind it to its
     /// semantic node with [`Self::bind_hit`] once that node exists.
     pub fn insert_hit(&mut self, bounds: Bounds, flags: HitFlags, cursor: CursorHint) -> HitId {
-        let (z, clip) = (self.current_z_index(), self.current_clip());
-        self.hit_table.push(bounds, clip, z, flags, cursor)
+        let z = self.current_z_index();
+        self.insert_hit_clipped(bounds, quark::hit::UNCLIPPED, z, flags, cursor)
+    }
+
+    /// Insert a hit entry clipped to `clip` within the current clip, at
+    /// layer `z`: how a replayed cache boundary re-registers its hits.
+    pub(super) fn insert_hit_clipped(
+        &mut self,
+        bounds: Bounds,
+        clip: Rect,
+        z: i32,
+        flags: HitFlags,
+        cursor: CursorHint,
+    ) -> HitId {
+        let local = intersect(self.current_local_clip(), clip);
+        let clip = intersect(self.current_clip(), clip);
+        let id = self.hit_table.push(bounds, clip, z, flags, cursor);
+        if self.hit_recordings > 0 {
+            self.local_hit_clips.push(local);
+            self.local_hit_ids.push(id);
+        }
+        id
+    }
+
+    /// Start recording the hits a cache boundary inserts: their clips are
+    /// kept relative to the boundary, so a replay can clip them again
+    /// under a different ancestor clip. Returns the first recorded row.
+    pub(super) fn begin_hit_recording(&mut self) -> usize {
+        if self.hit_recordings == 0 {
+            self.local_hit_clips.clear();
+            self.local_hit_ids.clear();
+            self.local_hit_base = self.hit_table.len();
+        }
+        self.hit_recordings += 1;
+        self.clip_stack.push(ClipEntry {
+            effective: self.current_clip(),
+            local: quark::hit::UNCLIPPED,
+        });
+        self.hit_table.len()
+    }
+
+    /// Ids and boundary-relative clips of hit rows `start..`, inserted since
+    /// the matching [`Self::begin_hit_recording`].
+    pub(super) fn recorded_hits(&self, start: usize) -> (&[HitId], &[Rect]) {
+        let from = start - self.local_hit_base;
+        (&self.local_hit_ids[from..], &self.local_hit_clips[from..])
+    }
+
+    /// End a recording: the rows' clips become relative to the enclosing
+    /// recording boundary, if any.
+    pub(super) fn end_hit_recording(&mut self, start: usize) {
+        self.clip_stack.pop();
+        self.hit_recordings -= 1;
+        if self.hit_recordings > 0 {
+            let outer = self.current_local_clip();
+            for clip in &mut self.local_hit_clips[start - self.local_hit_base..] {
+                *clip = intersect(*clip, outer);
+            }
+        }
     }
 
     pub fn bind_hit(&mut self, id: HitId, node: usize) {
@@ -408,4 +524,16 @@ impl<'a> ElementContext<'a> {
             semantic: std::mem::take(&mut self.semantic),
         }
     }
+}
+
+/// One level of the hit clip stack: the clip in window space, and the clip
+/// relative to the innermost recording cache boundary.
+#[derive(Clone, Copy)]
+struct ClipEntry {
+    effective: Rect,
+    local: Rect,
+}
+
+fn intersect(a: Rect, b: Rect) -> Rect {
+    a.intersection(b).unwrap_or(quark::hit::EMPTY_CLIP)
 }

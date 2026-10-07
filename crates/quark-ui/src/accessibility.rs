@@ -132,6 +132,19 @@ impl AccessibilityNode {
         self
     }
 
+    pub(crate) fn id(&self) -> NodeId {
+        self.id
+    }
+
+    pub(crate) fn parent(&self) -> Option<NodeId> {
+        self.parent
+    }
+
+    /// Move the node's bounds; element caches replay nodes at a new origin.
+    pub(crate) fn offset(&mut self, dx: f32, dy: f32) {
+        self.bounds = self.bounds.offset(dx, dy);
+    }
+
     fn to_accesskit_node(&self) -> Node {
         let mut node = Node::new(self.role);
         node.set_bounds(ax_rect(self.bounds));
@@ -273,6 +286,15 @@ impl AccessibilityFrame {
             }
             suffix += 1;
         }
+    }
+
+    /// Nodes pushed from index `start` on, in push order.
+    pub(crate) fn nodes_from(&self, start: usize) -> &[AccessibilityNode] {
+        &self.nodes[start..]
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
     }
 
     pub fn action_for(&self, id: NodeId) -> Option<&AccessibilityAction> {

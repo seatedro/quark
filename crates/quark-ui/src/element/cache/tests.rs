@@ -1,0 +1,375 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use super::*;
+use crate::accessibility::{AccessibilityFrame, dump_accessibility};
+use crate::theme::Theme;
+
+// ---------------------------------------------------------------------------
+// Counting allocator: allocations made by the current thread, so parallel
+// tests do not disturb each other's counts.
+// ---------------------------------------------------------------------------
+
+struct Counting;
+
+thread_local! {
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn count() {
+    let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
+}
+
+// SAFETY: forwards to the system allocator unchanged; counting touches only
+// a const-initialized thread local, which never allocates.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count();
+        // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count();
+        // SAFETY: as above.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: as above.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        count();
+        // SAFETY: as above.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+fn allocations() -> u64 {
+    ALLOCATIONS.with(Cell::get)
+}
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+struct Pressed(usize);
+
+impl From<Pressed> for Action {
+    fn from(value: Pressed) -> Self {
+        Action::new(value)
+    }
+}
+
+/// A window: text state, theme, and the element cache, kept across frames.
+struct Window {
+    text: TextSystem,
+    layouts: LayoutCache,
+    signals: SignalStore,
+    theme: Theme,
+    scale: f32,
+    pointer: Option<(f32, f32)>,
+    cache: ElementCache,
+}
+
+struct Frame {
+    scene: Scene,
+    input: InputFrame,
+    accessibility: AccessibilityFrame,
+}
+
+impl Window {
+    fn new() -> Self {
+        Self {
+            text: TextSystem::vendored_only(&Default::default()),
+            layouts: LayoutCache::default(),
+            signals: SignalStore::new(),
+            theme: Theme::default_dark(),
+            scale: 1.0,
+            pointer: None,
+            cache: ElementCache::new(),
+        }
+    }
+
+    /// Paint `root` into a 400x300 window; `cache` false paints without
+    /// the element cache, as the reference for what a build produces.
+    fn paint_with(&mut self, mut root: AnyElement, cache: bool) -> Frame {
+        self.layouts.begin_frame();
+        let mut cx = ElementContext::new(
+            &self.theme,
+            self.scale,
+            &mut self.text,
+            &mut self.layouts,
+            self.pointer,
+            &self.signals,
+        );
+        if cache {
+            cx = cx.with_element_cache(&mut self.cache);
+        }
+        cx.accessibility = AccessibilityFrame::new(400.0, 300.0);
+        cx.semantic = SemanticFrame::new(400.0, 300.0);
+        let mut scene = Scene::default();
+        render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
+        Frame {
+            scene,
+            input: cx.take_input_frame(),
+            accessibility: std::mem::take(&mut cx.accessibility),
+        }
+    }
+
+    fn paint(&mut self, root: AnyElement) -> Frame {
+        self.paint_with(root, true)
+    }
+}
+
+impl Frame {
+    /// Actions a click at `(x, y)` delivers.
+    fn click(self, x: f32, y: f32) -> Vec<Pressed> {
+        let mut router = InputRouter::default();
+        router.set_frame(self.input);
+        let mut focus = None;
+        let mut actions = router.pointer_down(x, y, &mut focus).actions;
+        actions.extend(router.pointer_up().actions);
+        actions
+            .iter()
+            .filter_map(|a| a.downcast_ref::<Pressed>().cloned())
+            .collect()
+    }
+
+    /// Fill colors of the scene's rounded rects, in paint order.
+    fn fills(&self) -> Vec<Color> {
+        self.scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                quark_render::Primitive::RoundedRect(r) => Some(r.color),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+const BUTTON: Color = Color::rgba(10, 20, 30, 255);
+const HOVER: Color = Color::rgba(200, 100, 50, 255);
+
+/// A labeled, clickable, hoverable button.
+fn button(id: usize) -> AnyElement {
+    div()
+        .w(120.0)
+        .h(30.0)
+        .bg(BUTTON)
+        .hover_bg(HOVER)
+        .accessibility_role(AccessibilityRole::Button)
+        .accessibility_label(format!("Button {id}"))
+        .on_click(Pressed(id))
+        .child(text(format!("Button {id}")).size(12.0))
+        .into_any()
+}
+
+/// A column with `top` points of space above a cached button. `builds`
+/// counts how often the button's closure runs.
+fn screen(top: f32, hash: u64, builds: &Rc<Cell<u32>>) -> AnyElement {
+    let builds = builds.clone();
+    div()
+        .size_full()
+        .flex_col()
+        .child(div().h(top))
+        .child(cached("button", hash, move || {
+            builds.set(builds.get() + 1);
+            button(7)
+        }))
+        .into_any()
+}
+
+/// The same column built without a cache boundary.
+fn reference(top: f32) -> AnyElement {
+    div()
+        .size_full()
+        .flex_col()
+        .child(div().h(top))
+        .child(button(7))
+        .into_any()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unchanged_inputs_replay_without_building() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    let first = window.paint(screen(0.0, 1, &builds));
+    let second = window.paint(screen(0.0, 1, &builds));
+    assert_eq!(builds.get(), 1);
+    assert_eq!(second.scene, first.scene);
+}
+
+#[test]
+fn changed_inputs_hash_rebuilds() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    window.paint(screen(0.0, 1, &builds));
+    window.paint(screen(0.0, 2, &builds));
+    assert_eq!(builds.get(), 2);
+}
+
+#[test]
+fn scale_and_theme_changes_rebuild() {
+    type Change = fn(&mut Window);
+    let cases: &[(&str, Change)] = &[
+        ("scale", |w| w.scale = 2.0),
+        ("theme", |w| w.theme = Theme::default_light()),
+    ];
+    for (name, change) in cases {
+        let mut window = Window::new();
+        let builds = Rc::new(Cell::new(0));
+        window.paint(screen(0.0, 1, &builds));
+        change(&mut window);
+        window.paint(screen(0.0, 1, &builds));
+        assert_eq!(builds.get(), 2, "{name}");
+    }
+}
+
+#[test]
+fn replay_at_a_new_origin_moves_hits_and_accessibility() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    window.paint(screen(0.0, 1, &builds));
+    let moved = window.paint(screen(100.0, 1, &builds));
+    let built = window.paint_with(reference(100.0), false);
+    assert_eq!(builds.get(), 1, "the move replayed");
+
+    assert_eq!(
+        dump_accessibility(&moved.accessibility),
+        dump_accessibility(&built.accessibility)
+    );
+    assert_eq!(moved.click(10.0, 110.0), vec![Pressed(7)]);
+    assert_eq!(
+        built.click(10.0, 10.0),
+        vec![],
+        "nothing left at the old origin"
+    );
+}
+
+#[test]
+fn replayed_hits_answer_clicks_only_inside_the_new_bounds() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    window.paint(screen(0.0, 1, &builds));
+    let moved = window.paint(screen(100.0, 1, &builds));
+    assert_eq!(moved.click(10.0, 10.0), vec![]);
+}
+
+#[test]
+fn hover_inside_a_cached_subtree_updates() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    let mut fills = Vec::new();
+    for pointer in [None, Some((10.0, 10.0)), Some((300.0, 200.0)), None] {
+        window.pointer = pointer;
+        fills.push(window.paint(screen(0.0, 1, &builds)).fills());
+    }
+    assert_eq!(
+        fills,
+        [vec![BUTTON], vec![HOVER], vec![BUTTON], vec![BUTTON]]
+    );
+    assert_eq!(
+        builds.get(),
+        3,
+        "hover in and out rebuild; the last frame replays"
+    );
+}
+
+#[test]
+fn a_new_width_rebuilds_at_that_width() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    let row = |width: f32, builds: &Rc<Cell<u32>>| {
+        let builds = builds.clone();
+        div()
+            .w(width)
+            .flex_col()
+            .child(cached("row", 1, move || {
+                builds.set(builds.get() + 1);
+                div().w_full().h(10.0).bg(BUTTON)
+            }))
+            .into_any()
+    };
+    window.paint(row(100.0, &builds));
+    let wide = window.paint(row(200.0, &builds));
+    let rects: Vec<f32> = wide
+        .scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            quark_render::Primitive::RoundedRect(r) => Some(r.rect.width),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rects, [200.0]);
+    assert_eq!(builds.get(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Frame budget: the regression guard for per-frame waste
+// ---------------------------------------------------------------------------
+
+const ROWS: usize = 2_000;
+
+fn list(builds: &Rc<Cell<u32>>, theme: &Theme) -> AnyElement {
+    let surface = theme.colors.surface;
+    div()
+        .w(400.0)
+        .h(300.0)
+        .flex_col()
+        .scroll_y(0.0)
+        .children((0..ROWS).map(|i| {
+            let builds = builds.clone();
+            cached(i as u64, 1, move || {
+                builds.set(builds.get() + 1);
+                div()
+                    .w_full()
+                    .flex_col()
+                    .p(4.0)
+                    .bg(surface)
+                    .child(text(format!("Author {i}")).size(12.0))
+                    .child(text(format!("Message {i}")).size(14.0))
+            })
+            .into_any()
+        }))
+        .into_any()
+}
+
+#[test]
+fn a_repeated_frame_of_cached_rows_stays_within_budget() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    let theme = window.theme.clone();
+    window.paint(list(&builds, &theme));
+
+    let before = allocations();
+    let frame = window.paint(list(&builds, &theme));
+    let allocated = allocations() - before;
+    drop(frame);
+
+    assert_eq!(builds.get(), ROWS as u32, "no row rebuilt");
+    let nodes = window
+        .cache
+        .engine
+        .as_ref()
+        .map_or(0, LayoutEngine::node_count);
+    assert!(nodes <= ROWS + 1, "{nodes} layout nodes");
+    let budget = ROWS as u64 * 8;
+    assert!(
+        allocated <= budget,
+        "{allocated} allocations, budget {budget}"
+    );
+}

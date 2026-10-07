@@ -30,8 +30,8 @@ use quark::scene::Scene;
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
-    AnyElement, Binding, CursorHint, Delivery, ElementContext, InputRouter, Mods, TextInputHitArea,
-    render_element,
+    AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
+    TextInputHitArea, render_element,
 };
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
@@ -274,6 +274,8 @@ pub struct UiAdapter<U: UiApp> {
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
     animations: AnimationTable,
+    /// Cached subtrees and the layout engine, reused every frame.
+    element_cache: ElementCache,
     sender: UiSender<U::Message>,
     messages: Receiver<U::Message>,
     #[cfg(feature = "devtools")]
@@ -313,6 +315,7 @@ impl<U: UiApp> UiAdapter<U> {
             ime_area: None,
             scale_factor: 1.0,
             animations: AnimationTable::new(),
+            element_cache: ElementCache::new(),
             sender: UiSender {
                 sender,
                 waker: Arc::new(OnceLock::new()),
@@ -733,7 +736,8 @@ impl<U: UiApp> App for UiAdapter<U> {
         )
         .with_focus(self.focus)
         .with_clock(clock_ms)
-        .with_animations(&mut self.animations);
+        .with_animations(&mut self.animations)
+        .with_element_cache(&mut self.element_cache);
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let painted = paint(&mut root, &mut ecx, width, height);

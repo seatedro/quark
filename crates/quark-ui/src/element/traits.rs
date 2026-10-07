@@ -7,7 +7,9 @@ use super::*;
 /// Every UI node implements `Element`. The lifecycle is:
 ///
 /// 1. **request_layout** — declare your Taffy style and children. Returns a
-///    `LayoutId` and arbitrary per-element state.
+///    `LayoutId` and arbitrary per-element state. It can run more than once
+///    per frame (a stale cache boundary reruns the pass), so it must not
+///    consume what a second call needs.
 /// 2. **prepaint** — given resolved bounds, register hitboxes and resolve
 ///    interaction state. Returns arbitrary prepaint state.
 /// 3. **paint** — emit scene primitives using resolved bounds and prepaint state.
@@ -256,14 +258,16 @@ impl<C: RenderOnce> Element for ComponentElement<C> {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, ()) {
-        let component = self
-            .component
-            .take()
-            .expect("ComponentElement rendered twice");
-        let mut any = component.render(cx);
-        let id = any.request_layout(engine, cx);
-        self.rendered = Some(any);
-        (id, ())
+        // A layout pass can run twice in a frame (see `render_element`);
+        // the second one lays out what the first rendered.
+        if let Some(component) = self.component.take() {
+            self.rendered = Some(component.render(cx));
+        }
+        let rendered = self
+            .rendered
+            .as_mut()
+            .expect("ComponentElement has a component or its render");
+        (rendered.request_layout(engine, cx), ())
     }
 
     fn prepaint(
