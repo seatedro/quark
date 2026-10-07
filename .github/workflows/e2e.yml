@@ -35,13 +35,10 @@ jobs:
         with:
           key: e2e
 
-      # Release codegen without the slow parts of the release profile (thin
-      # LTO, one codegen unit): optimized enough to behave like a shipped app.
+      # Debug builds (opt-level 1): quicker to build, and debug assertions
+      # turn integrity violations into spec failures.
       - name: Build examples
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "false"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-        run: cargo build --release -p quark-app --examples --features ui,notifications
+        run: cargo build -p quark-app --examples --features ui,notifications
 
       - name: Install cua driver
         run: e2e/install-cua.sh

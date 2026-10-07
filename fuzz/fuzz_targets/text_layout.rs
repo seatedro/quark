@@ -43,7 +43,7 @@ fuzz_target!(|data: &[u8]| {
         (width * 0.25, height * 0.75),
     ];
     for (x, y) in points {
-        let b = layout.hit(x, y);
+        let b = layout.hit(x, y).get();
         assert!(boundaries.contains(&b), "hit({x}, {y}) = {b}");
     }
     for (b, _) in text.char_indices().chain([(text.len(), ' ')]) {

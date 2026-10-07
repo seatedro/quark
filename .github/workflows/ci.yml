@@ -65,24 +65,9 @@ jobs:
           # (InstanceDescriptor::from_env_or_default); default backends already
           # include Vulkan.
           WGPU_BACKEND: vulkan
-        # TODO: once the integrity-checks feature lands, replace this script
-        # with `cargo test --workspace --features quark-ui/integrity-checks`
-        # (plus quark/integrity-checks if quark-ui's feature does not enable
-        # it). Until then each flag is added only if the crate declares it.
-        run: |
-          features=()
-          for crate in quark quark-ui; do
-            if cargo metadata --no-deps --format-version 1 \
-              | jq -e --arg c "$crate" '.packages[] | select(.name == $c) | .features | has("integrity-checks")' >/dev/null; then
-              features+=("$crate/integrity-checks")
-            fi
-          done
-          if ((${#features[@]})); then
-            joined=$(IFS=,; echo "${features[*]}")
-            cargo test --workspace --features "$joined"
-          else
-            cargo test --workspace
-          fi
+        # Full O(n) integrity checks after every mutation (quark-ui's feature
+        # turns on quark's too); cheap debug checks run without it.
+        run: cargo test --workspace --features quark-ui/integrity-checks
 
   fuzz:
     runs-on: ubuntu-latest
