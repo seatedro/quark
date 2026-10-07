@@ -312,7 +312,11 @@ pub struct TextLayout {
 }
 
 impl TextLayout {
-    pub(crate) fn build(fs: &mut FontSystem, params: &TextParams) -> Result<Self, TextError> {
+    pub(crate) fn build(
+        fs: &mut FontSystem,
+        params: &TextParams,
+        synth: SyntheticItalic,
+    ) -> Result<Self, TextError> {
         params.validate()?;
         let text = params.text.as_ref();
         let style = params.style;
@@ -327,20 +331,6 @@ impl TextLayout {
 
         let paragraphs = split_paragraphs(text);
         let base = base_attrs(&style);
-        // Scanning the font database costs a pass over every face; skip it
-        // for the common case of text without italic spans.
-        let synth = if params
-            .spans
-            .iter()
-            .any(|s| s.style == Some(FontStyle::Italic))
-        {
-            SyntheticItalic::new(fs)
-        } else {
-            SyntheticItalic {
-                ui: false,
-                mono: false,
-            }
-        };
         buffer.lines = paragraphs
             .iter()
             .map(|(range, ending)| {
@@ -1080,13 +1070,13 @@ fn base_attrs(style: &TextStyle) -> Attrs<'static> {
 /// slanted by the rasterizer instead (cosmic-text only does that when asked),
 /// so italic stays visible with fonts such as Geist that ship no italic.
 #[derive(Debug, Clone, Copy)]
-struct SyntheticItalic {
+pub(crate) struct SyntheticItalic {
     ui: bool,
     mono: bool,
 }
 
 impl SyntheticItalic {
-    fn new(fs: &FontSystem) -> Self {
+    pub(crate) fn new(fs: &FontSystem) -> Self {
         let db = fs.db();
         let lacks_italic = |generic: Family| {
             let name = db.family_name(&generic);

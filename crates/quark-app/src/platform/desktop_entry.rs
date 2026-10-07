@@ -61,8 +61,17 @@ impl DesktopEntry {
         out
     }
 
-    /// Write `<dir>/<id>.desktop`, creating `dir` if needed.
+    /// Write `<dir>/<id>.desktop`, creating `dir` if needed. Fails with
+    /// [`io::ErrorKind::InvalidInput`] unless `id` is a valid desktop file
+    /// ID (ASCII letters, digits, `-`, `_`, and `.`, not starting with `.`),
+    /// so an id like `../../.bashrc` cannot write outside `dir`.
     pub fn write_to(&self, dir: &Path) -> io::Result<PathBuf> {
+        if !valid_id(&self.id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid desktop file id {:?}", self.id),
+            ));
+        }
         std::fs::create_dir_all(dir)?;
         let path = dir.join(self.file_name());
         std::fs::write(&path, self.render())?;
@@ -81,6 +90,14 @@ pub fn user_applications_dir() -> Option<PathBuf> {
                 .map(|home| PathBuf::from(home).join(".local").join("share"))
         })?;
     Some(data.join("applications"))
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn push_key(out: &mut String, key: &str, value: &str) {
@@ -181,5 +198,29 @@ mod tests {
              Categories=Office;\n\
              MimeType=x-scheme-handler/notes;x-scheme-handler/notes-dev;\n"
         );
+    }
+
+    // Regression: `write_to` joined the id onto `dir` unchecked, so a path
+    // in the id wrote the file anywhere the user can write.
+    #[test]
+    fn write_to_rejects_ids_that_leave_the_directory() {
+        let dir = std::env::temp_dir().join(format!("quark-desktop-{}", std::process::id()));
+        for id in [
+            "../escape",
+            "/etc/escape",
+            "a/b",
+            ".hidden",
+            "",
+            "..",
+            "a\0b",
+        ] {
+            let entry = DesktopEntry {
+                id: id.into(),
+                ..DesktopEntry::default()
+            };
+            let error = entry.write_to(&dir).expect_err(id);
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{id:?}");
+        }
+        assert!(!dir.exists(), "a rejected id still created the directory");
     }
 }
