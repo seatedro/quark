@@ -1,0 +1,27 @@
+[package]
+name = "quark-update"
+description = "Signed self-updates for Quark apps: manifest verification, resumable downloads, and staged platform installs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No UI or windowing dependencies. Apps forward `UpdateEvent`s to their own
+# state (for example through `quark_app::Waker`) and apply a staged update
+# after their event loop returns.
+[dependencies]
+# Ed25519 verification and SHA-256. ureq's rustls backend already builds
+# ring, so verification adds no second crypto stack.
+ring = "0.17"
+semver = { version = "1", features = ["serde"] }
+serde.workspace = true
+serde_json = "1.0"
+thiserror.workspace = true
+tracing.workspace = true
+# Blocking HTTP on the updater's own thread. No gzip: artifacts are already
+# compressed, and a transparently decoded body would break byte ranges.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+
+[dev-dependencies]
+tempfile = "3"

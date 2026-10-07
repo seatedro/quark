@@ -1,0 +1,40 @@
+# cargo-packager config for the hello_ui example, the app the release
+# workflow packages. Copy it for a real app and change the names, the
+# identifier, and the build command. cargo-packager resolves relative paths
+# from this directory.
+#
+#   python3 packaging/icons.py         # writes packaging/icons/
+#   cargo packager -c packaging/packager.toml -f appimage,deb
+#
+# rpm is not a cargo-packager format; see linux/build-rpm.sh.
+
+name = "quark-hello"
+productName = "Quark Hello"
+version = "0.1.0"
+identifier = "dev.quark.hello"
+publisher = "Quark"
+description = "The Quark hello_ui example."
+category = "DeveloperTool"
+licenseFile = "../LICENSE"
+outDir = "../target/packages"
+binariesDir = "../target/release/examples"
+beforePackagingCommand = "cargo build --profile release -p quark-app --example hello_ui"
+icons = ["icons/*.png", "icons/quark.ico"]
+
+[[binaries]]
+path = "hello_ui"
+main = true
+
+[deb]
+section = "devel"
+
+[nsis]
+# Per-user install under %LOCALAPPDATA%, so updates install without UAC.
+installMode = "currentUser"
+
+# Keep [macos] the last table: the release workflow appends
+# `signingIdentity` here when the Apple signing secrets are set. Without an
+# identity cargo-packager builds an unsigned app and dmg.
+[macos]
+minimumSystemVersion = "11.0"
+entitlements = "macos/entitlements.plist"

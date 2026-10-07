@@ -92,13 +92,14 @@ fn check_scheme(scheme: &str) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-mod registry {
+pub(crate) mod registry {
     use std::io;
 
     use windows::Win32::Foundation::WIN32_ERROR;
     use windows::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-        RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RRF_RT_REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW,
+        RegGetValueW, RegSetValueExW,
     };
     use windows::core::{HSTRING, PCWSTR};
 
@@ -110,7 +111,7 @@ mod registry {
         }
     }
 
-    pub(super) fn set_string(key: &str, name: Option<&str>, data: &str) -> io::Result<()> {
+    pub(crate) fn set_string(key: &str, name: Option<&str>, data: &str) -> io::Result<()> {
         let key = HSTRING::from(key);
         let name = name.map(HSTRING::from);
         let data: Vec<u16> = data.encode_utf16().chain([0]).collect();
@@ -141,10 +142,54 @@ mod registry {
         }
     }
 
-    pub(super) fn delete_tree(key: &str) -> io::Result<()> {
+    pub(crate) fn delete_tree(key: &str) -> io::Result<()> {
         let key = HSTRING::from(key);
         // SAFETY: the key name outlives the call.
         unsafe { check(RegDeleteTreeW(HKEY_CURRENT_USER, &key)) }
+    }
+
+    /// Delete one value under `HKEY_CURRENT_USER\<key>`. Missing is fine.
+    pub(crate) fn delete_value(key: &str, name: &str) -> io::Result<()> {
+        let key = HSTRING::from(key);
+        let name = HSTRING::from(name);
+        // SAFETY: both strings outlive the call.
+        match unsafe { check(RegDeleteKeyValueW(HKEY_CURRENT_USER, &key, &name)) } {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+
+    /// A string value under `HKEY_CURRENT_USER\<key>`.
+    pub(crate) fn current_user_string(key: &str, name: &str) -> Option<String> {
+        get_string(HKEY_CURRENT_USER, key, name)
+    }
+
+    /// A string value under `HKEY_LOCAL_MACHINE\<key>`.
+    pub(crate) fn local_machine_string(key: &str, name: &str) -> Option<String> {
+        get_string(HKEY_LOCAL_MACHINE, key, name)
+    }
+
+    fn get_string(root: HKEY, key: &str, name: &str) -> Option<String> {
+        let key = HSTRING::from(key);
+        let name = HSTRING::from(name);
+        let mut buf = [0u16; 1024];
+        let mut size = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: `size` is the buffer's length in bytes, and the strings
+        // outlive the call.
+        unsafe {
+            check(RegGetValueW(
+                root,
+                &key,
+                &name,
+                RRF_RT_REG_SZ,
+                None,
+                Some(buf.as_mut_ptr().cast()),
+                Some(&mut size),
+            ))
+            .ok()?;
+        }
+        let len = (size as usize / 2).saturating_sub(1);
+        Some(String::from_utf16_lossy(&buf[..len]))
     }
 }
 

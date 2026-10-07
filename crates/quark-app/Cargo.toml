@@ -35,6 +35,9 @@ pollster = { workspace = true, optional = true }
 notify-rust = { version = "4.18", default-features = false, features = ["z"], optional = true }
 profiling = { workspace = true, optional = true }
 puffin_http = { version = "0.17", optional = true }
+# System-wide shortcuts (`platform::global_shortcut`): Carbon hot keys on
+# macOS, RegisterHotKey on Windows, X11 key grabs on Linux.
+global-hotkey = { version = "0.8", optional = true }
 
 # muda draws the native menu bar (`EventContext::set_menus`) on macOS and
 # Windows. It must stay on the minor tray-icon uses: both share muda's one
@@ -46,6 +49,8 @@ block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSMenu", "NSMenuItem", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSBundle", "NSAppleEventDescriptor", "NSAppleEventManager", "NSSet", "NSDictionary", "NSError", "NSArray"] }
 # Click and action callbacks for notifications in bundled apps.
+# Login items through SMAppService (`platform::autostart`).
+objc2-service-management = { version = "0.3", optional = true, default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
 objc2-user-notifications = { version = "0.3", optional = true, default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
 [target.'cfg(windows)'.dependencies.muda]
@@ -122,6 +127,13 @@ notifications = ["dep:notify-rust", "dep:objc2-user-notifications"]
 tray = ["dep:tray-icon"]
 # Open and save dialogs through `EventContext::file_dialog`.
 dialogs = ["dep:rfd", "dep:pollster"]
+# Launch at login: `platform::autostart`.
+autostart = ["dep:objc2-service-management"]
+# System-wide keyboard shortcuts: `platform::global_shortcut`. Needs `ui`
+# for the shared shortcut syntax.
+global-shortcut = ["ui", "dep:global-hotkey"]
+# Opt-in, local-by-default usage events: `platform::telemetry`.
+telemetry = []
 # Image get and set through `EventContext::clipboard_image`.
 clipboard-image = ["arboard/image-data"]
 # Developer tooling for UiApp windows: the frame HUD, the element inspector

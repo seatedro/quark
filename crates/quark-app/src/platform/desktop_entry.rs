@@ -108,7 +108,7 @@ fn push_key(out: &mut String, key: &str, value: &str) {
 }
 
 /// The spec's `string` escapes, applied to every value.
-fn escape_value(value: &str) -> String {
+pub(super) fn escape_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
@@ -134,7 +134,7 @@ fn list(items: &[String]) -> String {
 /// Quote one `Exec` argument by the spec's rules: reserved characters force
 /// double quotes, inside which `"`, `` ` ``, `$`, and `\` take a backslash.
 /// A literal `%` is always doubled so it is not read as a field code.
-fn quote_exec_arg(arg: &str) -> String {
+pub(super) fn quote_exec_arg(arg: &str) -> String {
     let arg = arg.replace('%', "%%");
     let reserved = |c: char| {
         c.is_whitespace()
