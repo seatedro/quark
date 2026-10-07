@@ -1,4 +1,4 @@
-use cosmic_text::FontSystem;
+use cosmic_text::{FontSystem, fontdb};
 
 use crate::fonts::{FontSettings, configure_generic_families, vendored_font_sources};
 use crate::layout::{TextError, TextLayout, TextParams};
@@ -23,6 +23,22 @@ impl TextSystem {
         configure_generic_families(font_system.db_mut(), settings);
         Self {
             font_system,
+            settings: settings.normalized(),
+            generation: 0,
+        }
+    }
+
+    /// Loads only the vendored fonts, with a fixed locale, so shaping does
+    /// not depend on the machine. Characters the vendored fonts lack shape as
+    /// `.notdef`. Tests and fuzzing use this.
+    pub fn vendored_only(settings: &FontSettings) -> Self {
+        let mut db = fontdb::Database::new();
+        for source in vendored_font_sources() {
+            db.load_font_source(source);
+        }
+        configure_generic_families(&mut db, settings);
+        Self {
+            font_system: FontSystem::new_with_locale_and_db("en-US".to_owned(), db),
             settings: settings.normalized(),
             generation: 0,
         }

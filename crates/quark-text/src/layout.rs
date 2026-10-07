@@ -76,6 +76,8 @@ pub struct TextSpan {
     pub range: Range<usize>,
     pub weight: Option<FontWeight>,
     pub style: Option<FontStyle>,
+    /// Font family override, e.g. an inline code run in UI text.
+    pub kind: Option<FontKind>,
 }
 
 /// Everything a layout depends on. Sizes are logical pixels.
@@ -800,13 +802,15 @@ fn base_attrs(style: &TextStyle) -> Attrs<'static> {
 }
 
 fn span_attrs(style: &TextStyle, span: &TextSpan, index: usize) -> Attrs<'static> {
+    let kind = span.kind.unwrap_or(style.font_kind);
     let weight = span.weight.unwrap_or(style.font_weight);
     let font_style = match span.style.unwrap_or(FontStyle::Normal) {
         FontStyle::Normal => cosmic_text::Style::Normal,
         FontStyle::Italic => cosmic_text::Style::Italic,
     };
     base_attrs(style)
-        .weight(cosmic_text::Weight(weight_value(style.font_kind, weight)))
+        .family(family(kind))
+        .weight(cosmic_text::Weight(weight_value(kind, weight)))
         .style(font_style)
         .metadata(index + 1)
 }

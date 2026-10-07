@@ -33,6 +33,7 @@ impl LayoutKey {
             attrs.write_usize(span.range.end);
             attrs.write_u8(weight_tag(span.weight));
             attrs.write_u8(style_tag(span.style));
+            attrs.write_u8(span.kind.map_or(255, kind_tag));
         }
 
         Self {
