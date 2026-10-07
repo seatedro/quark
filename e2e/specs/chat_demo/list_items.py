@@ -1,4 +1,4 @@
-"""Catches: transcript rows losing their list semantics. The conversation
+"""Catches: chat rows losing their list semantics. The conversation
 list must expose list items carrying 1-based position and the full set size,
 so a reader can say "item 4999 of 5001" for virtualized rows."""
 

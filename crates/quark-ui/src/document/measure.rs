@@ -13,8 +13,8 @@ use quark_render::scene::Rect;
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
 use super::{
-    BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState, MeasureSpec,
-    RULE_HEIGHT, TranscriptBlock,
+    Block, BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState,
+    MeasureSpec, RULE_HEIGHT,
 };
 use crate::element::{CodeBlock, SelectableText, StyledSpan};
 
@@ -114,7 +114,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
         })
     }
 
-    fn measure(&mut self, block: &TranscriptBlock, width: f32) -> TextGeometry {
+    fn measure(&mut self, block: &Block, width: f32) -> TextGeometry {
         let style = &block.style;
         let font_size = self.font_size * style.scale;
         let inset = style.inset(self.font_size);

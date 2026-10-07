@@ -1,5 +1,5 @@
-//! The transcript's element: the materialized rows placed at the positions
-//! [`Transcript::prepare`] computed, painted through `SelectableText` and
+//! The document's element: the materialized rows placed at the positions
+//! [`Document::prepare`] computed, painted through `SelectableText` and
 //! `CodeBlock`, with drag-select, wheel, and accessibility wiring.
 
 use std::borrow::Cow;
@@ -19,8 +19,8 @@ use quark::selection::BlockKey;
 
 use super::measure::{failed_image_spans, image_extent};
 use super::{
-    BlockContent, BlockGeometry, ImageState, LIST_STEP, Palette, QUOTE_STEP, Transcript,
-    TranscriptBlock, TranscriptMessage, TranscriptRole, TranscriptSource, VisibleRow,
+    Block, BlockContent, BlockGeometry, Decorator, Document, DocumentSource, ImageState, LIST_STEP,
+    Palette, QUOTE_STEP, RowChrome, VisibleRow,
 };
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
 use crate::action::Action;
@@ -39,7 +39,7 @@ use quark::Color;
 thread_local! {
     /// The list node's key, and the last static label it was given, shared
     /// so the per-frame list node allocates nothing.
-    static LIST_KEY: Arc<str> = Arc::from("transcript");
+    static LIST_KEY: Arc<str> = Arc::from("document");
     static LIST_LABEL: RefCell<(&'static str, Arc<str>)> = RefCell::new(("", Arc::from("")));
 }
 
@@ -57,24 +57,23 @@ fn list_label(label: &'static str) -> Arc<str> {
     })
 }
 
-/// Input from the transcript element, in coordinates relative to its top
-/// left. Pass each to [`Transcript::handle`].
+/// Input from the document element, in coordinates relative to its top
+/// left. Pass each to [`Document::handle`].
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TranscriptEvent {
+pub enum DocumentEvent {
     PointerDown { x: f32, y: f32 },
     PointerDrag { x: f32, y: f32 },
     PointerUp,
     Wheel(i32),
-    JumpToLatest,
 }
 
 /// Frame interval requested while a drag autoscrolls.
 const AUTOSCROLL_FRAME_MS: u64 = 16;
 
-type EventMap = Rc<dyn Fn(TranscriptEvent) -> Action>;
+type EventMap = Rc<dyn Fn(DocumentEvent) -> Action>;
 
 /// The link action of a built element. Its blocks are built before
-/// [`TranscriptElement::on_link`] can be called, so they share this slot.
+/// [`DocumentElement::on_link`] can be called, so they share this slot.
 type LinkSlot = Rc<RefCell<Option<Rc<dyn Fn(&Arc<str>) -> Action>>>>;
 
 /// A block's spans with their tones resolved, kept while the block stays
@@ -91,7 +90,7 @@ pub(super) struct PaintedSpans {
 fn painted_spans(
     cache: &mut HashMap<BlockKey, PaintedSpans>,
     kept: &mut HashMap<BlockKey, PaintedSpans>,
-    block: &TranscriptBlock,
+    block: &Block,
     palette: &Palette,
 ) -> Option<Arc<[StyledSpan]>> {
     let source = block.content.spans()?;
@@ -139,9 +138,9 @@ struct RowBuild {
     /// 1-based position among all rows, and the row count.
     position: usize,
     row_count: usize,
-    role: TranscriptRole,
     size: (f32, f32),
-    author: Arc<str>,
+    chrome: RowChrome,
+    decorator: Option<Decorator>,
     header: Rect,
     font_size: f32,
     colors: RowColors,
@@ -152,7 +151,7 @@ struct RowBuild {
 }
 
 struct BlockBuild {
-    block: TranscriptBlock,
+    block: Block,
     spans: Option<Arc<[StyledSpan]>>,
     rect: Rect,
     selection: Option<(usize, usize)>,
@@ -164,7 +163,6 @@ struct BlockBuild {
 /// The theme colors a row paints with besides its spans' own.
 #[derive(Clone, Copy, PartialEq)]
 struct RowColors {
-    row_background: Color,
     muted: Color,
     border: Color,
     selection: Color,
@@ -177,7 +175,6 @@ impl RowColors {
     fn new(theme: &Theme) -> Self {
         let c = &theme.colors;
         Self {
-            row_background: c.surface.with_alpha(Alpha::SOFT),
             muted: c.text_muted,
             border: c.border,
             selection: c.accent.with_alpha(Alpha::SOFT),
@@ -189,7 +186,6 @@ impl RowColors {
 
     fn hash_into(&self, hasher: &mut impl Hasher) {
         for color in [
-            self.row_background,
             self.muted,
             self.border,
             self.selection,
@@ -202,8 +198,8 @@ impl RowColors {
     }
 }
 
-/// Built by [`Transcript::element`].
-pub struct TranscriptElement {
+/// Built by [`Document::element`].
+pub struct DocumentElement {
     size: (f32, f32),
     scroll: f32,
     max_scroll: f32,
@@ -211,7 +207,6 @@ pub struct TranscriptElement {
     row_count: usize,
     /// One cached row subtree per materialized row.
     rows: Vec<Placed>,
-    jump: Option<Placed>,
     on_event: EventMap,
     on_link: LinkSlot,
     label: Cow<'static, str>,
@@ -219,14 +214,14 @@ pub struct TranscriptElement {
     animating: bool,
 }
 
-/// Cache keys of transcript rows, apart from other cached boundaries.
+/// Cache keys of document rows, apart from other cached boundaries.
 fn row_cache_key(row: RowKey) -> CacheKey {
-    CacheKey(inputs_hash(&("quark.transcript.row", row.0)))
+    CacheKey(inputs_hash(&("quark.document.row", row.0)))
 }
 
-impl<G: BlockGeometry> Transcript<G> {
+impl<G: BlockGeometry> Document<G> {
     /// The element for the rows materialized by the last
-    /// [`Transcript::prepare`]. `on_event` wraps input into the app's
+    /// [`Document::prepare`]. `on_event` wraps input into the app's
     /// action type. Theme colors are resolved here, so a theme change shows
     /// on the next element without rebuilding any block.
     ///
@@ -237,13 +232,12 @@ impl<G: BlockGeometry> Transcript<G> {
     /// rows that changed.
     pub fn element(
         &mut self,
-        source: &impl TranscriptSource,
+        source: &impl DocumentSource,
         theme: &Theme,
-        on_event: impl Fn(TranscriptEvent) -> Action + 'static,
-    ) -> TranscriptElement {
+        on_event: impl Fn(DocumentEvent) -> Action + 'static,
+    ) -> DocumentElement {
         self.elements_built += 1;
-        let style = self.style;
-        let (width, height) = self.size;
+        let width = self.size.0;
         let palette = Palette::new(theme);
         let colors = RowColors::new(theme);
         let theme_hash = {
@@ -267,14 +261,15 @@ impl<G: BlockGeometry> Transcript<G> {
         let row_count = self.list.rows().len();
         let mut placed = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
-            let message = source.message(row.key);
-            let blocks = message.map_or(&[][..], |m| &m.blocks[..]);
-            let hash = self.row_hash(row, message, blocks, theme_hash, row_count);
+            let content = source.row(row.key);
+            let blocks = content.map_or(&[][..], |r| &r.blocks[..]);
+            let chrome = content.map(|r| &r.chrome);
+            let hash = self.row_hash(row, chrome, blocks, theme_hash, row_count);
             let build = match builds.remove(&row.key) {
                 Some(entry) if entry.hash == hash => entry.build,
                 _ => Rc::new(self.row_build(
                     row,
-                    message,
+                    chrome,
                     blocks,
                     (&palette, colors),
                     (&mut painted, &mut kept),
@@ -312,49 +307,16 @@ impl<G: BlockGeometry> Transcript<G> {
         self.row_builds_spare = builds;
 
         let on_event: EventMap = Rc::new(on_event);
-        let jump = self.unseen.then(|| {
-            let (w, h) = (style.font_size * 10.0, style.font_size * 2.4);
-            let action = on_event(TranscriptEvent::JumpToLatest);
-            Placed {
-                rect: Rect {
-                    x: ((width - w) * 0.5).max(0.0),
-                    y: (height - h - style.font_size).max(0.0),
-                    width: w,
-                    height: h,
-                },
-                element: div()
-                    .w(w)
-                    .h(h)
-                    .rounded(h * 0.5)
-                    .items_center()
-                    .justify_center()
-                    .bg(theme.colors.accent)
-                    .hover_bg(theme.colors.accent_strong)
-                    .accessibility_id("transcript.jump-to-latest")
-                    .accessibility_role(AccessibilityRole::Button)
-                    .accessibility_label("Jump to latest")
-                    .on_click(action)
-                    .child(
-                        text("Jump to latest")
-                            .size(style.font_size * 0.9)
-                            .semibold()
-                            .color(theme.colors.text_strong),
-                    )
-                    .into_any(),
-            }
-        });
-
-        TranscriptElement {
+        DocumentElement {
             size: self.size,
             scroll: self.list.scroll_offset(),
             max_scroll: self.list.max_scroll_offset(),
             total_extent: self.list.rows().total_extent(),
             row_count,
             rows: placed,
-            jump,
             on_event,
             on_link,
-            label: Cow::Borrowed("Transcript"),
+            label: Cow::Borrowed("Document"),
             animating: self.wants_frame(),
         }
     }
@@ -363,16 +325,21 @@ impl<G: BlockGeometry> Transcript<G> {
     fn row_hash(
         &self,
         row: &VisibleRow,
-        message: Option<&TranscriptMessage>,
-        blocks: &[TranscriptBlock],
+        chrome: Option<&RowChrome>,
+        blocks: &[Block],
         theme_hash: u64,
         row_count: usize,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
-        (row.index, row_count, row.role, theme_hash).hash(&mut hasher);
+        (row.index, row_count, theme_hash).hash(&mut hasher);
         (self.size.0.to_bits(), row.height.to_bits()).hash(&mut hasher);
         self.style.font_size.to_bits().hash(&mut hasher);
-        message.map(|m| &*m.author).hash(&mut hasher);
+        chrome.hash(&mut hasher);
+        // Another decorator draws other chrome.
+        self.decorator
+            .as_ref()
+            .map(|d| Rc::as_ptr(&d.0).cast::<()>())
+            .hash(&mut hasher);
         for visible in &self.blocks[row.blocks.clone()] {
             let Some(block) = blocks.get(visible.index).filter(|b| b.key == visible.key) else {
                 continue;
@@ -398,8 +365,8 @@ impl<G: BlockGeometry> Transcript<G> {
     fn row_build(
         &self,
         row: &VisibleRow,
-        message: Option<&TranscriptMessage>,
-        blocks: &[TranscriptBlock],
+        chrome: Option<&RowChrome>,
+        blocks: &[Block],
         (palette, colors): (&Palette, RowColors),
         (painted, kept): (
             &mut HashMap<BlockKey, PaintedSpans>,
@@ -457,15 +424,15 @@ impl<G: BlockGeometry> Transcript<G> {
             key: row.key,
             position: row.index + 1,
             row_count,
-            role: row.role,
             size: (width, row.height),
-            author: message.map_or_else(|| Arc::from(""), |m| m.author.clone()),
             header: Rect {
                 x: style.pad_x,
                 y: style.pad_y,
                 width: (width - style.pad_x * 2.0).max(1.0),
-                height: style.header_height,
+                height: chrome.map_or(0.0, |c| c.header_height),
             },
+            chrome: chrome.cloned().unwrap_or_default(),
+            decorator: self.decorator.clone(),
             font_size: style.font_size,
             colors,
             blocks: built,
@@ -474,21 +441,18 @@ impl<G: BlockGeometry> Transcript<G> {
     }
 }
 
-/// One row: its background, find highlights, header, and blocks, with the
-/// row's list item node. Built inside the row's cached boundary, so it
-/// paints relative to the row's top left.
+/// One row: its chrome background, find highlights, chrome header, and
+/// blocks, with the row's list item node. Built inside the row's cached
+/// boundary, so it paints relative to the row's top left.
 struct RowElement {
     build: Rc<RowBuild>,
-    header: AnyElement,
+    /// The decorator's header, built at layout, where the theme is known.
+    header: Option<AnyElement>,
     children: Vec<Placed>,
 }
 
 impl RowElement {
     fn new(build: Rc<RowBuild>, links: &LinkHandler) -> Self {
-        let header = text(build.author.to_string())
-            .size(build.font_size * 0.85)
-            .semibold()
-            .into_any();
         let mut children = Vec::with_capacity(build.blocks.len() * 2);
         for b in &build.blocks {
             block_elements(
@@ -507,7 +471,7 @@ impl RowElement {
         }
         Self {
             build,
-            header,
+            header: None,
             children,
         }
     }
@@ -523,8 +487,17 @@ impl Element for RowElement {
         cx: &mut ElementContext,
     ) -> (LayoutId, ()) {
         let mut ids = Vec::with_capacity(self.children.len() + 1);
-        let header = self.header.request_layout(engine, cx);
-        ids.push(engine.request_layout(absolute(self.build.header), &[header]));
+        let build = &*self.build;
+        if build.header.height > 0.0 {
+            self.header = build
+                .decorator
+                .as_ref()
+                .and_then(|d| d.0.header(&build.chrome, build.header.width, cx.theme));
+        }
+        if let Some(header) = &mut self.header {
+            let header = header.request_layout(engine, cx);
+            ids.push(engine.request_layout(absolute(self.build.header), &[header]));
+        }
         for placed in &mut self.children {
             let child = placed.element.request_layout(engine, cx);
             ids.push(engine.request_layout(absolute(placed.rect), &[child]));
@@ -551,7 +524,9 @@ impl Element for RowElement {
         engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) {
-        self.header.prepaint(engine, cx);
+        if let Some(header) = &mut self.header {
+            header.prepaint(engine, cx);
+        }
         for placed in &mut self.children {
             placed.element.prepaint(engine, cx);
         }
@@ -567,12 +542,12 @@ impl Element for RowElement {
         cx: &mut ElementContext,
     ) {
         let build = &*self.build;
-        if build.role == TranscriptRole::User {
-            scene.rounded_rect(RoundedRectPrimitive::uniform(
-                bounds,
-                0.0,
-                build.colors.row_background,
-            ));
+        let background = build
+            .decorator
+            .as_ref()
+            .and_then(|d| d.0.background(&build.chrome, cx.theme));
+        if let Some(color) = background {
+            scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, 0.0, color));
         }
         for &(rect, current) in &build.highlights {
             let color = if current {
@@ -593,25 +568,27 @@ impl Element for RowElement {
         // The accessibility node carries the row's name. A semantic label
         // is a `String` that every replay of the row would clone.
         let item = cx.semantic.push(item);
-        cx.push_accessibility_for_semantic(
-            AccessibilityNode::new(
-                format!("transcript.row:{}", build.key.0),
-                AccessibilityRole::ListItem,
-                bounds,
-            )
-            .label(build.author.clone())
-            .position_in_set(build.position, build.row_count),
-            item,
-        );
+        let mut node = AccessibilityNode::new(
+            format!("document.row:{}", build.key.0),
+            AccessibilityRole::ListItem,
+            bounds,
+        )
+        .position_in_set(build.position, build.row_count);
+        if let Some(label) = &build.chrome.label {
+            node = node.label(label.clone());
+        }
+        cx.push_accessibility_for_semantic(node, item);
         cx.push_semantic_parent(item);
 
-        // The author is the item's name; keep the header out of the tree so
-        // it is not read twice.
-        cx.push_accessibility_text_hidden(true);
-        cx.push_text_color(build.colors.muted);
-        self.header.paint(engine, scene, cx);
-        cx.pop_text_color();
-        cx.pop_accessibility_text_hidden();
+        if let Some(header) = &mut self.header {
+            // A labelled row is named by its label; keep the header out of
+            // the tree so it is not read twice.
+            cx.push_accessibility_text_hidden(build.chrome.label.is_some());
+            cx.push_text_color(build.colors.muted);
+            header.paint(engine, scene, cx);
+            cx.pop_text_color();
+            cx.pop_accessibility_text_hidden();
+        }
 
         for placed in &mut self.children {
             placed.element.paint(engine, scene, cx);
@@ -640,7 +617,7 @@ struct BlockPaint<'a> {
 /// the inset, then the content to the right of it. `spans` are the content
 /// spans with theme colors resolved.
 fn block_elements(
-    block: &TranscriptBlock,
+    block: &Block,
     spans: Option<Arc<[StyledSpan]>>,
     paint: BlockPaint,
     placed: &mut Vec<Placed>,
@@ -871,7 +848,7 @@ impl Element for ImageBox {
         if cx.accessibility_enabled() && !self.alt.is_empty() {
             cx.push_accessibility(
                 AccessibilityNode::new(
-                    format!("transcript.image:{}", self.key.0),
+                    format!("document.image:{}", self.key.0),
                     AccessibilityRole::Image,
                     bounds,
                 )
@@ -887,7 +864,7 @@ impl IntoAnyElement for ImageBox {
     }
 }
 
-impl TranscriptElement {
+impl DocumentElement {
     /// Action a link click in any block emits, given its URL. Defaults to
     /// [`LinkClicked`].
     pub fn on_link(self, f: impl Fn(&Arc<str>) -> Action + 'static) -> Self {
@@ -899,10 +876,6 @@ impl TranscriptElement {
     pub fn label(mut self, label: impl Into<Cow<'static, str>>) -> Self {
         self.label = label.into();
         self
-    }
-
-    fn placed_mut(&mut self) -> impl Iterator<Item = &mut Placed> {
-        self.rows.iter_mut().chain(self.jump.iter_mut())
     }
 
     fn paint_scroll_thumb(&self, bounds: Bounds, scene: &mut Scene, cx: &ElementContext) {
@@ -944,7 +917,7 @@ fn absolute(rect: Rect) -> taffy::Style {
     }
 }
 
-impl Element for TranscriptElement {
+impl Element for DocumentElement {
     type LayoutState = ();
     type PrepaintState = HitId;
 
@@ -954,7 +927,7 @@ impl Element for TranscriptElement {
         cx: &mut ElementContext,
     ) -> (LayoutId, ()) {
         let mut ids = Vec::with_capacity(self.rows.len() + 1);
-        for placed in self.placed_mut() {
+        for placed in &mut self.rows {
             let child = placed.element.request_layout(engine, cx);
             ids.push(engine.request_layout(absolute(placed.rect), &[child]));
         }
@@ -981,7 +954,7 @@ impl Element for TranscriptElement {
     ) -> HitId {
         let hit = cx.insert_hit(bounds, HitFlags::DRAG | HitFlags::SCROLL, CursorHint::Text);
         cx.push_clip(bounds);
-        for placed in self.placed_mut() {
+        for placed in &mut self.rows {
             placed.element.prepaint(engine, cx);
         }
         cx.pop_clip();
@@ -1014,7 +987,7 @@ impl Element for TranscriptElement {
         let on_event = self.on_event.clone();
         let scroll_events = on_event.clone();
         let builder =
-            ScrollActionBuilder::new(move |lines| scroll_events(TranscriptEvent::Wheel(lines)));
+            ScrollActionBuilder::new(move |lines| scroll_events(DocumentEvent::Wheel(lines)));
         cx.handlers.on_scroll(
             list,
             ScrollTarget {
@@ -1052,16 +1025,13 @@ impl Element for TranscriptElement {
         }
 
         self.paint_scroll_thumb(bounds, scene, cx);
-        if let Some(jump) = &mut self.jump {
-            jump.element.paint(engine, scene, cx);
-        }
 
         cx.pop_semantic_parent();
         scene.pop_clip();
     }
 }
 
-impl IntoAnyElement for TranscriptElement {
+impl IntoAnyElement for DocumentElement {
     fn into_any(self) -> AnyElement {
         AnyElement::new(self)
     }
@@ -1084,17 +1054,17 @@ impl SelectDrag {
 impl DragHandler for SelectDrag {
     fn on_press(&mut self) -> Vec<Action> {
         let (x, y) = self.local(self.press.x, self.press.y);
-        vec![(self.on_event)(TranscriptEvent::PointerDown { x, y })]
+        vec![(self.on_event)(DocumentEvent::PointerDown { x, y })]
     }
 
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
         let (x, y) = self.local(x, y);
-        vec![(self.on_event)(TranscriptEvent::PointerDrag { x, y })]
+        vec![(self.on_event)(DocumentEvent::PointerDrag { x, y })]
     }
 
     fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult {
-            actions: vec![(self.on_event)(TranscriptEvent::PointerUp)],
+            actions: vec![(self.on_event)(DocumentEvent::PointerUp)],
         }
     }
 

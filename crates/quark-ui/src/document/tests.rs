@@ -61,7 +61,7 @@ impl BlockGeometry for GridGeometry {
 impl BlockMeasurer for Grid {
     type Geometry = GridGeometry;
 
-    fn measure(&mut self, block: &TranscriptBlock, width: f32) -> GridGeometry {
+    fn measure(&mut self, block: &Block, width: f32) -> GridGeometry {
         let cols = ((width / CHAR_W).floor() as usize).max(1);
         let mut lines = Vec::new();
         let mut start = 0;
@@ -82,12 +82,11 @@ impl BlockMeasurer for Grid {
     }
 }
 
-fn grid_style() -> TranscriptStyle {
-    TranscriptStyle {
+fn grid_style() -> DocumentStyle {
+    DocumentStyle {
         font_size: 14.0,
         pad_x: 10.0,
         pad_y: 10.0,
-        header_height: 20.0,
         block_gap: 10.0,
         line_scroll: 60.0,
         edge: 32.0,
@@ -97,43 +96,42 @@ fn grid_style() -> TranscriptStyle {
 
 /// Message `i`: row key `i`, blocks `10i` ("m{i} first") and `10i + 1`
 /// ("m{i} second"). With the grid style each row is 90px tall.
-fn message(i: u64) -> TranscriptMessage {
+fn message(i: u64) -> DocumentRow {
     message_with(i, &[&format!("m{i} first"), &format!("m{i} second")])
 }
 
-fn message_with(i: u64, blocks: &[&str]) -> TranscriptMessage {
-    TranscriptMessage {
+fn message_with(i: u64, blocks: &[&str]) -> DocumentRow {
+    DocumentRow {
         key: RowKey(i),
-        role: if i.is_multiple_of(2) {
-            TranscriptRole::User
-        } else {
-            TranscriptRole::Assistant
+        chrome: RowChrome {
+            header_height: 20.0,
+            label: Some(format!("author {i}").into()),
+            kind: (i % 2) as u32,
         },
-        author: format!("author {i}").into(),
         blocks: blocks
             .iter()
             .enumerate()
-            .map(|(b, text)| TranscriptBlock::plain(BlockKey(i * 10 + b as u64), *text))
+            .map(|(b, text)| Block::plain(BlockKey(i * 10 + b as u64), *text))
             .collect(),
     }
 }
 
-/// A transcript over a grid-measured document, with a frame clock.
+/// A view over a grid-measured document, with a frame clock.
 struct Doc {
-    messages: HashMap<RowKey, TranscriptMessage>,
-    transcript: Transcript<GridGeometry>,
+    messages: HashMap<RowKey, DocumentRow>,
+    view: Document<GridGeometry>,
     size: (f32, f32),
     now_ms: u64,
 }
 
 impl Doc {
-    fn new(messages: impl IntoIterator<Item = TranscriptMessage>) -> Self {
-        let messages: Vec<TranscriptMessage> = messages.into_iter().collect();
-        let mut transcript = Transcript::new(grid_style());
-        transcript.extend(&messages).unwrap();
+    fn new(messages: impl IntoIterator<Item = DocumentRow>) -> Self {
+        let messages: Vec<DocumentRow> = messages.into_iter().collect();
+        let mut view = Document::new(grid_style());
+        view.extend(&messages).unwrap();
         let mut doc = Self {
             messages: messages.into_iter().map(|m| (m.key, m)).collect(),
-            transcript,
+            view,
             size: (400.0, 900.0),
             now_ms: 0,
         };
@@ -147,20 +145,20 @@ impl Doc {
 
     fn frame(&mut self) {
         let (w, h) = self.size;
-        self.transcript
+        self.view
             .prepare(w, h, self.now_ms, &self.messages, &mut Grid);
         self.now_ms += 16;
     }
 
     fn scroll_to(&mut self, offset: f32) {
-        self.transcript.set_scroll_offset(offset);
+        self.view.set_scroll_offset(offset);
         self.frame();
     }
 
     /// Viewport point over byte `col` of the first line of `block`.
     fn point(&self, block: u64, col: usize) -> (f32, f32) {
         let visible = self
-            .transcript
+            .view
             .visible_blocks()
             .iter()
             .find(|b| b.key == BlockKey(block))
@@ -172,27 +170,25 @@ impl Doc {
     }
 
     fn press(&mut self, (x, y): (f32, f32)) {
-        self.transcript
-            .handle(TranscriptEvent::PointerDown { x, y });
+        self.view.handle(DocumentEvent::PointerDown { x, y });
     }
 
     fn drag(&mut self, (x, y): (f32, f32)) {
-        self.transcript
-            .handle(TranscriptEvent::PointerDrag { x, y });
+        self.view.handle(DocumentEvent::PointerDrag { x, y });
     }
 
     fn release(&mut self) {
-        self.transcript.handle(TranscriptEvent::PointerUp);
+        self.view.handle(DocumentEvent::PointerUp);
     }
 
     fn copy(&self) -> String {
-        self.transcript.selected_text(&self.messages)
+        self.view.selected_text(&self.messages)
     }
 
     /// Key of the row under the viewport's vertical middle.
     fn middle_row(&self) -> u64 {
         let middle = self.size.1 * 0.5;
-        self.transcript
+        self.view
             .visible_rows()
             .iter()
             .find(|r| r.top <= middle && r.top + r.height > middle)
@@ -201,7 +197,7 @@ impl Doc {
 
     /// The row under the viewport's top edge and where its top sits.
     fn anchor(&self) -> String {
-        self.transcript
+        self.view
             .visible_rows()
             .iter()
             .find(|r| r.top <= 0.0 && r.top + r.height > 0.0)
@@ -210,11 +206,11 @@ impl Doc {
 
     /// `"<block>:<lo>..<hi>"` for every materialized block with a highlight.
     fn highlights(&self) -> String {
-        self.transcript
+        self.view
             .visible_blocks()
             .iter()
             .filter_map(|b| {
-                let (lo, hi) = self.transcript.block_selection(b.key, b.text_len)?;
+                let (lo, hi) = self.view.block_selection(b.key, b.text_len)?;
                 Some(format!("{}:{lo}..{hi}", b.key.0))
             })
             .collect::<Vec<_>>()
@@ -225,19 +221,19 @@ impl Doc {
     fn stream(&mut self, row: u64, block: usize, text: &str) {
         let message = self.messages.get_mut(&RowKey(row)).unwrap();
         let key = message.blocks[block].key;
-        message.blocks[block] = TranscriptBlock::plain(key, text);
-        self.transcript.update(message).unwrap();
+        message.blocks[block] = Block::plain(key, text);
+        self.view.update(message).unwrap();
     }
 
     /// Where row `key`'s top sits relative to the viewport top, whether or
     /// not it is materialized.
     fn screen_top(&self, key: u64) -> f32 {
-        let rows = self.transcript.list().rows();
-        rows.offset_of(RowKey(key)).unwrap() - self.transcript.scroll_offset()
+        let rows = self.view.list().rows();
+        rows.offset_of(RowKey(key)).unwrap() - self.view.scroll_offset()
     }
 
     fn last_row_bottom(&self) -> f32 {
-        self.transcript
+        self.view
             .visible_rows()
             .last()
             .map_or(0.0, |r| r.top + r.height)
@@ -276,7 +272,7 @@ fn selection_survives_its_rows_scrolling_out_and_back() {
 
     doc.scroll_to(3000.0);
     let materialized = |doc: &Doc| {
-        let rows = doc.transcript.visible_rows();
+        let rows = doc.view.visible_rows();
         rows.iter().any(|r| r.key == RowKey(3))
     };
     let away = (materialized(&doc), doc.copy());
@@ -295,14 +291,15 @@ fn selection_survives_its_rows_scrolling_out_and_back() {
 #[test]
 fn prepending_history_keeps_the_selection_and_the_row_on_screen() {
     let mut doc = Doc::new((1000..1050).map(message));
-    doc.scroll_to(905.0);
+    let row = doc.view.list().rows().offset_of(RowKey(1010)).unwrap();
+    doc.scroll_to(row - 5.0);
     doc.press(doc.point(10_100, 0));
     doc.drag(doc.point(10_110, 2));
     doc.release();
     let before = (doc.anchor(), doc.copy());
 
-    let history: Vec<TranscriptMessage> = (0..100).map(message).collect();
-    doc.transcript.prepend(&history).unwrap();
+    let history: Vec<DocumentRow> = (0..100).map(message).collect();
+    doc.view.prepend(&history).unwrap();
     doc.messages.extend(history.into_iter().map(|m| (m.key, m)));
     doc.frame();
 
@@ -313,10 +310,10 @@ fn prepending_history_keeps_the_selection_and_the_row_on_screen() {
 #[test]
 fn key_command_maps_cmd_and_ctrl_bindings() {
     let cases = [
-        ("ctrl+c", Some(TranscriptCommand::Copy)),
-        ("Cmd+C", Some(TranscriptCommand::Copy)),
-        ("ctrl+a", Some(TranscriptCommand::SelectAll)),
-        ("cmd+a", Some(TranscriptCommand::SelectAll)),
+        ("ctrl+c", Some(DocumentCommand::Copy)),
+        ("Cmd+C", Some(DocumentCommand::Copy)),
+        ("ctrl+a", Some(DocumentCommand::SelectAll)),
+        ("cmd+a", Some(DocumentCommand::SelectAll)),
         ("ctrl+x", None),
         ("ctrl+shift+c", None),
     ];
@@ -330,7 +327,7 @@ fn key_command_maps_cmd_and_ctrl_bindings() {
 fn select_all_copies_every_block() {
     let mut doc = Doc::rows(3);
 
-    doc.transcript.select_all();
+    doc.view.select_all();
 
     assert_eq!(
         doc.copy(),
@@ -348,7 +345,7 @@ fn update_dropping_the_block_a_selection_ends_in_copies_up_to_the_previous_block
     doc.release();
 
     let shrunk = message_with(0, &["alpha", "beta"]);
-    doc.transcript.update(&shrunk).unwrap();
+    doc.view.update(&shrunk).unwrap();
     doc.messages.insert(shrunk.key, shrunk);
 
     assert_eq!(doc.copy(), "pha\n\nbeta");
@@ -361,7 +358,7 @@ fn block_with_a_key_another_message_owns_cannot_be_selected() {
     let mut doc = Doc::new([message_with(0, &["owner"])]);
     let mut duplicate = message_with(1, &["second"]);
     duplicate.blocks[0].key = BlockKey(0);
-    doc.transcript.push(&duplicate).unwrap();
+    doc.view.push(&duplicate).unwrap();
     doc.messages.insert(duplicate.key, duplicate);
     doc.frame();
 
@@ -369,7 +366,7 @@ fn block_with_a_key_another_message_owns_cannot_be_selected() {
     doc.press((50.0, 160.0));
 
     let drawn: Vec<(u64, u64)> = doc
-        .transcript
+        .view
         .visible_blocks()
         .iter()
         .map(|b| (b.row.0, b.key.0))
@@ -377,7 +374,7 @@ fn block_with_a_key_another_message_owns_cannot_be_selected() {
     assert_eq!(drawn, [(0, 0)]);
     // The end of "owner", not of "second".
     assert_eq!(
-        doc.transcript.selection(),
+        doc.view.selection(),
         Some(Selection::collapsed(SelectionPoint::new(BlockKey(0), 5)))
     );
 }
@@ -389,14 +386,14 @@ fn press_after_an_update_removed_the_block_skips_it() {
     let mut doc = Doc::new([message_with(0, &["keep", "drop"])]);
     let dropped = doc.point(1, 1);
     let shrunk = message_with(0, &["keep"]);
-    doc.transcript.update(&shrunk).unwrap();
+    doc.view.update(&shrunk).unwrap();
     doc.messages.insert(shrunk.key, shrunk);
 
     doc.press(dropped);
-    doc.transcript.push(&message(1)).unwrap();
+    doc.view.push(&message(1)).unwrap();
 
     assert_eq!(
-        doc.transcript.selection().map(|s| s.focus.block),
+        doc.view.selection().map(|s| s.focus.block),
         Some(BlockKey(0))
     );
 }
@@ -426,7 +423,7 @@ fn autoscroll_moves_while_held_past_the_edge_and_stops_on_release() {
         doc.frame();
         held.push(doc.screen_top(row));
     }
-    let wanted_frames = doc.transcript.wants_frame();
+    let wanted_frames = doc.view.wants_frame();
     doc.release();
     let released = doc.screen_top(row);
     for _ in 0..3 {
@@ -440,18 +437,14 @@ fn autoscroll_moves_while_held_past_the_edge_and_stops_on_release() {
     );
     assert!(wanted_frames);
     assert_eq!(doc.screen_top(row), released);
-    assert!(!doc.transcript.wants_frame());
+    assert!(!doc.view.wants_frame());
 }
 
 #[test]
 fn selection_focus_follows_rows_autoscrolling_under_the_pointer() {
     let mut doc = Doc::rows(50);
     let row = hold_above_the_top_edge(&mut doc);
-    let focus_row = |doc: &Doc| {
-        doc.transcript
-            .selection()
-            .map_or(0, |s| s.focus.block.0 / 10)
-    };
+    let focus_row = |doc: &Doc| doc.view.selection().map_or(0, |s| s.focus.block.0 / 10);
     let first = focus_row(&doc);
 
     for _ in 0..10 {
@@ -502,40 +495,40 @@ fn update_then_prepare_keeps_pin() {
         bottoms.push(doc.last_row_bottom());
     }
 
-    assert!(doc.transcript.is_stuck_to_bottom());
+    assert!(doc.view.is_stuck_to_bottom());
     assert_eq!(bottoms, [900.0; 8]);
-    assert!(doc.transcript.visible_rows().last().unwrap().height > 90.0);
+    assert!(doc.view.visible_rows().last().unwrap().height > 90.0);
 }
 
 #[test]
-fn new_content_while_scrolled_up_offers_jump_to_latest() {
+fn new_content_while_scrolled_up_is_flagged_until_scrolled_to_bottom() {
     let mut doc = Doc::rows(50);
     doc.scroll_to(0.0);
 
     doc.stream(49, 1, "m49 second, and more");
     doc.frame();
-    let scrolled_up = (doc.transcript.has_unseen(), doc.transcript.scroll_offset());
-    doc.transcript.handle(TranscriptEvent::JumpToLatest);
+    let scrolled_up = (doc.view.has_content_below(), doc.view.scroll_offset());
+    doc.view.scroll_to_bottom();
     doc.frame();
 
     assert_eq!(scrolled_up, (true, 0.0));
     assert_eq!(
-        (doc.transcript.has_unseen(), doc.last_row_bottom()),
+        (doc.view.has_content_below(), doc.last_row_bottom()),
         (false, 900.0)
     );
 }
 
-// Catches edits to older messages (a highlight arriving) offering "Jump to
-// latest" when nothing new arrived at the bottom.
+// Catches edits to older rows (a highlight arriving) flagging content
+// below when nothing new arrived at the bottom.
 #[test]
-fn editing_an_older_message_while_scrolled_up_offers_no_jump() {
+fn editing_an_older_row_while_scrolled_up_flags_no_content_below() {
     let mut doc = Doc::rows(50);
     doc.scroll_to(0.0);
 
     doc.stream(10, 1, "m10 second, edited");
     doc.frame();
 
-    assert!(!doc.transcript.has_unseen());
+    assert!(!doc.view.has_content_below());
 }
 
 #[test]
@@ -543,15 +536,12 @@ fn narrowing_the_viewport_rewraps_rows() {
     // 76 chars: 2 lines at 38 columns (400px), 5 lines at 18 (200px).
     let long = "x".repeat(76);
     let mut doc = Doc::new([message_with(0, &[&long])]);
-    let wide = doc.transcript.visible_rows()[0].height;
+    let wide = doc.view.visible_rows()[0].height;
 
     doc.size.0 = 200.0;
     doc.frame();
 
-    assert_eq!(
-        (wide, doc.transcript.visible_rows()[0].height),
-        (80.0, 140.0)
-    );
+    assert_eq!((wide, doc.view.visible_rows()[0].height), (80.0, 140.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -559,23 +549,21 @@ fn narrowing_the_viewport_rewraps_rows() {
 // ---------------------------------------------------------------------------
 
 // Catches debug integrity checks that walk the whole document per block or
-// per message, which made loading a long transcript quadratic in debug
+// per message, which made loading a long view quadratic in debug
 // builds. Counted in check steps, not timed.
 #[test]
 fn extending_with_30k_blocks_checks_in_linear_steps() {
-    let messages: Vec<TranscriptMessage> = (0..10_000)
+    let messages: Vec<DocumentRow> = (0..10_000)
         .map(|i| message_with(i, &["a", "b", "c"]))
         .collect();
-    let mut transcript: Transcript<GridGeometry> = Transcript::new(grid_style());
-    transcript
-        .push(&message_with(1_000_000, &["first"]))
-        .unwrap();
+    let mut view: Document<GridGeometry> = Document::new(grid_style());
+    view.push(&message_with(1_000_000, &["first"])).unwrap();
 
     let before = quark::selection::integrity_steps();
-    transcript.extend(&messages).unwrap();
+    view.extend(&messages).unwrap();
     let steps = quark::selection::integrity_steps() - before;
 
-    assert_eq!(transcript.len(), 10_001);
+    assert_eq!(view.len(), 10_001);
     assert!(steps <= 5 * 30_000, "{steps} check steps for 30k blocks");
 }
 
@@ -599,7 +587,7 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn blocks_message(key: u64, count: u8) -> TranscriptMessage {
+fn blocks_message(key: u64, count: u8) -> DocumentRow {
     let texts: Vec<String> = (0..count).map(|b| format!("{key}.{b}")).collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     message_with(key, &refs)
@@ -613,13 +601,13 @@ proptest! {
     /// more here.
     #[test]
     fn edits_keep_rows_blocks_and_selection_consistent(ops in prop::collection::vec(op(), 1..40)) {
-        let mut transcript: Transcript<GridGeometry> = Transcript::new(grid_style());
+        let mut view: Document<GridGeometry> = Document::new(grid_style());
         let (mut next, mut first) = (1_000u64, 1_000u64);
         for op in ops {
             match op {
                 Op::Push(n) => {
                     for _ in 0..n {
-                        transcript.push(&blocks_message(next, 2)).unwrap();
+                        view.push(&blocks_message(next, 2)).unwrap();
                         next += 1;
                     }
                 }
@@ -627,22 +615,22 @@ proptest! {
                     let history: Vec<_> =
                         (0..n as u64).map(|i| blocks_message(first - n as u64 + i, 2)).collect();
                     first -= n as u64;
-                    transcript.prepend(&history).unwrap();
+                    view.prepend(&history).unwrap();
                 }
-                Op::Update(..) | Op::Remove(..) if transcript.is_empty() => {}
+                Op::Update(..) | Op::Remove(..) if view.is_empty() => {}
                 Op::Update(rank, count) => {
-                    let keys = transcript.list().rows().keys();
+                    let keys = view.list().rows().keys();
                     let key = keys[rank as usize % keys.len()];
-                    transcript.update(&blocks_message(key.0, count)).unwrap();
+                    view.update(&blocks_message(key.0, count)).unwrap();
                 }
                 Op::Remove(rank) => {
-                    let keys = transcript.list().rows().keys();
+                    let keys = view.list().rows().keys();
                     let key = keys[rank as usize % keys.len()];
-                    transcript.remove(key).unwrap();
+                    view.remove(key).unwrap();
                 }
-                Op::SelectAll => transcript.select_all(),
+                Op::SelectAll => view.select_all(),
             }
-            prop_assert_eq!(transcript.verify_integrity(), Ok(()));
+            prop_assert_eq!(view.verify_integrity(), Ok(()));
         }
     }
 }
@@ -652,7 +640,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
-struct Ev(TranscriptEvent);
+struct Ev(DocumentEvent);
 
 impl From<Ev> for Action {
     fn from(ev: Ev) -> Self {
@@ -661,23 +649,24 @@ impl From<Ev> for Action {
 }
 
 struct Painted {
+    scene: Scene,
     accessibility: AccessibilityFrame,
     regions: Vec<crate::element::SelectableTextRegion>,
     router: InputRouter,
 }
 
-/// Prepares `transcript` with real layouts and paints its element `top`
+/// Prepares `view` with real layouts and paints its element `top`
 /// pixels below the window's top edge.
 fn paint(
-    transcript: &mut Transcript,
-    messages: &HashMap<RowKey, TranscriptMessage>,
+    view: &mut Document,
+    messages: &HashMap<RowKey, DocumentRow>,
     size: (f32, f32),
     top: f32,
 ) -> Painted {
     let mut text = TextSystem::vendored_only(&Default::default());
     let mut layouts = LayoutCache::default();
-    let font_size = transcript.style().font_size;
-    transcript.prepare(
+    let font_size = view.style().font_size;
+    view.prepare(
         size.0,
         size.1,
         0,
@@ -685,7 +674,7 @@ fn paint(
         &mut TextMeasurer::new(&mut text, &mut layouts, font_size, 1.0),
     );
     let theme = Theme::default_dark();
-    let element = transcript.element(messages, &theme, |ev| Ev(ev).into());
+    let element = view.element(messages, &theme, |ev| Ev(ev).into());
     let (w, h) = (size.0, size.1 + top);
     let signals = SignalStore::new();
     let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
@@ -698,19 +687,21 @@ fn paint(
         .child(div().w(w).h(top).flex_shrink_0())
         .child(element)
         .into_any();
-    render_element(&mut root, &mut Scene::default(), &mut cx, w, h);
+    let mut scene = Scene::default();
+    render_element(&mut root, &mut scene, &mut cx, w, h);
     let regions = std::mem::take(&mut cx.selectable_text_runs);
     let accessibility = std::mem::take(&mut cx.accessibility);
     let mut router = InputRouter::default();
     router.set_frame(cx.take_input_frame());
     Painted {
+        scene,
         accessibility,
         regions,
         router,
     }
 }
 
-fn real_document(n: u64) -> HashMap<RowKey, TranscriptMessage> {
+fn real_document(n: u64) -> HashMap<RowKey, DocumentRow> {
     (0..n)
         .map(|i| {
             let mut m = message_with(
@@ -720,7 +711,7 @@ fn real_document(n: u64) -> HashMap<RowKey, TranscriptMessage> {
                 )],
             );
             if i.is_multiple_of(3) {
-                m.blocks.push(TranscriptBlock::code(
+                m.blocks.push(Block::code(
                     BlockKey(i * 10 + 5),
                     ["fn main() {", "    run();", "}"]
                         .iter()
@@ -733,28 +724,26 @@ fn real_document(n: u64) -> HashMap<RowKey, TranscriptMessage> {
         .collect()
 }
 
-fn real_transcript(messages: &HashMap<RowKey, TranscriptMessage>) -> Transcript {
+fn real_view(messages: &HashMap<RowKey, DocumentRow>) -> Document {
     let mut keys: Vec<&RowKey> = messages.keys().collect();
     keys.sort();
-    let mut transcript = Transcript::new(TranscriptStyle::for_font_size(14.0));
-    transcript
-        .extend(keys.into_iter().map(|k| &messages[k]))
-        .unwrap();
-    transcript
+    let mut view = Document::new(DocumentStyle::for_font_size(14.0));
+    view.extend(keys.into_iter().map(|k| &messages[k])).unwrap();
+    view
 }
 
 #[test]
 fn measured_blocks_match_the_painted_text_elements() {
     let messages = real_document(12);
-    let mut transcript = real_transcript(&messages);
-    transcript.set_scroll_offset(0.0);
+    let mut view = real_view(&messages);
+    view.set_scroll_offset(0.0);
 
-    let painted = paint(&mut transcript, &messages, (260.0, 600.0), 0.0);
+    let painted = paint(&mut view, &messages, (260.0, 600.0), 0.0);
 
     let fmt = |key: u64, x: f32, y: f32, h: f32, ox: f32, oy: f32| {
         format!("{key} {x:.0},{y:.0} h{h:.0} text@{ox:.0},{oy:.0}")
     };
-    let expected: Vec<String> = transcript
+    let expected: Vec<String> = view
         .visible_blocks()
         .iter()
         .filter(|b| b.rect.y < 600.0 && b.rect.y + b.rect.height > 0.0)
@@ -790,15 +779,15 @@ fn measured_blocks_match_the_painted_text_elements() {
 #[test]
 fn rows_publish_their_position_among_all_rows_and_their_block_text() {
     let messages = real_document(50);
-    let mut transcript = real_transcript(&messages);
-    let offset = transcript.list().rows().offset_of(RowKey(25)).unwrap();
-    transcript.set_scroll_offset(offset);
-    paint(&mut transcript, &messages, (400.0, 600.0), 0.0);
+    let mut view = real_view(&messages);
+    let offset = view.list().rows().offset_of(RowKey(25)).unwrap();
+    view.set_scroll_offset(offset);
+    paint(&mut view, &messages, (400.0, 600.0), 0.0);
     // Rows above were measured on the way; settle the anchor at row 25.
-    let offset = transcript.list().rows().offset_of(RowKey(25)).unwrap();
-    transcript.set_scroll_offset(offset);
+    let offset = view.list().rows().offset_of(RowKey(25)).unwrap();
+    view.set_scroll_offset(offset);
 
-    let painted = paint(&mut transcript, &messages, (400.0, 600.0), 0.0);
+    let painted = paint(&mut view, &messages, (400.0, 600.0), 0.0);
 
     let update = painted.accessibility.tree_update("Test", None);
     let item = update
@@ -834,14 +823,13 @@ fn rows_publish_their_position_among_all_rows_and_their_block_text() {
 #[test]
 fn routed_drag_selects_from_one_message_into_another() {
     let messages = real_document(6);
-    let mut transcript = real_transcript(&messages);
-    transcript.set_scroll_offset(0.0);
-    // The transcript sits 50px down, so window and local coordinates differ.
+    let mut view = real_view(&messages);
+    view.set_scroll_offset(0.0);
+    // The view sits 50px down, so window and local coordinates differ.
     let top = 50.0;
-    let mut painted = paint(&mut transcript, &messages, (400.0, 600.0), top);
+    let mut painted = paint(&mut view, &messages, (400.0, 600.0), top);
     let block = |key: u64| {
-        transcript
-            .visible_blocks()
+        view.visible_blocks()
             .iter()
             .find(|b| b.key == BlockKey(key))
             .map(|b| b.rect)
@@ -863,12 +851,12 @@ fn routed_drag_selects_from_one_message_into_another() {
     actions.extend(painted.router.pointer_up().actions);
     for action in actions {
         if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
-            transcript.handle(*event);
+            view.handle(*event);
         }
     }
 
     assert_eq!(
-        transcript.selected_text(&messages),
+        view.selected_text(&messages),
         "Message 1 wraps across a few lines when the column is narrow enough.\n\n\
          Message 2 wraps across a few lines when the column is narrow enough."
     );
@@ -881,24 +869,23 @@ fn routed_drag_selects_from_one_message_into_another() {
 /// Converts markdown with a fresh block key allocator, so keys count from 0.
 fn markdown_message(
     row: u64,
-    markdown: &mut MarkdownMessage,
+    markdown: &mut MarkdownBlocks,
     source: &str,
     syntax: &mut SyntaxHighlighter,
-) -> TranscriptMessage {
+) -> DocumentRow {
     markdown_message_with(row, markdown, source, syntax, &mut BlockKeys::new())
 }
 
 fn markdown_message_with(
     row: u64,
-    markdown: &mut MarkdownMessage,
+    markdown: &mut MarkdownBlocks,
     source: &str,
     syntax: &mut SyntaxHighlighter,
     keys: &mut BlockKeys,
-) -> TranscriptMessage {
-    TranscriptMessage {
+) -> DocumentRow {
+    DocumentRow {
         key: RowKey(row),
-        role: TranscriptRole::Assistant,
-        author: "assistant".into(),
+        chrome: RowChrome::default(),
         blocks: markdown.blocks(
             &crate::markdown::MarkdownDoc::parse(source),
             syntax,
@@ -910,7 +897,7 @@ fn markdown_message_with(
 
 /// One line per block: key, content kind and label, list and quote depth,
 /// gutter marker, copy prefix, then the selectable text.
-fn dump_blocks(message: &TranscriptMessage) -> String {
+fn dump_blocks(message: &DocumentRow) -> String {
     message
         .blocks
         .iter()
@@ -939,7 +926,7 @@ fn dump_blocks(message: &TranscriptMessage) -> String {
 }
 
 /// Texts of the content spans that take a syntax color.
-fn highlighted_runs(block: &TranscriptBlock) -> Vec<String> {
+fn highlighted_runs(block: &Block) -> Vec<String> {
     let (Some(spans), Some(tones)) = (block.content.spans(), block.tones()) else {
         return Vec::new();
     };
@@ -958,7 +945,7 @@ fn markdown_blocks_become_separate_keyed_blocks_with_markers_and_prefixes() {
 
     let message = markdown_message(
         7,
-        &mut MarkdownMessage::new(),
+        &mut MarkdownBlocks::new(),
         source,
         &mut SyntaxHighlighter::new(),
     );
@@ -987,7 +974,7 @@ fn table_columns_align_by_display_width() {
 
     let message = markdown_message(
         0,
-        &mut MarkdownMessage::new(),
+        &mut MarkdownBlocks::new(),
         source,
         &mut SyntaxHighlighter::new(),
     );
@@ -1005,7 +992,7 @@ fn table_columns_align_by_display_width() {
 fn drag_from_a_heading_across_a_list_into_code_copies_markers_and_source() {
     let mut syntax = SyntaxHighlighter::new();
     let source = "## Setup\n\n- one\n- two\n\n```rust\nfn main() {\n    run();\n}\n```";
-    let message = markdown_message(0, &mut MarkdownMessage::new(), source, &mut syntax);
+    let message = markdown_message(0, &mut MarkdownBlocks::new(), source, &mut syntax);
     let (heading, code) = (message.blocks[0].key.0, message.blocks[3].key.0);
     let mut doc = Doc::new([message]);
 
@@ -1022,31 +1009,30 @@ fn streaming_markdown_reshapes_only_the_last_block() {
     let mut layouts = LayoutCache::default();
     let mut syntax = SyntaxHighlighter::new();
     let mut keys = BlockKeys::new();
-    let mut markdown = MarkdownMessage::new();
+    let mut markdown = MarkdownBlocks::new();
     let mut source = String::from("# Title\n\nFirst paragraph.\n\n- a\n- b\n\nStreaming");
     let mut messages = HashMap::new();
-    let mut transcript = Transcript::new(TranscriptStyle::for_font_size(14.0));
+    let mut view = Document::new(DocumentStyle::for_font_size(14.0));
     let message = markdown_message_with(0, &mut markdown, &source, &mut syntax, &mut keys);
-    transcript.push(&message).unwrap();
+    view.push(&message).unwrap();
     messages.insert(message.key, message);
-    let mut frame = |transcript: &mut Transcript, messages: &HashMap<_, _>| {
+    let mut frame = |view: &mut Document, messages: &HashMap<_, _>| {
         let mut measurer = TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0);
-        transcript.prepare(400.0, 600.0, 0, messages, &mut measurer);
-        transcript
-            .visible_blocks()
+        view.prepare(400.0, 600.0, 0, messages, &mut measurer);
+        view.visible_blocks()
             .iter()
             .map(|b| b.geometry.layout.clone().unwrap())
             .collect::<Vec<_>>()
     };
-    let mut before = frame(&mut transcript, &messages);
+    let mut before = frame(&mut view, &messages);
 
     let mut reshaped = Vec::new();
     for word in [" more", " words", " arrive"] {
         source.push_str(word);
         let message = markdown_message_with(0, &mut markdown, &source, &mut syntax, &mut keys);
-        transcript.update(&message).unwrap();
+        view.update(&message).unwrap();
         messages.insert(message.key, message);
-        let after = frame(&mut transcript, &messages);
+        let after = frame(&mut view, &messages);
         let changed: Vec<usize> = (0..after.len())
             .filter(|&i| !before.get(i).is_some_and(|b| Arc::ptr_eq(b, &after[i])))
             .collect();
@@ -1060,7 +1046,7 @@ fn streaming_markdown_reshapes_only_the_last_block() {
 #[test]
 fn unknown_fence_language_renders_plain_with_its_label() {
     let mut syntax = SyntaxHighlighter::new();
-    let mut markdown = MarkdownMessage::new();
+    let mut markdown = MarkdownBlocks::new();
     let source = "```klingon\nqapla' \"batlh\" fn\n```";
     markdown_message(0, &mut markdown, source, &mut syntax);
     syntax.finish_pending();
@@ -1082,7 +1068,7 @@ fn unknown_fence_language_renders_plain_with_its_label() {
 #[test]
 fn rust_code_block_is_colored_once_its_highlight_arrives() {
     let mut syntax = SyntaxHighlighter::new();
-    let mut markdown = MarkdownMessage::new();
+    let mut markdown = MarkdownBlocks::new();
     let source = "```rust\nfn main() { let s = \"hi\"; }\n```";
     let first = markdown_message(0, &mut markdown, source, &mut syntax);
 
@@ -1107,7 +1093,7 @@ fn highlight_arrival_reports_the_block_it_is_for() {
     let mut syntax = SyntaxHighlighter::new();
     let message = markdown_message(
         0,
-        &mut MarkdownMessage::new(),
+        &mut MarkdownBlocks::new(),
         "```rust\nfn main() {}\n```",
         &mut syntax,
     );
@@ -1115,13 +1101,12 @@ fn highlight_arrival_reports_the_block_it_is_for() {
     assert_eq!(syntax.finish_pending(), vec![message.blocks[0].key]);
 }
 
-/// A markdown transcript holding message 0 with `source`.
-fn markdown_transcript(source: &str) -> MarkdownTranscript {
-    let mut md = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+/// A markdown view holding message 0 with `source`.
+fn markdown_document(source: &str) -> MarkdownDocument {
+    let mut md = MarkdownDocument::new(DocumentStyle::for_font_size(14.0));
     md.push(MarkdownEntry {
         row: RowKey(0),
-        role: TranscriptRole::Assistant,
-        author: "assistant".into(),
+        chrome: RowChrome::default(),
         markdown: source.to_owned(),
     })
     .unwrap();
@@ -1133,7 +1118,7 @@ fn markdown_transcript(source: &str) -> MarkdownTranscript {
 #[cfg(feature = "syntax")]
 #[test]
 fn removing_a_message_forgets_its_highlights() {
-    let mut md = markdown_transcript("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+    let mut md = markdown_document("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
     md.finish_highlights();
     let kept = md.highlighter().len();
 
@@ -1146,7 +1131,7 @@ fn removing_a_message_forgets_its_highlights() {
 #[cfg(feature = "syntax")]
 #[test]
 fn shrinking_a_message_forgets_the_highlights_of_dropped_blocks() {
-    let mut md = markdown_transcript("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+    let mut md = markdown_document("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
     md.finish_highlights();
 
     md.set_markdown(RowKey(0), "```rust\nfn a() {}\n```")
@@ -1161,7 +1146,7 @@ fn shrinking_a_message_forgets_the_highlights_of_dropped_blocks() {
 #[test]
 fn dead_highlight_worker_is_replaced_and_does_not_hang() {
     let mut syntax = SyntaxHighlighter::new();
-    let mut markdown = MarkdownMessage::new();
+    let mut markdown = MarkdownBlocks::new();
     let source = "```rust\nfn main() {}\n```";
     markdown_message(0, &mut markdown, source, &mut syntax);
     syntax.kill_worker();
@@ -1177,18 +1162,18 @@ fn dead_highlight_worker_is_replaced_and_does_not_hang() {
 
 #[test]
 fn facade_streams_markdown_into_selectable_blocks() {
-    let mut md = markdown_transcript("# Answer\n\nfirst");
+    let mut md = markdown_document("# Answer\n\nfirst");
 
     md.set_markdown(RowKey(0), "# Answer\n\nfirst words\n\n- item")
         .unwrap();
-    md.transcript_mut().select_all();
+    md.document_mut().select_all();
 
     assert_eq!(md.selected_text(), "# Answer\n\nfirst words\n\n- item");
 }
 
 /// Paints `md` with `theme` and returns its text regions and scene.
 fn paint_markdown(
-    md: &mut MarkdownTranscript,
+    md: &mut MarkdownDocument,
     theme: &Theme,
 ) -> (Vec<crate::element::SelectableTextRegion>, Scene) {
     let mut text = TextSystem::vendored_only(&Default::default());
@@ -1212,7 +1197,7 @@ fn paint_markdown(
 // rebuilt on a theme change.
 #[test]
 fn theme_change_recolors_blocks_without_rebuilding_them() {
-    let mut md = markdown_transcript("see ![a chart](c.png)");
+    let mut md = markdown_document("see ![a chart](c.png)");
     let (dark, light) = (Theme::default_dark(), Theme::default_light());
 
     let colors = |(_, scene): (_, Scene)| {
@@ -1236,7 +1221,7 @@ fn theme_change_recolors_blocks_without_rebuilding_them() {
 // headings rendered at normal weight.
 #[test]
 fn heading_weights_reach_the_glyphs() {
-    let mut md = markdown_transcript("# Title\n\n### Small\n\nplain");
+    let mut md = markdown_document("# Title\n\n### Small\n\nplain");
 
     let (regions, _) = paint_markdown(&mut md, &Theme::default_dark());
 
@@ -1250,10 +1235,10 @@ fn heading_weights_reach_the_glyphs() {
 }
 
 #[test]
-fn link_click_emits_the_transcript_link_action() {
+fn link_click_emits_the_document_link_action() {
     #[derive(Debug, Clone, PartialEq)]
     struct Open(Arc<str>);
-    let mut md = markdown_transcript("see [docs](https://example.com/docs) now");
+    let mut md = markdown_document("see [docs](https://example.com/docs) now");
     let theme = Theme::default_dark();
     let mut text = TextSystem::vendored_only(&Default::default());
     let mut layouts = LayoutCache::default();
@@ -1302,7 +1287,7 @@ fn link_click_emits_the_transcript_link_action() {
 // Catches markdown span flags not reaching the painted decorations.
 #[test]
 fn strikethrough_markdown_paints_a_line_through_its_run() {
-    let mut md = markdown_transcript("keep ~~gone~~ keep");
+    let mut md = markdown_document("keep ~~gone~~ keep");
 
     let (regions, scene) = paint_markdown(&mut md, &Theme::default_dark());
 
@@ -1342,7 +1327,7 @@ fn strikethrough_markdown_paints_a_line_through_its_run() {
 // Cached rows
 // ---------------------------------------------------------------------------
 
-/// Paints transcripts frame after frame through one element cache, as a
+/// Paints documents frame after frame through one element cache, as a
 /// window does, and dumps what a frame published.
 struct CachedPainter {
     text: TextSystem,
@@ -1363,13 +1348,13 @@ impl CachedPainter {
     /// of one frame, painted with the cache or without it.
     fn frame(
         &mut self,
-        transcript: &mut Transcript,
-        messages: &HashMap<RowKey, TranscriptMessage>,
+        view: &mut Document,
+        messages: &HashMap<RowKey, DocumentRow>,
         size: (f32, f32),
         cached: bool,
     ) -> String {
-        let font_size = transcript.style().font_size;
-        transcript.prepare(
+        let font_size = view.style().font_size;
+        view.prepare(
             size.0,
             size.1,
             0,
@@ -1377,7 +1362,7 @@ impl CachedPainter {
             &mut TextMeasurer::new(&mut self.text, &mut self.layouts, font_size, 1.0),
         );
         let theme = Theme::default_dark();
-        let element = transcript.element(messages, &theme, |ev| Ev(ev).into());
+        let element = view.element(messages, &theme, |ev| Ev(ev).into());
         let signals = SignalStore::new();
         let mut cx = ElementContext::new(
             &theme,
@@ -1429,18 +1414,18 @@ impl CachedPainter {
 #[test]
 fn cached_rows_paint_exactly_what_an_uncached_frame_paints_after_each_edit() {
     let mut messages = real_document(30);
-    let mut transcript = real_transcript(&messages);
-    transcript.set_scroll_offset(0.0);
+    let mut view = real_view(&messages);
+    view.set_scroll_offset(0.0);
     let mut painter = CachedPainter::new();
     let mut size = (400.0, 500.0);
-    painter.frame(&mut transcript, &messages, size, true);
+    painter.frame(&mut view, &messages, size, true);
 
-    type Edit = fn(&mut Transcript, &mut HashMap<RowKey, TranscriptMessage>, &mut (f32, f32));
+    type Edit = fn(&mut Document, &mut HashMap<RowKey, DocumentRow>, &mut (f32, f32));
     let edits: &[(&str, Edit)] = &[
         ("nothing", |_, _, _| {}),
         ("stream into row 1", |t, m, _| {
             let message = m.get_mut(&RowKey(1)).unwrap();
-            message.blocks[0] = TranscriptBlock::plain(BlockKey(10), "Streamed text for row one.");
+            message.blocks[0] = Block::plain(BlockKey(10), "Streamed text for row one.");
             t.update(message).unwrap();
         }),
         ("select inside row 2", |t, _, _| {
@@ -1461,9 +1446,9 @@ fn cached_rows_paint_exactly_what_an_uncached_frame_paints_after_each_edit() {
         }),
     ];
     for (name, edit) in edits {
-        edit(&mut transcript, &mut messages, &mut size);
-        let cached = painter.frame(&mut transcript, &messages, size, true);
-        let mut fresh = transcript.without_element_memory();
+        edit(&mut view, &mut messages, &mut size);
+        let cached = painter.frame(&mut view, &messages, size, true);
+        let mut fresh = view.without_element_memory();
         let uncached = painter.frame(&mut fresh, &messages, size, false);
         assert_eq!(cached, uncached, "after {name}");
     }
@@ -1476,7 +1461,7 @@ fn cached_rows_paint_exactly_what_an_uncached_frame_paints_after_each_edit() {
 impl Doc {
     /// `"<block>:<start>..<end>"` per match, the current one starred.
     fn find_dump(&self) -> String {
-        let Some(find) = self.transcript.find() else {
+        let Some(find) = self.view.find() else {
             return "closed".to_owned();
         };
         find.matches()
@@ -1495,15 +1480,15 @@ impl Doc {
     }
 
     fn find(&mut self, query: &str) {
-        self.transcript.set_find_query(query, &self.messages);
+        self.view.set_find_query(query, &self.messages);
     }
 
     /// Where the current match's block sits in the viewport, if it is
     /// materialized.
     fn current_match_top(&self) -> Option<f32> {
-        let m = self.transcript.find()?.current()?.clone();
+        let m = self.view.find()?.current()?.clone();
         let block = self
-            .transcript
+            .view
             .visible_blocks()
             .iter()
             .find(|b| b.key == m.block)?;
@@ -1544,11 +1529,11 @@ fn find_drops_matches_of_removed_blocks() {
         message_with(1, &["word", "word"]),
     ]);
     doc.find("word");
-    doc.transcript.find_next(ScrollAlign::Center);
-    doc.transcript.find_next(ScrollAlign::Center);
+    doc.view.find_next(ScrollAlign::Center);
+    doc.view.find_next(ScrollAlign::Center);
 
     let message = message_with(1, &["word"]);
-    doc.transcript.update(&message).unwrap();
+    doc.view.update(&message).unwrap();
     doc.messages.insert(message.key, message);
     doc.frame();
 
@@ -1563,14 +1548,14 @@ fn next_and_prev_wrap_and_scroll_the_match_to_the_viewport_center() {
     doc.find("first");
 
     // From the first match, previous wraps to the last row's block.
-    let prev = doc.transcript.find_prev(ScrollAlign::Center).unwrap();
+    let prev = doc.view.find_prev(ScrollAlign::Center).unwrap();
     doc.frame();
     let at_last = doc.current_match_top();
-    let next = doc.transcript.find_next(ScrollAlign::Center).unwrap();
+    let next = doc.view.find_next(ScrollAlign::Center).unwrap();
     doc.frame();
 
     assert_eq!(
-        (prev.block.0, next.block.0, doc.transcript.scroll_offset()),
+        (prev.block.0, next.block.0, doc.view.scroll_offset()),
         (390, 0, 0.0)
     );
     // The last row cannot scroll to the center; it sits fully in view.
@@ -1584,7 +1569,7 @@ fn next_centers_a_match_in_the_middle_of_the_document() {
     doc.scroll_to(0.0);
     doc.find("m20 second");
 
-    doc.transcript.find_next(ScrollAlign::Center).unwrap();
+    doc.view.find_next(ScrollAlign::Center).unwrap();
     doc.frame();
 
     let top = doc.current_match_top().unwrap();
@@ -1594,16 +1579,16 @@ fn next_centers_a_match_in_the_middle_of_the_document() {
 #[test]
 fn find_paints_a_highlight_per_match_and_marks_the_current_one() {
     let messages = real_document(4);
-    let mut transcript = real_transcript(&messages);
-    transcript.set_scroll_offset(0.0);
-    transcript.set_find_query("Message", &messages);
+    let mut view = real_view(&messages);
+    view.set_scroll_offset(0.0);
+    view.set_find_query("Message", &messages);
     let theme = Theme::default_dark();
     let (plain, current) = (
         format!("{:?}", theme.colors.search_match_bg),
         format!("{:?}", theme.colors.search_match_active_bg),
     );
 
-    let frame = CachedPainter::new().frame(&mut transcript, &messages, (400.0, 600.0), true);
+    let frame = CachedPainter::new().frame(&mut view, &messages, (400.0, 600.0), true);
 
     let count = |color: &str| frame.lines().filter(|l| l.ends_with(color)).count();
     assert_eq!((count(&current), count(&plain)), (1, 3));
@@ -1628,7 +1613,7 @@ fn sized_loader() -> ImageLoader {
 }
 
 /// Prepares `md` at 400x300 with real text layouts.
-fn prepare_markdown(md: &mut MarkdownTranscript, text: &mut TextSystem, layouts: &mut LayoutCache) {
+fn prepare_markdown(md: &mut MarkdownDocument, text: &mut TextSystem, layouts: &mut LayoutCache) {
     md.prepare(
         400.0,
         300.0,
@@ -1639,14 +1624,14 @@ fn prepare_markdown(md: &mut MarkdownTranscript, text: &mut TextSystem, layouts:
 
 /// Height of the first image block on screen, and whether its pixels
 /// arrived.
-fn image_block(md: &MarkdownTranscript) -> (f32, bool) {
-    let t = md.transcript();
+fn image_block(md: &MarkdownDocument) -> (f32, bool) {
+    let t = md.document();
     let visible = t
         .visible_blocks()
         .iter()
-        .find(|b| md.messages()[&b.row].blocks[b.index].content_kind() == "image")
+        .find(|b| md.rows()[&b.row].blocks[b.index].content_kind() == "image")
         .expect("an image block is on screen");
-    let block = &md.messages()[&visible.row].blocks[visible.index];
+    let block = &md.rows()[&visible.row].blocks[visible.index];
     let ready = matches!(
         block.content,
         BlockContent::Image {
@@ -1657,7 +1642,7 @@ fn image_block(md: &MarkdownTranscript) -> (f32, bool) {
     (visible.rect.height, ready)
 }
 
-impl TranscriptBlock {
+impl Block {
     fn content_kind(&self) -> &'static str {
         match self.content {
             BlockContent::Image { .. } => "image",
@@ -1678,7 +1663,7 @@ fn image_blocks_reserve_their_height_and_scale_to_the_column() {
         ("200x100.png", false, placeholder, 100.0),
     ];
     for &(src, hint, before, after) in cases {
-        let mut md = markdown_transcript(&format!("![chart]({src})"));
+        let mut md = markdown_document(&format!("![chart]({src})"));
         let (mut text, mut layouts) = (
             TextSystem::vendored_only(&Default::default()),
             LayoutCache::default(),
@@ -1704,12 +1689,11 @@ fn image_blocks_reserve_their_height_and_scale_to_the_column() {
 
 #[test]
 fn an_image_resolving_above_the_view_does_not_move_the_rows_on_screen() {
-    let mut md = MarkdownTranscript::new(TranscriptStyle::for_font_size(14.0));
+    let mut md = MarkdownDocument::new(DocumentStyle::for_font_size(14.0));
     md.set_image_loader(sized_loader());
     md.extend((0..40).map(|i| MarkdownEntry {
         row: RowKey(i),
-        role: TranscriptRole::Assistant,
-        author: "assistant".into(),
+        chrome: RowChrome::default(),
         markdown: if i == 10 {
             "![tall](100x600.png)".to_owned()
         } else {
@@ -1724,27 +1708,27 @@ fn an_image_resolving_above_the_view_does_not_move_the_rows_on_screen() {
     prepare_markdown(&mut md, &mut text, &mut layouts);
     md.finish_measures();
     // Put row 12 at the top: the image row sits in the overscan above.
-    let top = |md: &MarkdownTranscript, row: u64| {
-        let t = md.transcript();
+    let top = |md: &MarkdownDocument, row: u64| {
+        let t = md.document();
         t.list().rows().offset_of(RowKey(row)).unwrap() - t.scroll_offset()
     };
-    let offset = md.transcript().list().rows().offset_of(RowKey(12)).unwrap() + 5.0;
-    md.transcript_mut().set_scroll_offset(offset);
+    let offset = md.document().list().rows().offset_of(RowKey(12)).unwrap() + 5.0;
+    md.document_mut().set_scroll_offset(offset);
     prepare_markdown(&mut md, &mut text, &mut layouts);
-    let image_row = md.transcript().list().rows().height_of(RowKey(10)).unwrap();
+    let image_row = md.document().list().rows().height_of(RowKey(10)).unwrap();
     let before = top(&md, 12);
 
     md.finish_images();
     prepare_markdown(&mut md, &mut text, &mut layouts);
 
-    let grown = md.transcript().list().rows().height_of(RowKey(10)).unwrap() - image_row;
+    let grown = md.document().list().rows().height_of(RowKey(10)).unwrap() - image_row;
     assert_eq!((top(&md, 12), grown > 400.0), (before, true));
 }
 
 #[test]
 fn an_image_without_pixels_shows_its_alt_text_and_names_its_node() {
-    let mut no_loader = markdown_transcript("![a sales chart](chart.png)");
-    let mut loaded = markdown_transcript("![a sales chart](30x20.png)");
+    let mut no_loader = markdown_document("![a sales chart](chart.png)");
+    let mut loaded = markdown_document("![a sales chart](30x20.png)");
     loaded.set_image_loader(sized_loader());
     loaded.finish_images();
     let theme = Theme::default_dark();
@@ -1786,16 +1770,16 @@ fn an_image_without_pixels_shows_its_alt_text_and_names_its_node() {
 fn a_wide_code_block_scrolls_sideways_and_pointer_hits_follow_it() {
     let long = format!("let row = \"{}\";", "x".repeat(150));
     let mut message = message_with(0, &["Above the code."]);
-    message.blocks.push(TranscriptBlock::code(
+    message.blocks.push(Block::code(
         BlockKey(5),
         vec![vec![crate::element::StyledSpan::plain(long.as_str())]],
     ));
-    let messages: HashMap<RowKey, TranscriptMessage> = [(message.key, message)].into();
-    let mut transcript = real_transcript(&messages);
+    let messages: HashMap<RowKey, DocumentRow> = [(message.key, message)].into();
+    let mut view = real_view(&messages);
     let mut painter = CachedPainter::new();
     let size = (300.0, 400.0);
-    painter.frame(&mut transcript, &messages, size, true);
-    let hit = |t: &Transcript| {
+    painter.frame(&mut view, &messages, size, true);
+    let hit = |t: &Document| {
         let code = t
             .visible_blocks()
             .iter()
@@ -1804,17 +1788,119 @@ fn a_wide_code_block_scrolls_sideways_and_pointer_hits_follow_it() {
         let (x, y) = (code.rect.x + 60.0, code.rect.y + code.rect.height * 0.5);
         t.point_at(x, y).unwrap().byte
     };
-    let before = hit(&transcript);
+    let before = hit(&view);
 
-    transcript.scroll_handles[&BlockKey(5)].set_offset(200.0, 0.0);
-    painter.frame(&mut transcript, &messages, size, true);
-    let cached = painter.frame(&mut transcript, &messages, size, true);
-    let mut fresh = transcript.without_element_memory();
+    view.scroll_handles[&BlockKey(5)].set_offset(200.0, 0.0);
+    painter.frame(&mut view, &messages, size, true);
+    let cached = painter.frame(&mut view, &messages, size, true);
+    let mut fresh = view.without_element_memory();
     let uncached = painter.frame(&mut fresh, &messages, size, false);
-    let after = hit(&transcript);
+    let after = hit(&view);
 
-    assert_eq!(transcript.scroll_handles[&BlockKey(5)].offset().0, 200.0);
+    assert_eq!(view.scroll_handles[&BlockKey(5)].offset().0, 200.0);
     assert_eq!(cached, uncached);
     // 200 points of monospace at this size is well over 15 characters.
     assert!(after > before + 15, "{before} -> {after}");
+}
+
+// ---------------------------------------------------------------------------
+// Row chrome
+// ---------------------------------------------------------------------------
+
+const KIND_1_BACKGROUND: Color = Color::rgba(200, 30, 60, 255);
+
+/// Chrome from the row's kind: a "header {kind}" line on every row, and a
+/// background behind kind 1 rows only.
+struct KindChrome;
+
+impl RowDecorator for KindChrome {
+    fn background(&self, chrome: &RowChrome, _theme: &Theme) -> Option<Color> {
+        (chrome.kind == 1).then_some(KIND_1_BACKGROUND)
+    }
+
+    fn header(&self, chrome: &RowChrome, _width: f32, _theme: &Theme) -> Option<AnyElement> {
+        Some(crate::element::text(format!("header {}", chrome.kind)).into_any())
+    }
+}
+
+/// Rows 0..n with a 20px header band, kind `i % 2`, and no label, so the
+/// header text stays in the accessibility tree.
+fn chrome_view(n: u64) -> (HashMap<RowKey, DocumentRow>, Document) {
+    let mut rows = real_document(n);
+    for row in rows.values_mut() {
+        row.chrome.label = None;
+    }
+    let mut view = real_view(&rows);
+    view.set_decorator(KindChrome);
+    view.set_scroll_offset(0.0);
+    (rows, view)
+}
+
+// Catches the app's header not being drawn, or drawn outside the band the
+// document reserved for it above the row's blocks.
+#[test]
+fn decorator_header_is_drawn_in_the_band_above_each_rows_blocks() {
+    let (rows, mut view) = chrome_view(4);
+
+    let painted = paint(&mut view, &rows, (400.0, 600.0), 0.0);
+
+    let update = painted.accessibility.tree_update("Test", None);
+    let mut headers: Vec<String> = update
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.label().is_some_and(|l| l.starts_with("header ")))
+        .map(|(_, n)| {
+            let b = n.bounds().expect("header has bounds");
+            format!("{} y{:.0}", n.label().unwrap(), b.y0)
+        })
+        .collect();
+    headers.sort_by_key(|h| h.split(" y").nth(1).unwrap().parse::<i32>().unwrap());
+    let pad_y = view.style().pad_y;
+    let expected: Vec<String> = view
+        .visible_rows()
+        .iter()
+        .map(|r| format!("header {} y{:.0}", r.key.0 % 2, r.top + pad_y))
+        .collect();
+    let first_blocks_below_band = view.visible_rows().iter().all(|r| {
+        view.visible_blocks()[r.blocks.clone()]
+            .first()
+            .is_some_and(|b| b.rect.y >= r.top + pad_y + 20.0)
+    });
+    assert_eq!((headers, first_blocks_below_band), (expected, true));
+}
+
+// Catches the background hook painting the wrong rows, or not spanning the
+// whole row.
+#[test]
+fn decorator_background_fills_exactly_the_rows_it_returns_a_color_for() {
+    let (rows, mut view) = chrome_view(4);
+
+    let painted = paint(&mut view, &rows, (400.0, 600.0), 0.0);
+
+    let fmt = |r: &Rect| format!("{:.0},{:.0} {:.0}x{:.0}", r.x, r.y, r.width, r.height);
+    let painted: Vec<String> = painted
+        .scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            quark_render::Primitive::RoundedRect(rr) if rr.color == KIND_1_BACKGROUND => {
+                Some(fmt(&rr.rect))
+            }
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<String> = view
+        .visible_rows()
+        .iter()
+        .filter(|r| r.key.0 % 2 == 1)
+        .map(|r| {
+            fmt(&Rect {
+                x: 0.0,
+                y: r.top,
+                width: 400.0,
+                height: r.height,
+            })
+        })
+        .collect();
+    assert_eq!(painted, expected);
 }

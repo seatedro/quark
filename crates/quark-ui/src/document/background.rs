@@ -23,8 +23,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use quark_text::{LayoutCache, TextSystem, TextSystemRecipe};
 
 use super::{
-    BlockGeometry, BlockMeasurer, TextMeasurer, Transcript, TranscriptBlock, TranscriptSource,
-    TranscriptStyle, row_height,
+    Block, BlockGeometry, BlockMeasurer, Document, DocumentSource, DocumentStyle, TextMeasurer,
+    row_height,
 };
 use crate::virtual_list::RowKey;
 
@@ -43,12 +43,12 @@ pub struct MeasureSpec {
     pub scale_factor: f32,
 }
 
-/// Everything a row's height depends on besides its blocks. Each distinct
+/// Everything a row's height depends on besides its header and blocks. Each distinct
 /// value is one epoch.
 #[derive(Debug, Clone)]
 pub(super) struct RowLayout {
     spec: MeasureSpec,
-    style: TranscriptStyle,
+    style: DocumentStyle,
     width: f32,
 }
 
@@ -65,7 +65,8 @@ struct Job {
     generation: u64,
     epoch: u64,
     layout: Arc<RowLayout>,
-    blocks: Vec<TranscriptBlock>,
+    header: f32,
+    blocks: Vec<Block>,
 }
 
 /// A finished row. `height` is `None` when measuring it panicked.
@@ -80,16 +81,18 @@ struct RowHeight {
 struct WorkerGone;
 
 /// Measures one row's blocks. Swapped in tests to inject a panic.
-type MeasureRow = fn(&mut TextMeasurer<'_>, &RowLayout, &[TranscriptBlock]) -> f32;
+type MeasureRow = fn(&mut TextMeasurer<'_>, &RowLayout, f32, &[Block]) -> f32;
 
 fn measure_row(
     measurer: &mut TextMeasurer<'_>,
     layout: &RowLayout,
-    blocks: &[TranscriptBlock],
+    header: f32,
+    blocks: &[Block],
 ) -> f32 {
     row_height(
         &layout.style,
         layout.width,
+        header,
         blocks.iter(),
         |block, width| measurer.measure(block, width).height(),
     )
@@ -201,7 +204,7 @@ fn run(jobs: Receiver<Job>, done: Sender<RowHeight>, epoch: &AtomicU64, measure:
                 let (_, system) = text.as_mut()?;
                 let mut measurer =
                     TextMeasurer::new(system, &mut layouts, spec.font_size, spec.scale_factor);
-                Some(measure(&mut measurer, &job.layout, &job.blocks))
+                Some(measure(&mut measurer, &job.layout, job.header, &job.blocks))
             }))
             .ok()
             .flatten();
@@ -223,7 +226,7 @@ fn run(jobs: Receiver<Job>, done: Sender<RowHeight>, epoch: &AtomicU64, measure:
 }
 
 /// The UI side of background measurement: which rows wait for which
-/// request, and the worker. One per [`super::MarkdownTranscript`].
+/// request, and the worker. One per [`super::MarkdownDocument`].
 pub(super) struct BackgroundMeasure {
     worker: Option<MeasureWorker>,
     layout: Option<Arc<RowLayout>>,
@@ -257,7 +260,7 @@ impl BackgroundMeasure {
     pub(super) fn configure<M: BlockMeasurer>(
         &mut self,
         measurer: &M,
-        style: TranscriptStyle,
+        style: DocumentStyle,
         width: f32,
     ) {
         let layout = measurer
@@ -293,11 +296,11 @@ impl BackgroundMeasure {
 
     /// Takes the results that have arrived. Returns whether any row's
     /// height changed.
-    pub(super) fn apply<G: BlockGeometry>(&mut self, transcript: &mut Transcript<G>) -> bool {
+    pub(super) fn apply<G: BlockGeometry>(&mut self, document: &mut Document<G>) -> bool {
         let mut changed = false;
         while let Some(worker) = &self.worker {
             match worker.try_recv() {
-                Ok(Some(result)) => changed |= self.take(result, transcript),
+                Ok(Some(result)) => changed |= self.take(result, document),
                 Ok(None) => break,
                 Err(WorkerGone) => {
                     self.respawn();
@@ -312,14 +315,14 @@ impl BackgroundMeasure {
     /// limit.
     pub(super) fn request<G: BlockGeometry>(
         &mut self,
-        transcript: &Transcript<G>,
-        source: &impl TranscriptSource,
+        document: &Document<G>,
+        source: &impl DocumentSource,
     ) {
         let Some(layout) = &self.layout else {
             return;
         };
         let (pending, failed) = (&self.pending, &self.failed);
-        let rows = transcript.unmeasured_near_window(
+        let rows = document.unmeasured_near_window(
             MAX_IN_FLIGHT.saturating_sub(pending.len()),
             pending.len() + failed.len(),
             |row| pending.contains_key(&row) || failed.contains(&row),
@@ -334,12 +337,14 @@ impl BackgroundMeasure {
         for row in rows {
             self.generation += 1;
             self.pending.insert(row, self.generation);
+            let (header, blocks) = document.row_snapshot(source, row);
             worker.send(Job {
                 row,
                 generation: self.generation,
                 epoch,
                 layout: layout.clone(),
-                blocks: transcript.row_snapshot(source, row),
+                header,
+                blocks,
             });
         }
     }
@@ -348,20 +353,20 @@ impl BackgroundMeasure {
     /// done. For tests and screenshots. Returns whether any height changed.
     pub(super) fn finish<G: BlockGeometry>(
         &mut self,
-        transcript: &mut Transcript<G>,
-        source: &impl TranscriptSource,
+        document: &mut Document<G>,
+        source: &impl DocumentSource,
     ) -> bool {
-        let mut changed = self.apply(transcript);
+        let mut changed = self.apply(document);
         // One respawn per call, so a worker that cannot run leaves rows
         // estimated instead of hanging.
         let mut respawned = false;
         loop {
-            self.request(transcript, source);
+            self.request(document, source);
             let Some(worker) = self.worker.as_ref().filter(|_| self.is_busy()) else {
                 return changed;
             };
             match worker.recv() {
-                Ok(result) => changed |= self.take(result, transcript),
+                Ok(result) => changed |= self.take(result, document),
                 Err(WorkerGone) if !respawned => {
                     respawned = true;
                     self.respawn();
@@ -371,17 +376,13 @@ impl BackgroundMeasure {
         }
     }
 
-    fn take<G: BlockGeometry>(
-        &mut self,
-        result: RowHeight,
-        transcript: &mut Transcript<G>,
-    ) -> bool {
+    fn take<G: BlockGeometry>(&mut self, result: RowHeight, document: &mut Document<G>) -> bool {
         if self.pending.get(&result.row) != Some(&result.generation) {
             return false;
         }
         self.pending.remove(&result.row);
         match result.height {
-            Some(height) => transcript.set_background_height(result.row, height),
+            Some(height) => document.set_background_height(result.row, height),
             None => {
                 self.failed.insert(result.row);
                 false
@@ -417,7 +418,7 @@ mod tests {
     use quark_text::{LayoutCache, TextSystem};
 
     use super::*;
-    use crate::transcript::{MarkdownEntry, MarkdownTranscript, TranscriptRole};
+    use crate::document::{MarkdownDocument, MarkdownEntry, RowChrome};
 
     const FONT_SIZE: f32 = 14.0;
 
@@ -439,8 +440,11 @@ mod tests {
     fn entry(row: u64, markdown: String) -> MarkdownEntry {
         MarkdownEntry {
             row: RowKey(row),
-            role: TranscriptRole::Assistant,
-            author: "a".into(),
+            // A header band, so background heights must count it too.
+            chrome: RowChrome {
+                header_height: 22.0,
+                ..RowChrome::default()
+            },
             markdown,
         }
     }
@@ -457,17 +461,17 @@ mod tests {
             .collect()
     }
 
-    /// A markdown transcript with the UI thread's text system.
+    /// A markdown document with the UI thread's text system.
     struct Ui {
         text: TextSystem,
         layouts: LayoutCache,
-        md: MarkdownTranscript,
+        md: MarkdownDocument,
         size: (f32, f32),
     }
 
     impl Ui {
         fn new(entries: Vec<MarkdownEntry>, size: (f32, f32)) -> Self {
-            let mut md = MarkdownTranscript::new(TranscriptStyle::for_font_size(FONT_SIZE));
+            let mut md = MarkdownDocument::new(DocumentStyle::for_font_size(FONT_SIZE));
             md.extend(entries).unwrap();
             let mut ui = Self {
                 text: TextSystem::vendored_only(&Default::default()),
@@ -485,13 +489,13 @@ mod tests {
         }
 
         fn scroll_to(&mut self, offset: f32) {
-            self.md.transcript_mut().set_scroll_offset(offset);
+            self.md.document_mut().set_scroll_offset(offset);
             self.frame();
         }
 
         /// `key:height` per row, `key:~` for a row still estimated.
         fn heights(&self) -> String {
-            let rows = self.md.transcript().list().rows();
+            let rows = self.md.document().list().rows();
             rows.keys()
                 .iter()
                 .map(|&key| match rows.is_measured(key) {
@@ -503,12 +507,12 @@ mod tests {
         }
 
         /// The heights the UI thread measures for every row at this width,
-        /// from a plain transcript whose viewport holds them all.
+        /// from a plain document whose viewport holds them all.
         fn synchronous_heights(&mut self) -> String {
-            let messages = self.md.messages();
+            let messages = self.md.rows();
             let mut keys: Vec<&RowKey> = messages.keys().collect();
             keys.sort();
-            let mut reference = Transcript::new(*self.md.transcript().style());
+            let mut reference = Document::new(*self.md.document().style());
             reference
                 .extend(keys.into_iter().map(|k| &messages[k]))
                 .unwrap();
@@ -524,7 +528,7 @@ mod tests {
 
         /// The row under the viewport's top edge and where its top sits.
         fn anchor(&self) -> String {
-            let view = self.md.transcript();
+            let view = self.md.document();
             view.visible_rows()
                 .iter()
                 .find(|r| r.top <= 0.0 && r.top + r.height > 0.0)
@@ -537,7 +541,7 @@ mod tests {
     #[test]
     fn offscreen_heights_converge_to_exact_without_moving_the_anchor() {
         let mut ui = Ui::new(history(80), (420.0, 300.0));
-        let max = ui.md.transcript().max_scroll_offset();
+        let max = ui.md.document().max_scroll_offset();
         ui.scroll_to((max * 0.5).round());
         let anchor = ui.anchor();
 
@@ -563,10 +567,10 @@ mod tests {
 
         ui.size.0 = 300.0;
         ui.frame();
-        let (background, transcript) = ui.md.background_mut();
+        let (background, document) = ui.md.background_mut();
         let taken = stale
             .into_iter()
-            .filter(|result| background.take(*result, transcript))
+            .filter(|result| background.take(*result, document))
             .count();
         ui.md.finish_measures();
 
@@ -594,13 +598,14 @@ mod tests {
     fn panics_on_boom(
         measurer: &mut TextMeasurer<'_>,
         layout: &RowLayout,
-        blocks: &[TranscriptBlock],
+        header: f32,
+        blocks: &[Block],
     ) -> f32 {
         assert!(
             blocks.iter().all(|b| !b.text().contains("boom")),
             "shaping bug"
         );
-        measure_row(measurer, layout, blocks)
+        measure_row(measurer, layout, header, blocks)
     }
 
     // Catches a panicking measurement killing the worker (every later row

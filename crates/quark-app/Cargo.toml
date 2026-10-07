@@ -107,9 +107,9 @@ cjk-font = ["quark-text/cjk-font"]
 # depend on the windowing runner.
 ui = ["dep:quark-ui"]
 hot-reload = ["dep:subsecond", "dep:tungstenite"]
-# Syntax highlighting in transcript code blocks; see quark-ui's `syntax`.
+# Syntax highlighting in document code blocks; see quark-ui's `syntax`.
 syntax = ["ui", "quark-ui/syntax"]
-# PNG and JPEG decoding of transcript image blocks; see quark-ui's `images`.
+# PNG and JPEG decoding of document image blocks; see quark-ui's `images`.
 images = ["ui", "quark-ui/images"]
 # Desktop notifications through `EventContext::notify`.
 notifications = ["dep:notify-rust", "dep:objc2-user-notifications"]
@@ -164,8 +164,10 @@ required-features = ["ui"]
 test = true
 
 [[example]]
-name = "transcript_demo"
+name = "chat_demo"
 required-features = ["ui"]
+# Its test module drives the chat chrome through `quark_app::testing`.
+test = true
 
 [[example]]
 name = "panels_demo"

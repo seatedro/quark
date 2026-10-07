@@ -142,7 +142,7 @@ mod imp {
     use quark_syntax::{HighlightKind, HighlightSpan, HighlightWorker, LanguageId};
 
     use super::{CodeLine, mono, plain_lines};
-    use crate::transcript::{SpanTone, SyntaxTone};
+    use crate::document::{SpanTone, SyntaxTone};
 
     struct Done {
         generation: u64,
