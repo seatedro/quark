@@ -12,6 +12,7 @@ use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome};
+use quark_app::quark_ui::theme::{Theme, ThemeMode};
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, UiSender, ViewContext, WindowOptions};
@@ -95,7 +96,7 @@ impl ControlsDemo {
                 .disabled(label == "Quince")
         })
         .collect();
-        let themes: Rc<[SelectOption]> = ["System", "Light", "Dark", "High contrast"]
+        let themes: Rc<[SelectOption]> = ["System", "Light", "Dark"]
             .into_iter()
             .map(SelectOption::new)
             .collect();
@@ -213,7 +214,18 @@ impl UiApp for ControlsDemo {
         let now_ms = cx.window.elapsed().as_millis() as u64;
         let focus = match msg {
             Msg::Fruit(m) => self.fruit.update(m, &self.fruits, now_ms).focus,
-            Msg::Theme(m) => self.theme.update(m, &self.themes, now_ms).focus,
+            Msg::Theme(m) => {
+                let before = self.theme.selected();
+                let focus = self.theme.update(m, &self.themes, now_ms).focus;
+                if self.theme.selected() != before {
+                    match self.theme.selected() {
+                        Some(1) => cx.set_theme(Theme::default_light()),
+                        Some(2) => cx.set_theme(Theme::default_dark()),
+                        _ => cx.set_themes(Theme::default_light(), Theme::default_dark()),
+                    }
+                }
+                focus
+            }
             Msg::City(m) => self.city.update(m).focus,
             Msg::Size(i) => {
                 self.size = Some(i);
@@ -407,6 +419,16 @@ mod tests {
                 .as_deref(),
             Some("Dark")
         );
+    }
+
+    #[test]
+    fn choosing_a_theme_repaints_in_it() {
+        let mut ui = demo();
+        for (name, mode) in [("Light", ThemeMode::Light), ("Dark", ThemeMode::Dark)] {
+            ui.click_node(By::role_name(Role::ComboBox, "Theme"));
+            ui.click_node(By::role_name(Role::ListBoxOption, name));
+            assert_eq!(ui.theme().mode, mode, "after choosing {name}");
+        }
     }
 
     #[test]

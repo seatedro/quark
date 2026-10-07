@@ -86,6 +86,11 @@ impl<U: UiApp> UiTestHarness<U> {
         self.adapter.app()
     }
 
+    /// The theme the app paints with.
+    pub fn theme(&self) -> &quark_ui::theme::Theme {
+        self.adapter.theme()
+    }
+
     /// The app, to set up state directly. Changes show after the next frame:
     /// call [`Self::frame`] or ask for one from the app.
     pub fn app_mut(&mut self) -> &mut U {

@@ -824,6 +824,7 @@ impl Element for Div {
 
         if z != 0 {
             scene.push_z_index(z);
+            cx.push_z_index(z);
         }
 
         // Before the layer: the backdrop it blurs lies outside the group.
@@ -946,12 +947,17 @@ impl Element for Div {
                 width: bounds.width - ring_inset * 2.0,
                 height: bounds.height - ring_inset * 2.0,
             };
+            // The ring sits outside the bounds, where siblings painted later
+            // (a hovered neighbor's background) would cover it; one z above
+            // the element's own keeps it on top of them and under overlays.
+            scene.push_z_index(cx.current_z_index() + 1);
             scene.border(BorderPrimitive {
                 rect: ring_bounds,
                 widths: [2.0; 4],
                 corner_radii: radii.map(|c| c + 2.0),
                 color: cx.theme.colors.focus_border,
             });
+            scene.pop_z_index();
         }
 
         let click_action = self.on_click.clone();
@@ -1204,6 +1210,7 @@ impl Element for Div {
         }
         if z != 0 {
             scene.pop_z_index();
+            cx.pop_z_index();
         }
     }
 

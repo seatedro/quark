@@ -1260,6 +1260,49 @@ fn z_index_zero_emits_no_push_pop() {
     assert!(!has_push, "z_index 0 should not emit ZIndexPush");
 }
 
+// Catches a focus ring, drawn outside its element, being painted over by
+// the next sibling's background (a hovered list option below the focused
+// one hid the ring's bottom edge).
+#[test]
+fn focus_ring_draws_above_later_siblings() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store).with_focus(Some(FOCUS_LIST));
+    let mut scene = Scene::default();
+    let ring = Theme::default_dark().colors.focus_border;
+    let hover = Color::rgba(255, 0, 0, 255);
+
+    let mut root = div()
+        .w(100.0)
+        .h(40.0)
+        .flex_col()
+        .child(div().w(100.0).h(20.0).focus_ring(FOCUS_LIST))
+        .child(div().w(100.0).h(20.0).bg(hover))
+        .into_any();
+    render_element(&mut root, &mut scene, &mut cx, 100.0, 40.0);
+
+    // The z each primitive lands at, as the renderer resolves pushes.
+    let mut stack = vec![0];
+    let mut ring_z = None;
+    let mut hover_z = None;
+    for primitive in &scene.primitives {
+        match primitive {
+            quark_render::Primitive::ZIndexPush(z) => stack.push(*z),
+            quark_render::Primitive::ZIndexPop => {
+                stack.pop();
+            }
+            quark_render::Primitive::Border(b) if b.color == ring => ring_z = stack.last().copied(),
+            quark_render::Primitive::Rect(r) if r.color == hover => hover_z = stack.last().copied(),
+            quark_render::Primitive::RoundedRect(r) if r.color == hover => {
+                hover_z = stack.last().copied()
+            }
+            _ => {}
+        }
+    }
+    let (ring_z, hover_z) = (ring_z.expect("a ring"), hover_z.expect("a background"));
+    assert!(ring_z > hover_z, "ring z {ring_z}, sibling z {hover_z}");
+}
+
 #[test]
 fn focus_tree_registers_focus_ring_and_text_input_targets() {
     let mut ts = TestText::new();

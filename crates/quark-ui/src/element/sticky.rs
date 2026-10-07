@@ -105,7 +105,9 @@ impl Element for StickySection {
         // Header first, so it comes first in the accessibility tree; its
         // raised z keeps it drawn over the body.
         scene.push_z_index(z);
+        cx.push_z_index(z);
         self.header.paint_with_offset(engine, scene, cx, 0.0, shift);
+        cx.pop_z_index();
         scene.pop_z_index();
         self.body.paint(engine, scene, cx);
     }

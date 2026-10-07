@@ -474,6 +474,11 @@ impl<U: UiApp> UiAdapter<U> {
         &self.app
     }
 
+    /// The theme the next frame paints with.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
     /// A sender for [`UiApp::message`], for threads started before
     /// [`run`]. Inside the app, [`UiContext::sender`] gives the same.
     pub fn sender(&self) -> UiSender<U::Message> {
