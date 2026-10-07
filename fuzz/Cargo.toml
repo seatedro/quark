@@ -1,0 +1,32 @@
+[package]
+name = "quark-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+quark-text = { path = "../crates/quark-text" }
+quark-ui = { path = "../crates/quark-ui" }
+unicode-segmentation = "1.12"
+
+# Its own workspace so the root workspace never builds it.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "text_layout"
+path = "fuzz_targets/text_layout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markdown"
+path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+bench = false

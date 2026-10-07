@@ -118,6 +118,13 @@ impl UiApp for HelloUi {
         }
     }
 
+    fn edit_text(&mut self, target: FocusId, command: TextEditCommand) {
+        if target == NAME_FIELD {
+            let now_ms = self.started.elapsed().as_millis() as u64;
+            self.name.apply_at(command, now_ms);
+        }
+    }
+
     fn set_text_value(&mut self, target: FocusId, value: String, _cx: &mut UiContext) {
         if target == NAME_FIELD {
             self.name.set_text(value);

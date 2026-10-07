@@ -21,4 +21,5 @@ tracing = { workspace = true, optional = true }
 profile = ["dep:profiling", "dep:tracing"]
 
 [dev-dependencies]
+proptest.workspace = true
 unicode-segmentation.workspace = true

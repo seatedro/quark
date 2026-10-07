@@ -171,6 +171,7 @@ impl BlockOrder {
         }
         self.index.insert(key, self.keys.len() as u32);
         self.keys.push(key);
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         true
     }
 
@@ -191,6 +192,7 @@ impl BlockOrder {
         fresh.extend_from_slice(&self.keys);
         self.keys = fresh;
         self.reindex_from(0);
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         added
     }
 
@@ -206,6 +208,7 @@ impl BlockOrder {
         let at = pos as usize + 1;
         self.keys.insert(at, key);
         self.reindex_from(at);
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         true
     }
 
@@ -215,6 +218,7 @@ impl BlockOrder {
         let pos = self.index.remove(&key)?;
         self.keys.remove(pos as usize);
         self.reindex_from(pos as usize);
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         Some(pos)
     }
 
@@ -232,12 +236,81 @@ impl BlockOrder {
         }
     }
 
+    /// Checks that `index` is exactly the inverse of `keys`. Mutations call
+    /// this through `debug_assert!`, so release builds skip it. O(n).
+    pub fn verify_integrity(&self) -> Result<(), IntegrityError> {
+        if self.keys.len() > u32::MAX as usize {
+            return Err(IntegrityError::TooManyBlocks(self.keys.len()));
+        }
+        if self.index.len() != self.keys.len() {
+            return Err(IntegrityError::IndexLength {
+                keys: self.keys.len(),
+                index: self.index.len(),
+            });
+        }
+        for (i, key) in self.keys.iter().enumerate() {
+            match self.index.get(key) {
+                Some(&pos) if pos as usize == i => {}
+                // `index` holds one position per key, so a second
+                // occurrence of a key in `keys` lands here.
+                Some(&pos) if self.keys.get(pos as usize) == Some(key) => {
+                    return Err(IntegrityError::DuplicateKey(*key));
+                }
+                found => {
+                    return Err(IntegrityError::Position {
+                        key: *key,
+                        position: i,
+                        index: found.copied(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn reindex_from(&mut self, start: usize) {
         for (i, key) in self.keys.iter().enumerate().skip(start) {
             self.index.insert(*key, i as u32);
         }
     }
 }
+
+/// A broken [`BlockOrder`] invariant, reported by
+/// [`BlockOrder::verify_integrity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityError {
+    TooManyBlocks(usize),
+    IndexLength {
+        keys: usize,
+        index: usize,
+    },
+    DuplicateKey(BlockKey),
+    /// `keys[position] == key` but `index[key]` is `index`.
+    Position {
+        key: BlockKey,
+        position: usize,
+        index: Option<u32>,
+    },
+}
+
+impl std::fmt::Display for IntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyBlocks(n) => write!(f, "{n} blocks exceed u32 positions"),
+            Self::IndexLength { keys, index } => {
+                write!(f, "{keys} keys but {index} index entries")
+            }
+            Self::DuplicateKey(key) => write!(f, "{key:?} appears more than once"),
+            Self::Position {
+                key,
+                position,
+                index,
+            } => write!(f, "{key:?} is at {position} but indexed at {index:?}"),
+        }
+    }
+}
+
+impl std::error::Error for IntegrityError {}
 
 /// Supplies block text from the document model by key.
 pub trait SelectionText {
@@ -311,6 +384,7 @@ pub fn copy_text<S: SelectionText + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn k(n: u64) -> BlockKey {
         BlockKey(n)
@@ -330,131 +404,327 @@ mod tests {
         (order, text)
     }
 
+    /// `PROPTEST_CASES` overrides the per-property default for heavier runs.
+    fn config(default_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            // Miri hides host env vars under isolation, so it gets its own
+            // small default.
+            .unwrap_or(if cfg!(miri) { 4 } else { default_cases });
+        let mut config = ProptestConfig::with_cases(cases);
+        if cfg!(miri) {
+            // Miri's isolation forbids the regression file lookups.
+            config.failure_persistence = None;
+        }
+        config
+    }
+
+    /// Mixes 1-, 2-, 3- and 4-byte chars and a combining mark so arbitrary
+    /// byte offsets land inside multibyte chars.
+    const PIECES: &[&str] = &["a", "b", " ", "\u{e9}", "\u{65e5}", "\u{1f600}", "\u{301}"];
+
+    fn block_text() -> impl Strategy<Value = String> {
+        prop::collection::vec(prop::sample::select(PIECES), 0..8).prop_map(|v| v.concat())
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Append(u64),
+        Prepend(Vec<u64>),
+        InsertAfter(u64, u64),
+        Remove(u64),
+    }
+
+    const KEYS: u64 = 10;
+
+    fn op() -> impl Strategy<Value = Op> {
+        let key = 0..KEYS;
+        prop_oneof![
+            key.clone().prop_map(Op::Append),
+            prop::collection::vec(key.clone(), 0..5).prop_map(Op::Prepend),
+            (key.clone(), key.clone()).prop_map(|(a, b)| Op::InsertAfter(a, b)),
+            key.prop_map(Op::Remove),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(config(256))]
+
+        // Catches index drift after batch prepends and mid-list inserts or
+        // removals, which would misorder selections spanning those blocks.
+        #[test]
+        fn block_order_arbitrary_ops_agree_with_vec_model(
+            ops in prop::collection::vec(op(), 0..24),
+        ) {
+            let mut order = BlockOrder::new();
+            let mut model: Vec<u64> = Vec::new();
+            for op in ops {
+                match op {
+                    Op::Append(key) => {
+                        let fresh = !model.contains(&key);
+                        if fresh {
+                            model.push(key);
+                        }
+                        prop_assert_eq!(order.append(k(key)), fresh);
+                    }
+                    Op::Prepend(keys) => {
+                        let mut fresh: Vec<u64> = Vec::new();
+                        for key in &keys {
+                            if !model.contains(key) && !fresh.contains(key) {
+                                fresh.push(*key);
+                            }
+                        }
+                        let added = fresh.len();
+                        fresh.extend(&model);
+                        model = fresh;
+                        prop_assert_eq!(order.prepend(keys.into_iter().map(k)), added);
+                    }
+                    Op::InsertAfter(after, key) => {
+                        let at = model.iter().position(|&m| m == after);
+                        let ok = at.is_some() && !model.contains(&key);
+                        if let (true, Some(at)) = (ok, at) {
+                            model.insert(at + 1, key);
+                        }
+                        prop_assert_eq!(order.insert_after(k(after), k(key)), ok);
+                    }
+                    Op::Remove(key) => {
+                        let at = model.iter().position(|&m| m == key);
+                        if let Some(at) = at {
+                            model.remove(at);
+                        }
+                        prop_assert_eq!(order.remove(k(key)), at.map(|a| a as u32));
+                    }
+                }
+                prop_assert_eq!(order.verify_integrity(), Ok(()));
+                prop_assert_eq!(order.keys(), &model.iter().copied().map(k).collect::<Vec<_>>()[..]);
+            }
+            let pos = |key: u64| model.iter().position(|&m| m == key);
+            for a in 0..KEYS {
+                for b in 0..KEYS {
+                    let expected = pos(a).zip(pos(b)).map(|(pa, pb)| pa.cmp(&pb));
+                    prop_assert_eq!(order.compare(k(a), k(b)), expected);
+                    let range: Vec<BlockKey> = match (pos(a), pos(b)) {
+                        (Some(pa), Some(pb)) if pa <= pb => model[pa..=pb].iter().copied().map(k).collect(),
+                        _ => Vec::new(),
+                    };
+                    prop_assert_eq!(order.range(k(a), k(b)), &range[..]);
+                }
+            }
+        }
+
+        // Catches slicing inside a multibyte char (panic) and off-by-one
+        // clamping at either endpoint or around blocks without text.
+        #[test]
+        fn copy_text_arbitrary_offsets_match_char_filter_model(
+            texts in prop::collection::vec(prop::option::weighted(0.85, block_text()), 1..5),
+            anchor in (0usize..6, 0usize..24),
+            focus in (0usize..6, 0usize..24),
+            separator in prop::sample::select(&["\n", "|", ""][..]),
+        ) {
+            let mut order = BlockOrder::new();
+            let mut source = HashMap::new();
+            for (i, text) in texts.iter().enumerate() {
+                order.append(k(i as u64));
+                if let Some(text) = text {
+                    source.insert(k(i as u64), text.clone());
+                }
+            }
+            // Block indexes past the end name a key that is not in `order`.
+            let sel = Selection::new(p(anchor.0 as u64, anchor.1), p(focus.0 as u64, focus.1));
+            let got = copy_text(&sel, &order, &source, separator);
+
+            let n = texts.len();
+            let expected = if anchor.0 >= n || focus.0 >= n || anchor == focus {
+                String::new()
+            } else {
+                let (s, e) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+                // A char is in the copy when its end lies after the start
+                // offset and at or before the end offset (in its block).
+                let pieces: Vec<String> = (s.0..=e.0)
+                    .filter_map(|i| {
+                        let text = texts[i].as_ref()?;
+                        Some(
+                            text.char_indices()
+                                .filter(|(at, c)| {
+                                    let end = at + c.len_utf8();
+                                    (i != s.0 || end > s.1) && (i != e.0 || end <= e.1)
+                                })
+                                .map(|(_, c)| c)
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                pieces.join(separator)
+            };
+            prop_assert_eq!(got, expected);
+        }
+
+        // Catches repair moving an endpoint into a removed or wrong block, or
+        // flipping the selection's direction.
+        #[test]
+        fn selection_after_remove_lands_in_survivors_and_keeps_direction(
+            texts in prop::collection::vec(block_text(), 1..6),
+            anchor in (0usize..6, 0usize..24),
+            focus in (0usize..6, 0usize..24),
+            removed in 0usize..6,
+        ) {
+            let n = texts.len();
+            let (anchor, focus, removed) = ((anchor.0 % n, anchor.1), (focus.0 % n, focus.1), removed % n);
+            let blocks: Vec<(u64, &str)> =
+                texts.iter().enumerate().map(|(i, t)| (i as u64, t.as_str())).collect();
+            let (mut order, source) = doc(&blocks);
+            let sel = Selection::new(p(anchor.0 as u64, anchor.1), p(focus.0 as u64, focus.1));
+            // Offsets past the end or inside a char read as the clamped offset,
+            // so direction is judged on clamped points.
+            let doc_point = |order: &BlockOrder, point: SelectionPoint| {
+                let text = &source[&point.block];
+                (order.position(point.block), floor_boundary(text, point.byte))
+            };
+            let forward = doc_point(&order, sel.anchor) <= doc_point(&order, sel.focus);
+
+            let former = order.remove(k(removed as u64));
+            prop_assert_eq!(former, Some(removed as u32));
+            let fixed = sel.after_remove(k(removed as u64), removed as u32, &order, &source);
+
+            if n == 1 {
+                prop_assert_eq!(fixed, None);
+                return Ok(());
+            }
+            let Some(fixed) = fixed else {
+                return Err(TestCaseError::fail("repair dropped a selection with survivors"));
+            };
+            if anchor.0 != removed && focus.0 != removed {
+                prop_assert_eq!(fixed, sel);
+            }
+            prop_assert!(order.contains(fixed.anchor.block));
+            prop_assert!(order.contains(fixed.focus.block));
+            let (a, f) = (doc_point(&order, fixed.anchor), doc_point(&order, fixed.focus));
+            if forward {
+                prop_assert!(a <= f, "forward selection flipped: {:?}", fixed);
+            } else {
+                prop_assert!(a >= f, "backward selection flipped: {:?}", fixed);
+            }
+        }
+    }
+
     #[test]
-    fn prepend_keeps_order_and_positions() {
+    fn selection_after_remove_cases_shrink_inward() {
+        let three: &[(u64, &str)] = &[(1, "aaa"), (2, "bbb"), (3, "ccc")];
+        // (name, blocks, selection, removed key, repaired selection)
+        type Case<'a> = (
+            &'a str,
+            &'a [(u64, &'a str)],
+            Selection,
+            u64,
+            Option<Selection>,
+        );
+        let cases: &[Case] = &[
+            (
+                "start removed moves to next block start",
+                &[(1, "aaa"), (2, "bbb"), (3, "ccc"), (4, "ddd")],
+                Selection::new(p(2, 1), p(4, 2)),
+                2,
+                Some(Selection::new(p(3, 0), p(4, 2))),
+            ),
+            (
+                "end removed (backward anchor) moves to previous block end",
+                three,
+                Selection::new(p(3, 1), p(1, 1)),
+                3,
+                Some(Selection::new(p(2, 3), p(1, 1))),
+            ),
+            (
+                "unrelated block removed leaves selection alone",
+                three,
+                Selection::new(p(1, 1), p(3, 1)),
+                2,
+                Some(Selection::new(p(1, 1), p(3, 1))),
+            ),
+            (
+                "both endpoints removed collapse at next block start",
+                three,
+                Selection::new(p(2, 0), p(2, 2)),
+                2,
+                Some(Selection::collapsed(p(3, 0))),
+            ),
+            (
+                "both endpoints in removed last block collapse at previous end",
+                three,
+                Selection::new(p(3, 0), p(3, 2)),
+                3,
+                Some(Selection::collapsed(p(2, 3))),
+            ),
+            (
+                "only block removed leaves nothing",
+                &[(1, "aaa")],
+                Selection::collapsed(p(1, 1)),
+                1,
+                None,
+            ),
+        ];
+        for (name, blocks, sel, removed, expected) in cases {
+            let (mut order, text) = doc(blocks);
+            let pos = order.remove(k(*removed)).unwrap_or(u32::MAX);
+            assert_eq!(
+                sel.after_remove(k(*removed), pos, &order, &text),
+                *expected,
+                "{name}"
+            );
+        }
+    }
+}
+
+/// Bounded model checking; run with `cargo kani -p quark`.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    fn any_key() -> BlockKey {
+        BlockKey(u64::from(kani::any::<u8>() % 4))
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn block_order_index_matches_keys_after_bounded_ops() {
         let mut order = BlockOrder::new();
-        order.append(k(10));
-        order.append(k(11));
-        assert_eq!(order.prepend([k(7), k(8), k(9), k(10)]), 3);
-        assert_eq!(order.keys(), &[k(7), k(8), k(9), k(10), k(11)]);
+        for _ in 0..3 {
+            let (key, other) = (any_key(), any_key());
+            match kani::any::<u8>() % 4 {
+                0 => {
+                    order.append(key);
+                }
+                1 => {
+                    order.prepend([key, other]);
+                }
+                2 => {
+                    order.insert_after(other, key);
+                }
+                _ => {
+                    order.remove(key);
+                }
+            }
+        }
+        assert!(order.verify_integrity().is_ok());
         for (i, key) in order.keys().iter().enumerate() {
-            assert_eq!(order.position(*key), Some(i as u32));
+            assert!(order.position(*key) == Some(i as u32));
         }
-        assert_eq!(order.compare(k(7), k(11)), Some(Ordering::Less));
-        assert_eq!(order.compare(k(11), k(9)), Some(Ordering::Greater));
-        assert_eq!(order.compare(k(1), k(9)), None);
-        assert_eq!(order.range(k(8), k(10)), &[k(8), k(9), k(10)]);
-        assert!(order.range(k(10), k(8)).is_empty());
-
-        // A selection made before the prepend still orders correctly.
-        let sel = Selection::new(p(11, 2), p(10, 1));
-        assert_eq!(sel.ordered(&order), Some((p(10, 1), p(11, 2))));
     }
 
-    #[test]
-    fn insert_after_and_duplicates() {
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn selection_ordered_puts_start_before_end() {
         let mut order = BlockOrder::new();
-        order.append(k(1));
-        order.append(k(3));
-        assert!(order.insert_after(k(1), k(2)));
-        assert!(!order.insert_after(k(1), k(2)));
-        assert!(!order.insert_after(k(99), k(4)));
-        assert!(!order.append(k(3)));
-        assert_eq!(order.keys(), &[k(1), k(2), k(3)]);
-        assert_eq!(order.position(k(3)), Some(2));
-    }
-
-    #[test]
-    fn copy_across_three_blocks_with_partial_ends() {
-        let (order, text) = doc(&[(1, "hello world"), (2, "middle"), (3, "goodbye")]);
-        let sel = Selection::new(p(3, 4), p(1, 6));
-        assert_eq!(copy_text(&sel, &order, &text, "\n"), "world\nmiddle\ngood");
-    }
-
-    #[test]
-    fn copy_within_one_block_and_out_of_range() {
-        let (order, text) = doc(&[(1, "abcdef")]);
-        let sel = Selection::new(p(1, 1), p(1, 4));
-        assert_eq!(copy_text(&sel, &order, &text, "\n"), "bcd");
-        let sel = Selection::new(p(1, 2), p(1, 999));
-        assert_eq!(copy_text(&sel, &order, &text, "\n"), "cdef");
-        assert!(copy_text(&Selection::collapsed(p(1, 2)), &order, &text, "\n").is_empty());
-    }
-
-    #[test]
-    fn copy_clamps_multibyte_boundaries() {
-        // "é" is 2 bytes, "日" is 3 bytes.
-        let (order, text) = doc(&[(1, "aé日b"), (2, "日本")]);
-        // Start inside "é" rounds down to include it; end inside "本" rounds
-        // down to exclude it.
-        let sel = Selection::new(p(1, 2), p(2, 4));
-        assert_eq!(copy_text(&sel, &order, &text, "|"), "é日b|日");
-    }
-
-    #[test]
-    fn copy_skips_missing_blocks() {
-        let (mut order, text) = doc(&[(1, "one"), (3, "three")]);
-        order.insert_after(k(1), k(2));
-        let sel = Selection::new(p(1, 0), p(3, 5));
-        assert_eq!(copy_text(&sel, &order, &text, "\n"), "one\nthree");
-    }
-
-    #[test]
-    fn streaming_append_keeps_points_valid() {
-        let (order, mut text) = doc(&[(1, "first"), (2, "stre")]);
-        let sel = Selection::new(p(1, 2), p(2, 4));
-        assert_eq!(copy_text(&sel, &order, &text, "\n"), "rst\nstre");
-        if let Some(t) = text.get_mut(&k(2)) {
-            t.push_str("aming");
+        for n in 0..3 {
+            order.append(BlockKey(n));
         }
-        assert_eq!(copy_text(&sel, &order, &text, "\n"), "rst\nstre");
-        let to_end = Selection::new(p(1, 2), p(2, usize::MAX));
-        assert_eq!(copy_text(&to_end, &order, &text, "\n"), "rst\nstreaming");
-    }
-
-    #[test]
-    fn removal_shrinks_selection_inward() {
-        let (mut order, text) = doc(&[(1, "aaa"), (2, "bbb"), (3, "ccc"), (4, "ddd")]);
-
-        // Start endpoint removed: moves to byte 0 of the next block.
-        let sel = Selection::new(p(2, 1), p(4, 2));
-        let pos = order.remove(k(2)).unwrap_or(u32::MAX);
-        let fixed = sel.after_remove(k(2), pos, &order, &text);
-        assert_eq!(fixed, Some(Selection::new(p(3, 0), p(4, 2))));
-
-        // End endpoint (here the anchor, selection is backwards) removed:
-        // moves to the end of the previous block.
-        let (mut order, text) = doc(&[(1, "aaa"), (2, "bbb"), (3, "ccc")]);
-        let sel = Selection::new(p(3, 1), p(1, 1));
-        let pos = order.remove(k(3)).unwrap_or(u32::MAX);
-        let fixed = sel.after_remove(k(3), pos, &order, &text);
-        assert_eq!(fixed, Some(Selection::new(p(2, 3), p(1, 1))));
-
-        // Unrelated removal leaves the selection alone.
-        let (mut order, text) = doc(&[(1, "aaa"), (2, "bbb"), (3, "ccc")]);
-        let sel = Selection::new(p(1, 1), p(3, 1));
-        let pos = order.remove(k(2)).unwrap_or(u32::MAX);
-        assert_eq!(sel.after_remove(k(2), pos, &order, &text), Some(sel));
-        assert_eq!(copy_text(&sel, &order, &text, "\n"), "aa\nc");
-    }
-
-    #[test]
-    fn removal_of_block_holding_both_endpoints_collapses() {
-        let (mut order, text) = doc(&[(1, "aaa"), (2, "bbb"), (3, "ccc")]);
-        let sel = Selection::new(p(2, 0), p(2, 2));
-        let pos = order.remove(k(2)).unwrap_or(u32::MAX);
-        let fixed = sel.after_remove(k(2), pos, &order, &text);
-        assert_eq!(fixed, Some(Selection::collapsed(p(3, 0))));
-
-        // Last block removed: collapse at the end of the previous one.
-        let sel = Selection::new(p(3, 0), p(3, 2));
-        let pos = order.remove(k(3)).unwrap_or(u32::MAX);
-        let fixed = sel.after_remove(k(3), pos, &order, &text);
-        assert_eq!(fixed, Some(Selection::collapsed(p(1, 3))));
-
-        // Nothing left.
-        let sel = Selection::collapsed(p(1, 1));
-        let pos = order.remove(k(1)).unwrap_or(u32::MAX);
-        assert_eq!(sel.after_remove(k(1), pos, &order, &text), None);
+        let point = || SelectionPoint::new(BlockKey(u64::from(kani::any::<u8>() % 3)), kani::any());
+        let sel = Selection::new(point(), point());
+        let Some((start, end)) = sel.ordered(&order) else {
+            panic!("both blocks are in order");
+        };
+        let key = |p: SelectionPoint| (order.position(p.block), p.byte);
+        assert!(key(start) <= key(end));
+        assert!((start, end) == (sel.anchor, sel.focus) || (start, end) == (sel.focus, sel.anchor));
     }
 }

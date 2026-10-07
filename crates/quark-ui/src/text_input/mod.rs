@@ -13,6 +13,7 @@ mod editor;
 mod ime;
 mod input_element;
 mod keys;
+mod pointer;
 mod text_edit;
 mod undo;
 mod view;
@@ -23,6 +24,8 @@ pub use editor::{
 pub use ime::{Composition, Preedit, compose};
 pub use input_element::{CursorSnapshot, TextEditorElement, text_editor_element};
 pub use keys::command_for_binding;
+pub(crate) use pointer::text_pointer_drag;
+pub use pointer::{AUTOSCROLL_STEP_MS, TextPointer, TextPointerEvent};
 pub use text_edit::{
     TextEditCommand, TextEditOutcome, TextField, next_grapheme_boundary, next_word_boundary,
     next_word_end, prev_grapheme_boundary, prev_word_boundary, word_range_at,

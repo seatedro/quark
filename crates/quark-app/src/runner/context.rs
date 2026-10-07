@@ -66,8 +66,18 @@ pub struct FrameContext<'a> {
     pub(super) timing: FrameTiming,
     pub(super) flags: &'a mut Flags,
     pub(super) waker: &'a Waker,
+    pub(super) ime: FrameIme,
     #[cfg(feature = "devtools")]
     pub(super) last_render: quark_render::FrameStats,
+}
+
+/// IME requests made while building a frame. The runner applies them to
+/// the frame's window once [`App::frame`] returns, so they use the caret
+/// that frame painted.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct FrameIme {
+    pub(super) allowed: Option<bool>,
+    pub(super) cursor_area: Option<(f32, f32, f32, f32)>,
 }
 
 impl FrameContext<'_> {
@@ -75,6 +85,18 @@ impl FrameContext<'_> {
     #[cfg(feature = "devtools")]
     pub fn last_render_stats(&self) -> quark_render::FrameStats {
         self.last_render
+    }
+
+    /// Turn IME on or off for this window once the frame is built; see
+    /// [`EventContext::set_ime_allowed`].
+    pub fn set_ime_allowed(&mut self, allowed: bool) {
+        self.ime.allowed = Some(allowed);
+    }
+
+    /// Place this window's IME candidate window, in logical points, once
+    /// the frame is built; see [`EventContext::set_ime_cursor_area`].
+    pub fn set_ime_cursor_area(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        self.ime.cursor_area = Some((x, y, width, height));
     }
 
     /// The window this frame is for.

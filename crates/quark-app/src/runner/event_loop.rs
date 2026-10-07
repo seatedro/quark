@@ -262,6 +262,7 @@ impl<A: App> Runner<A> {
             timing,
             flags: &mut self.flags,
             waker: &self.waker,
+            ime: FrameIme::default(),
             #[cfg(feature = "devtools")]
             last_render: state.last_render,
         };
@@ -276,6 +277,16 @@ impl<A: App> Runner<A> {
             self.app.frame(&mut cx)
         };
         let mut scene = scene;
+        let ime = cx.ime;
+        if let Some(allowed) = ime.allowed {
+            state.window.set_ime_allowed(allowed);
+        }
+        if let Some((x, y, width, height)) = ime.cursor_area {
+            state.window.set_ime_cursor_area(
+                LogicalPosition::new(f64::from(x), f64::from(y)),
+                LogicalSize::new(f64::from(width), f64::from(height)),
+            );
+        }
 
         scene_to_physical(&mut scene, scale);
         let time = timing.elapsed.as_secs_f32();

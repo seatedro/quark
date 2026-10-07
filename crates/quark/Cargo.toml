@@ -10,3 +10,10 @@ repository.workspace = true
 quark-macros.workspace = true
 serde.workspace = true
 taffy.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints.rust]
+# `cfg(kani)` gates the bounded model checking harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

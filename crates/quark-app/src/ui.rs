@@ -10,7 +10,7 @@
 //! root transform that scales them to the physical pixels accesskit expects.
 
 use std::any::Any;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use accesskit::{Action as AxAction, ActionData, ActionRequest, Affine, TreeUpdate};
 use quark::Rect;
@@ -19,8 +19,9 @@ use quark::reactive::SignalStore;
 use quark::scene::Scene;
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame};
 use quark_ui::element::{
-    AnyElement, CursorHint, Delivery, ElementContext, InputRouter, render_element,
+    AnyElement, CursorHint, Delivery, ElementContext, InputRouter, TextInputHitArea, render_element,
 };
+use quark_ui::text_input::{TextEditCommand, TextPointer, TextPointerEvent};
 use quark_ui::theme::Theme;
 use quark_ui::{Action, FocusId};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
@@ -53,6 +54,14 @@ pub trait UiApp: 'static {
 
     /// Assistive tech set the value of the text field `target`.
     fn set_text_value(&mut self, _target: FocusId, _value: String, _cx: &mut UiContext) {}
+
+    /// Apply `command` to the model behind the text field `target`
+    /// (`TextField::apply` or `Editor::apply`). The adapter sends pointer
+    /// selection (click, drag, double and triple click, Shift-click, and
+    /// autoscroll past an edge) and `CancelPreedit` when focus leaves a
+    /// field mid-composition. It may be called while a frame is built, so
+    /// it gets no context; the adapter redraws afterwards.
+    fn edit_text(&mut self, _target: FocusId, _command: TextEditCommand) {}
 
     /// Sees every input event first. Return `true` to stop the adapter's own
     /// handling (clicks, wheel, Tab focus traversal).
@@ -111,8 +120,15 @@ pub struct UiAdapter<U: UiApp> {
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
     accessibility: AccessibilityFrame,
-    /// Text fields of the last frame with their caret rects, for IME.
-    text_targets: Vec<(FocusId, Option<Rect>)>,
+    /// Text fields of the last frame, for pointer selection and IME.
+    text_areas: Vec<TextInputHitArea>,
+    text_pointer: TextPointer,
+    /// Clock for multi-click and autoscroll timing.
+    epoch: Instant,
+    /// The focused text field as of the last input, to cancel its
+    /// composition once focus leaves it.
+    edit_focus: Option<FocusId>,
+    /// IME state last sent to the window.
     ime_allowed: bool,
     ime_area: Option<Rect>,
     /// Scale factor of the last painted frame, for accessibility bounds.
@@ -139,7 +155,10 @@ impl<U: UiApp> UiAdapter<U> {
             pointer: None,
             router: InputRouter::default(),
             accessibility: AccessibilityFrame::default(),
-            text_targets: Vec::new(),
+            text_areas: Vec::new(),
+            text_pointer: TextPointer::default(),
+            epoch: Instant::now(),
+            edit_focus: None,
             ime_allowed: false,
             ime_area: None,
             scale_factor: 1.0,
@@ -159,6 +178,17 @@ impl<U: UiApp> UiAdapter<U> {
 
     fn dispatch(&mut self, actions: Vec<Action>, cx: &mut EventContext) {
         for action in actions {
+            if let Some(event) = action.downcast_ref::<TextPointerEvent>() {
+                let extend = cx.modifiers().shift_key();
+                let now_ms = self.epoch.elapsed().as_millis() as u64;
+                if let Some((target, command)) =
+                    self.text_pointer
+                        .event(*event, &self.text_areas, now_ms, extend)
+                {
+                    self.app.edit_text(target, command);
+                }
+                continue;
+            }
             let Some(action) = action.downcast_ref::<U::Action>().cloned() else {
                 tracing::debug!("ignoring action of another type: {action:?}");
                 continue;
@@ -213,24 +243,49 @@ impl<U: UiApp> UiAdapter<U> {
         self.deliver(delivery, cx);
     }
 
-    /// Allow IME only while a text field has focus, and point the
-    /// candidate window at its caret. Frames cannot reach the window, so
-    /// this runs after events with the last frame's caret.
-    fn sync_ime(&mut self, cx: &mut EventContext) {
+    /// IME follows focus: allowed while a text field has focus, with the
+    /// candidate window at the caret `areas` (this frame's fields) painted.
+    fn ime_request(&mut self, areas: &[TextInputHitArea]) -> ImeRequest {
         let target = self
             .focus
-            .and_then(|focus| self.text_targets.iter().find(|(t, _)| *t == focus));
+            .and_then(|focus| areas.iter().find(|area| area.focus_target == focus));
+        let mut request = ImeRequest::default();
         let allowed = target.is_some();
         if allowed != self.ime_allowed {
-            cx.set_ime_allowed(allowed);
+            request.allowed = Some(allowed);
             self.ime_allowed = allowed;
             self.ime_area = None;
         }
-        if let Some(caret) = target.and_then(|(_, caret)| *caret)
+        if let Some(caret) = target.and_then(|area| area.caret)
             && self.ime_area != Some(caret)
         {
-            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
+            request.cursor_area = Some(caret);
             self.ime_area = Some(caret);
+        }
+        request
+    }
+
+    /// Cancel the composition of a text field focus left since the last
+    /// input, or of the focused one when the window lost focus. winit
+    /// reports no `Ime::Disabled` for either, so a preedit would otherwise
+    /// linger. Returns whether a field was told.
+    fn cancel_stale_preedit(&mut self, window_blurred: bool) -> bool {
+        let current = self
+            .focus
+            .filter(|focus| self.text_areas.iter().any(|a| a.focus_target == *focus));
+        let stale = self
+            .edit_focus
+            .filter(|previous| window_blurred || Some(*previous) != current);
+        self.edit_focus = current;
+        if let Some(target) = stale {
+            self.app.edit_text(target, TextEditCommand::CancelPreedit);
+        }
+        stale.is_some()
+    }
+
+    fn after_input(&mut self, window_blurred: bool, cx: &mut EventContext) {
+        if self.cancel_stale_preedit(window_blurred) {
+            cx.request_redraw();
         }
     }
 
@@ -261,14 +316,20 @@ impl<U: UiApp> UiAdapter<U> {
     }
 }
 
+/// IME changes for the window, applied once the frame is built.
+#[derive(Debug, Default, PartialEq)]
+struct ImeRequest {
+    allowed: Option<bool>,
+    cursor_area: Option<Rect>,
+}
+
 /// One painted frame, with the scene still in logical points.
 struct Painted {
     scene: Scene,
     input: quark_ui::element::InputFrame,
     accessibility: AccessibilityFrame,
     next_frame_ms: Option<u64>,
-    /// Text fields with their caret rects, for IME.
-    text_targets: Vec<(FocusId, Option<Rect>)>,
+    text_areas: Vec<TextInputHitArea>,
 }
 
 /// Lay out and paint `root` into a `width` x `height` point viewport.
@@ -282,11 +343,7 @@ fn paint(root: &mut AnyElement, ecx: &mut ElementContext, width: f32, height: f3
         input: ecx.take_input_frame(),
         accessibility: std::mem::take(&mut ecx.accessibility),
         next_frame_ms: ecx.next_frame_ms(),
-        text_targets: ecx
-            .text_input_hit_areas
-            .iter()
-            .map(|area| (area.focus_target, area.caret))
-            .collect(),
+        text_areas: std::mem::take(&mut ecx.text_input_hit_areas),
     }
 }
 
@@ -353,12 +410,19 @@ impl<U: UiApp> App for UiAdapter<U> {
             focus: &mut self.focus,
         };
         self.app.init(&mut ucx);
+        self.after_input(false, cx);
     }
 
     fn frame(&mut self, cx: &mut FrameContext) -> Scene {
         let (width, height) = cx.size();
         let scale = cx.scale_factor();
         let clock_ms = cx.elapsed().as_millis() as u64;
+        // A pointer held past a text field's edge keeps selecting (and so
+        // scrolling) without moving; apply the step before this frame's view.
+        let now_ms = self.epoch.elapsed().as_millis() as u64;
+        if let Some((target, command)) = self.text_pointer.autoscroll(&self.text_areas, now_ms) {
+            self.app.edit_text(target, command);
+        }
         #[cfg(feature = "devtools")]
         let view_started = std::time::Instant::now();
         let mut root = self.app.view(&mut ViewContext {
@@ -385,12 +449,19 @@ impl<U: UiApp> App for UiAdapter<U> {
         let painted = paint(&mut root, &mut ecx, width, height);
         #[cfg(feature = "devtools")]
         let phases = self.devtools.end_frame(&mut ecx.devtools);
-        self.router.set_frame(painted.input);
-        self.accessibility = painted.accessibility;
-        self.text_targets = painted.text_targets;
         self.scale_factor = scale;
         if let Some(at_ms) = painted.next_frame_ms {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
+        }
+        let (scene, ime) = self.finish_frame(painted);
+        if let Some(allowed) = ime.allowed {
+            cx.set_ime_allowed(allowed);
+        }
+        if let Some(caret) = ime.cursor_area {
+            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
+        }
+        if let Some(at_ms) = self.text_pointer.next_autoscroll_ms(&self.text_areas) {
+            cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(now_ms)));
         }
         #[cfg(feature = "devtools")]
         let frame = crate::devtools::PaintedFrame {
@@ -401,14 +472,14 @@ impl<U: UiApp> App for UiAdapter<U> {
             phases,
         };
         #[cfg(feature = "devtools")]
-        return crate::devtools::finish_frame(&mut self.devtools, painted.scene, cx, frame);
-        #[cfg(not(feature = "devtools"))]
-        painted.scene
+        let scene = crate::devtools::finish_frame(&mut self.devtools, scene, cx, frame);
+        scene
     }
 
     fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
+        let window_blurred = matches!(event, InputEvent::Focused(false));
         self.handle_event(event, cx);
-        self.sync_ime(cx);
+        self.after_input(window_blurred, cx);
     }
 
     fn wake(&mut self, cx: &mut EventContext) {
@@ -417,7 +488,7 @@ impl<U: UiApp> App for UiAdapter<U> {
             focus: &mut self.focus,
         };
         self.app.wake(&mut ucx);
-        self.sync_ime(cx);
+        self.after_input(false, cx);
     }
 
     fn accessibility(&mut self) -> Option<TreeUpdate> {
@@ -429,11 +500,21 @@ impl<U: UiApp> App for UiAdapter<U> {
 
     fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
         self.handle_accessibility_action(request, cx);
-        self.sync_ime(cx);
+        self.after_input(false, cx);
     }
 }
 
 impl<U: UiApp> UiAdapter<U> {
+    /// Keep `painted`'s input state for routing until the next frame, and
+    /// return its scene with the IME changes for the caret it painted.
+    fn finish_frame(&mut self, painted: Painted) -> (Scene, ImeRequest) {
+        self.router.set_frame(painted.input);
+        self.accessibility = painted.accessibility;
+        let ime = self.ime_request(&painted.text_areas);
+        self.text_areas = painted.text_areas;
+        (painted.scene, ime)
+    }
+
     fn handle_event(&mut self, event: InputEvent, cx: &mut EventContext) {
         #[cfg(feature = "devtools")]
         if crate::devtools::intercept(&mut self.devtools, &event, cx) {
@@ -514,6 +595,7 @@ mod tests {
     use quark::scene::ShapedText;
     use quark_ui::element::{IntoAnyElement, ScrollActionBuilder, div, text_input};
     use quark_ui::style::Styled;
+    use quark_ui::text_input::TextField;
 
     use super::*;
 
@@ -598,6 +680,109 @@ mod tests {
                 &self.signals,
             );
             paint(&mut root, &mut ecx, 400.0, 300.0)
+        }
+
+        /// Paint `field` as the focused text input `FIELD`.
+        fn paint_field(&mut self, field: &TextField) -> Painted {
+            self.layouts.begin_frame();
+            let mut ecx = ElementContext::new(
+                &self.theme,
+                1.0,
+                &mut self.text,
+                &mut self.layouts,
+                None,
+                &self.signals,
+            )
+            .with_focus(Some(FIELD));
+            let mut root = text_input("Name", "")
+                .field(field)
+                .focused(true)
+                .focus_target(FIELD)
+                .w(200.0)
+                .h(52.0)
+                .into_any();
+            paint(&mut root, &mut ecx, 400.0, 300.0)
+        }
+    }
+
+    /// An app with one text field that applies the adapter's edits to it.
+    struct FieldApp {
+        field: TextField,
+    }
+
+    impl UiApp for FieldApp {
+        type Action = Msg;
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            div().into_any()
+        }
+
+        fn update(&mut self, _action: Msg, _cx: &mut UiContext) {}
+
+        fn edit_text(&mut self, target: FocusId, command: TextEditCommand) {
+            if target == FIELD {
+                self.field.apply(command);
+            }
+        }
+    }
+
+    fn field_adapter(text: &str) -> UiAdapter<FieldApp> {
+        let mut adapter = UiAdapter::new(
+            FieldApp {
+                field: TextField::new(text),
+            },
+            "Test",
+        );
+        adapter.focus = Some(FIELD);
+        adapter
+    }
+
+    // Regression: the IME candidate window was placed during event
+    // handling with the previous frame's caret, so it trailed by a frame.
+    #[test]
+    fn ime_area_requested_with_a_frame_is_that_frames_caret() {
+        let mut fixture = Fixture::new();
+        let mut adapter = field_adapter("hello world");
+
+        let frames = [0, 11].map(|cursor| {
+            adapter
+                .app
+                .field
+                .apply(TextEditCommand::SetTextCursor(cursor));
+            let painted = fixture.paint_field(&adapter.app.field);
+            let caret = painted.text_areas[0].caret.expect("focused caret");
+            let (_, ime) = adapter.finish_frame(painted);
+            (caret, ime.cursor_area)
+        });
+
+        assert_ne!(frames[0].0, frames[1].0, "the caret moved");
+        for (caret, requested) in frames {
+            assert_eq!(requested, Some(caret));
+        }
+    }
+
+    // Regression: winit sends no Ime::Disabled when focus leaves a field
+    // or the window, so the field kept painting a stale composition.
+    #[test]
+    fn leaving_a_composing_field_cancels_its_preedit() {
+        let cases = [
+            ("focus stays", Some(FIELD), false, Some("にほ")),
+            ("focus moves away", None, false, None),
+            ("window loses focus", Some(FIELD), true, None),
+        ];
+        for (name, focus, window_blurred, expected) in cases {
+            let mut fixture = Fixture::new();
+            let mut adapter = field_adapter("");
+            let painted = fixture.paint_field(&adapter.app.field);
+            adapter.finish_frame(painted);
+            adapter.cancel_stale_preedit(false);
+            adapter.app.field.set_preedit("にほ", None);
+
+            adapter.focus = focus;
+            adapter.cancel_stale_preedit(window_blurred);
+
+            let preedit = adapter.app.field.preedit().map(|p| p.text.as_str());
+            assert_eq!(preedit, expected, "{name}");
         }
     }
 
