@@ -27,7 +27,7 @@ use quark::SemanticFrame;
 use quark::hit::HitId;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
-use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame};
+use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer, Politeness};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementContext, InputRouter, Mods, TextInputHitArea,
@@ -190,6 +190,7 @@ impl ViewContext<'_, '_> {
 pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
     focus: &'a mut Option<FocusId>,
+    announcer: &'a mut Announcer,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
 }
@@ -204,6 +205,17 @@ impl UiContext<'_, '_> {
             *self.focus = focus;
             redraw(Redraw::Focus, self.window);
         }
+    }
+
+    /// Have assistive tech speak `text`, for changes nothing on screen
+    /// names: a finished response, a background save. Each call is spoken
+    /// once, even when it repeats the last text. For text that is on
+    /// screen (a toast), make its element a live region instead
+    /// (`Div::live`).
+    pub fn announce(&mut self, text: impl Into<String>, politeness: Politeness) {
+        self.announcer.announce(text, politeness);
+        // The announcement is published with the next frame's tree.
+        self.window.request_redraw();
     }
 
     /// A sender for this app's messages; `M` must be the app's
@@ -262,6 +274,7 @@ pub struct UiAdapter<U: UiApp> {
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
     accessibility: AccessibilityFrame,
+    announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
     text_areas: Vec<TextInputHitArea>,
     text_pointer: TextPointer,
@@ -306,6 +319,7 @@ impl<U: UiApp> UiAdapter<U> {
             hovered: Vec::new(),
             router: InputRouter::default(),
             accessibility: AccessibilityFrame::default(),
+            announcer: Announcer::default(),
             text_areas: Vec::new(),
             text_pointer: TextPointer::default(),
             edit_focus: None,
@@ -359,6 +373,7 @@ impl<U: UiApp> UiAdapter<U> {
         let mut ucx = UiContext {
             window: cx,
             focus: &mut self.focus,
+            announcer: &mut self.announcer,
             sender: &self.sender,
         };
         f(&mut self.app, &mut ucx)
@@ -469,6 +484,13 @@ impl<U: UiApp> UiAdapter<U> {
             }
         }
         let delivery = self.router.key_down(&binding, self.focus);
+        if delivery.node.is_some() {
+            self.deliver(delivery, cx);
+            return;
+        }
+        // Enter or Space on a focused clickable that binds neither clicks it,
+        // so everything a pointer can press is reachable from the keyboard.
+        let delivery = self.router.activate(&binding, self.focus);
         if delivery.node.is_some() {
             self.deliver(delivery, cx);
             return;
@@ -659,9 +681,22 @@ enum Routed {
     Dispatch(Action),
     Focus(FocusId),
     SetValue(FocusId, String),
+    /// Select from `anchor` to `focus`, byte offsets into the field's text.
+    Select {
+        target: FocusId,
+        anchor: usize,
+        focus: usize,
+    },
+    Edit(FocusId, TextEditCommand),
 }
 
 fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> Option<Routed> {
+    // Any node standing for a focus target takes focus, action or not.
+    if request.action == AxAction::Focus {
+        return frame
+            .focus_target_of(request.target_node)
+            .map(Routed::Focus);
+    }
     let target = frame.action_for(request.target_node)?;
     let scroll_lines = match request.action {
         AxAction::ScrollUp => -ACCESSIBILITY_SCROLL_LINES,
@@ -671,17 +706,29 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
         (AxAction::Click, AccessibilityAction::Click(action)) => {
             Some(Routed::Dispatch(action.clone()))
         }
-        (
-            AxAction::Focus,
-            AccessibilityAction::Focus(focus)
-            | AccessibilityAction::TextValue(focus)
-            | AccessibilityAction::EditorViewport { focus, .. },
-        ) => Some(Routed::Focus(*focus)),
-        (
-            AxAction::SetValue | AxAction::ReplaceSelectedText,
-            AccessibilityAction::TextValue(focus),
-        ) => match &request.data {
+        (AxAction::SetValue, AccessibilityAction::TextValue(focus)) => match &request.data {
             Some(ActionData::Value(value)) => Some(Routed::SetValue(*focus, value.to_string())),
+            _ => None,
+        },
+        (
+            AxAction::ReplaceSelectedText,
+            AccessibilityAction::TextValue(focus)
+            | AccessibilityAction::EditorViewport { focus, .. },
+        ) => match &request.data {
+            Some(ActionData::Value(value)) => Some(Routed::Edit(
+                *focus,
+                TextEditCommand::InsertText(value.to_string()),
+            )),
+            _ => None,
+        },
+        (AxAction::SetTextSelection, _) => match &request.data {
+            Some(ActionData::SetTextSelection(selection)) => frame
+                .text_selection_for(request.target_node, selection)
+                .map(|(target, anchor, focus)| Routed::Select {
+                    target,
+                    anchor,
+                    focus,
+                }),
             _ => None,
         },
         (
@@ -799,7 +846,7 @@ impl<U: UiApp> App for UiAdapter<U> {
 
     fn accessibility(&mut self) -> Option<TreeUpdate> {
         // A full tree; accesskit diffs it against the last one.
-        let mut update = self.accessibility.tree_update(&self.name, self.focus);
+        let mut update = self.logical_accessibility_tree();
         scale_tree(&mut update, self.scale_factor);
         Some(update)
     }
@@ -823,7 +870,9 @@ impl<U: UiApp> UiAdapter<U> {
 
     /// The last painted frame's accessibility tree, in points.
     pub(crate) fn logical_accessibility_tree(&self) -> TreeUpdate {
-        self.accessibility.tree_update(&self.name, self.focus)
+        let mut update = self.accessibility.tree_update(&self.name, self.focus);
+        self.announcer.publish(&mut update);
+        update
     }
 
     pub(crate) fn accessibility_frame(&self) -> &AccessibilityFrame {
@@ -883,6 +932,18 @@ impl<U: UiApp> UiAdapter<U> {
                 self.with_app(cx, |app, ucx| app.set_text_value(target, value, ucx));
                 redraw(Redraw::TextEdit, cx);
             }
+            Some(Routed::Select {
+                target,
+                anchor,
+                focus,
+            }) => {
+                self.app
+                    .edit_text(target, TextEditCommand::SetTextCursor(anchor));
+                self.edit(target, TextEditCommand::ExtendTextSelection(focus), cx);
+                // The cursor move alone may have changed the selection.
+                redraw(Redraw::TextEdit, cx);
+            }
+            Some(Routed::Edit(target, command)) => self.edit(target, command, cx),
             None => tracing::debug!("unhandled accessibility request: {request:?}"),
         }
     }
@@ -1384,5 +1445,78 @@ mod tests {
             let after = ui.app().field.cursor();
             assert_eq!(after > before, grows, "{name}: cursor {before} -> {after}");
         }
+    }
+
+    /// The published text field as assistive tech sees it, without its id.
+    fn field_state(ui: &UiTestHarness<ComposerApp>) -> String {
+        quark_ui::accessibility::dump_accessibility_states(&ui.accessibility_update())
+            .lines()
+            .find(|line| line.contains("| TextInput |"))
+            .and_then(|line| line.split_once(" | "))
+            .map(|(_, rest)| rest.to_owned())
+            .expect("text field in the tree")
+    }
+
+    #[test]
+    fn edits_publish_the_fields_text_caret_and_selection() {
+        let mut ui = composer("");
+
+        ui.click((10.0, 50.0));
+        ui.type_text("hello");
+        let typed = field_state(&ui);
+        ui.key("mod+a");
+
+        assert_eq!(typed, r#"TextInput | Message | text="hello" | caret=5"#);
+        assert_eq!(
+            field_state(&ui),
+            r#"TextInput | Message | text="hello" | caret=5 | sel=0..5"#
+        );
+    }
+
+    // AT-SPI's set_selection and set_caret_offset arrive as
+    // SetTextSelection; ReplaceSelectedText replaces only the selection.
+    #[test]
+    fn text_actions_from_assistive_tech_reach_the_field() {
+        use accesskit::{
+            Action as AxAction, ActionData, ActionRequest, TextPosition, TextSelection, TreeId,
+        };
+        let mut ui = composer("hello world");
+        let update = ui.accessibility_update();
+        let with_role = |role| {
+            update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == role)
+                .map(|(id, _)| *id)
+                .expect("node with role")
+        };
+        let (field, run) = (with_role(Role::TextInput), with_role(Role::TextRun));
+        let request = |action, data| ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: field,
+            data: Some(data),
+        };
+        let at = |character_index| TextPosition {
+            node: run,
+            character_index,
+        };
+
+        ui.accessibility_action(request(
+            AxAction::SetTextSelection,
+            ActionData::SetTextSelection(TextSelection {
+                anchor: at(6),
+                focus: at(11),
+            }),
+        ));
+        let field_text = ui.app().field.text().to_owned();
+        let range = ui.app().field.selection_range().expect("selection");
+        assert_eq!(&field_text[range.start.get()..range.end.get()], "world");
+
+        ui.accessibility_action(request(
+            AxAction::ReplaceSelectedText,
+            ActionData::Value("there".into()),
+        ));
+        assert_eq!(ui.app().field.text(), "hello there");
     }
 }

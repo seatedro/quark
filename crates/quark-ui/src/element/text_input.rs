@@ -507,7 +507,12 @@ impl Element for TextInput {
             } else {
                 AccessibilityRole::TextInput
             };
+            // Caret and selection in the text assistive tech reads (the
+            // bullets of a masked field), from the committed value.
+            let (text_anchor, text_focus) = (to_display(self.anchor), to_display(self.cursor));
             let accessible_value = masked_display.unwrap_or_else(|| self.value.to_string());
+            let accessible_text = AccessibleText::new(accessible_value.as_str())
+                .selection(text_anchor.get(), text_focus.get());
             let semantic_id = format!("text-input:{target:?}");
             let mut style_state = StyleState::empty();
             if self.focused {
@@ -534,6 +539,7 @@ impl Element for TextInput {
                 AccessibilityNode::new(semantic_id, role, bounds)
                     .label(accessibility_label)
                     .value(accessible_value)
+                    .text(accessible_text)
                     .action(AccessibilityAction::TextValue(target)),
                 index,
             );

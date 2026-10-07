@@ -30,7 +30,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use accesskit::{NodeId, Role, TreeUpdate};
+use accesskit::{ActionRequest, NodeId, Role, TreeUpdate};
 use quark::Rect;
 use quark::scene::{Primitive, Scene};
 use quark_ui::FocusId;
@@ -380,6 +380,21 @@ impl<U: UiApp> UiTestHarness<U> {
             out.push('\n');
         }
         out
+    }
+
+    /// The last frame's accessibility tree as AccessKit receives it,
+    /// announcements included, with bounds in points.
+    pub fn accessibility_update(&self) -> TreeUpdate {
+        self.adapter.logical_accessibility_tree()
+    }
+
+    /// Deliver a request from assistive tech (a click, focus, text
+    /// selection, or value change), then run until idle.
+    pub fn accessibility_action(&mut self, request: ActionRequest) {
+        self.runner.callback(&mut self.adapter, |adapter, cx| {
+            App::accessibility_action(adapter, request, cx)
+        });
+        self.run_until_idle();
     }
 
     /// The one node `by` finds.

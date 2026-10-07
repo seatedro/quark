@@ -1,7 +1,7 @@
 """Catches: typed text not reaching a focused text field. A real pointer
 click focuses the Name entry, real key events type into it, and Greet must
-then greet that name. AccessKit exposes no AT-SPI text interface, so the
-greeting is the only way to observe the field's value."""
+then greet that name. (a11y_demo/field_text reads a field's text over
+AT-SPI directly.)"""
 
 from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, wait_for
 

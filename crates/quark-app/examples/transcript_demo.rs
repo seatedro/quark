@@ -24,6 +24,7 @@
 use std::time::{Duration, Instant};
 
 use quark_app::quark_ui::Action;
+use quark_app::quark_ui::accessibility::Politeness;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::transcript::{
@@ -305,8 +306,8 @@ impl Demo {
     }
 
     /// Reveals the next chunk of the streaming answer; a finished answer
-    /// is followed by a new one.
-    fn tick(&mut self) {
+    /// is followed by a new one. Returns whether this chunk finished it.
+    fn tick(&mut self) -> bool {
         if self
             .stream
             .as_ref()
@@ -332,7 +333,7 @@ impl Demo {
             });
         }
         let Some(stream) = &mut self.stream else {
-            return;
+            return false;
         };
         let mut end = (stream.shown + STREAM_CHUNK).min(stream.script.len());
         while !stream.script.is_char_boundary(end) {
@@ -345,6 +346,7 @@ impl Demo {
         {
             eprintln!("{e:?}");
         }
+        end == stream.script.len()
     }
 
     fn record(&mut self, elapsed: Duration) {
@@ -399,7 +401,9 @@ impl UiApp for Demo {
     }
 
     fn message(&mut self, _tick: StreamTick, cx: &mut UiContext) {
-        self.tick();
+        if self.tick() {
+            cx.announce("Response complete", Politeness::Polite);
+        }
         cx.window.request_redraw();
     }
 
