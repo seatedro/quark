@@ -26,14 +26,13 @@ struct Hello {
 impl App for Hello {
     fn frame(&mut self, cx: &mut FrameContext) -> Scene {
         let (width, height) = cx.size();
-        let scale = cx.scale_factor();
         self.card = Rect {
             x: 0.0,
             y: 0.0,
             width,
-            height: height,
+            height,
         }
-        .center(320.0 * scale, 160.0 * scale);
+        .center(320.0, 160.0);
 
         let mut scene = Scene::default();
         scene.rect(quark::scene::RectPrimitive {
@@ -47,22 +46,21 @@ impl App for Hello {
         });
         scene.shadow(ShadowPrimitive {
             rect: self.card,
-            blur_radius: 24.0 * scale,
-            corner_radius: 16.0 * scale,
-            offset: [0.0, 8.0 * scale],
+            blur_radius: 24.0,
+            corner_radius: 16.0,
+            offset: [0.0, 8.0],
             color: Color::rgba(0, 0, 0, 160),
         });
         scene.rounded_rect(RoundedRectPrimitive::uniform(
             self.card,
-            16.0 * scale,
+            16.0,
             COLORS[self.color],
         ));
-        let label = self.card.inset(24.0 * scale);
-        let style = TextStyle::new(20.0 * scale).weight(FontWeight::Semibold);
+        let label = self.card.inset(24.0);
+        let style = TextStyle::new(20.0).weight(FontWeight::Semibold);
         let params = TextParams::new("Hello from Quark. Click me, Esc quits.", style)
             .wrap_width(Some(label.width));
-        let text = cx.text();
-        if let Ok(layout) = text.layouts.layout(&mut text.system, &params) {
+        if let Ok(layout) = cx.layout_text(&params) {
             scene.text(TextPrimitive {
                 rect: label,
                 layout: ShapedText::new(layout),

@@ -32,6 +32,8 @@ struct Runner<A> {
     /// The first window's options until `resumed` opens it.
     first_window: Option<WindowOptions>,
     windows: WindowTable<WindowEntry>,
+    /// Created with the first window and shared by every later one.
+    gpu: Option<GpuContext>,
     focused: Option<WindowHandle>,
     theme: Option<Theme>,
     started: bool,
@@ -60,6 +62,7 @@ impl<A: App> Runner<A> {
             app,
             first_window: Some(options),
             windows: WindowTable::default(),
+            gpu: None,
             focused: None,
             theme: None,
             started: false,
@@ -81,7 +84,7 @@ impl<A: App> Runner<A> {
     }
 
     fn create_window(
-        &self,
+        &mut self,
         event_loop: &ActiveEventLoop,
         options: &WindowOptions,
     ) -> Result<WindowState, RunError> {
@@ -102,7 +105,14 @@ impl<A: App> Runner<A> {
             },
             AccessibilityDeactivation,
         );
-        let mut renderer = Renderer::new(window.clone())?;
+        let mut renderer = match &self.gpu {
+            Some(gpu) => Renderer::with_gpu(gpu, window.clone())?,
+            None => {
+                let renderer = Renderer::new(window.clone())?;
+                self.gpu = Some(renderer.gpu().clone());
+                renderer
+            }
+        };
         renderer.resize(size.width, size.height, scale_factor);
         window.set_visible(true);
         position_traffic_lights(&window, options.traffic_lights);
@@ -111,9 +121,10 @@ impl<A: App> Runner<A> {
             accessibility,
             accessibility_tree,
             window,
-            input: InputNormalizer::default(),
+            input: InputNormalizer::new(scale_factor),
             scale_factor,
             surface_size: size,
+            frame_clock: FrameClock::default(),
             traffic_lights: options.traffic_lights,
             persist_key: options.persist_key.clone(),
         })
@@ -234,16 +245,17 @@ impl<A: App> Runner<A> {
             return;
         };
         let renderer = &mut state.renderer;
-        let elapsed = self.launch_at.elapsed();
+        let timing = state.frame_clock.tick(Instant::now(), self.launch_at);
         self.text.layouts.begin_frame();
-        let text_metrics = renderer.text_metrics(&mut self.text.system);
+        let scale = state.scale_factor as f32;
+        let text_metrics = logical_metrics(renderer.text_metrics(&mut self.text.system), scale);
         let mut cx = FrameContext {
             window: handle,
             size: state.surface_size,
             scale_factor: state.scale_factor,
             text_metrics,
             text: &mut self.text,
-            elapsed,
+            timing,
             flags: &mut self.flags,
             waker: &self.waker,
         };
@@ -254,9 +266,26 @@ impl<A: App> Runner<A> {
         let scene = subsecond::call(|| self.app.frame(&mut cx));
         #[cfg(not(feature = "hot-reload"))]
         let scene = self.app.frame(&mut cx);
+        let mut scene = scene;
 
-        if let Err(error) = renderer.render(&scene, &mut self.text.system, elapsed.as_secs_f32()) {
-            tracing::error!("render failed: {error}");
+        scene_to_physical(&mut scene, scale);
+        let time = timing.elapsed.as_secs_f32();
+        match renderer.render(&scene, &mut self.text.system, time) {
+            Ok(_) => {}
+            // Nothing reached the screen; try again on the next pass.
+            Err(RenderError::SurfaceReconfigured) => {
+                tracing::debug!("surface reconfigured; redrawing");
+                self.flags.redraw.push(handle);
+            }
+            Err(RenderError::SurfaceTimeout) => {
+                tracing::debug!("surface acquire timed out; skipping a frame");
+                self.flags.redraw.push(handle);
+            }
+            Err(RenderError::OutOfMemory) => {
+                tracing::error!("the GPU is out of memory; exiting");
+                self.flags.exit_requested = true;
+            }
+            Err(error) => tracing::error!("render failed: {error}"),
         }
         self.text.layouts.trim();
 
@@ -422,12 +451,28 @@ impl<A: App> ApplicationHandler for Runner<A> {
             return;
         }
 
-        let now = Instant::now();
-        if self.flags.next_frame_at.is_some_and(|at| at <= now) {
-            self.flags.next_frame_at = None;
-            self.flags.redraw_all = true;
+        for (target, at) in std::mem::take(&mut self.flags.frame_at) {
+            for (handle, entry) in self.windows.iter_mut() {
+                if let WindowEntry::Open(state) = entry
+                    && target.is_none_or(|target| target == handle)
+                {
+                    state.frame_clock.schedule(at);
+                }
+            }
         }
-        event_loop.set_control_flow(match self.flags.next_frame_at {
+        let now = Instant::now();
+        let mut wake_at: Option<Instant> = None;
+        for (_, entry) in self.windows.iter_mut() {
+            let WindowEntry::Open(state) = entry else {
+                continue;
+            };
+            match state.frame_clock.poll(now) {
+                Ok(()) => state.window.request_redraw(),
+                Err(Some(at)) => wake_at = Some(wake_at.map_or(at, |wake| wake.min(at))),
+                Err(None) => {}
+            }
+        }
+        event_loop.set_control_flow(match wake_at {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
@@ -446,5 +491,16 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 }
             }
         }
+    }
+}
+
+/// The renderer measures in physical pixels; apps size text in points.
+fn logical_metrics(metrics: TextMetrics, scale: f32) -> TextMetrics {
+    TextMetrics {
+        ui_font_size_px: metrics.ui_font_size_px / scale,
+        ui_line_height_px: metrics.ui_line_height_px / scale,
+        mono_font_size_px: metrics.mono_font_size_px / scale,
+        mono_line_height_px: metrics.mono_line_height_px / scale,
+        mono_char_width_px: metrics.mono_char_width_px / scale,
     }
 }

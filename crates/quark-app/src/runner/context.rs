@@ -21,8 +21,10 @@ pub(super) struct Flags {
     /// Windows to redraw on the next pass. Duplicates are harmless.
     pub(super) redraw: Vec<WindowHandle>,
     pub(super) redraw_all: bool,
-    /// When reached, every window redraws.
-    pub(super) next_frame_at: Option<Instant>,
+    /// Frames requested for a time: for one window, or for every window when
+    /// the window is `None`. The runner moves them onto each window's frame
+    /// clock before it next waits.
+    pub(super) frame_at: Vec<(Option<WindowHandle>, Instant)>,
     pub(super) exit_requested: bool,
     pub(super) keep_running_without_windows: bool,
     pub(super) close: Vec<WindowHandle>,
@@ -31,8 +33,8 @@ pub(super) struct Flags {
 }
 
 impl Flags {
-    fn request_frame_at(&mut self, at: Instant) {
-        self.next_frame_at = Some(self.next_frame_at.map_or(at, |next| next.min(at)));
+    fn request_frame_at(&mut self, window: Option<WindowHandle>, at: Instant) {
+        self.frame_at.push((window, at));
     }
 
     fn request_redraw(&mut self, window: Option<WindowHandle>) {
@@ -52,13 +54,16 @@ pub struct ClipboardImage {
     pub rgba: Vec<u8>,
 }
 
+/// What [`App::frame`] sees. Sizes and scene coordinates are logical points;
+/// the runner multiplies the returned scene by [`Self::scale_factor`] once,
+/// snapping quads to physical pixels, before the renderer draws it.
 pub struct FrameContext<'a> {
     pub(super) window: WindowHandle,
     pub(super) size: PhysicalSize<u32>,
     pub(super) scale_factor: f64,
     pub(super) text_metrics: TextMetrics,
     pub(super) text: &'a mut AppText,
-    pub(super) elapsed: Duration,
+    pub(super) timing: FrameTiming,
     pub(super) flags: &'a mut Flags,
     pub(super) waker: &'a Waker,
 }
@@ -69,27 +74,42 @@ impl FrameContext<'_> {
         self.window
     }
 
-    /// Drawable size in physical pixels.
+    /// Drawable size in logical points, the space the scene is built in.
     pub fn size(&self) -> (f32, f32) {
+        let (width, height) = self.physical_size();
+        let scale = self.scale_factor as f32;
+        (width / scale, height / scale)
+    }
+
+    /// Same as [`Self::size`].
+    pub fn logical_size(&self) -> (f32, f32) {
+        self.size()
+    }
+
+    /// Drawable size in physical pixels.
+    pub fn physical_size(&self) -> (f32, f32) {
         (
             self.size.width.max(1) as f32,
             self.size.height.max(1) as f32,
         )
     }
 
-    pub fn logical_size(&self) -> (f32, f32) {
-        let (width, height) = self.size();
-        let scale = self.scale_factor as f32;
-        (width / scale, height / scale)
-    }
-
+    /// Physical pixels per logical point for this window.
     pub fn scale_factor(&self) -> f32 {
         self.scale_factor as f32
     }
 
-    /// Default UI and monospace metrics at the current scale factor.
+    /// Default UI and monospace metrics in logical points.
     pub fn text_metrics(&self) -> TextMetrics {
         self.text_metrics
+    }
+
+    /// Shape `params` for this window: sizes stay logical, glyphs are shaped
+    /// at this window's scale so they rasterize crisply. Layouts drawn in a
+    /// scene must be shaped this way (or with the same scale factor).
+    pub fn layout_text(&mut self, params: &TextParams) -> Result<Arc<TextLayout>, TextError> {
+        let params = params.clone().scale_factor(self.scale_factor as f32);
+        self.text.layouts.layout(&mut self.text.system, &params)
     }
 
     pub fn font_system(&mut self) -> &mut FontSystem {
@@ -102,9 +122,15 @@ impl FrameContext<'_> {
         self.text
     }
 
-    /// Time since the runner started.
+    /// This frame's time on the window's frame clock, measured from when the
+    /// runner started. Constant for the whole frame; drive animations off it.
     pub fn elapsed(&self) -> Duration {
-        self.elapsed
+        self.timing.elapsed
+    }
+
+    /// Time since this window's previous frame, zero for its first frame.
+    pub fn frame_delta(&self) -> Duration {
+        self.timing.delta
     }
 
     /// Draw another frame of this window right after this one, for animation.
@@ -112,8 +138,15 @@ impl FrameContext<'_> {
         self.flags.redraw.push(self.window);
     }
 
+    /// Draw this window again at `at`. Other windows are not redrawn.
     pub fn request_frame_at(&mut self, at: Instant) {
-        self.flags.request_frame_at(at);
+        self.flags.request_frame_at(Some(self.window), at);
+    }
+
+    /// Draw this window again `after` this frame's time.
+    pub fn request_frame_in(&mut self, after: Duration) {
+        let at = self.timing.now + after;
+        self.flags.request_frame_at(Some(self.window), at);
     }
 
     pub fn waker(&self) -> &Waker {
@@ -144,8 +177,10 @@ impl EventContext<'_> {
         self.flags.redraw_all = true;
     }
 
+    /// Redraw the context's window (or every window when the context has
+    /// none) at `at`.
     pub fn request_frame_at(&mut self, at: Instant) {
-        self.flags.request_frame_at(at);
+        self.flags.request_frame_at(self.window, at);
     }
 
     pub fn exit(&mut self) {
@@ -182,7 +217,7 @@ impl EventContext<'_> {
         self.flags.keep_running_without_windows = !exit;
     }
 
-    /// Last pointer position in physical pixels, if the pointer is inside the
+    /// Last pointer position in logical points, if the pointer is inside the
     /// context's window.
     pub fn pointer_position(&self) -> Option<(f32, f32)> {
         self.state()?.input.pointer_position()
@@ -194,6 +229,7 @@ impl EventContext<'_> {
             .unwrap_or_default()
     }
 
+    /// Physical pixels per logical point for the context's window.
     pub fn scale_factor(&self) -> f32 {
         self.state().map_or(1.0, |state| state.scale_factor as f32)
     }
@@ -219,12 +255,12 @@ impl EventContext<'_> {
         }
     }
 
-    /// Where the IME candidate window should appear, in physical pixels.
+    /// Where the IME candidate window should appear, in logical points.
     pub fn set_ime_cursor_area(&mut self, x: f32, y: f32, width: f32, height: f32) {
         if let Some(window) = self.native() {
             window.set_ime_cursor_area(
-                PhysicalPosition::new(x as f64, y as f64),
-                PhysicalSize::new(width as f64, height as f64),
+                LogicalPosition::new(x as f64, y as f64),
+                LogicalSize::new(width as f64, height as f64),
             );
         }
     }

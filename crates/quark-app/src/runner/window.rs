@@ -24,8 +24,9 @@ impl WindowEntry {
 }
 
 /// Everything the runner owns for one native window. Each window has its own
-/// renderer (and wgpu device); all of them borrow the runner's one
-/// [`AppText`] so layouts shaped for any window rasterize in every window.
+/// renderer (surface and frame state) on the runner's shared [`GpuContext`];
+/// all of them borrow the runner's one [`AppText`] so layouts shaped for any
+/// window rasterize in every window.
 pub(super) struct WindowState {
     // Declared before `window` so the surface goes first on drop.
     pub(super) renderer: Renderer,
@@ -35,6 +36,7 @@ pub(super) struct WindowState {
     pub(super) input: InputNormalizer,
     pub(super) scale_factor: f64,
     pub(super) surface_size: PhysicalSize<u32>,
+    pub(super) frame_clock: FrameClock,
     pub(super) traffic_lights: Option<TrafficLights>,
     pub(super) persist_key: Option<String>,
 }
@@ -62,11 +64,67 @@ impl WindowState {
         }
     }
 
+    /// Resize the surface to `size` and adopt `scale_factor`. Text layouts
+    /// need no flush on a scale change: the layout cache keys every layout by
+    /// its scale factor, so the next frame shapes at the new scale and the
+    /// old layouts age out.
     pub(super) fn sync_metrics(&mut self, size: PhysicalSize<u32>, scale_factor: f64) {
         self.surface_size = size;
         self.scale_factor = scale_factor;
+        self.input.set_scale_factor(scale_factor);
         self.renderer.resize(size.width, size.height, scale_factor);
         position_traffic_lights(&self.window, self.traffic_lights);
+    }
+}
+
+/// The per-window frame clock: when the window last drew and when it must
+/// draw next. Windows only redraw when something asked for a frame, so an
+/// idle window costs nothing and an animating one does not wake the others.
+#[derive(Debug, Default)]
+pub(super) struct FrameClock {
+    last_frame: Option<Instant>,
+    next_frame_at: Option<Instant>,
+}
+
+/// One frame's reading of a window's [`FrameClock`].
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FrameTiming {
+    pub(super) now: Instant,
+    /// `now` measured from the runner's start.
+    pub(super) elapsed: Duration,
+    /// Since the window's previous frame.
+    pub(super) delta: Duration,
+}
+
+impl FrameClock {
+    /// Ask for a frame at `at`; the earliest request wins.
+    pub(super) fn schedule(&mut self, at: Instant) {
+        self.next_frame_at = Some(self.next_frame_at.map_or(at, |next| next.min(at)));
+    }
+
+    /// The pending request, cleared when it is due at `now`.
+    /// Returns `Ok(())` when a frame is due, else the time to wake for.
+    pub(super) fn poll(&mut self, now: Instant) -> Result<(), Option<Instant>> {
+        match self.next_frame_at {
+            Some(at) if at <= now => {
+                self.next_frame_at = None;
+                Ok(())
+            }
+            next => Err(next),
+        }
+    }
+
+    /// Start a frame at `now`.
+    pub(super) fn tick(&mut self, now: Instant, launch: Instant) -> FrameTiming {
+        let delta = self
+            .last_frame
+            .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+        self.last_frame = Some(now);
+        FrameTiming {
+            now,
+            elapsed: now.saturating_duration_since(launch),
+            delta,
+        }
     }
 }
 
