@@ -460,6 +460,27 @@ fn visible_rows_stay_bounded_across_5000_messages() {
 // Invariants under arbitrary document edits
 // ---------------------------------------------------------------------------
 
+// Catches debug integrity checks that walk the whole document per block or
+// per message, which made loading a long transcript quadratic in debug
+// builds. Counted in check steps, not timed.
+#[test]
+fn extending_with_30k_blocks_checks_in_linear_steps() {
+    let messages: Vec<TranscriptMessage> = (0..10_000)
+        .map(|i| message_with(i, &["a", "b", "c"]))
+        .collect();
+    let mut transcript: Transcript<GridGeometry> = Transcript::new(grid_style());
+    transcript
+        .push(&message_with(1_000_000, &["first"]))
+        .unwrap();
+
+    let before = quark::selection::integrity_steps();
+    transcript.extend(&messages).unwrap();
+    let steps = quark::selection::integrity_steps() - before;
+
+    assert_eq!(transcript.len(), 10_001);
+    assert!(steps <= 5 * 30_000, "{steps} check steps for 30k blocks");
+}
+
 #[derive(Debug, Clone)]
 enum Op {
     Push(u8),

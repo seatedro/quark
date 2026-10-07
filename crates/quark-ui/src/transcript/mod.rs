@@ -32,7 +32,10 @@ pub use syntax::SyntaxHighlighter;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use quark::selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText};
+use quark::selection::{
+    BlockKey, BlockOrder, FULL_INTEGRITY_CHECKS, Selection, SelectionPoint, SelectionText,
+    count_integrity_steps,
+};
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
@@ -410,7 +413,7 @@ impl<G: BlockGeometry> Transcript<G> {
             .collect();
         self.adopt(message.key, blocks);
         self.mark_new_content();
-        self.debug_check();
+        self.debug_check_row(message.key);
         Ok(())
     }
 
@@ -429,15 +432,19 @@ impl<G: BlockGeometry> Transcript<G> {
                 self.list.append(message.key)?;
             }
         }
+        let mut fresh = Vec::new();
+        let mut seen = HashSet::new();
         for message in messages {
-            let blocks = message
+            let blocks: Vec<BlockKey> = message
                 .blocks
                 .iter()
                 .map(|block| block.key)
-                .filter(|key| self.order.append(*key))
+                .filter(|key| !self.order.contains(*key) && seen.insert(*key))
                 .collect();
+            fresh.extend_from_slice(&blocks);
             self.adopt(message.key, blocks);
         }
+        self.order.extend(fresh);
         self.mark_new_content();
         self.debug_check();
         Ok(())
@@ -503,7 +510,7 @@ impl<G: BlockGeometry> Transcript<G> {
         self.adopt(key, kept);
         self.list.invalidate(key)?;
         self.mark_new_content();
-        self.debug_check();
+        self.debug_check_row(key);
         Ok(())
     }
 
@@ -894,7 +901,63 @@ impl<G: BlockGeometry> Transcript<G> {
 
     // -- Integrity --
 
+    /// Checks row `row` only: its blocks are owned by it and sit together
+    /// in the block order, right after the previous row's blocks and right
+    /// before the next row's, plus the map sizes and the selection. O(blocks
+    /// of the row) plus the rows without blocks around it; per-message
+    /// edits call it through `debug_assert!`.
+    pub fn verify_row(&self, row: RowKey) -> Result<(), TranscriptIntegrityError> {
+        let rows = self.list.rows();
+        let index = rows
+            .index_of(row)
+            .ok_or(TranscriptIntegrityError::UnknownRow { row })?;
+        rows.verify_row(index)
+            .map_err(TranscriptIntegrityError::Rows)?;
+        if self.row_blocks.len() != rows.len() || self.block_row.len() != self.order.len() {
+            return Err(TranscriptIntegrityError::BlockOrder);
+        }
+        let blocks = self
+            .row_blocks
+            .get(&row)
+            .ok_or(TranscriptIntegrityError::UnknownRow { row })?;
+        count_integrity_steps(blocks.len());
+        let mut expected = self
+            .last_block_before(row)
+            .and_then(|b| self.order.position(b))
+            .map_or(0, |p| p + 1);
+        for block in blocks {
+            if self.block_row.get(block) != Some(&row) {
+                return Err(TranscriptIntegrityError::BlockRow { block: *block });
+            }
+            if self.order.position(*block) != Some(expected) {
+                return Err(TranscriptIntegrityError::BlockOrder);
+            }
+            expected += 1;
+        }
+        let next_first = rows.keys()[index + 1..]
+            .iter()
+            .find_map(|key| self.row_blocks.get(key)?.first().copied());
+        let next_pos = next_first.map_or(Some(self.order.len() as u32), |b| self.order.position(b));
+        if next_pos != Some(expected) {
+            return Err(TranscriptIntegrityError::BlockOrder);
+        }
+        self.verify_selection()
+    }
+
+    fn verify_selection(&self) -> Result<(), TranscriptIntegrityError> {
+        match self.selection {
+            Some(selection) if selection.ordered(&self.order).is_none() => {
+                Err(TranscriptIntegrityError::SelectionOutsideDocument)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks every row, block, and the selection. O(rows + blocks); batch
+    /// edits call it through `debug_assert!`, as do per-message ones with
+    /// `integrity-checks`.
     pub fn verify_integrity(&self) -> Result<(), TranscriptIntegrityError> {
+        count_integrity_steps(self.order.len());
         self.list
             .rows()
             .verify_integrity()
@@ -903,7 +966,10 @@ impl<G: BlockGeometry> Transcript<G> {
         if self.row_blocks.len() != rows.len() {
             return Err(TranscriptIntegrityError::BlockOrder);
         }
-        let mut expected = Vec::with_capacity(self.order.len());
+        // Walk the rows' blocks against the order in place, without
+        // collecting them.
+        let order = self.order.keys();
+        let mut at = 0;
         for row in rows {
             let blocks = self
                 .row_blocks
@@ -913,22 +979,28 @@ impl<G: BlockGeometry> Transcript<G> {
                 if self.block_row.get(block) != Some(row) {
                     return Err(TranscriptIntegrityError::BlockRow { block: *block });
                 }
+                if order.get(at) != Some(block) {
+                    return Err(TranscriptIntegrityError::BlockOrder);
+                }
+                at += 1;
             }
-            expected.extend_from_slice(blocks);
         }
-        if expected != self.order.keys() || self.block_row.len() != expected.len() {
+        if at != order.len() || self.block_row.len() != at {
             return Err(TranscriptIntegrityError::BlockOrder);
         }
-        if let Some(selection) = self.selection
-            && selection.ordered(&self.order).is_none()
-        {
-            return Err(TranscriptIntegrityError::SelectionOutsideDocument);
-        }
-        Ok(())
+        self.verify_selection()
     }
 
     fn debug_check(&self) {
         debug_assert_eq!(self.verify_integrity(), Ok(()));
+    }
+
+    fn debug_check_row(&self, row: RowKey) {
+        if FULL_INTEGRITY_CHECKS {
+            self.debug_check();
+        } else {
+            debug_assert_eq!(self.verify_row(row), Ok(()));
+        }
     }
 }
 

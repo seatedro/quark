@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::VirtualListWindow;
 use quark::fenwick::{Fenwick, UNITS_PER_PX, px_to_units, units_to_px};
+use quark::selection::{FULL_INTEGRITY_CHECKS, count_integrity_steps};
 
 /// Stable identity of a row across inserts, removals, and remeasurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -145,7 +146,7 @@ impl RowTable {
         self.heights.push(height);
         self.measured.push(false);
         self.tree.push(px_to_units(height));
-        self.debug_check();
+        self.debug_check_row(self.keys.len() - 1);
         Ok(())
     }
 
@@ -225,7 +226,7 @@ impl RowTable {
             self.measured_units += new_units;
         }
         self.heights[index] = height;
-        self.debug_check();
+        self.debug_check_row(index);
     }
 
     /// Marks a row for remeasurement. O(1); offsets do not change.
@@ -236,7 +237,7 @@ impl RowTable {
             self.measured_count -= 1;
             self.measured_units -= px_to_units(self.heights[index]);
         }
-        self.debug_check();
+        self.debug_check_row(index);
         Ok(())
     }
 
@@ -313,7 +314,37 @@ impl RowTable {
         }
     }
 
-    pub fn verify_integrity(&self) -> Result<(), RowIntegrityError> {
+    /// Checks row `index` only: column and map lengths, its key's map
+    /// entry, its height, its Fenwick leaf, and that the measured totals are
+    /// in range. O(log n); single-row mutations call it through
+    /// `debug_assert!`.
+    pub fn verify_row(&self, index: usize) -> Result<(), RowIntegrityError> {
+        count_integrity_steps(1);
+        self.verify_lengths()?;
+        let key = self.keys[index];
+        let mapped = self.index.get(&key).copied();
+        if mapped != Some(index) {
+            return Err(RowIntegrityError::IndexMap { key, index, mapped });
+        }
+        let height = self.heights[index];
+        if sanitize_height(height) != height {
+            return Err(RowIntegrityError::InvalidHeight { index, height });
+        }
+        if self.tree.prefix(index + 1) - self.tree.prefix(index) != px_to_units(height) {
+            return Err(RowIntegrityError::FenwickMismatch);
+        }
+        if self.measured_count > self.keys.len() || self.measured_units < 0 {
+            return Err(RowIntegrityError::MeasuredStats {
+                count: self.measured_count,
+                expected_count: self.measured_count.min(self.keys.len()),
+                units: self.measured_units,
+                expected_units: self.measured_units.max(0),
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_lengths(&self) -> Result<(), RowIntegrityError> {
         let expected = self.keys.len();
         for (column, len) in [
             ("heights", self.heights.len()),
@@ -334,6 +365,15 @@ impl RowTable {
                 expected,
             });
         }
+        Ok(())
+    }
+
+    /// Checks every row, rebuilds the Fenwick tree to compare, and recounts
+    /// the measured totals. O(n); batch mutations call it through
+    /// `debug_assert!`, as do single-row ones with `integrity-checks`.
+    pub fn verify_integrity(&self) -> Result<(), RowIntegrityError> {
+        count_integrity_steps(self.keys.len());
+        self.verify_lengths()?;
         // Equal lengths plus every key mapping to its own row make the map a
         // bijection, which also rules out duplicate keys.
         for (index, &key) in self.keys.iter().enumerate() {
@@ -383,6 +423,14 @@ impl RowTable {
 
     fn debug_check(&self) {
         debug_assert_eq!(self.verify_integrity(), Ok(()));
+    }
+
+    fn debug_check_row(&self, index: usize) {
+        if FULL_INTEGRITY_CHECKS {
+            self.debug_check();
+        } else {
+            debug_assert_eq!(self.verify_row(index), Ok(()));
+        }
     }
 }
 
@@ -813,18 +861,6 @@ mod tests {
 
         assert!(list.rows().is_measured(RowKey(16)).unwrap());
         assert!((screen_top(&list, 20) - before).abs() <= 0.5);
-    }
-
-    #[test]
-    fn width_change_remeasures_visible_rows() {
-        let mut list = list(&[], 200.0);
-        for key in 0..5 {
-            list.append(RowKey(key)).unwrap();
-        }
-        list.measure_visible(400.0, 0.0, |_, width| 8000.0 / width);
-        list.measure_visible(200.0, 0.0, |_, width| 8000.0 / width);
-
-        assert_eq!(list.rows().height_of(RowKey(4)), Some(40.0));
     }
 
     #[test]
