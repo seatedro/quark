@@ -8,7 +8,15 @@
 //!
 //! [`TextEditorElement`] paints an [`Editor`] snapshot (text, selection,
 //! cursor, gutter) as an element.
+//!
+//! Positions are [`TextOffset`]s on grapheme boundaries; raw byte indices
+//! (in [`TextEditCommand`]s) are snapped onto the target's text on entry.
 
+// Byte slicing of strings lives in `quark_text::offset`.
+#![deny(clippy::string_slice)]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
+
+mod buffer;
 mod editor;
 mod ime;
 mod input_element;
@@ -26,10 +34,8 @@ pub use input_element::{CursorSnapshot, TextEditorElement, text_editor_element};
 pub use keys::command_for_binding;
 pub(crate) use pointer::text_pointer_drag;
 pub use pointer::{AUTOSCROLL_STEP_MS, TextPointer, TextPointerEvent};
-pub use text_edit::{
-    TextEditCommand, TextEditOutcome, TextField, next_grapheme_boundary, next_word_boundary,
-    next_word_end, prev_grapheme_boundary, prev_word_boundary, word_range_at,
-};
+pub use quark_text::TextOffset;
+pub use text_edit::{TextEditCommand, TextEditOutcome, TextField};
 pub use undo::COALESCE_PAUSE_MS;
 pub use view::{
     CARET_BLINK_MS, ClickCounter, HorizontalScroll, MULTI_CLICK_MS, caret_blink, reveal_offset,

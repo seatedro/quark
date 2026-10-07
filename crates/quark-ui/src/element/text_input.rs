@@ -1,8 +1,17 @@
+// Raw byte slicing belongs in `quark_text::offset`; offsets here are
+// `TextOffset`s snapped onto the value being painted.
+#![deny(clippy::string_slice)]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
+
 use super::*;
 use crate::text_input::{
     HorizontalScroll, Preedit, TextField, caret_blink, compose, reveal_offset, text_pointer_drag,
 };
 use quark_render::RectPrimitive;
+use quark_text::TextOffset;
+use quark_text::offset;
+
+const BULLET: &str = "\u{2022}";
 
 // ---------------------------------------------------------------------------
 // TextInput — text field with cursor, selection, and editing support
@@ -10,13 +19,13 @@ use quark_render::RectPrimitive;
 
 pub struct TextInput {
     label: String,
-    value: String,
+    value: Arc<str>,
     placeholder: String,
     focused: bool,
     on_click: Option<Action>,
     base_style: ElementStyle,
-    cursor: usize,
-    anchor: usize,
+    cursor: TextOffset,
+    anchor: TextOffset,
     cursor_moved_at_ms: u64,
     focus_target: Option<FocusId>,
     bare: bool,
@@ -29,13 +38,13 @@ pub struct TextInput {
 pub fn text_input(label: impl Into<String>, value: impl Into<String>) -> TextInput {
     TextInput {
         label: label.into(),
-        value: value.into(),
+        value: Arc::from(value.into()),
         placeholder: String::new(),
         focused: false,
         on_click: None,
         base_style: ElementStyle::default(),
-        cursor: 0,
-        anchor: 0,
+        cursor: TextOffset::ZERO,
+        anchor: TextOffset::ZERO,
         cursor_moved_at_ms: 0,
         focus_target: None,
         bare: false,
@@ -62,12 +71,15 @@ impl TextInput {
         self
     }
 
-    pub fn cursor(mut self, offset: usize) -> Self {
+    /// The caret. It is snapped onto the value when painted, so an offset
+    /// from an older value is safe.
+    pub fn cursor(mut self, offset: TextOffset) -> Self {
         self.cursor = offset;
         self
     }
 
-    pub fn anchor(mut self, offset: usize) -> Self {
+    /// The selection anchor, snapped like [`Self::cursor`].
+    pub fn anchor(mut self, offset: TextOffset) -> Self {
         self.anchor = offset;
         self
     }
@@ -113,7 +125,7 @@ impl TextInput {
             .anchor(field.anchor())
             .preedit(field.preedit().cloned())
             .scroll(field.scroll().clone());
-        this.value = field.text().to_owned();
+        this.value = Arc::from(field.text());
         this
     }
 
@@ -130,50 +142,93 @@ impl Styled for TextInput {
     }
 }
 
-/// Describes a text input hit area for click-to-position cursor placement.
+/// A painted text field, recorded each frame so pointer input and the IME
+/// can be mapped through what is on screen.
 #[derive(Debug, Clone)]
 pub struct TextInputHitArea {
     pub bounds: Rect,
-    pub text_x: f32,
-    pub text_y: f32,
-    pub text_width: f32,
-    pub text_height: f32,
-    pub value: String,
-    pub font_size: f32,
     pub focus_target: FocusId,
-    pub multiline: bool,
-    /// Painted layout of the displayed value (bullets when masked), with its
-    /// origin at `(text_x - scroll_x, text_y - scroll_y)`. `None` for
-    /// placeholders and compositions.
-    pub layout: Option<Arc<TextLayout>>,
-    /// How far the single-line text is scrolled left.
-    pub scroll_x: f32,
-    /// How far an editor's text is scrolled up.
-    pub scroll_y: f32,
+    /// The text area in window coordinates. Pointers past its edges along
+    /// the scroll axis autoscroll.
+    pub text_rect: Rect,
     /// Caret rect in window coordinates while focused, for placing the IME
     /// candidate window.
     pub caret: Option<Rect>,
+    pub content: TextHitContent,
+}
+
+/// How a [`TextInputHitArea`] maps points to offsets of its text.
+#[derive(Debug, Clone)]
+pub enum TextHitContent {
+    /// A single-line field. `layout` is the painted value (bullets when
+    /// masked) with its origin `scroll_x` left of the text area; only `x`
+    /// matters for hits.
+    SingleLine {
+        layout: Option<Arc<TextLayout>>,
+        scroll_x: f32,
+        /// The real value behind the bullets of a masked field.
+        masked: Option<Arc<str>>,
+    },
+    /// An editor. `layout` is its wrapped text with its origin `scroll_y`
+    /// above the text area.
+    Multiline {
+        layout: Option<Arc<TextLayout>>,
+        scroll_y: f32,
+    },
 }
 
 impl TextInputHitArea {
-    /// Byte offset into `value` for a pointer at window x `x`. A pointer
-    /// past either edge maps to text scrolled out of view there, so a drag
-    /// selection past the edge extends into it and the next frame scrolls
-    /// it in. `None` when there is no value layout.
-    pub fn offset_at(&self, x: f32) -> Option<usize> {
-        let layout = self.layout.as_ref()?;
-        let byte = layout.hit(x - self.text_x + self.scroll_x, self.text_height * 0.5);
-        if layout.text().as_ref() == self.value {
-            return Some(byte);
+    /// The painted layout pointer hits go through: `None` for placeholders
+    /// and compositions.
+    pub fn layout(&self) -> Option<&Arc<TextLayout>> {
+        match &self.content {
+            TextHitContent::SingleLine { layout, .. }
+            | TextHitContent::Multiline { layout, .. } => layout.as_ref(),
         }
-        // Masked: the layout shows one bullet per char of the value.
-        let chars = layout.text()[..byte].chars().count();
-        Some(
-            self.value
-                .char_indices()
-                .nth(chars)
-                .map_or(self.value.len(), |(i, _)| i),
-        )
+    }
+
+    /// Window position of the layout origin.
+    pub fn origin(&self) -> (f32, f32) {
+        let (x, y) = (self.text_rect.x, self.text_rect.y);
+        match self.content {
+            TextHitContent::SingleLine { scroll_x, .. } => (x - scroll_x, y),
+            TextHitContent::Multiline { scroll_y, .. } => (x, y - scroll_y),
+        }
+    }
+
+    /// Offset into the field's text under a window point. A point past an
+    /// edge maps to text scrolled out of view there, so a drag selection
+    /// past the edge extends into it and the next frame scrolls it in.
+    /// `None` when there is no layout.
+    pub fn offset_at_point(&self, x: f32, y: f32) -> Option<TextOffset> {
+        let layout = self.layout()?;
+        let (ox, oy) = self.origin();
+        let y = match self.content {
+            TextHitContent::SingleLine { .. } => self.text_rect.height * 0.5,
+            TextHitContent::Multiline { .. } => y - oy,
+        };
+        let hit = layout.hit(x - ox, y);
+        match &self.content {
+            // One bullet is painted per grapheme of the value.
+            TextHitContent::SingleLine {
+                masked: Some(value),
+                ..
+            } => Some(offset::nth_grapheme(
+                value,
+                offset::graphemes_before(layout.text(), hit),
+            )),
+            _ => Some(hit),
+        }
+    }
+
+    /// Whether a point is past the edge the field scrolls along: left or
+    /// right for single-line fields, above or below for editors.
+    pub(crate) fn is_past_edge(&self, x: f32, y: f32) -> bool {
+        let r = &self.text_rect;
+        match self.content {
+            TextHitContent::SingleLine { .. } => x < r.x || x > r.x + r.width,
+            TextHitContent::Multiline { .. } => y < r.y || y > r.y + r.height,
+        }
     }
 }
 
@@ -293,22 +348,31 @@ impl Element for TextInput {
             .preedit
             .as_ref()
             .filter(|_| self.focused && !self.masked)
-            .map(|preedit| compose(&self.value, (self.anchor, self.cursor), preedit));
+            .map(|preedit| compose(&self.value, self.anchor..self.cursor, preedit));
         let is_placeholder = self.value.is_empty() && composition.is_none();
-        let byte_to_measure_byte = |offset: usize| -> usize {
-            if !self.masked {
-                return offset.min(self.value.len());
+        let masked_display = self.masked.then(|| {
+            BULLET.repeat(offset::graphemes_before(
+                &self.value,
+                TextOffset::end(&self.value),
+            ))
+        });
+        // Offset into the painted text for an offset into the value. Both
+        // builders' offsets may be stale, so they are snapped here.
+        let to_display = |at: TextOffset| -> TextOffset {
+            match &masked_display {
+                Some(bullets) => {
+                    offset::nth_grapheme(bullets, offset::graphemes_before(&self.value, at))
+                }
+                None => at.within(&self.value),
             }
-            let char_index = self.value[..offset.min(self.value.len())].chars().count();
-            char_index * "\u{2022}".len()
         };
 
-        let display = if let Some(composition) = &composition {
-            composition.text.clone()
+        let display: Arc<str> = if let Some(composition) = &composition {
+            Arc::from(composition.text.as_str())
         } else if is_placeholder {
-            std::mem::take(&mut self.placeholder)
-        } else if self.masked {
-            "\u{2022}".repeat(self.value.chars().count())
+            Arc::from(std::mem::take(&mut self.placeholder))
+        } else if let Some(bullets) = &masked_display {
+            Arc::from(bullets.as_str())
         } else {
             self.value.clone()
         };
@@ -322,12 +386,12 @@ impl Element for TextInput {
         // and selection so they sit on the painted glyph edges.
         let layout = cx.layout_text(&TextParams::new(display, value_style));
         let value_layout = layout.as_ref().filter(|_| !is_placeholder);
-        let caret_x = |byte: usize| value_layout.map_or(0.0, |l| l.caret(byte).x);
+        let caret_x = |at: TextOffset| value_layout.map_or(0.0, |l| l.caret(at).x);
 
         // Caret in layout coordinates; `None` when the IME hides it.
         let caret_byte = match &composition {
             Some(composition) => composition.caret,
-            None => Some(byte_to_measure_byte(self.cursor)),
+            None => Some(to_display(self.cursor)),
         };
         let content_w = value_layout.map_or(0.0, |l| l.size().0);
         let previous = self.scroll.as_ref().map_or(0.0, HorizontalScroll::get);
@@ -360,11 +424,10 @@ impl Element for TextInput {
 
         // Selection highlight (render before text so it appears behind)
         if self.focused && !is_placeholder && composition.is_none() {
-            let sel_start = self.cursor.min(self.anchor);
-            let sel_end = self.cursor.max(self.anchor);
-            if sel_start != sel_end && sel_end <= self.value.len() {
-                let x_start = caret_x(byte_to_measure_byte(sel_start));
-                let x_end = caret_x(byte_to_measure_byte(sel_end));
+            let (sel_start, sel_end) = (to_display(self.anchor), to_display(self.cursor));
+            if sel_start != sel_end {
+                let (x0, x1) = (caret_x(sel_start), caret_x(sel_end));
+                let (x_start, x_end) = (x0.min(x1), x0.max(x1));
                 scene.rounded_rect(RoundedRectPrimitive::uniform(
                     Rect {
                         x: origin_x + x_start,
@@ -437,7 +500,6 @@ impl Element for TextInput {
 
         // Register hit area for click-to-position (stored in cx for app.rs to use)
         if let Some(target) = self.focus_target {
-            let value = std::mem::take(&mut self.value);
             let role = if self.masked {
                 AccessibilityRole::PasswordInput
             } else if self.search {
@@ -445,11 +507,7 @@ impl Element for TextInput {
             } else {
                 AccessibilityRole::TextInput
             };
-            let accessible_value = if self.masked {
-                "\u{2022}".repeat(value.chars().count())
-            } else {
-                value.clone()
-            };
+            let accessible_value = masked_display.unwrap_or_else(|| self.value.to_string());
             let semantic_id = format!("text-input:{target:?}");
             let mut style_state = StyleState::empty();
             if self.focused {
@@ -481,18 +539,14 @@ impl Element for TextInput {
             );
             cx.text_input_hit_areas.push(TextInputHitArea {
                 bounds,
-                text_x,
-                text_y,
-                text_width: text_area_w,
-                text_height: value_lh,
-                value,
-                font_size: value_size,
                 focus_target: target,
-                multiline: false,
-                layout: value_layout.filter(|_| composition.is_none()).cloned(),
-                scroll_x,
-                scroll_y: 0.0,
+                text_rect,
                 caret,
+                content: TextHitContent::SingleLine {
+                    layout: value_layout.filter(|_| composition.is_none()).cloned(),
+                    scroll_x,
+                    masked: self.masked.then(|| self.value.clone()),
+                },
             });
         } else if on_click.is_some() {
             let mut semantic_node = SemanticNode::new(bounds)
@@ -556,6 +610,10 @@ mod tests {
 
         /// Paint `field` focused in a 160px input; return its hit area.
         fn paint(&mut self, field: &TextField) -> TextInputHitArea {
+            self.paint_input(text_input("Name", "").field(field))
+        }
+
+        fn paint_input(&mut self, input: TextInput) -> TextInputHitArea {
             let mut cx = ElementContext::new(
                 &self.theme,
                 1.0,
@@ -565,8 +623,7 @@ mod tests {
                 &self.signals,
             )
             .with_focus(Some(FIELD));
-            let mut root = text_input("Name", "")
-                .field(field)
+            let mut root = input
                 .focused(true)
                 .focus_target(FIELD)
                 .w(160.0)
@@ -579,7 +636,7 @@ mod tests {
 
     fn assert_caret_visible(area: &TextInputHitArea) {
         let caret = area.caret.expect("focused field reports a caret");
-        let (left, right) = (area.text_x, area.text_x + area.text_width);
+        let (left, right) = (area.text_rect.x, area.text_rect.right());
         assert!(
             caret.x >= left - 0.5 && caret.x + caret.width <= right + 0.5,
             "caret {}..{} outside {left}..{right}",
@@ -599,7 +656,7 @@ mod tests {
         assert!(field.scroll().get() > 0.0, "long text scrolled");
         field.apply(CursorHome);
         let area = painter.paint(&field);
-        assert_eq!(area.scroll_x, 0.0);
+        assert_eq!(area.origin().0, area.text_rect.x, "scrolled home");
         assert_caret_visible(&area);
     }
 
@@ -609,16 +666,36 @@ mod tests {
         let mut field = TextField::new("the quick brown fox jumps over the lazy dog");
         field.apply(CursorHome);
         let area = painter.paint(&field);
-        let layout = area.layout.clone().expect("value layout");
+        let layout = area.layout().cloned().expect("value layout");
         let past = area
-            .offset_at(area.text_x + area.text_width + 12.0)
+            .offset_at_point(area.text_rect.right() + 12.0, area.text_rect.y)
             .expect("offset");
-        assert!(layout.caret(past).x > area.text_width, "offset was hidden");
+        assert!(
+            layout.caret(past).x > area.text_rect.width,
+            "offset was hidden"
+        );
 
-        field.apply(ExtendTextSelection(past));
+        field.apply(ExtendTextSelection(past.get()));
         let area = painter.paint(&field);
-        assert_eq!(field.selection_range(), Some((0, past)));
-        assert!(area.scroll_x > 0.0);
+        assert_eq!(field.selection_range(), Some(TextOffset::ZERO..past));
+        assert!(area.origin().0 < area.text_rect.x, "scrolled right");
         assert_caret_visible(&area);
+    }
+
+    // Regression: a masked field counted chars up to its raw cursor by
+    // slicing the value, so a cursor left over from another value (here
+    // inside the "é") panicked.
+    #[test]
+    fn masked_field_with_a_stale_cursor_puts_the_caret_on_a_grapheme() {
+        let mut painter = Painter::new();
+        let stale = TextOffset::snap("abc", 1);
+        let caret = |painter: &mut Painter, cursor| {
+            let input = text_input("Pin", "\u{e9}a").masked(true).cursor(cursor);
+            painter.paint_input(input).caret.expect("caret")
+        };
+        assert_eq!(
+            caret(&mut painter, stale),
+            caret(&mut painter, TextOffset::ZERO)
+        );
     }
 }
