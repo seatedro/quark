@@ -202,6 +202,9 @@ fn answer_markdown(n: usize, rng: &mut Rng) -> String {
     )
 }
 
+/// Sent by the timer thread every [`STREAM_TICK`].
+struct StreamTick;
+
 /// The answer currently streaming in.
 struct Stream {
     key: RowKey,
@@ -222,7 +225,6 @@ struct Demo {
     stream: Option<Stream>,
     answers: usize,
     next_key: u64,
-    last_tick: Option<Duration>,
     timing: Timing,
     log: bool,
 }
@@ -255,7 +257,6 @@ impl Demo {
             stream: None,
             answers: 0,
             next_key: HISTORY,
-            last_tick: None,
             timing: Timing::default(),
             log: std::env::var_os("QUARK_TRANSCRIPT_LOG").is_some(),
         }
@@ -325,19 +326,32 @@ impl Demo {
 
 impl UiApp for Demo {
     type Action = Msg;
-    type Message = ();
+    /// A stream tick from the timer thread.
+    type Message = StreamTick;
+
+    fn init(&mut self, cx: &mut UiContext) {
+        // The scripted answer arrives on a timer thread, the way a real
+        // model's chunks arrive from a socket reader.
+        let sender = cx.sender::<StreamTick>();
+        std::thread::spawn(move || {
+            while sender.send(StreamTick) {
+                std::thread::sleep(STREAM_TICK);
+            }
+        });
+    }
+
+    fn message(&mut self, _tick: StreamTick, cx: &mut UiContext) {
+        self.tick();
+        cx.window.request_redraw();
+    }
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
         let scale = cx.frame.scale_factor();
         let now = cx.frame.elapsed();
 
-        let due = self.last_tick.is_none_or(|last| now >= last + STREAM_TICK);
-        if due {
-            self.last_tick = Some(now);
-            self.tick();
-        }
-        // Rebuild the messages whose code highlights arrived.
+        // Rebuild the messages whose code highlights arrived. Ticks redraw
+        // often enough to pick them up while streaming.
         self.transcript.poll_highlights();
 
         let started = Instant::now();
@@ -356,7 +370,6 @@ impl UiApp for Demo {
         self.record(started.elapsed());
 
         // The element schedules its own frames while a drag autoscrolls.
-        cx.frame.request_frame_in(STREAM_TICK);
 
         let colors = &cx.theme.colors;
         let view = self.transcript.transcript();
@@ -409,7 +422,7 @@ impl UiApp for Demo {
             cx.window.exit();
             return true;
         }
-        match chord.binding_string().as_deref().and_then(key_command) {
+        match chord.binding().as_ref().and_then(key_command) {
             Some(TranscriptCommand::Copy) => {
                 let copied = self.transcript.selected_text();
                 if !copied.is_empty() {

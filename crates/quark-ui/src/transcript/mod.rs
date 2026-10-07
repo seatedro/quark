@@ -41,7 +41,7 @@ use quark::selection::{
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
-use crate::element::{StyledSpan, join_code_lines};
+use crate::element::{Binding, StyledSpan, join_code_lines};
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, VariableList};
 use quark::Color;
@@ -553,15 +553,16 @@ pub enum TranscriptCommand {
     SelectAll,
 }
 
-/// Maps a keymap binding (`"cmd+c"`, `"ctrl+a"`) to a command. Cmd and
-/// Ctrl both work so one binding table serves every platform.
-pub fn key_command(binding: &str) -> Option<TranscriptCommand> {
-    let binding = binding.to_ascii_lowercase();
-    match binding.as_str() {
-        "cmd+c" | "ctrl+c" => Some(TranscriptCommand::Copy),
-        "cmd+a" | "ctrl+a" => Some(TranscriptCommand::SelectAll),
-        _ => None,
-    }
+/// The command a pressed key triggers. Bound to `mod+c` and `mod+a`, so
+/// Cmd and Ctrl both work and one table serves every platform.
+pub fn key_command(pressed: &Binding) -> Option<TranscriptCommand> {
+    [
+        ("mod+c", TranscriptCommand::Copy),
+        ("mod+a", TranscriptCommand::SelectAll),
+    ]
+    .into_iter()
+    .find(|(pattern, _)| pattern.parse::<Binding>().is_ok_and(|p| p.matches(pressed)))
+    .map(|(_, command)| command)
 }
 
 /// Transcript state. `G` is the block geometry the measurer produces.
@@ -638,21 +639,14 @@ impl<G: BlockGeometry> Transcript<G> {
         Ok(())
     }
 
-    /// Appends many messages, checking integrity once. Into an empty
-    /// transcript this is one batch insert.
+    /// Appends many messages as one batch, checking integrity once.
     pub fn extend<'a>(
         &mut self,
         messages: impl IntoIterator<Item = &'a TranscriptMessage>,
     ) -> Result<(), RowError> {
         let messages: Vec<&TranscriptMessage> = messages.into_iter().collect();
-        if self.is_empty() {
-            let keys: Vec<RowKey> = messages.iter().map(|m| m.key).collect();
-            self.list.prepend(&keys)?;
-        } else {
-            for message in &messages {
-                self.list.append(message.key)?;
-            }
-        }
+        let keys: Vec<RowKey> = messages.iter().map(|m| m.key).collect();
+        self.list.extend(&keys)?;
         let mut fresh = Vec::new();
         let mut seen = HashSet::new();
         for message in messages {

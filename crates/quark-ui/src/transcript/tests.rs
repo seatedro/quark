@@ -303,9 +303,11 @@ fn key_command_maps_cmd_and_ctrl_bindings() {
         ("ctrl+a", Some(TranscriptCommand::SelectAll)),
         ("cmd+a", Some(TranscriptCommand::SelectAll)),
         ("ctrl+x", None),
+        ("ctrl+shift+c", None),
     ];
     for (binding, expected) in cases {
-        assert_eq!(key_command(binding), expected, "{binding}");
+        let pressed: Binding = binding.parse().unwrap();
+        assert_eq!(key_command(&pressed), expected, "{binding}");
     }
 }
 

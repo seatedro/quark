@@ -538,6 +538,11 @@ impl VariableList {
         self.anchored(|rows| rows.prepend(keys))
     }
 
+    /// Appends a batch of rows, indexing and checking once.
+    pub fn extend(&mut self, keys: &[RowKey]) -> Result<f32, RowError> {
+        self.anchored(|rows| rows.insert_batch(rows.len(), keys))
+    }
+
     pub fn insert(&mut self, index: usize, key: RowKey) -> Result<f32, RowError> {
         self.anchored(|rows| rows.insert(index, key))
     }
