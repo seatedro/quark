@@ -12,6 +12,7 @@ pub mod button;
 pub mod checkbox;
 pub mod combobox;
 pub mod context_menu;
+pub mod diff_view;
 pub mod dock;
 pub mod dropdown;
 pub mod hover_card;
@@ -45,6 +46,9 @@ pub use button::{Button, ButtonSize, ButtonStyle};
 pub use checkbox::*;
 pub use combobox::*;
 pub use context_menu::*;
+pub use diff_view::{
+    CopySide, DiffEvent, DiffKey, DiffOutcome, DiffStyle, DiffViewState, diff_view,
+};
 pub use dock::{
     Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockSplit, DockState, PanelId,
     RegionSnapshot,

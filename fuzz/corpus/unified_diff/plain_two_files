@@ -1,0 +1,9 @@
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
++one
++two
+--- a/gone.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-bye

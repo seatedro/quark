@@ -2762,6 +2762,7 @@ dependencies = [
  "quark",
  "quark-app",
  "quark-components",
+ "quark-diff",
  "quark-render",
  "quark-text",
  "quark-ui",
@@ -2786,10 +2787,20 @@ dependencies = [
  "accesskit",
  "proptest",
  "quark",
+ "quark-diff",
  "quark-render",
+ "quark-syntax",
  "quark-text",
  "quark-ui",
  "serde",
+]
+
+[[package]]
+name = "quark-diff"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "unicode-segmentation",
 ]
 
 [[package]]

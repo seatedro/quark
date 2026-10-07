@@ -1,0 +1,15 @@
+[package]
+name = "quark-diff"
+description = "Diff model for Quark: unified patch parsing, line and word diffs, and display projections."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No UI, text shaping, or syntax dependencies: the diff view in
+# quark-components adapts this model into elements.
+[dependencies]
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

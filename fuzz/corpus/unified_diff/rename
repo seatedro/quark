@@ -1,0 +1,9 @@
+diff --git a/a.rs b/b.rs
+similarity index 90%
+rename from a.rs
+rename to b.rs
+--- a/a.rs
++++ b/b.rs
+@@ -1 +1 @@
+-x
++y

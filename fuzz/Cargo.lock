@@ -1587,10 +1587,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "quark-diff"
+version = "0.1.0"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "quark-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "quark-diff",
  "quark-text",
  "quark-ui",
  "unicode-segmentation",
@@ -1628,7 +1636,9 @@ dependencies = [
  "cosmic-text",
  "quark",
  "serde",
+ "sys-locale",
  "thiserror 2.0.21",
+ "unicode-script",
  "unicode-segmentation",
 ]
 

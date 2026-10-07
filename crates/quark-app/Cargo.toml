@@ -91,6 +91,7 @@ quark-ui = { workspace = true, features = ["test-alloc"] }
 quark-render = { workspace = true, features = ["headless-render"] }
 # The a11y_demo and controls_demo examples' components.
 quark-components.workspace = true
+quark-diff.workspace = true
 image.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }
 # Tests and examples always get the headless harness (`quark_app::testing`).
@@ -188,6 +189,12 @@ test = true
 name = "tree_table_demo"
 required-features = ["ui"]
 # Its test module drives the tree and table through `quark_app::testing`.
+test = true
+
+[[example]]
+name = "diff_demo"
+required-features = ["ui"]
+# Its test module drives the diff view through `quark_app::testing`.
 test = true
 
 [[example]]
