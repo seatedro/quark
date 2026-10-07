@@ -1,6 +1,5 @@
 use std::ops::Range;
 
-mod fenwick;
 mod variable;
 
 pub use variable::{

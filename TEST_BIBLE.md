@@ -33,7 +33,7 @@ catches, do not write it.
 | Tool | Use it for | Where |
 |---|---|---|
 | `proptest` | Invariants of pure logic: selection ordering and copy, text hit and caret round trips, spring settling, virtual list offsets | the module's test block |
-| Kani | Small bounded cores that must hold for all inputs: Fenwick tree, `BlockOrder` index, selection repair | `#[cfg(kani)]` harnesses in the module |
+| Kani | Small bounded cores with no `HashMap` that must hold for all inputs: the Fenwick tree | `#[cfg(kani)]` harnesses in the module |
 | `cargo-fuzz` | Anything that parses or decodes untrusted input: Markdown, input event normalization, text layout of arbitrary strings | `fuzz/` with a committed, minimized corpus |
 | Miri | Undefined behavior in quark's own `unsafe` and `bytemuck` casts | CI job over the crates that do not touch the GPU |
 | Conformance suites | Behavior an external spec defines: CommonMark spec tests, AT-SPI tree through cua | CI job that reports without failing until the baseline passes |

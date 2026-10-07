@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::VirtualListWindow;
-use super::fenwick::{Fenwick, UNITS_PER_PX, px_to_units, units_to_px};
+use quark::fenwick::{Fenwick, UNITS_PER_PX, px_to_units, units_to_px};
 
 /// Stable identity of a row across inserts, removals, and remeasurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

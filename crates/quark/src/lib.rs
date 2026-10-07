@@ -15,6 +15,7 @@ pub use quark_macros::{Store, view};
 pub mod animation;
 pub mod color;
 pub mod event;
+pub mod fenwick;
 pub mod focus;
 pub mod geometry;
 pub mod hit;
