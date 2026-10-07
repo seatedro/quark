@@ -1,0 +1,292 @@
+"""Helpers for the end-to-end specs.
+
+Two clients, both talking to the real desktop session run.sh set up:
+
+- `Cua` drives the app the way a computer-use agent does, through the cua
+  driver's MCP server (clicks, keys, clipboard, screenshots).
+- `atspi_tree` reads the raw AT-SPI tree over D-Bus. The specs assert on it
+  because cua 0.34 cannot report AccessKit roles: it asks for
+  `GetRoleName`, which accesskit_unix does not implement, so every role comes
+  back blank. The same gap makes cua's element_token clicks fail, so actions
+  go through cua's pixel route, which hit-tests to the AT-SPI action.
+
+Waiting is by polling observable state against a deadline, never a fixed
+sleep.
+"""
+
+import base64
+import json
+import os
+import subprocess
+import sys
+import time
+
+import dbus
+
+# AT-SPI role numbers (AtspiRole) that the specs name.
+ROLE = {
+    "frame": 23,
+    "dialog": 16,
+    "heading": 83,
+    "label": 29,
+    "entry": 79,
+    "push button": 43,
+    "list": 31,
+    "list item": 32,
+}
+ROLE_NAME = {v: k for k, v in ROLE.items()}
+STATE_FOCUSED = 12
+
+
+class Node:
+    def __init__(self, role, name, extents, attributes, states, children):
+        self.role = role
+        self.name = name
+        self.extents = extents  # (x, y, w, h) in screen pixels, or None
+        self.attributes = attributes
+        self.states = states
+        self.children = children
+
+    def walk(self):
+        yield self
+        for child in self.children:
+            yield from child.walk()
+
+    def find(self, role, name=None):
+        for node in self.walk():
+            if node.role == ROLE[role] and (name is None or node.name == name):
+                return node
+        return None
+
+    def find_all(self, role):
+        return [n for n in self.walk() if n.role == ROLE[role]]
+
+    def has_state(self, state):
+        return bool(self.states[state // 32] & (1 << (state % 32)))
+
+    def center(self):
+        x, y, w, h = self.extents
+        return x + w // 2, y + h // 2
+
+    def dump(self, depth=0):
+        role = ROLE_NAME.get(self.role, f"role{self.role}")
+        attrs = "".join(f" {k}={v}" for k, v in sorted(self.attributes.items()))
+        line = f"{'  ' * depth}{role} {self.name!r} {self.extents}{attrs}\n"
+        return line + "".join(c.dump(depth + 1) for c in self.children)
+
+
+def _a11y_bus():
+    session = dbus.SessionBus()
+    bus = session.get_object("org.a11y.Bus", "/org/a11y/bus")
+    return dbus.bus.BusConnection(bus.GetAddress(dbus_interface="org.a11y.Bus"))
+
+
+def _read(bus, name, path, depth):
+    obj = bus.get_object(name, path)
+    acc = dbus.Interface(obj, "org.a11y.atspi.Accessible")
+    props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+    extents = None
+    if "org.a11y.atspi.Component" in acc.GetInterfaces():
+        comp = dbus.Interface(obj, "org.a11y.atspi.Component")
+        extents = tuple(int(v) for v in comp.GetExtents(dbus.UInt32(0)))
+    try:
+        attributes = {str(k): str(v) for k, v in acc.GetAttributes().items()}
+    except dbus.DBusException:
+        attributes = {}  # AccessKit's application root has no GetAttributes
+    children = []
+    if depth < 64:
+        children = [_read(bus, n, p, depth + 1) for n, p in acc.GetChildren()]
+    return Node(
+        role=int(acc.GetRole()),
+        name=str(props.Get("org.a11y.atspi.Accessible", "Name")),
+        extents=extents,
+        attributes=attributes,
+        states=[int(s) for s in acc.GetState()],
+        children=children,
+    )
+
+
+def atspi_tree(app_name):
+    """The application node named `app_name`, or None if it is not registered."""
+    bus = _a11y_bus()
+    root = dbus.Interface(
+        bus.get_object("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root"),
+        "org.a11y.atspi.Accessible",
+    )
+    for name, path in root.GetChildren():
+        props = dbus.Interface(
+            bus.get_object(name, path), "org.freedesktop.DBus.Properties"
+        )
+        try:
+            app = str(props.Get("org.a11y.atspi.Accessible", "Name"))
+        except dbus.DBusException:
+            continue  # an application that exited mid-walk
+        if app == app_name:
+            return _read(bus, name, path, 0)
+    return None
+
+
+def wait_for(what, probe, timeout=15.0, interval=0.1):
+    """Poll `probe` until it returns a truthy value; fail with `what` on timeout."""
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            value = probe()
+            if value:
+                return value
+        except dbus.DBusException as error:
+            last_error = error
+        time.sleep(interval)
+    raise AssertionError(f"timed out waiting for {what}" + (f": {last_error}" if last_error else ""))
+
+
+def app_tree(content=True):
+    """The first window frame of the app run.sh launched. With `content`,
+    waits until the frame has children; a raw `App` publishes none."""
+    name = os.environ["QUARK_E2E_APP"]
+
+    def probe():
+        app = atspi_tree(name)
+        frame = app and app.find("frame")
+        return frame if frame and (frame.children or not content) else None
+
+    return wait_for(f"{name}'s accessibility tree", probe)
+
+
+class CuaError(AssertionError):
+    pass
+
+
+class Cua:
+    """One MCP session with `cua-driver mcp`, kept open so snapshots and
+    captures persist between calls."""
+
+    def __init__(self):
+        driver = os.environ.get("CUA_DRIVER", "cua-driver")
+        self.proc = subprocess.Popen(
+            [driver, "mcp", "--direct", "--no-overlay"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.next_id = 0
+        self._rpc(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "quark-e2e", "version": "0"},
+            },
+        )
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _send(self, message):
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+
+    def _rpc(self, method, params):
+        self.next_id += 1
+        self._send({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params})
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                raise CuaError(f"cua-driver exited during {method}")
+            reply = json.loads(line)
+            if reply.get("id") == self.next_id:
+                if "error" in reply:
+                    raise CuaError(f"{method}: {reply['error']}")
+                return reply["result"]
+
+    def call(self, tool, **args):
+        result = self._rpc("tools/call", {"name": tool, "arguments": args})
+        text = " ".join(c.get("text", "") for c in result.get("content", []) if c.get("type") == "text")
+        if result.get("isError"):
+            raise CuaError(f"{tool} failed: {text}")
+        return result.get("structuredContent") or {}
+
+    def window(self, pid):
+        windows = self.call("list_windows", pid=pid, on_screen_only=True)["windows"]
+        if not windows:
+            raise CuaError(f"pid {pid} has no on-screen window")
+        return max(windows, key=lambda w: w.get("z_index") or 0)
+
+    def click_node(self, pid, node, delivery_mode="background"):
+        """Click the center of an AT-SPI node in window-local pixels.
+
+        A pixel click needs a screenshot from this session first; the fresh
+        get_window_state also supplies the window origin for the conversion.
+        """
+        window = self.window(pid)
+        state = self.call(
+            "get_window_state", pid=pid, window_id=window["window_id"], max_image_dimension=0
+        )
+        origin = state["window_bounds"]
+        x, y = node.center()
+        return self.call(
+            "click",
+            pid=pid,
+            window_id=window["window_id"],
+            x=x - origin["x"],
+            y=y - origin["y"],
+            delivery_mode=delivery_mode,
+        )
+
+    def screenshot(self, path):
+        """Save the full display as a PNG."""
+        result = self._rpc("tools/call", {"name": "get_desktop_state", "arguments": {}})
+        for content in result.get("content", []):
+            if content.get("type") == "image":
+                with open(path, "wb") as f:
+                    f.write(base64.b64decode(content["data"]))
+                return True
+        return False
+
+    def close(self):
+        self.proc.stdin.close()
+        self.proc.wait(timeout=10)
+
+
+def app_pid():
+    return int(os.environ["QUARK_E2E_PID"])
+
+
+def example_binary(name):
+    return os.path.join(os.environ["QUARK_E2E_BIN_DIR"], name)
+
+
+def main(spec):
+    """Run `spec(cua)`; exit 0 on success, 1 with the assertion on failure."""
+    cua = Cua()
+    try:
+        spec(cua)
+    except AssertionError as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        cua.close()
+    print("PASS")
+
+
+def _cli():
+    """`wait`: block until the launched app's tree is up.
+    `dump DIR`: save a screenshot and the AT-SPI tree for a failed spec."""
+    command = sys.argv[1]
+    if command == "wait":
+        app_tree(content=False)
+    elif command == "dump":
+        out = sys.argv[2]
+        app = atspi_tree(os.environ["QUARK_E2E_APP"])
+        with open(os.path.join(out, "tree.txt"), "w") as f:
+            f.write(app.dump() if app else "application not registered on the AT-SPI bus\n")
+        cua = Cua()
+        try:
+            cua.screenshot(os.path.join(out, "screen.png"))
+        finally:
+            cua.close()
+    else:
+        sys.exit(f"unknown command {command}")
+
+
+if __name__ == "__main__":
+    _cli()
