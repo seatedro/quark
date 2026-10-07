@@ -314,9 +314,12 @@ mod tests {
         }
     }
 
+    /// `(bounds, clip, z, blocks_mouse)`.
+    type Row = (Rect, Rect, i32, bool);
+
     /// Push `(bounds, clip, z, blocks_mouse)` rows and return the rows of
     /// `stack_at(5, 5)`, topmost first.
-    fn stack(rows: &[(Rect, Rect, i32, bool)]) -> Vec<usize> {
+    fn stack(rows: &[Row]) -> Vec<usize> {
         let mut table = HitTable::default();
         for &(bounds, clip, z, blocks) in rows {
             let flags = if blocks {
@@ -337,7 +340,7 @@ mod tests {
     fn stack_at_orders_by_z_then_paint_and_honors_clip_and_blockers() {
         let on = rect(0.0, 0.0, 10.0, 10.0);
         let off = rect(20.0, 20.0, 10.0, 10.0);
-        let cases: &[(&str, &[(Rect, Rect, i32, bool)], &[usize])] = &[
+        let cases: &[(&str, &[Row], &[usize])] = &[
             (
                 "later paint wins at equal z",
                 &[(on, UNCLIPPED, 0, false), (on, UNCLIPPED, 0, false)],

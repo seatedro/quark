@@ -506,7 +506,13 @@ fn class_attribute_lowers_to_builder_methods() {
     let el = view! { <div class="flex-row grow grow-0 shrink-0 px-2" /> };
     assert_eq!(
         el.calls,
-        ["flex_row", "flex_grow", "flex_grow_val(0)", "flex_shrink_0", "px_2"]
+        [
+            "flex_row",
+            "flex_grow",
+            "flex_grow_val(0)",
+            "flex_shrink_0",
+            "px_2"
+        ]
     );
 
     let el = view! { <text class="font-bold font-mono">"x"</text> };
