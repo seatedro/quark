@@ -12,15 +12,23 @@ dependents for lazy recomputation.
 
 ### Three-state propagation
 
-Every slot in the store is `Clean`, `Check`, or `Dirty`.
+Every memo is `Clean`, `Check`, or `Dirty`. Raw signals carry no state,
+so reading a written signal cannot consume the change before its memos
+see it.
 
 - **Clean** — value is up-to-date.
 - **Check** — a transitive source changed; value may or may not still
-  be correct. Resolved on next read: re-evaluates memo fns, compares to
-  prior value, transitions to `Clean` if equal or `Dirty` if different.
-- **Dirty** — value is stale. `mark_source_dirty` transitions to
-  `Dirty` immediately for the source and BFS-marks all transitive
-  subscribers as `Check`.
+  be correct. On read, the memo brings its sources up to date first and
+  recomputes only if one of them marked it `Dirty`; otherwise it returns
+  to `Clean`.
+- **Dirty** — a direct source changed. A write marks the signal's direct
+  subscribers `Dirty` and everything further downstream `Check`; a memo
+  whose recomputed value changed does the same to its own subscribers.
+
+A memo that reads itself, directly or through other memos, panics with
+the cycle path (`memo cycle: memo #1 ... (#1 -> #2 -> #1)`). A compute
+that panics leaves the memo `Dirty` with its old value, so the next read
+retries.
 
 `any_dirty()` returns true if any slot has been written since the last
 `clear_dirty()`. Typical frame loop: read `any_dirty()` to decide
@@ -38,7 +46,8 @@ writes cascade down the graph only as far as they change anything.
 
 `#[derive(Store)]` on a struct with scalar fields generates a
 `FooStore` parallel struct where every field becomes `Signal<T>`, plus
-`FooStore::new(&store, Foo { ... })` and `FooStore::new_default(&store)`.
+`FooStore::new(&store, Foo { ... })`. Struct-level `#[store(default)]`
+adds `FooStore::new_default(&store)` for `Default` structs.
 `#[store(flatten)]` on a nested struct field inlines its fields into the
 parent's store. Use this to split big `State` structs into
 fine-grained signals without hand-writing every field.
