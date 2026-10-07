@@ -132,14 +132,15 @@ impl HoverCardState {
     }
 
     /// The pointer moved to `pointer` (`None`: it left the window) over
-    /// `anchors`. Returns whether the visible card changed.
+    /// `anchors`. Returns whether to draw a frame: the visible card
+    /// changed, or a delay started whose end the next frame schedules.
     pub fn pointer_moved(
         &mut self,
         pointer: Option<(f32, f32)>,
         anchors: &[(u64, Rect)],
         now_ms: u64,
     ) -> bool {
-        let before = self.shown();
+        let before = (self.shown(), self.next_wake_ms());
         let over_card = self.shown().is_some()
             && pointer
                 .zip(self.card)
@@ -174,7 +175,7 @@ impl HoverCardState {
             (phase @ Phase::Closing { .. }, None) => phase,
             (Phase::Hidden | Phase::Pending { .. }, None) => Phase::Hidden,
         };
-        self.shown() != before
+        (self.shown(), self.next_wake_ms()) != before
     }
 
     /// Open or close a card whose delay ran out by `now_ms`. Returns

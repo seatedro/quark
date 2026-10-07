@@ -698,15 +698,22 @@ impl<'a> ToastStack<'a> {
 /// expiry that pauses while the stack is hovered, action buttons that work
 /// only while the toast is live, and the undo shortcut.
 ///
-/// Each frame, call [`ToastQueue::tick`] and schedule a frame at the time
-/// it returns, then render [`ToastQueue::stack`]. Pass pointer moves to
-/// [`ToastQueue::pointer_moved`], and key presses to
+/// Changes made from `update` (which has no animation table) start their
+/// animations at the next [`ToastQueue::tick`]. In the view, call `tick`
+/// with the window's animation table and schedule a frame at the time it
+/// returns, then render [`ToastQueue::stack`]. Pass pointer moves to
+/// [`ToastQueue::pointer_moved`] and key presses to
 /// [`ToastQueue::undo_shortcut`].
 #[derive(Debug, Default)]
 pub struct ToastQueue {
     toasts: Vec<Toast>,
     /// Ids of toasts sliding out; their buttons no longer work.
     exiting: Vec<u64>,
+    /// Entrances and exits to start at the next tick.
+    pending_in: Vec<u64>,
+    pending_out: Vec<u64>,
+    /// A fan change to start at the next tick.
+    pending_fan: Option<bool>,
     next_id: u64,
     hovered: bool,
     /// The stack's rect from the last [`Self::stack`].
@@ -724,7 +731,7 @@ impl ToastQueue {
     }
 
     /// Show `toast`, assigning its id and creation time. Returns the id.
-    pub fn push(&mut self, mut toast: Toast, table: &mut AnimationTable, now_ms: u64) -> u64 {
+    pub fn push(&mut self, mut toast: Toast, now_ms: u64) -> u64 {
         self.next_id += 1;
         toast.id = self.next_id;
         toast.created_at_ms = now_ms;
@@ -734,7 +741,7 @@ impl ToastQueue {
         if self.hovered {
             toast.set_hovered(true, now_ms);
         }
-        animate_toast_in(table, toast.id, now_ms);
+        self.pending_in.push(toast.id);
         let id = toast.id;
         self.toasts.push(toast);
         id
@@ -745,37 +752,31 @@ impl ToastQueue {
     }
 
     /// Start toast `id` sliding out.
-    pub fn dismiss(&mut self, id: u64, table: &mut AnimationTable, now_ms: u64) {
+    pub fn dismiss(&mut self, id: u64) {
         if self.toasts.iter().any(|t| t.id == id) && !self.exiting.contains(&id) {
             self.exiting.push(id);
-            animate_toast_out(table, id, now_ms);
+            self.pending_out.push(id);
         }
     }
 
     /// Dismiss the toast at `index` in [`Self::toasts`], as the stack's
     /// `on_dismiss` reports.
-    pub fn dismiss_index(&mut self, index: usize, table: &mut AnimationTable, now_ms: u64) {
+    pub fn dismiss_index(&mut self, index: usize) {
         if let Some(id) = self.toasts.get(index).map(|t| t.id) {
-            self.dismiss(id, table, now_ms);
+            self.dismiss(id);
         }
     }
 
     /// Button `index` of toast `id` was pressed: dismiss the toast and
     /// return the button's action, or `None` when the toast already timed
     /// out or left.
-    pub fn activate(
-        &mut self,
-        id: u64,
-        index: usize,
-        table: &mut AnimationTable,
-        now_ms: u64,
-    ) -> Option<Action> {
+    pub fn activate(&mut self, id: u64, index: usize, now_ms: u64) -> Option<Action> {
         let toast = self.toasts.iter().find(|t| t.id == id)?;
         if !self.is_live(toast, now_ms) {
             return None;
         }
         let action = toast.actions.get(index)?.action.clone();
-        self.dismiss(id, table, now_ms);
+        self.dismiss(id);
         Some(action)
     }
 
@@ -786,7 +787,6 @@ impl ToastQueue {
         &mut self,
         pressed: &Binding,
         in_text_field: bool,
-        table: &mut AnimationTable,
         now_ms: u64,
     ) -> Option<Action> {
         let m = pressed.mods;
@@ -800,12 +800,12 @@ impl ToastQueue {
             .rev()
             .filter(|t| self.is_live(t, now_ms))
             .find_map(|t| Some((t.id, t.actions.iter().position(|a| a.undo)?)))?;
-        self.activate(id, index, table, now_ms)
+        self.activate(id, index, now_ms)
     }
 
     /// Pause every toast while the pointer is on the stack (and fan it
     /// out). Returns whether hover changed.
-    pub fn set_hovered(&mut self, hovered: bool, table: &mut AnimationTable, now_ms: u64) -> bool {
+    pub fn set_hovered(&mut self, hovered: bool, now_ms: u64) -> bool {
         if self.hovered == hovered {
             return false;
         }
@@ -813,35 +813,43 @@ impl ToastQueue {
         for toast in &mut self.toasts {
             toast.set_hovered(hovered, now_ms);
         }
-        animate_toast_fan(table, hovered, now_ms);
+        self.pending_fan = Some(hovered);
         true
     }
 
     /// The pointer moved to `pointer` (`None`: it left the window).
     /// Returns whether hover changed.
-    pub fn pointer_moved(
-        &mut self,
-        pointer: Option<(f32, f32)>,
-        table: &mut AnimationTable,
-        now_ms: u64,
-    ) -> bool {
+    pub fn pointer_moved(&mut self, pointer: Option<(f32, f32)>, now_ms: u64) -> bool {
         let over = !self.toasts.is_empty()
             && pointer
                 .zip(self.bounds)
                 .is_some_and(|((x, y), r)| r.contains(x, y));
-        self.set_hovered(over, table, now_ms)
+        self.set_hovered(over, now_ms)
     }
 
-    /// Slide out toasts whose time ran out and drop those whose exit
-    /// finished. Returns when the next toast times out, for scheduling a
-    /// frame; animations schedule their own.
+    /// Start pending animations, slide out toasts whose time ran out, and
+    /// drop those whose exit finished. Returns when the next toast times
+    /// out, for scheduling a frame; animations schedule their own.
     pub fn tick(&mut self, table: &mut AnimationTable, now_ms: u64) -> Option<u64> {
         for i in 0..self.toasts.len() {
             let toast = &self.toasts[i];
             if !self.exiting.contains(&toast.id) && toast.remaining_ms(now_ms) == Some(0) {
                 let id = toast.id;
-                self.dismiss(id, table, now_ms);
+                self.dismiss(id);
             }
+        }
+        for id in self.pending_in.drain(..) {
+            animate_toast_in(table, id, now_ms);
+        }
+        for id in self.pending_out.drain(..) {
+            animate_toast_out(table, id, now_ms);
+        }
+        if self.toasts.len() == self.exiting.len() && self.hovered {
+            // The pointer stays put while the last toast leaves.
+            self.set_hovered(false, now_ms);
+        }
+        if let Some(fanned) = self.pending_fan.take() {
+            animate_toast_fan(table, fanned, now_ms);
         }
         let exiting = &mut self.exiting;
         self.toasts.retain(|t| {
@@ -851,10 +859,6 @@ impl ToastQueue {
             }
             !gone
         });
-        if self.toasts.is_empty() && self.hovered {
-            self.hovered = false;
-            animate_toast_fan(table, false, now_ms);
-        }
         self.toasts
             .iter()
             .filter(|t| !self.exiting.contains(&t.id) && t.paused_at_ms.is_none())
