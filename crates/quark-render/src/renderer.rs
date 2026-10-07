@@ -230,7 +230,7 @@ impl TexturePool {
 
         // Allocate a new texture.
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("diffy_offscreen"),
+            label: Some("quark_offscreen"),
             size: wgpu::Extent3d {
                 width: w,
                 height: h,
@@ -424,7 +424,7 @@ impl GpuContext {
             .await?;
         let viewport_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("diffy_viewport_bind_group_layout"),
+                label: Some("quark_viewport_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -438,16 +438,16 @@ impl GpuContext {
             });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("diffy_quad_shader"),
+            label: Some("quark_quad_shader"),
             source: wgpu::ShaderSource::Wgsl(QUAD_SHADER.into()),
         });
         let quad_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("diffy_quad_pipeline_layout"),
+            label: Some("quark_quad_pipeline_layout"),
             bind_group_layouts: &[&viewport_bind_group_layout],
             immediate_size: 0,
         });
         let quad_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("diffy_quad_pipeline"),
+            label: Some("quark_quad_pipeline"),
             layout: Some(&quad_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -477,17 +477,17 @@ impl GpuContext {
         });
 
         let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("diffy_shadow_shader"),
+            label: Some("quark_shadow_shader"),
             source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
         });
         let shadow_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("diffy_shadow_pipeline_layout"),
+                label: Some("quark_shadow_pipeline_layout"),
                 bind_group_layouts: &[&viewport_bind_group_layout],
                 immediate_size: 0,
             });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("diffy_shadow_pipeline"),
+            label: Some("quark_shadow_pipeline"),
             layout: Some(&shadow_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shadow_shader,
@@ -517,17 +517,17 @@ impl GpuContext {
         });
 
         let effect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("diffy_effect_shader"),
+            label: Some("quark_effect_shader"),
             source: wgpu::ShaderSource::Wgsl(EFFECT_SHADER.into()),
         });
         let effect_quad_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("diffy_effect_quad_pipeline_layout"),
+                label: Some("quark_effect_quad_pipeline_layout"),
                 bind_group_layouts: &[&viewport_bind_group_layout],
                 immediate_size: 0,
             });
         let effect_quad_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("diffy_effect_quad_pipeline"),
+            label: Some("quark_effect_quad_pipeline"),
             layout: Some(&effect_quad_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &effect_shader,
@@ -560,7 +560,7 @@ impl GpuContext {
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("diffy_texture_bind_group_layout"),
+                label: Some("quark_texture_bind_group_layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -581,23 +581,23 @@ impl GpuContext {
                 ],
             });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("diffy_blit_sampler"),
+            label: Some("quark_blit_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("diffy_blit_shader"),
+            label: Some("quark_blit_shader"),
             source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
         });
         let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("diffy_blit_pipeline_layout"),
+            label: Some("quark_blit_pipeline_layout"),
             bind_group_layouts: &[&viewport_bind_group_layout, &texture_bind_group_layout],
             immediate_size: 0,
         });
         let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("diffy_blit_pipeline"),
+            label: Some("quark_blit_pipeline"),
             layout: Some(&blit_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &blit_shader,
@@ -627,16 +627,16 @@ impl GpuContext {
         });
 
         let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("diffy_blur_shader"),
+            label: Some("quark_blur_shader"),
             source: wgpu::ShaderSource::Wgsl(BLUR_SHADER.into()),
         });
         let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("diffy_blur_pipeline_layout"),
+            label: Some("quark_blur_pipeline_layout"),
             bind_group_layouts: &[&viewport_bind_group_layout, &texture_bind_group_layout],
             immediate_size: 0,
         });
         let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("diffy_blur_pipeline"),
+            label: Some("quark_blur_pipeline"),
             layout: Some(&blur_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &blur_shader,
@@ -870,12 +870,12 @@ impl Renderer {
         let queue = shared.queue.clone();
         let viewport_uniform = ViewportUniform::new(surface_config.width, surface_config.height);
         let viewport_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("diffy_viewport_uniform"),
+            label: Some("quark_viewport_uniform"),
             contents: bytemuck::bytes_of(&viewport_uniform),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let viewport_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("diffy_viewport_bind_group"),
+            label: Some("quark_viewport_bind_group"),
             layout: &shared.viewport_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -990,7 +990,7 @@ impl Renderer {
     /// Create a bind group for sampling an offscreen target in a shader.
     pub fn create_texture_bind_group(&self, target: &OffscreenTarget) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("diffy_offscreen_bind_group"),
+            label: Some("quark_offscreen_bind_group"),
             layout: &self.texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1071,7 +1071,7 @@ impl Renderer {
         // Owned target texture (COPY_SRC so we can read it back). Format matches
         // the surface format the pipelines were built against.
         let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("diffy_png_target"),
+            label: Some("quark_png_target"),
             size: wgpu::Extent3d {
                 width: w,
                 height: h,
@@ -1088,7 +1088,7 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("diffy_png_encoder"),
+                label: Some("quark_png_encoder"),
             });
         self.record_frame(&mut encoder, &view, text, w, h)?;
 
@@ -1097,7 +1097,7 @@ impl Renderer {
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("diffy_png_readback"),
+            label: Some("quark_png_readback"),
             size: (padded_bytes_per_row * h) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -1213,7 +1213,7 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("diffy_frame_encoder"),
+                label: Some("quark_frame_encoder"),
             });
         self.record_frame(&mut encoder, &view, text, sw, sh)?;
 
@@ -1296,15 +1296,15 @@ impl Renderer {
         let queue = &self.queue;
         let pool = &mut self.instance_buffer_pool;
         let mut buffers = FrameBuffers {
-            shadow: pool.upload(device, queue, "diffy_shadow_instances", &batches.shadows),
+            shadow: pool.upload(device, queue, "quark_shadow_instances", &batches.shadows),
             effect: pool.upload(
                 device,
                 queue,
-                "diffy_effect_quad_instances",
+                "quark_effect_quad_instances",
                 &batches.effects,
             ),
-            quad: pool.upload(device, queue, "diffy_quad_instances", &batches.quads),
-            image: pool.upload(device, queue, "diffy_image_blit", &batches.images),
+            quad: pool.upload(device, queue, "quark_quad_instances", &batches.quads),
+            image: pool.upload(device, queue, "quark_image_blit", &batches.images),
             ..FrameBuffers::default()
         };
 
@@ -1470,13 +1470,13 @@ impl Renderer {
         buffers.blur = pool.upload(
             &self.device,
             &self.queue,
-            "diffy_blur_instances",
+            "quark_blur_instances",
             &blur_instances,
         );
         buffers.blur_blit = pool.upload(
             &self.device,
             &self.queue,
-            "diffy_blur_blit",
+            "quark_blur_blit",
             &blit_instances,
         );
 
@@ -1536,7 +1536,7 @@ impl Renderer {
                 .position(|s| matches!(s, DrawStep::Blur(_)))
                 .map_or(flat.steps.len(), |p| start + p);
             {
-                let mut pass = begin_pass(encoder, "diffy_frame_pass", draw_view, load);
+                let mut pass = begin_pass(encoder, "quark_frame_pass", draw_view, load);
                 set_viewport(&mut pass);
                 if let (Some(b), Some(buf)) = (blur, &buffers.blur_blit)
                     && blurs_done > 0
@@ -1570,7 +1570,7 @@ impl Renderer {
             for (dir, source, dest) in [(0, &b.scene_bind, &b.h_view), (1, &b.h_bind, &b.v_view)] {
                 let mut pass = begin_pass(
                     encoder,
-                    "diffy_blur_pass",
+                    "quark_blur_pass",
                     dest,
                     wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 );
@@ -1589,7 +1589,7 @@ impl Renderer {
         if let (Some(b), Some(buf)) = (blur, &buffers.blur_blit) {
             let mut pass = begin_pass(
                 encoder,
-                "diffy_composite_pass",
+                "quark_composite_pass",
                 target,
                 wgpu::LoadOp::Clear(wgpu::Color::BLACK),
             );
@@ -1702,7 +1702,7 @@ impl Renderer {
         let texture = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
-                label: Some("diffy_cached_image"),
+                label: Some("quark_cached_image"),
                 size: wgpu::Extent3d {
                     width: image.width,
                     height: image.height,
@@ -1830,7 +1830,7 @@ fn create_texture_bind_group(
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("diffy_texture_bind_group"),
+        label: Some("quark_texture_bind_group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {

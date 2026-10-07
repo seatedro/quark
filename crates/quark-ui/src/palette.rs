@@ -174,7 +174,7 @@ pub fn alpha_scale(base: Color) -> AlphaScale {
 // Predefined palette hues and chromas
 // ---------------------------------------------------------------------------
 
-/// Neutral blue-grey (the existing diffy palette lean, ~255°).
+/// Neutral blue-grey (the default palette's lean, ~255°).
 pub const NEUTRAL_HUE: f32 = 255.0;
 pub const NEUTRAL_CHROMA: f32 = 0.035;
 

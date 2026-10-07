@@ -1,6 +1,5 @@
-//! Tree-sitter syntax highlighting for code blocks, ported from Diffy's
-//! `phosphor` crate with the grammars compiled in instead of loaded from
-//! downloaded packs.
+//! Tree-sitter syntax highlighting for code blocks, with grammars compiled
+//! in.
 //!
 //! Each language is a cargo feature (`rust`, `javascript`, `typescript`,
 //! `python`, `bash`, `json`, `go`, or `common` for all of them). A language

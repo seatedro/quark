@@ -1,24 +1,25 @@
 # AGENTS.md
 
-Guidance for agents working in `crates/halogen`. The root `AGENTS.md` still
-applies; this node is the high-signal map for the local UI/reactivity toolkit.
+Guidance for agents working in `crates/quark`, the core crate of the quark
+UI framework. Repo-wide rules (including `TEST_BIBLE.md`) still apply.
 
 ## Purpose And Scope
 
-Quark provides Diffy's small UI foundation: fine-grained reactive signals,
-pure geometry, hit-testing primitives, style data, immediate-mode scene
+This crate provides the renderer-free foundation: fine-grained reactive
+signals, geometry, the hit table, the semantic frame, focus, document
+selection, the animation table, the Fenwick tree, style data, scene
 primitives, and re-exports for the `view!` and `Store` macros.
 
-Quark does not own Diffy's design tokens, app action enum, renderer, glyph
-cache, OS event loop, overlay policy, or product state. Those live in the app
-and adapt Quark's generic data.
+It does not own design tokens, elements, the renderer, text shaping, the OS
+event loop, or app state. Those live in `quark-ui`, `quark-render`,
+`quark-text`, `quark-app`, and the app itself.
 
 ## Related Context
 
-- Root product and UI rules: `../../AGENTS.md`
-- Quark architecture overview: `ARCHITECTURE.md`
+- Test rules: `../../TEST_BIBLE.md`
+- Core architecture overview: `ARCHITECTURE.md`
 - Macro parser and lowering contracts: `../quark-macros/AGENTS.md`
-- Diffy builder/style methods that `view!` calls: `../../src/ui/style.rs`
+- Builder/style methods that `view!` calls: `../quark-ui/src/style.rs`
 
 ## Core Contracts
 
@@ -36,13 +37,13 @@ and adapt Quark's generic data.
   the redraw need.
 - Re-entrant signal access is a bug. The store intentionally panics on nested
   mutable/immutable borrow conflicts instead of hiding feedback-loop writes.
-- `scene::Scene` is pure data. Quark emits primitives; Diffy's renderer
+- `scene::Scene` is pure data. This crate defines primitives; `quark-render`
   decides how to batch, cache, clip, and draw them.
 - `hit` is generic over the host click-result payload. Keep action routing in
   the app; Quark should only resolve geometry, z-order, blocking, cursor, and
   identity data.
-- `style::ElementStyle` is pure layout/visual data. Diffy's fluent `Styled`
-  helpers and token systems live outside this crate.
+- `style::ElementStyle` is pure layout/visual data. The fluent `Styled`
+  helpers and design tokens live in `quark-ui`.
 - `class="..."` in `view!` is not CSS. It lowers to Rust builder method calls
   such as `.flex_row()` or mapped aliases from `quark-macros`.
 
@@ -62,8 +63,8 @@ and adapt Quark's generic data.
   path and the macro lowering before claiming semantics.
 - Do not add wgpu, glyphon, winit, app `Action`, or theme-token dependencies to
   Quark.
-- Do not patch only a Diffy component if the underlying Quark primitive
-  contract is wrong.
+- Do not patch only a component in `quark-components` or `quark-ui` if the
+  underlying primitive contract here is wrong.
 - Do not introduce reactive effects that write during their own execution
   without a deferred-write design.
 - Do not let scene or hit-test construction allocate unbounded data per frame
@@ -71,11 +72,11 @@ and adapt Quark's generic data.
 
 ## Validation
 
-- Focused crate tests: `cargo test -p halogen`
+- Focused crate tests: `cargo test -p quark`
 - Macro contract fallout: `cargo test -p quark-macros` and then
-  `cargo test -p halogen`
-- UI behavior changes that cross into Diffy: run the smallest relevant app test
-  or smoke path in addition to crate tests.
+  `cargo test -p quark`
+- Changes that reach elements or the app: also run the relevant `quark-ui` or
+  `quark-app` tests, or an example under Xvfb.
 
 ## Maintenance
 

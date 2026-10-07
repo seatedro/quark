@@ -1,3 +1,11 @@
-# Halogen
+# quark
 
-Halogen is Diffy's native UI platform, not a browser runtime. It borrows the web platform lessons that make product UI tractable: retained identity, keyed children, event routing, focus and accessibility semantics, typed style states, virtualization hooks, and inspectable component fixtures. It rejects DOM/CSS emulation, hydration, implicit framework lifecycles, and stringly component contracts; native apps should get explicit Rust APIs, predictable lifecycles, renderer-agnostic GPU-first output, and devtools that understand app semantics directly.
+The core crate of quark, a native Rust UI framework. It holds the parts that
+know nothing about windows, GPUs, or text shaping: reactive signals, scene
+primitives, hit testing, the semantic frame used for focus and accessibility,
+document selection, the animation table, and style data.
+
+Quark borrows what makes web UI tractable (stable identity, keyed children,
+event routing, focus and accessibility semantics, virtualization) without
+emulating the DOM or CSS. Apps get explicit Rust APIs, predictable lifecycles,
+and GPU-first output.

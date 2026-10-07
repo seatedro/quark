@@ -1,4 +1,4 @@
-//! Parsing and query evaluation, ported from phosphor's `language.rs`.
+//! Parsing and query evaluation.
 //! Parsers and compiled queries are cached per thread, so a worker thread
 //! compiles each language once.
 

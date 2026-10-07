@@ -1,4 +1,4 @@
-# halogen
+# quark
 
 View macro + reactive signal store for building UIs.
 

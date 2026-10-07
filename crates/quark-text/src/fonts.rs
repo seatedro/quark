@@ -7,8 +7,6 @@ use std::sync::{Arc, OnceLock};
 use cosmic_text::fontdb;
 use serde::{Deserialize, Serialize};
 
-const LEGACY_SYSTEM_FONT_SELECTION: &str = "__diffy_system_font__";
-
 pub const UI_FAMILY: &str = "Geist";
 pub const MONO_FAMILY: &str = "Geist Mono";
 pub const INTER_FAMILY: &str = "Inter";
@@ -84,7 +82,7 @@ static VENDORED_FONT_BYTES: &[&[u8]] = &[
 
 pub fn normalize_font_selection(role: FontRole, family: &str) -> String {
     let trimmed = family.trim();
-    if trimmed.is_empty() || trimmed == LEGACY_SYSTEM_FONT_SELECTION {
+    if trimmed.is_empty() {
         return default_family(role).to_owned();
     }
     trimmed.to_owned()

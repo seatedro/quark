@@ -305,7 +305,7 @@ fn realistic_title_bar_layout() {
         .h(52.0)
         .px(20.0)
         .bg(theme.colors.title_bar_background)
-        .child(text("diffy").text_lg().color(theme.colors.text_strong))
+        .child(text("quark").text_lg().color(theme.colors.text_strong))
         .child(spacer())
         .child(
             div()
