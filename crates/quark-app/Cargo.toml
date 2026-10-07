@@ -65,6 +65,7 @@ interprocess = { version = "2.2", default-features = false }
 [dev-dependencies]
 quark-render = { workspace = true, features = ["headless-render"] }
 image.workspace = true
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [features]
 default = ["ui"]

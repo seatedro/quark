@@ -50,6 +50,7 @@ fn button(key: &str, label: &str, idle: Color, hover: Color, msg: Option<Msg>) -
 
 impl UiApp for AnimationDemo {
     type Action = Msg;
+    type Message = ();
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();

@@ -1,0 +1,5 @@
+error: unknown struct-level `#[store(...)]` attribute; supported: `default`
+ --> tests/ui/store_unknown_struct_attr.rs:4:9
+  |
+4 | #[store(defaults)]
+  |         ^^^^^^^^

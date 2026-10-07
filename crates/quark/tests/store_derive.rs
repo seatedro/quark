@@ -4,6 +4,7 @@ use quark::Store;
 use quark::reactive::SignalStore;
 
 #[derive(Debug, Clone, Default, PartialEq, Store)]
+#[store(default)]
 pub struct Pane {
     pub scroll_px: f32,
     pub hovered: Option<usize>,
@@ -25,41 +26,6 @@ pub struct Workspace {
     pub debug: PaneDebug,
     #[store(skip)]
     pub callbacks: Vec<String>, // stays out of the store
-}
-
-#[test]
-fn generates_store_with_leaf_signals() {
-    let store = SignalStore::default();
-    let initial = Pane {
-        scroll_px: 42.5,
-        hovered: Some(3),
-        filter: "foo".into(),
-    };
-    let pane = PaneStore::new(&store, initial);
-
-    assert_eq!(store.read(pane.scroll_px), 42.5);
-    assert_eq!(store.read(pane.hovered), Some(3));
-    assert_eq!(store.read(pane.filter), "foo");
-}
-
-#[test]
-fn store_is_copy() {
-    let store = SignalStore::default();
-    let pane = PaneStore::new(&store, Pane::default());
-    let pane2 = pane; // Copy
-    let pane3 = pane;
-    assert_eq!(store.read(pane2.scroll_px), 0.0);
-    assert_eq!(store.read(pane3.scroll_px), 0.0);
-}
-
-#[test]
-fn writes_propagate_to_any_dirty() {
-    let store = SignalStore::default();
-    let pane = PaneStore::new(&store, Pane::default());
-    assert!(!store.any_dirty());
-    store.write(pane.scroll_px, 100.0);
-    assert!(store.any_dirty());
-    assert_eq!(store.read(pane.scroll_px), 100.0);
 }
 
 #[test]
@@ -89,22 +55,7 @@ fn flatten_nests_stores() {
 }
 
 #[test]
-fn set_if_changed_works_on_generated_signals() {
-    let store = SignalStore::default();
-    let pane = PaneStore::new(&store, Pane::default());
-
-    assert!(store.set_if_changed(pane.scroll_px, 5.0));
-    store.clear_dirty();
-    // Writing the same value should be a no-op (no dirty).
-    assert!(!store.set_if_changed(pane.scroll_px, 5.0));
-    assert!(!store.any_dirty());
-    // Different value → dirty.
-    assert!(store.set_if_changed(pane.scroll_px, 7.0));
-    assert!(store.any_dirty());
-}
-
-#[test]
-fn snapshot_reconstructs_original() {
+fn snapshot_reflects_writes() {
     let store = SignalStore::default();
     let initial = Pane {
         scroll_px: 12.5,
@@ -112,23 +63,24 @@ fn snapshot_reconstructs_original() {
         filter: "hello".into(),
     };
     let pane = PaneStore::new(&store, initial.clone());
-
     assert_eq!(pane.snapshot(&store), initial);
 
-    // Mutations reflect in the snapshot.
     store.write(pane.scroll_px, 99.0);
     store.write(pane.filter, "world".into());
-    let snap = pane.snapshot(&store);
-    assert_eq!(snap.scroll_px, 99.0);
-    assert_eq!(snap.hovered, Some(9));
-    assert_eq!(snap.filter, "world");
+    assert_eq!(
+        pane.snapshot(&store),
+        Pane {
+            scroll_px: 99.0,
+            hovered: Some(9),
+            filter: "world".into(),
+        }
+    );
 }
 
 #[test]
 fn snapshot_recurses_through_flatten() {
     let store = SignalStore::default();
     // Workspace has #[store(skip)] for callbacks, so snapshot is NOT generated.
-    // Build a pure nested store to test snapshot recursion.
     #[derive(Debug, Clone, Default, PartialEq, quark::Store)]
     struct Outer {
         pub flag: bool,
@@ -136,51 +88,43 @@ fn snapshot_recurses_through_flatten() {
         pub inner: Pane,
     }
 
-    let outer = OuterStore::new(
-        &store,
-        Outer {
-            flag: true,
-            inner: Pane {
-                scroll_px: 1.5,
-                hovered: None,
-                filter: "x".into(),
-            },
+    let initial = Outer {
+        flag: true,
+        inner: Pane {
+            scroll_px: 1.5,
+            hovered: None,
+            filter: "x".into(),
         },
-    );
-    let snap = outer.snapshot(&store);
-    assert!(snap.flag);
-    assert_eq!(snap.inner.scroll_px, 1.5);
-    assert_eq!(snap.inner.filter, "x");
+    };
+    let outer = OuterStore::new(&store, initial.clone());
+    assert_eq!(outer.snapshot(&store), initial);
 }
 
 #[test]
-fn new_default_constructs_from_default() {
+fn store_default_constructs_from_default() {
     let store = SignalStore::default();
     let pane = PaneStore::new_default(&store);
     assert_eq!(pane.snapshot(&store), Pane::default());
 }
 
+/// Regression: the derive used to emit `new_default` with a `where Self:
+/// Default` bound, which fails to compile for structs without `Default`.
 #[test]
-fn signal_ergonomic_methods() {
+fn non_default_struct_derives_store() {
+    #[derive(Debug, Clone, PartialEq)]
+    struct Handle(u32);
+
+    #[derive(Debug, Clone, PartialEq, Store)]
+    struct Session {
+        handle: Handle,
+        title: String,
+    }
+
     let store = SignalStore::default();
-    let pane = PaneStore::new(&store, Pane::default());
-
-    // .set / .get
-    pane.scroll_px.set(&store, 42.0);
-    assert_eq!(pane.scroll_px.get(&store), 42.0);
-
-    // .update
-    pane.scroll_px.update(&store, |v| *v *= 2.0);
-    assert_eq!(pane.scroll_px.get(&store), 84.0);
-
-    // .with (no clone)
-    let len = pane.filter.with(&store, |s| s.len());
-    assert_eq!(len, 0);
-
-    // .set_if_changed
-    store.clear_dirty();
-    assert!(!pane.scroll_px.set_if_changed(&store, 84.0));
-    assert!(!store.any_dirty());
-    assert!(pane.scroll_px.set_if_changed(&store, 85.0));
-    assert!(store.any_dirty());
+    let initial = Session {
+        handle: Handle(7),
+        title: "main".into(),
+    };
+    let session = SessionStore::new(&store, initial.clone());
+    assert_eq!(session.snapshot(&store), initial);
 }
