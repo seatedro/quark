@@ -1,6 +1,11 @@
-//! The app runner: owns the winit event loop and a table of windows, each
-//! with its own wgpu renderer and accesskit adapter, and asks an [`App`] for a
-//! [`Scene`] whenever a window needs repainting.
+//! The app runner: owns the winit event loop, one shared [`GpuContext`], and
+//! a table of windows, each with its own surface, renderer state, and
+//! accesskit adapter, and asks an [`App`] for a [`Scene`] whenever a window
+//! needs repainting.
+//!
+//! Apps work in logical points. The runner converts winit's physical
+//! positions to points once, as input arrives, and converts each window's
+//! scene to physical pixels once, just before drawing it.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -14,10 +19,10 @@ use accesskit_winit::Adapter as AccessibilityAdapter;
 use glyphon::FontSystem;
 use quark::scene::Scene;
 use quark_render::fonts::FontSettings;
-use quark_render::{RenderError, Renderer, TextMetrics};
-use quark_text::{LayoutCache, TextSystem};
+use quark_render::{GpuContext, RenderError, Renderer, TextMetrics};
+use quark_text::{LayoutCache, TextError, TextLayout, TextParams, TextSystem};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -32,6 +37,7 @@ mod app;
 mod context;
 mod event_loop;
 mod events;
+mod scale;
 mod table;
 mod text;
 mod window;
@@ -41,6 +47,7 @@ pub use app::*;
 pub use context::*;
 pub use event_loop::*;
 pub use events::*;
+pub use scale::scene_to_physical;
 pub use table::WindowHandle;
 use table::WindowTable;
 pub use text::AppText;

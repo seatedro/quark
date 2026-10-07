@@ -5,6 +5,7 @@ mod scroll;
 
 use std::path::PathBuf;
 
+use winit::dpi::PhysicalPosition;
 use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
@@ -12,8 +13,9 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 pub use scroll::{quantize_scroll_delta_px, scroll_delta_to_px};
 
-/// Pointer coordinates are physical pixels relative to the window's content
-/// area, matching the coordinate space of the `Scene` the app draws.
+/// Pointer coordinates and wheel pixel deltas are logical points relative to
+/// the window's content area, matching the coordinate space of the `Scene`
+/// the app draws. [`InputNormalizer`] converts winit's physical values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     TextInput(String),
@@ -228,18 +230,48 @@ fn named_binding_key(named: NamedKey) -> Option<(&'static str, bool)> {
 
 /// Turns raw winit window events into `InputEvent`s, tracking the modifier,
 /// pointer, and IME composition state that individual events don't carry.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InputNormalizer {
     modifiers: ModifiersState,
     pointer_position: Option<(f32, f32)>,
     ime_composing: bool,
+    scale_factor: f64,
+}
+
+impl Default for InputNormalizer {
+    fn default() -> Self {
+        Self::new(1.0)
+    }
 }
 
 impl InputNormalizer {
+    /// A normalizer for a window with `scale_factor` physical pixels per
+    /// logical point.
+    pub fn new(scale_factor: f64) -> Self {
+        Self {
+            modifiers: ModifiersState::empty(),
+            pointer_position: None,
+            ime_composing: false,
+            scale_factor,
+        }
+    }
+
+    /// The window moved to a display with another scale factor. The last
+    /// pointer position is kept in logical points at the new scale.
+    pub fn set_scale_factor(&mut self, scale_factor: f64) {
+        if let Some((x, y)) = &mut self.pointer_position {
+            let ratio = (self.scale_factor / scale_factor) as f32;
+            *x *= ratio;
+            *y *= ratio;
+        }
+        self.scale_factor = scale_factor;
+    }
+
     pub fn modifiers(&self) -> ModifiersState {
         self.modifiers
     }
 
+    /// Last pointer position in logical points.
     pub fn pointer_position(&self) -> Option<(f32, f32)> {
         self.pointer_position
     }
@@ -261,7 +293,8 @@ impl InputNormalizer {
                 vec![InputEvent::Focused(focused)]
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let (x, y) = (position.x as f32, position.y as f32);
+                let position = position.to_logical::<f32>(self.scale_factor);
+                let (x, y) = (position.x, position.y);
                 self.pointer_position = Some((x, y));
                 vec![InputEvent::PointerMoved { x, y }]
             }
@@ -270,6 +303,15 @@ impl InputNormalizer {
                 vec![InputEvent::PointerLeft]
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                let delta = match delta {
+                    // The type says physical, but the value is now points,
+                    // like every other position an app sees.
+                    MouseScrollDelta::PixelDelta(pixels) => {
+                        let points = pixels.to_logical::<f64>(self.scale_factor);
+                        MouseScrollDelta::PixelDelta(PhysicalPosition::new(points.x, points.y))
+                    }
+                    lines => lines,
+                };
                 vec![InputEvent::Wheel { delta, phase }]
             }
             WindowEvent::MouseInput { state, button, .. } => {

@@ -1,7 +1,9 @@
 use super::*;
 
-/// An application driven by [`run`]. Scene and pointer coordinates are
-/// physical pixels; use [`FrameContext::scale_factor`] to size content.
+/// An application driven by [`run`]. Scene, size, and pointer coordinates
+/// are logical points; the runner scales each window's scene to physical
+/// pixels with that window's [`FrameContext::scale_factor`]. Shape text with
+/// [`FrameContext::layout_text`] so glyphs are rasterized at physical size.
 ///
 /// Every window shares the one app. Each context names the window it is for
 /// ([`FrameContext::window_handle`], [`EventContext::window_handle`]); an app
