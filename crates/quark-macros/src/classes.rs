@@ -861,7 +861,11 @@ mod tests {
                 On::Text,
                 ".text_sm().size(14f32).color((c.text))",
             ),
-            ("aspect-[16/9] rotate-45", On::Box, ".aspect_ratio(16f32/9f32).rotate(45f32.to_radians())"),
+            (
+                "aspect-[16/9] rotate-45",
+                On::Box,
+                ".aspect_ratio(16f32/9f32).rotate(45f32.to_radians())",
+            ),
             (
                 "hover:bg-[c] hover:opacity-80",
                 On::Box,

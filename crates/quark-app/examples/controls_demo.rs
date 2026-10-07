@@ -4,9 +4,11 @@
 //! bottom of the window whose list opens upward. Tab moves between
 //! controls; inside a radio group or segmented control the arrow keys move
 //! the choice. Escape closes an open list, or quits when none is open.
+//! The layout is written with `view!` around the components' builders.
 
 use std::rc::Rc;
 
+use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome};
@@ -15,8 +17,8 @@ use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, UiSender, ViewContext, WindowOptions};
 use quark_components::{
     ComboboxMsg, ComboboxState, RadioOption, SegmentedControl, SegmentedItem, SelectMsg,
-    SelectOption, SelectState, combobox, radio_focus_id, radio_group, segmented_focus_id, select,
-    slider, switch,
+    SelectOption, SelectState, Switch, combobox, radio_focus_id, radio_group, segmented_focus_id,
+    select, slider,
 };
 
 const CITIES: [&str; 12] = [
@@ -139,19 +141,14 @@ impl ControlsDemo {
     }
 
     fn row(label: &str, control: impl IntoAnyElement, cx: &ViewContext) -> AnyElement {
-        div()
-            .flex_row()
-            .items_center()
-            .gap(16.0)
-            .child(
-                div().w(96.0).child(
-                    text(label.to_owned())
-                        .text_sm()
-                        .color(cx.theme.colors.text_muted),
-                ),
-            )
-            .child(control)
-            .into_any()
+        view! {
+            <div class="flex-row items-center gap-4">
+                <div class="w-24">
+                    <text class="text-sm" color={cx.theme.colors.text_muted}>{label.to_owned()}</text>
+                </div>
+                {control}
+            </div>
+        }
     }
 }
 
@@ -167,79 +164,49 @@ impl UiApp for ControlsDemo {
         let viewport = cx.frame.size();
         let (width, height) = viewport;
         let colors = &cx.theme.colors;
-        let form = div()
-            .flex_col()
-            .gap(14.0)
-            .child(Self::row(
-                "Fruit",
-                select(&self.fruit, self.fruits.clone(), |m| Msg::Fruit(m).into())
-                    .label("Fruit")
-                    .viewport(viewport),
-                cx,
-            ))
-            .child(Self::row(
-                "City",
-                combobox(&self.city, "City", |m| Msg::City(m).into())
-                    .placeholder("Search cities")
-                    .viewport(viewport),
-                cx,
-            ))
-            .child(Self::row(
-                "Size",
-                radio_group(
-                    "controls.size",
-                    "Size",
-                    SIZES
-                        .iter()
-                        .map(|s| RadioOption::new(*s).disabled(*s == "Huge"))
-                        .collect(),
-                    self.size,
-                    |i| Msg::Size(i).into(),
-                ),
-                cx,
-            ))
-            .child(Self::row(
-                "View",
-                SegmentedControl::new(
-                    VIEWS
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| SegmentedItem::new(*v, Msg::View(i), i == self.view))
-                        .collect(),
-                )
-                .id("controls.view"),
-                cx,
-            ))
-            .child(Self::row(
-                "Network",
-                switch(self.wifi).label("Wi-Fi").on_toggle(Msg::Wifi),
-                cx,
-            ))
-            .child(Self::row(
-                "Volume",
-                slider("controls.volume", "Volume", self.volume, 0.0, 100.0, |v| {
-                    Msg::Volume(v).into()
-                })
-                .step(5.0),
-                cx,
-            ));
-        let footer = Self::row(
-            "Theme",
-            select(&self.theme, self.themes.clone(), |m| Msg::Theme(m).into())
-                .label("Theme")
-                .viewport(viewport),
-            cx,
-        );
-        div()
-            .w(width)
-            .h(height)
-            .p(24.0)
-            .flex_col()
-            .justify_between()
-            .bg(colors.background)
-            .child(form)
-            .child(footer)
-            .into_any()
+        let fruit = select(&self.fruit, self.fruits.clone(), |m| Msg::Fruit(m).into())
+            .label("Fruit")
+            .viewport(viewport);
+        let city = combobox(&self.city, "City", |m| Msg::City(m).into())
+            .placeholder("Search cities")
+            .viewport(viewport);
+        let sizes = SIZES
+            .iter()
+            .map(|s| RadioOption::new(*s).disabled(*s == "Huge"))
+            .collect();
+        let size = radio_group("controls.size", "Size", sizes, self.size, |i| {
+            Msg::Size(i).into()
+        });
+        let views = VIEWS
+            .iter()
+            .enumerate()
+            .map(|(i, v)| SegmentedItem::new(*v, Msg::View(i), i == self.view))
+            .collect();
+        let volume = slider("controls.volume", "Volume", self.volume, 0.0, 100.0, |v| {
+            Msg::Volume(v).into()
+        })
+        .step(5.0);
+        let theme = select(&self.theme, self.themes.clone(), |m| Msg::Theme(m).into())
+            .label("Theme")
+            .viewport(viewport);
+        // Builder values and markup mix freely: rows take either.
+        view! {
+            <div w={width} h={height} class="p-6 flex-col justify-between bg-[colors.background]">
+                <div class="flex-col gap-[14]">
+                    {Self::row("Fruit", fruit, cx)}
+                    {Self::row("City", city, cx)}
+                    {Self::row("Size", size, cx)}
+                    {Self::row("View", SegmentedControl::new(views).id("controls.view"), cx)}
+                    {Self::row(
+                        "Network",
+                        view! { <Switch on={self.wifi} label="Wi-Fi" on:toggle={Msg::Wifi} /> },
+                        cx,
+                    )}
+                    {Self::row("Volume", volume, cx)}
+                </div>
+                {Self::row("Theme", theme, cx)}
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
