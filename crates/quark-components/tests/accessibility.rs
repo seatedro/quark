@@ -168,7 +168,7 @@ fn keyboard_focus_rings_the_focused_component() {
         .nodes()
         .iter()
         .filter(|node| node.state.style_state.contains(StyleState::FOCUS_VISIBLE))
-        .map(|node| node.label.clone())
+        .map(|node| node.label.as_deref().map(str::to_owned))
         .collect();
     assert_eq!(ringed, [Some("Remember me".to_owned())]);
 }

@@ -28,6 +28,9 @@
 //!   has a transition in motion is rebuilt every frame until it settles.
 //!   Transition rows of a replayed subtree are kept alive.
 //! - **Text inputs**: a subtree with a text input is never replayed.
+//! - **Scroll handles**: the boundary watches every [`ScrollHandle`] its
+//!   subtree paints and rebuilds when one has moved, has a request pending,
+//!   or is in motion. Replays keep the handles' viewports current.
 //!
 //! A boundary is a block box: the content is laid out at the width the
 //! parent gives the boundary and keeps its own height. Style the boundary
@@ -233,8 +236,10 @@ impl ElementCache {
             return Claim::Uncached;
         }
         self.last_pass[r] = self.pass;
+        let scroll_unchanged = self.paint[r].scroll_unchanged();
         let inputs = &mut self.inputs[r];
         let replay = self.replay
+            && scroll_unchanged
             && inputs.reusable
             && inputs.hash == hash
             && inputs.scale == scale
