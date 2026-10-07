@@ -193,3 +193,18 @@ fn pointer_opens_titles_follows_hover_and_shows_shortcuts() {
     assert_eq!(ui.app().picks, ["find"]);
     assert_eq!(ui.app().bar.bar.open_menu(), None);
 }
+
+// Catches an open menu that only a title or an item can close, so a click
+// elsewhere in the window leaves it hanging.
+#[test]
+fn a_press_outside_the_open_menu_closes_it_without_a_pick() {
+    let mut ui = harness();
+    let file = ui.find(By::role_name(Role::MenuItem, "File")).center();
+    ui.click(file);
+    assert_eq!(ui.app().bar.bar.open_menu(), Some(0));
+
+    ui.click((350.0, 280.0));
+
+    assert_eq!(ui.app().bar.bar.open_menu(), None);
+    assert!(ui.app().picks.is_empty(), "{:?}", ui.app().picks);
+}

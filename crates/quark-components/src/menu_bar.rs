@@ -150,6 +150,20 @@ impl MenuBar {
         self.dropdown.pointer_moved(x, y)
     }
 
+    /// A pointer press at `(x, y)`: one outside the titles and the open
+    /// menu closes it, as a native menu bar does. Returns whether it
+    /// closed, in which case the press should go no further.
+    pub fn pointer_pressed(&mut self, x: f32, y: f32) -> bool {
+        if !matches!(self.mode, Mode::Open(_))
+            || self.titles.iter().any(|r| r.contains(x, y))
+            || self.dropdown.contains(x, y)
+        {
+            return false;
+        }
+        self.close();
+        true
+    }
+
     /// Open menu `index`; from the keyboard, with its first row
     /// highlighted.
     fn open(&mut self, index: usize, keyboard: bool) {
@@ -253,7 +267,7 @@ impl MenuBar {
     fn title_width(label: &str, theme: &Theme) -> f32 {
         let m = &theme.metrics;
         let glyphs = label.chars().count() as f32;
-        (glyphs * m.ui_small_font_size * 0.62 + m.spacing_md * 2.0).ceil()
+        (glyphs * m.ui_small_font_size * 0.58 + m.spacing_md).ceil()
     }
 
     /// The bar, `viewport`-wide, with the open menu over the window.
@@ -267,7 +281,7 @@ impl MenuBar {
     ) -> AnyElement {
         let tc = &theme.colors;
         let m = &theme.metrics;
-        let height = (m.ui_small_font_size * 1.35 + m.spacing_xs * 2.0 + 4.0).ceil();
+        let height = (m.ui_small_font_size * 1.35 + m.spacing_xs * 2.0).ceil();
         let mut x = m.spacing_xs;
         self.titles.clear();
         let mut bar = div()

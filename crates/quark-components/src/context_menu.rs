@@ -11,7 +11,7 @@ use quark::SemanticRole;
 
 use quark_render::Rect;
 use quark_ui::Action;
-use quark_ui::design::{Ico, Shadow, Sp, Sz};
+use quark_ui::design::{Ico, Shadow, Sz};
 use quark_ui::element::{AnyElement, Binding, IntoAnyElement, NoopAction, div, svg_icon, text};
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -136,7 +136,7 @@ impl Metrics {
         let m = &theme.metrics;
         let scale = m.ui_scale();
         Self {
-            item_h: (m.ui_small_font_size * 1.35 + (m.spacing_xs + Sp::XXS * scale) * 2.0)
+            item_h: (m.ui_small_font_size * 1.35 + m.spacing_xs * 2.0)
                 .ceil()
                 .max(24.0 * scale),
             separator_h: (m.spacing_xs * 2.0 + Sz::SEPARATOR_W).ceil(),
@@ -222,6 +222,7 @@ fn menu_panel(
         .w(rect.width)
         .z_index(250 + level as i32)
         .py(metrics.pad_y)
+        .px(metrics.pad_y)
         .bg(tc.elevated_surface)
         .border(tc.border)
         .rounded(m.panel_radius)
@@ -234,6 +235,13 @@ fn menu_panel(
         .accessibility_id(id.clone())
         .focus_scope(id.clone())
         .key_context("context-menu");
+    // A leading column only when some row fills it, so a menu of plain
+    // items does not indent every label past an empty slot.
+    let leading = entries.iter().any(|entry| match entry {
+        ContextMenuEntry::Item { icon, checked, .. } => icon.is_some() || checked.is_some(),
+        ContextMenuEntry::Submenu { icon, .. } => icon.is_some(),
+        ContextMenuEntry::Separator => false,
+    });
     for (index, entry) in entries.iter().enumerate() {
         let row = match entry {
             ContextMenuEntry::Separator => div()
@@ -242,7 +250,14 @@ fn menu_panel(
                 .px(m.spacing_sm)
                 .child(div().w_full().h(Sz::SEPARATOR_W).bg(tc.border_variant))
                 .into_any(),
-            _ => menu_row(entry, &id, highlighted == Some(index), metrics, theme),
+            _ => menu_row(
+                entry,
+                &id,
+                highlighted == Some(index),
+                leading,
+                metrics,
+                theme,
+            ),
         };
         panel = panel.child(row);
     }
@@ -253,6 +268,7 @@ fn menu_row(
     entry: &ContextMenuEntry,
     menu_id: &str,
     highlighted: bool,
+    leading_slot: bool,
     metrics: &Metrics,
     theme: &Theme,
 ) -> AnyElement {
@@ -302,7 +318,8 @@ fn menu_row(
         .flex_shrink_0()
         .h(metrics.item_h)
         .gap(m.spacing_sm)
-        .px(m.spacing_md)
+        .px(m.spacing_sm)
+        .rounded(m.spacing_xs)
         .bg(if highlighted {
             tc.sidebar_row_hover
         } else {
@@ -332,7 +349,10 @@ fn menu_row(
     };
     row = match leading {
         Some(svg) => row.child(svg_icon(svg, Ico::SM).color(icon_color)),
-        None => row.child(div().flex_shrink_0().w(Ico::SM * scale).h(Ico::SM * scale)),
+        None if leading_slot => {
+            row.child(div().flex_shrink_0().w(Ico::SM * scale).h(Ico::SM * scale))
+        }
+        None => row,
     };
     row = row.child(div().flex_1().child(text(label).text_sm().color(fg)));
 

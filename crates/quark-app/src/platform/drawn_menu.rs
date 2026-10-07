@@ -148,6 +148,8 @@ impl AltTap {
 pub struct DrawnMenuBar {
     pub bar: MenuBar,
     alt: AltTap,
+    /// Where the pointer last moved, for presses, which carry no position.
+    pointer: (f32, f32),
     wrap: Rc<dyn Fn(MenuPick) -> Action>,
 }
 
@@ -158,6 +160,7 @@ impl DrawnMenuBar {
         Self {
             bar: MenuBar::new(menu_bar_menus(menus, &*wrap)),
             alt: AltTap::default(),
+            pointer: (f32::NAN, f32::NAN),
             wrap,
         }
     }
@@ -172,7 +175,7 @@ impl DrawnMenuBar {
     /// from `UiApp::event` and redraw); `Activate` carries the app action
     /// for the pick. Pointer moves update an open menu's highlight but are
     /// left to the adapter, which tracks the pointer and redraws for the
-    /// hover change.
+    /// hover change. A press outside the open menu closes it and is taken.
     pub fn event(&mut self, event: &InputEvent) -> Option<ContextMenuOutcome> {
         if self.alt.event(event) {
             self.bar.activate();
@@ -184,8 +187,18 @@ impl DrawnMenuBar {
                 self.bar.handle_key(&pressed)
             }
             InputEvent::PointerMoved { x, y } => {
+                self.pointer = (*x, *y);
                 self.bar.pointer_moved(*x, *y);
                 None
+            }
+            InputEvent::PointerButton {
+                state: ElementState::Pressed,
+                ..
+            } => {
+                let (x, y) = self.pointer;
+                self.bar
+                    .pointer_pressed(x, y)
+                    .then_some(ContextMenuOutcome::Closed)
             }
             _ => None,
         }

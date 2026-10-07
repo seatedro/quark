@@ -8,18 +8,20 @@
 //!   global one).
 //! - Gallery (middle): `repeat(auto-fill, 120px)` columns, spans, and
 //!   square thumbnails from `aspect_ratio`.
-//! - Files (right): folders as sticky sections. Drag a file onto the
-//!   desktop or a file manager (macOS and Windows).
+//! - Files (right): folders as sticky sections. On macOS and Windows, drag
+//!   a file onto the desktop or a file manager.
 //! - The menu bar is drawn where the platform has none (Linux), or
 //!   everywhere with `QUARK_DRAWN_MENU=1`; F10 or a lone Alt opens it.
 
-use quark_app::platform::drag_out::DragOutError;
+use quark_app::platform::drag_out::{self, DragOutError};
 use quark_app::platform::drawn_menu::{DrawnMenuBar, MenuPick};
 use quark_app::platform::menu::{Menu, MenuAction, MenuItem, MenuRole, native_menu_bar};
+use quark_app::quark_ui::design::Ico;
 use quark_app::quark_ui::element::{
-    AnyElement, Div, DragHandler, DragReleaseResult, IntoAnyElement, ScrollHandle, div,
-    sticky_section, text,
+    AnyElement, CursorHint, Div, DragHandler, DragReleaseResult, IntoAnyElement, ScrollHandle, div,
+    sticky_section, svg_icon, text,
 };
+use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::key_context::KeyBindings;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::style::track::{fr, minmax, px, repeat_fill};
@@ -159,7 +161,12 @@ impl Demo {
                     .w(18.0)
                     .h(TASK_ROW)
                     .flex_shrink_0()
-                    .child(text("⋮⋮").text_sm().color(theme.colors.text_muted))
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .cursor(CursorHint::Grab)
+                    .tooltip("Drag to reorder")
+                    .child(svg_icon(lucide::GRIP_VERTICAL, Ico::SM).color(theme.colors.text_muted))
                     .on_drag(Reorder::drag_start(i, Msg::Reorder));
                 div()
                     .key(task.as_str())
@@ -248,14 +255,22 @@ impl Demo {
                     .border_b(theme.colors.border)
                     .child(text(*folder).text_sm());
                 let body = div().flex_col().children_from(files.iter().map(|file| {
-                    div()
+                    let row = div()
                         .h(44.0)
                         .px(16.0)
                         .flex_row()
                         .items_center()
                         .border_b(theme.colors.border_variant)
-                        .on_drag(move |_| Box::new(DragOutRow::new(file)))
-                        .child(text(*file).text_sm())
+                        .child(text(*file).text_sm());
+                    // Linux has no drag source yet (see `drag_out`), so rows
+                    // there are plain.
+                    if drag_out::supported() {
+                        row.cursor(CursorHint::Grab)
+                            .tooltip("Drag onto the desktop or a file manager")
+                            .on_drag(move |_| Box::new(DragOutRow::new(file)))
+                    } else {
+                        row
+                    }
                 }));
                 sticky_section(header, body).flex_shrink_0()
             }))
