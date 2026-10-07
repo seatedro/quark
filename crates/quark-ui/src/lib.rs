@@ -7,6 +7,7 @@ pub mod design;
 pub mod element;
 pub mod hud;
 pub mod icons;
+pub mod markdown;
 pub mod palette;
 pub mod style;
 pub mod text_input;
