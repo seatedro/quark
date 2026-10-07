@@ -560,12 +560,15 @@ struct VertexInput {
     @location(0) bounds: vec4<f32>,    // screen-space destination [x, y, w, h]
     @location(1) uv_rect: vec4<f32>,   // source UV [u_min, v_min, u_max, v_max]
     @location(2) tint: vec4<f32>,      // tint/opacity
+    @location(3) radii: vec4<f32>,     // rounded mask [tl, tr, br, bl] over bounds
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) tint: vec4<f32>,
+    @location(2) @interpolate(flat) bounds: vec4<f32>,
+    @location(3) @interpolate(flat) radii: vec4<f32>,
 };
 
 @vertex
@@ -584,13 +587,238 @@ fn vs_blit(input: VertexInput) -> VertexOutput {
     out.position = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = uv;
     out.tint = input.tint;
+    out.bounds = input.bounds;
+    out.radii = input.radii;
     return out;
+}
+
+fn blit_rounded_mask(pixel: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>) -> f32 {
+    if (max(max(radii.x, radii.y), max(radii.z, radii.w)) <= 0.0) {
+        return 1.0;
+    }
+    let half_size = bounds.zw * 0.5;
+    let p = pixel - (bounds.xy + half_size);
+    var r: f32;
+    if (p.x < 0.0) {
+        r = select(radii.w, radii.x, p.y < 0.0);
+    } else {
+        r = select(radii.z, radii.y, p.y < 0.0);
+    }
+    r = min(r, min(half_size.x, half_size.y));
+    let q = abs(p) - half_size + vec2<f32>(r);
+    let sdf = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    return saturate(0.5 - sdf);
 }
 
 @fragment
 fn fs_blit(input: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(t_source, s_source, input.uv);
-    return tex_color * input.tint;
+    let mask = blit_rounded_mask(input.position.xy, input.bounds, input.radii);
+    return tex_color * input.tint * mask;
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Layer composite shader — an offscreen layer drawn through an affine map
+// ---------------------------------------------------------------------------
+
+pub(super) const LAYER_SHADER: &str = r#"
+struct ViewportUniform {
+    resolution: vec2<f32>,
+    time: f32,
+    _padding: f32,
+};
+
+@group(0) @binding(0)
+var<uniform> viewport: ViewportUniform;
+
+@group(1) @binding(0)
+var t_layer: texture_2d<f32>;
+@group(1) @binding(1)
+var s_layer: sampler;
+
+struct VertexInput {
+    @builtin(vertex_index) vertex_id: u32,
+    // Layer texel (u, v) lands at (a·u + c·v + tx, b·u + d·v + ty).
+    @location(0) linear: vec4<f32>,        // [a, b, c, d]
+    @location(1) offset_size: vec4<f32>,   // [tx, ty, layer width, layer height]
+    @location(2) params: vec4<f32>,        // [1 / texture width, 1 / texture height, opacity, 0]
+    @location(3) clip_bounds: vec4<f32>,
+    @location(4) clip_radii: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) opacity: f32,
+    @location(2) @interpolate(flat) clip_bounds: vec4<f32>,
+    @location(3) @interpolate(flat) clip_radii: vec4<f32>,
+};
+
+@vertex
+fn vs_layer(input: VertexInput) -> VertexOutput {
+    let unit = vec2<f32>(
+        f32(input.vertex_id & 1u),
+        f32((input.vertex_id >> 1u) & 1u)
+    );
+    let local = unit * input.offset_size.zw;
+    let m = input.linear;
+    let pixel_pos = vec2<f32>(
+        m.x * local.x + m.z * local.y + input.offset_size.x,
+        m.y * local.x + m.w * local.y + input.offset_size.y,
+    );
+    let ndc = pixel_pos / viewport.resolution * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+
+    var out: VertexOutput;
+    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = local * input.params.xy;
+    out.opacity = input.params.z;
+    out.clip_bounds = input.clip_bounds;
+    out.clip_radii = input.clip_radii;
+    return out;
+}
+
+fn layer_clip_alpha(pixel: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>) -> f32 {
+    if (max(max(radii.x, radii.y), max(radii.z, radii.w)) <= 0.0) {
+        return 1.0;
+    }
+    let half_size = bounds.zw * 0.5;
+    let p = pixel - (bounds.xy + half_size);
+    var r: f32;
+    if (p.x < 0.0) {
+        r = select(radii.w, radii.x, p.y < 0.0);
+    } else {
+        r = select(radii.z, radii.y, p.y < 0.0);
+    }
+    let q = abs(p) - half_size + vec2<f32>(r);
+    let sdf = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    return saturate(0.5 - sdf);
+}
+
+@fragment
+fn fs_layer(input: VertexOutput) -> @location(0) vec4<f32> {
+    // The layer holds premultiplied color with a transparent border, so
+    // bilinear sampling antialiases the edges of a rotated layer.
+    let color = textureSample(t_layer, s_layer, input.uv);
+    let clip = layer_clip_alpha(input.position.xy, input.clip_bounds, input.clip_radii);
+    return color * (input.opacity * clip);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Path shader — winding number and edge distance over a band's segments
+// ---------------------------------------------------------------------------
+
+/// Texels per row of the segment texture; `SEGMENT_TEXTURE_WIDTH` in the
+/// renderer must match.
+pub(super) const PATH_SHADER: &str = r#"
+struct ViewportUniform {
+    resolution: vec2<f32>,
+    time: f32,
+    _padding: f32,
+};
+
+@group(0) @binding(0)
+var<uniform> viewport: ViewportUniform;
+
+// One segment [x0, y0, x1, y1] per texel, path-local physical pixels.
+@group(1) @binding(0)
+var t_segments: texture_2d<f32>;
+
+const SEGMENT_ROW: u32 = 1024u;
+
+struct VertexInput {
+    @builtin(vertex_index) vertex_id: u32,
+    @location(0) bounds: vec4<f32>,       // band quad [x, y, w, h]
+    @location(1) origin_rule: vec4<f32>,  // [origin x, origin y, fill rule, 0]
+    @location(2) color: vec4<f32>,
+    @location(3) segments: vec4<u32>,     // [first, count, 0, 0]
+    @location(4) clip_bounds: vec4<f32>,
+    @location(5) clip_radii: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) origin_rule: vec4<f32>,
+    @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) segments: vec4<u32>,
+    @location(3) @interpolate(flat) clip_bounds: vec4<f32>,
+    @location(4) @interpolate(flat) clip_radii: vec4<f32>,
+};
+
+@vertex
+fn vs_path(input: VertexInput) -> VertexOutput {
+    let unit = vec2<f32>(
+        f32(input.vertex_id & 1u),
+        f32((input.vertex_id >> 1u) & 1u)
+    );
+    let pixel_pos = input.bounds.xy + unit * input.bounds.zw;
+    let ndc = pixel_pos / viewport.resolution * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+
+    var out: VertexOutput;
+    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.origin_rule = input.origin_rule;
+    out.color = input.color;
+    out.segments = input.segments;
+    out.clip_bounds = input.clip_bounds;
+    out.clip_radii = input.clip_radii;
+    return out;
+}
+
+fn path_clip_alpha(pixel: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>) -> f32 {
+    if (max(max(radii.x, radii.y), max(radii.z, radii.w)) <= 0.0) {
+        return 1.0;
+    }
+    let half_size = bounds.zw * 0.5;
+    let p = pixel - (bounds.xy + half_size);
+    var r: f32;
+    if (p.x < 0.0) {
+        r = select(radii.w, radii.x, p.y < 0.0);
+    } else {
+        r = select(radii.z, radii.y, p.y < 0.0);
+    }
+    let q = abs(p) - half_size + vec2<f32>(r);
+    let sdf = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    return saturate(0.5 - sdf);
+}
+
+@fragment
+fn fs_path(input: VertexOutput) -> @location(0) vec4<f32> {
+    let p = input.position.xy - input.origin_rule.xy;
+    var winding = 0;
+    var dist = 1.0e9;
+    let first = input.segments.x;
+    let count = input.segments.y;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let index = first + i;
+        let s = textureLoad(t_segments, vec2<i32>(i32(index % SEGMENT_ROW), i32(index / SEGMENT_ROW)), 0);
+        let a = s.xy;
+        let ab = s.zw - a;
+        let pa = p - a;
+        let h = clamp(dot(pa, ab) / max(dot(ab, ab), 1.0e-12), 0.0, 1.0);
+        dist = min(dist, length(pa - ab * h));
+        // Crossings of the ray from p toward +x.
+        if ((a.y <= p.y) != (s.w <= p.y)) {
+            let x = a.x + (p.y - a.y) * ab.x / ab.y;
+            if (x > p.x) {
+                winding = winding + select(-1, 1, s.w > a.y);
+            }
+        }
+    }
+    var inside: bool;
+    if (input.origin_rule.z > 0.5) {
+        inside = (winding & 1) != 0;
+    } else {
+        inside = winding != 0;
+    }
+    let signed_dist = select(dist, -dist, inside);
+    let coverage = saturate(0.5 - signed_dist)
+        * path_clip_alpha(input.position.xy, input.clip_bounds, input.clip_radii);
+    let alpha = input.color.a * coverage;
+    if (alpha <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(input.color.rgb * alpha, alpha);
 }
 "#;
 

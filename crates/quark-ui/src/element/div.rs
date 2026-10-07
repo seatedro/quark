@@ -808,7 +808,7 @@ impl Element for Div {
             scene.blur_region(BlurRegionPrimitive {
                 rect: bounds,
                 blur_radius: radius,
-                corner_radius: r,
+                corner_radii: radii,
             });
         }
 

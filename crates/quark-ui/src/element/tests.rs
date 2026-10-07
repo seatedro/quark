@@ -1067,7 +1067,7 @@ fn blur_emits_blur_region_primitive() {
 
     if let quark_render::Primitive::BlurRegion(br) = &scene.primitives[blur_idx] {
         assert!((br.blur_radius - 12.0).abs() < 0.1);
-        assert!((br.corner_radius - 14.0).abs() < 0.1);
+        assert_eq!(br.corner_radii, [14.0; 4]);
         assert!((br.rect.width - 400.0).abs() < 1.0);
     } else {
         panic!("expected BlurRegion");

@@ -131,10 +131,15 @@ struct Recolored {
 const KEEP_UNUSED_RECOLORED_FRAMES: u64 = 120;
 
 impl RecoloredBuffers {
-    /// Build or reuse a copy for every multi-colored primitive in `rich_texts`.
-    pub(super) fn prepare(&mut self, rich_texts: &[ClippedRichText], text: &mut TextSystem) {
+    /// Build or reuse a copy for every multi-colored primitive in the
+    /// frame's `targets` (the window and its offscreen layers).
+    pub(super) fn prepare<'a>(
+        &mut self,
+        targets: impl IntoIterator<Item = &'a [ClippedRichText]>,
+        text: &mut TextSystem,
+    ) {
         self.frame += 1;
-        for text_run in rich_texts {
+        for text_run in targets.into_iter().flatten() {
             let primitive = &text_run.primitive;
             let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
                 continue;

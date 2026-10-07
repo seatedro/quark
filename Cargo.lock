@@ -2821,6 +2821,7 @@ dependencies = [
  "bytemuck",
  "glyphon",
  "image",
+ "kurbo",
  "pollster",
  "quark",
  "quark-text",
