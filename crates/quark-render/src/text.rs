@@ -49,14 +49,23 @@ fn text_area(layout: &TextLayout, origin: Rect, clip: Rect, color: Color) -> Tex
         top: origin.y,
         // The buffer is already shaped at physical size.
         scale: 1.0,
-        bounds: TextBounds {
-            left: clip.x.round() as i32,
-            top: clip.y.round() as i32,
-            right: clip.right().round() as i32,
-            bottom: clip.bottom().round() as i32,
-        },
+        bounds: text_bounds(clip),
         default_color: glyphon_color(color),
         custom_glyphs: &[],
+    }
+}
+
+/// `clip` in whole pixels. `as i32` saturates and maps NaN to 0; an
+/// inverted or non-finite clip becomes empty bounds rather than a rect whose
+/// right edge lies left of its left edge.
+fn text_bounds(clip: Rect) -> TextBounds {
+    let left = clip.x.round() as i32;
+    let top = clip.y.round() as i32;
+    TextBounds {
+        left,
+        top,
+        right: (clip.right().round() as i32).max(left),
+        bottom: (clip.bottom().round() as i32).max(top),
     }
 }
 

@@ -107,8 +107,18 @@ struct PooledTexture {
     bind_group: Option<wgpu::BindGroup>,
     width: u32,
     height: u32,
-    in_use: bool,
+    /// Shared with the [`OffscreenTarget`] handed out for this texture, so
+    /// the entry is in use exactly while that handle is alive. Dropping a
+    /// target without releasing it frees the entry instead of pinning the
+    /// pool forever.
+    lease: Arc<()>,
     last_used_frame: u64,
+}
+
+impl PooledTexture {
+    fn in_use(&self) -> bool {
+        Arc::strong_count(&self.lease) > 1
+    }
 }
 
 struct TexturePool {
@@ -179,9 +189,10 @@ fn create_transient_buffer(device: &wgpu::Device, label: &'static str, size: u64
     })
 }
 
-/// Handle to an offscreen render target allocated from the pool.
+/// Handle to an offscreen render target allocated from the pool. The
+/// texture returns to the pool when the handle is released or dropped.
 pub struct OffscreenTarget {
-    pool_index: usize,
+    lease: Arc<()>,
     pub width: u32,
     pub height: u32,
 }
@@ -199,19 +210,18 @@ impl TexturePool {
         self.frame = self.frame.saturating_add(1);
     }
 
-    /// Acquire a texture of at least the given dimensions.
-    /// Returns a pool index. The caller must call `release()` when done.
+    /// Acquire a texture of at least the given dimensions. It stays out of
+    /// the pool until the target is released or dropped.
     fn acquire(&mut self, device: &wgpu::Device, width: u32, height: u32) -> OffscreenTarget {
         let w = width.max(1);
         let h = height.max(1);
 
         // Look for an existing unused texture that's big enough.
-        for (i, entry) in self.textures.iter_mut().enumerate() {
-            if !entry.in_use && entry.width >= w && entry.height >= h {
-                entry.in_use = true;
+        for entry in &mut self.textures {
+            if !entry.in_use() && entry.width >= w && entry.height >= h {
                 entry.last_used_frame = self.frame;
                 return OffscreenTarget {
-                    pool_index: i,
+                    lease: Arc::clone(&entry.lease),
                     width: entry.width,
                     height: entry.height,
                 };
@@ -234,25 +244,38 @@ impl TexturePool {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let index = self.textures.len();
-        let _ = texture;
+        let lease = Arc::new(());
         self.textures.push(PooledTexture {
             view,
             bind_group: None,
             width: w,
             height: h,
-            in_use: true,
+            lease: Arc::clone(&lease),
             last_used_frame: self.frame,
         });
         OffscreenTarget {
-            pool_index: index,
+            lease,
             width: w,
             height: h,
         }
     }
 
+    /// The entry `target` leases. A target from another renderer's pool is a
+    /// caller bug.
+    fn entry_mut(&mut self, target: &OffscreenTarget) -> &mut PooledTexture {
+        self.textures
+            .iter_mut()
+            .find(|entry| Arc::ptr_eq(&entry.lease, &target.lease))
+            .expect("offscreen target belongs to this renderer's pool")
+    }
+
     fn view(&self, target: &OffscreenTarget) -> &wgpu::TextureView {
-        &self.textures[target.pool_index].view
+        &self
+            .textures
+            .iter()
+            .find(|entry| Arc::ptr_eq(&entry.lease, &target.lease))
+            .expect("offscreen target belongs to this renderer's pool")
+            .view
     }
 
     /// Get the cached bind group for sampling `target`, creating it on first
@@ -265,7 +288,7 @@ impl TexturePool {
         sampler: &wgpu::Sampler,
         target: &OffscreenTarget,
     ) -> wgpu::BindGroup {
-        let entry = &mut self.textures[target.pool_index];
+        let entry = self.entry_mut(target);
         let view = &entry.view;
         entry
             .bind_group
@@ -273,18 +296,17 @@ impl TexturePool {
             .clone()
     }
 
+    /// Return `target` to the pool, counting this frame as its last use.
     fn release(&mut self, target: OffscreenTarget) {
-        self.textures[target.pool_index].in_use = false;
-        self.textures[target.pool_index].last_used_frame = self.frame;
+        let frame = self.frame;
+        self.entry_mut(&target).last_used_frame = frame;
     }
 
     fn trim_unused(&mut self) {
-        if self.textures.iter().any(|entry| entry.in_use) {
-            return;
-        }
         let frame = self.frame;
         self.textures.retain(|entry| {
-            frame.saturating_sub(entry.last_used_frame) <= KEEP_UNUSED_OFFSCREEN_FRAMES
+            entry.in_use()
+                || frame.saturating_sub(entry.last_used_frame) <= KEEP_UNUSED_OFFSCREEN_FRAMES
         });
     }
 }
@@ -345,17 +367,30 @@ impl GpuContext {
             .find(wgpu::TextureFormat::is_srgb)
             .or_else(|| capabilities.formats.first().copied())
             .ok_or(RenderError::IncompatibleSurface)?;
-        Self::build(instance, adapter, format).await
+        Self::build(instance, adapter, format, wgpu::Limits::default()).await
     }
 
     /// Context with no window, rendering into sRGB offscreen targets.
     #[cfg(any(test, feature = "headless-render"))]
     pub fn headless() -> Result<Self, RenderError> {
+        Self::headless_with_limits(wgpu::Limits::default())
+    }
+
+    /// [`Self::headless`] on a device capped at `limits`. Tests shrink the
+    /// texture size limit to fill the glyph atlas with a few glyphs.
+    #[cfg(any(test, feature = "headless-render"))]
+    fn headless_with_limits(limits: wgpu::Limits) -> Result<Self, RenderError> {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
             let adapter = request_adapter(&instance, None).await?;
             // Match the on-screen path: an sRGB target so colors and PNG bytes agree.
-            Self::build(instance, adapter, wgpu::TextureFormat::Rgba8UnormSrgb).await
+            Self::build(
+                instance,
+                adapter,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                limits,
+            )
+            .await
         })
     }
 
@@ -379,9 +414,13 @@ impl GpuContext {
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
         surface_format: wgpu::TextureFormat,
+        required_limits: wgpu::Limits,
     ) -> Result<Self, RenderError> {
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits,
+                ..wgpu::DeviceDescriptor::default()
+            })
             .await?;
         let viewport_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -707,8 +746,11 @@ pub struct Renderer {
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
-    /// One text renderer per text segment of the frame, grown on demand.
+    /// One text renderer per text segment of the frame.
     text_renderers: Vec<TextRenderer>,
+    /// False when this frame's glyphs did not fit the atlas; its text
+    /// segments are skipped.
+    text_ready: bool,
     /// `(font size, TextSystem generation, width)` of the last measurement.
     cached_mono_char_width: Option<(f32, u64, f32)>,
     flattener: Flattener,
@@ -870,6 +912,7 @@ impl Renderer {
             viewport,
             atlas,
             text_renderers: vec![text_renderer],
+            text_ready: true,
             cached_mono_char_width: None,
             flattener: Flattener::default(),
             flat: FlattenedScene::default(),
@@ -960,7 +1003,8 @@ impl Renderer {
         })
     }
 
-    /// Return an offscreen target to the pool for reuse.
+    /// Return an offscreen target to the pool for reuse. Dropping the target
+    /// also returns it.
     pub fn release_offscreen(&mut self, target: OffscreenTarget) {
         self.texture_pool.release(target);
     }
@@ -1263,7 +1307,61 @@ impl Renderer {
         };
 
         // Prepare every text segment before recording any pass.
-        while self.text_renderers.len() < batches.text_steps {
+        self.fit_text_renderers(batches.text_steps);
+        self.text_ready = match self.prepare_text(flat, text) {
+            Ok(()) => true,
+            Err(_) => {
+                // The atlas is full of glyphs pinned by this frame. Unpin
+                // them and prepare every segment again, since the retry may
+                // evict glyphs that earlier segments' vertices point at.
+                self.atlas.trim();
+                match self.prepare_text(flat, text) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        // This frame's glyphs do not fit even alone. Draw
+                        // everything else rather than failing the frame, and
+                        // unpin so the next frame starts from a clean atlas.
+                        tracing::warn!("skipping text for one frame: {error}");
+                        self.atlas.trim();
+                        false
+                    }
+                }
+            }
+        };
+
+        let blur_targets = self.prepare_blur(flat, &mut buffers, width, height);
+        let result = self.encode_steps(
+            encoder,
+            target,
+            flat,
+            batches,
+            &buffers,
+            blur_targets.as_ref(),
+            width,
+            height,
+        );
+        if let Some(targets) = blur_targets {
+            self.texture_pool.release(targets.scene);
+            self.texture_pool.release(targets.h);
+            self.texture_pool.release(targets.v);
+        }
+        let mut images = lock_images(&self.images);
+        let frame = images.frame;
+        images
+            .cache
+            .retain(|_, image| frame - image.last_used_frame <= KEEP_UNUSED_IMAGE_FRAMES);
+        result
+    }
+
+    /// Keep one text renderer per text segment of this frame. Renderers left
+    /// over from a frame with many more segments are dropped, so one busy
+    /// frame does not hold their vertex buffers forever.
+    fn fit_text_renderers(&mut self, segments: usize) {
+        let wanted = segments.max(1);
+        if self.text_renderers.len() > wanted * 2 {
+            self.text_renderers.truncate(wanted);
+        }
+        while self.text_renderers.len() < wanted {
             self.text_renderers.push(TextRenderer::new(
                 &mut self.atlas,
                 &self.device,
@@ -1271,6 +1369,14 @@ impl Renderer {
                 None,
             ));
         }
+    }
+
+    /// Prepare each text segment into its own renderer.
+    fn prepare_text(
+        &mut self,
+        flat: &FlattenedScene,
+        text: &mut TextSystem,
+    ) -> Result<(), glyphon::PrepareError> {
         let mut text_index = 0;
         for step in &flat.steps {
             let DrawStep::Batch {
@@ -1296,29 +1402,7 @@ impl Renderer {
             )?;
             text_index += 1;
         }
-
-        let blur_targets = self.prepare_blur(flat, &mut buffers, width, height);
-        let result = self.encode_steps(
-            encoder,
-            target,
-            flat,
-            batches,
-            &buffers,
-            blur_targets.as_ref(),
-            width,
-            height,
-        );
-        if let Some(targets) = blur_targets {
-            self.texture_pool.release(targets.scene);
-            self.texture_pool.release(targets.h);
-            self.texture_pool.release(targets.v);
-        }
-        let mut images = lock_images(&self.images);
-        let frame = images.frame;
-        images
-            .cache
-            .retain(|_, image| frame - image.last_used_frame <= KEEP_UNUSED_IMAGE_FRAMES);
-        result
+        Ok(())
     }
 
     /// Acquire offscreen targets and upload blur instances when the frame has
@@ -1558,6 +1642,9 @@ impl Renderer {
                 return Ok(());
             }
             PrimKind::Text => {
+                if !self.text_ready {
+                    return Ok(());
+                }
                 pass.set_scissor_rect(0, 0, width, height);
                 self.text_renderers[cmds.start].render(&self.atlas, &self.viewport, pass)?;
                 return Ok(());
@@ -3291,6 +3378,18 @@ mod tests {
         assert!(image.get_pixel(16, 16).0[0] > 200, "image missing");
     }
 
+    // Regression: a target dropped without `release_offscreen` stayed in use
+    // forever, which also stopped the pool from trimming any texture.
+    #[test]
+    fn dropped_offscreen_target_returns_to_the_pool() {
+        let Some(mut renderer) = gpu_renderer(16, 16) else {
+            return;
+        };
+        drop(renderer.acquire_offscreen(64, 64));
+        let reused = renderer.acquire_offscreen(32, 32);
+        assert_eq!((reused.width, reused.height), (64, 64));
+    }
+
     // Regression: a minimized window (size 0) kept acquiring and
     // reconfiguring its stale surface, and the runner redrew on every
     // `SurfaceReconfigured`, spinning a core while minimized.
@@ -3326,6 +3425,72 @@ mod tests {
             return;
         };
         assert_eq!(image.get_pixel(8, 8).0, [0, 0, 255, 255]);
+    }
+
+    // Regression: a full glyph atlas failed the frame before the end-of-frame
+    // trim, so its glyphs stayed pinned and every later frame failed too. Now
+    // that frame draws everything but text and the next frame draws text.
+    #[test]
+    fn render_recovers_from_a_full_glyph_atlas() {
+        // glyphon caps its atlas at the device's texture size limit: at 256px
+        // a few dozen large glyphs cannot fit in one frame.
+        let limits = wgpu::Limits {
+            max_texture_dimension_2d: 256,
+            ..wgpu::Limits::default()
+        };
+        let gpu = match GpuContext::headless_with_limits(limits) {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                assert!(
+                    std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                    "QUARK_REQUIRE_GPU is set but no capped device: {error}"
+                );
+                return;
+            }
+        };
+        let mut renderer = Renderer::headless_with_gpu(&gpu, 256, 128, 1.0);
+        let mut text = test_text();
+        let shaped = |text: &mut TextSystem, s: &str, size: f32| {
+            let layout = text.layout(&TextParams::new(s, TextStyle::new(size)));
+            ShapedText::new(Arc::new(layout.expect("layout")))
+        };
+        let white = quark::Color::rgba(255, 255, 255, 255);
+
+        let mut crowded = Scene::default();
+        crowded.push(solid(rect(0.0, 0.0, 256.0, 128.0), 0, 0, 255));
+        crowded.text(TextPrimitive {
+            rect: rect(0.0, 0.0, 256.0, 128.0),
+            layout: shaped(
+                &mut text,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                120.0,
+            ),
+            color: white,
+        });
+        let pixels = renderer
+            .render_to_rgba(&crowded, &mut text, 256, 128)
+            .expect("a full atlas still renders the frame");
+        let crowded = image::RgbaImage::from_raw(256, 128, pixels).expect("pixel buffer size");
+        assert_eq!(
+            crowded.get_pixel(250, 120).0,
+            [0, 0, 255, 255],
+            "quad missing"
+        );
+
+        let mut sparse = Scene::default();
+        sparse.text(TextPrimitive {
+            rect: rect(0.0, 0.0, 256.0, 128.0),
+            layout: shaped(&mut text, "W", 48.0),
+            color: white,
+        });
+        let pixels = renderer
+            .render_to_rgba(&sparse, &mut text, 256, 128)
+            .expect("next frame renders");
+        let sparse = image::RgbaImage::from_raw(256, 128, pixels).expect("pixel buffer size");
+        assert!(
+            any_light_pixel(&sparse, rect(0.0, 0.0, 64.0, 64.0)),
+            "text did not recover after the atlas filled"
+        );
     }
 
     // Two windows share one device: an image uploaded while drawing one
