@@ -24,6 +24,7 @@ pub mod search_field;
 pub mod segmented;
 pub mod select;
 pub mod sidebar_skeleton;
+pub mod slider;
 pub mod stat_summary;
 pub mod tabs;
 pub mod toast;
@@ -50,6 +51,7 @@ pub use search_field::*;
 pub use segmented::{SegmentedControl, SegmentedItem, segmented_focus_id};
 pub use select::*;
 pub use sidebar_skeleton::sidebar_skeleton;
+pub use slider::*;
 pub use stat_summary::*;
 pub use tabs::*;
 pub use toast::{
