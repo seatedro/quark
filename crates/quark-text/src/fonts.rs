@@ -34,6 +34,9 @@ pub struct FontSettings {
     pub ui_family: String,
     pub mono_family: String,
     pub bundled_fallback: BundledFallback,
+    /// Standard and contextual ligatures (`fi`, `->` in Fira Code). Off
+    /// shapes every character on its own.
+    pub ligatures: bool,
 }
 
 /// Where the bundled emoji and CJK faces sit in the fallback chain. Either
@@ -57,6 +60,7 @@ impl Default for FontSettings {
             ui_family: UI_FAMILY.to_owned(),
             mono_family: MONO_FAMILY.to_owned(),
             bundled_fallback: BundledFallback::default(),
+            ligatures: true,
         }
     }
 }
@@ -67,6 +71,7 @@ impl FontSettings {
             ui_family: normalize_font_selection(FontRole::Ui, &self.ui_family),
             mono_family: normalize_font_selection(FontRole::Mono, &self.mono_family),
             bundled_fallback: self.bundled_fallback,
+            ligatures: self.ligatures,
         }
     }
 }
@@ -128,6 +133,10 @@ pub(crate) fn configure_generic_families(db: &mut fontdb::Database, settings: &F
     let settings = settings.normalized();
     let ui = resolve_family(db, FontRole::Ui, &settings.ui_family);
     let mono = resolve_family(db, FontRole::Mono, &settings.mono_family);
+    // A family picked for UI or code text with fewer weights than quark
+    // asks for (Fira Code's variable face registers only as Light) would
+    // otherwise lose to a fallback family of the exact weight.
+    fill_weights(db, [ui.as_str(), mono.as_str()]);
     db.set_sans_serif_family(ui);
     db.set_monospace_family(mono);
 }
@@ -231,32 +240,39 @@ impl QuarkFallback {
         families.extend(self.scripts.values().flatten());
         families.sort_unstable();
         families.dedup();
-        let mut copies = Vec::new();
-        for family in families {
-            for weight in TEXT_WEIGHTS {
-                let has_weight = db.faces().any(|face| {
-                    face.weight.0 == weight
-                        && face.style == fontdb::Style::Normal
-                        && face.families.iter().any(|(name, _)| name == family)
-                });
-                if has_weight {
-                    continue;
-                }
-                let query = fontdb::Query {
-                    families: &[fontdb::Family::Name(family)],
-                    weight: fontdb::Weight(weight),
-                    ..fontdb::Query::default()
-                };
-                if let Some(face) = db.query(&query).and_then(|id| db.face(id)) {
-                    let mut copy = face.clone();
-                    copy.weight = fontdb::Weight(weight);
-                    copies.push(copy);
-                }
+        fill_weights(db, families);
+    }
+}
+
+/// Register each of `families` again under every text weight it lacks, as
+/// a copy of the face fontdb's own query picks for that weight; copies
+/// share the original's bytes.
+fn fill_weights<'a>(db: &mut fontdb::Database, families: impl IntoIterator<Item = &'a str>) {
+    let mut copies = Vec::new();
+    for family in families {
+        for weight in TEXT_WEIGHTS {
+            let has_weight = db.faces().any(|face| {
+                face.weight.0 == weight
+                    && face.style == fontdb::Style::Normal
+                    && face.families.iter().any(|(name, _)| name == family)
+            });
+            if has_weight {
+                continue;
+            }
+            let query = fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                weight: fontdb::Weight(weight),
+                ..fontdb::Query::default()
+            };
+            if let Some(face) = db.query(&query).and_then(|id| db.face(id)) {
+                let mut copy = face.clone();
+                copy.weight = fontdb::Weight(weight);
+                copies.push(copy);
             }
         }
-        for copy in copies {
-            db.push_face_info(copy);
-        }
+    }
+    for copy in copies {
+        db.push_face_info(copy);
     }
 }
 
@@ -673,6 +689,44 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // The ligatures setting: with it off, Fira Code's `==`, `<=`, and `&&`
+    // must shape as the same glyphs as each character alone; with it on
+    // (the default) the font's contextual alternates join them. Also
+    // catches a picked family with fewer weights (Fira Code registers only
+    // as Light) losing to Geist Mono.
+    #[test]
+    fn ligatures_off_shapes_each_character_alone() {
+        use crate::{TextParams, TextStyle, TextSystem};
+        use quark::FontKind;
+        let glyphs = |system: &mut TextSystem, text: &str| {
+            let style = TextStyle::new(16.0).kind(FontKind::Mono);
+            let layout = system
+                .layout(&TextParams::new(text, style))
+                .expect("layout");
+            layout.glyphs().glyph_id.to_vec()
+        };
+        let fira = FontSettings {
+            mono_family: FIRA_CODE_FAMILY.to_owned(),
+            ..FontSettings::default()
+        };
+        let mut system = TextSystem::vendored_only(&fira);
+        for text in ["==", "<=", "&&"] {
+            let alone: Vec<u16> = text
+                .chars()
+                .flat_map(|c| glyphs(&mut system, &c.to_string()))
+                .collect();
+            system.set_font_settings(&fira);
+            let joined = glyphs(&mut system, text);
+            system.set_font_settings(&FontSettings {
+                ligatures: false,
+                ..fira.clone()
+            });
+            let separate = glyphs(&mut system, text);
+            assert_ne!(joined, alone, "{text} with ligatures");
+            assert_eq!(separate, alone, "{text} without ligatures");
         }
     }
 

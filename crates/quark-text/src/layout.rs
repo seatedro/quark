@@ -387,8 +387,9 @@ impl TextLayout {
         params: &TextParams,
         synth: SyntheticItalic,
         emoji: Option<&'static str>,
+        ligatures: bool,
     ) -> Result<Self, TextError> {
-        Self::build_with(fs, params, synth, emoji, |_| true)
+        Self::build_with(fs, params, synth, emoji, ligatures, |_| true)
     }
 
     /// [`Self::build`] keeping only the shaped runs `keep` accepts, so tests
@@ -398,6 +399,7 @@ impl TextLayout {
         params: &TextParams,
         synth: SyntheticItalic,
         emoji: Option<&'static str>,
+        ligatures: bool,
         keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
     ) -> Result<Self, TextError> {
         params.validate()?;
@@ -413,7 +415,8 @@ impl TextLayout {
         buffer.set_size(fs, params.wrap_width.map(|w| (w * scale).max(1.0)), None);
 
         let paragraphs = split_paragraphs(text);
-        let base = base_attrs(&style);
+        let features = font_features(ligatures);
+        let base = base_attrs(&style).font_features(features.clone());
         buffer.lines = paragraphs
             .iter()
             .map(|(range, ending)| {
@@ -422,7 +425,8 @@ impl TextLayout {
                     let start = span.range.start.max(range.start);
                     let end = span.range.end.min(range.end);
                     if start < end {
-                        let span_attrs = span_attrs(&style, span, i, synth);
+                        let span_attrs =
+                            span_attrs(&style, span, i, synth).font_features(features.clone());
                         attrs.add_span(start - range.start..end - range.start, &span_attrs);
                     }
                 }
@@ -1181,6 +1185,22 @@ fn emoji_spans(attrs: &mut AttrsList, paragraph: &str, emoji: &'static str) {
     }
 }
 
+/// No features (the font's defaults) with ligatures on; otherwise the
+/// ligature features turned off.
+fn font_features(ligatures: bool) -> cosmic_text::FontFeatures {
+    let mut features = cosmic_text::FontFeatures::new();
+    if !ligatures {
+        for tag in [
+            cosmic_text::FeatureTag::STANDARD_LIGATURES,
+            cosmic_text::FeatureTag::CONTEXTUAL_LIGATURES,
+            cosmic_text::FeatureTag::CONTEXTUAL_ALTERNATES,
+        ] {
+            features.disable(tag);
+        }
+    }
+    features
+}
+
 fn base_attrs(style: &TextStyle) -> Attrs<'static> {
     Attrs::new()
         .family(family(style.font_kind))
@@ -1653,7 +1673,8 @@ mod tests {
         let mut system = test_system();
         let fs = system.font_system_mut();
         let synth = SyntheticItalic::new(fs);
-        let layout = TextLayout::build_with(fs, &params, synth, None, |_| false).expect("layout");
+        let layout =
+            TextLayout::build_with(fs, &params, synth, None, true, |_| false).expect("layout");
         assert_eq!(layout.line_count(), 1);
         assert_eq!(layout.hit(50.0, 50.0), 0);
         let caret = layout.caret(2);
