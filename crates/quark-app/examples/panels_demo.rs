@@ -369,7 +369,8 @@ mod tests {
     fn dragging_a_tab_reorders_the_strip() {
         let mut ui = harness();
         let (x, y) = ui.find(By::role_name(Role::Tab, "Preview")).center();
-        ui.drag((x, y), (x + 250.0, y));
+        // Five tabs share the 420 wide strip: 84 each, so two slots.
+        ui.drag((x, y), (x + 170.0, y));
         assert_eq!(
             tab_names(&ui),
             ["Terminal", "Diff", "Preview", "Files", "Pull requests"]

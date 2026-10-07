@@ -416,8 +416,8 @@ impl<'a> Dock<'a> {
         self
     }
 
-    /// Width of every tab. Tabs share one width so a drag maps to a slot
-    /// without measuring titles.
+    /// Width of every tab, shrunk so all tabs fit the strip. Tabs share one
+    /// width so a drag maps to a slot without measuring titles.
     pub fn tab_width(mut self, width: f32) -> Self {
         self.tab_width = width;
         self
@@ -501,7 +501,13 @@ impl<'a> Dock<'a> {
         if show_tabs {
             let strip_height = (theme.metrics.ui_font_size * 2.5).round();
             body_height = (height - strip_height).max(0.0);
-            root = root.child(self.tab_strip(theme, region, active_index, strip_height, title));
+            root = root.child(self.tab_strip(
+                theme,
+                region,
+                active_index,
+                (width, strip_height),
+                title,
+            ));
         }
         let name = title(active);
         root.child(
@@ -523,13 +529,14 @@ impl<'a> Dock<'a> {
         theme: &Theme,
         region: DockRegion,
         active: usize,
-        height: f32,
+        (width, height): (f32, f32),
         title: &impl Fn(PanelId) -> String,
     ) -> AnyElement {
         let colors = &theme.colors;
         let m = &theme.metrics;
         let panels = self.state.panels(region);
         let count = panels.len();
+        let tab_width = self.tab_width.min(width / count as f32).floor();
         let mut strip = div()
             .flex_row()
             .w_full()
@@ -546,7 +553,6 @@ impl<'a> Dock<'a> {
             let selected = index == active;
             let name = title(panel);
             let map = self.map.clone();
-            let tab_width = self.tab_width;
             let mut tab = div()
                 .flex_row()
                 .flex_none()
@@ -628,6 +634,9 @@ impl<'a> Dock<'a> {
                 .child(
                     div()
                         .flex_1()
+                        // Let a long title shrink and truncate instead of
+                        // pushing the close button out of the tab.
+                        .min_w(0.0)
                         .clip()
                         .child(text(name).text_sm().color(label_color).truncate()),
                 )
