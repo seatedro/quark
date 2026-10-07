@@ -51,6 +51,9 @@ pub enum TextEditCommand {
     SelectLineAt(usize),
     Undo,
     Redo,
+    /// Drop any IME composition without committing it (focus left the
+    /// field, or the IME was turned off mid-composition).
+    CancelPreedit,
 }
 
 /// What applying a [`TextEditCommand`] did.
@@ -207,6 +210,7 @@ impl TextField {
             ExtendTextSelection(offset) => self.move_cursor(offset, true),
             Undo => outcome.text_changed = self.undo(),
             Redo => outcome.text_changed = self.redo(),
+            CancelPreedit => self.preedit = None,
             // Vertical movement only applies to `Editor`.
             CursorUp | CursorDown | SelectUp | SelectDown => {}
         }

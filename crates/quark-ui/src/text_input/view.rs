@@ -20,6 +20,27 @@ impl HorizontalScroll {
     }
 }
 
+/// Scale factor of the frame an [`super::Editor`] was last painted in.
+/// The editor's element writes it during paint and the editor reads it on
+/// the next flush, so layouts follow the window's scale without the app
+/// passing it along. Clones share the value.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FrameScale(Arc<AtomicU32>);
+
+impl FrameScale {
+    /// `None` until a frame has painted.
+    pub(crate) fn get(&self) -> Option<f32> {
+        let bits = self.0.load(Ordering::Relaxed);
+        (bits != 0).then(|| f32::from_bits(bits))
+    }
+
+    pub(crate) fn set(&self, scale: f32) {
+        if scale.is_finite() && scale > 0.0 {
+            self.0.store(scale.to_bits(), Ordering::Relaxed);
+        }
+    }
+}
+
 /// The smallest change to `scroll` that keeps a caret of `caret_width` at
 /// `caret_x` inside a `view_width` window over `content_width` of text.
 pub fn reveal_offset(
