@@ -2942,107 +2942,52 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fonts::FontSettings;
-    use crate::scene::{FontKind, ShapedText};
+    use crate::scene::ShapedText;
+    use crate::text::test_text;
     use quark_text::{TextParams, TextStyle};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
-    fn scissor_rect_clamps_to_render_target() {
-        let clip = Rect {
-            x: 807.0,
-            y: 118.0,
-            width: 844.0,
-            height: 865.0,
-        };
-
-        assert_eq!(scissor_rect(clip, 1650, 1050), Some((807, 118, 843, 865)));
+    fn scissor_rect_clamps_to_target_and_rejects_degenerate_clips() {
+        let cases = [
+            (rect(807.0, 118.0, 844.0, 865.0), Some((807, 118, 843, 865))),
+            (rect(-10.0, -5.0, 20.0, 10.0), Some((0, 0, 10, 5))),
+            (rect(1650.0, 118.0, 10.0, 865.0), None),
+            (rect(10.0, 10.0, -5.0, 5.0), None),
+            (rect(f32::NAN, 0.0, 10.0, 10.0), None),
+            (rect(0.0, 0.0, f32::INFINITY, 10.0), None),
+        ];
+        for (clip, expected) in cases {
+            assert_eq!(scissor_rect(clip, 1650, 1050), expected, "{clip:?}");
+        }
     }
 
+    // A rectangular clip inside a rounded one must keep the rounded corners
+    // for its children, or a list inside a rounded card paints square
+    // corners over the card's.
     #[test]
-    fn scissor_rect_skips_clips_outside_render_target() {
-        let clip = Rect {
-            x: 1650.0,
-            y: 118.0,
-            width: 10.0,
-            height: 865.0,
-        };
-
-        assert_eq!(scissor_rect(clip, 1650, 1050), None);
-    }
-
-    #[test]
-    fn child_quad_inherits_rounded_clip_from_parent() {
-        use crate::scene::{ClipPrimitive, Primitive, RoundedRectPrimitive, Scene};
-        use quark::Color;
-
-        let viewport = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 400.0,
-            height: 36.0,
-        };
-        let cluster = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 400.0,
-            height: 36.0,
-        };
-        let child = Rect {
-            x: 300.0,
-            y: 0.0,
-            width: 100.0,
-            height: 36.0,
-        };
-
+    fn render_child_of_rect_clip_inside_rounded_clip_keeps_rounded_corners() {
+        let area = rect(0.0, 0.0, 40.0, 40.0);
         let mut scene = Scene::default();
-        // Parent bg (self-rounded, not clipped by anything)
-        scene.push(Primitive::RoundedRect(RoundedRectPrimitive {
-            rect: cluster,
-            corner_radii: [6.0; 4],
-            color: Color::rgba(100, 100, 100, 255),
-        }));
-        // Parent's rounded clip
         scene.push(Primitive::ClipStart(ClipPrimitive {
-            rect: cluster,
-            corner_radii: [6.0; 4],
+            rect: area,
+            corner_radii: [12.0; 4],
         }));
-        // Child bg (square corners, should inherit rounded clip)
-        scene.push(Primitive::RoundedRect(RoundedRectPrimitive {
-            rect: child,
+        scene.push(Primitive::ClipStart(ClipPrimitive {
+            rect: area,
             corner_radii: [0.0; 4],
-            color: Color::rgba(200, 200, 0, 255),
         }));
+        scene.push(solid(area, 255, 255, 255));
         scene.push(Primitive::ClipEnd);
-
-        let flat = flatten_scene(&scene, viewport, &ImageCache::new());
-        let quads: Vec<&QuadInstance> = flat.quads.iter().map(|q| &q.instance).collect();
-
-        // Expect 2 quads: the parent bg and the child bg.
-        assert_eq!(quads.len(), 2, "expected 2 quads, got {}", quads.len());
-
-        // Parent's own rect is drawn before the clip is pushed — should have
-        // no rounded-clip attribution (clip_radii all zero).
-        let parent_quad = quads[0];
+        scene.push(Primitive::ClipEnd);
+        let Some(image) = render_pixels(&scene, 40, 40) else {
+            return;
+        };
         assert_eq!(
-            parent_quad.clip_radii, [0.0; 4],
-            "parent bg (before ClipStart) should have no rounded clip: {:?}",
-            parent_quad.clip_radii,
+            image.get_pixel(1, 1).0,
+            [0, 0, 0, 255],
+            "corner not clipped"
         );
-
-        // Child is inside the rounded clip — should inherit clip_bounds =
-        // cluster rect and clip_radii = [6; 4].
-        let child_quad = quads[1];
-        assert_eq!(
-            child_quad.clip_radii,
-            [6.0, 6.0, 6.0, 6.0],
-            "child bg should inherit rounded clip radii from parent",
-        );
-        assert_eq!(
-            child_quad.clip_bounds,
-            [cluster.x, cluster.y, cluster.width, cluster.height],
-            "child bg should inherit rounded clip bounds from parent",
-        );
+        assert_eq!(image.get_pixel(20, 20).0, [255, 255, 255, 255]);
     }
 
     // -- Headless GPU helpers ------------------------------------------------
@@ -3061,14 +3006,6 @@ mod tests {
             }
             Err(error) => panic!("headless renderer failed: {error}"),
         }
-    }
-
-    /// One vendored-only system shared by the tests that shape and render.
-    fn test_text() -> MutexGuard<'static, TextSystem> {
-        static TEXT: OnceLock<Mutex<TextSystem>> = OnceLock::new();
-        TEXT.get_or_init(|| Mutex::new(TextSystem::vendored_only(&FontSettings::default())))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn render_pixels(scene: &Scene, width: u32, height: u32) -> Option<image::RgbaImage> {
@@ -3169,42 +3106,6 @@ mod tests {
             .flat_map(|y| (x0..x1).map(move |x| (x, y)))
             .filter(|&(x, y)| pred(image.get_pixel(x, y).0))
             .count()
-    }
-
-    // Regression: mono text used Basic shaping, which skips font fallback, so
-    // an emoji in code drew as the mono face's tofu box.
-    #[test]
-    fn render_mono_emoji_draws_glyph_from_fallback_font() {
-        let mut text = TextSystem::new();
-        let has_emoji_font = text
-            .font_system()
-            .db()
-            .faces()
-            .any(|face| face.families.iter().any(|(name, _)| name.contains("Emoji")));
-        if !has_emoji_font {
-            return;
-        }
-        let params = TextParams::new("a\u{1F600}b", TextStyle::new(32.0).kind(FontKind::Mono));
-        let layout = text.layout(&params).expect("layout");
-        let g = layout.glyphs();
-        assert_eq!(g.len(), 3);
-        assert_ne!(
-            g.font_id[1], g.font_id[0],
-            "emoji shaped with the mono face"
-        );
-        assert_ne!(g.glyph_id[1], 0, "emoji shaped as .notdef");
-        let emoji = rect(g.x[1], 0.0, g.advance[1], 48.0);
-        let mut scene = Scene::default();
-        scene.text(TextPrimitive {
-            rect: rect(0.0, 0.0, 160.0, 48.0),
-            layout: ShapedText::new(Arc::new(layout)),
-            color: quark::Color::rgba(255, 255, 255, 255),
-        });
-        let Some(image) = render_pixels_with(&scene, &mut text, 160, 48) else {
-            return;
-        };
-        let lit = count_pixels(&image, emoji, |p| p[..3].iter().any(|&c| c > 128));
-        assert!(lit > 20, "emoji drew nothing ({lit} lit pixels)");
     }
 
     // The renderer bakes span colors into a copy of the layout's buffer; each

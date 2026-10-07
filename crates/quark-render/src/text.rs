@@ -337,6 +337,17 @@ fn srgb_to_linear(channel: u8) -> f32 {
     }
 }
 
+/// One vendored-only system shared by the tests that shape and render;
+/// building one parses every vendored font.
+#[cfg(test)]
+pub(crate) fn test_text() -> std::sync::MutexGuard<'static, TextSystem> {
+    use std::sync::{Mutex, OnceLock};
+    static TEXT: OnceLock<Mutex<TextSystem>> = OnceLock::new();
+    TEXT.get_or_init(|| Mutex::new(TextSystem::vendored_only(&Default::default())))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,7 +369,7 @@ mod tests {
     // underline below the baseline and strikethrough above it.
     #[test]
     fn decoration_quads_sit_within_their_glyph_runs() {
-        let mut system = TextSystem::vendored_only(&FontSettings::default());
+        let mut system = test_text();
         let text = "plain words then a decorated stretch that wraps onto the next line";
         let start = text.find("decorated").unwrap_or(0);
         let end = text.find(" line").unwrap_or(text.len());
@@ -408,24 +419,15 @@ mod tests {
     // Regression: the default vendored faces (Geist, Geist Mono) have no
     // italic, so italic spans painted upright. They must be slanted
     // synthetically, while a family that ships an italic face (JetBrains
-    // Mono) uses it instead of being slanted twice.
+    // Mono) uses it instead of being slanted twice, including after the
+    // fonts change on a running system.
     #[test]
     fn italic_spans_without_an_italic_face_are_slanted() {
         use quark::scene::FontStyle;
         use quark_text::TextSpan;
         use quark_text::cosmic_text::CacheKeyFlags;
 
-        let jetbrains = FontSettings {
-            mono_family: "JetBrains Mono".to_owned(),
-            ..FontSettings::default()
-        };
-        let cases = [
-            (FontSettings::default(), FontKind::Ui, true),
-            (FontSettings::default(), FontKind::Mono, true),
-            (jetbrains, FontKind::Mono, false),
-        ];
-        for (settings, kind, expected) in cases {
-            let mut system = TextSystem::vendored_only(&settings);
+        fn slanted(system: &mut TextSystem, kind: FontKind) -> bool {
             let span = TextSpan {
                 range: 0..6,
                 weight: None,
@@ -434,12 +436,22 @@ mod tests {
             };
             let params = TextParams::new("italic", TextStyle::new(14.0)).spans(vec![span]);
             let layout = system.layout(&params).expect("layout");
-            let slanted = layout
-                .glyphs()
-                .flags
-                .iter()
-                .all(|f| f.contains(CacheKeyFlags::FAKE_ITALIC));
-            assert_eq!(slanted, expected, "{} {kind:?}", settings.mono_family);
+            let flags = &layout.glyphs().flags;
+            flags.iter().all(|f| f.contains(CacheKeyFlags::FAKE_ITALIC))
         }
+
+        // Its own system: changing fonts on the shared one would race other
+        // tests.
+        let mut system = TextSystem::vendored_only(&FontSettings::default());
+        assert!(slanted(&mut system, FontKind::Ui), "Geist upright");
+        assert!(slanted(&mut system, FontKind::Mono), "Geist Mono upright");
+        system.set_font_settings(&FontSettings {
+            mono_family: "JetBrains Mono".to_owned(),
+            ..FontSettings::default()
+        });
+        assert!(
+            !slanted(&mut system, FontKind::Mono),
+            "JetBrains Mono slanted twice"
+        );
     }
 }
