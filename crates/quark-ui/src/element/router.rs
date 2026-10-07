@@ -173,6 +173,40 @@ impl ScrollTarget {
     }
 }
 
+/// A node's retained scroll state: wheel and key input move the handle
+/// directly on the axes it scrolls.
+#[derive(Debug, Clone)]
+pub struct HandleTarget {
+    pub handle: ScrollHandle,
+    pub axes: ScrollAxes,
+}
+
+/// What scrolls a node along one axis.
+#[derive(Clone, Copy)]
+enum AxisTarget<'a> {
+    Handle(&'a ScrollHandle),
+    Builder(&'a ScrollTarget),
+}
+
+impl AxisTarget<'_> {
+    fn can_scroll(self, axis: Axis, forward: bool) -> bool {
+        match self {
+            Self::Handle(handle) => handle.can_scroll(axis, forward),
+            Self::Builder(target) => !target.at_limit(if forward { 1 } else { -1 }),
+        }
+    }
+}
+
+/// One wheel event for [`InputRouter::scroll_wheel`]: motion in points,
+/// positive scrolling content down and right, and when it happened, for
+/// fling velocity.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WheelEvent {
+    pub dx: f32,
+    pub dy: f32,
+    pub now_ms: u64,
+}
+
 /// Event handlers of one frame. Each kind is a pair of parallel columns:
 /// the owning semantic node index and the handler.
 #[derive(Default)]
@@ -183,6 +217,12 @@ pub struct InputHandlers {
     drag: Vec<DragStart>,
     scroll_node: Vec<usize>,
     scroll: Vec<ScrollTarget>,
+    scroll_x_node: Vec<usize>,
+    scroll_x: Vec<ScrollTarget>,
+    handle_node: Vec<usize>,
+    handle: Vec<HandleTarget>,
+    scrollbar_node: Vec<usize>,
+    scrollbar: Vec<(Scrollbar, ScrollSink)>,
     key_node: Vec<usize>,
     /// Shared so a replayed cache boundary re-registers its bindings
     /// without copying their key strings.
@@ -201,9 +241,31 @@ impl InputHandlers {
         self.drag.push(start);
     }
 
+    /// Vertical wheel input for an app-owned offset.
     pub fn on_scroll(&mut self, node: usize, target: ScrollTarget) {
         self.scroll_node.push(node);
         self.scroll.push(target);
+    }
+
+    /// Horizontal wheel input for an app-owned offset; `target.builder`
+    /// gets the lines.
+    pub fn on_scroll_x(&mut self, node: usize, target: ScrollTarget) {
+        self.scroll_x_node.push(node);
+        self.scroll_x.push(target);
+    }
+
+    /// Wheel and key input on `axes` move `handle`. Takes precedence over
+    /// app-owned targets of the same node on those axes.
+    pub fn on_scroll_handle(&mut self, node: usize, handle: ScrollHandle, axes: ScrollAxes) {
+        self.handle_node.push(node);
+        self.handle.push(HandleTarget { handle, axes });
+    }
+
+    /// A press on `bar` pages or drags its thumb; kept apart from
+    /// [`Self::on_drag`] so a frame registers it without allocating.
+    pub(crate) fn on_scrollbar(&mut self, node: usize, bar: Scrollbar, sink: ScrollSink) {
+        self.scrollbar_node.push(node);
+        self.scrollbar.push((bar, sink));
     }
 
     /// `binding` uses the keymap format, e.g. `"enter"` or `"mod+s"`. A
@@ -228,6 +290,12 @@ impl InputHandlers {
         self.drag.clear();
         self.scroll_node.clear();
         self.scroll.clear();
+        self.scroll_x_node.clear();
+        self.scroll_x.clear();
+        self.handle_node.clear();
+        self.handle.clear();
+        self.scrollbar_node.clear();
+        self.scrollbar.clear();
         self.key_node.clear();
         self.key_binding.clear();
         self.key_action.clear();
@@ -238,6 +306,9 @@ impl InputHandlers {
             click: self.click.len(),
             drag: self.drag.len(),
             scroll: self.scroll.len(),
+            scroll_x: self.scroll_x.len(),
+            handle: self.handle.len(),
+            scrollbar: self.scrollbar.len(),
             key: self.key_action.len(),
         }
     }
@@ -266,6 +337,21 @@ impl InputHandlers {
                 node_base,
                 &mut out.scroll_node,
             )
+            & nodes(
+                &self.scroll_x_node[marks.scroll_x..],
+                node_base,
+                &mut out.scroll_x_node,
+            )
+            & nodes(
+                &self.handle_node[marks.handle..],
+                node_base,
+                &mut out.handle_node,
+            )
+            & nodes(
+                &self.scrollbar_node[marks.scrollbar..],
+                node_base,
+                &mut out.scrollbar_node,
+            )
             & nodes(&self.key_node[marks.key..], node_base, &mut out.key_node);
         fn copy<T: Clone>(from: &[T], out: &mut Vec<T>) {
             out.clear();
@@ -274,6 +360,9 @@ impl InputHandlers {
         copy(&self.click[marks.click..], &mut out.click);
         copy(&self.drag[marks.drag..], &mut out.drag);
         copy(&self.scroll[marks.scroll..], &mut out.scroll);
+        copy(&self.scroll_x[marks.scroll_x..], &mut out.scroll_x);
+        copy(&self.handle[marks.handle..], &mut out.handle);
+        copy(&self.scrollbar[marks.scrollbar..], &mut out.scrollbar);
         copy(&self.key_binding[marks.key..], &mut out.key_binding);
         copy(&self.key_action[marks.key..], &mut out.key_action);
         ok
@@ -290,6 +379,14 @@ impl InputHandlers {
         self.drag.extend_from_slice(&from.drag);
         self.scroll_node.extend(shift(&from.scroll_node, node_base));
         self.scroll.extend_from_slice(&from.scroll);
+        self.scroll_x_node
+            .extend(shift(&from.scroll_x_node, node_base));
+        self.scroll_x.extend_from_slice(&from.scroll_x);
+        self.handle_node.extend(shift(&from.handle_node, node_base));
+        self.handle.extend_from_slice(&from.handle);
+        self.scrollbar_node
+            .extend(shift(&from.scrollbar_node, node_base));
+        self.scrollbar.extend_from_slice(&from.scrollbar);
         self.key_node.extend(shift(&from.key_node, node_base));
         self.key_binding.extend_from_slice(&from.key_binding);
         self.key_action.extend_from_slice(&from.key_action);
@@ -305,9 +402,31 @@ impl InputHandlers {
         self.drag.get(i)
     }
 
-    fn scroll(&self, node: usize) -> Option<&ScrollTarget> {
-        let i = self.scroll_node.iter().position(|n| *n == node)?;
-        self.scroll.get(i)
+    /// The drag a press at `(x, y)` on `node` starts, if it has one.
+    fn start_drag(&self, node: usize, x: f32, y: f32) -> Option<Box<dyn DragHandler>> {
+        if let Some(start) = self.drag(node) {
+            return Some(start.start(ClickEvent { x, y }));
+        }
+        let i = self.scrollbar_node.iter().position(|n| *n == node)?;
+        let (bar, sink) = self.scrollbar.get(i)?;
+        Some(Box::new(ScrollbarDrag::new(*bar, sink.clone(), x, y)))
+    }
+
+    fn axis_target(&self, node: usize, axis: Axis) -> Option<AxisTarget<'_>> {
+        let handle = self
+            .handle_node
+            .iter()
+            .zip(&self.handle)
+            .find(|(n, target)| **n == node && target.axes.has(axis));
+        if let Some((_, target)) = handle {
+            return Some(AxisTarget::Handle(&target.handle));
+        }
+        let (nodes, targets) = match axis {
+            Axis::X => (&self.scroll_x_node, &self.scroll_x),
+            Axis::Y => (&self.scroll_node, &self.scroll),
+        };
+        let i = nodes.iter().position(|n| *n == node)?;
+        targets.get(i).map(AxisTarget::Builder)
     }
 
     fn key(&self, node: usize, pressed: &Binding) -> Option<&Action> {
@@ -324,6 +443,9 @@ pub(super) struct HandlerMarks {
     click: usize,
     drag: usize,
     scroll: usize,
+    scroll_x: usize,
+    handle: usize,
+    scrollbar: usize,
     key: usize,
 }
 
@@ -341,6 +463,9 @@ pub struct InputFrame {
 pub struct Delivery {
     pub node: Option<usize>,
     pub actions: Vec<Action>,
+    /// The event moved a [`ScrollHandle`] (or its scrollbar state), so the
+    /// window needs a repaint even without actions.
+    pub redraw: bool,
 }
 
 /// The drag holding the pointer. Frames come and go during a drag, so it
@@ -358,9 +483,11 @@ pub struct InputRouter {
     frame: InputFrame,
     focus_tree: FocusTree,
     capture: Option<Capture>,
-    /// Wheel motion in lines not yet delivered, so slow trackpad motion
-    /// adds up instead of rounding away.
-    wheel_lines: f32,
+    /// Wheel motion in lines not yet delivered on each axis, so slow
+    /// trackpad motion adds up instead of rounding away.
+    wheel_lines: [f32; 2],
+    /// The handle wheel input last moved: the one a fling continues.
+    wheel_handle: Option<ScrollHandle>,
 }
 
 impl InputRouter {
@@ -415,8 +542,11 @@ impl InputRouter {
 
     /// Press: update `focus`, then start a drag (capturing the pointer and
     /// delivering its press actions) or deliver a click to the first handler
-    /// on the route.
+    /// on the route. A press stops any fling.
     pub fn pointer_down(&mut self, x: f32, y: f32, focus: &mut Option<FocusId>) -> Delivery {
+        if let Some(handle) = &self.wheel_handle {
+            handle.stop_fling();
+        }
         let target = self.target_at(x, y);
         if let Some(next) = self.focus_after_press(target) {
             *focus = next;
@@ -428,12 +558,15 @@ impl InputRouter {
         // The innermost node with a drag or click handler owns the press, so
         // a button inside a draggable panel still clicks.
         let drag = self.walk(target, UiEventKind::PointerDown, |node| {
-            (handlers.drag(node).is_some() || handlers.click(node).is_some()).then(Vec::new)
+            (handlers.drag(node).is_some()
+                || handlers.scrollbar_node.contains(&node)
+                || handlers.click(node).is_some())
+            .then(Vec::new)
         });
+        let epoch = scroll_epoch();
         if let Some(node) = drag.node
-            && let Some(start) = handlers.drag(node)
+            && let Some(mut drag) = handlers.start_drag(node, x, y)
         {
-            let mut drag = start.start(ClickEvent { x, y });
             let actions = drag.on_press();
             self.capture = Some(Capture {
                 identity: node_identities(&self.frame.semantic)[node],
@@ -443,6 +576,7 @@ impl InputRouter {
             return Delivery {
                 node: Some(node),
                 actions,
+                redraw: scroll_epoch() != epoch,
             };
         }
         self.walk(target, UiEventKind::Click, |node| {
@@ -454,10 +588,12 @@ impl InputRouter {
 
     /// Moves go to the capturing drag, wherever the pointer is.
     pub fn pointer_move(&mut self, x: f32, y: f32) -> Delivery {
+        let epoch = scroll_epoch();
         match &mut self.capture {
             Some(capture) => Delivery {
                 node: capture.node,
                 actions: capture.drag.on_move(x, y),
+                redraw: scroll_epoch() != epoch,
             },
             None => Delivery::default(),
         }
@@ -465,10 +601,12 @@ impl InputRouter {
 
     /// Release ends pointer capture.
     pub fn pointer_up(&mut self) -> Delivery {
+        let epoch = scroll_epoch();
         match self.capture.take() {
             Some(mut capture) => Delivery {
                 node: capture.node,
                 actions: capture.drag.on_release().actions,
+                redraw: scroll_epoch() != epoch,
             },
             None => Delivery::default(),
         }
@@ -479,49 +617,151 @@ impl InputRouter {
     /// release, so handlers that act while the button is held (selection
     /// autoscroll) stop.
     pub fn cancel_pointer(&mut self) -> Delivery {
-        self.wheel_lines = 0.0;
+        self.wheel_lines = [0.0; 2];
         self.pointer_up()
     }
 
-    /// Wheel goes to the innermost scrollable under the pointer, in whole
-    /// lines of [`WHEEL_LINE_PX`]; positive `delta_px` scrolls down. The
-    /// fraction of a line left over carries into the next call. A node at
-    /// its limit in the wheel's direction passes the input to the next
-    /// scrollable ancestor; when every one is at its limit, the innermost
-    /// still gets it so the app can clamp or rubber-band.
+    /// Vertical wheel motion; see [`Self::scroll_wheel`].
     pub fn wheel(&mut self, x: f32, y: f32, delta_px: f32) -> Delivery {
+        self.scroll_wheel(
+            x,
+            y,
+            WheelEvent {
+                dy: delta_px,
+                ..WheelEvent::default()
+            },
+        )
+    }
+
+    /// Wheel motion goes, per axis, to the innermost node under the pointer
+    /// that scrolls on that axis. A node at its limit in the wheel's
+    /// direction passes the input to the next ancestor scrolling on that
+    /// axis; when every one is at its limit, the innermost still gets it so
+    /// the app can clamp or rubber-band.
+    ///
+    /// A [`ScrollHandle`] moves by the points given. An app-owned target
+    /// gets whole lines of [`WHEEL_LINE_PX`]; the fraction of a line left
+    /// over carries into the next call.
+    pub fn scroll_wheel(&mut self, x: f32, y: f32, event: WheelEvent) -> Delivery {
         let Some(target) = self.target_at(x, y) else {
-            self.wheel_lines = 0.0;
+            self.wheel_lines = [0.0; 2];
             return Delivery::default();
         };
+        let epoch = scroll_epoch();
+        let mut delivery = Delivery::default();
+        for (axis, delta) in [(Axis::Y, event.dy), (Axis::X, event.dx)] {
+            if delta == 0.0 {
+                continue;
+            }
+            let routed = self.wheel_axis(target, axis, delta, event.now_ms);
+            delivery.node = delivery.node.or(routed.node);
+            delivery.actions.extend(routed.actions);
+        }
+        delivery.redraw = scroll_epoch() != epoch;
+        delivery
+    }
+
+    fn wheel_axis(&mut self, target: usize, axis: Axis, delta: f32, now_ms: u64) -> Delivery {
+        let handlers = &self.frame.handlers;
+        let forward = delta > 0.0;
+        let mut innermost = None;
+        let routed = self.walk(target, UiEventKind::Wheel, |node| {
+            let scroll = handlers.axis_target(node, axis)?;
+            innermost.get_or_insert(node);
+            scroll.can_scroll(axis, forward).then(Vec::new)
+        });
+        let Some(node) = routed.node.or(innermost) else {
+            return routed;
+        };
+        // An event binding that stops the wheel ends the walk at a node
+        // that may not scroll.
+        let Some(scroll) = handlers.axis_target(node, axis) else {
+            return routed;
+        };
+        let target = match scroll {
+            AxisTarget::Handle(handle) => {
+                handle.scroll_by(axis, delta, now_ms);
+                self.wheel_handle = Some(handle.clone());
+                return Delivery {
+                    node: Some(node),
+                    ..Delivery::default()
+                };
+            }
+            AxisTarget::Builder(target) => target,
+        };
+        let pending = &mut self.wheel_lines[axis.index()];
         // A reversal starts over rather than first paying off the old
         // direction's fraction.
-        if self.wheel_lines * delta_px < 0.0 {
-            self.wheel_lines = 0.0;
+        if *pending * delta < 0.0 {
+            *pending = 0.0;
         }
-        self.wheel_lines += delta_px / WHEEL_LINE_PX;
-        let lines = self.wheel_lines.trunc() as i32;
+        *pending += delta / WHEEL_LINE_PX;
+        let lines = pending.trunc() as i32;
         if lines == 0 {
             return Delivery::default();
         }
-        self.wheel_lines -= lines as f32;
+        *pending -= lines as f32;
+        Delivery {
+            node: Some(node),
+            actions: vec![target.builder.build(lines)],
+            redraw: false,
+        }
+    }
+
+    /// Fingers lifted off a trackpad that sends no momentum of its own:
+    /// continue the handle wheel input last moved with inertia, from its
+    /// recent velocity. Returns whether a fling started.
+    pub fn fling(&mut self, now_ms: u64) -> bool {
+        self.wheel_handle
+            .as_ref()
+            .is_some_and(|handle| handle.fling(now_ms))
+    }
+
+    /// Keyboard scrolling: arrows, Page Up/Down, Space, Home, and End move
+    /// the nearest node on the focus path (focused node first) that scrolls
+    /// on the key's axis and is not at its limit in that direction. A
+    /// [`ScrollHandle`] scrolls smoothly; an app-owned target gets lines,
+    /// or `to_px` for Home and End when it has one.
+    pub fn scroll_key(&self, pressed: &Binding, focus: Option<FocusId>) -> Delivery {
+        let Some(scroll) = KeyScroll::for_binding(pressed) else {
+            return Delivery::default();
+        };
+        let semantic = &self.frame.semantic;
+        let Some(start) = focus.and_then(|focus| semantic.node_for_focus(focus)) else {
+            return Delivery::default();
+        };
         let handlers = &self.frame.handlers;
-        let mut innermost = None;
-        let delivery = self.walk(target, UiEventKind::Wheel, |node| {
-            let scroll = handlers.scroll(node)?;
-            innermost.get_or_insert(node);
-            (!scroll.at_limit(lines)).then(|| vec![scroll.builder.build(lines)])
-        });
-        if delivery.node.is_some() {
-            return delivery;
-        }
-        match innermost.and_then(|node| Some((node, handlers.scroll(node)?))) {
-            Some((node, scroll)) => Delivery {
+        let (axis, forward) = (scroll.axis(), scroll.forward());
+        let epoch = scroll_epoch();
+        for node in semantic.ancestors_inclusive(start) {
+            let Some(target) = handlers.axis_target(node, axis) else {
+                continue;
+            };
+            if !target.can_scroll(axis, forward) {
+                continue;
+            }
+            let actions = match target {
+                AxisTarget::Handle(handle) => {
+                    handle.key_scroll(scroll);
+                    Vec::new()
+                }
+                AxisTarget::Builder(target) => {
+                    let bounds = semantic.nodes()[node].bounds;
+                    let viewport = if axis == Axis::X {
+                        bounds.width
+                    } else {
+                        bounds.height
+                    };
+                    key_scroll_actions(target, scroll, viewport)
+                }
+            };
+            return Delivery {
                 node: Some(node),
-                actions: vec![scroll.builder.build(lines)],
-            },
-            None => delivery,
+                actions,
+                redraw: scroll_epoch() != epoch,
+            };
         }
+        Delivery::default()
     }
 
     /// Key press: the focused node first, then its ancestors. With nothing
@@ -574,6 +814,7 @@ impl InputRouter {
                 x: b.x + b.width / 2.0,
                 y: b.y + b.height / 2.0,
             }),
+            redraw: false,
         }
     }
 
@@ -634,6 +875,7 @@ impl InputRouter {
                 || actions.drag
                 || handlers.click(i).is_some()
                 || handlers.drag(i).is_some()
+                || handlers.scrollbar_node.contains(&i)
         });
         (!interactive).then_some(None)
     }
@@ -658,12 +900,13 @@ impl InputRouter {
                 return Delivery {
                     node: Some(node),
                     actions,
+                    redraw: false,
                 };
             }
             if self.binding_stops(node, kind, phase) {
                 return Delivery {
                     node: Some(node),
-                    actions: Vec::new(),
+                    ..Delivery::default()
                 };
             }
         }
@@ -681,6 +924,29 @@ impl InputRouter {
                     && !binding.default_result.should_continue()
             })
     }
+}
+
+/// Actions an app-owned target gets for a key scroll: lines, or `to_px`
+/// for Home and End when the builder has one.
+fn key_scroll_actions(target: &ScrollTarget, scroll: KeyScroll, viewport: f32) -> Vec<Action> {
+    let lines = |px: f32| (px / WHEEL_LINE_PX).round() as i32;
+    let action = match scroll {
+        KeyScroll::By(_, px) => Some(target.builder.build(lines(px))),
+        KeyScroll::Page(_, forward) => {
+            let page = lines(page_px(viewport));
+            Some(target.builder.build(if forward { page } else { -page }))
+        }
+        KeyScroll::Edge(_, forward) => {
+            let to = if forward { target.max } else { Some(0.0) };
+            to.and_then(|to| {
+                target
+                    .builder
+                    .build_to_px(to as u32)
+                    .or_else(|| Some(target.builder.build(lines(to - target.offset))))
+            })
+        }
+    };
+    action.into_iter().collect()
 }
 
 /// Each node's identity across frames: its stable id or test id when it
@@ -862,6 +1128,51 @@ mod tests {
             [
                 r#"outer [Scroll("outer", 3)]"#,
                 r#"inner [Scroll("inner", -3)]"#
+            ]
+        );
+    }
+
+    // A code block that scrolls sideways inside a page that scrolls both
+    // ways: each axis goes to the innermost container scrolling on it that
+    // is not at its limit.
+    #[test]
+    fn wheel_chains_per_axis() {
+        let route = |inner_x: f32, dx: f32, dy: f32| {
+            let (outer, inner) = (ScrollHandle::new(), ScrollHandle::new());
+            inner.set_offset(inner_x, 0.0);
+            let code = div()
+                .w(200.0)
+                .h(100.0)
+                .flex_shrink_0()
+                .track_scroll(&inner)
+                .overflow_x_scroll()
+                .child(div().w(600.0).h(100.0).flex_shrink_0());
+            let page = div()
+                .w(200.0)
+                .h(200.0)
+                .flex_col()
+                .track_scroll(&outer)
+                .overflow_scroll()
+                .child(code)
+                .child(div().w(400.0).h(1000.0).flex_shrink_0());
+            let mut router = routed(page, 200.0, 200.0);
+            router.scroll_wheel(50.0, 50.0, WheelEvent { dx, dy, now_ms: 0 });
+            format!("outer {:?} inner {:?}", outer.offset(), inner.offset())
+        };
+
+        let got = [
+            route(0.0, 0.0, 40.0),
+            route(0.0, 40.0, 0.0),
+            // The code block is scrolled to its end (600 - 200).
+            route(400.0, 40.0, 0.0),
+        ];
+
+        assert_eq!(
+            got,
+            [
+                "outer (0.0, 40.0) inner (0.0, 0.0)",
+                "outer (0.0, 0.0) inner (40.0, 0.0)",
+                "outer (40.0, 0.0) inner (400.0, 0.0)",
             ]
         );
     }

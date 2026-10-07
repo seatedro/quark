@@ -132,6 +132,9 @@ pub struct Theme {
     pub mono_family: &'static str,
     pub colors: ThemeColors,
     pub metrics: ThemeMetrics,
+    /// Jump instead of animating where motion is decoration (smooth
+    /// scrolling), for users who ask the system to reduce motion.
+    pub reduced_motion: bool,
 }
 
 impl Theme {
@@ -170,6 +173,7 @@ impl Theme {
             mono_family: default_mono_family(),
             colors: dark_colors(&n, &blue, &red, &green, &yellow, &purple, &teal, &orange),
             metrics: default_metrics(),
+            reduced_motion: false,
         }
     }
 
@@ -189,6 +193,7 @@ impl Theme {
             mono_family: default_mono_family(),
             colors: light_colors(&n, &blue, &red, &green, &yellow, &purple, &teal, &orange),
             metrics: default_metrics(),
+            reduced_motion: false,
         }
     }
 }

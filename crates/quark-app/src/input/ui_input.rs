@@ -3,7 +3,7 @@
 //! the adapter and devtools match on these instead of winit's types.
 
 use quark_ui::element::{Binding, Mods, WHEEL_LINE_PX};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase};
 
 use super::{InputEvent, KeyChord, scroll_delta_to_px};
 
@@ -29,6 +29,8 @@ pub enum UiInput {
     Wheel {
         dx: f32,
         dy: f32,
+        /// The fingers left the trackpad: the gesture's last event.
+        ended: bool,
     },
     /// A key press that spells a binding.
     Key(Binding),
@@ -62,7 +64,7 @@ impl UiInput {
                     ElementState::Released => Self::PointerUp(button),
                 }
             }
-            InputEvent::Wheel { delta, .. } => {
+            InputEvent::Wheel { delta, phase } => {
                 let dx = match *delta {
                     MouseScrollDelta::LineDelta(x, _) => -x * WHEEL_LINE_PX,
                     MouseScrollDelta::PixelDelta(position) => -(position.x as f32),
@@ -70,6 +72,7 @@ impl UiInput {
                 Self::Wheel {
                     dx,
                     dy: scroll_delta_to_px(*delta, WHEEL_LINE_PX, 1.0),
+                    ended: *phase == TouchPhase::Ended,
                 }
             }
             InputEvent::KeyPress(chord) => Self::Key(chord.binding()?),
