@@ -825,6 +825,9 @@ impl Element for Div {
             } else if let Some(builder) = self.on_scroll.clone() {
                 node = node.action(AccessibilityAction::Scroll(builder));
             }
+            if let Some(focus) = semantic_parent.and_then(|index| cx.semantic.focus_id(index)) {
+                node = node.focus(focus);
+            }
             match semantic_parent {
                 Some(index) => cx.push_accessibility_for_semantic(node, index),
                 None => cx.push_accessibility(node),

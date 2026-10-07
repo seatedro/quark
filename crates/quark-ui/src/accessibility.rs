@@ -337,6 +337,9 @@ pub struct AccessibilityNode {
     live: Option<Politeness>,
     numeric: Option<NumericValue>,
     text: Option<AccessibleText>,
+    /// Keyboard focus target the node represents, when its action does
+    /// not name one (a focusable button).
+    focus: Option<FocusId>,
     /// 1-based position among siblings and the set size, for list items
     /// whose set is larger than the materialized rows.
     position_in_set: Option<(usize, usize)>,
@@ -369,6 +372,7 @@ impl AccessibilityNode {
             live: None,
             numeric: None,
             text: None,
+            focus: None,
             position_in_set: None,
             set_size: None,
             action: None,
@@ -484,6 +488,13 @@ impl AccessibilityNode {
         self
     }
 
+    /// The keyboard focus target this node stands for, so assistive tech
+    /// sees focus land on it and can move focus to it.
+    pub fn focus(mut self, focus: FocusId) -> Self {
+        self.focus = Some(focus);
+        self
+    }
+
     pub fn action(mut self, action: AccessibilityAction) -> Self {
         self.action = Some(action);
         self
@@ -571,6 +582,9 @@ impl AccessibilityNode {
             }
             None => {}
         }
+        if self.focus.is_some() && !node.supports_action(AxAction::Focus) {
+            node.add_action(AxAction::Focus);
+        }
         node
     }
 
@@ -624,6 +638,9 @@ impl AccessibilityNode {
     }
 
     fn focus_target(&self) -> Option<FocusId> {
+        if self.focus.is_some() {
+            return self.focus;
+        }
         match self.action {
             Some(
                 AccessibilityAction::Focus(focus)
@@ -799,6 +816,11 @@ impl AccessibilityFrame {
 
     pub fn action_for(&self, id: NodeId) -> Option<&AccessibilityAction> {
         self.actions.get(&id)
+    }
+
+    /// The keyboard focus target node `id` stands for.
+    pub fn focus_target_of(&self, id: NodeId) -> Option<FocusId> {
+        self.nodes.iter().find(|node| node.id == id)?.focus_target()
     }
 
     /// The focus target of node `id` and the byte offsets `(anchor, focus)`
@@ -1279,6 +1301,34 @@ mod tests {
              more | Button | More | collapsed\n\
              volume | Slider | Volume | disabled | range=30/0..100\n\
              confirm | Dialog | Confirm | modal\n"
+        );
+    }
+
+    // Regression: keyboard focus on a clickable div (Tab to a button) was
+    // never published, so screen readers stayed on the window.
+    #[test]
+    fn focused_button_is_the_published_focus() {
+        use crate::element::div;
+        use crate::style::Styled;
+        #[derive(Clone, Debug, PartialEq)]
+        struct Save;
+        let root = div().w(400.0).h(300.0).child(
+            div()
+                .w(80.0)
+                .h(30.0)
+                .accessibility_id("save")
+                .accessibility_role(Role::Button)
+                .accessibility_label("Save")
+                .on_click(Action::new(Save)),
+        );
+        let frame = painted(root);
+        let update = frame.tree_update("Test", Some(FocusId::from_key("save")));
+        let focused = update.nodes.iter().find(|(id, _)| *id == update.focus);
+        assert_eq!(
+            focused.and_then(|(_, node)| node.label()),
+            Some("Save"),
+            "focus is on {:?}",
+            focused.map(|(_, node)| node.role())
         );
     }
 

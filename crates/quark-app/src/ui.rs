@@ -691,6 +691,12 @@ enum Routed {
 }
 
 fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> Option<Routed> {
+    // Any node standing for a focus target takes focus, action or not.
+    if request.action == AxAction::Focus {
+        return frame
+            .focus_target_of(request.target_node)
+            .map(Routed::Focus);
+    }
     let target = frame.action_for(request.target_node)?;
     let scroll_lines = match request.action {
         AxAction::ScrollUp => -ACCESSIBILITY_SCROLL_LINES,
@@ -700,12 +706,6 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
         (AxAction::Click, AccessibilityAction::Click(action)) => {
             Some(Routed::Dispatch(action.clone()))
         }
-        (
-            AxAction::Focus,
-            AccessibilityAction::Focus(focus)
-            | AccessibilityAction::TextValue(focus)
-            | AccessibilityAction::EditorViewport { focus, .. },
-        ) => Some(Routed::Focus(*focus)),
         (AxAction::SetValue, AccessibilityAction::TextValue(focus)) => match &request.data {
             Some(ActionData::Value(value)) => Some(Routed::SetValue(*focus, value.to_string())),
             _ => None,
