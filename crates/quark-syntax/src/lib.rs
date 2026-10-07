@@ -15,7 +15,7 @@
 mod engine;
 mod worker;
 
-pub use worker::{HighlightWorker, Highlighted};
+pub use worker::{HighlightWorker, Highlighted, WorkerGone};
 
 /// What a highlighted run of source is.
 #[repr(u8)]
@@ -78,7 +78,8 @@ pub struct HighlightSpan {
 
 impl HighlightSpan {
     pub fn range(self) -> std::ops::Range<usize> {
-        self.offset as usize..(self.offset + self.length) as usize
+        // Saturates like `compact_spans` does for sources past 4 GiB.
+        self.offset as usize..self.offset.saturating_add(self.length) as usize
     }
 }
 
@@ -110,17 +111,37 @@ impl LanguageId {
     /// The language a Markdown fence tag (```` ```rs ````) names, matched
     /// case-insensitively, when its grammar is compiled in.
     pub fn from_fence(tag: &str) -> Option<Self> {
-        let language = match tag.to_ascii_lowercase().as_str() {
-            "sh" | "bash" | "shell" | "zsh" | "console" => Self::Bash,
-            "go" | "golang" => Self::Go,
-            "js" | "javascript" | "jsx" | "mjs" | "cjs" => Self::JavaScript,
-            "json" | "jsonc" => Self::Json,
-            "py" | "python" | "python3" => Self::Python,
-            "rs" | "rust" => Self::Rust,
-            "ts" | "typescript" | "mts" | "cts" => Self::TypeScript,
-            _ => return None,
-        };
-        language.is_compiled().then_some(language)
+        const TAGS: &[(&str, LanguageId)] = &[
+            ("sh", LanguageId::Bash),
+            ("bash", LanguageId::Bash),
+            ("shell", LanguageId::Bash),
+            ("zsh", LanguageId::Bash),
+            ("console", LanguageId::Bash),
+            ("go", LanguageId::Go),
+            ("golang", LanguageId::Go),
+            ("js", LanguageId::JavaScript),
+            ("javascript", LanguageId::JavaScript),
+            ("jsx", LanguageId::JavaScript),
+            ("mjs", LanguageId::JavaScript),
+            ("cjs", LanguageId::JavaScript),
+            ("json", LanguageId::Json),
+            ("jsonc", LanguageId::Json),
+            ("py", LanguageId::Python),
+            ("python", LanguageId::Python),
+            ("python3", LanguageId::Python),
+            ("rs", LanguageId::Rust),
+            ("rust", LanguageId::Rust),
+            ("ts", LanguageId::TypeScript),
+            ("typescript", LanguageId::TypeScript),
+            ("mts", LanguageId::TypeScript),
+            ("cts", LanguageId::TypeScript),
+        ];
+        // Called for every code block on every rebuild, so no lowercased
+        // copy of the tag.
+        let (_, language) = TAGS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(tag))?;
+        language.is_compiled().then_some(*language)
     }
 
     /// Whether this language's grammar feature is on.
