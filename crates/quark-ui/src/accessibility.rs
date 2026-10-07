@@ -20,11 +20,12 @@
 //! and character extents, since runs publish no glyph positions.
 //!
 //! Keyboard gaps: a clickable div needs a stable id (`id`, `test_id`,
-//! `accessibility_id`) or a `focus_ring` to be a Tab stop. Groups (radio
-//! groups, tab lists, menus, list boxes) have no arrow-key navigation, so
-//! each item is its own Tab stop. Drag-only interactions have no keyboard
-//! alternative. Selectable text publishes its selection but ignores
-//! selection requests, since the app owns it.
+//! `accessibility_id`) or a `focus_ring` to be a Tab stop. The radio group,
+//! segmented control, select, and combobox in quark-components are one Tab
+//! stop each and move with the arrow keys; tab lists and menus have no
+//! arrow-key navigation, so each item is its own Tab stop. Drag-only
+//! interactions have no keyboard alternative. Selectable text publishes its
+//! selection but ignores selection requests, since the app owns it.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
