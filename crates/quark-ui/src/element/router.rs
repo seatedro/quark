@@ -365,7 +365,7 @@ pub struct InputRouter {
 
 impl InputRouter {
     pub fn set_frame(&mut self, frame: InputFrame) {
-        self.focus_tree = frame.semantic.focus_tree();
+        frame.semantic.fill_focus_tree(&mut self.focus_tree);
         self.frame = frame;
         if let Some(capture) = &mut self.capture {
             let identities = node_identities(&self.frame.semantic);
