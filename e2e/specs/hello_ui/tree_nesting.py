@@ -1,16 +1,19 @@
-"""Catches: the form's accessibility tree losing its structure. The named
-dialog must sit in the window frame and hold the heading, the Name entry,
-and both buttons, and cua must index both buttons as clickable."""
+"""Catches: the form's accessibility tree losing its structure or its role
+names. As cua reads it, the named dialog must sit in the window frame and
+hold the heading, the Name entry, the hint, and both buttons, with both
+buttons indexed as clickable."""
 
-from quark_e2e import ROLE_NAME, Cua, app_pid, app_tree, main
+from quark_e2e import Cua, app_pid, app_tree, main
 
 
 def spec(cua: Cua):
-    frame = app_tree()
-    assert frame.name == "Hello Quark UI", frame.dump()
-    dialog = frame.require("dialog", "Hello Quark")
+    app_tree()
+    snapshot = cua.snapshot(app_pid())
+    frame = snapshot.root.children[0] if snapshot.root.children else None
+    assert frame and (frame.role, frame.name) == ("frame", "Hello Quark UI"), snapshot.root.dump()
+    dialog = frame.find("dialog", "Hello Quark")
     assert dialog in frame.children, f"'Hello Quark' dialog is not directly in the frame:\n{frame.dump()}"
-    children = [(ROLE_NAME.get(c.role, c.role), c.name) for c in dialog.children]
+    children = [(c.role, c.name) for c in dialog.children]
     expected = [
         ("heading", "Hello from Quark"),
         ("entry", "Name"),
@@ -19,10 +22,7 @@ def spec(cua: Cua):
         ("push button", "Clear"),
     ]
     assert children == expected, f"dialog children {children}, expected {expected}"
-
-    window = cua.window(app_pid())
-    state = cua.call("get_window_state", pid=app_pid(), window_id=window["window_id"], include_screenshot=False)
-    clickable = sorted(e["label"] for e in state.get("elements", []) if "click" in e.get("actions", []))
+    clickable = sorted(e["label"] for e in snapshot.elements if "click" in e.get("actions", []))
     assert clickable == ["Clear", "Greet"], f"cua indexed {clickable} as clickable"
 
 
