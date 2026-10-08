@@ -1,9 +1,13 @@
 //! A runner with no event loop or native window, for driving an [`App`] from
-//! tests: one window that never opens natively, a fake clock that moves only
-//! when told, an in-memory clipboard, and a waker that raises a flag instead
-//! of waking a loop. [`crate::testing`] builds its public harness on it.
+//! tests: virtual windows that open, close, move, resize, rescale, and take
+//! focus only when told, each with its own frame schedule; a fake clock
+//! that moves only when told; an in-memory clipboard; and a waker that
+//! raises a flag instead of waking a loop. Window lifecycle events, close
+//! reasons, and geometry notifications arrive as the event loop delivers
+//! them. [`crate::testing`] builds its public harness on it.
 
 use super::*;
+use crate::testing::ImeState;
 
 /// How far a frame's own redraw request pushes the next frame: one 60 Hz
 /// vsync, as on a real display. Drawing it at the same instant would loop
@@ -21,10 +25,83 @@ fn schedule(frames: &mut Vec<u64>, ms: u64) {
     }
 }
 
+/// An open window of the [`HeadlessRunner`]: what a native window and its
+/// input normalizer would report, set by the test instead of a desktop.
+pub(crate) struct VirtualWindow {
+    pub(crate) title: String,
+    /// Content size in logical points.
+    pub(crate) size: (f32, f32),
+    pub(crate) scale_factor: f64,
+    pub(crate) pointer: Option<(f32, f32)>,
+    pub(crate) modifiers: ModifiersState,
+    /// The window's IME as its frames left it.
+    pub(crate) ime: ImeState,
+    /// Whether this is the active window, holding keyboard focus.
+    pub(crate) focused: bool,
+    /// Top-left corner on the virtual desktop in physical pixels. Virtual
+    /// windows have no decorations, so the content area starts here too.
+    pub(crate) position: (i32, i32),
+    pub(crate) monitor: Option<MonitorInfo>,
+    /// Times frames were requested for, in ms since launch, sorted and
+    /// deduplicated. One frame serves every request due by then, as the
+    /// real frame clock does. A vector so a frame that schedules the next
+    /// one reuses its capacity instead of allocating tree nodes.
+    frames: Vec<u64>,
+    last_frame_ms: Option<u64>,
+    pub(crate) frames_drawn: u64,
+    /// The last frame drawn, in points. The one before it went back to the
+    /// app through [`App::recycle_scene`], as the event loop does once a
+    /// frame is rendered.
+    pub(crate) scene: Scene,
+}
+
+impl VirtualWindow {
+    fn new(title: String, size: (f32, f32), scale_factor: f64, position: (i32, i32)) -> Self {
+        Self {
+            title,
+            size,
+            scale_factor,
+            pointer: None,
+            modifiers: ModifiersState::empty(),
+            ime: ImeState::default(),
+            focused: false,
+            position,
+            monitor: None,
+            frames: Vec::new(),
+            last_frame_ms: None,
+            frames_drawn: 0,
+            scene: Scene::default(),
+        }
+    }
+
+    pub(crate) fn placement(&self, capabilities: PlatformCapabilities) -> WindowPlacement {
+        let position = capabilities.window_positions.then_some(self.position);
+        WindowPlacement {
+            inner_position: position,
+            outer_position: position,
+            size: self.size,
+            scale_factor: self.scale_factor,
+            monitor: self.monitor.clone(),
+            maximized: false,
+            minimized: Some(false),
+            focused: self.focused,
+        }
+    }
+
+    /// The frame due soonest, in ms since launch.
+    fn next_frame_ms(&self) -> Option<u64> {
+        self.frames.first().copied()
+    }
+}
+
 pub(crate) struct HeadlessRunner {
     windows: WindowTable<WindowEntry>,
-    /// The one window. It stays pending: nothing natively opens it.
-    window: WindowHandle,
+    /// The window the runner starts with, which single-window callers
+    /// target.
+    main: WindowHandle,
+    /// The active window, which app events and wakes are delivered against
+    /// as the event loop delivers them against the focused window.
+    focused: Option<WindowHandle>,
     text: AppText,
     flags: Flags,
     clipboard: Clipboard,
@@ -32,6 +109,13 @@ pub(crate) struct HeadlessRunner {
     events: EventSink,
     app_events: Receiver<Posted>,
     theme: Option<Theme>,
+    capabilities: PlatformCapabilities,
+    /// Window creations left to fail.
+    open_failures: usize,
+    /// The scale factor windows open at.
+    open_scale: f64,
+    /// The window drawn last.
+    last_drawn: Option<WindowHandle>,
     /// The base the fake clock's milliseconds count from. Frame contexts
     /// hand out `Instant`s, so it has to be a real one; nothing reads the
     /// wall clock after construction.
@@ -40,33 +124,26 @@ pub(crate) struct HeadlessRunner {
     /// most tests read the tree a frame builds.
     pub(crate) accessibility_active: bool,
     now_ms: u64,
-    last_frame_ms: Option<u64>,
-    /// Times frames were requested for, in ms since launch, sorted and
-    /// deduplicated. One frame serves every request due by then, as the
-    /// real frame clock does. A vector so a frame that schedules the next
-    /// one reuses its capacity instead of allocating tree nodes.
-    frames: Vec<u64>,
-    /// Window size in logical points.
-    size: (f32, f32),
-    pub(crate) input: HeadlessWindow,
-    /// The window's IME as frames left it.
-    pub(crate) ime: crate::testing::ImeState,
-    frames_drawn: u64,
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
     platform: PlatformState,
 }
 
 impl HeadlessRunner {
-    /// A `size` point window at `scale_factor`, at time zero.
+    /// A runner with one focused `size` point window at `scale_factor`, at
+    /// time zero, on a desktop with [`PlatformCapabilities::DESKTOP`].
+    /// Windows the app opens later open at the same scale.
     pub(crate) fn new(size: (f32, f32), scale_factor: f64) -> Self {
         let waker = Waker::detached();
         let (events, app_events) = EventSink::new(waker.clone());
         let mut windows = WindowTable::default();
-        let window = windows.insert(WindowEntry::Pending(Box::default()));
+        let mut main = VirtualWindow::new("Test".to_owned(), size, scale_factor, (0, 0));
+        main.focused = true;
+        let main = windows.insert(WindowEntry::Virtual(Box::new(main)));
         Self {
             windows,
-            window,
+            main,
+            focused: Some(main),
             // Vendored fonts only: fast, and the same on every host.
             text: AppText {
                 system: TextSystem::vendored_only(&FontSettings::default()),
@@ -78,19 +155,13 @@ impl HeadlessRunner {
             events,
             app_events,
             theme: None,
+            capabilities: PlatformCapabilities::DESKTOP,
+            open_failures: 0,
+            open_scale: scale_factor,
+            last_drawn: None,
             launch: Instant::now(),
             accessibility_active: true,
             now_ms: 0,
-            last_frame_ms: None,
-            frames: Vec::new(),
-            size,
-            input: HeadlessWindow {
-                pointer: None,
-                modifiers: ModifiersState::empty(),
-                scale_factor,
-            },
-            ime: Default::default(),
-            frames_drawn: 0,
             #[cfg(feature = "tray")]
             tray: None,
             platform: PlatformState::default(),
@@ -101,19 +172,51 @@ impl HeadlessRunner {
         self.now_ms
     }
 
-    pub(crate) fn size(&self) -> (f32, f32) {
-        self.size
+    /// The window the runner started with.
+    pub(crate) fn main_window(&self) -> WindowHandle {
+        self.main
     }
 
-    pub(crate) fn frames_drawn(&self) -> u64 {
-        self.frames_drawn
+    /// Every open window, in table order.
+    pub(crate) fn windows(&self) -> Vec<WindowHandle> {
+        self.windows.handles()
     }
 
-    /// The earliest requested frame, in ms since launch.
+    /// An open window, or `None` once it closed.
+    pub(crate) fn window(&self, window: WindowHandle) -> Option<&VirtualWindow> {
+        match self.windows.get(window)? {
+            WindowEntry::Virtual(virtual_window) => Some(virtual_window),
+            _ => None,
+        }
+    }
+
+    fn window_mut(&mut self, window: WindowHandle) -> Option<&mut VirtualWindow> {
+        match self.windows.get_mut(window)? {
+            WindowEntry::Virtual(virtual_window) => Some(virtual_window),
+            _ => None,
+        }
+    }
+
+    /// The window drawn last: the one a UI adapter keeping a single
+    /// window's state holds the state of.
+    pub(crate) fn last_drawn(&self) -> Option<WindowHandle> {
+        self.last_drawn
+    }
+
+    /// The earliest frame requested of any window, in ms since launch.
     pub(crate) fn next_frame_ms(&self) -> Option<u64> {
-        self.frames.first().copied()
+        self.windows
+            .iter()
+            .filter_map(|(_, entry)| match entry {
+                WindowEntry::Virtual(virtual_window) => virtual_window.next_frame_ms(),
+                _ => None,
+            })
+            .min()
     }
 
+    /// Whether the app called `exit`, quit, or closed its last window
+    /// without [`EventContext::set_exit_when_last_window_closes`] turned
+    /// off: when the event loop would stop.
     pub(crate) fn exit_requested(&self) -> bool {
         self.flags.exit_requested
     }
@@ -131,35 +234,188 @@ impl HeadlessRunner {
         }
     }
 
-    /// Resize the window, in points, and ask for a frame.
-    pub(crate) fn resize(&mut self, size: (f32, f32)) {
-        self.size = size;
-        schedule(&mut self.frames, self.now_ms);
+    pub(crate) fn capabilities(&self) -> PlatformCapabilities {
+        self.capabilities
     }
 
-    /// Move the window to a display with another scale and ask for a frame.
-    /// The pointer stays at the same point.
-    pub(crate) fn set_scale_factor(&mut self, scale_factor: f64) {
-        self.input.scale_factor = scale_factor;
-        schedule(&mut self.frames, self.now_ms);
+    /// Act as a desktop with `capabilities`: without window positions,
+    /// placements carry none and moves are not reported, as on Wayland.
+    pub(crate) fn set_capabilities(&mut self, capabilities: PlatformCapabilities) {
+        self.capabilities = capabilities;
     }
 
-    /// Ask for a frame now, as the platform does when a window is exposed.
-    pub(crate) fn request_frame(&mut self) {
-        schedule(&mut self.frames, self.now_ms);
+    /// Make the next window creation fail, as when the platform refuses a
+    /// window: the app gets [`AppEvent::WindowClosed`] with
+    /// [`CloseReason::OpenFailed`] instead of [`AppEvent::WindowOpened`].
+    /// Calls add up.
+    pub(crate) fn fail_next_open(&mut self) {
+        self.open_failures += 1;
     }
 
-    fn event_cx(&mut self) -> EventContext<'_> {
+    /// Put `window` on `monitor`, or on no known display. Reported through
+    /// [`EventContext::placement`]; the platform sends no event for it.
+    pub(crate) fn set_monitor(&mut self, window: WindowHandle, monitor: Option<MonitorInfo>) {
+        if let Some(virtual_window) = self.window_mut(window) {
+            virtual_window.monitor = monitor;
+        }
+    }
+
+    /// Resize `window`, in points: report it and ask for a frame.
+    pub(crate) fn resize<A: App>(&mut self, app: &mut A, window: WindowHandle, size: (f32, f32)) {
+        let Some(virtual_window) = self.window_mut(window) else {
+            return;
+        };
+        virtual_window.size = size;
+        self.flags.redraw.push(window);
+        self.callback_in(window, app, |app, cx| {
+            app.app_event(AppEvent::WindowResized { window, size }, cx)
+        });
+    }
+
+    /// Move `window` to a display with another scale: report it and ask
+    /// for a frame. The size in points and the pointer's point stay.
+    pub(crate) fn set_scale_factor<A: App>(
+        &mut self,
+        app: &mut A,
+        window: WindowHandle,
+        scale_factor: f64,
+    ) {
+        let Some(virtual_window) = self.window_mut(window) else {
+            return;
+        };
+        virtual_window.scale_factor = scale_factor;
+        self.flags.redraw.push(window);
+        self.callback_in(window, app, |app, cx| {
+            let event = AppEvent::WindowScaleChanged {
+                window,
+                scale_factor,
+            };
+            app.app_event(event, cx)
+        });
+    }
+
+    /// Move `window` on the desktop, in physical pixels, as the user
+    /// dragging its title bar does. Reported only where windows have
+    /// positions.
+    pub(crate) fn move_window<A: App>(
+        &mut self,
+        app: &mut A,
+        window: WindowHandle,
+        position: (i32, i32),
+    ) {
+        let reported = self.capabilities.window_positions;
+        let Some(virtual_window) = self.window_mut(window) else {
+            return;
+        };
+        virtual_window.position = position;
+        if reported {
+            self.callback_in(window, app, |app, cx| {
+                app.app_event(AppEvent::WindowMoved { window, position }, cx)
+            });
+        }
+    }
+
+    /// Give `window` keyboard focus, or take it away. Focusing a window
+    /// first blurs the one that had focus, as desktops do.
+    pub(crate) fn set_focus<A: App>(&mut self, app: &mut A, window: WindowHandle, focused: bool) {
+        if self.window(window).is_none() {
+            return;
+        }
+        if focused {
+            let blurred: Option<WindowHandle> =
+                self.windows.iter().find_map(|(handle, entry)| match entry {
+                    WindowEntry::Virtual(other) if other.focused && handle != window => {
+                        Some(handle)
+                    }
+                    _ => None,
+                });
+            if let Some(blurred) = blurred {
+                self.input(app, blurred, InputEvent::Focused(false));
+            }
+            self.focused = Some(window);
+        }
+        self.input(app, window, InputEvent::Focused(focused));
+    }
+
+    /// Ask the app to close `window` for `reason`, as its close button
+    /// ([`CloseReason::User`]) does, and close it if the app agrees.
+    /// Returns [`App::close_requested`]'s answer.
+    pub(crate) fn request_close<A: App>(
+        &mut self,
+        app: &mut A,
+        window: WindowHandle,
+        reason: CloseReason,
+    ) -> bool {
+        if self.window(window).is_none() {
+            return false;
+        }
+        self.callback_in(window, app, |app, cx| {
+            let close = app.close_requested(reason, cx);
+            if close {
+                cx.flags.close.push((window, reason));
+            }
+            close
+        })
+    }
+
+    /// Quit as the Quit menu item does: ask every window, and if all agree
+    /// close them all and exit; one refusal cancels the quit. Returns
+    /// whether all agreed.
+    pub(crate) fn request_quit<A: App>(&mut self, app: &mut A) -> bool {
+        let windows = self.windows();
+        let mut all = true;
+        for &window in &windows {
+            all &= app.close_requested(CloseReason::Quit, &mut self.event_cx(Some(window)));
+        }
+        if all {
+            self.flags.close.extend(
+                windows
+                    .into_iter()
+                    .map(|window| (window, CloseReason::Quit)),
+            );
+            self.flags.exit_requested = true;
+        }
+        self.settle(app);
+        all
+    }
+
+    /// Ask for a frame of `window` now, as the platform does when a window
+    /// is exposed.
+    pub(crate) fn request_frame(&mut self, window: WindowHandle) {
+        let now = self.now_ms;
+        if let Some(virtual_window) = self.window_mut(window) {
+            schedule(&mut virtual_window.frames, now);
+        }
+    }
+
+    /// Hand `event` to the app for `window`, keeping the window's pointer
+    /// and modifiers in step as the platform layer does.
+    pub(crate) fn input<A: App>(&mut self, app: &mut A, window: WindowHandle, event: InputEvent) {
+        let Some(virtual_window) = self.window_mut(window) else {
+            return;
+        };
+        match &event {
+            InputEvent::PointerMoved { x, y } => virtual_window.pointer = Some((*x, *y)),
+            InputEvent::PointerLeft => virtual_window.pointer = None,
+            InputEvent::ModifiersChanged(modifiers) => virtual_window.modifiers = *modifiers,
+            InputEvent::Focused(focused) => virtual_window.focused = *focused,
+            _ => {}
+        }
+        self.callback_in(window, app, |app, cx| app.event(event, cx));
+    }
+
+    fn event_cx(&mut self, window: Option<WindowHandle>) -> EventContext<'_> {
         EventContext {
             windows: &mut self.windows,
-            window: Some(self.window),
+            window,
             text: &mut self.text,
             flags: &mut self.flags,
             clipboard: &mut self.clipboard,
             waker: &self.waker,
             events: &self.events,
             theme: self.theme,
-            headless: Some(self.input),
+            capabilities: self.capabilities,
+            headless: true,
             elapsed: Duration::from_millis(self.now_ms),
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
@@ -167,20 +423,111 @@ impl HeadlessRunner {
         }
     }
 
-    /// Run an app callback with an event context, then queue the frames it
-    /// asked for.
+    /// Run an app callback with an event context for the main window.
     pub(crate) fn callback<A: App, R>(
         &mut self,
         app: &mut A,
         f: impl FnOnce(&mut A, &mut EventContext) -> R,
     ) -> R {
-        let result = f(app, &mut self.event_cx());
-        self.queue_requested_frames(false);
+        self.callback_in(self.main, app, f)
+    }
+
+    /// Run an app callback with an event context for `window`, then open
+    /// and close the windows it asked for and queue the frames it asked
+    /// for, as the event loop does after every callback.
+    pub(crate) fn callback_in<A: App, R>(
+        &mut self,
+        window: WindowHandle,
+        app: &mut A,
+        f: impl FnOnce(&mut A, &mut EventContext) -> R,
+    ) -> R {
+        let result = f(app, &mut self.event_cx(Some(window)));
+        self.settle(app);
         result
     }
 
-    /// Move the contexts' redraw and frame requests onto the clock. A frame
-    /// asking to be redrawn right away gets the next vsync instead.
+    /// Open and close the windows callbacks asked for and queue the frames
+    /// they asked for, as the event loop does after every callback.
+    fn settle<A: App>(&mut self, app: &mut A) {
+        self.apply_window_changes(app);
+        self.queue_requested_frames(false);
+    }
+
+    /// The window app events are delivered against: the focused one, else
+    /// the first open one.
+    fn default_window(&self) -> Option<WindowHandle> {
+        self.focused
+            .filter(|&window| self.window(window).is_some())
+            .or_else(|| self.windows.iter().map(|(handle, _)| handle).next())
+    }
+
+    /// Open pending windows and close requested ones, one change at a time
+    /// as the event loop does, telling the app of each.
+    fn apply_window_changes<A: App>(&mut self, app: &mut A) {
+        loop {
+            let pending = self
+                .windows
+                .iter()
+                .find_map(|(handle, entry)| Some((handle, entry.pending()?.clone())));
+            if let Some((window, options)) = pending {
+                if self.open_failures > 0 {
+                    self.open_failures -= 1;
+                    self.close(app, window, CloseReason::OpenFailed);
+                    continue;
+                }
+                let (width, height) = options.size;
+                let position = options.position.unwrap_or_default();
+                let opened = VirtualWindow::new(
+                    options.title,
+                    (width as f32, height as f32),
+                    self.open_scale,
+                    position,
+                );
+                if let Some(entry) = self.windows.get_mut(window) {
+                    *entry = WindowEntry::Virtual(Box::new(opened));
+                }
+                self.flags.redraw.push(window);
+                let mut cx = self.event_cx(Some(window));
+                app.app_event(AppEvent::WindowOpened(window), &mut cx);
+                continue;
+            }
+            // In request order: a quit closes windows in table order.
+            if self.flags.close.is_empty() {
+                break;
+            }
+            let (window, reason) = self.flags.close.remove(0);
+            self.close(app, window, reason);
+        }
+        if self.windows.is_empty() && !self.flags.keep_running_without_windows {
+            self.flags.exit_requested = true;
+        }
+    }
+
+    /// Tell the app `window` closes for `reason` while its placement is
+    /// still readable, then drop it. Stale handles are ignored.
+    fn close<A: App>(&mut self, app: &mut A, window: WindowHandle, reason: CloseReason) {
+        if self.windows.get(window).is_none() {
+            return;
+        }
+        if self.focused == Some(window) {
+            self.focused = None;
+        }
+        if self.last_drawn == Some(window) {
+            self.last_drawn = None;
+        }
+        let bound = self
+            .default_window()
+            .filter(|&other| other != window)
+            .or_else(|| self.windows().into_iter().find(|&other| other != window));
+        let mut cx = self.event_cx(bound);
+        app.app_event(AppEvent::WindowClosed { window, reason }, &mut cx);
+        self.windows.remove(window);
+        self.text.layouts.remove_scope(window.scope_id());
+    }
+
+    /// Move the contexts' redraw and frame requests onto the windows'
+    /// schedules. A frame asking to be redrawn right away gets the next
+    /// vsync instead.
     fn queue_requested_frames(&mut self, from_frame: bool) {
         let now = self.now_ms;
         let soonest = |ms: u64| {
@@ -191,35 +538,51 @@ impl HeadlessRunner {
             }
         };
         let flags = &mut self.flags;
-        if !flags.redraw.is_empty() || std::mem::take(&mut flags.redraw_all) {
-            flags.redraw.clear();
-            schedule(&mut self.frames, soonest(now));
+        let redraw_all = std::mem::take(&mut flags.redraw_all);
+        // Drain, not take: the request vectors keep their capacity.
+        for window in flags.redraw.drain(..) {
+            if let Some(WindowEntry::Virtual(virtual_window)) = self.windows.get_mut(window) {
+                schedule(&mut virtual_window.frames, soonest(now));
+            }
         }
-        // Drain, not take: the request vector keeps its capacity.
-        for (_, at) in flags.frame_at.drain(..) {
-            // Round up: a frame drawn early would see its animation unfinished.
-            let since = at.saturating_duration_since(self.launch);
-            let ms = since.as_nanos().div_ceil(1_000_000) as u64;
-            schedule(&mut self.frames, soonest(ms));
+        for (window, entry) in self.windows.iter_mut() {
+            let WindowEntry::Virtual(virtual_window) = entry else {
+                continue;
+            };
+            if redraw_all {
+                schedule(&mut virtual_window.frames, soonest(now));
+            }
+            for &(target, at) in &flags.frame_at {
+                if target.is_none_or(|target| target == window) {
+                    // Round up: a frame drawn early would see its animation
+                    // unfinished.
+                    let since = at.saturating_duration_since(self.launch);
+                    let ms = since.as_nanos().div_ceil(1_000_000) as u64;
+                    schedule(&mut virtual_window.frames, soonest(ms));
+                }
+            }
         }
-        // The one window cannot close or open others; drop such requests.
-        flags.close.clear();
+        flags.frame_at.clear();
     }
 
-    /// Draw a frame now, whether or not one was requested.
-    pub(crate) fn draw<A: App>(&mut self, app: &mut A) -> Scene {
+    /// Draw a frame of `window` now, whether or not one was requested.
+    /// Returns false when the window is not open.
+    pub(crate) fn draw<A: App>(&mut self, app: &mut A, window: WindowHandle) -> bool {
         let now = self.now_ms;
-        self.frames.retain(|&ms| ms > now);
-        let delta = self
+        let Some(WindowEntry::Virtual(virtual_window)) = self.windows.get_mut(window) else {
+            return false;
+        };
+        virtual_window.frames.retain(|&ms| ms > now);
+        let delta = virtual_window
             .last_frame_ms
             .map_or(Duration::ZERO, |last| Duration::from_millis(now - last));
-        self.last_frame_ms = Some(now);
-        self.text.begin_frame(self.window.scope_id());
-        let scale = self.input.scale_factor;
-        let (width, height) = self.size;
+        virtual_window.last_frame_ms = Some(now);
+        self.text.begin_frame(window.scope_id());
+        let scale = virtual_window.scale_factor;
+        let (width, height) = virtual_window.size;
         let elapsed = Duration::from_millis(now);
         let mut cx = FrameContext {
-            window: self.window,
+            window,
             size: PhysicalSize::new(
                 (f64::from(width) * scale).round() as u32,
                 (f64::from(height) * scale).round() as u32,
@@ -240,11 +603,15 @@ impl HeadlessRunner {
             last_render: Default::default(),
         };
         let scene = app.frame(&mut cx);
-        self.ime.apply(cx.ime);
+        let ime = cx.ime;
+        virtual_window.ime.apply(ime);
         self.text.end_frame();
-        self.frames_drawn += 1;
+        virtual_window.frames_drawn += 1;
+        let previous = std::mem::replace(&mut virtual_window.scene, scene);
+        self.last_drawn = Some(window);
+        app.recycle_scene(window, previous);
         self.queue_requested_frames(true);
-        scene
+        true
     }
 
     /// Deliver an app event, dropping a theme change to the theme the app
@@ -256,7 +623,10 @@ impl HeadlessRunner {
             }
             self.theme = Some(theme);
         }
-        self.callback(app, |app, cx| app.app_event(event, cx));
+        let Some(window) = self.default_window() else {
+            return;
+        };
+        self.callback_in(window, app, |app, cx| app.app_event(event, cx));
     }
 
     /// If something woke the runner, deliver queued app events and then
@@ -269,46 +639,73 @@ impl HeadlessRunner {
         for posted in posted {
             match posted {
                 Posted::App(event) => self.app_event(app, event),
-                // The one window cannot minimize or close; edit roles type
-                // their keys as on the desktop.
+                // Quit and Close Window ask first, as on the desktop; edit
+                // roles type their keys. Virtual windows do not minimize,
+                // zoom, or go fullscreen.
                 #[cfg(feature = "ui")]
                 Posted::Role(role) => {
+                    use crate::platform::menu::MenuRole;
+                    let Some(window) = self.default_window() else {
+                        continue;
+                    };
                     if let Some((key, shift)) = role.edit_key() {
                         let chord = platform::edit_chord(key, shift);
-                        self.callback(app, |app, cx| {
+                        self.callback_in(window, app, |app, cx| {
                             app.event(InputEvent::KeyPress(chord.clone()), cx);
                             app.event(InputEvent::KeyRelease(chord), cx);
                         });
-                    } else if role == crate::platform::menu::MenuRole::Quit {
-                        self.flags.exit_requested = true;
+                    } else if role == MenuRole::Quit {
+                        self.request_quit(app);
+                    } else if role == MenuRole::CloseWindow {
+                        self.request_close(app, window, CloseReason::User);
                     }
                 }
             }
         }
-        self.callback(app, |app, cx| app.wake(cx));
+        if let Some(window) = self.default_window() {
+            self.callback_in(window, app, |app, cx| app.wake(cx));
+        }
         true
     }
 
+    /// The window with the earliest frame due by now; the first in table
+    /// order on a tie.
+    fn due_window(&self) -> Option<WindowHandle> {
+        let mut due: Option<(u64, WindowHandle)> = None;
+        for (window, entry) in self.windows.iter() {
+            let WindowEntry::Virtual(virtual_window) = entry else {
+                continue;
+            };
+            if let Some(ms) = virtual_window
+                .next_frame_ms()
+                .filter(|&ms| ms <= self.now_ms)
+                && due.is_none_or(|(soonest, _)| ms < soonest)
+            {
+                due = Some((ms, window));
+            }
+        }
+        due.map(|(_, window)| window)
+    }
+
     /// Without moving the clock: deliver wakes until none are pending, and
-    /// draw any frame due now, repeating until neither is left. Wakes come
-    /// before frames so a frame shows every message sent before it. Returns
-    /// the last frame drawn.
+    /// draw any window's frame due now, repeating until neither is left.
+    /// Wakes come before frames so a frame shows every message sent before
+    /// it.
     ///
     /// # Panics
     ///
     /// When the app never settles, for example by waking itself from every
     /// [`App::wake`].
-    pub(crate) fn run_until_idle<A: App>(&mut self, app: &mut A) -> Option<Scene> {
-        let mut last = None;
+    pub(crate) fn run_until_idle<A: App>(&mut self, app: &mut A) {
         for _ in 0..IDLE_STEP_LIMIT {
             if self.deliver_wake(app) {
                 continue;
             }
-            if self.next_frame_ms().is_some_and(|ms| ms <= self.now_ms) {
-                last = Some(self.draw(app));
+            if let Some(window) = self.due_window() {
+                self.draw(app, window);
                 continue;
             }
-            return last;
+            return;
         }
         panic!(
             "the app did not go idle in {IDLE_STEP_LIMIT} steps at {} ms: it keeps waking itself",
@@ -318,21 +715,23 @@ impl HeadlessRunner {
 
     /// Move the clock forward `ms`, stopping at each requested frame on the
     /// way to draw it, so animations and timers run in order at their own
-    /// times. Returns the last frame drawn.
-    pub(crate) fn advance<A: App>(&mut self, app: &mut A, ms: u64) -> Option<Scene> {
+    /// times, every window on its own schedule.
+    pub(crate) fn advance<A: App>(&mut self, app: &mut A, ms: u64) {
         let target = self.now_ms + ms;
-        let mut last = self.run_until_idle(app);
+        self.run_until_idle(app);
         while let Some(next) = self.next_frame_ms().filter(|&next| next <= target) {
             self.now_ms = next;
-            last = self.run_until_idle(app).or(last);
+            self.run_until_idle(app);
         }
         self.now_ms = target;
-        self.run_until_idle(app).or(last)
+        self.run_until_idle(app);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     /// An app that logs its frames and wakes, and asks for frames as told.
@@ -375,7 +774,7 @@ mod tests {
             after_frame: vec![Some(50), Some(20), None],
             ..Recorder::default()
         };
-        runner.draw(&mut app);
+        runner.draw(&mut app, runner.main_window());
         app.log.clear();
 
         runner.advance(&mut app, 100);
@@ -393,7 +792,7 @@ mod tests {
             after_frame: vec![None],
             ..Recorder::default()
         };
-        runner.request_frame();
+        runner.request_frame(runner.main_window());
 
         runner.run_until_idle(&mut app);
 
@@ -410,11 +809,372 @@ mod tests {
             redraw_on_wake: true,
             ..Recorder::default()
         };
-        runner.request_frame();
+        runner.request_frame(runner.main_window());
         runner.waker.wake();
 
         runner.run_until_idle(&mut app);
 
         assert_eq!(app.log, ["wake 0", "frame 0"]);
+    }
+
+    /// A multi-window app that logs, by window name, the lifecycle, input,
+    /// and frames it sees, and answers close requests as told.
+    #[derive(Default)]
+    struct Shell {
+        log: Vec<String>,
+        names: HashMap<WindowHandle, String>,
+        /// Windows whose close requests it refuses, by name.
+        refuse_close: Vec<&'static str>,
+        /// Frames each window asks for after drawing, as delays in ms.
+        frame_every: HashMap<String, u64>,
+        /// Scenes handed back: the window each came back with, and the
+        /// width of its one rect, which is the length of the name of the
+        /// window it was built for.
+        recycled: Vec<String>,
+    }
+
+    impl Shell {
+        fn name(&self, window: Option<WindowHandle>) -> String {
+            window
+                .and_then(|window| self.names.get(&window))
+                .map_or("-".to_owned(), Clone::clone)
+        }
+
+        fn log_in(&mut self, cx: &EventContext, line: String) {
+            let window = self.name(cx.window_handle());
+            self.log.push(format!("{window}: {line}"));
+        }
+    }
+
+    impl App for Shell {
+        fn frame(&mut self, cx: &mut FrameContext) -> Scene {
+            let name = self.name(Some(cx.window_handle()));
+            self.log
+                .push(format!("{name}: frame {}", cx.elapsed().as_millis()));
+            if let Some(&every) = self.frame_every.get(&name) {
+                cx.request_frame_in(Duration::from_millis(every));
+            }
+            // Mark the scene with its window, to see where it comes back.
+            let mut scene = Scene::default();
+            scene.rect(quark::scene::RectPrimitive {
+                rect: quark::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: name.len() as f32,
+                    height: 1.0,
+                },
+                color: quark::Color::rgba(0, 0, 0, 255),
+            });
+            scene
+        }
+
+        fn recycle_scene(&mut self, window: WindowHandle, scene: Scene) {
+            let built_for = match scene.expanded().first() {
+                Some(quark::scene::Primitive::Rect(rect)) => rect.rect.width,
+                _ => 0.0,
+            };
+            let name = self.name(Some(window));
+            self.recycled.push(format!("{name} <- {built_for}"));
+        }
+
+        fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
+            let line = match event {
+                InputEvent::Focused(focused) => format!("focused {focused}"),
+                InputEvent::PointerMoved { x, y } => {
+                    let main = cx.pointer_position();
+                    format!("pointer {x},{y} (context sees {main:?})")
+                }
+                other => format!("{other:?}"),
+            };
+            self.log_in(cx, line);
+        }
+
+        fn app_event(&mut self, event: AppEvent, cx: &mut EventContext) {
+            let line = match event {
+                AppEvent::WindowOpened(window) => format!("opened {}", self.name(Some(window))),
+                AppEvent::WindowClosed { window, reason } => {
+                    let placed = cx.placement(window).map(|placement| placement.size);
+                    let name = self.name(Some(window));
+                    format!("closed {name} {reason:?}, placement {placed:?}")
+                }
+                AppEvent::WindowMoved { window, position } => {
+                    format!("moved {} to {position:?}", self.name(Some(window)))
+                }
+                AppEvent::WindowResized { window, size } => {
+                    format!("resized {} to {size:?}", self.name(Some(window)))
+                }
+                AppEvent::WindowScaleChanged {
+                    window,
+                    scale_factor,
+                } => format!("rescaled {} to {scale_factor}", self.name(Some(window))),
+                other => format!("{other:?}"),
+            };
+            self.log_in(cx, line);
+        }
+
+        fn close_requested(&mut self, reason: CloseReason, cx: &mut EventContext) -> bool {
+            let name = self.name(cx.window_handle());
+            self.log
+                .push(format!("{name}: close requested, {reason:?}"));
+            !self.refuse_close.contains(&name.as_str())
+        }
+    }
+
+    /// A runner with a main window named "main" and the app's first frame
+    /// drawn, with the log cleared.
+    fn shell() -> (HeadlessRunner, Shell) {
+        let mut runner = HeadlessRunner::new((400.0, 300.0), 1.0);
+        let mut app = Shell::default();
+        app.names.insert(runner.main_window(), "main".to_owned());
+        runner.request_frame(runner.main_window());
+        runner.run_until_idle(&mut app);
+        app.log.clear();
+        (runner, app)
+    }
+
+    /// Open a `size` window named `name` from a callback on the main window.
+    fn open(runner: &mut HeadlessRunner, app: &mut Shell, name: &str) -> WindowHandle {
+        runner.callback(app, |app, cx| {
+            let window = cx.open_window(WindowOptions {
+                title: name.to_owned(),
+                size: (200.0, 100.0),
+                position: Some((30, 40)),
+                ..WindowOptions::default()
+            });
+            app.names.insert(window, name.to_owned());
+            window
+        })
+    }
+
+    // Docking reserves a window and moves panels in only once it exists:
+    // the acknowledgement must come, bound to the new window, before the
+    // window's first frame.
+    #[test]
+    fn an_opened_window_is_acknowledged_before_its_first_frame() {
+        let (mut runner, mut app) = shell();
+
+        open(&mut runner, &mut app, "tools");
+        runner.run_until_idle(&mut app);
+
+        assert_eq!(app.log, ["tools: opened tools", "tools: frame 0"]);
+    }
+
+    // A window the platform refuses must end its handle with a failure the
+    // app can tell from a close, and never draw or report opening.
+    #[test]
+    fn a_failed_window_reports_open_failed_and_never_opens() {
+        let (mut runner, mut app) = shell();
+        runner.fail_next_open();
+
+        let tools = open(&mut runner, &mut app, "tools");
+        runner.run_until_idle(&mut app);
+
+        assert_eq!(app.log, ["main: closed tools OpenFailed, placement None"]);
+        assert!(!runner.windows().contains(&tools));
+    }
+
+    // Each way a window closes must carry its own reason, and only user and
+    // quit closes may ask the app first: a floating window re-docks on a
+    // user close but must keep its layout when the app quits. A refused
+    // quit closes nothing, so no window is lost to a cancelled quit.
+    #[test]
+    fn closes_report_their_reason_and_ask_only_for_user_and_quit() {
+        type Close = fn(&mut HeadlessRunner, &mut Shell, WindowHandle);
+        let cases: [(&str, Close, &[&str]); 5] = [
+            (
+                "close button",
+                |runner, app, tools| {
+                    runner.request_close(app, tools, CloseReason::User);
+                },
+                &[
+                    "tools: close requested, User",
+                    "main: closed tools User, placement Some((200.0, 100.0))",
+                ],
+            ),
+            (
+                "close button refused",
+                |runner, app, tools| {
+                    app.refuse_close.push("tools");
+                    runner.request_close(app, tools, CloseReason::User);
+                },
+                &["tools: close requested, User"],
+            ),
+            (
+                "close_window",
+                |runner, app, tools| runner.callback(app, |_, cx| cx.close_window(tools)),
+                &["main: closed tools Program, placement Some((200.0, 100.0))"],
+            ),
+            (
+                "quit",
+                |runner, app, _| {
+                    runner.request_quit(app);
+                },
+                &[
+                    "main: close requested, Quit",
+                    "tools: close requested, Quit",
+                    "tools: closed main Quit, placement Some((400.0, 300.0))",
+                    "-: closed tools Quit, placement Some((200.0, 100.0))",
+                ],
+            ),
+            (
+                "quit refused by one window",
+                |runner, app, _| {
+                    app.refuse_close.push("tools");
+                    runner.request_quit(app);
+                },
+                &[
+                    "main: close requested, Quit",
+                    "tools: close requested, Quit",
+                ],
+            ),
+        ];
+        for (name, close, expected) in cases {
+            let (mut runner, mut app) = shell();
+            let tools = open(&mut runner, &mut app, "tools");
+            runner.run_until_idle(&mut app);
+            app.log.clear();
+
+            close(&mut runner, &mut app, tools);
+
+            assert_eq!(app.log, expected, "{name}");
+        }
+    }
+
+    // A closed window's handle must be stale once its close was reported,
+    // or a dock could keep sending panels to a window that is gone.
+    #[test]
+    fn a_closed_window_has_no_placement_after_its_close() {
+        let (mut runner, mut app) = shell();
+        let tools = open(&mut runner, &mut app, "tools");
+
+        runner.request_close(&mut app, tools, CloseReason::User);
+
+        let placement = runner.callback(&mut app, |_, cx| cx.placement(tools));
+        assert_eq!(placement, None);
+    }
+
+    // An animating window must not wake an idle one: each window draws on
+    // its own schedule.
+    #[test]
+    fn each_window_draws_on_its_own_schedule() {
+        let (mut runner, mut app) = shell();
+        open(&mut runner, &mut app, "tools");
+        app.frame_every.insert("tools".to_owned(), 30);
+        runner.run_until_idle(&mut app);
+        app.log.clear();
+
+        runner.advance(&mut app, 70);
+
+        assert_eq!(app.log, ["tools: frame 30", "tools: frame 60"]);
+    }
+
+    // Scenes must come back to the app tagged with the window they were
+    // built for, whatever window drew in between, so per-window buffers
+    // are reused by the right window.
+    #[test]
+    fn recycled_scenes_name_the_window_they_were_built_for() {
+        let (mut runner, mut app) = shell();
+        let main = runner.main_window();
+        let tools = open(&mut runner, &mut app, "tools");
+        runner.run_until_idle(&mut app);
+        app.recycled.clear();
+
+        runner.draw(&mut app, tools);
+        runner.draw(&mut app, main);
+
+        assert_eq!(app.recycled, ["tools <- 5", "main <- 4"]);
+    }
+
+    // Activation moves between windows the way desktops do it: the old
+    // window blurs before the new one gains focus, and placements say which
+    // window is active.
+    #[test]
+    fn focusing_a_window_blurs_the_focused_one_first() {
+        let (mut runner, mut app) = shell();
+        let main = runner.main_window();
+        let tools = open(&mut runner, &mut app, "tools");
+        app.log.clear();
+
+        runner.set_focus(&mut app, tools, true);
+
+        assert_eq!(app.log, ["main: focused false", "tools: focused true"]);
+        let focused = runner.callback(&mut app, |_, cx| {
+            [main, tools].map(|w| cx.placement(w).unwrap().focused)
+        });
+        assert_eq!(focused, [false, true]);
+    }
+
+    // Docking rebuilds its drop targets when a window moves, resizes, or
+    // changes scale, so each change must be reported for the window it
+    // happened to.
+    #[test]
+    fn geometry_changes_are_reported_for_their_window() {
+        type Change = fn(&mut HeadlessRunner, &mut Shell, WindowHandle);
+        let cases: [(&str, Change, &str); 3] = [
+            (
+                "move",
+                |runner, app, tools| runner.move_window(app, tools, (500, 60)),
+                "tools: moved tools to (500, 60)",
+            ),
+            (
+                "resize",
+                |runner, app, tools| runner.resize(app, tools, (320.0, 240.0)),
+                "tools: resized tools to (320.0, 240.0)",
+            ),
+            (
+                "rescale",
+                |runner, app, tools| runner.set_scale_factor(app, tools, 2.0),
+                "tools: rescaled tools to 2",
+            ),
+        ];
+        for (name, change, expected) in cases {
+            let (mut runner, mut app) = shell();
+            let tools = open(&mut runner, &mut app, "tools");
+            runner.run_until_idle(&mut app);
+            app.log.clear();
+
+            change(&mut runner, &mut app, tools);
+
+            assert_eq!(app.log, [expected], "{name}");
+        }
+    }
+
+    // Where windows have no desktop position (Wayland), placements must
+    // not invent one and moves must go unreported, or docking would place
+    // drop targets at made-up coordinates.
+    #[test]
+    fn without_window_positions_placement_has_none_and_moves_are_silent() {
+        let (mut runner, mut app) = shell();
+        runner.set_capabilities(PlatformCapabilities::WAYLAND);
+        let tools = open(&mut runner, &mut app, "tools");
+        app.log.clear();
+
+        runner.move_window(&mut app, tools, (500, 60));
+
+        assert_eq!(app.log, Vec::<String>::new());
+        let placement = runner.callback(&mut app, |_, cx| cx.placement(tools).unwrap());
+        assert_eq!(
+            (placement.inner_position, placement.outer_position),
+            (None, None)
+        );
+    }
+
+    // Input sent to one window must reach the app bound to that window and
+    // move only that window's pointer.
+    #[test]
+    fn input_reaches_only_the_window_it_is_sent_to() {
+        let (mut runner, mut app) = shell();
+        let main = runner.main_window();
+        let tools = open(&mut runner, &mut app, "tools");
+        app.log.clear();
+
+        runner.input(&mut app, tools, InputEvent::PointerMoved { x: 5.0, y: 6.0 });
+        let main_pointer = runner.window(main).unwrap().pointer;
+
+        assert_eq!(
+            app.log,
+            ["tools: pointer 5,6 (context sees Some((5.0, 6.0)))"]
+        );
+        assert_eq!(main_pointer, None);
     }
 }

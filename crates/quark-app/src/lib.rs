@@ -246,8 +246,9 @@ pub use quark_ui;
 #[cfg(feature = "clipboard-image")]
 pub use runner::ClipboardImage;
 pub use runner::{
-    App, AppEvent, AppText, EventContext, FrameContext, RunError, TrafficLights, Waker,
-    WindowChrome, WindowHandle, WindowOptions, run, scene_to_physical,
+    App, AppEvent, AppText, CloseReason, EventContext, FrameContext, MonitorInfo,
+    PlatformCapabilities, RunError, TrafficLights, Waker, WindowChrome, WindowHandle,
+    WindowOptions, WindowPlacement, run, scene_to_physical,
 };
 #[cfg(feature = "ui")]
 pub use ui::{UiAdapter, UiApp, UiContext, UiSender, ViewContext, run_ui};

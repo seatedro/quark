@@ -72,16 +72,6 @@ pub(crate) struct MemoryClipboard {
     pub(crate) image: Option<ClipboardImage>,
 }
 
-/// What an [`EventContext`] reports about its window when no native window
-/// backs it: the headless test runner's pointer, modifiers, and scale.
-#[cfg(feature = "test-support")]
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct HeadlessWindow {
-    pub(crate) pointer: Option<(f32, f32)>,
-    pub(crate) modifiers: ModifiersState,
-    pub(crate) scale_factor: f64,
-}
-
 /// Runner state that contexts mutate on the app's behalf.
 #[derive(Debug, Default)]
 pub(super) struct Flags {
@@ -94,7 +84,8 @@ pub(super) struct Flags {
     pub(super) frame_at: Vec<(Option<WindowHandle>, Instant)>,
     pub(super) exit_requested: bool,
     pub(super) keep_running_without_windows: bool,
-    pub(super) close: Vec<WindowHandle>,
+    /// Windows to close once the current callback returns, and why.
+    pub(super) close: Vec<(WindowHandle, CloseReason)>,
     #[cfg(feature = "dialogs")]
     pub(super) next_dialog: u64,
 }
@@ -280,8 +271,11 @@ pub struct EventContext<'a> {
     pub(super) waker: &'a Waker,
     pub(super) events: &'a EventSink,
     pub(super) theme: Option<Theme>,
+    pub(super) capabilities: PlatformCapabilities,
+    /// The headless test runner's context: no native window, menu bar, or
+    /// badge to touch.
     #[cfg(feature = "test-support")]
-    pub(super) headless: Option<HeadlessWindow>,
+    pub(super) headless: bool,
     /// When the callback started, measured from the runner's start.
     pub(super) elapsed: Duration,
     #[cfg(feature = "tray")]
@@ -324,15 +318,47 @@ impl EventContext<'_> {
 
     /// Open another window. It is created when the current callback returns;
     /// until then the handle is valid but the window has no native surface.
-    /// Failure arrives as [`AppEvent::WindowOpenFailed`].
+    /// Success arrives as [`AppEvent::WindowOpened`], failure as
+    /// [`AppEvent::WindowClosed`] with [`CloseReason::OpenFailed`].
     pub fn open_window(&mut self, options: WindowOptions) -> WindowHandle {
         self.windows.insert(WindowEntry::Pending(Box::new(options)))
     }
 
     /// Close a window when the current callback returns, without asking
-    /// [`App::close_requested`]. Stale handles are ignored.
+    /// [`App::close_requested`]; it closes with [`CloseReason::Program`].
+    /// Stale handles are ignored.
     pub fn close_window(&mut self, window: WindowHandle) {
-        self.flags.close.push(window);
+        self.flags.close.push((window, CloseReason::Program));
+    }
+
+    /// Where `window` is on the desktop and how big, read now. `None` for a
+    /// window not open yet, or a stale handle.
+    pub fn placement(&self, window: WindowHandle) -> Option<WindowPlacement> {
+        match self.windows.get(window)? {
+            WindowEntry::Open(state) => Some(state.placement()),
+            #[cfg(feature = "test-support")]
+            WindowEntry::Virtual(virtual_window) => {
+                Some(virtual_window.placement(self.capabilities))
+            }
+            WindowEntry::Pending(_) => None,
+        }
+    }
+
+    /// What the windowing system lets the app do with window positions.
+    pub fn capabilities(&self) -> PlatformCapabilities {
+        self.capabilities
+    }
+
+    /// Ask the desktop for an activation token for the context's window,
+    /// which arrives as [`AppEvent::ActivationToken`]. Returns false where
+    /// there are none: anywhere but X11 and Wayland.
+    pub fn request_activation_token(&mut self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(window) = self.native() {
+            use winit::platform::startup_notify::WindowExtStartupNotify;
+            return window.request_activation_token().is_ok();
+        }
+        false
     }
 
     /// Every open or opening window.
@@ -350,16 +376,16 @@ impl EventContext<'_> {
     /// context's window.
     pub fn pointer_position(&self) -> Option<(f32, f32)> {
         #[cfg(feature = "test-support")]
-        if let Some(headless) = self.headless {
-            return headless.pointer;
+        if let Some(virtual_window) = self.virtual_window() {
+            return virtual_window.pointer;
         }
         self.state()?.input.pointer_position()
     }
 
     pub fn modifiers(&self) -> ModifiersState {
         #[cfg(feature = "test-support")]
-        if let Some(headless) = self.headless {
-            return headless.modifiers;
+        if let Some(virtual_window) = self.virtual_window() {
+            return virtual_window.modifiers;
         }
         self.state()
             .map(|state| state.input.modifiers())
@@ -369,8 +395,8 @@ impl EventContext<'_> {
     /// Physical pixels per logical point for the context's window.
     pub fn scale_factor(&self) -> f32 {
         #[cfg(feature = "test-support")]
-        if let Some(headless) = self.headless {
-            return headless.scale_factor as f32;
+        if let Some(virtual_window) = self.virtual_window() {
+            return virtual_window.scale_factor as f32;
         }
         self.state().map_or(1.0, |state| state.scale_factor as f32)
     }
@@ -575,6 +601,14 @@ impl EventContext<'_> {
 
     fn state(&self) -> Option<&WindowState> {
         self.windows.get(self.window?)?.open()
+    }
+
+    #[cfg(feature = "test-support")]
+    fn virtual_window(&self) -> Option<&VirtualWindow> {
+        match self.windows.get(self.window?)? {
+            WindowEntry::Virtual(virtual_window) => Some(virtual_window),
+            _ => None,
+        }
     }
 
     pub(super) fn native(&self) -> Option<&Window> {

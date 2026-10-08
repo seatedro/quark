@@ -259,7 +259,7 @@ impl App for Demo {
     fn app_event(&mut self, event: AppEvent, cx: &mut EventContext) {
         match &event {
             AppEvent::ThemeChanged(theme) => self.theme = *theme,
-            AppEvent::WindowClosed(window) if Some(*window) == self.inspector => {
+            AppEvent::WindowClosed { window, .. } if Some(*window) == self.inspector => {
                 self.inspector = None;
             }
             AppEvent::Menu(id) => self.command(id, cx),

@@ -17,7 +17,8 @@ pub trait App: 'static {
 
     /// The runner hands each scene back once it is rendered, so the app can
     /// build the next one in the same buffer instead of allocating it.
-    fn recycle_scene(&mut self, _scene: Scene) {}
+    /// `window` is the window the scene was built for.
+    fn recycle_scene(&mut self, _window: WindowHandle, _scene: Scene) {}
 
     fn event(&mut self, _event: InputEvent, _cx: &mut EventContext) {}
 
@@ -28,15 +29,19 @@ pub trait App: 'static {
     /// bound to the window the event concerns, or else to the focused window.
     fn app_event(&mut self, _event: AppEvent, _cx: &mut EventContext) {}
 
-    /// The user asked to close the context's window. Return false to keep it
-    /// open (for example, to ask about unsaved changes first).
-    fn close_requested(&mut self, _cx: &mut EventContext) -> bool {
+    /// The context's window is about to close for `reason`:
+    /// [`CloseReason::User`] when the user closed it, [`CloseReason::Quit`]
+    /// when the Quit menu item asks every window. Return false to keep it
+    /// open (for example, to ask about unsaved changes first). Closes from
+    /// [`EventContext::close_window`] do not ask.
+    fn close_requested(&mut self, _reason: CloseReason, _cx: &mut EventContext) -> bool {
         true
     }
 
-    /// The accessibility tree to publish, if it changed. Called right after
-    /// [`App::frame`] for the same window.
-    fn accessibility(&mut self) -> Option<TreeUpdate> {
+    /// The accessibility tree to publish for `window`, if it changed.
+    /// Called after [`App::frame`] for that window, while assistive tech
+    /// listens to it.
+    fn accessibility(&mut self, _window: WindowHandle) -> Option<TreeUpdate> {
         None
     }
 
@@ -79,6 +84,11 @@ pub struct WindowOptions {
     /// and restore them when a window with the same key opens. See
     /// [`crate::platform::window_state`].
     pub persist_key: Option<String>,
+    /// Initial outer position in physical desktop pixels, as
+    /// [`WindowPlacement::outer_position`] reports it. Ignored where windows
+    /// cannot be positioned ([`PlatformCapabilities::window_positions`]),
+    /// and when `persist_key` restores a saved position.
+    pub position: Option<(i32, i32)>,
 }
 
 impl Default for WindowOptions {
@@ -93,6 +103,7 @@ impl Default for WindowOptions {
             traffic_lights: None,
             panic_hook: true,
             persist_key: None,
+            position: None,
         }
     }
 }

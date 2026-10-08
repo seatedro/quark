@@ -49,7 +49,7 @@ pub enum UiInput {
 
 impl UiInput {
     /// The UI input `event` stands for, if any. Key releases, modifier
-    /// changes, and file drags have none.
+    /// changes, pointer entry, and file drags have none.
     pub fn from_event(event: &InputEvent) -> Option<Self> {
         Some(match event {
             InputEvent::PointerMoved { x, y } => Self::PointerMove { x: *x, y: *y },
@@ -85,7 +85,9 @@ impl UiInput {
                 cursor: *cursor,
             },
             InputEvent::Focused(focused) => Self::WindowFocus(*focused),
-            InputEvent::KeyRelease(_)
+            // The move that follows places the pointer.
+            InputEvent::PointerEntered
+            | InputEvent::KeyRelease(_)
             | InputEvent::ModifiersChanged(_)
             | InputEvent::FileHovered(_)
             | InputEvent::FileHoverCancelled

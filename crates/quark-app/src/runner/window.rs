@@ -5,20 +5,30 @@ use super::*;
 pub(super) enum WindowEntry {
     Pending(Box<WindowOptions>),
     Open(Box<WindowState>),
+    /// An open window of the headless runner, with no native window.
+    #[cfg(feature = "test-support")]
+    Virtual(Box<VirtualWindow>),
 }
 
 impl WindowEntry {
     pub(super) fn open(&self) -> Option<&WindowState> {
         match self {
             Self::Open(state) => Some(state),
-            Self::Pending(_) => None,
+            _ => None,
         }
     }
 
     pub(super) fn open_mut(&mut self) -> Option<&mut WindowState> {
         match self {
             Self::Open(state) => Some(state),
-            Self::Pending(_) => None,
+            _ => None,
+        }
+    }
+
+    pub(super) fn pending(&self) -> Option<&WindowOptions> {
+        match self {
+            Self::Pending(options) => Some(options),
+            _ => None,
         }
     }
 }
@@ -142,6 +152,9 @@ pub(super) fn window_attributes(
         .with_window_icon(options.icon.clone())
         // Shown once the renderer exists, so the first paint isn't blank.
         .with_visible(false);
+    if let Some((x, y)) = options.position {
+        attrs = attrs.with_position(PhysicalPosition::new(x, y));
+    }
     if let Some(path) = options.persist_key.as_deref().and_then(state_path) {
         let monitors: Vec<MonitorArea> = event_loop
             .available_monitors()
