@@ -200,6 +200,94 @@ impl ThemeMetrics {
     }
 }
 
+/// Optional sizes for one kind of control, in logical points at 100% zoom.
+///
+/// Components multiply a set value by [`ThemeMetrics::ui_scale`] once, as
+/// they do their own defaults, so a recipe can ask for 13-point control
+/// text while `ui_font_size` stays at the 16-point zoom anchor. `None`
+/// keeps the component's default.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ControlMetrics {
+    pub height: Option<f32>,
+    pub radius: Option<f32>,
+    pub padding_x: Option<f32>,
+    pub padding_y: Option<f32>,
+    pub gap: Option<f32>,
+    pub font_size: Option<f32>,
+    pub icon_size: Option<f32>,
+}
+
+impl ControlMetrics {
+    /// Each field of `self`, or of `fallback` where `self` has none.
+    pub fn or(self, fallback: Self) -> Self {
+        Self {
+            height: self.height.or(fallback.height),
+            radius: self.radius.or(fallback.radius),
+            padding_x: self.padding_x.or(fallback.padding_x),
+            padding_y: self.padding_y.or(fallback.padding_y),
+            gap: self.gap.or(fallback.gap),
+            font_size: self.font_size.or(fallback.font_size),
+            icon_size: self.icon_size.or(fallback.icon_size),
+        }
+    }
+}
+
+/// One black shadow layer under a floating surface, in logical points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Elevation {
+    pub offset_y: f32,
+    pub blur: f32,
+    /// Opacity of the black, 0 to 255.
+    pub alpha: u8,
+}
+
+/// Optional sizes for a floating surface: popover, tooltip, toast, or
+/// modal. Same units and scaling as [`ControlMetrics`]; a set `shadow`
+/// replaces the component's preset with one layer.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SurfaceMetrics {
+    pub radius: Option<f32>,
+    pub padding_x: Option<f32>,
+    pub padding_y: Option<f32>,
+    pub gap: Option<f32>,
+    pub font_size: Option<f32>,
+    pub title_font_size: Option<f32>,
+    pub shadow: Option<Elevation>,
+}
+
+/// Per-component overrides an app sets once on its theme, so every
+/// instance in every window follows one recipe. The default overrides
+/// nothing: components look as they always have.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ComponentMetrics {
+    /// Buttons of `ButtonSize::Default`. `height` sets buttons without a
+    /// fixed size; a button's own `fixed_size` keeps its square.
+    pub button: ControlMetrics,
+    /// Buttons of `ButtonSize::Compact`.
+    pub button_compact: ControlMetrics,
+    /// The select trigger and the combobox field.
+    pub select: ControlMetrics,
+    /// Rows of select and combobox lists.
+    pub option: ControlMetrics,
+    /// Popover panels: menus and select lists.
+    pub popover: SurfaceMetrics,
+    pub tooltip: SurfaceMetrics,
+    pub toast: SurfaceMetrics,
+    pub modal: SurfaceMetrics,
+    /// Skeleton placeholders: `height` is one line, `gap` between lines,
+    /// `padding_x` and `padding_y` around them.
+    pub skeleton: ControlMetrics,
+    /// Form fields: `font_size` for the label, `gap` between label, control,
+    /// and message.
+    pub field: ControlMetrics,
+}
+
+/// `value`, in unscaled points, at `scale` and rounded to whole points; or
+/// `default`, which is already scaled.
+pub fn scaled_or(value: Option<f32>, scale: f32, default: f32) -> f32 {
+    value.map_or(default, |v| (v * scale).round())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     pub mode: ThemeMode,
@@ -208,6 +296,8 @@ pub struct Theme {
     pub mono_family: &'static str,
     pub colors: ThemeColors,
     pub metrics: ThemeMetrics,
+    /// Optional per-component sizes; see [`ComponentMetrics`].
+    pub components: ComponentMetrics,
     /// Jump instead of animating where motion is decoration (smooth
     /// scrolling), for users who ask the system to reduce motion.
     pub reduced_motion: bool,
@@ -263,6 +353,7 @@ impl Theme {
             mono_family: default_mono_family(),
             colors: dark_colors(&n, &blue, &red, &green, &yellow, &purple, &teal, &orange),
             metrics: default_metrics(),
+            components: ComponentMetrics::default(),
             reduced_motion: false,
         }
     }
@@ -284,6 +375,7 @@ impl Theme {
             mono_family: default_mono_family(),
             colors: light_colors(&n, &blue, &red, &green, &yellow, &purple, &teal, &orange),
             metrics: default_metrics(),
+            components: ComponentMetrics::default(),
             reduced_motion: false,
         }
     }
@@ -298,6 +390,7 @@ impl Theme {
             mono_family: default_mono_family(),
             colors: high_contrast_dark_colors(),
             metrics: default_metrics(),
+            components: ComponentMetrics::default(),
             reduced_motion: false,
         }
     }
@@ -312,6 +405,7 @@ impl Theme {
             mono_family: default_mono_family(),
             colors: high_contrast_light_colors(),
             metrics: default_metrics(),
+            components: ComponentMetrics::default(),
             reduced_motion: false,
         }
     }
