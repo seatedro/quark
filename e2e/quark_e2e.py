@@ -41,6 +41,7 @@ ROLE = {
     "push button": 43,
     "list": 31,
     "list item": 32,
+    "menu": 33,
     "check box": 7,
     "radio button": 44,
     "toggle button": 62,

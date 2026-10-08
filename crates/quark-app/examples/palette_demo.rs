@@ -35,9 +35,12 @@ const HOVER_ANCHOR: Rect = Rect {
     width: 140.0,
     height: 32.0,
 };
-/// Where Ctrl+Shift+O opens the menu: under the buttons. A click on
-/// "Options" opens it at the pointer instead.
+/// Where the menu opens before any frame has placed the Options button.
 const MENU_AT: (f32, f32) = (40.0, 220.0);
+/// The Options button's id, which the keyboard-opened menu anchors to.
+const OPTIONS_ID: &str = "demo.options";
+/// Space between the Options button and a menu anchored under it.
+const MENU_GAP: f32 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sort {
@@ -253,7 +256,12 @@ impl PaletteDemo {
             return true;
         }
         if binding("mod+shift+o").matches(pressed) {
-            self.open_menu(MENU_AT);
+            // Under the Options button, wherever the last frame put it. A
+            // click on "Options" opens the menu at the pointer instead.
+            let at = cx.geometry().by_id(OPTIONS_ID).map_or(MENU_AT, |options| {
+                (options.bounds.x, options.bounds.bottom() + MENU_GAP)
+            });
+            self.open_menu(at);
             cx.window.request_redraw();
             return true;
         }
@@ -316,7 +324,7 @@ impl UiApp for PaletteDemo {
                 <text color={colors.text_muted}>{note}</text>
                 <div class="flex-row gap-2">
                     {Self::button("demo.delete", "Delete note", Msg::DeleteNote, cx)}
-                    {Self::button("demo.options", "Options", Msg::OpenMenu, cx)}
+                    {Self::button(OPTIONS_ID, "Options", Msg::OpenMenu, cx)}
                 </div>
                 <div class="absolute" left={HOVER_ANCHOR.x} top={HOVER_ANCHOR.y}
                      w={HOVER_ANCHOR.width} h={HOVER_ANCHOR.height}
@@ -546,6 +554,22 @@ mod tests {
         ui.key("enter");
         assert_eq!(status(&ui), "sorted by date");
         assert_eq!(open_menus(&ui), 0);
+    }
+
+    // Catches a keyboard-opened menu placed at a fixed point instead of
+    // under its trigger: it must open just below the Options button.
+    #[test]
+    fn keyboard_menu_opens_under_the_options_button() {
+        let mut ui = demo();
+        let options = ui.find(By::role_name(Role::Button, "Options")).bounds;
+
+        ui.key("mod+shift+o");
+
+        let menu = ui.find(By::role(Role::Menu)).bounds;
+        assert_eq!(
+            (menu.x, menu.y),
+            (options.x, options.y + options.height + MENU_GAP)
+        );
     }
 
     fn card_open(ui: &UiTestHarness<PaletteDemo>) -> bool {
