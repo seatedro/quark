@@ -43,7 +43,7 @@ use quark_render::scene::Rect;
 use quark_syntax::{
     GrammarStore, HighlightKind, HighlightSpan, HighlightWorker, Highlighted, LanguageId,
 };
-use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
+use quark_text::{FontEpoch, LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX};
 use quark_ui::virtual_list::{RowKey, VariableList};
@@ -326,7 +326,9 @@ pub struct DiffViewState {
     drag: Option<Drag>,
     /// The view's bounds in the window as of the last frame.
     bounds: Rc<Cell<Rect>>,
-    metrics: Option<(Metrics, u32)>,
+    /// Measured metrics, with the scale factor's bits and the fonts they
+    /// were measured under.
+    metrics: Option<(Metrics, (u32, FontEpoch))>,
     painted: HashMap<u64, Rc<RowPaint>>,
     /// Projection row of each row key, for measuring rows by key.
     row_index: HashMap<u64, u32>,
@@ -972,7 +974,8 @@ impl DiffViewState {
     }
 
     fn build_frame(&mut self, text: &mut TextSystem, layouts: &mut LayoutCache, scale: f32) {
-        if self.metrics.is_none_or(|(_, s)| s != scale.to_bits()) {
+        let measured = (scale.to_bits(), text.font_epoch());
+        if self.metrics.is_none_or(|(_, key)| key != measured) {
             self.measure_font(text, layouts, scale);
         }
         let m = self.metrics();
@@ -1121,9 +1124,16 @@ impl DiffViewState {
             char_w,
             &self.doc,
         );
+        let fonts = text.font_epoch();
         let changed = self.metrics.is_none_or(|(old, _)| old != m);
-        self.metrics = Some((m, scale.to_bits()));
-        if changed {
+        let new_fonts = self.metrics.is_some_and(|(_, (_, old))| old != fonts);
+        self.metrics = Some((m, (scale.to_bits(), fonts)));
+        if new_fonts {
+            // Rows were shaped and wrapped with the old fonts.
+            self.painted.clear();
+            self.content_w = [0.0; 2];
+        }
+        if changed || new_fonts {
             let anchor = self.anchor();
             self.rebuild_rows(anchor);
         }
@@ -1496,6 +1506,62 @@ mod tests {
 -fn a() {}
 +fn b() {}
 ";
+
+    // Catches rows shaped and wrapped before a font change being kept: a
+    // wrapped diff must lay out as a fresh view does in the new fonts.
+    #[test]
+    fn font_change_reshapes_and_rewraps_every_row() {
+        let long = "let wrapped = some_function(first_argument, second_argument, third);";
+        let patch = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-{long}\n+{long} // x\n"
+        );
+        let doc = || quark_diff::parse_unified(&patch).unwrap();
+        let open = || {
+            let mut state = DiffViewState::new("test.diff", FocusId::new(1), doc());
+            state.set_style(DiffStyle {
+                wrap: true,
+                ..DiffStyle::default()
+            });
+            state.set_viewport(260.0, 400.0);
+            state
+        };
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        // Row heights, and each side's text in pixels wide.
+        let layout =
+            |state: &mut DiffViewState, text: &mut TextSystem, layouts: &mut LayoutCache| {
+                state.prepare(text, layouts, 1.0, 0);
+                let frame = state.frame.as_ref().unwrap();
+                let rows: Vec<String> = frame
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let widths: Vec<f32> = row
+                            .paint
+                            .sides
+                            .iter()
+                            .flatten()
+                            .map(|side| side.layout.size().0)
+                            .collect();
+                        format!("{}:{widths:?}", row.height)
+                    })
+                    .collect();
+                rows.join(" ")
+            };
+        let mut state = open();
+        let before = layout(&mut state, &mut text, &mut layouts);
+
+        text.set_font_settings(&quark_text::FontSettings {
+            // Proportional, so the lines wrap elsewhere.
+            mono_family: "Inter".into(),
+            ..Default::default()
+        });
+        let after = layout(&mut state, &mut text, &mut layouts);
+
+        let expected = layout(&mut open(), &mut text, &mut layouts);
+        assert_ne!(before, expected, "the fonts lay the rows out differently");
+        assert_eq!(after, expected);
+    }
 
     // Catches progressive highlights being dropped or stale ones winning:
     // later revisions for the shown document recolor it, while earlier
