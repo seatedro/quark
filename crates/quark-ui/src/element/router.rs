@@ -486,6 +486,8 @@ pub struct InputFrame {
     pub semantic: SemanticFrame,
     /// Where the frame's identified elements landed.
     pub geometry: LayoutSnapshot,
+    /// Where the frame takes drops.
+    pub drop_targets: DropTargets,
 }
 
 /// The outcome of routing one event: the semantic node that handled it
