@@ -36,6 +36,7 @@
 //! back to [`DockState::apply`]. [`DockState::workspace_snapshot`] persists
 //! sizes, visibility, the tab groups, and floating hosts.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -1481,7 +1482,8 @@ pub struct Dock<'a> {
     size: (f32, f32),
     map: EventMap,
     toggle_keys: Vec<(DockRegion, String)>,
-    move_keys: Option<(String, String)>,
+    /// Borrowed for the defaults, so building a dock allocates no keys.
+    move_keys: Option<(Cow<'static, str>, Cow<'static, str>)>,
     always_tabs: [bool; 4],
     tab_width: f32,
     grips: bool,
@@ -1606,7 +1608,8 @@ impl<'a> Dock<'a> {
     /// next group that takes it, in tree order ([`DockState::move_target`]);
     /// `None` binds none. Defaults to Mod+Shift+Page Up and Page Down.
     pub fn move_tab_keys(mut self, keys: Option<(&str, &str)>) -> Self {
-        self.move_keys = keys.map(|(previous, next)| (previous.into(), next.into()));
+        self.move_keys = keys
+            .map(|(previous, next)| (Cow::Owned(previous.to_owned()), Cow::Owned(next.to_owned())));
         self
     }
 
@@ -2050,9 +2053,9 @@ impl<'a> Dock<'a> {
                 }
                 if let Some(active) = group.active_panel() {
                     <div w={width} h={body_height} class="overflow-clip"
-                         accessibility_id={format!("dock:pane:{}:panel", group.id.0)}
+                         accessibility_id={pane_panel_id(group.id)}
                          accessibility_role={Role::TabPanel} role="tabpanel"
-                         aria-label={title(active).into()}>
+                         aria-label={quark::intern(title(active).as_ref())}>
                         {content(active, (width, body_height))}
                     </div>
                 }
@@ -2199,6 +2202,20 @@ impl<'a> Dock<'a> {
     }
 }
 
+/// Accessibility id of a group's panel area, shared across frames.
+fn pane_panel_id(pane: PaneId) -> std::sync::Arc<str> {
+    use std::fmt::Write;
+    thread_local! {
+        static BUF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        buf.clear();
+        let _ = write!(buf, "dock:pane:{}:panel", pane.0);
+        quark::intern(&buf)
+    })
+}
+
 /// A panel title [`Dock::build`] takes: read for hashing every frame, and
 /// owned only when a tab strip is rebuilt, so `&'static str` titles cost
 /// no allocation in a steady frame.
@@ -2219,7 +2236,7 @@ struct StripData {
     confined: Vec<bool>,
     /// The active tab's move keys, bound only toward a group that takes it,
     /// so a refused move leaves the key to the app.
-    moves: Vec<(String, Action)>,
+    moves: Vec<(Cow<'static, str>, Action)>,
     label: String,
     tab_width: f32,
     height: f32,
@@ -2367,7 +2384,7 @@ impl StripView {
         let next = (index + 1) % count;
         let select = |index| (self.map)(DockEvent::Select { pane, index });
         // Only the focusable active tab takes the move keys.
-        let moves: &[(String, Action)] = if selected { &data.moves } else { &[] };
+        let moves: &[(Cow<'static, str>, Action)] = if selected { &data.moves } else { &[] };
         let label_color = if selected {
             colors.text_strong
         } else {
