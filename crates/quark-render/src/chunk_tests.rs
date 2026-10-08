@@ -260,7 +260,7 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         });
         scene.push(chunk);
     };
-    let cases: [(&str, Scene, Scene); 9] = [
+    let cases: [(&str, Scene, Scene); 10] = [
         (
             "unchanged",
             framed(&card, [10.0, 10.0], just),
@@ -290,6 +290,11 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
             "moved by a fraction at 1.5x",
             physical(framed(&card, [10.0, 10.0], just), 1.5),
             physical(framed(&card, [10.5, 12.25], just), 1.5),
+        ),
+        (
+            "back from outside its clip",
+            framed(&card, [10.0, 170.0], just),
+            framed(&card, [10.0, 10.0], just),
         ),
         (
             "in a faded layer",
