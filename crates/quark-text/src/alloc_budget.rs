@@ -215,9 +215,8 @@ fn warmed_cache(system: &mut TextSystem, warm: &[Input]) -> LayoutCache {
 
 // What laying out unseen text still allocates is all inside cosmic-text and
 // its dependencies: unicode-bidi's paragraph analysis (six vectors per
-// paragraph), cosmic-text's attribute span maps, its per-word glyph vectors
-// (which word gets which retained vector varies, so one can grow), and a
-// glyph vector and missing-glyph list for each font fallback tries. The budgets sit just above that, so storage quark-text
+// paragraph), cosmic-text's attribute span maps, and its per-word glyph
+// vectors (which word gets which retained vector varies, so one can grow). The budgets sit just above that, so storage quark-text
 // allocates or grows per layout (each one costs at least 14 glyph columns)
 // breaks them.
 #[test]
@@ -248,8 +247,9 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             vec![bidi_emoji(2)],
             // No vendored font has Hebrew or Arabic, so fallback shapes
             // those runs with every font: 69 shape plans, which must all
-            // stay cached.
-            175,
+            // stay cached, and a glyph vector and missing-glyph list per
+            // font tried, which must be reused.
+            24,
         ),
     ];
     for (name, warm, measured, budget) in cases {

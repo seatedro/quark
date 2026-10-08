@@ -53,3 +53,13 @@ own pull request.
   `ShapeBuffer` keeps, where it collected two new vectors per visual line.
   Remove once upstream reuses reorder storage;
   `wrapped_bidi_lines_paint_their_runs_in_visual_order` checks the order.
+- Fallback and feature scratch (`src/shape.rs`): `shape_run` and
+  `shape_fallback` keep the missing-cluster lists, the fallback font's
+  glyph vector, and the run's harfrust feature vector in `ShapeBuffer`
+  instead of allocating them per run and per fallback font. Text that
+  walks a long fallback chain allocated two vectors per font tried (148 of
+  the bidi and emoji paragraph's 173 allocations after the plan cache),
+  and with ligatures off every shaped word allocated a feature vector.
+  Remove once upstream reuses that storage; the bidi and emoji budget
+  checks it, and `layout_with_evicting_shape_plan_cache_matches_cold_layout`
+  shapes fallback text after other fallback text.

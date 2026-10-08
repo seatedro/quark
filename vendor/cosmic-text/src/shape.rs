@@ -119,6 +119,15 @@ pub struct ShapeBuffer {
     /// Buffers for a visual line's bidi levels and reordered level runs.
     reorder_levels: Vec<unicode_bidi::Level>,
     reorder_runs: Vec<Range<usize>>,
+
+    /// Buffer for a run's font features converted for harfrust.
+    rb_font_features: Vec<harfrust::Feature>,
+
+    /// Buffers for font fallback: the clusters still missing a glyph, and a
+    /// fallback font's glyphs and missing clusters.
+    missing: Vec<usize>,
+    fb_missing: Vec<usize>,
+    fb_glyphs: Vec<ShapeGlyph>,
 }
 
 impl Default for ShapeBuffer {
@@ -135,6 +144,10 @@ impl Default for ShapeBuffer {
             glyph_sets: Vec::new(),
             reorder_levels: Vec::new(),
             reorder_runs: Vec::new(),
+            rb_font_features: Vec::new(),
+            missing: Vec::new(),
+            fb_missing: Vec::new(),
+            fb_glyphs: Vec::new(),
         }
     }
 }
@@ -167,7 +180,8 @@ fn shape_fallback(
     start_run: usize,
     end_run: usize,
     span_rtl: bool,
-) -> Vec<usize> {
+    missing: &mut Vec<usize>,
+) {
     let run = &line[start_run..end_run];
 
     let font_scale = font.metrics().units_per_em as f32;
@@ -195,7 +209,8 @@ fn shape_fallback(
     assert_eq!(rtl, span_rtl);
 
     let attrs = attrs_list.get_span(start_run);
-    let mut rb_font_features = Vec::new();
+    let mut rb_font_features = mem::take(&mut scratch.rb_font_features);
+    rb_font_features.clear();
 
     // Convert attrs::Feature to harfrust::Feature
     for feature in &attrs.font_features.features {
@@ -247,7 +262,7 @@ fn shape_fallback(
     let glyph_infos = glyph_buffer.glyph_infos();
     let glyph_positions = glyph_buffer.glyph_positions();
 
-    let mut missing = Vec::new();
+    missing.clear();
     glyphs.reserve(glyph_infos.len());
     let glyph_start = glyphs.len();
     for (info, pos) in glyph_infos.iter().zip(glyph_positions.iter()) {
@@ -310,10 +325,9 @@ fn shape_fallback(
         }
     }
 
-    // Restore the buffer to save an allocation.
+    // Restore the buffers to save allocations.
     scratch.harfrust_buffer = Some(glyph_buffer.clear());
-
-    missing
+    scratch.rb_font_features = rb_font_features;
 }
 
 fn shape_run(
@@ -331,6 +345,10 @@ fn shape_run(
         scripts.clear();
         scripts
     };
+    // And the fallback buffers, which `shape_fallback` clears.
+    let mut missing = mem::take(&mut font_system.shape_buffer.missing);
+    let mut fb_missing = mem::take(&mut font_system.shape_buffer.fb_missing);
+    let mut fb_glyphs = mem::take(&mut font_system.shape_buffer.fb_glyphs);
     for c in line[start_run..end_run].chars() {
         match c.script() {
             Script::Common | Script::Inherited | Script::Latin | Script::Unknown => (),
@@ -361,12 +379,17 @@ fn shape_run(
     let font = font_iter.next().expect("no default font found");
 
     let glyph_start = glyphs.len();
-    let mut missing = {
-        let scratch = font_iter.shape_caches();
-        shape_fallback(
-            scratch, glyphs, &font, line, attrs_list, start_run, end_run, span_rtl,
-        )
-    };
+    shape_fallback(
+        font_iter.shape_caches(),
+        glyphs,
+        &font,
+        line,
+        attrs_list,
+        start_run,
+        end_run,
+        span_rtl,
+        &mut missing,
+    );
 
     //TODO: improve performance!
     while !missing.is_empty() {
@@ -378,10 +401,9 @@ fn shape_run(
             "Evaluating fallback with font '{}'",
             font_iter.face_name(font.id())
         );
-        let mut fb_glyphs = Vec::new();
-        let scratch = font_iter.shape_caches();
-        let fb_missing = shape_fallback(
-            scratch,
+        fb_glyphs.clear();
+        shape_fallback(
+            font_iter.shape_caches(),
             &mut fb_glyphs,
             &font,
             line,
@@ -389,6 +411,7 @@ fn shape_run(
             start_run,
             end_run,
             span_rtl,
+            &mut fb_missing,
         );
 
         // Insert all matching glyphs
@@ -454,8 +477,11 @@ fn shape_run(
     }
     */
 
-    // Restore the scripts buffer.
+    // Restore the buffers.
     font_system.shape_buffer.scripts = scripts;
+    font_system.shape_buffer.missing = missing;
+    font_system.shape_buffer.fb_missing = fb_missing;
+    font_system.shape_buffer.fb_glyphs = fb_glyphs;
 }
 
 #[cfg(feature = "shape-run-cache")]
