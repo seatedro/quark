@@ -1,3 +1,4 @@
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -506,6 +507,8 @@ pub(crate) struct LayoutScratch {
     paragraphs: Vec<(Range<usize>, LineEnding)>,
     /// The paragraph of each visual line.
     line_paragraph: Vec<usize>,
+    /// The font features every span gets.
+    features: cosmic_text::FontFeatures,
 }
 
 impl TextLayout {
@@ -624,8 +627,11 @@ impl TextLayout {
 
         split_paragraphs(text, &mut scratch.paragraphs);
         let paragraphs = &scratch.paragraphs;
-        let features = font_features(ligatures);
-        let base = base_attrs(&style).font_features(features.clone());
+        set_font_features(&mut scratch.features, ligatures);
+        // One features vector moves between the base and each span's
+        // attributes: an `Attrs` owns its features, so a clone per span
+        // would allocate whenever ligatures are off.
+        let mut base = base_attrs(&style).font_features(mem::take(&mut scratch.features));
         while buffer.lines.len() > paragraphs.len() {
             spare_lines.extend(buffer.lines.pop());
         }
@@ -635,9 +641,10 @@ impl TextLayout {
                 let start = span.range.start.max(range.start);
                 let end = span.range.end.min(range.end);
                 if start < end {
-                    let span_attrs =
-                        span_attrs(&style, span, i, synth).font_features(features.clone());
+                    let span_attrs = span_attrs(&style, span, i, synth)
+                        .font_features(mem::take(&mut base.font_features));
                     attrs.add_span(start - range.start..end - range.start, &span_attrs);
+                    base.font_features = span_attrs.font_features;
                 }
             }
             let paragraph = text.get(range.clone()).unwrap_or_default();
@@ -668,6 +675,7 @@ impl TextLayout {
                 )),
             }
         }
+        scratch.features = base.font_features;
         buffer.set_wrap(fs, Wrap::WordOrGlyph);
         buffer.set_metrics_and_size(
             fs,
@@ -1486,10 +1494,10 @@ fn emoji_spans(attrs: &mut AttrsList, paragraph: &str, emoji: &'static str) {
     }
 }
 
-/// No features (the font's defaults) with ligatures on; otherwise the
-/// ligature features turned off.
-fn font_features(ligatures: bool) -> cosmic_text::FontFeatures {
-    let mut features = cosmic_text::FontFeatures::new();
+/// Sets `features` to none (the font's defaults) with ligatures on;
+/// otherwise the ligature features turned off.
+fn set_font_features(features: &mut cosmic_text::FontFeatures, ligatures: bool) {
+    features.features.clear();
     if !ligatures {
         for tag in [
             cosmic_text::FeatureTag::STANDARD_LIGATURES,
@@ -1499,7 +1507,6 @@ fn font_features(ligatures: bool) -> cosmic_text::FontFeatures {
             features.disable(tag);
         }
     }
-    features
 }
 
 fn base_attrs(style: &TextStyle) -> Attrs<'static> {
@@ -2101,6 +2108,205 @@ mod tests {
             "fixture lost its font change"
         );
         assert_eq!(dump(&reused), dump(&fresh));
+    }
+
+    /// Texts that each need different shape plans: scripts, directions,
+    /// UI and mono fonts, and weights.
+    fn plan_mix() -> Vec<TextParams> {
+        let style = TextStyle::new(14.0);
+        let span = |range, weight, kind| TextSpan {
+            range,
+            weight,
+            style: None,
+            kind,
+        };
+        vec![
+            TextParams::new("office affine", style),
+            TextParams::new("fn main() -> x != y", style.kind(FontKind::Mono)),
+            TextParams::new(
+                "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd}",
+                style,
+            ),
+            TextParams::new("\u{627}\u{644}\u{633}\u{644}\u{627}\u{645}", style),
+            TextParams::new(
+                "\u{1f600}\u{1f469}\u{200d}\u{1f4bb} \u{65e5}\u{672c}\u{8a9e}",
+                style,
+            ),
+            TextParams::new("ab \u{5e9}\u{5dc}\u{5d5}\u{5dd} cd office", style).spans(vec![
+                span(0..2, Some(FontWeight::Bold), Some(FontKind::Mono)),
+                span(12..14, Some(FontWeight::Semibold), None),
+            ]),
+        ]
+    }
+
+    // The shape plan cache is keyed by font, script, direction, features,
+    // and variation instance. A lookup that returns another key's plan, or
+    // loses track of a plan when a hit moves it or a miss evicts, shapes
+    // with the wrong plan.
+    #[test]
+    fn layout_with_evicting_shape_plan_cache_matches_cold_layout() {
+        let mut cold = TextSystem::vendored_only(&FontSettings::default());
+        let expected: Vec<String> = plan_mix()
+            .iter()
+            .map(|params| dump(&cold.layout(params).expect("layout")))
+            .collect();
+        let mut system = TextSystem::vendored_only(&FontSettings::default());
+        // Smaller than the mix's working set, so lookups hit, promote, and
+        // evict.
+        system.font_system_mut().set_shape_plan_capacity(3);
+        let order = (0..expected.len()).chain((0..expected.len()).rev());
+        for i in order.clone().chain(order.step_by(2)) {
+            let layout = system.layout(&plan_mix()[i]).expect("layout");
+            assert_eq!(dump(&layout), expected[i], "text {i}");
+        }
+    }
+
+    // Mono text falls back through monospace candidates ordered by weight
+    // distance, then by how many of the word's chars they lack, with the
+    // default mono font first. Geist Mono lacks Greek and the snowman;
+    // JetBrains Mono (400) and Fira Code (300) have Greek, and Noto Color
+    // Emoji, which counts as monospace, has the snowman at every weight.
+    #[test]
+    fn mono_fallback_picks_nearest_weight_then_best_coverage() {
+        let cases = [
+            ("a\u{3b1}", FontWeight::Normal, 1, "JetBrains Mono", 400),
+            ("a\u{3b1}", FontWeight::Bold, 1, "JetBrains Mono", 400),
+            ("a\u{2603}", FontWeight::Medium, 1, "Noto Color Emoji", 500),
+            ("a\u{2603}", FontWeight::Bold, 1, "Noto Color Emoji", 700),
+            ("x \u{3b1}b\u{3b3}", FontWeight::Bold, 4, "Geist Mono", 700),
+            (
+                "x \u{3b1}b\u{3b3}",
+                FontWeight::Bold,
+                5,
+                "JetBrains Mono",
+                400,
+            ),
+            (
+                "a\u{1f600}",
+                FontWeight::Semibold,
+                1,
+                "Noto Color Emoji",
+                400,
+            ),
+        ];
+        let mut system = test_system();
+        for (text, weight, byte, family, face_weight) in cases {
+            let style = TextStyle::new(13.0).kind(FontKind::Mono).weight(weight);
+            let layout = system
+                .layout(&TextParams::new(text, style))
+                .expect("layout");
+            let g = layout.glyphs();
+            let i = g.byte_start.iter().position(|&b| b as usize == byte);
+            let i = i.unwrap_or_else(|| panic!("{text:?} has no glyph at {byte}"));
+            assert_ne!(
+                g.glyph_id[i], 0,
+                "{text:?} {weight:?} byte {byte} is .notdef"
+            );
+            let face = system.font_system().db().face(g.font_id[i]).expect("face");
+            assert_eq!(
+                (face.families[0].0.as_str(), face.weight.0),
+                (family, face_weight),
+                "{text:?} {weight:?} byte {byte}"
+            );
+        }
+    }
+
+    /// Each line's clusters as painted left to right.
+    fn painted_lines(layout: &TextLayout) -> Vec<String> {
+        let g = layout.glyphs();
+        let text = layout.text();
+        layout
+            .lines()
+            .map(|line| {
+                let mut glyphs: Vec<usize> = line.glyph_range.collect();
+                glyphs.sort_by(|&a, &b| g.x[a].total_cmp(&g.x[b]));
+                glyphs.dedup_by_key(|&mut i| g.byte_start[i]);
+                glyphs
+                    .iter()
+                    .map(|&i| text.get(g.byte_start[i] as usize..g.byte_end[i] as usize))
+                    .collect::<Option<String>>()
+                    .expect("clusters start and end on char boundaries")
+            })
+            .collect()
+    }
+
+    // Each visual line reorders its own level runs. Lines with fewer runs
+    // after lines with more catch runs or levels a line inherits from the
+    // one before; the digits sit at level 2 inside RTL text in both
+    // directions.
+    #[test]
+    fn wrapped_bidi_lines_paint_their_runs_in_visual_order() {
+        let cases: [(&str, f32, &[&str]); 3] = [
+            (
+                "ab \u{5e9}\u{5dc}\u{5d5}\u{5dd} cd \u{5d0}\u{5d1}\u{5d2} ef gh \u{5d3}\u{5d4} ij",
+                120.0,
+                &[
+                    "ab \u{5dd}\u{5d5}\u{5dc}\u{5e9} cd \u{5d2}\u{5d1}\u{5d0} ef",
+                    "gh \u{5d4}\u{5d3} ij",
+                ],
+            ),
+            (
+                "ab \u{5e9}\u{5dc} \u{5d5}\u{5dd} cd ef \u{5d0}\u{5d1} 34 gh",
+                80.0,
+                &[
+                    "ab \u{5dd}\u{5d5} \u{5dc}\u{5e9} cd",
+                    "ef 34 \u{5d1}\u{5d0} gh",
+                ],
+            ),
+            (
+                "\u{5e9}\u{5dc}\u{5d5}\u{5dd} ab cd \u{5d0}\u{5d1} 12 \u{5d2}\u{5d3} ef \u{5d4}\u{5d5}",
+                90.0,
+                &[
+                    "ab cd \u{5dd}\u{5d5}\u{5dc}\u{5e9}",
+                    "ef \u{5d3}\u{5d2} 12 \u{5d1}\u{5d0}",
+                    "\u{5d5}\u{5d4}",
+                ],
+            ),
+        ];
+        for (text, wrap, expected) in cases {
+            assert_eq!(
+                painted_lines(&layout(text, Some(wrap))),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
+
+    // With ligatures off every span and paragraph carries the features
+    // that turn them off, so Fira Code's `==`, `<=`, and `&&` shape as each
+    // character alone inside and after italic spans and in a later
+    // paragraph.
+    #[test]
+    fn ligatures_off_reach_every_span_and_paragraph() {
+        let mut system = TextSystem::vendored_only(&FontSettings {
+            mono_family: crate::fonts::FIRA_CODE_FAMILY.to_owned(),
+            ligatures: false,
+            ..FontSettings::default()
+        });
+        let style = TextStyle::new(16.0).kind(FontKind::Mono);
+        let alone = |system: &mut TextSystem, c: char| {
+            let layout = system.layout(&TextParams::new(c.to_string(), style));
+            layout.expect("layout").glyphs().glyph_id[0]
+        };
+        let text = "== <= &&\n&& == <=";
+        let italic = |range| TextSpan {
+            range,
+            weight: None,
+            style: Some(FontStyle::Italic),
+            kind: None,
+        };
+        let params = TextParams::new(text, style).spans(vec![italic(0..2), italic(6..11)]);
+        let layout = system.layout(&params).expect("layout");
+        let g = layout.glyphs();
+        let shaped: Vec<(usize, u16)> = (0..g.len())
+            .map(|i| (g.byte_start[i] as usize, g.glyph_id[i]))
+            .collect();
+        let expected: Vec<(usize, u16)> = text
+            .char_indices()
+            .filter(|&(_, c)| c != '\n')
+            .map(|(i, c)| (i, alone(&mut system, c)))
+            .collect();
+        assert_eq!(shaped, expected);
     }
 
     #[test]
