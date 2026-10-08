@@ -176,14 +176,17 @@ fn just(scene: &mut Scene, chunk: Primitive) {
 }
 
 /// Every pixel of `scene` drawn from its chunks, on a renderer that drew
-/// `warm` first, against the scene expanded on a fresh renderer.
-fn assert_draws_expanded(name: &str, warm: &Scene, scene: &Scene, text: &mut TextSystem) {
+/// `warm` first, against the scene expanded on a fresh renderer. Drawn
+/// three times: a chunk drawn where it was last drawn records its
+/// placement the first time and draws from the record after.
+fn assert_draws_expanded(name: &str, warm: &[&Scene], scene: &Scene, text: &mut TextSystem) {
     let (w, h) = SIZE;
     let Some(mut chunked) = gpu_renderer(w, h) else {
         return;
     };
-    chunked.render_to_rgba(warm, text, w, h).expect("render");
-    let drawn = chunked.render_to_rgba(scene, text, w, h).expect("render");
+    for warm in warm {
+        chunked.render_to_rgba(warm, text, w, h).expect("render");
+    }
     let mut fresh = gpu_renderer(w, h).expect("renderer");
     let expected = fresh
         .render_to_rgba(&expanded(scene), text, w, h)
@@ -197,15 +200,18 @@ fn assert_draws_expanded(name: &str, warm: &Scene, scene: &Scene, text: &mut Tex
         lit > 3000,
         "{name}: {lit} lit pixels, the fixture drew too little"
     );
-    let differing = pixels(&drawn)
-        .iter()
-        .zip(pixels(&expected))
-        .filter(|(a, b)| *a != b)
-        .count();
-    assert_eq!(
-        differing, 0,
-        "{name}: pixels differ from the expanded scene"
-    );
+    for draw in 1..=3 {
+        let drawn = chunked.render_to_rgba(scene, text, w, h).expect("render");
+        let differing = pixels(&drawn)
+            .iter()
+            .zip(pixels(&expected))
+            .filter(|(a, b)| *a != b)
+            .count();
+        assert_eq!(
+            differing, 0,
+            "{name}: draw {draw} differs from the expanded scene"
+        );
+    }
 }
 
 // A chunk drawn again, moved, clipped, scaled, or grouped by layers, paints
@@ -237,7 +243,24 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         chunk_primitive(&card, [0.0, 0.0]),
         Primitive::LayerEnd,
     ]);
-    let cases: [(&str, Scene, Scene); 8] = [
+    // Text under the card that the card's backdrop must cover: drawn
+    // before the chunk, it splits the quads around it into segments.
+    let label = text
+        .layout(&TextParams::new(
+            "under the card".to_owned(),
+            TextStyle::new(30.0),
+        ))
+        .expect("layout");
+    let label = ShapedText::new(Arc::new(label));
+    let covered = |scene: &mut Scene, chunk: Primitive| {
+        scene.text(TextPrimitive {
+            rect: rect(12.0, 14.0, 180.0, 40.0),
+            layout: label.clone(),
+            color: color(255, 255, 255),
+        });
+        scene.push(chunk);
+    };
+    let cases: [(&str, Scene, Scene); 9] = [
         (
             "unchanged",
             framed(&card, [10.0, 10.0], just),
@@ -278,9 +301,15 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
             framed(&layered, [10.0, 10.0], just),
             framed(&layered, [16.0, 40.0], just),
         ),
+        (
+            "where it was, over new primitives",
+            framed(&card, [10.0, 10.0], just),
+            framed(&card, [10.0, 10.0], covered),
+        ),
     ];
     for (name, warm, scene) in &cases {
-        assert_draws_expanded(name, warm, scene, &mut text);
+        // Twice, so the chunk can record its placement before `scene`.
+        assert_draws_expanded(name, &[warm, warm], scene, &mut text);
     }
 }
 
@@ -329,20 +358,23 @@ fn chunks_moved_by_whole_pixels_snap_like_their_primitives() {
             render(&at(start));
             for (dx, dy) in [(1.0, 1.0), (2.0, 3.0), (3.0, 2.0), (6.0, 5.0)] {
                 let moved = at([start[0] + dx, start[1] + dy]);
-                let drawn = render(&moved);
                 let expected = render(&expanded(&moved));
                 assert!(expected.iter().any(|&b| b > 200), "nothing drew");
-                let differing = drawn
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(expected.as_chunks::<4>().0)
-                    .filter(|(a, b)| a != b)
-                    .count();
-                assert_eq!(
-                    differing, 0,
-                    "at {scale}x, from {start:?} moved by ({dx}, {dy})"
-                );
+                // Moved, then recorded in place, then drawn from the record.
+                for draw in 1..=3 {
+                    let drawn = render(&moved);
+                    let differing = drawn
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(expected.as_chunks::<4>().0)
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    assert_eq!(
+                        differing, 0,
+                        "at {scale}x, from {start:?} moved by ({dx}, {dy}), draw {draw}"
+                    );
+                }
             }
         }
     }

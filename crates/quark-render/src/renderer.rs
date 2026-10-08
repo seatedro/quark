@@ -2843,6 +2843,47 @@ impl ZBuilder {
         segment
     }
 
+    /// Choose the segments of consecutive primitives of `kind` covering
+    /// `bounds` (whose union is `union`), as [`Self::place`] would one by
+    /// one, calling `assign` with each segment and how many of them, in
+    /// order, take it. Primitives of one kind never block each other, so
+    /// once one of them opens a segment (or none of them overlaps what
+    /// blocks the latest) the rest join it in bulk.
+    fn place_span(
+        &mut self,
+        kind: PrimKind,
+        bounds: &[Rect],
+        union: Rect,
+        mut assign: impl FnMut(u32, usize),
+    ) {
+        let k = kind as usize;
+        let mut rest = bounds;
+        if self.latest[k].is_none() || self.blockers[k].overlaps(union) {
+            while let Some((&first, tail)) = rest.split_first() {
+                let opened = self.segments.len();
+                assign(self.place(kind, first), 1);
+                rest = tail;
+                if self.segments.len() > opened {
+                    break;
+                }
+            }
+        }
+        let Some(segment) = self.latest[k].filter(|_| !rest.is_empty()) else {
+            return;
+        };
+        for j in 0..KIND_COUNT {
+            if j != k
+                && let Some(latest) = self.latest[j]
+                && segment > latest
+            {
+                for &rect in rest {
+                    self.blockers[j].push(rect);
+                }
+            }
+        }
+        assign(segment, rest.len());
+    }
+
     /// A blur samples everything before it, so nothing after it may merge
     /// into an earlier segment.
     fn barrier(&mut self, blur: FlattenedBlurRegion) {
@@ -2903,6 +2944,7 @@ impl Flattener {
     }
 
     fn place(&mut self, z: i32, kind: PrimKind, bounds: Rect) -> DrawKey {
+        self.chunks.log_place(kind, z, bounds);
         self.seq += 1;
         let seq = self.seq;
         let builder = self.builder(z);
@@ -2913,7 +2955,33 @@ impl Flattener {
         }
     }
 
+    /// Place consecutive primitives of `kind` covering `bounds` (whose
+    /// union is `union`) as [`Self::place`] would one by one, appending
+    /// their keys to `keys`.
+    fn place_span(
+        &mut self,
+        z: i32,
+        kind: PrimKind,
+        bounds: &[Rect],
+        union: Rect,
+        keys: &mut Vec<DrawKey>,
+    ) {
+        for &rect in bounds {
+            self.chunks.log_place(kind, z, rect);
+        }
+        let mut seq = self.seq;
+        self.builder(z)
+            .place_span(kind, bounds, union, |segment, count| {
+                keys.extend((0..count).map(|_| {
+                    seq += 1;
+                    DrawKey { z, segment, seq }
+                }));
+            });
+        self.seq = seq;
+    }
+
     fn barrier(&mut self, z: i32, blur: FlattenedBlurRegion) {
+        self.chunks.log_barrier(z, blur);
         self.builder(z).barrier(blur);
     }
 }
