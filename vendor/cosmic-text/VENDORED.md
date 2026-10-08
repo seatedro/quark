@@ -104,6 +104,14 @@ own pull request.
   now 2. It takes the words shorter lines gave up instead. Remove once upstream
   keeps spare words across spans; quark-text's
   `block_edits_within_warmed_capacity_copy_no_text` budget checks it.
+- Layout glyph reserve (`src/shape.rs`): `ShapeLine::layout_to_buffer`
+  reserves each visual line's glyphs before pushing them (rounded up to
+  the capacity pushing would have reached), where a new line's glyph
+  vector started at one and grew push by push: six reallocations for an
+  80-column row, four on every fresh terminal row. A debug assertion
+  checks the count against the glyphs pushed. Remove once upstream
+  reserves the line's glyphs; the terminal demo's allocation budgets
+  check it.
 - Storage measurement (`src/attrs.rs`, `src/shape.rs`,
   `src/buffer_line.rs`): `BufferLine::storage_bytes`,
   `ShapeLine::storage_bytes`, and `AttrsList::storage_bytes` report the

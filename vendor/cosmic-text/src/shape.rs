@@ -993,6 +993,26 @@ impl VisualLine {
 }
 
 impl ShapeLine {
+    /// How many glyphs `visual_line`'s ranges cover, counted as `layout_to_buffer` takes them.
+    fn visual_line_glyphs(&self, visual_line: &VisualLine) -> usize {
+        let mut count = 0;
+        for &(span_index, (starting_word, starting_glyph), (ending_word, ending_glyph)) in
+            &visual_line.ranges
+        {
+            let words = &self.spans[span_index].words;
+            for i in starting_word..ending_word + usize::from(ending_glyph != 0) {
+                let start = if i == starting_word { starting_glyph } else { 0 };
+                let end = if i == ending_word {
+                    ending_glyph
+                } else {
+                    words[i].glyphs.len()
+                };
+                count += end.saturating_sub(start);
+            }
+        }
+        count
+    }
+
     /// Heap bytes the line keeps: its spans, their words, and the words'
     /// glyphs, at capacity.
     pub fn storage_bytes(&self) -> usize {
@@ -1667,9 +1687,11 @@ impl ShapeLine {
                 continue;
             }
             self.reorder(&visual_line.ranges, &mut reorder_levels, &mut new_order);
-            let mut glyphs = cached_glyph_sets
-                .pop()
-                .unwrap_or_else(|| Vec::with_capacity(1));
+            let mut glyphs = cached_glyph_sets.pop().unwrap_or_default();
+            // Room for the glyphs `process_range` below pushes, so a new line allocates once,
+            // rounded up as growing push by push would have, so a reused line keeps that slack.
+            let glyph_count = self.visual_line_glyphs(visual_line);
+            glyphs.reserve(glyph_count.next_power_of_two());
             let mut x = start_x;
             let mut y = 0.;
             let mut max_ascent: f32 = 0.;
@@ -1797,6 +1819,7 @@ impl ShapeLine {
                     process_range(range.clone());
                 }
             }
+            debug_assert_eq!(glyphs.len(), glyph_count, "glyphs reserved for the visual line");
 
             let mut line_height_opt: Option<f32> = None;
             for glyph in &glyphs {
