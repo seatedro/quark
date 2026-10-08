@@ -123,7 +123,11 @@ run_one() {
 
   "$CUA_DRIVER" telemetry disable >/dev/null 2>&1 || true
 
-  "$QUARK_E2E_BIN_DIR/$example" >"$out/app.log" 2>&1 &
+  # Examples live in QUARK_E2E_BIN_DIR; package binaries such as workbench
+  # in the profile directory above it.
+  local bin="$QUARK_E2E_BIN_DIR/$example"
+  [ -x "$bin" ] || bin="$ROOT/target/debug/$example"
+  "$bin" >"$out/app.log" 2>&1 &
   export QUARK_E2E_PID=$!
 
   local status=0

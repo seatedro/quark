@@ -549,7 +549,11 @@ def app_pid():
 
 
 def example_binary(name):
-    return os.path.join(os.environ["QUARK_E2E_BIN_DIR"], name)
+    path = os.path.join(os.environ["QUARK_E2E_BIN_DIR"], name)
+    if os.access(path, os.X_OK):
+        return path
+    # A package binary such as workbench, in the profile directory.
+    return os.path.join(os.path.dirname(__file__), "..", "target", "debug", name)
 
 
 def artifacts_dir():

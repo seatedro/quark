@@ -106,7 +106,9 @@ jobs:
       # Debug builds (opt-level 1): quicker to build, and debug assertions
       # turn integrity violations into spec failures.
       - name: Build examples
-        run: cargo build -p quark-app --examples --features ui,notifications
+        run: |
+          cargo build -p quark-app --examples --features ui,notifications
+          cargo build -p quark-workbench --bin workbench
 
       - name: Install cua driver
         run: e2e/install-cua.sh
