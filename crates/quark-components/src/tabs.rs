@@ -99,15 +99,27 @@ impl TabItem {
 pub struct TabBar {
     items: Vec<TabItem>,
     fill: bool,
+    label: Option<String>,
 }
 
 pub fn tab_bar(items: Vec<TabItem>) -> TabBar {
-    TabBar { items, fill: false }
+    TabBar {
+        items,
+        fill: false,
+        label: None,
+    }
 }
 
 impl TabBar {
     pub fn fill(mut self) -> Self {
         self.fill = true;
+        self
+    }
+
+    /// The tab list's accessible name, which tells it apart from other tab
+    /// lists around it (a dock's, say).
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 }
@@ -120,7 +132,8 @@ impl RenderOnce for TabBar {
         view! {
             <div class="flex-row items-end" border_b={tc.border_variant}
                  id="tab-bar" test-id="tab-bar"
-                 role="tablist" accessibility_id={"tab-bar"}>
+                 role="tablist" accessibility_id={"tab-bar"}
+                 @when {let Some(label) = self.label} { aria-label={label} }>
                 for item in self.items {
                     {Self::tab(item, fill, cx)}
                 }

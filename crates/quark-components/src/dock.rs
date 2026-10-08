@@ -414,6 +414,25 @@ impl DockState {
         self.labels[region.index()]
     }
 
+    /// A group's name, which its tab list publishes: its region's label,
+    /// numbered in reading order when the region is split, so no two
+    /// groups share a name.
+    pub fn group_label(&self, pane: PaneId) -> String {
+        DockRegion::ALL
+            .into_iter()
+            .find_map(|region| {
+                let groups = self.roots[region.index()].groups();
+                let at = groups.iter().position(|g| g.id == pane)?;
+                let label = self.label(region);
+                Some(if groups.len() == 1 {
+                    label.to_owned()
+                } else {
+                    format!("{label} {}", at + 1)
+                })
+            })
+            .unwrap_or_default()
+    }
+
     /// Constrain which tab moves cross `region`'s boundary.
     pub fn set_policy(&mut self, region: DockRegion, policy: TabPolicy) {
         self.policies[region.index()] = policy;
@@ -1388,7 +1407,7 @@ impl<'a> Dock<'a> {
 
     /// The divider's value for assistive tech is its position in points
     /// from the split's start, with the range [`DockState`] lets it move
-    /// in; its text is that position as a percentage of the split.
+    /// in; its text is that position, in points like a region divider's.
     fn pane_divider(
         &self,
         theme: &Theme,
@@ -1431,11 +1450,6 @@ impl<'a> Dock<'a> {
         .steps(nudge(-NUDGE_STEP), nudge(NUDGE_STEP));
         let avail: f32 = sizes.iter().sum();
         let (at, lo, hi) = divider_span(sizes, divider_min(MIN_GROUP, avail, sizes.len()), divider);
-        let percent = if extent > 0.0 {
-            at / extent * 100.0
-        } else {
-            0.0
-        };
         let drag_map = self.map.clone();
         // The same wide invisible grip as a `Split` divider.
         let grip = 8.0;
@@ -1451,7 +1465,7 @@ impl<'a> Dock<'a> {
                          "quark-resize-named",
                          [("name", self.state.label(region).into())],
                      )}
-                     aria-valuetext={format!("{percent:.0}%")}
+                     aria-valuetext={format!("{at:.0}")}
                      accessibility_numeric={NumericValue {
                          value: f64::from(at),
                          min: f64::from(lo),
@@ -1563,7 +1577,7 @@ impl<'a> Dock<'a> {
                  border_b={colors.border_variant}
                  accessibility_id={format!("dock:pane:{}:tabs", group.id.0)}
                  accessibility_role={Role::TabList} role="tablist"
-                 aria-label={self.state.label(region)} test_id="dock-tabs">
+                 aria-label={self.state.group_label(group.id)} test_id="dock-tabs">
                 for (index, &panel) in group.panels.iter().enumerate() {
                     {self.tab(theme, region, group, index, panel, (tab_width, height), drag, title)}
                 }

@@ -128,22 +128,10 @@ impl PanelsDemo {
         }
     }
 
-    /// A group's name for the menu and announcements: its region's label,
-    /// numbered when the region is split.
+    /// A group's name for the menu and announcements, as its tab list
+    /// publishes it.
     fn group_name(&self, pane: PaneId) -> String {
-        DockRegion::ALL
-            .into_iter()
-            .find_map(|region| {
-                let groups = self.dock.root(region).groups();
-                let at = groups.iter().position(|g| g.id == pane)?;
-                let label = self.dock.label(region);
-                Some(if groups.len() == 1 {
-                    label.to_owned()
-                } else {
-                    format!("{label} {}", at + 1)
-                })
-            })
-            .unwrap_or_default()
+        self.dock.group_label(pane)
     }
 
     /// Open the "Move to group" menu for `panel` under its tab, listing
@@ -249,7 +237,7 @@ impl PanelsDemo {
             .map_or("No session", |(_, name)| name);
         view! {
             <div w={width} h={height} class="flex-col">
-                {tab_bar(tabs)}
+                {tab_bar(tabs).label("Sessions")}
                 <div class="p-3 gap-[6] flex-col">
                     <text class="font-semibold" color={colors.text_strong}>{current}</text>
                     <text class="text-sm" color={colors.text_muted}>"$ cargo test"</text>
@@ -793,6 +781,45 @@ mod tests {
         assert_eq!(announcement(&ui).as_deref(), Some("Moved Threads to Chat"));
     }
 
+    // Catches tab lists a screen reader cannot tell apart: both halves of a
+    // split region were named after the region, and the drawer's session
+    // tabs had no name.
+    #[test]
+    fn every_tab_list_has_its_own_name() {
+        let mut ui = harness();
+        ui.key("mod+j");
+        split_right_panel(&mut ui);
+        let names: Vec<String> = ui
+            .find_all(By::role(Role::TabList))
+            .into_iter()
+            .map(|n| n.name.unwrap_or_default())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Sidebar",
+                "Chat",
+                "Drawer",
+                "Sessions",
+                "Right panel 1",
+                "Right panel 2"
+            ]
+        );
+    }
+
+    // Catches a region divider claiming it goes down to 0: the sidebar's
+    // smallest size is 180 (Enter, not resizing, collapses it).
+    #[test]
+    fn region_dividers_publish_their_real_range() {
+        let ui = harness();
+        let id = ui.find(divider("Sidebar")).id.expect("divider id");
+        let (_, node) = ax_node(&ui, &id);
+        assert_eq!(
+            (node.min_numeric_value(), node.max_numeric_value()),
+            (Some(180.0), Some(480.0))
+        );
+    }
+
     #[test]
     fn a_tab_moved_out_of_the_sidebar_moves_back() {
         let mut ui = harness();
@@ -1017,7 +1044,7 @@ mod tests {
         // line, each group at least 100.
         assert_eq!(
             divider_value(&ui),
-            ((210.0, 100.0, 319.0), Some("50%".into()))
+            ((210.0, 100.0, 319.0), Some("210".into()))
         );
         ui.click_node(By::test_id("dock-pane-divider"));
         // (key, divider position, Terminal's group width)

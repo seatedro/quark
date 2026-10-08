@@ -722,7 +722,8 @@ fn divider(
                  aria-valuetext={format!("{size:.0}")}
                  accessibility_numeric={NumericValue {
                      value: f64::from(size),
-                     min: if p.collapsible { 0.0 } else { f64::from(p.min) },
+                     // Collapsing is Enter's job; a size is never below min.
+                     min: f64::from(p.min),
                      max: f64::from(p.max.min(extent)),
                      step: Some(f64::from(NUDGE_STEP)),
                  }}
