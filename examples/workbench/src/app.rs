@@ -54,6 +54,8 @@ pub enum Message {
     /// Announce what playback queued during the last frame (views have no
     /// `UiContext` to announce through).
     Flush,
+    /// A watched theme file changed (`QUARK_WORKBENCH_THEME_DIR`).
+    ThemeFiles,
 }
 
 pub struct Workbench {
@@ -73,6 +75,8 @@ pub struct Workbench {
     sender: Option<UiSender<Message>>,
     /// Announcements playback queued for the next `Message::Flush`.
     announcements: Vec<String>,
+    /// The theme choice in effect (launch option, then `SetTheme`).
+    theme_choice: crate::contracts::ThemeChoice,
     /// Runner time of the latest callback, for text edits (which get no
     /// context).
     runner_ms: u64,
@@ -113,6 +117,7 @@ impl Workbench {
             events: Vec::new(),
             sender: None,
             announcements: Vec::new(),
+            theme_choice: options.theme,
             runner_ms: 0,
             main_size: (0.0, 0.0),
             policy: WidthPolicy {
@@ -243,6 +248,7 @@ impl Workbench {
             Effect::Announce(text) => cx.announce(text, Politeness::Polite),
             Effect::CopyText(text) => cx.window.set_clipboard_text(&text),
             Effect::SetTheme(choice) => {
+                self.theme_choice = choice;
                 let (light, dark) = design::themes_for(choice);
                 cx.set_themes(light, dark);
             }
@@ -386,6 +392,10 @@ impl UiApp for Workbench {
 
     fn init(&mut self, cx: &mut UiContext) {
         self.sender = Some(cx.sender::<Message>());
+        let sender = cx.sender::<Message>();
+        design::reload::watch(move || {
+            sender.send(Message::ThemeFiles);
+        });
         dock::init(&mut self.dock, cx);
     }
 
@@ -537,6 +547,18 @@ impl UiApp for Workbench {
                     cx.announce(text, Politeness::Polite);
                 }
             }
+            Message::ThemeFiles => {
+                let (light, dark) = design::themes_for(self.theme_choice);
+                cx.set_themes(light, dark);
+                if let Some(why) = design::reload::take_rejection() {
+                    self.fx.push(Effect::Toast(Toast {
+                        kind: ToastKind::Error,
+                        text: format!("Theme file rejected: {why}"),
+                        undo: None,
+                    }));
+                    self.apply_effects(cx);
+                }
+            }
         }
     }
 
@@ -545,7 +567,8 @@ impl UiApp for Workbench {
         if dock::input(&mut self.dock, event, cx) {
             return true;
         }
-        if !matches!(event, InputEvent::KeyPress(_)) {
+        // Keys, and dropped files for the composer's attachments.
+        if !matches!(event, InputEvent::KeyPress(_) | InputEvent::FileDropped(_)) {
             return false;
         }
         let handled = {
@@ -561,6 +584,10 @@ impl UiApp for Workbench {
             self.apply_effects(cx);
         }
         handled
+    }
+
+    fn set_preedit(&mut self, target: FocusId, text: String, cursor: Option<(usize, usize)>) {
+        composer::set_preedit(&mut self.composer, target, text, cursor);
     }
 
     fn edit_text(&mut self, target: FocusId, command: TextEditCommand) -> TextEditOutcome {
