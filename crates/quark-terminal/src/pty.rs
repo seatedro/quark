@@ -639,9 +639,7 @@ mod tests {
         pty.write(b"\r").unwrap();
 
         let mut term = crate::TerminalState::headless(100, 30);
-        let started = std::time::Instant::now();
-        let debug = std::env::var_os("QUARK_PTY_DEBUG").is_some();
-        let deadline = started + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut exit = None;
         while exit.is_none() {
             assert!(
@@ -651,18 +649,8 @@ mod tests {
             );
             thread::park_timeout(Duration::from_millis(200));
             pty.read(|event| match event {
-                PtyEvent::Output(bytes) => {
-                    if debug {
-                        eprintln!("{:?} out {}", started.elapsed(), bytes.escape_ascii());
-                    }
-                    term.feed(bytes);
-                }
-                PtyEvent::Exited(code) => {
-                    if debug {
-                        eprintln!("{:?} exit {code:?}", started.elapsed());
-                    }
-                    exit = Some(code);
-                }
+                PtyEvent::Output(bytes) => term.feed(bytes),
+                PtyEvent::Exited(code) => exit = Some(code),
             });
             // Query replies go back to the program, as TerminalState sends
             // them with a PTY attached: ConPTY asks for the cursor position
@@ -670,9 +658,6 @@ mod tests {
             // once the program has exited.
             let replies = term.take_input();
             if !replies.is_empty() {
-                if debug {
-                    eprintln!("{:?} reply {}", started.elapsed(), replies.escape_ascii());
-                }
                 let _ = pty.write(&replies);
             }
         }
