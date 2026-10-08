@@ -462,25 +462,25 @@ mod tests {
     #[test]
     fn a_changed_frame_stays_within_its_allocation_budget() {
         // (case, input, text it shows, budget warm, budget after idling)
-        // Measured: 73/32, 80/36, 1655/690, 17/17.
+        // Measured: 50/9, 55/11, 1283/234, 2/2.
         let cases: &[(&str, String, &str, u64, u64)] = &[
-            ("a typed character", "o".into(), "$ echo", 75, 34),
+            ("a typed character", "o".into(), "$ echo", 52, 11),
             (
                 "one new line",
                 "\r\nfresh output line".into(),
                 "fresh output line",
-                82,
-                38,
+                57,
+                13,
             ),
             (
                 "thirty new lines",
                 format!("\r\n{}", lines(9, 30)),
                 "output 9.29 of a build step",
-                1680,
-                700,
+                1300,
+                240,
             ),
             // Onto a blank cell, so no glyph under the cursor needs shaping.
-            ("a cursor move", "\x1b[22;2H".into(), "$ ech", 18, 18),
+            ("a cursor move", "\x1b[22;2H".into(), "$ ech", 2, 2),
         ];
         for (name, input, shown, warm, idled) in cases {
             for (idle_frames, budget) in [(0, warm), (300, idled)] {
