@@ -590,6 +590,19 @@ impl TextLayout {
         self.set_settings(query);
     }
 
+    /// Takes `source` as its text and spans, shared, with `query`'s
+    /// settings.
+    pub(crate) fn share_source(&mut self, source: &TextSource, query: &TextQuery) {
+        self.source = source.clone();
+        self.set_settings(query);
+    }
+
+    /// Lets go of its source, so its owner can write over it while this
+    /// layout waits to be rebuilt.
+    pub(crate) fn detach_source(&mut self) {
+        self.source = TextSource::empty();
+    }
+
     /// `pooled` refilled by `fill`, or a new layout when there is none or
     /// something reached it after all. Only [`Arc::get_mut`] decides that
     /// nothing else holds a layout.
@@ -611,7 +624,8 @@ impl TextLayout {
         self.scale_factor = query.scale_factor;
     }
 
-    /// Shapes and lays out the inputs [`Self::copy_inputs`] set, which must be valid params, reusing this
+    /// Shapes and lays out the inputs [`Self::copy_inputs`] or
+    /// [`Self::share_source`] set, which must be valid params, reusing this
     /// layout's buffer, lines, and columns.
     pub(crate) fn rebuild(
         &mut self,

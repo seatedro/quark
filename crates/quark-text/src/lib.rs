@@ -27,6 +27,7 @@ macro_rules! profile_scope {
 
 #[cfg(test)]
 mod alloc_budget;
+mod block;
 mod cache;
 mod epoch;
 pub mod fonts;
@@ -36,6 +37,7 @@ mod row;
 mod source;
 mod system;
 
+pub use block::TextBlock;
 pub use cache::{LayoutCache, LayoutCacheLimits, LayoutCacheMemory, LayoutCacheStats, LayoutKey};
 pub use cosmic_text;
 pub use epoch::{FontEpoch, TextSystemId};

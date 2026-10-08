@@ -357,3 +357,41 @@ fn layout_released_after_eviction_is_refilled() {
     assert!(allocations <= 1, "{allocations} allocations");
     assert_eq!(layout.expect("layout").text(), fresh.text);
 }
+
+// A block being edited while its last layout stays on screen writes each
+// revision over the storage of the one before last, whatever its length.
+// Neither the text nor the layout may be copied into new storage; what is
+// left is shaping's own residual: a word's glyph vector growing when it
+// goes to a longer word than it last held.
+#[test]
+fn block_edits_within_warmed_capacity_copy_no_text() {
+    let mut system = test_system();
+    let style = TextStyle::new(14.0);
+    let mut block = crate::block::TextBlock::new();
+    let edits = [
+        "a line long enough to hold every later revision of the edit",
+        "a line long enough",
+        "short",
+        "na\u{ef}ve caf\u{e9} \u{65e5}\u{672c}",
+        "a line long enough to hold every later revision of it",
+        "a line",
+    ];
+    // Warms the storage: the first two revisions allocate the sources and
+    // layouts the rest reuse, and the font lookups for every char.
+    let mut shown = None;
+    for text in edits.iter().chain(&edits) {
+        block.set_text(text);
+        shown = Some(block.layout(&mut system, style, None, 1.0).expect("warm"));
+    }
+    for (i, text) in edits.iter().enumerate() {
+        let (layout, allocations) = count(|| {
+            block.set_text(text);
+            block.layout(&mut system, style, None, 1.0)
+        });
+        let layout = layout.expect("layout");
+        assert!(allocations <= 2, "edit {i}: {allocations} allocations");
+        assert_eq!(layout.text(), *text);
+        shown = Some(layout);
+    }
+    drop(shown);
+}
