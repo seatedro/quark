@@ -31,9 +31,20 @@ jobs:
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # kache caches each rustc call by its inputs, workspace crates
+      # included, in the quark-kache R2 bucket. Only master writes; kache
+      # also keeps pull requests and unprotected branches read-only. Without
+      # the secrets (fork pull requests) it falls back to the Actions cache.
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
-          key: e2e
+          cache-key-prefix: kache-e2e
+          s3-bucket: ${{ secrets.KACHE_S3_ACCESS_KEY_ID != '' && 'quark-kache' || '' }}
+          s3-endpoint: https://d996894143090cc02f1539e379655b2c.r2.cloudflarestorage.com
+          s3-region: auto
+          s3-access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          save-cache: ${{ github.ref == 'refs/heads/master' }}
+          pr-comment: false
 
       # Debug builds (opt-level 1): quicker to build, and debug assertions
       # turn integrity violations into spec failures.
