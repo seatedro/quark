@@ -7,7 +7,11 @@
 //! router shows it once the pointer has moved [`DRAG_PREVIEW_THRESHOLD`]
 //! from the press, keeps its hotspot under the pointer, and drops it when
 //! the drag ends (released or cancelled) or its source leaves the frame
-//! ([`InputRouter::drag_preview`]). The host paints it with a
+//! ([`InputRouter::drag_preview`]). A drag handed off to a
+//! [`DragSession`] takes a copy of its preview along: the session owns it
+//! from then on and shows it over whichever window the pointer is in
+//! ([`DragSession::preview_in`]), whether or not the source element is
+//! still painted. Either way the host paints it with a
 //! [`DragPreviewLayer`] after the root, outside every clip and above every
 //! z-index. The layer records the preview's drawing once per content key,
 //! size, theme, and scale, and moves that recording with the pointer.
@@ -33,7 +37,7 @@ pub struct DragPreview {
     content: PreviewContent,
     key: u64,
     size: (f32, f32),
-    hotspot: (f32, f32),
+    pub(super) hotspot: (f32, f32),
 }
 
 impl DragPreview {
