@@ -209,7 +209,16 @@ impl Subtree {
                     .height
                     .map_or(available.height, AvailableSpace::Definite),
             };
+            // A sizing pass is not rounded: nothing reads its rounded
+            // layout, and the final pass rounds the whole subtree again.
+            let sizing = known.width.is_none() || known.height.is_none();
+            if sizing {
+                self.engine.tree.disable_rounding();
+            }
             self.engine.compute(root, available, cx);
+            if sizing {
+                self.engine.tree.enable_rounding();
+            }
             self.laid_out_at = Some(known);
         }
         let size = self.engine.tree.unrounded_layout(root).size;
@@ -1000,6 +1009,59 @@ mod tests {
     fn warmed_frame_that_adds_nodes_allocates_nothing() {
         let frames = [(10.0, false), (10.0, true), (10.0, false), (10.0, true)];
         assert_eq!(last_frame_allocations(&frames), 0);
+    }
+
+    /// A cache boundary's content lands on whole pixels at its final size,
+    /// after its parent sized it at fractional widths.
+    #[test]
+    fn boundary_content_lands_on_whole_pixels() {
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        let mut cx = MeasureContext {
+            text: &mut text,
+            layouts: &mut layouts,
+        };
+        let mut engine = LayoutEngine::new();
+        let index = engine.begin_subtree();
+        let sub = engine.subtree_mut(index);
+        let third = sub.request_layout(
+            taffy::Style {
+                size: taffy::Size {
+                    width: Dimension::percent(1.0 / 3.0),
+                    height: Dimension::length(10.25),
+                },
+                ..Default::default()
+            },
+            &[],
+        );
+        // As tall as text of a fixed area wrapped to its width.
+        let wrapped = sub.request_measured_layout(taffy::Style::default(), |known, available| {
+            let width = known.width.unwrap_or(match available.width {
+                AvailableSpace::Definite(width) => width,
+                _ => 50.0,
+            });
+            taffy::Size {
+                width,
+                height: 700.0 / width,
+            }
+        });
+        let content = sub.request_layout(
+            taffy::Style {
+                padding: taffy::Rect::length(4.5_f32),
+                ..flex(taffy::FlexDirection::Column)
+            },
+            &[third, wrapped],
+        );
+        let boundary = engine.finish_subtree(index, taffy::Style::default(), content);
+        let root = engine.request_layout(flex(taffy::FlexDirection::Column), &[boundary]);
+        engine.compute_layout(root, 137.5, 300.0, &mut cx);
+
+        let sub = engine.subtree(index);
+        for &node in &sub.nodes[..sub.cursor] {
+            let b = sub.layout_bounds(node);
+            let edges = [b.x, b.y, b.width, b.height];
+            assert!(edges.iter().all(|v| v.fract() == 0.0), "{b:?}");
+        }
     }
 
     // -----------------------------------------------------------------------
