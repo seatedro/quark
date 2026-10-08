@@ -295,6 +295,13 @@ impl InnerAtlas {
     fn trim(&mut self) {
         self.glyphs_in_use.clear();
     }
+
+    // quark patch: see `TextAtlas::clear`.
+    fn clear(&mut self) {
+        self.packer.clear();
+        self.glyph_cache.clear();
+        self.glyphs_in_use.clear();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +417,16 @@ impl TextAtlas {
     pub fn trim(&mut self) {
         self.mask_atlas.trim();
         self.color_atlas.trim();
+    }
+
+    // quark patch: forgetting every glyph.
+    /// Drops every cached glyph, in use or not, keeping the textures and
+    /// their size. Glyphs are keyed by font id, so an atlas that keeps
+    /// drawing after the font database is replaced must be cleared: the
+    /// new database numbers its faces from the start again.
+    pub fn clear(&mut self) {
+        self.mask_atlas.clear();
+        self.color_atlas.clear();
     }
 
     // quark patch: atlas work counters.
