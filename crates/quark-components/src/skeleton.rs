@@ -1,6 +1,8 @@
 //! Shimmering placeholders shown where content is still loading, so the
 //! wait previews the shape of what will appear. The shimmer runs on the
-//! GPU through quark's shimmer effect, with no per-frame CPU work.
+//! GPU through quark's shimmer effect, with no per-frame CPU work. Under
+//! [`Theme::reduced_motion`] the placeholders are flat and still, so nothing
+//! asks for frames.
 
 use quark::view;
 
@@ -23,11 +25,16 @@ const LINE_H: f32 = 12.0;
 pub fn skeleton(width: f32, height: f32, theme: &Theme) -> AnyElement {
     let tc = &theme.colors;
     let scale = theme.metrics.ui_scale();
+    let radius = theme.components.skeleton.radius.unwrap_or(Rad::SM);
+    let still = theme.reduced_motion;
     view! { scale,
         <div w={width} h={height}
-             rounded={Rad::SM}
-             bg={Color::TRANSPARENT}
-             bg_effect={shimmer(tc.element_background, tc.ghost_element_hover, 1.0)} />
+             rounded={radius}
+             @when {still} { bg={tc.element_background} }
+             @when {!still} {
+                 bg={Color::TRANSPARENT}
+                 bg_effect={shimmer(tc.element_background, tc.ghost_element_hover, 1.0)}
+             } />
     }
 }
 
@@ -36,14 +43,20 @@ pub fn skeleton(width: f32, height: f32, theme: &Theme) -> AnyElement {
 /// it.
 pub fn skeleton_lines(count: usize, theme: &Theme) -> AnyElement {
     let scale = theme.metrics.ui_scale();
+    let recipe = theme.components.skeleton;
+    let line_h = recipe.height.map_or(LINE_H, |h| (h * scale).round());
     let lines: Vec<AnyElement> = LINE_WIDTHS
         .iter()
         .cycle()
         .take(count)
-        .map(|w| skeleton(*w, LINE_H, theme))
+        .map(|w| skeleton(*w, line_h, theme))
         .collect();
+    // Unscaled: the view scales padding and gap.
     view! { scale,
-        <div class="flex-col w-full" p={Sp::MD} gap={Sp::MD}>
+        <div class="flex-col w-full"
+             px={recipe.padding_x.unwrap_or(Sp::MD)}
+             py={recipe.padding_y.unwrap_or(Sp::MD)}
+             gap={recipe.gap.unwrap_or(Sp::MD)}>
             {...lines}
         </div>
     }

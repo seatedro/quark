@@ -1,5 +1,8 @@
-//! Workbench geometry tokens, in logical points at 100% zoom (design
-//! section 3). Placeholder values from the spec; stream B owns refinement.
+//! Workbench geometry, type, elevation, and motion tokens, in logical
+//! points at 100% zoom (design section 3). Colors live in
+//! `assets/themes/workbench.json`, which the theme adapter loads. Multiply
+//! a size by the theme's `metrics.ui_scale()` (the zoom) once where it is
+//! used; [`super::recipes`] does that for text and common surfaces.
 
 /// Spacing scale.
 pub const SPACE_2: f32 = 2.0;
@@ -39,3 +42,43 @@ pub const RIGHT_DOCK_WIDTH: f32 = 400.0;
 pub const TIMELINE_MAX_WIDTH: f32 = 760.0;
 /// macOS traffic lights' reserved leading zone.
 pub const TRAFFIC_LIGHT_ZONE: f32 = 80.0;
+
+/// Borders and focus.
+pub const DIVIDER: f32 = 1.0;
+pub const FOCUS_RING: f32 = 2.0;
+pub const FOCUS_RING_OFFSET: f32 = 2.0;
+
+/// A shadow: vertical offset, blur, and black alpha in light and dark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shadow {
+    pub offset_y: f32,
+    pub blur: f32,
+    pub alpha_light: u8,
+    pub alpha_dark: u8,
+}
+
+/// Menus, popovers, toasts: black 12% light, 28% dark.
+pub const SHADOW_MENU: Shadow = Shadow {
+    offset_y: 4.0,
+    blur: 16.0,
+    alpha_light: 31,
+    alpha_dark: 71,
+};
+/// Modals: black 18% light, 40% dark.
+pub const SHADOW_MODAL: Shadow = Shadow {
+    offset_y: 12.0,
+    blur: 40.0,
+    alpha_light: 46,
+    alpha_dark: 102,
+};
+
+/// Motion durations, in milliseconds. Reduced motion drops movement and
+/// disclosures entirely (see `recipes`).
+pub const MOTION_HOVER_MS: u32 = 100;
+pub const MOTION_MENU_MS: u32 = 120;
+/// How far a menu travels as it fades in.
+pub const MOTION_MENU_SHIFT: f32 = 4.0;
+pub const MOTION_DISCLOSURE_MS: u32 = 160;
+pub const MOTION_TOAST_MS: u32 = 180;
+/// Tooltips appear after the pointer rests this long.
+pub const TOOLTIP_DELAY_MS: u64 = 500;

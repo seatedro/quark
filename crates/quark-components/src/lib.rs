@@ -14,8 +14,10 @@ pub mod child;
 pub mod combobox;
 pub mod context_menu;
 pub mod diff_view;
+pub mod disclosure;
 pub mod dock;
 pub mod dropdown;
+pub mod form_field;
 pub mod hover_card;
 pub mod kbd;
 mod list_nav;
@@ -52,6 +54,7 @@ pub use context_menu::*;
 pub use diff_view::{
     CopySide, DiffEvent, DiffKey, DiffOutcome, DiffStyle, DiffViewState, diff_view,
 };
+pub use disclosure::{DISCLOSURE_MS, DisclosurePhase, DisclosureState};
 pub use dock::{
     Boundary, Dock, DockDestination, DockEffects, DockEvent, DockIntegrityError, DockLayout,
     DockLocation, DockOutcome, DockRegion, DockSnapshot, DockSplit, DockState, FloatingSnapshot,
@@ -59,6 +62,7 @@ pub use dock::{
     TabMove, TabPolicy, Transfer, TransferRefusal, WORKSPACE_VERSION, WorkspaceSnapshot,
 };
 pub use dropdown::*;
+pub use form_field::FormField;
 pub use hover_card::*;
 pub use kbd::*;
 pub use list_nav::TypeAhead;

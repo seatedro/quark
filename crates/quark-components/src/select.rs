@@ -19,11 +19,44 @@ use quark_ui::element::{AnyElement, IntoAnyElement, svg_icon, text};
 use quark_ui::element::{ElementContext, RenderOnce, div};
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
-use quark_ui::theme::{Color, Theme};
+use quark_ui::theme::{Color, ControlMetrics, Theme, scaled_or};
 use quark_ui::{Action, FocusId};
 
 use crate::list_nav::{self, TYPE_AHEAD_KEYS, TypeAhead};
-use crate::popover::{PopoverSide, anchored, popover_panel};
+use crate::popover::{PopoverSide, anchored, list_padding, popover_panel};
+
+/// Resolved sizes of a control or list row: the theme's recipe where it
+/// sets them, else the defaults these widgets always used.
+#[derive(Clone, Copy)]
+pub(crate) struct RowSizes {
+    pub gap: f32,
+    pub px: f32,
+    pub py: f32,
+    pub radius: f32,
+    pub font: f32,
+    pub icon: f32,
+    pub height: Option<f32>,
+}
+
+impl RowSizes {
+    pub(crate) fn resolve(recipe: ControlMetrics, theme: &Theme) -> Self {
+        let m = &theme.metrics;
+        let scale = m.ui_scale();
+        Self {
+            gap: scaled_or(recipe.gap, scale, m.spacing_sm),
+            px: scaled_or(recipe.padding_x, scale, m.spacing_md),
+            py: scaled_or(
+                recipe.padding_y,
+                scale,
+                m.spacing_xs + (Sp::XXS * scale).round(),
+            ),
+            radius: scaled_or(recipe.radius, scale, m.control_radius),
+            font: recipe.font_size.map_or(m.ui_small_font_size, |s| s * scale),
+            icon: recipe.icon_size.map_or(m.ui_small_font_size, |s| s * scale),
+            height: recipe.height.map(|h| (h * scale).round()),
+        }
+    }
+}
 
 /// One option of a [`select`]. Consecutive options with the same `group`
 /// are listed under that group's heading.
@@ -298,6 +331,7 @@ impl RenderOnce for Select {
         let m = &theme.metrics;
         let scale = m.ui_scale();
         let width = self.width.unwrap_or((220.0 * scale).round());
+        let sz = RowSizes::resolve(theme.components.select, theme);
         let msg = &self.on_msg;
         let chosen = self.selected.and_then(|i| self.options.get(i));
         let shown = chosen.map_or(self.placeholder.as_str(), |o| o.label.as_str());
@@ -328,8 +362,9 @@ impl RenderOnce for Select {
                          on_key={(key, msg(SelectMsg::TypeAhead(key.chars().next().unwrap_or_default())))}
                      }
                  }>
-                <div class="flex-row items-center w-full" gap={m.spacing_sm} px={m.spacing_md}
-                     py={m.spacing_xs + (Sp::XXS * scale).round()} rounded={m.control_radius}
+                <div class="flex-row items-center w-full" gap={sz.gap} px={sz.px}
+                     py={sz.py} rounded={sz.radius}
+                     @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
                      bg={tc.element_background}
                      border={if open { tc.focus_border } else { tc.border_variant }}
                      accessibility_id={&*self.id} test_id="select-trigger" focus_ring={self.focus}
@@ -341,18 +376,18 @@ impl RenderOnce for Select {
                          on:click={msg(SelectMsg::Toggle)}
                      }>
                     <div class="flex-1">
-                        <text class="text-sm truncate"
+                        <text class="truncate" size={sz.font}
                               color={if chosen.is_some() && !self.disabled { tc.text } else { tc.text_muted }}>
                             {shown.to_owned()}
                         </text>
                     </div>
                     <icon svg={if open { lucide::CHEVRON_UP } else { lucide::CHEVRON_DOWN }}
-                          size={m.ui_small_font_size} color={tc.text_muted} />
+                          size={sz.icon} color={tc.text_muted} />
                 </div>
                 if open {
                     <anchored(
                         view! {
-                            <popover_panel(theme) w={width} py={m.spacing_xs}
+                            <popover_panel(theme) w={width} py={list_padding(theme)}
                                 accessibility_id={format!("{}-listbox", self.id)}
                                 test_id="select-listbox"
                                 accessibility_role={accesskit::Role::ListBox}
@@ -425,10 +460,11 @@ fn group_box(
     theme: &Theme,
 ) -> AnyElement {
     let m = &theme.metrics;
+    let sz = RowSizes::resolve(theme.components.option, theme);
     view! {
         <div class="flex-col w-full" accessibility_id={format!("{id}-group-{first}")}
              accessibility_role={accesskit::Role::Group} aria-label={name.to_owned()}>
-            <div px={m.spacing_md} pt={m.spacing_xs} pb={(Sp::XXS * m.ui_scale()).round()}>
+            <div px={sz.px} pt={m.spacing_xs} pb={(Sp::XXS * m.ui_scale()).round()}>
                 <text class="text-xs font-semibold" color={theme.colors.text_muted}>
                     {name.to_owned()}
                 </text>
@@ -450,11 +486,10 @@ fn option_row(
     theme: &Theme,
 ) -> AnyElement {
     let tc = &theme.colors;
-    let m = &theme.metrics;
-    let scale = m.ui_scale();
+    let sz = RowSizes::resolve(theme.components.option, theme);
     view! {
-        <div class="flex-row items-center w-full" gap={m.spacing_sm} px={m.spacing_md}
-             py={m.spacing_xs + (Sp::XXS * scale).round()}
+        <div class="flex-row items-center w-full" gap={sz.gap} px={sz.px} py={sz.py}
+             @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
              accessibility_id={format!("{id}-option-{index}")} test_id="select-option"
              accessibility_role={accesskit::Role::ListBoxOption}
              aria-label={option.label.clone()} aria-selected={selected}
@@ -465,7 +500,7 @@ fn option_row(
                  hover_bg={tc.ghost_element_hover} class="cursor-pointer" on:click={commit}
              }>
             <div class="flex-1">
-                <text class="text-sm truncate"
+                <text class="truncate" size={sz.font}
                       color={if option.disabled {
                           tc.text_disabled
                       } else if selected {
@@ -477,7 +512,7 @@ fn option_row(
                 </text>
             </div>
             if selected {
-                <icon svg={lucide::CHECK} size={m.ui_small_font_size} color={tc.accent} />
+                <icon svg={lucide::CHECK} size={sz.icon} color={tc.accent} />
             }
         </div>
     }

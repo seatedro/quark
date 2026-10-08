@@ -41,7 +41,13 @@ impl Transitions {
         target: PaintTransform,
         cx: &mut ElementContext,
     ) -> PaintTransform {
-        let (Some(key), Some(motion)) = (self.key(key), self.motion(Prop::Transform)) else {
+        // Movement is the motion reduced motion asks to drop; fades and
+        // color changes stay, as on the platforms.
+        let (Some(key), Some(motion), false) = (
+            self.key(key),
+            self.motion(Prop::Transform),
+            cx.theme.reduced_motion,
+        ) else {
             return target;
         };
         let mut value = |prop, target| cx.transition(key, prop, target, motion).0;
@@ -168,12 +174,22 @@ mod tests {
         pointer: Option<(f32, f32)>,
         clock_ms: u64,
     ) -> Frame {
+        frame_in(&Theme::default_dark(), root, table, pointer, clock_ms)
+    }
+
+    /// [`frame`] under `theme`.
+    fn frame_in(
+        theme: &Theme,
+        root: impl IntoAnyElement,
+        table: &mut AnimationTable,
+        pointer: Option<(f32, f32)>,
+        clock_ms: u64,
+    ) -> Frame {
         let mut text = TextSystem::vendored_only(&Default::default());
         let mut layouts = LayoutCache::default();
         let store = SignalStore::new();
-        let theme = Theme::default_dark();
         table.tick(clock_ms);
-        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, pointer, &store)
+        let mut cx = ElementContext::new(theme, 1.0, &mut text, &mut layouts, pointer, &store)
             .with_clock(clock_ms)
             .with_animations(table);
         let mut scene = Scene::default();
@@ -310,6 +326,32 @@ mod tests {
         assert_eq!(
             frame(panel(100.0), &mut table, at(105.0), now).backgrounds,
             vec![HOVER]
+        );
+    }
+
+    // Catches a slide that still moves under reduced motion: the child
+    // lands at once and no frame is scheduled for it.
+    #[test]
+    fn translate_jumps_without_frames_under_reduced_motion() {
+        let theme = Theme {
+            reduced_motion: true,
+            ..Theme::default_dark()
+        };
+        let panel = |x: f32| {
+            div()
+                .key("panel")
+                .w(50.0)
+                .h(50.0)
+                .translate(x, 0.0)
+                .transition(Prop::Transform, Motion::tween(160, Curve::Linear))
+                .child(div().w(10.0).h(10.0).bg(IDLE).hover_bg(HOVER))
+        };
+        let mut table = AnimationTable::new();
+        frame_in(&theme, panel(0.0), &mut table, None, 0);
+        let moved = frame_in(&theme, panel(100.0), &mut table, Some((105.0, 5.0)), 0);
+        assert_eq!(
+            (moved.backgrounds, moved.next_frame_ms),
+            (vec![HOVER], None)
         );
     }
 

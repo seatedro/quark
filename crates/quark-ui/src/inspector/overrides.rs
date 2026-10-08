@@ -24,6 +24,23 @@ impl StyleEdit {
         *self == Self::default()
     }
 
+    /// The edit as `view!` attributes to paste into the element's source:
+    /// `p={12.0} bg={Color::rgba(235, 87, 87, 255)}`. Values are the points
+    /// on screen; in a `view! { scale, .. }`, divide padding, gap, and
+    /// radius by the zoom.
+    pub fn patch(&self) -> String {
+        let color = |c: Color| format!("Color::rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a);
+        let attrs = [
+            self.padding.map(|v| format!("p={{{v:?}}}")),
+            self.gap.map(|v| format!("gap={{{v:?}}}")),
+            self.background.map(|c| format!("bg={{{}}}", color(c))),
+            self.border_color
+                .map(|c| format!("border={{{}}}", color(c))),
+            self.radius.map(|v| format!("rounded={{{v:?}}}")),
+        ];
+        attrs.into_iter().flatten().collect::<Vec<_>>().join(" ")
+    }
+
     pub fn apply(&self, style: &mut ElementStyle) {
         if let Some(padding) = self.padding {
             let length = taffy::LengthPercentage::length(padding);
@@ -109,5 +126,16 @@ impl StyleOverrides {
         if let Some(edit) = self.edits.get(key) {
             edit.apply(style);
         }
+    }
+
+    /// Every edit as [`StyleEdit::patch`], one line per element in key
+    /// order, each after a comment naming its key.
+    pub fn patch(&self) -> String {
+        let mut edits: Vec<_> = self.edits.iter().collect();
+        edits.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        edits
+            .into_iter()
+            .map(|(key, edit)| format!("// {key}\n{}\n", edit.patch()))
+            .collect()
     }
 }

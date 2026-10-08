@@ -13,12 +13,12 @@
 use quark::{Rect, SemanticRole};
 
 use quark_render::Scene;
-use quark_ui::design::{Shadow, Sp, Sz};
+use quark_ui::design::{Shadow, ShadowLayer, Sp, Sz};
 use quark_ui::element::{
     AnyElement, Bounds, Div, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId, div,
 };
 use quark_ui::style::{ElementStyle, Styled};
-use quark_ui::theme::Theme;
+use quark_ui::theme::{Elevation, Theme, scaled_or};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopoverSide {
@@ -213,10 +213,15 @@ impl IntoAnyElement for Anchored {
 
 /// The elevated panel a popover draws, at the top-left of its containing
 /// block: wrap it in [`anchored`] to place it, or position it yourself.
+/// The theme's [`ComponentMetrics::popover`] recipe sets its radius and
+/// shadow.
+///
+/// [`ComponentMetrics::popover`]: quark_ui::theme::ComponentMetrics::popover
 pub fn popover_panel(theme: &Theme) -> Div {
     let tc = &theme.colors;
     let m = &theme.metrics;
-    div()
+    let recipe = theme.components.popover;
+    let panel = div()
         .absolute()
         .left(0.0)
         .top(0.0)
@@ -228,8 +233,50 @@ pub fn popover_panel(theme: &Theme) -> Div {
         .key_context("popover")
         .bg(tc.elevated_surface)
         .border(tc.border)
-        .rounded(m.panel_radius)
-        .shadow_preset(Shadow::POPOVER)
+        .rounded(scaled_or(recipe.radius, m.ui_scale(), m.panel_radius));
+    panel.shadow_preset(Shadows::new(recipe.shadow, Shadow::POPOVER, m.ui_scale()).layers())
+}
+
+/// A surface's shadow: the recipe's single layer at `scale`, or the
+/// component's preset when the recipe sets none.
+pub(crate) enum Shadows {
+    Preset(&'static [ShadowLayer]),
+    One([ShadowLayer; 1]),
+}
+
+impl Shadows {
+    pub(crate) fn new(
+        recipe: Option<Elevation>,
+        preset: &'static [ShadowLayer],
+        scale: f32,
+    ) -> Self {
+        match recipe {
+            Some(e) => Self::One([ShadowLayer {
+                blur: e.blur * scale,
+                offset_y: e.offset_y * scale,
+                alpha: e.alpha,
+            }]),
+            None => Self::Preset(preset),
+        }
+    }
+
+    pub(crate) fn layers(&self) -> &[ShadowLayer] {
+        match self {
+            Self::Preset(layers) => layers,
+            Self::One(layer) => layer,
+        }
+    }
+}
+
+/// The vertical padding of a popover list: the theme's popover recipe, or
+/// the default spacing.
+pub(crate) fn list_padding(theme: &Theme) -> f32 {
+    let m = &theme.metrics;
+    scaled_or(
+        theme.components.popover.padding_y,
+        m.ui_scale(),
+        m.spacing_xs,
+    )
 }
 
 pub fn popover_section() -> Div {

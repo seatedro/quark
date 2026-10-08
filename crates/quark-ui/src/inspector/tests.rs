@@ -256,3 +256,31 @@ fn style_override_reaches_an_element_inside_a_cached_subtree() {
         }]
     );
 }
+
+// Catches a copied patch that drops an edit, names the wrong element, or
+// writes values that do not paste as `view!` attributes.
+#[test]
+fn copy_patch_lists_every_override_as_view_attributes() {
+    let mut devtools = inspecting();
+    devtools
+        .overrides_mut()
+        .edit(UiKey::from("sidebar.row"), |edit| {
+            edit.padding = Some(12.0);
+            edit.radius = Some(6.0);
+        });
+    devtools
+        .overrides_mut()
+        .edit(UiKey::from("composer"), |edit| {
+            edit.background = Some(RED);
+            edit.gap = Some(8.5);
+        });
+    assert_eq!(devtools.take_copy(), None);
+    devtools.apply(DevtoolsMsg::CopyPatch);
+    assert_eq!(
+        devtools.take_copy().as_deref(),
+        Some(
+            "// composer\ngap={8.5} bg={Color::rgba(250, 10, 10, 255)}\n\
+             // sidebar.row\np={12.0} rounded={6.0}\n"
+        )
+    );
+}

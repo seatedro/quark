@@ -3,7 +3,7 @@ use quark::view;
 use quark_ui::design::{Shadow, Sp};
 use quark_ui::element::*;
 use quark_ui::style::Styled;
-use quark_ui::theme::Theme;
+use quark_ui::theme::{Theme, scaled_or};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TooltipSide {
@@ -22,6 +22,14 @@ pub fn tooltip_layer(
 ) -> AnyElement {
     let tc = &theme.colors;
     let m = &theme.metrics;
+    let scale = m.ui_scale();
+    let recipe = theme.components.tooltip;
+    let px = scaled_or(recipe.padding_x, scale, m.spacing_sm);
+    let py = scaled_or(recipe.padding_y, scale, m.spacing_xs);
+    let radius = scaled_or(recipe.radius, scale, m.control_radius - Sp::XXS);
+    let font = recipe
+        .font_size
+        .map_or(m.ui_small_font_size - 1.0, |s| s * scale);
 
     let (offset_x, offset_y) = match side {
         TooltipSide::Top => (0.0, -(m.spacing_sm + Sp::XS)),
@@ -30,16 +38,17 @@ pub fn tooltip_layer(
         TooltipSide::Right => (m.spacing_sm + Sp::XS, 0.0),
     };
 
+    let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::TOOLTIP, scale);
     view! {
         <div class="absolute"
              left={x + offset_x} top={y + offset_y}
              z_index={500}
-             px={m.spacing_sm} py={m.spacing_xs}
+             px={px} py={py}
              bg={tc.elevated_surface}
              border={tc.border}
-             rounded={m.control_radius - Sp::XXS}
-             shadow_preset={Shadow::TOOLTIP}>
-            <text class="text-xs" color={tc.text}>{content}</text>
+             rounded={radius}
+             shadow_preset={shadows.layers()}>
+            <text size={font} color={tc.text}>{content}</text>
         </div>
     }
 }

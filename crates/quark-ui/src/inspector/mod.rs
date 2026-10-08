@@ -14,7 +14,9 @@
 //!   shows bounds, clip, z, semantics, and style, edits padding, gap, colors,
 //!   and radius of a pinned element that has a key or id (also inside
 //!   cached subtrees, which rebuild under a new edit), and lists the
-//!   semantic tree in a scrolling list (click a row to pin it).
+//!   semantic tree in a scrolling list (click a row to pin it). "copy
+//!   patch" puts the session's edits on the clipboard as `view!`
+//!   attributes, through [`Devtools::take_copy`], to paste into source.
 //! - `ctrl+shift+l` toggles layout debug: every element's bounds outlined,
 //!   and hit regions cut by a clip shown with their clipped part.
 
@@ -106,6 +108,8 @@ pub enum DevtoolsMsg {
     ClearPinned,
     ClearAll,
     ToggleLayout,
+    /// Copy every override as a source patch.
+    CopyPatch,
 }
 
 impl From<DevtoolsMsg> for Action {
@@ -136,6 +140,8 @@ pub struct Devtools {
     /// The inspector's semantic tree list.
     tree_scroll: ScrollHandle,
     text_stats: LayoutCacheStats,
+    /// Text for the host to put on the clipboard.
+    copy: Option<String>,
 }
 
 impl Devtools {
@@ -166,6 +172,12 @@ impl Devtools {
 
     pub fn overrides_mut(&mut self) -> &mut StyleOverrides {
         &mut self.overrides
+    }
+
+    /// Text the inspector asked to copy since the last call. The host puts
+    /// it on the clipboard after [`Self::handle`].
+    pub fn take_copy(&mut self) -> Option<String> {
+        self.copy.take()
     }
 
     /// The last frame's recorded elements.
@@ -335,6 +347,7 @@ impl Devtools {
             DevtoolsMsg::Unpin => self.pin = None,
             DevtoolsMsg::ToggleLayout => self.layout = !self.layout,
             DevtoolsMsg::ClearAll => self.overrides.clear_all(),
+            DevtoolsMsg::CopyPatch => self.copy = Some(self.overrides.patch()),
             msg => self.edit_pinned(msg),
         }
     }
