@@ -85,7 +85,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// Allocations `f` makes on this thread.
-fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
+pub(crate) fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
     let before = ALLOCATIONS.with(Cell::get);
     let result = f();
     (result, ALLOCATIONS.with(Cell::get) - before)

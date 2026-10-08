@@ -99,6 +99,11 @@ impl<K: Hash + Eq, V> HalfLoadMap<K, V> {
     }
 
     fn insert(&mut self, key: K, value: V) {
+        if let Some(slot) = self.map.get_mut(&key) {
+            // Replacing adds no entry, so it is no reason to grow.
+            *slot = value;
+            return;
+        }
         let len = self.map.len() + 1;
         if len > self.built_capacity / 2 {
             let old = mem::replace(&mut self.map, HashMap::with_capacity(2 * len));
@@ -966,6 +971,22 @@ mod tests {
             assert_eq!(layout.text(), row.as_str());
             assert_eq!(&format!("{:?}", layout.glyphs()), glyphs);
         }
+    }
+
+    // Replacing a key's value adds no entry, so it must not grow the map:
+    // a map that grew on replacement allocated where its length said it
+    // would not.
+    #[test]
+    fn half_load_map_replacing_a_key_allocates_nothing() {
+        let mut map = HalfLoadMap::default();
+        map.insert(1u64, 0u64);
+        let ((), allocations) = crate::alloc_budget::count(|| {
+            for value in 1..8 {
+                map.insert(1, value);
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(map.get(&1), Some(&7));
     }
 
     // A cache whose limits are lowered once it keeps layouts must come
