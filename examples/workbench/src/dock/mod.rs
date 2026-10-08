@@ -130,7 +130,7 @@ pub enum Action {
 }
 
 /// Dock layout per the design: sidebar 232 left, right dock 400.
-pub fn new_state(_options: &Options) -> State {
+pub fn new_state(options: &Options) -> State {
     let mut layout = DockState::new(DockLayout {
         left: Pane::fixed("Sidebar", tokens::SIDEBAR_WIDTH)
             .min(180.0)
@@ -167,7 +167,10 @@ pub fn new_state(_options: &Options) -> State {
     State {
         layout,
         windows,
-        panels: Panels::default(),
+        panels: Panels {
+            terminal: terminal::State::new(options),
+            ..Panels::default()
+        },
         tab_labels: TabLabels::default(),
     }
 }
@@ -238,6 +241,16 @@ pub fn set_region_visible(state: &mut State, region: DockRegion, visible: bool) 
     state.layout.set_visible(region, visible);
 }
 
+/// The window host showing the terminal: it is its group's active tab, in
+/// a floating window or a visible region of the main one.
+fn terminal_host(state: &State) -> Option<quark_components::HostId> {
+    let (at, _) = state.layout.location(panels::TERMINAL)?;
+    let group = state.layout.group(at.pane)?;
+    let shown = group.panels.get(group.active) == Some(&panels::TERMINAL)
+        && (at.host != quark_components::HostId::MAIN || state.layout.is_visible(at.region));
+    shown.then_some(at.host)
+}
+
 /// Make `panel` active wherever it is and focus its content. In the main
 /// window the app reveals it, through the shell's width policy, so the
 /// shell's idea of whether the dock is wanted stays true.
@@ -271,19 +284,7 @@ pub fn command(state: &mut State, id: CommandId, scx: &SurfaceCx, fx: &mut Effec
             fx,
         ),
         CommandId::ToggleTerminal => {
-            let shown = state
-                .layout
-                .location(panels::TERMINAL)
-                .is_some_and(|(at, _)| {
-                    state
-                        .layout
-                        .group(at.pane)
-                        .and_then(|g| g.panels.get(g.active))
-                        == Some(&panels::TERMINAL)
-                        && (at.host != quark_components::HostId::MAIN
-                            || state.layout.is_visible(at.region))
-                });
-            if shown && scx.is_focused(terminal::FOCUS) {
+            if terminal_host(state).is_some() && scx.is_focused(terminal::FOCUS) {
                 // Second press: back to the composer, as editors do with
                 // their terminal toggle.
                 fx.push(Effect::Command(CommandId::FocusComposer));
@@ -436,6 +437,7 @@ pub fn reveal_panel(state: &mut State, panel: PanelId) {
 
 pub fn init(state: &mut State, cx: &mut UiContext) {
     state.windows.init(&mut state.layout, cx);
+    terminal::init(&mut state.panels.terminal, cx);
 }
 
 /// Raw input for every window, before the surfaces see it: a drag between
@@ -447,11 +449,16 @@ pub fn input(state: &mut State, event: &InputEvent, cx: &mut UiContext) -> bool 
     if menu_input(state, event, cx) {
         return true;
     }
-    terminal::input(&mut state.panels.terminal, event, cx)
+    let here = cx
+        .window_handle()
+        .and_then(|w| state.windows.host(w))
+        .is_some_and(|host| terminal_host(state) == Some(host));
+    terminal::input(&mut state.panels.terminal, event, here, cx)
 }
 
 pub fn wake(state: &mut State, cx: &mut UiContext) {
     state.windows.wake(&mut state.layout, cx);
+    terminal::wake(&mut state.panels.terminal, cx);
 }
 
 pub fn app_event(state: &mut State, event: &AppEvent, cx: &mut UiContext) {

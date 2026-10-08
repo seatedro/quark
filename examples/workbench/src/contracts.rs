@@ -441,6 +441,17 @@ pub enum ScenarioKind {
     Stress,
 }
 
+/// What the terminal panel runs (`--terminal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerminalMode {
+    /// The user's shell on a PTY: what interactive launches get.
+    Real,
+    /// The in-memory scripted shell over the fixture files. The default
+    /// here, so tests that build `Options` directly stay deterministic.
+    #[default]
+    Scripted,
+}
+
 /// Launch options: command-line flags, with environment equivalents for
 /// the e2e runner, which starts binaries without arguments.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -458,6 +469,10 @@ pub struct Options {
     /// Write JSONL frame samples here and exit after the scripted run
     /// (`--perf <path>`).
     pub perf_out: Option<PathBuf>,
+    pub terminal: TerminalMode,
+    /// Where real terminal sessions start; the process's current directory
+    /// when unset.
+    pub cwd: Option<PathBuf>,
 }
 
 // ------------------------------------------------- surface context

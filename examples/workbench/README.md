@@ -4,9 +4,11 @@ A deterministic coding-agent client built from [Quark](../../README.md)'s
 document, composer, dock, and window primitives. It opens on the thread
 "Add keyboard shortcuts" in a fictional project, Atlas; sending a prompt
 plays a scripted run (text, tool calls, a file edit, tests) from
-[fixtures/run.json](fixtures/run.json). Nothing touches the network, a
-shell, or your files: the backend, the terminal, and the file store are
-simulated in memory, and the title bar says "Demo workspace".
+[fixtures/run.json](fixtures/run.json). Nothing touches the network or
+your files: the backend and the file store are simulated in memory, and
+the title bar says "Demo workspace". The Terminal panel is the exception:
+it runs your login shell on a real PTY unless launched with
+`--terminal scripted`.
 
 ## Launch
 
@@ -25,6 +27,8 @@ cargo run -p quark-workbench --bin workbench --features devtools -- --scenario r
 | `--manual-clock` | `QUARK_WORKBENCH_MANUAL_CLOCK=1` | off | Time moves only through "Advance demo step" (`mod+shift+.`), for screenshots of exact animation endpoints. |
 | `--state-dir DIR` | `QUARK_WORKBENCH_STATE_DIR` | none | Restore and save the dock layout in `DIR`. Without it the session keeps nothing. |
 | `--perf FILE` | `QUARK_WORKBENCH_PERF` | none | Record frame timings (see [Profiling](#profiling)) and exit. |
+| `--terminal real\|scripted` | `QUARK_WORKBENCH_TERMINAL` | `real` | What the Terminal panel runs. `real` starts your login shell (`$SHELL`, else your account's, else `/bin/sh`; `%ComSpec%` or `cmd.exe` on Windows) on a PTY with `TERM=xterm-256color` and `COLORTERM=truecolor`, each session the first time it is shown. `scripted` starts no process: a fixed shell answers `help`, `ls`, `cat`, and `cargo test` from the fixture files. Tests and e2e specs use `scripted`. |
+| `--cwd DIR` | `QUARK_WORKBENCH_CWD` | current directory | Where real terminal sessions start. |
 | | `QUARK_WORKBENCH_MARKS=1` | off | Print the first-frame and history-ready marks to stderr. |
 
 Flags win over the environment. The environment forms exist because the
@@ -132,8 +136,13 @@ profile-tracy`. The `devtools` feature adds the frame HUD and inspector
 
 - The preview panel shows a bundled image labeled "Snapshot preview"; there
   is no web engine.
-- The terminal never starts a shell or PTY: it shows fixture output
-  ([fixtures/terminal.ansi](fixtures/terminal.ansi)) and scripted commands.
+- The terminal's shell does not see the fixture project: it runs in the
+  real directory given by `--cwd`. "New terminal" (the "+" by its tabs)
+  opens up to eight sessions. Workbench shortcuts (`mod+k`, `mod+j`, and
+  the rest) go to the app before the shell, so on Linux and Windows the
+  shell never gets Ctrl+K, Ctrl+J, Ctrl+B, Ctrl+F, Ctrl+L, Ctrl+N, or
+  Ctrl+,. Tab goes to a real shell for completion; Shift+Tab leaves the
+  panel. With `--terminal scripted`, Tab leaves too.
 - Applying the diff changes only the in-memory file store, with Undo.
 - On macOS the window uses custom chrome with native traffic lights; on
   Linux and Windows it keeps system decorations above the in-app top bar.
