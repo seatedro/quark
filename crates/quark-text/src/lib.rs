@@ -34,6 +34,8 @@ pub mod fonts;
 mod layout;
 pub mod offset;
 mod row;
+#[cfg(test)]
+mod row_timing;
 mod source;
 mod system;
 
