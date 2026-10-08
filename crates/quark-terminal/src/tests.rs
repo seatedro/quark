@@ -644,3 +644,117 @@ proptest::proptest! {
         proptest::prop_assert!(text.is_char_boundary(range.end));
     }
 }
+
+/// Release-mode time per phase of a terminal frame for each kind of
+/// change, on the fixture of terminal_demo's allocation budget tests (an
+/// 80x22 terminal after three screens of output and a prompt). Prints
+/// medians over fresh harnesses, then the per-cell cost of reading a full
+/// screen. Run with `cargo test --release -p quark-terminal --lib --
+/// --ignored --nocapture report_frame_timing`.
+#[test]
+#[ignore = "measurement, prints a report"]
+fn report_frame_timing() {
+    use std::time::{Duration, Instant};
+
+    use quark_app::testing::UiTestHarness;
+    use quark_app::{UiApp, UiContext, ViewContext};
+    use quark_ui::Action;
+    use quark_ui::element::AnyElement;
+
+    use crate::view::{TerminalEnv, terminal_view};
+    use crate::vt::timing;
+
+    struct Probe(TerminalState);
+
+    impl UiApp for Probe {
+        type Action = TerminalEvent;
+        type Message = ();
+
+        fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+            let (width, height) = cx.frame.size();
+            self.0.set_viewport(width, height);
+            let scale = cx.frame.scale_factor();
+            let text = cx.frame.text();
+            self.0
+                .prepare(&mut text.system, &mut text.layouts, scale, cx.theme);
+            let env = TerminalEnv {
+                focused: true,
+                accessible: false,
+            };
+            terminal_view(&mut self.0, cx.theme, env, Action::new)
+        }
+
+        fn update(&mut self, _event: TerminalEvent, _cx: &mut UiContext) {}
+    }
+
+    fn lines(seed: usize, count: usize) -> String {
+        (0..count)
+            .map(|n| {
+                let text = format!("output {seed}.{n} of a build step");
+                format!("\x1b[32m{n:04}\x1b[0m {text:<74}\r\n")
+            })
+            .collect()
+    }
+
+    fn median(mut v: Vec<Duration>) -> Duration {
+        v.sort();
+        v[v.len() / 2]
+    }
+
+    const RUNS: usize = 41;
+    let cases: [(&str, String); 4] = [
+        ("typed char", "o".into()),
+        ("scrolled line", "\r\nfresh output line".into()),
+        ("30-line redraw", format!("\r\n{}", lines(9, 30))),
+        ("cursor move", "\x1b[22;2H".into()),
+    ];
+    for (name, input) in &cases {
+        let mut frames = Vec::new();
+        let mut scopes: Vec<Vec<(Duration, u32)>> = vec![Vec::new(); timing::SCOPES.len()];
+        let mut costs = None;
+        for _ in 0..RUNS {
+            let mut ui = UiTestHarness::new(
+                Probe(TerminalState::new(
+                    "probe",
+                    quark_ui::FocusId::from_key("probe"),
+                )),
+                (640.0, 400.0),
+                1.0,
+            );
+            ui.set_accessibility_active(false);
+            for seed in 0..3 {
+                ui.app_mut().0.feed(lines(seed, 30).as_bytes());
+                ui.frame();
+            }
+            ui.app_mut().0.feed(b"$ ech");
+            ui.frame();
+            assert_eq!(ui.app().0.size(), (80, 22));
+
+            ui.app_mut().0.feed(input.as_bytes());
+            timing::take();
+            let started = Instant::now();
+            ui.frame();
+            frames.push(started.elapsed());
+            for (i, (_, d, n)) in timing::take().into_iter().enumerate() {
+                scopes[i].push((d, n));
+            }
+            if costs.is_none() && *name == "30-line redraw" {
+                costs = Some(ui.app_mut().0.vt_mut().cell_read_costs(2000));
+            }
+        }
+        eprintln!("{name}: frame {:?}", median(frames));
+        for (scope, samples) in timing::SCOPES.iter().zip(scopes) {
+            let n = samples[0].1;
+            let d = median(samples.into_iter().map(|(d, _)| d).collect());
+            if n > 0 {
+                eprintln!("  {scope:?} x{n}: {d:?}");
+            }
+        }
+        if let Some(costs) = costs {
+            eprintln!("  per full screen of cells (22 rows):");
+            for (step, d) in costs {
+                eprintln!("    {step}: {d:?}");
+            }
+        }
+    }
+}

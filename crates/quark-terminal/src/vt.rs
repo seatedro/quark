@@ -505,33 +505,40 @@ impl Terminal {
     /// selection, the cursor, and the colors. Returns what in `grid`
     /// changed. Reuses `grid`'s buffers.
     pub fn snapshot(&mut self, grid: &mut Grid) -> Changes {
+        timed!(Snapshot);
         let rs = self.render.as_ptr();
         // SAFETY: valid handles; every get passes its documented type.
         unsafe {
-            sys::ghostty_render_state_update(rs, self.raw.as_ptr());
-            let mut dirty: sys::GhosttyRenderStateDirty = 0;
-            sys::ghostty_render_state_get(
-                rs,
-                sys::GHOSTTY_RENDER_STATE_DATA_DIRTY,
-                (&raw mut dirty).cast(),
+            timed!(
+                Update,
+                sys::ghostty_render_state_update(rs, self.raw.as_ptr())
             );
-            let mut colors = sized!(sys::GhosttyRenderStateColors);
-            sys::ghostty_render_state_get(
-                rs,
-                sys::GHOSTTY_RENDER_STATE_DATA_COLORS,
-                (&raw mut colors).cast(),
-            );
-            let (mut cols, mut rows) = (0u16, 0u16);
-            sys::ghostty_render_state_get(
-                rs,
-                sys::GHOSTTY_RENDER_STATE_DATA_COLS,
-                (&raw mut cols).cast(),
-            );
-            sys::ghostty_render_state_get(
-                rs,
-                sys::GHOSTTY_RENDER_STATE_DATA_ROWS,
-                (&raw mut rows).cast(),
-            );
+            let (dirty, colors, cols, rows) = timed!(Header, {
+                let mut dirty: sys::GhosttyRenderStateDirty = 0;
+                sys::ghostty_render_state_get(
+                    rs,
+                    sys::GHOSTTY_RENDER_STATE_DATA_DIRTY,
+                    (&raw mut dirty).cast(),
+                );
+                let mut colors = sized!(sys::GhosttyRenderStateColors);
+                sys::ghostty_render_state_get(
+                    rs,
+                    sys::GHOSTTY_RENDER_STATE_DATA_COLORS,
+                    (&raw mut colors).cast(),
+                );
+                let (mut cols, mut rows) = (0u16, 0u16);
+                sys::ghostty_render_state_get(
+                    rs,
+                    sys::GHOSTTY_RENDER_STATE_DATA_COLS,
+                    (&raw mut cols).cast(),
+                );
+                sys::ghostty_render_state_get(
+                    rs,
+                    sys::GHOSTTY_RENDER_STATE_DATA_ROWS,
+                    (&raw mut rows).cast(),
+                );
+                (dirty, colors, cols, rows)
+            });
             let new_colors = Colors {
                 foreground: rgb(colors.foreground),
                 background: rgb(colors.background),
@@ -554,34 +561,41 @@ impl Terminal {
                 (&raw mut iter).cast(),
             );
             let mut y = 0usize;
-            while y < grid.rows.len() && sys::ghostty_render_state_row_iterator_next(iter) {
-                let mut row_dirty = false;
-                sys::ghostty_render_state_row_get(
-                    iter,
-                    sys::GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
-                    (&raw mut row_dirty).cast(),
-                );
-                let mut sel = sized!(sys::GhosttyRenderStateRowSelection);
-                let selection = ok(sys::ghostty_render_state_row_get(
-                    iter,
-                    sys::GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
-                    (&raw mut sel).cast(),
-                ))
-                .then_some((sel.start_x, sel.end_x));
+            while let Some((row_dirty, selection)) = timed!(RowFlags, {
+                (y < grid.rows.len() && sys::ghostty_render_state_row_iterator_next(iter)).then(
+                    || {
+                        let mut row_dirty = false;
+                        sys::ghostty_render_state_row_get(
+                            iter,
+                            sys::GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
+                            (&raw mut row_dirty).cast(),
+                        );
+                        let mut sel = sized!(sys::GhosttyRenderStateRowSelection);
+                        let selection = ok(sys::ghostty_render_state_row_get(
+                            iter,
+                            sys::GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+                            (&raw mut sel).cast(),
+                        ))
+                        .then_some((sel.start_x, sel.end_x));
+                        (row_dirty, selection)
+                    },
+                )
+            }) {
                 let row = &mut grid.rows[y];
                 let before = row.hash;
                 if full || row_dirty {
-                    self.read_row(iter, row, new_colors);
+                    timed!(ReadRow, self.read_row(iter, row, new_colors));
                     row.selection = selection;
-                    row.rehash();
+                    timed!(Hash, row.rehash());
                 } else if row.selection != selection {
                     row.selection = selection;
-                    row.rehash();
+                    timed!(Hash, row.rehash());
                 }
                 rows_changed |= row.hash != before;
                 y += 1;
             }
 
+            timed!(Cursor);
             let mut c = sized!(sys::GhosttyRenderStateCursor);
             sys::ghostty_render_state_get(
                 rs,
@@ -607,7 +621,7 @@ impl Terminal {
             };
             let cursor_changed = grid.cursor != cursor;
             grid.cursor = cursor;
-            sys::ghostty_render_state_clean(rs);
+            timed!(Clean, sys::ghostty_render_state_clean(rs));
             Changes {
                 rows: rows_changed,
                 cursor: cursor_changed,
@@ -729,6 +743,83 @@ impl Terminal {
             last.cols = col - last.col;
         }
         debug_assert_eq!(row.verify_integrity(), Ok(()));
+    }
+
+    /// Time to walk every viewport row of the current render state `reps`
+    /// times, doing progressively more of what [`Self::read_row`] does per
+    /// cell: advancing the cell iterator, then reading the raw cell and its
+    /// width, its text, its style, the whole conversion into runs, and
+    /// hashing the row. Differences between steps are each part's cost.
+    #[cfg(test)]
+    pub(crate) fn cell_read_costs(
+        &mut self,
+        reps: u32,
+    ) -> [(&'static str, std::time::Duration); 6] {
+        let colors = Colors::default();
+        let mut scratch = GridRow::default();
+        let mut step = |level: u8| {
+            let started = std::time::Instant::now();
+            for _ in 0..reps {
+                let mut iter = self.rows.as_ptr();
+                // SAFETY: valid handles and documented output types.
+                unsafe {
+                    sys::ghostty_render_state_get(
+                        self.render.as_ptr(),
+                        sys::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                        (&raw mut iter).cast(),
+                    );
+                    while sys::ghostty_render_state_row_iterator_next(iter) {
+                        if level >= 4 {
+                            self.read_row(iter, &mut scratch, colors);
+                            if level >= 5 {
+                                scratch.rehash();
+                            }
+                            std::hint::black_box(&scratch);
+                            continue;
+                        }
+                        let mut cells = self.cells.as_ptr();
+                        sys::ghostty_render_state_row_get(
+                            iter,
+                            sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                            (&raw mut cells).cast(),
+                        );
+                        while sys::ghostty_render_state_row_cells_next(cells) {
+                            if level == 0 {
+                                continue;
+                            }
+                            let mut raw: sys::GhosttyCell = 0;
+                            let mut wide: sys::GhosttyCellWide = 0;
+                            sys::ghostty_render_state_row_cells_get(
+                                cells,
+                                sys::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+                                (&raw mut raw).cast(),
+                            );
+                            sys::ghostty_cell_get(
+                                raw,
+                                sys::GHOSTTY_CELL_DATA_WIDE,
+                                (&raw mut wide).cast(),
+                            );
+                            std::hint::black_box(wide);
+                            if level >= 2 {
+                                std::hint::black_box(self.cell_text(cells).len());
+                            }
+                            if level >= 3 {
+                                std::hint::black_box(cell_style(cells, raw, colors));
+                            }
+                        }
+                    }
+                }
+            }
+            started.elapsed() / reps
+        };
+        [
+            ("iterate cells", step(0)),
+            ("+ raw cell, width", step(1)),
+            ("+ text", step(2)),
+            ("+ style", step(3)),
+            ("read_row (all conversion)", step(4)),
+            ("+ rehash", step(5)),
+        ]
     }
 
     /// The UTF-8 grapheme of the cells iterator's current cell (empty for
@@ -1313,5 +1404,108 @@ unsafe extern "C" fn read_paste(
         // SAFETY: the writer accepts `len` readable bytes.
         Some(write) => unsafe { write(writer.userdata, text.as_ptr(), text.len()) },
         None => false,
+    }
+}
+
+/// In test builds, `timed!(Scope, expr)` adds the time `expr` takes to that
+/// scope (see [`timing`]), and the statement `timed!(Scope);` adds the time
+/// until the end of its block. Elsewhere they are `expr` and nothing.
+macro_rules! timed {
+    ($scope:ident, $e:expr) => {{
+        #[cfg(test)]
+        let _guard = $crate::vt::timing::Guard::new($crate::vt::timing::Scope::$scope);
+        $e
+    }};
+    ($scope:ident) => {
+        #[cfg(test)]
+        let _guard = $crate::vt::timing::Guard::new($crate::vt::timing::Scope::$scope);
+    };
+}
+pub(crate) use timed;
+
+/// Wall time spent in each phase of preparing and building a terminal
+/// frame, summed per thread, for the ignored profiling test. Compiled only
+/// into test builds; elsewhere [`timed!`] is just its expression.
+#[cfg(test)]
+pub(crate) mod timing {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Scope {
+        /// `TerminalState::prepare`, all of it.
+        Prepare,
+        SyncScroll,
+        /// `Terminal::snapshot`, all of it.
+        Snapshot,
+        /// `ghostty_render_state_update`.
+        Update,
+        /// Dirty state, colors, and size reads.
+        Header,
+        /// Per row: advancing the iterator, its dirty flag and selection.
+        RowFlags,
+        /// Per dirty row: reading its cells into runs.
+        ReadRow,
+        /// Per changed row: hashing it.
+        Hash,
+        Cursor,
+        /// `ghostty_render_state_clean`.
+        Clean,
+        /// Scrollbar read and the `Frame` after the snapshot.
+        Frame,
+        /// `terminal_view`, without the lazily built rows.
+        View,
+        /// The rows element tree, built when the frame changed.
+        Build,
+    }
+
+    pub(crate) const SCOPES: [Scope; 13] = [
+        Scope::Prepare,
+        Scope::SyncScroll,
+        Scope::Snapshot,
+        Scope::Update,
+        Scope::Header,
+        Scope::RowFlags,
+        Scope::ReadRow,
+        Scope::Hash,
+        Scope::Cursor,
+        Scope::Clean,
+        Scope::Frame,
+        Scope::View,
+        Scope::Build,
+    ];
+
+    thread_local! {
+        static TOTALS: [Cell<(Duration, u32)>; SCOPES.len()] =
+            const { [const { Cell::new((Duration::ZERO, 0)) }; SCOPES.len()] };
+    }
+
+    pub(crate) struct Guard(Scope, Instant);
+
+    impl Guard {
+        pub(crate) fn new(scope: Scope) -> Self {
+            Self(scope, Instant::now())
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let spent = self.1.elapsed();
+            TOTALS.with(|t| {
+                let slot = &t[self.0 as usize];
+                let (total, n) = slot.get();
+                slot.set((total + spent, n + 1));
+            });
+        }
+    }
+
+    /// Each scope's total time and entry count since the last call.
+    pub(crate) fn take() -> [(Scope, Duration, u32); SCOPES.len()] {
+        TOTALS.with(|t| {
+            SCOPES.map(|s| {
+                let (d, n) = t[s as usize].take();
+                (s, d, n)
+            })
+        })
     }
 }

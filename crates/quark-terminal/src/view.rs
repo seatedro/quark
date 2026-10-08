@@ -27,6 +27,7 @@ use quark_ui::{Action, FocusId};
 
 use crate::grid::{CellStyle, CursorShape, Grid, GridRow, Rgb, Underline};
 use crate::state::{Frame, Metrics, Palette, Preedit, TerminalEvent, TerminalState, palette};
+use crate::vt::timed;
 
 /// Cursor blink half-period.
 const BLINK_MS: u64 = 600;
@@ -60,6 +61,7 @@ pub fn terminal_view(
     env: TerminalEnv,
     on_event: fn(TerminalEvent) -> Action,
 ) -> AnyElement {
+    timed!(View);
     if !env.focused {
         state.cancel_preedit();
     }
@@ -99,7 +101,10 @@ pub fn terminal_view(
     });
     let (grid_frame, rows_grid) = (frame.clone(), grid.clone());
     let content = cached(frame.id, hash, move || {
-        build(&grid_frame, &rows_grid, screen, top, palette, drag)
+        timed!(
+            Build,
+            build(&grid_frame, &rows_grid, screen, top, palette, drag)
+        )
     })
     .w(width)
     .h(height);

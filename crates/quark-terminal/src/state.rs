@@ -17,6 +17,7 @@ use winit::keyboard::{ModifiersState, NamedKey};
 use crate::grid::{Grid, Rgb};
 use crate::input::{self, KeyPress};
 use crate::pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
+use crate::vt::timed;
 use crate::vt::{
     KeyAction, KeyInput, Mode, Mods, MouseAction, MouseButton, MouseGeometry, Scroll, Terminal,
     UnsafePaste,
@@ -941,6 +942,7 @@ impl TerminalState {
         scale: f32,
         theme: &Theme,
     ) {
+        timed!(Prepare);
         // Remeasure when the scale or the fonts changed (a new monospace
         // family has its own advance), and resize to match.
         let key = (scale.to_bits(), Some(text.font_epoch()));
@@ -988,7 +990,7 @@ impl TerminalState {
             self.flush();
             self.dirty = true;
         }
-        self.sync_scroll(m);
+        timed!(SyncScroll, self.sync_scroll(m));
         if !self.dirty && self.frame.is_some() {
             return;
         }
@@ -996,6 +998,7 @@ impl TerminalState {
         // The last frame's views of the grid are dropped by now, so this
         // updates it in place; a copy an app still holds is cloned first.
         let changes = self.vt.snapshot(Rc::make_mut(&mut self.grid));
+        timed!(Frame);
         let sb = self.vt.scrollbar();
         let leftover = (self.viewport.1 - f32::from(rows) * m.cell_h).max(0.0);
         let content_h = sb.total as f32 * m.cell_h + leftover;
