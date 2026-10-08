@@ -236,7 +236,16 @@ fn keys_encode_for_the_active_keyboard_mode() {
         // Alt sends ESC first; on macOS Option composes text instead
         // (Ghostty's default, macos-option-as-alt off), so it arrives as is.
         if cfg!(target_os = "macos") {
-            ("", key(None, Some("å"), alt), "å")
+            // A real Option+A carries its physical key; "å" alone maps to
+            // no key.
+            (
+                "",
+                KeyPress {
+                    physical: Some(KeyCode::KeyA),
+                    ..key(None, Some("å"), alt)
+                },
+                "å",
+            )
         } else {
             ("", key(None, Some("a"), alt), "\x1ba")
         },
