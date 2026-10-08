@@ -196,6 +196,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// How much of a shortfall this item absorbs relative to its siblings,
+    /// weighted by its basis as in CSS `flex-shrink`.
+    fn flex_shrink_val(mut self, v: f32) -> Self {
+        self.element_style_mut().layout.flex_shrink = v;
+        self
+    }
+
     fn gap(mut self, v: f32) -> Self {
         self.element_style_mut().layout.gap = taffy::Size {
             width: taffy::LengthPercentage::length(v),
