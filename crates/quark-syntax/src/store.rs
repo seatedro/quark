@@ -99,33 +99,77 @@ impl GrammarStore {
         let _ = listener;
     }
 
-    /// Highlights `source` with `language`'s grammar, or returns no spans
-    /// and whether the grammar is still on its way.
+    /// Highlights `source` with `language`'s grammar and the grammars of
+    /// languages embedded in it, or returns no spans while the grammar is
+    /// still on its way.
     pub(crate) fn highlight(&self, language: &LanguageId, source: &str) -> Outcome {
         #[cfg(feature = "engine")]
-        if let Some(inner) = &self.inner {
-            return match inner.lookup(language.as_str()) {
-                Tag::Ready(grammar) => Outcome {
-                    spans: grammar.highlight(source),
-                    pending: false,
-                },
-                Tag::Pending => Outcome {
-                    spans: Vec::new(),
-                    pending: true,
-                },
-                Tag::Unavailable => Outcome::default(),
-            };
+        {
+            self.highlight_within(
+                language,
+                source,
+                crate::engine::Limits::for_source(source.len()),
+            )
         }
-        let _ = (language, source);
-        Outcome::default()
+        #[cfg(not(feature = "engine"))]
+        {
+            let _ = (language, source);
+            Outcome::default()
+        }
+    }
+
+    /// [`Self::highlight`] with explicit bounds on embedded layers.
+    #[cfg(feature = "engine")]
+    pub(crate) fn highlight_within(
+        &self,
+        language: &LanguageId,
+        source: &str,
+        limits: crate::engine::Limits,
+    ) -> Outcome {
+        let Some(inner) = &self.inner else {
+            return Outcome::default();
+        };
+        match inner.lookup(language.as_str()) {
+            Tag::Ready(grammar) => {
+                // Each lookup takes the state lock only to clone a handle;
+                // parsing runs without it.
+                let found = crate::engine::highlight(&grammar, source, limits, &mut |embedded| {
+                    inner.lookup(embedded.as_str())
+                });
+                Outcome {
+                    spans: found.spans,
+                    unresolved: found.unresolved,
+                    truncated: found.truncated,
+                }
+            }
+            Tag::Pending => Outcome {
+                spans: Vec::new(),
+                unresolved: vec![language.clone()],
+                truncated: false,
+            },
+            Tag::Unavailable => Outcome::default(),
+        }
     }
 }
 
-/// A highlight, or none yet because the grammar is still arriving.
+/// A highlight, possibly partial because grammars are still arriving.
 #[derive(Debug, Default)]
 pub(crate) struct Outcome {
     pub(crate) spans: Vec<HighlightSpan>,
-    pub(crate) pending: bool,
+    /// Languages whose grammars are still arriving: the language itself
+    /// (and `spans` is empty) or ones embedded in it (whose regions keep
+    /// the host's colors for now).
+    pub(crate) unresolved: Vec<LanguageId>,
+    /// Bounds on embedded layers left some regions unparsed.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) truncated: bool,
+}
+
+impl Outcome {
+    /// Whether a fuller highlight may follow once grammars arrive.
+    pub(crate) fn pending(&self) -> bool {
+        !self.unresolved.is_empty()
+    }
 }
 
 /// What a [`GrammarStore`] may load. Nothing is loaded unless the app

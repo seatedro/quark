@@ -27,16 +27,27 @@ enum Message {
 
 /// A finished highlight of the source requested for `slot` at
 /// `generation`.
+///
+/// A request can get several results while grammars arrive: each has the
+/// same generation and a higher `revision`, and the last has `pending`
+/// unset. Keep a result when its `(generation, revision)` is newer than the
+/// one held for the slot, and drop it otherwise.
 #[derive(Debug, Clone)]
 pub struct Highlighted {
     pub slot: u64,
     pub generation: u64,
+    /// Counts the results for this slot and generation, from 0.
+    pub revision: u32,
     pub source: Arc<str>,
     pub spans: Vec<HighlightSpan>,
-    /// The language's grammar is still arriving, so `spans` is empty for
-    /// now; another result for this slot and generation follows once it
-    /// resolves (colored, or plain for good if it failed).
+    /// Grammars in `unresolved` are still arriving, so another result for
+    /// this slot and generation follows once one of them resolves.
     pub pending: bool,
+    /// Languages whose grammars are still arriving. When the requested
+    /// language is one, `spans` is empty; otherwise these are languages
+    /// embedded in the source, whose regions keep the host's colors until
+    /// they arrive.
+    pub unresolved: Vec<LanguageId>,
 }
 
 /// The worker thread is gone (it could not be spawned), so no more results
@@ -54,9 +65,11 @@ type HighlightFn = Arc<dyn Fn(&LanguageId, &str) -> Outcome + Send + Sync>;
 /// arrive in [`HighlightWorker::try_recv`]; callers still compare
 /// generations, since a result can land after a newer request was sent.
 ///
-/// A request whose grammar is still downloading gets a plain result marked
-/// [`Highlighted::pending`] at once, and its real result when the grammar
-/// resolves, unless a newer request for the slot superseded it.
+/// A request whose grammars are still downloading gets the best result
+/// available at once (plain when its own grammar is missing, host colors
+/// when only embedded ones are) marked [`Highlighted::pending`], then a
+/// result with a higher revision each time an arriving grammar changes it,
+/// unless a newer request for the slot superseded it.
 ///
 /// A highlight that panics yields a result with no spans (the block stays
 /// plain) and the thread keeps serving requests.
@@ -161,14 +174,22 @@ impl Drop for HighlightWorker {
     }
 }
 
+/// A job still waiting for grammars, and what it last published.
+struct Parked {
+    job: Job,
+    revision: u32,
+    spans: Vec<HighlightSpan>,
+    unresolved: Vec<LanguageId>,
+}
+
 fn run(
     messages: &Receiver<Message>,
     done: &Sender<Highlighted>,
     cancel: &AtomicBool,
     highlight: &(dyn Fn(&LanguageId, &str) -> Outcome + Send + Sync),
 ) {
-    // Jobs whose grammar was pending, newest per slot, rerun on `Retry`.
-    let mut parked: HashMap<u64, Job> = HashMap::new();
+    // Jobs whose grammars were pending, newest per slot, rerun on `Retry`.
+    let mut parked: HashMap<u64, Parked> = HashMap::new();
     while let Ok(first) = messages.recv() {
         // Coalesce everything queued: keep the newest job per slot, in the
         // order the slots were first requested.
@@ -196,14 +217,14 @@ fn run(
                 }
             }
         }
-        // Slots rerun for a retry; one still pending already has its plain
-        // stand-in, so it is parked again without another result.
-        let mut retried = Vec::new();
+        // Slots rerun for a retry, with what each last published: a rerun
+        // that changes nothing is parked again without another result.
+        let mut retried: HashMap<u64, Parked> = HashMap::new();
         if retry {
-            for (slot, job) in parked.drain() {
+            for (slot, waiting) in parked.drain() {
                 order.push(slot);
-                retried.push(slot);
-                newest.insert(slot, job);
+                newest.insert(slot, waiting.job.clone());
+                retried.insert(slot, waiting);
             }
         }
         for slot in order {
@@ -217,18 +238,35 @@ fn run(
             // would silently stay plain.
             let outcome = catch_unwind(AssertUnwindSafe(|| highlight(&job.language, &job.source)))
                 .unwrap_or_default();
-            if outcome.pending {
-                parked.insert(slot, job.clone());
-                if retried.contains(&slot) {
-                    continue;
-                }
+            let mut previous = retried.remove(&slot);
+            if let Some(unchanged) = previous.take_if(|previous| {
+                previous.spans == outcome.spans && previous.unresolved == outcome.unresolved
+            }) {
+                // Still waiting on the same grammars.
+                parked.insert(slot, unchanged);
+                continue;
+            }
+            let revision = previous.map_or(0, |previous| previous.revision + 1);
+            let pending = outcome.pending();
+            if pending {
+                parked.insert(
+                    slot,
+                    Parked {
+                        job: job.clone(),
+                        revision,
+                        spans: outcome.spans.clone(),
+                        unresolved: outcome.unresolved.clone(),
+                    },
+                );
             }
             let result = Highlighted {
                 slot,
                 generation: job.generation,
+                revision,
                 source: job.source,
                 spans: outcome.spans,
-                pending: outcome.pending,
+                pending,
+                unresolved: outcome.unresolved,
             };
             if done.send(result).is_err() {
                 return;
@@ -249,7 +287,7 @@ mod tests {
                 length: source.len() as u32,
                 kind: crate::HighlightKind::Keyword,
             }],
-            pending: false,
+            ..Outcome::default()
         }
     }
 

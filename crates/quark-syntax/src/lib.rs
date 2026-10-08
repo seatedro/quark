@@ -12,6 +12,13 @@
 //! background thread and drops requests superseded by a newer generation
 //! for the same slot, which suits a code block that is still streaming.
 //!
+//! Languages embedded in others (a script in HTML, a fenced block in
+//! Markdown, a macro body in Rust) are highlighted with their own grammars
+//! when the host's pack has an injection query, following tree-sitter's
+//! injection rules. Embedded spans take precedence over the host's. While
+//! an embedded grammar downloads, its region keeps the host's colors, and
+//! the worker sends a newer revision of the result when it arrives.
+//!
 //! Features: `engine` (the tree-sitter runtime and local packs) and
 //! `download` (fetching packs). Without `engine` every lookup is plain and
 //! the crate has no dependencies.
@@ -176,10 +183,10 @@ impl std::fmt::Display for LanguageId {
     }
 }
 
-/// Highlights `source` on the calling thread. Empty when `store` has no
-/// grammar for the language yet; highlighting is best effort. Resolving a
-/// language for the first time may load its pack from disk or start its
-/// download.
+/// Highlights `source` on the calling thread, including the languages
+/// embedded in it. Empty when `store` has no grammar for the language yet;
+/// highlighting is best effort. Resolving a language for the first time
+/// may load its pack from disk or start its download.
 pub fn highlight(store: &GrammarStore, language: &LanguageId, source: &str) -> Vec<HighlightSpan> {
     store.highlight(language, source).spans
 }
