@@ -194,16 +194,20 @@ impl RowDecorator for ChatChrome {
 
 /// The overlay shown while new content arrived below the view.
 fn jump_to_latest(theme: &Theme, width: f32, height: f32) -> AnyElement {
-    let (w, h) = (FONT_SIZE * 10.0, FONT_SIZE * 2.4);
+    let label = quark_app::quark_ui::i18n::tr("quark-jump-to-latest");
+    // Wide enough for longer translations ("Zum Neuesten springen").
+    let w =
+        (label.chars().count() as f32 * FONT_SIZE * 0.55 + FONT_SIZE * 2.0).max(FONT_SIZE * 10.0);
+    let h = FONT_SIZE * 2.4;
     view! {
         <div class="absolute" left={((width - w) * 0.5).max(0.0)}
              top={(height - h - FONT_SIZE).max(0.0)}
              class="w-[w] h-[h] rounded-[h * 0.5] items-center justify-center bg-[theme.colors.accent]"
              hover_bg={theme.colors.accent_strong}
              accessibility_id="chat.jump-to-latest" accessibility_role={accesskit::Role::Button}
-             aria-label="Jump to latest" on:click={Msg::JumpToLatest}>
+             aria-label={label.clone()} on:click={Msg::JumpToLatest}>
             <text size={FONT_SIZE * 0.9} class="font-semibold" color={theme.colors.text_strong}>
-                "Jump to latest"
+                {label}
             </text>
         </div>
     }
