@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use quark_render::FontKind;
 use quark_render::scene::Rect;
-use quark_text::{LayoutCache, TextParams, TextStyle, TextSystem};
+use quark_text::{FontEpoch, LayoutCache, TextParams, TextStyle, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{DragStart, ScrollHandle};
 use quark_ui::theme::Theme;
@@ -183,7 +183,7 @@ pub struct TerminalState {
     style: TerminalStyle,
     /// The cell metrics and what they were measured for: the scale
     /// factor's bits and the text system's font generation.
-    metrics: Option<(Metrics, (u32, u64))>,
+    metrics: Option<(Metrics, (u32, Option<FontEpoch>))>,
     colors: Option<(Rgb, Rgb)>,
     viewport: (f32, f32),
     /// Grid size in cells, and the scale it was sized at.
@@ -821,7 +821,7 @@ impl TerminalState {
     ) {
         // Remeasure when the scale or the fonts changed (a new monospace
         // family has its own advance), and resize to match.
-        let key = (scale.to_bits(), text.generation());
+        let key = (scale.to_bits(), Some(text.font_epoch()));
         let remeasured = self.metrics.is_none_or(|(_, k)| k != key);
         if remeasured {
             let style = TextStyle::new(self.style.font_size).kind(FontKind::Mono);
@@ -986,7 +986,7 @@ impl TerminalState {
     pub(crate) fn headless(cols: u16, rows: u16) -> Self {
         let mut state = Self::new("test", FocusId::from_key("test.terminal"));
         let m = state.metrics();
-        state.metrics = Some((m, (1f32.to_bits(), 0)));
+        state.metrics = Some((m, (1f32.to_bits(), None)));
         state.size = (cols, rows, 1f32.to_bits());
         state
             .vt
