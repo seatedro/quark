@@ -189,7 +189,17 @@ pub struct Terminal {
     /// Grapheme bytes of the cell being read.
     cell_text: Vec<u8>,
     decoder: CellDecoder,
+    /// The grid's previous rows during [`Self::redraw_rows`], which rows
+    /// of them moved, and where each line's row comes from and its
+    /// selection: kept for their storage.
+    old_rows: Vec<GridRow>,
+    taken: Vec<bool>,
+    placed: Vec<Placement>,
 }
+
+/// Where a line's row comes from in [`Terminal::redraw_rows`]: the index of
+/// the earlier row it matches, if any, and its selection.
+type Placement = (Option<usize>, Option<(u16, u16)>);
 
 impl std::fmt::Debug for Terminal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -300,6 +310,9 @@ impl Terminal {
             host: Box::default(),
             cell_text: vec![0; 64],
             decoder: CellDecoder::new(),
+            old_rows: Vec::new(),
+            taken: Vec::new(),
+            placed: Vec::new(),
         };
         term.install_callbacks();
         let name = b"xterm-256color";
@@ -545,56 +558,39 @@ impl Terminal {
                 foreground: rgb(colors.foreground),
                 background: rgb(colors.background),
             };
-            let full = dirty == sys::GHOSTTY_RENDER_STATE_DIRTY_FULL
-                || grid.cols != cols
-                || grid.rows.len() != rows as usize
-                || grid.colors != new_colors;
+            let redraw = dirty == sys::GHOSTTY_RENDER_STATE_DIRTY_FULL;
+            // Rows read before still draw the same with the same width and
+            // default colors.
+            let comparable = grid.cols == cols && grid.colors == new_colors;
+            let full = redraw || !comparable || grid.rows.len() != rows as usize;
             // Dirty rows can reread to the same cells (the cursor's row
             // when only the cursor moved), so compare hashes instead.
             let mut rows_changed = full;
             grid.cols = cols;
             grid.colors = new_colors;
-            grid.rows.resize_with(rows as usize, GridRow::default);
-
-            let mut iter = self.rows.as_ptr();
-            sys::ghostty_render_state_get(
-                rs,
-                sys::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
-                (&raw mut iter).cast(),
-            );
-            let mut y = 0usize;
-            while let Some((row_dirty, selection)) = timed!(RowFlags, {
-                (y < grid.rows.len() && sys::ghostty_render_state_row_iterator_next(iter)).then(
-                    || {
-                        let mut row_dirty = false;
-                        sys::ghostty_render_state_row_get(
-                            iter,
-                            sys::GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
-                            (&raw mut row_dirty).cast(),
-                        );
-                        let mut sel = sized!(sys::GhosttyRenderStateRowSelection);
-                        let selection = ok(sys::ghostty_render_state_row_get(
-                            iter,
-                            sys::GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
-                            (&raw mut sel).cast(),
-                        ))
-                        .then_some((sel.start_x, sel.end_x));
-                        (row_dirty, selection)
-                    },
-                )
-            }) {
-                let row = &mut grid.rows[y];
-                let before = row.hash;
-                if full || row_dirty {
-                    timed!(ReadRow, self.read_row(iter, row, new_colors));
-                    row.selection = selection;
-                    timed!(Hash, row.rehash());
-                } else if row.selection != selection {
-                    row.selection = selection;
-                    timed!(Hash, row.rehash());
+            if redraw && comparable {
+                self.redraw_rows(grid, rows as usize, new_colors);
+            } else {
+                grid.rows.resize_with(rows as usize, GridRow::new);
+                let iter = self.row_iterator();
+                let mut y = 0usize;
+                while let Some((row_dirty, selection)) = timed!(RowFlags, {
+                    (y < grid.rows.len() && sys::ghostty_render_state_row_iterator_next(iter))
+                        .then(|| (row_flag(iter), row_selection(iter)))
+                }) {
+                    let row = &mut grid.rows[y];
+                    let before = row.hash;
+                    if full || row_dirty {
+                        timed!(ReadRow, self.read_row(iter, row, new_colors));
+                        row.selection = selection;
+                        timed!(Hash, row.rehash());
+                    } else if row.selection != selection {
+                        row.selection = selection;
+                        timed!(Hash, row.rehash());
+                    }
+                    rows_changed |= row.hash != before;
+                    y += 1;
                 }
-                rows_changed |= row.hash != before;
-                y += 1;
             }
 
             timed!(Cursor);
@@ -631,6 +627,193 @@ impl Terminal {
         }
     }
 
+    /// The render state's row iterator, before its first row.
+    fn row_iterator(&self) -> sys::GhosttyRenderStateRowIterator {
+        let mut iter = self.rows.as_ptr();
+        // SAFETY: valid handles and the documented output type.
+        unsafe {
+            sys::ghostty_render_state_get(
+                self.render.as_ptr(),
+                sys::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                (&raw mut iter).cast(),
+            );
+        }
+        iter
+    }
+
+    /// Refills `grid.rows` with all `rows` rows when every row redraws (a
+    /// scroll moved the viewport, the screen switched). Usually most rows
+    /// still hold what some row held before, so a row whose cells and
+    /// drawing match an earlier row's (see [`Self::same_row`]) moves from
+    /// there with its runs, hash, and id; the rest are read into the
+    /// storage left over, preferring the storage at their own line.
+    ///
+    /// # Safety
+    ///
+    /// The render state must be updated, and `grid` must have been read
+    /// at the same width and default colors.
+    unsafe fn redraw_rows(&mut self, grid: &mut Grid, rows: usize, colors: Colors) {
+        let mut old = std::mem::take(&mut self.old_rows);
+        std::mem::swap(&mut old, &mut grid.rows);
+        grid.rows.clear();
+        let mut taken = std::mem::take(&mut self.taken);
+        taken.clear();
+        taken.resize(old.len(), false);
+        let mut placed = std::mem::take(&mut self.placed);
+        placed.clear();
+
+        // Find each line's earlier row: first where the last line's came
+        // from (a scroll moves every line alike), then at its own line,
+        // then anywhere.
+        let iter = self.row_iterator();
+        let mut shift = 0isize;
+        // SAFETY: (both passes) the iterator is positioned on the row read.
+        while placed.len() < rows && unsafe { sys::ghostty_render_state_row_iterator_next(iter) } {
+            timed!(Match);
+            let y = placed.len();
+            let selection = unsafe { row_selection(iter) };
+            let (cells, wrapped) = unsafe { row_cells(iter) };
+            let found = [y.checked_add_signed(shift), Some(y)]
+                .into_iter()
+                .flatten()
+                .chain(0..old.len())
+                .find(|&j| {
+                    j < old.len()
+                        && !taken[j]
+                        && unsafe { self.same_row(iter, &old[j], cells, wrapped, colors) }
+                });
+            if let Some(j) = found {
+                taken[j] = true;
+                shift = j as isize - y as isize;
+            }
+            placed.push((found, selection));
+        }
+
+        let iter = self.row_iterator();
+        let mut free = 0;
+        for &(found, selection) in &placed {
+            unsafe { sys::ghostty_render_state_row_iterator_next(iter) };
+            let y = grid.rows.len();
+            let mut row = match found {
+                Some(j) => std::mem::take(&mut old[j]),
+                None => {
+                    let spare = if y < old.len() && !taken[y] {
+                        Some(y)
+                    } else {
+                        while free < old.len() && taken[free] {
+                            free += 1;
+                        }
+                        (free < old.len()).then_some(free)
+                    };
+                    let mut row = match spare {
+                        Some(j) => {
+                            taken[j] = true;
+                            std::mem::take(&mut old[j])
+                        }
+                        None => GridRow::new(),
+                    };
+                    timed!(ReadRow, unsafe { self.read_row(iter, &mut row, colors) });
+                    row
+                }
+            };
+            if found.is_none() || row.selection != selection {
+                row.selection = selection;
+                timed!(Hash, row.rehash());
+            }
+            grid.rows.push(row);
+        }
+        grid.rows.resize_with(rows, GridRow::new);
+        // Storage of rows a shorter screen no longer needs.
+        old.clear();
+        self.old_rows = old;
+        self.taken = taken;
+        self.placed = placed;
+    }
+
+    /// Whether the row under `iter`, with raw `cells` and soft wrap
+    /// `wrapped`, reads to `row`. Equal raw cells can still draw
+    /// differently: a style id is an index into the style table of the
+    /// row's page, which may differ or have been reused, and grapheme
+    /// clusters live outside the cell. So the styles the render state
+    /// resolves (at each change of style key) and the clusters are checked
+    /// against `row`'s runs too.
+    ///
+    /// # Safety
+    ///
+    /// `iter` must be this terminal's row iterator, positioned on the row
+    /// whose raw cells are `cells`.
+    unsafe fn same_row(
+        &mut self,
+        iter: sys::GhosttyRenderStateRowIterator,
+        row: &GridRow,
+        cells: &[sys::GhosttyCell],
+        wrapped: bool,
+        colors: Colors,
+    ) -> bool {
+        // Compared cell by cell rather than as slices: slice equality calls
+        // `bcmp`, and the one libghostty-vt's bundled compiler-rt exports
+        // (which the link picks over libc's) compares a byte at a time,
+        // about nine times slower on a row.
+        if row.wrapped != wrapped
+            || row.cells.len() != cells.len()
+            || !row.cells.iter().zip(cells).all(|(a, b)| a == b)
+        {
+            return false;
+        }
+        if !row.looked_up {
+            // Every cell's text and style came from its raw value.
+            return true;
+        }
+        let plain = CellStyle::plain(colors);
+        let mut styles = RowStyles::default();
+        let mut prev_key = None;
+        let mut prev_raw = None;
+        let mut runs = row.runs.iter().peekable();
+        for (x, &raw) in cells.iter().enumerate() {
+            if prev_raw.replace(raw) == Some(raw) {
+                // Checked with the cell before, unless a cluster.
+                if self.decoder.get(raw).tag != sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME {
+                    continue;
+                }
+            }
+            let bits = self.decoder.get(raw);
+            if bits.wide == sys::GHOSTTY_CELL_WIDE_SPACER_TAIL {
+                continue;
+            }
+            let key = bits.style_key(raw);
+            let grapheme = bits.tag == sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME;
+            if prev_key == Some(key) && !grapheme {
+                continue;
+            }
+            let col = x as u16;
+            while runs.next_if(|run| run.col + run.cols <= col).is_some() {}
+            // Cells past the runs were trimmed as plain blanks.
+            let run = runs.peek().filter(|run| run.col <= col);
+            if bits.tag == sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME {
+                // SAFETY: `iter` is positioned on this row and `x` in it.
+                let cells = unsafe { styles.cell(self, iter, x) };
+                let text = self.cell_text(cells);
+                let same = match run {
+                    // A cluster is a run of its own.
+                    Some(run) => grapheme_str(text) == row.run_text(run),
+                    None => text.is_empty() || text == b" ",
+                };
+                if !same {
+                    return false;
+                }
+            }
+            if prev_key != Some(key) {
+                prev_key = Some(key);
+                // SAFETY: as above, and `raw` is cell `x`.
+                let style = unsafe { styles.resolve(self, iter, x, raw, key, colors) };
+                if style != run.map_or(plain, |run| run.style) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Reads the iterator's current row into `row`.
     ///
     /// The row's raw cells come in one call, and each decodes through
@@ -649,44 +832,13 @@ impl Terminal {
         colors: Colors,
     ) {
         row.clear();
-        let mut raw_row: sys::GhosttyRow = 0;
-        let mut view = sys::GhosttyCellsView {
-            ptr: ptr::null(),
-            len: 0,
-        };
-        // SAFETY: (all calls) valid handles and documented output types.
-        unsafe {
-            sys::ghostty_render_state_row_get(
-                iter,
-                sys::GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
-                (&raw mut raw_row).cast(),
-            );
-            let mut wrapped = false;
-            sys::ghostty_row_get(
-                raw_row,
-                sys::GHOSTTY_ROW_DATA_WRAP,
-                (&raw mut wrapped).cast(),
-            );
-            row.wrapped = wrapped;
-            sys::ghostty_render_state_row_get(
-                iter,
-                sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS_RAW,
-                (&raw mut view).cast(),
-            );
-        }
-        let raws: &[sys::GhosttyCell] = if view.ptr.is_null() {
-            &[]
-        } else {
-            // SAFETY: the render state owns `len` cells at `ptr` until its
-            // next update, which cannot happen while `self` is borrowed.
-            unsafe { std::slice::from_raw_parts(view.ptr, view.len) }
-        };
-        // The cells iterator, filled for this row on first use.
-        let mut cells = None;
+        // SAFETY: `iter` is positioned on a row.
+        let (raws, wrapped) = unsafe { row_cells(iter) };
+        row.wrapped = wrapped;
+        row.cells.clear();
+        row.cells.extend_from_slice(raws);
         let plain = CellStyle::plain(colors);
-        // The last style read through the iterator and what identifies it
-        // within this row (one page, so one style table).
-        let mut last_read: Option<(StyleKey, CellStyle)> = None;
+        let mut styles = RowStyles::default();
         // The previous cell's style: a cell with the same key has the same
         // style, so runs of it skip comparing styles.
         let mut prev_key = None;
@@ -696,8 +848,26 @@ impl Terminal {
         // default blank, for trimming.
         let mut keep_text = 0usize;
         let mut keep_runs = 0usize;
+        // The previous cell, when it was one narrow ASCII character, and
+        // whether it was kept: a cell equal to it (padding, blank space)
+        // extends the same run the same way.
+        let mut repeat = None;
         for (x, &raw) in raws.iter().enumerate() {
             let here = x as u16;
+            if let Some((prev, kept)) = repeat
+                && prev == raw
+                && let (Some(&byte), Some(last)) = (row.text.as_bytes().last(), row.runs.last_mut())
+            {
+                last.cols += 1;
+                last.text.end += 1;
+                row.text.push(char::from(byte));
+                if kept {
+                    keep_text = row.text.len();
+                    keep_runs = row.runs.len();
+                }
+                continue;
+            }
+            repeat = None;
             let bits = self.decoder.get(raw);
             if bits.wide == sys::GHOSTTY_CELL_WIDE_SPACER_TAIL {
                 // Drawn by the wide character before it.
@@ -708,45 +878,22 @@ impl Terminal {
             // or color-only cell, or a codepoint that does not encode.
             let blank = if bits.tag == sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME {
                 // SAFETY: `iter` is positioned on this row and `x` in it.
-                let cells = unsafe { self.row_cell(iter, &mut cells, x) };
+                let cells = unsafe { styles.cell(self, iter, x) };
                 let text = self.cell_text(cells);
-                let blank = text.is_empty() || text == b" ";
-                match std::str::from_utf8(text) {
-                    Ok(s) if !s.is_empty() => row.text.push_str(s),
-                    Ok(_) => row.text.push(' '),
-                    Err(_) => row.text.push('\u{fffd}'),
-                }
-                blank
+                row.text.push_str(grapheme_str(text));
+                text.is_empty() || text == b" "
             } else {
                 row.text.push(bits.text.unwrap_or(' '));
                 matches!(bits.text, None | Some(' '))
             };
-            let key = if !bits.textual {
-                // The color is in the cell itself.
-                StyleKey::Cell(raw)
-            } else if bits.styled {
-                StyleKey::Style(bits.style_id, bits.hyperlink)
-            } else {
-                StyleKey::Plain(bits.hyperlink)
-            };
+            let key = bits.style_key(raw);
+            row.looked_up |= !matches!(key, StyleKey::Plain(_))
+                || bits.tag == sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME;
             let same_style = prev_key == Some(key);
             if !same_style {
                 prev_key = Some(key);
-                style = match key {
-                    StyleKey::Plain(hyperlink) => CellStyle { hyperlink, ..plain },
-                    _ => match last_read {
-                        Some((k, style)) if k == key => style,
-                        _ => {
-                            // SAFETY: as above, and `raw` is cell `x`.
-                            let style = unsafe {
-                                let cells = self.row_cell(iter, &mut cells, x);
-                                cell_style(cells, raw, colors)
-                            };
-                            last_read = Some((key, style));
-                            style
-                        }
-                    },
-                };
+                // SAFETY: as above, and `raw` is cell `x`.
+                style = unsafe { styles.resolve(self, iter, x, raw, key, colors) };
                 style_is_plain = style == plain;
             }
             let width = if bits.wide == sys::GHOSTTY_CELL_WIDE_WIDE {
@@ -774,9 +921,13 @@ impl Terminal {
                     style,
                 }),
             }
-            if !blank || !style_is_plain {
+            let kept = !blank || !style_is_plain;
+            if kept {
                 keep_text = row.text.len();
                 keep_runs = row.runs.len();
+            }
+            if narrow_ascii && bits.tag != sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME {
+                repeat = Some((raw, kept));
             }
         }
         let col = raws.len() as u16;
@@ -800,46 +951,18 @@ impl Terminal {
         debug_assert_eq!(row.verify_integrity(), Ok(()));
     }
 
-    /// The cells iterator positioned on cell `x` of the row iterator's
-    /// current row, filling `cells` for that row first if it is `None`.
-    ///
-    /// # Safety
-    ///
-    /// `iter` must be this terminal's row iterator, positioned on a row
-    /// with more than `x` cells, and `cells` `None` or filled for that row.
-    unsafe fn row_cell(
-        &self,
-        iter: sys::GhosttyRenderStateRowIterator,
-        cells: &mut Option<sys::GhosttyRenderStateRowCells>,
-        x: usize,
-    ) -> sys::GhosttyRenderStateRowCells {
-        let cells = *cells.get_or_insert_with(|| {
-            let mut cells = self.cells.as_ptr();
-            // SAFETY: a valid iterator and the documented output type.
-            unsafe {
-                sys::ghostty_render_state_row_get(
-                    iter,
-                    sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                    (&raw mut cells).cast(),
-                );
-            }
-            cells
-        });
-        // SAFETY: a filled cells handle and a column inside its row.
-        unsafe { sys::ghostty_render_state_row_cells_select(cells, x as u16) };
-        cells
-    }
-
     /// Time to walk every viewport row of the current render state `reps`
     /// times, doing progressively more of what [`Self::read_row`] does:
-    /// fetching each row's raw cells, decoding them, the whole conversion
-    /// into runs, and hashing the row. Differences between steps are each
+    /// fetching each row's raw cells, decoding them, reading one style
+    /// through the cells iterator, the whole conversion into runs, and
+    /// hashing the row, or instead recognizing the row as the one read
+    /// (what a scroll does for each moved row). Differences between steps are each
     /// part's cost.
     #[cfg(test)]
     pub(crate) fn cell_read_costs(
         &mut self,
         reps: u32,
-    ) -> [(&'static str, std::time::Duration); 4] {
+    ) -> [(&'static str, std::time::Duration); 6] {
         let colors = Colors::default();
         let mut scratch = GridRow::default();
         let mut step = |level: u8| {
@@ -854,10 +977,15 @@ impl Terminal {
                         (&raw mut iter).cast(),
                     );
                     while sys::ghostty_render_state_row_iterator_next(iter) {
-                        if level >= 2 {
+                        if level >= 3 {
                             self.read_row(iter, &mut scratch, colors);
-                            if level >= 3 {
+                            if level == 4 {
                                 scratch.rehash();
+                            }
+                            if level == 5 {
+                                let (cells, wrapped) = row_cells(iter);
+                                let same = self.same_row(iter, &scratch, cells, wrapped, colors);
+                                assert!(same);
                             }
                             std::hint::black_box(&scratch);
                             continue;
@@ -871,10 +999,17 @@ impl Terminal {
                             sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS_RAW,
                             (&raw mut view).cast(),
                         );
+                        let cells = std::slice::from_raw_parts(view.ptr, view.len);
                         if level >= 1 {
-                            for &raw in std::slice::from_raw_parts(view.ptr, view.len) {
+                            for &raw in cells {
                                 std::hint::black_box(self.decoder.get(raw));
                             }
+                        }
+                        if level >= 2 && !cells.is_empty() {
+                            let key = StyleKey::Cell(cells[0]);
+                            std::hint::black_box(
+                                RowStyles::default().resolve(self, iter, 0, cells[0], key, colors),
+                            );
                         }
                         std::hint::black_box(view.len);
                     }
@@ -885,8 +1020,10 @@ impl Terminal {
         [
             ("raw cell views", step(0)),
             ("+ decode", step(1)),
-            ("read_row (all conversion)", step(2)),
-            ("+ rehash", step(3)),
+            ("+ a style read per row", step(2)),
+            ("read_row (all conversion)", step(3)),
+            ("+ rehash", step(4)),
+            ("read_row + recognizing the row", step(5)),
         ]
     }
 
@@ -1362,6 +1499,181 @@ enum StyleKey {
     Cell(sys::GhosttyCell),
 }
 
+impl CellBits {
+    fn style_key(&self, raw: sys::GhosttyCell) -> StyleKey {
+        if !self.textual {
+            // The color is in the cell itself.
+            StyleKey::Cell(raw)
+        } else if self.styled {
+            StyleKey::Style(self.style_id, self.hyperlink)
+        } else {
+            StyleKey::Plain(self.hyperlink)
+        }
+    }
+}
+
+/// Styles of one row's cells, read through the cells iterator only when
+/// the raw cell does not settle them.
+#[derive(Default)]
+struct RowStyles {
+    /// The cells iterator, filled for the row on first use.
+    cells: Option<sys::GhosttyRenderStateRowCells>,
+    /// The last style read and its key: equal keys within a row (one
+    /// page, so one style table) have equal styles.
+    last_read: Option<(StyleKey, CellStyle)>,
+}
+
+impl RowStyles {
+    /// The cells iterator positioned on cell `x` of `iter`'s row.
+    ///
+    /// # Safety
+    ///
+    /// `iter` must be `term`'s row iterator, positioned on the row this
+    /// `RowStyles` is for, with more than `x` cells.
+    unsafe fn cell(
+        &mut self,
+        term: &Terminal,
+        iter: sys::GhosttyRenderStateRowIterator,
+        x: usize,
+    ) -> sys::GhosttyRenderStateRowCells {
+        let cells = *self.cells.get_or_insert_with(|| {
+            let mut cells = term.cells.as_ptr();
+            // SAFETY: a valid iterator and the documented output type.
+            unsafe {
+                sys::ghostty_render_state_row_get(
+                    iter,
+                    sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                    (&raw mut cells).cast(),
+                );
+            }
+            cells
+        });
+        // SAFETY: a filled cells handle and a column inside its row.
+        unsafe { sys::ghostty_render_state_row_cells_select(cells, x as u16) };
+        cells
+    }
+
+    /// The style of cell `x`, whose raw value is `raw` and style key `key`.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::cell`].
+    unsafe fn resolve(
+        &mut self,
+        term: &Terminal,
+        iter: sys::GhosttyRenderStateRowIterator,
+        x: usize,
+        raw: sys::GhosttyCell,
+        key: StyleKey,
+        colors: Colors,
+    ) -> CellStyle {
+        if let StyleKey::Plain(hyperlink) = key {
+            return CellStyle {
+                hyperlink,
+                ..CellStyle::plain(colors)
+            };
+        }
+        if let Some((k, style)) = self.last_read
+            && k == key
+        {
+            return style;
+        }
+        // SAFETY: as the caller's.
+        let style = unsafe { cell_style(self.cell(term, iter, x), raw, colors) };
+        self.last_read = Some((key, style));
+        style
+    }
+}
+
+/// A grapheme as [`Terminal::read_row`] writes it: a space for an empty
+/// cell.
+fn grapheme_str(text: &[u8]) -> &str {
+    match std::str::from_utf8(text) {
+        Ok("") => " ",
+        Ok(s) => s,
+        Err(_) => "\u{fffd}",
+    }
+}
+
+/// Whether the iterator's current row is dirty.
+///
+/// # Safety
+///
+/// `iter` must be positioned on a row.
+unsafe fn row_flag(iter: sys::GhosttyRenderStateRowIterator) -> bool {
+    let mut dirty = false;
+    // SAFETY: the documented output type.
+    unsafe {
+        sys::ghostty_render_state_row_get(
+            iter,
+            sys::GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
+            (&raw mut dirty).cast(),
+        );
+    }
+    dirty
+}
+
+/// The iterator's current row's selected columns, inclusive.
+///
+/// # Safety
+///
+/// As [`row_flag`].
+unsafe fn row_selection(iter: sys::GhosttyRenderStateRowIterator) -> Option<(u16, u16)> {
+    let mut sel = sized!(sys::GhosttyRenderStateRowSelection);
+    // SAFETY: the documented output type.
+    ok(unsafe {
+        sys::ghostty_render_state_row_get(
+            iter,
+            sys::GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+            (&raw mut sel).cast(),
+        )
+    })
+    .then_some((sel.start_x, sel.end_x))
+}
+
+/// The iterator's current row's raw cells, valid until the render state
+/// next updates, and whether it soft wraps.
+///
+/// # Safety
+///
+/// As [`row_flag`], and the cells must not be used past the next update.
+unsafe fn row_cells<'a>(
+    iter: sys::GhosttyRenderStateRowIterator,
+) -> (&'a [sys::GhosttyCell], bool) {
+    let mut raw_row: sys::GhosttyRow = 0;
+    let mut wrapped = false;
+    let mut view = sys::GhosttyCellsView {
+        ptr: ptr::null(),
+        len: 0,
+    };
+    // SAFETY: (all calls) documented output types.
+    unsafe {
+        sys::ghostty_render_state_row_get(
+            iter,
+            sys::GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+            (&raw mut raw_row).cast(),
+        );
+        sys::ghostty_row_get(
+            raw_row,
+            sys::GHOSTTY_ROW_DATA_WRAP,
+            (&raw mut wrapped).cast(),
+        );
+        sys::ghostty_render_state_row_get(
+            iter,
+            sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS_RAW,
+            (&raw mut view).cast(),
+        );
+    }
+    let cells = if view.ptr.is_null() {
+        &[][..]
+    } else {
+        // SAFETY: the render state owns `len` cells at `ptr` until its
+        // next update.
+        unsafe { std::slice::from_raw_parts(view.ptr, view.len) }
+    };
+    (cells, wrapped)
+}
+
 /// The resolved style of the cells iterator's current cell.
 ///
 /// # Safety
@@ -1621,6 +1933,8 @@ pub(crate) mod timing {
         Header,
         /// Per row: advancing the iterator, its dirty flag and selection.
         RowFlags,
+        /// Per row of a redraw: finding the earlier row it matches.
+        Match,
         /// Per dirty row: reading its cells into runs.
         ReadRow,
         /// Per changed row: hashing it.
@@ -1636,13 +1950,14 @@ pub(crate) mod timing {
         Build,
     }
 
-    pub(crate) const SCOPES: [Scope; 13] = [
+    pub(crate) const SCOPES: [Scope; 14] = [
         Scope::Prepare,
         Scope::SyncScroll,
         Scope::Snapshot,
         Scope::Update,
         Scope::Header,
         Scope::RowFlags,
+        Scope::Match,
         Scope::ReadRow,
         Scope::Hash,
         Scope::Cursor,

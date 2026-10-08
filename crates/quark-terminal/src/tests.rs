@@ -655,6 +655,84 @@ proptest::proptest! {
     }
 }
 
+/// Everything a grid row draws, one line per row.
+fn dump(grid: &Grid) -> String {
+    grid.rows
+        .iter()
+        .map(|row| format!("{} {:?} {}\n", runs(row), row.selection, row.wrapped))
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+enum Op {
+    /// A line of these pieces.
+    Line(Vec<&'static str>),
+    /// Erase the line above and write this there instead.
+    Rewrite(&'static str),
+    /// Move the viewport.
+    Scroll(isize),
+    /// Change palette color 1, which the red pieces use.
+    Recolor(u8),
+}
+
+fn op() -> impl proptest::strategy::Strategy<Value = Op> {
+    use proptest::prelude::*;
+    const PIECES: &[&str] = &[
+        "plain text",
+        "\x1b[31mred\x1b[0m",
+        "\x1b[1;4mbold\x1b[0m",
+        "\x1b[34mred\x1b[0m",
+        "e\u{301}",
+        "\u{6f22}",
+        "\x1b]8;;http://a\x1b\\link\x1b]8;;\x1b\\",
+        "\x1b[41m\x1b[3X\x1b[0m",
+        "dup",
+    ];
+    prop_oneof![
+        4 => prop::collection::vec(prop::sample::select(PIECES), 0..3).prop_map(Op::Line),
+        1 => prop::sample::select(PIECES).prop_map(Op::Rewrite),
+        2 => (-6isize..6).prop_map(Op::Scroll),
+        1 => any::<u8>().prop_map(Op::Recolor),
+    ]
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    // Snapshots between writes and scrolls move rows they recognize
+    // rather than reading them again; the grid must still match one read
+    // from scratch.
+    #[test]
+    fn a_grid_kept_across_updates_matches_a_fresh_one(
+        ops in proptest::collection::vec(op(), 1..24),
+    ) {
+        let mut kept = term(12, 4);
+        let mut bytes = Vec::new();
+        for op in &ops {
+            let start = bytes.len();
+            match op {
+                Op::Line(pieces) => {
+                    bytes.extend(pieces.concat().bytes());
+                    bytes.extend(b"\r\n");
+                }
+                Op::Rewrite(piece) => {
+                    bytes.extend(format!("\x1b[A\x1b[2K{piece}\r\n").bytes());
+                }
+                Op::Recolor(v) => {
+                    bytes.extend(format!("\x1b]4;1;rgb:{v:02x}/40/80\x1b\\").bytes());
+                }
+                Op::Scroll(rows) => kept.vt_mut().scroll(Scroll::Delta(*rows)),
+            }
+            kept.feed(&bytes[start..]);
+            kept.refresh();
+        }
+        let mut fresh = term(12, 4);
+        fresh.feed(&bytes);
+        fresh.vt_mut().scroll(Scroll::Row(kept.scrollbar().offset as usize));
+        proptest::prop_assert_eq!(dump(kept.refresh()), dump(fresh.refresh()));
+    }
+}
+
 /// Release-mode time per phase of a terminal frame for each kind of
 /// change, on the fixture of terminal_demo's allocation budget tests (an
 /// 80x22 terminal after three screens of output and a prompt). Prints
