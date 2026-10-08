@@ -362,6 +362,9 @@ pub enum Effect {
     OpenFile(String),
     /// Show the diff panel, scrolled to `path` when given.
     RevealDiff(Option<String>),
+    /// Show `panel` in the right dock, opening the dock (through the
+    /// shell's width policy) when it is hidden.
+    RevealPanel(PanelId),
     ApplyDiff,
     UndoDiff,
     Toast(Toast),

@@ -116,7 +116,7 @@ fn shell_arrow_keys_move_the_selection_from_the_focused_list() {
 
     assert_eq!(after_down, ["Share trips as read-only links"]);
     assert_eq!(selected_rows(&ui), ["Empty library onboarding"]);
-    assert!(ui.find(By::role(Role::List)).focused);
+    assert!(ui.find(By::role_name(Role::List, "Threads")).focused);
 }
 
 // Catches the width policy resetting the layout: a sidebar the user

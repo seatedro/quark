@@ -248,12 +248,16 @@ impl Workbench {
                 self.send_prompt(thread, "Retry the last step.", cx);
             }
             Effect::OpenFile(path) => {
-                self.shell.dock_wanted = true;
+                self.show_dock();
                 dock::open_file(&mut self.dock, &path);
             }
             Effect::RevealDiff(path) => {
-                self.shell.dock_wanted = true;
+                self.show_dock();
                 dock::reveal_diff(&mut self.dock, path.as_deref());
+            }
+            Effect::RevealPanel(panel) => {
+                self.show_dock();
+                dock::reveal_panel(&mut self.dock, panel);
             }
             Effect::ApplyDiff => self.apply_diff(),
             Effect::UndoDiff => {
@@ -283,6 +287,15 @@ impl Workbench {
             Effect::SetRegionVisible(region, visible) => {
                 dock::set_region_visible(&mut self.dock, region, visible);
             }
+        }
+    }
+
+    /// Ask the shell to show the right dock; below the dock breakpoint it
+    /// opens anyway, as the toggle does. The next frame applies it.
+    fn show_dock(&mut self) {
+        self.shell.dock_wanted = true;
+        if self.main_size.0 < shell::DOCK_BREAKPOINT {
+            self.shell.dock_forced = true;
         }
     }
 
