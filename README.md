@@ -108,7 +108,7 @@ model, platform services, and testing.
 
 | Platform | Graphics backend | What CI checks |
 |---|---|---|
-| Linux, X11 | Vulkan, GLES fallback | Format, clippy, every feature combination, all tests (lavapipe software Vulkan), end-to-end specs under Xvfb and openbox, fuzz corpus replay, Miri on `quark`, Kani on `quark` |
+| Linux, X11 | Vulkan, GLES fallback | Format, clippy, every feature combination, all tests (lavapipe software Vulkan), end-to-end specs under Xvfb and openbox, fuzz corpus replay, Miri on `quark`, Kani proofs in `quark`, `quark-ui`, `quark-components`, `quark-diff`, and `quark-app` |
 | Linux, Wayland | Vulkan, GLES fallback | Compiles as part of the Linux build; nothing runs on a Wayland compositor |
 | macOS (Apple silicon) | Metal | Clippy, all tests, `platform_smoke` (native menu bar, badge, window level, edit roles, deep links), a launch of `hello_ui` that must present one frame |
 | Windows | DX12 (WARP on the hosted runner) | Clippy, all tests, `platform_smoke`, a launch of `hello_ui` that must present one frame |
