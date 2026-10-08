@@ -215,13 +215,12 @@ fn warmed_cache(system: &mut TextSystem, warm: &[Input]) -> LayoutCache {
 
 // What laying out unseen text still allocates is all inside cosmic-text and
 // its dependencies: unicode-bidi's paragraph analysis (seven vectors per
-// paragraph), cosmic-text's line reordering, its attribute span maps, a
-// monospace fallback set per word of monospace text, its per-word glyph
-// vectors (which word gets which retained vector varies, so one can grow),
-// and a glyph vector and missing-glyph list for each font fallback tries.
-// The budgets sit just above that, so storage
-// quark-text allocates or grows per layout (each one costs at least 14 glyph
-// columns) breaks them.
+// paragraph), cosmic-text's line reordering, its attribute span maps, its
+// per-word glyph vectors (which word gets which retained vector varies, so
+// one can grow), and a glyph vector and missing-glyph list for each font
+// fallback tries. The budgets sit just above that, so storage quark-text
+// allocates or grows per layout (each one costs at least 14 glyph columns)
+// breaks them.
 #[test]
 fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
     let mut system = test_system();
@@ -236,13 +235,13 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             "80-column styled row",
             vec![styled_row(1), styled_row(2)],
             vec![styled_row(3)],
-            11,
+            9,
         ),
         (
             "30 fresh rows",
             (0..30).map(plain_row).collect(),
             (30..60).map(plain_row).collect(),
-            30 * 11,
+            30 * 9,
         ),
         (
             "bidi and emoji paragraph",
@@ -292,11 +291,11 @@ fn stream_past_cache_capacity_refills_evicted_layouts() {
         }
         last
     });
-    // Each row's residual: unicode-bidi's seven vectors, cosmic-text's
-    // reordering, and a monospace fallback set for each of its 19 words.
-    // The evictions themselves must add nothing.
+    // Each row's residual: unicode-bidi's seven vectors and cosmic-text's
+    // reordering. Its 19 words' monospace fallback candidates reuse one
+    // vector, and the evictions themselves must add nothing.
     assert!(
-        allocations <= 64 * 27 + 2,
+        allocations <= 64 * 8 + 2,
         "{allocations} allocations for 64 rows"
     );
     let last = last.expect("layout");

@@ -181,6 +181,33 @@ pub struct MonospaceFallbackInfo {
     id: fontdb::ID,
 }
 
+/// The monospace fallback candidates of a word, popped smallest first. A
+/// vector kept sorted largest first, so it keeps its storage from word to
+/// word where a `BTreeSet` would free and allocate its node.
+#[derive(Debug, Default)]
+pub(crate) struct MonospaceFallbacks(Vec<MonospaceFallbackInfo>);
+
+impl MonospaceFallbacks {
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Adds `info`, returning whether it was not already present.
+    pub(crate) fn insert(&mut self, info: MonospaceFallbackInfo) -> bool {
+        match self.0.binary_search_by(|probe| info.cmp(probe)) {
+            Ok(_) => false,
+            Err(i) => {
+                self.0.insert(i, info);
+                true
+            }
+        }
+    }
+
+    pub(crate) fn pop_first(&mut self) -> Option<MonospaceFallbackInfo> {
+        self.0.pop()
+    }
+}
+
 #[derive(Debug)]
 pub struct FontFallbackIter<'a> {
     font_system: &'a mut FontSystem,

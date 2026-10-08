@@ -2154,6 +2154,56 @@ mod tests {
         }
     }
 
+    // Mono text falls back through monospace candidates ordered by weight
+    // distance, then by how many of the word's chars they lack, with the
+    // default mono font first. Geist Mono lacks Greek and the snowman;
+    // JetBrains Mono (400) and Fira Code (300) have Greek, and Noto Color
+    // Emoji, which counts as monospace, has the snowman at every weight.
+    #[test]
+    fn mono_fallback_picks_nearest_weight_then_best_coverage() {
+        let cases = [
+            ("a\u{3b1}", FontWeight::Normal, 1, "JetBrains Mono", 400),
+            ("a\u{3b1}", FontWeight::Bold, 1, "JetBrains Mono", 400),
+            ("a\u{2603}", FontWeight::Medium, 1, "Noto Color Emoji", 500),
+            ("a\u{2603}", FontWeight::Bold, 1, "Noto Color Emoji", 700),
+            ("x \u{3b1}b\u{3b3}", FontWeight::Bold, 4, "Geist Mono", 700),
+            (
+                "x \u{3b1}b\u{3b3}",
+                FontWeight::Bold,
+                5,
+                "JetBrains Mono",
+                400,
+            ),
+            (
+                "a\u{1f600}",
+                FontWeight::Semibold,
+                1,
+                "Noto Color Emoji",
+                400,
+            ),
+        ];
+        let mut system = test_system();
+        for (text, weight, byte, family, face_weight) in cases {
+            let style = TextStyle::new(13.0).kind(FontKind::Mono).weight(weight);
+            let layout = system
+                .layout(&TextParams::new(text, style))
+                .expect("layout");
+            let g = layout.glyphs();
+            let i = g.byte_start.iter().position(|&b| b as usize == byte);
+            let i = i.unwrap_or_else(|| panic!("{text:?} has no glyph at {byte}"));
+            assert_ne!(
+                g.glyph_id[i], 0,
+                "{text:?} {weight:?} byte {byte} is .notdef"
+            );
+            let face = system.font_system().db().face(g.font_id[i]).expect("face");
+            assert_eq!(
+                (face.families[0].0.as_str(), face.weight.0),
+                (family, face_weight),
+                "{text:?} {weight:?} byte {byte}"
+            );
+        }
+    }
+
     #[test]
     fn layout_invalid_params_return_matching_error() {
         let style = TextStyle::new(12.0);

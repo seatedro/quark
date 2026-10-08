@@ -39,3 +39,12 @@ own pull request.
   quark-text can raise; `layout_with_evicting_shape_plan_cache_matches_cold_layout`
   checks the cache, and the bidi and emoji budget in
   `quark-text/src/alloc_budget.rs` checks the size.
+- Monospace fallback candidates (`src/font/fallback/mod.rs`,
+  `src/font/system.rs`): `FontFallbackIter` collects a word's monospace
+  candidates in a vector kept sorted largest first and pops from its end,
+  where it used a `BTreeSet` it cleared per word. Clearing a `BTreeSet`
+  frees its node, so every word of monospace text allocated one (19 per
+  80-column terminal row of words); the vector keeps its storage. Order and
+  the duplicate check are unchanged. Remove once upstream reuses the
+  candidate storage; `mono_fallback_picks_nearest_weight_then_best_coverage`
+  checks the order.

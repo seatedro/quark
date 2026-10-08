@@ -13,7 +13,7 @@ use skrifa::raw::{ReadError, TableProvider as _};
 pub use fontdb;
 pub use harfrust;
 
-use super::fallback::{Fallback, Fallbacks, MonospaceFallbackInfo, PlatformFallback};
+use super::fallback::{Fallback, Fallbacks, MonospaceFallbacks, PlatformFallback};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FontMatchKey {
@@ -110,7 +110,7 @@ pub struct FontSystem {
     pub(crate) shape_buffer: ShapeBuffer,
 
     /// Buffer for use in `FontFallbackIter`.
-    pub(crate) monospace_fallbacks_buffer: BTreeSet<MonospaceFallbackInfo>,
+    pub(crate) monospace_fallbacks_buffer: MonospaceFallbacks,
 
     /// Cache for shaped runs
     #[cfg(feature = "shape-run-cache")]
@@ -216,7 +216,7 @@ impl FontSystem {
             font_cache: HashMap::default(),
             font_matches_cache: HashMap::default(),
             font_codepoint_support_info_cache: HashMap::default(),
-            monospace_fallbacks_buffer: BTreeSet::default(),
+            monospace_fallbacks_buffer: MonospaceFallbacks::default(),
             #[cfg(feature = "shape-run-cache")]
             shape_run_cache: crate::ShapeRunCache::default(),
             shape_buffer: ShapeBuffer::default(),
