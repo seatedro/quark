@@ -103,13 +103,17 @@ pub struct SliderRange {
     pub step: f32,
 }
 
+/// `10^d` for the decimal places a step can need. A table rather than
+/// `powi`, which Kani cannot model; the values are the same, all exact.
+const POW10: [f32; 7] = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6];
+
 impl SliderRange {
     /// `value` moved to the nearest step and into range.
     pub fn snap(&self, value: f32) -> f32 {
         let steps = ((value - self.min) / self.step).round();
         let snapped = self.min + steps * self.step;
         // Round off float noise below the step's precision (0.1 + 0.2).
-        let scale = 10f32.powi(self.decimals() as i32);
+        let scale = POW10[self.decimals()];
         ((snapped * scale).round() / scale).clamp(self.min, self.max)
     }
 
@@ -118,10 +122,10 @@ impl SliderRange {
     pub fn decimals(&self) -> usize {
         (0..6)
             .find(|&d| {
-                let scaled = self.step * 10f32.powi(d);
+                let scaled = self.step * POW10[d];
                 (scaled - scaled.round()).abs() < 1e-3
             })
-            .unwrap_or(6) as usize
+            .unwrap_or(6)
     }
 
     /// The value at fraction `t` of the range.
