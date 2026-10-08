@@ -284,6 +284,70 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
     }
 }
 
+// A chunk drawn again after moving by whole pixels snaps its edges where
+// its primitives drawn one by one snap. Rounding treats half pixels on
+// either side of zero differently, so moving a chunk's converted items
+// across zero could change a snapped width: a rect at x -0.5 moved 1 px
+// right drew 11 px wide instead of 10.
+#[test]
+fn chunks_moved_by_whole_pixels_snap_like_their_primitives() {
+    let (w, h) = (30, 30);
+    let mut text = test_text();
+    let Some(mut renderer) = gpu_renderer(w, h) else {
+        return;
+    };
+    let mut render = |scene: &Scene| renderer.render_to_rgba(scene, &mut text, w, h).unwrap();
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        // Geometry in physical pixels: half-pixel and nearby edges, some
+        // negative, and a clip of its own.
+        let px = |v: f32| v / scale;
+        let edges = chunk(vec![
+            Primitive::Rect(RectPrimitive {
+                rect: rect(px(-0.5), px(2.5), px(10.0), px(3.0)),
+                color: color(255, 0, 0),
+            }),
+            Primitive::ClipStart(ClipPrimitive {
+                rect: rect(px(1.5), px(7.5), px(6.0), px(5.0)),
+                corner_radii: [0.0; 4],
+            }),
+            Primitive::Rect(RectPrimitive {
+                rect: rect(px(-1.5), px(6.5), px(12.0), px(8.0)),
+                color: color(0, 255, 0),
+            }),
+            Primitive::ClipEnd,
+            Primitive::Rect(RectPrimitive {
+                rect: rect(px(4.4), px(-0.5), px(0.6), px(15.5)),
+                color: color(0, 0, 255),
+            }),
+        ]);
+        let at = |[x, y]: [f32; 2]| {
+            let mut scene = Scene::default();
+            scene.chunk(&edges, [px(x), px(y)]);
+            physical(scene, scale)
+        };
+        for start in [[-2.0, -1.0], [-2.25, -1.5]] {
+            render(&at(start));
+            for (dx, dy) in [(1.0, 1.0), (2.0, 3.0), (3.0, 2.0), (6.0, 5.0)] {
+                let moved = at([start[0] + dx, start[1] + dy]);
+                let drawn = render(&moved);
+                let expected = render(&expanded(&moved));
+                assert!(expected.iter().any(|&b| b > 200), "nothing drew");
+                let differing = drawn
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(expected.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert_eq!(
+                    differing, 0,
+                    "at {scale}x, from {start:?} moved by ({dx}, {dy})"
+                );
+            }
+        }
+    }
+}
+
 /// White text at `rect`, 40 px.
 fn big_text(text: &mut TextSystem, rect: Rect, s: &str) -> Primitive {
     let layout = text

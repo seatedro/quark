@@ -5,7 +5,8 @@
 //! (moved to where the chunk lands, in physical pixels) into [`Drawn`]
 //! items, each with the chunk's own clip, if any, and z-index around it.
 //! Later frames draw those items again while the chunk's generation and
-//! scale match and it has moved by whole pixels: each item is moved by the
+//! scale match and it has moved by whole pixels, keeping the fraction of a
+//! pixel its primitives snap around: each item is moved by the
 //! difference, clipped by the clips around the chunk, faded by the layers
 //! drawn in place around it, and placed like any primitive, so draw order
 //! and batching are those of the chunk's primitives drawn one by one. A
@@ -81,8 +82,9 @@ struct ChunkEntry {
     /// converted.
     generation: Option<u64>,
     scale: Option<f32>,
-    /// The chunk offset it was converted at.
+    /// The chunk offset it was converted at, and its pixel origin there.
     offset: [f32; 2],
+    origin: Option<([f32; 2], [f32; 2])>,
     last_used: u64,
     items: Vec<Item>,
     /// Clips inside the chunk; `clips[0]` is none.
@@ -164,17 +166,23 @@ impl LocalClip {
 
 impl ChunkEntry {
     /// How far the items moved since they were converted, when they can
-    /// be drawn moved: the same content at the same scale, moved by whole
-    /// physical pixels, so every snapped edge moves by the same amount.
+    /// be drawn moved: the same content at the same scale, with the same
+    /// fraction of a pixel in its origin, so every edge snaps as it did
+    /// and moves by the difference of whole pixels. In logical points
+    /// nothing snaps, so any move will do.
     fn moved(&self, chunk: &ChunkPrimitive) -> Option<(f32, f32)> {
         if self.generation != Some(chunk.chunk.generation()) || self.scale != chunk.scale {
             return None;
         }
-        let s = self.scale.unwrap_or(1.0);
-        let dx = (chunk.offset[0] - self.offset[0]) * s;
-        let dy = (chunk.offset[1] - self.offset[1]) * s;
-        let whole = dx.fract() == 0.0 && dy.fract() == 0.0;
-        (whole || self.scale.is_none()).then_some((dx, dy))
+        match (self.origin, chunk.pixel_origin()) {
+            (Some((whole, fraction)), Some((now, fraction_now))) => {
+                (fraction == fraction_now).then_some((now[0] - whole[0], now[1] - whole[1]))
+            }
+            _ => Some((
+                chunk.offset[0] - self.offset[0],
+                chunk.offset[1] - self.offset[1],
+            )),
+        }
     }
 
     /// Convert `chunk`'s primitives where it lands now.
@@ -187,6 +195,7 @@ impl ChunkEntry {
         self.generation = Some(chunk.chunk.generation());
         self.scale = chunk.scale;
         self.offset = chunk.offset;
+        self.origin = chunk.pixel_origin();
         self.items.clear();
         self.clips.clear();
         self.clips.push(LocalClip::NONE);
