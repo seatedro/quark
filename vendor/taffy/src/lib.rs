@@ -107,7 +107,8 @@ pub use crate::compute::detailed_info::*;
 pub use crate::compute::{compute_block_layout, BlockScratch};
 #[doc(inline)]
 pub use crate::compute::{
-    compute_cached_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout, round_layout,
+    compute_cached_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout, compute_root_size,
+    round_layout,
 };
 #[cfg(feature = "flexbox")]
 #[doc(inline)]

@@ -58,6 +58,10 @@ struct BlockItem {
     static_position: Point<f32>,
     /// Whether margins can be collapsed through this item
     can_be_collapsed_through: bool,
+    /// Whether the item is measured instead of laid out: the container is only being sized, and the item is a flex or
+    /// grid container, whose layout output carries no collapsible margins and never collapses through, so that its
+    /// size alone stands in for its layout.
+    measure_only: bool,
 }
 
 /// Storage that [`compute_block_layout`] reuses across calls, so that laying out a container does not allocate
@@ -252,7 +256,7 @@ fn compute_inner_with(
     drop(style);
 
     // 1. Generate items
-    generate_item_list(tree, node_id, container_content_box_size, items);
+    generate_item_list(tree, node_id, container_content_box_size, run_mode, items);
 
     // 2. Compute container width
     let container_outer_width = known_dimensions.width.unwrap_or_else(|| {
@@ -353,6 +357,7 @@ fn generate_item_list(
     tree: &impl LayoutBlockContainer,
     node: NodeId,
     node_inner_size: Size<Option<f32>>,
+    run_mode: RunMode,
     items: &mut Vec<BlockItem>,
 ) {
     let new_items = tree
@@ -361,6 +366,8 @@ fn generate_item_list(
         .filter(|(_, style)| style.box_generation_mode() != BoxGenerationMode::None)
         .enumerate()
         .map(|(order, (child_node_id, child_style))| {
+            let measure_only =
+                run_mode == RunMode::ComputeSize && !child_style.is_block() && tree.child_count(child_node_id) > 0;
             let aspect_ratio = child_style.aspect_ratio();
             let padding = child_style.padding().resolve_or_zero(node_inner_size, |val, basis| tree.calc(val, basis));
             let border = child_style.border().resolve_or_zero(node_inner_size, |val, basis| tree.calc(val, basis));
@@ -399,6 +406,7 @@ fn generate_item_list(
                 computed_size: Size::zero(),
                 static_position: Point::zero(),
                 can_be_collapsed_through: false,
+                measure_only,
             }
         });
     items.clear();
@@ -491,14 +499,28 @@ fn perform_final_layout_on_in_flow_children(
                     .maybe_clamp(item.min_size, item.max_size)
             };
 
-            let item_layout = tree.perform_child_layout(
-                item.node_id,
-                known_dimensions,
-                parent_size,
-                available_space.map_width(|w| w.maybe_sub(item_non_auto_x_margin_sum)),
-                SizingMode::InherentSize,
-                Line::TRUE,
-            );
+            let item_available_space = available_space.map_width(|w| w.maybe_sub(item_non_auto_x_margin_sum));
+            // Laying the item out would lay out all of its descendants, at a size the container's final layout may
+            // not give it.
+            let item_layout = if item.measure_only {
+                LayoutOutput::from_outer_size(tree.measure_child_size_both(
+                    item.node_id,
+                    known_dimensions,
+                    parent_size,
+                    item_available_space,
+                    SizingMode::InherentSize,
+                    Line::TRUE,
+                ))
+            } else {
+                tree.perform_child_layout(
+                    item.node_id,
+                    known_dimensions,
+                    parent_size,
+                    item_available_space,
+                    SizingMode::InherentSize,
+                    Line::TRUE,
+                )
+            };
             let final_size = item_layout.size;
 
             let top_margin_set = item_layout.top_margin.collapse_with_margin(item_margin.top.unwrap_or(0.0));
@@ -569,20 +591,24 @@ fn perform_final_layout_on_in_flow_children(
                 height: if item.overflow.x == Overflow::Scroll { item.scrollbar_width } else { 0.0 },
             };
 
-            tree.set_unrounded_layout(
-                item.node_id,
-                &Layout {
-                    order: item.order,
-                    size: item_layout.size,
-                    #[cfg(feature = "content_size")]
-                    content_size: item_layout.content_size,
-                    scrollbar_size,
-                    location,
-                    padding: item.padding,
-                    border: item.border,
-                    margin: resolved_margin,
-                },
-            );
+            // A measured item is placed by the container's final layout. Placing it here, at its measured size,
+            // would leave it there if that layout is answered from the cache.
+            if !item.measure_only {
+                tree.set_unrounded_layout(
+                    item.node_id,
+                    &Layout {
+                        order: item.order,
+                        size: item_layout.size,
+                        #[cfg(feature = "content_size")]
+                        content_size: item_layout.content_size,
+                        scrollbar_size,
+                        location,
+                        padding: item.padding,
+                        border: item.border,
+                        margin: resolved_margin,
+                    },
+                );
+            }
 
             #[cfg(feature = "content_size")]
             {

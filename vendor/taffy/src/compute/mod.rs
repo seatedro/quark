@@ -58,7 +58,8 @@ pub use self::grid::compute_grid_layout;
 use crate::geometry::{Line, Point, Size};
 use crate::style::{AvailableSpace, CoreStyle, Overflow};
 use crate::tree::{
-    Layout, LayoutInput, LayoutOutput, LayoutPartialTree, LayoutPartialTreeExt, NodeId, RoundTree, SizingMode,
+    Layout, LayoutInput, LayoutOutput, LayoutPartialTree, LayoutPartialTreeExt, NodeId, RequestedAxis, RoundTree,
+    RunMode, SizingMode,
 };
 use crate::util::debug::{debug_log, debug_log_node, debug_pop_node, debug_push_node};
 use crate::util::sys::round;
@@ -67,6 +68,79 @@ use crate::{CacheTree, MaybeMath, MaybeResolve};
 
 /// Compute layout for the root node in the tree
 pub fn compute_root_layout(tree: &mut impl LayoutPartialTree, root: NodeId, available_space: Size<AvailableSpace>) {
+    let known_dimensions = root_known_dimensions(tree, root, available_space);
+
+    // Recursively compute node layout
+    let output = tree.perform_child_layout(
+        root,
+        known_dimensions,
+        available_space.into_options(),
+        available_space,
+        SizingMode::InherentSize,
+        Line::FALSE,
+    );
+
+    let style = tree.get_core_container_style(root);
+    let padding =
+        style.padding().resolve_or_zero(available_space.width.into_option(), |val, basis| tree.calc(val, basis));
+    let border =
+        style.border().resolve_or_zero(available_space.width.into_option(), |val, basis| tree.calc(val, basis));
+    let margin =
+        style.margin().resolve_or_zero(available_space.width.into_option(), |val, basis| tree.calc(val, basis));
+    let scrollbar_size = Size {
+        width: if style.overflow().y == Overflow::Scroll { style.scrollbar_width() } else { 0.0 },
+        height: if style.overflow().x == Overflow::Scroll { style.scrollbar_width() } else { 0.0 },
+    };
+    drop(style);
+
+    tree.set_unrounded_layout(
+        root,
+        &Layout {
+            order: 0,
+            location: Point::ZERO,
+            size: output.size,
+            #[cfg(feature = "content_size")]
+            content_size: output.content_size,
+            scrollbar_size,
+            padding,
+            border,
+            // TODO: support auto margins for root node?
+            margin,
+        },
+    );
+}
+
+/// Computes the size [`compute_root_layout`] gives `root`, without laying out its descendants: the root is
+/// computed in [`RunMode::ComputeSize`](crate::RunMode::ComputeSize) with the inputs `compute_root_layout` gives it, and
+/// no node's layout is written. A later `compute_root_layout` with the same space places the descendants.
+pub fn compute_root_size(
+    tree: &mut impl LayoutPartialTree,
+    root: NodeId,
+    available_space: Size<AvailableSpace>,
+) -> Size<f32> {
+    let known_dimensions = root_known_dimensions(tree, root, available_space);
+    tree.compute_child_layout(
+        root,
+        LayoutInput {
+            known_dimensions,
+            parent_size: available_space.into_options(),
+            available_space,
+            sizing_mode: SizingMode::InherentSize,
+            axis: RequestedAxis::Both,
+            run_mode: RunMode::ComputeSize,
+            vertical_margins_are_collapsible: Line::FALSE,
+        },
+    )
+    .size
+}
+
+/// The dimensions [`compute_root_layout`] and [`compute_root_size`] lay `root` out with
+#[cfg_attr(not(feature = "block_layout"), allow(unused_variables, unused_mut))]
+fn root_known_dimensions(
+    tree: &mut impl LayoutPartialTree,
+    root: NodeId,
+    available_space: Size<AvailableSpace>,
+) -> Size<Option<f32>> {
     let mut known_dimensions = Size::NONE;
 
     #[cfg(feature = "block_layout")]
@@ -125,44 +199,7 @@ pub fn compute_root_layout(tree: &mut impl LayoutPartialTree, root: NodeId, avai
         }
     }
 
-    // Recursively compute node layout
-    let output = tree.perform_child_layout(
-        root,
-        known_dimensions,
-        available_space.into_options(),
-        available_space,
-        SizingMode::InherentSize,
-        Line::FALSE,
-    );
-
-    let style = tree.get_core_container_style(root);
-    let padding =
-        style.padding().resolve_or_zero(available_space.width.into_option(), |val, basis| tree.calc(val, basis));
-    let border =
-        style.border().resolve_or_zero(available_space.width.into_option(), |val, basis| tree.calc(val, basis));
-    let margin =
-        style.margin().resolve_or_zero(available_space.width.into_option(), |val, basis| tree.calc(val, basis));
-    let scrollbar_size = Size {
-        width: if style.overflow().y == Overflow::Scroll { style.scrollbar_width() } else { 0.0 },
-        height: if style.overflow().x == Overflow::Scroll { style.scrollbar_width() } else { 0.0 },
-    };
-    drop(style);
-
-    tree.set_unrounded_layout(
-        root,
-        &Layout {
-            order: 0,
-            location: Point::ZERO,
-            size: output.size,
-            #[cfg(feature = "content_size")]
-            content_size: output.content_size,
-            scrollbar_size,
-            padding,
-            border,
-            // TODO: support auto margins for root node?
-            margin,
-        },
-    );
+    known_dimensions
 }
 
 /// Attempts to find a cached layout for the specified node and layout inputs.

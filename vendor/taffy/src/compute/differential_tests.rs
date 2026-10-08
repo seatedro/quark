@@ -435,6 +435,41 @@ fn aspect_ratio_and_scrolling(tree: &mut Tree) -> NodeId {
     node(tree, style, &[a, b, scroller])
 }
 
+/// Blocks without a definite width around flex containers, measured by a row and sized from their content
+fn intrinsic_blocks(tree: &mut Tree) -> NodeId {
+    let a = text(tree, Style { flex_grow: 1.0, ..Default::default() }, 5);
+    let b = leaf(tree, Style { size: wh(px(30.0), px(14.0)), ..Default::default() });
+    let flex_row = node(tree, Style { margin: margins(4.0, 6.0, 3.0, 2.0), gap: Size::length(5.0), ..row() }, &[a, b]);
+    let c = text(tree, Style::default(), 7);
+    let d = text(tree, Style { margin: margins(2.0, 2.0, 0.0, 0.0), ..Default::default() }, 2);
+    let wrapping =
+        node(tree, Style { flex_wrap: FlexWrap::Wrap, max_size: wh(Dimension::auto(), px(40.0)), ..column() }, &[c, d]);
+    let leaf_text = text(tree, Style { margin: margins(0.0, 0.0, 6.0, 6.0), ..Default::default() }, 3);
+    let block = node(
+        tree,
+        Style { display: Display::Block, padding: sides(2.0), ..Default::default() },
+        &[flex_row, wrapping, leaf_text],
+    );
+    let e = text(tree, Style::default(), 4);
+    let percent = node(tree, Style { size: wh(pct(0.5), Dimension::auto()), ..column() }, &[e]);
+    let other = node(tree, Style { display: Display::Block, flex_shrink: 0.0, ..Default::default() }, &[percent]);
+    node(tree, Style { gap: Size::length(3.0), ..row() }, &[block, other])
+}
+
+/// A block with no style around one flex container with margins, as a host wraps a separately laid out subtree
+fn block_around_flex(tree: &mut Tree) -> NodeId {
+    let a = text(tree, Style::default(), 9);
+    let b = leaf(tree, Style { size: wh(pct(0.25), px(12.0)), ..Default::default() });
+    let c = text(tree, Style { flex_grow: 1.0, ..Default::default() }, 4);
+    let tiles = node(tree, Style { flex_wrap: FlexWrap::Wrap, gap: Size::length(4.0), ..row() }, &[b, c]);
+    let content = node(
+        tree,
+        Style { margin: margins(3.0, 5.0, 7.0, 2.0), padding: sides(4.0), gap: Size::length(2.0), ..column() },
+        &[a, tiles],
+    );
+    node(tree, Style { display: Display::Block, ..Default::default() }, &[content])
+}
+
 /// Every layout the test compares, with the space its root is given
 const CASES: &[(&str, Size<AvailableSpace>, Build)] = &[
     ("grow with min and max", DEFINITE, grow_with_min_and_max),
@@ -453,7 +488,18 @@ const CASES: &[(&str, Size<AvailableSpace>, Build)] = &[
     ("intrinsic row under min-content", Size::MIN_CONTENT, intrinsic_row),
     ("intrinsic row in definite space", DEFINITE, intrinsic_row),
     ("aspect ratio and scrolling", DEFINITE, aspect_ratio_and_scrolling),
+    ("intrinsic blocks under max-content", Size::MAX_CONTENT, intrinsic_blocks),
+    ("intrinsic blocks under min-content", Size::MIN_CONTENT, intrinsic_blocks),
+    ("intrinsic blocks in definite space", DEFINITE, intrinsic_blocks),
+    ("intrinsic blocks in a narrow space", NARROW, intrinsic_blocks),
+    ("block around flex in definite space", DEFINITE, block_around_flex),
+    ("block around flex in a narrow space", NARROW, block_around_flex),
+    ("block around flex under max-content", Size::MAX_CONTENT, block_around_flex),
 ];
+
+/// A space narrower than most layouts' content
+const NARROW: Size<AvailableSpace> =
+    Size { width: AvailableSpace::Definite(150.0), height: AvailableSpace::Definite(600.0) };
 
 /// The space most roots are given
 const DEFINITE: Size<AvailableSpace> =
@@ -510,5 +556,20 @@ fn patched_layouts_match_the_published_algorithms() {
         for (i, (actual, expected)) in actual.iter().zip(&expected[case]).enumerate() {
             assert_eq!(actual, expected, "{name}, node {i} (depth first), pass {pass}");
         }
+    }
+}
+
+#[test]
+fn root_size_is_the_size_layout_gives_the_root() {
+    for &(name, available, build) in CASES {
+        let mut tree = Tree::new();
+        let root = build(&mut tree);
+        let size = tree
+            .compute_size_with_measure(root, available, |known, available, _, text, _| {
+                text.map_or(Size::ZERO, |text| text.measure(known, available))
+            })
+            .unwrap();
+        lay_out(&mut tree, root, available);
+        assert_eq!(size, tree.unrounded_layout(root).size, "{name}");
     }
 }
