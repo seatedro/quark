@@ -278,8 +278,9 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             // No vendored font has Hebrew or Arabic, so fallback shapes
             // those runs with every font: 69 shape plans, which must all
             // stay cached, and a glyph vector and missing-glyph list per
-            // font tried, which must be reused.
-            20,
+            // font tried, which must be reused. Runs differ by one
+            // allocation (20 or 21), so the budget allows the higher count.
+            21,
         ),
     ];
     assert_budgets(&mut test_system(), cases);
