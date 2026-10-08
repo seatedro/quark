@@ -63,6 +63,8 @@ pub struct State {
     /// Row data of the rows on screen, reused across frames.
     visible: Vec<Rc<RowData>>,
     memo: RowMemo,
+    /// The rows the cached list was last built from, with their hash.
+    built: Option<(u64, Rc<[Rc<RowData>]>)>,
 }
 
 impl Default for State {
@@ -75,6 +77,7 @@ impl Default for State {
             rows: Vec::new(),
             visible: Vec::new(),
             memo: RowMemo::default(),
+            built: None,
         }
     }
 }
@@ -290,8 +293,6 @@ fn list(sidebar: &mut State, scx: &SurfaceCx, width: f32, list_h: f32) -> AnyEle
         0.0,
         OVERSCAN,
     );
-    let scroll = ScrollActionBuilder::new(|lines| Action::ScrollLines(lines).into())
-        .with_to_px(|px| Action::ScrollTo(px).into());
     let colors = RowColors::new(scx);
     let searching = !sidebar.query().is_empty();
     let mut rows = std::mem::take(&mut sidebar.visible);
@@ -308,25 +309,100 @@ fn list(sidebar: &mut State, scx: &SurfaceCx, width: f32, list_h: f32) -> AnyEle
         };
         rows.push(data);
     }
-    let element = view! {
-        <div w={width} h={list_h} class="flex-col px-2" scroll_y={sidebar.scroll}
-             scroll_total={window.total_extent} on:scroll={scroll} track_focus={LIST}
-             focus_ring={LIST}
-             on_key={("up", QAction::from(Action::Step(-1)))}
-             on_key={("down", QAction::from(Action::Step(1)))}
-             on_key={("home", QAction::from(Action::Step(i32::MIN)))}
-             on_key={("end", QAction::from(Action::Step(i32::MAX)))}
-             accessibility_role={AccessibilityRole::List} aria-label="Threads">
-            <div class="w-full shrink-0" h={window.top_spacer} />
-            for data in rows.iter() {
-                {row_view(data, colors)}
-            }
-            <div class="w-full shrink-0" h={window.bottom_spacer} />
-        </div>
-    }
-    .into_any();
+    // The list replays from the element cache while the same row data sits
+    // at the same offsets: a row whose content changes gets new data (the
+    // memo hands out a new Rc), so pointers stand for contents here.
+    let geometry = [
+        width,
+        list_h,
+        sidebar.scroll,
+        window.top_spacer,
+        window.bottom_spacer,
+        window.total_extent,
+    ]
+    .map(f32::to_bits);
+    let pointers = rows.iter().map(|d| Rc::as_ptr(d) as usize);
+    let hash = inputs_hash(&(geometry, pointers.collect::<SmallKey>()));
+    let built = match &sidebar.built {
+        Some((h, built)) if *h == hash => built.clone(),
+        _ => {
+            let built: Rc<[Rc<RowData>]> = rows.iter().cloned().collect();
+            sidebar.built = Some((hash, built.clone()));
+            built
+        }
+    };
     sidebar.visible = rows;
-    element
+    let list = ListView {
+        rows: built,
+        colors,
+        width,
+        list_h,
+        scroll: sidebar.scroll,
+        top: window.top_spacer,
+        bottom: window.bottom_spacer,
+        total: window.total_extent,
+    };
+    cached("sidebar.list", hash, move || list.build())
+        .w(width)
+        .h(list_h)
+        .into_any()
+}
+
+/// Hashes row pointers without collecting them.
+#[derive(Default)]
+struct SmallKey(u64);
+
+impl FromIterator<usize> for SmallKey {
+    fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for p in iter {
+            p.hash(&mut hasher);
+        }
+        Self(hasher.finish())
+    }
+}
+
+impl std::hash::Hash for SmallKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+/// The thread list's build closure: the rows on screen and where.
+struct ListView {
+    rows: Rc<[Rc<RowData>]>,
+    colors: RowColors,
+    width: f32,
+    list_h: f32,
+    scroll: f32,
+    top: f32,
+    bottom: f32,
+    total: f32,
+}
+
+impl ListView {
+    fn build(self) -> AnyElement {
+        let scroll = ScrollActionBuilder::new(|lines| Action::ScrollLines(lines).into())
+            .with_to_px(|px| Action::ScrollTo(px).into());
+        view! {
+            <div w={self.width} h={self.list_h} class="flex-col px-2" scroll_y={self.scroll}
+                 scroll_total={self.total} on:scroll={scroll} track_focus={LIST}
+                 focus_ring={LIST}
+                 on_key={("up", QAction::from(Action::Step(-1)))}
+                 on_key={("down", QAction::from(Action::Step(1)))}
+                 on_key={("home", QAction::from(Action::Step(i32::MIN)))}
+                 on_key={("end", QAction::from(Action::Step(i32::MAX)))}
+                 accessibility_role={AccessibilityRole::List} aria-label="Threads">
+                <div class="w-full shrink-0" h={self.top} />
+                for data in self.rows.iter() {
+                    {row_view(data, self.colors)}
+                }
+                <div class="w-full shrink-0" h={self.bottom} />
+            </div>
+        }
+        .into_any()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
