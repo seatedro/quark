@@ -230,6 +230,9 @@ impl KeyPress<'_> {
         if let Some(named) = self.named {
             return key_from_named(named).map(|k| (k, None));
         }
+        if self.is_linefeed() {
+            return key_from_code(KeyCode::KeyJ).map(|k| (k, Some('j')));
+        }
         let mut chars = self.text.unwrap_or("").chars();
         if let (Some(c), None) = (chars.next(), chars.next())
             && let Some((key, unshifted)) = key_from_char(c)
@@ -242,12 +245,28 @@ impl KeyPress<'_> {
     }
 
     /// Text the key types, for the encoder: named keys type none except
-    /// Space.
+    /// Space, and neither does Linefeed.
     pub fn typed(&self) -> Option<&str> {
         match self.named {
             Some(NamedKey::Space) => Some(" "),
             Some(_) => None,
+            None if self.is_linefeed() => None,
             None => self.text,
         }
+    }
+
+    /// Modifiers for the encoder. Linefeed (X11's keysym, which types
+    /// "\n") encodes as Ctrl+J, so it sends LF as xterm does.
+    pub fn mods(&self) -> Mods {
+        let mods = mods(self.modifiers);
+        if self.is_linefeed() {
+            mods | Mods::CTRL
+        } else {
+            mods
+        }
+    }
+
+    fn is_linefeed(&self) -> bool {
+        self.named.is_none() && self.text == Some("\n")
     }
 }

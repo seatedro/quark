@@ -271,6 +271,8 @@ fn keys_encode_for_the_active_keyboard_mode() {
             ("", key(None, Some("a"), alt), "\x1ba")
         },
         ("", key(Some(NamedKey::Enter), None, none), "\r"),
+        // X11's Linefeed key types "\n" and sends LF, as in xterm.
+        ("", key(None, Some("\n"), none), "\n"),
         ("", key(Some(NamedKey::Backspace), None, none), "\x7f"),
         ("", key(Some(NamedKey::Tab), None, none), "\t"),
         ("", key(Some(NamedKey::Escape), None, none), "\x1b"),

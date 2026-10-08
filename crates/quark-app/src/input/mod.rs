@@ -74,6 +74,14 @@ impl KeyChord {
         let logical = match &event.logical_key {
             Key::Named(named) => KeyKind::Named(*named),
             Key::Character(text) => KeyKind::Character(text.to_string()),
+            // A key winit leaves unnamed that types one control character
+            // keeps it: X11's Linefeed types "\n", which terminals send.
+            Key::Unidentified(_) => match event.text.as_deref() {
+                Some(text) if text.chars().count() == 1 && text.chars().all(char::is_control) => {
+                    KeyKind::Character(text.to_owned())
+                }
+                _ => KeyKind::Other,
+            },
             _ => KeyKind::Other,
         };
         let physical = match event.physical_key {

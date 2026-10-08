@@ -568,7 +568,7 @@ impl TerminalState {
         }
         let input = KeyInput {
             key,
-            mods: input::mods(m),
+            mods: press.mods(),
             text: press.typed(),
             unshifted,
             action: if press.repeat {
