@@ -262,7 +262,8 @@ impl UiContext<'_, '_> {
     /// Drag `paths` out of the window as files
     /// ([`EventContext::start_drag_out`]). The platform takes the pointer,
     /// so the adapter ends its pointer capture: the drag that called this
-    /// gets its release right after.
+    /// is cancelled ([`DragHandler::on_cancel`](crate::quark_ui::element::DragHandler::on_cancel))
+    /// right after.
     pub fn start_drag_out<P: AsRef<std::path::Path>>(
         &mut self,
         paths: impl IntoIterator<Item = P>,
