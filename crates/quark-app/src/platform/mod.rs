@@ -1,7 +1,7 @@
 //! Operating system integration beyond the window: menus, notifications,
-//! badges, single instance handoff, deep links, dragging files out, window
-//! state persistence, crash reports, and the opt-in launch at login, global
-//! shortcuts, and telemetry.
+//! badges, single instance handoff, deep links, dragging files out, docking
+//! drags across windows, window state persistence, crash reports, and the
+//! opt-in launch at login, global shortcuts, and telemetry.
 
 #[cfg(feature = "autostart")]
 pub mod autostart;
@@ -11,6 +11,8 @@ pub mod deep_link;
 pub mod desktop_entry;
 #[cfg(feature = "dialogs")]
 pub mod dialog;
+#[cfg(feature = "ui")]
+pub mod dock_drag;
 pub mod drag_out;
 #[cfg(feature = "components")]
 pub mod drawn_menu;
