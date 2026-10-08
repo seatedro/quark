@@ -278,12 +278,18 @@ jobs:
             args: "-p quark-components --harness list_nav:: --harness slider::"
           - name: quark-components pane_tree
             args: "-p quark-components --harness pane_tree::"
-          - name: quark-components split 0
-            args: "-p quark-components --harness split_resize_pane0"
-          - name: quark-components split 1
-            args: "-p quark-components --harness split_resize_pane1"
-          - name: quark-components split 2
-            args: "-p quark-components --harness split_resize_pane2"
+          - name: quark-components split 0/1
+            args: "-p quark-components --harness split_resize_pane0_flex1"
+          - name: quark-components split 0/2
+            args: "-p quark-components --harness split_resize_pane0_flex2"
+          - name: quark-components split 1/0
+            args: "-p quark-components --harness split_resize_pane1_flex0"
+          - name: quark-components split 1/2
+            args: "-p quark-components --harness split_resize_pane1_flex2"
+          - name: quark-components split 2/0
+            args: "-p quark-components --harness split_resize_pane2_flex0"
+          - name: quark-components split 2/1
+            args: "-p quark-components --harness split_resize_pane2_flex1"
           - name: quark-diff
             args: -p quark-diff
     steps:
