@@ -68,6 +68,13 @@ and cancels a composition when focus leaves the field
 (`TextEditCommand::CancelPreedit`). `quark_ui::text_input::compose` merges
 the text and the composition for painting.
 
+An element that handles composition in `UiApp::event`, such as a terminal,
+gets `InputEvent::ImePreedit` and `InputEvent::ImeCommit`; typed text
+arrives separately as `InputEvent::TextInput`. Once focus leaves the
+element composing, the adapter drops the rest of that composition until the
+next frame resets the platform IME, so neither the app nor a text field
+sees it.
+
 ## Composer pieces
 
 For chat inputs, `Editor` adds parts an app assembles into a composer:

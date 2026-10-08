@@ -65,8 +65,12 @@ impl ElementHandles {
         }
     }
 
-    /// Retire `handle`; lookups by it find nothing from now on, even after
-    /// its slot is reused. Releasing a stale handle does nothing.
+    /// Retire `handle`: its slot comes back from a later `allocate` under a
+    /// new generation, so the new handle never matches the old one's rows.
+    /// Lookups read snapshots, which release does not touch: a snapshot
+    /// painted before the release still finds the element by `handle`, and
+    /// so does any later frame that still attaches it. Releasing a stale
+    /// handle does nothing.
     pub fn release(&mut self, handle: ElementHandle) {
         let Some(generation) = self.generations.get_mut(handle.slot as usize) else {
             return;

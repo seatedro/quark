@@ -56,7 +56,8 @@ pub(super) struct PaintRecord {
     size: (f32, f32),
     /// The paint output, drawn by reference from every scene that replays
     /// it. Scenes hold it until they are cleared, so a rerecording fills
-    /// whichever of this and `spare_scene` no scene holds any more.
+    /// whichever of this and `spare_scene` nothing holds any more (a
+    /// `Weak` counts), or a new chunk when both are held.
     /// `None` until the first recording, so taking a record out of its
     /// row allocates nothing.
     scene: Option<Arc<SceneChunk>>,
@@ -128,15 +129,15 @@ impl PaintRecord {
     /// The chunk to record into: one no scene holds, so changing it
     /// changes no frame already painted.
     fn writable_scene(&mut self) -> &mut SceneChunk {
-        let shared = self
-            .scene
-            .as_ref()
-            .is_none_or(|chunk| Arc::strong_count(chunk) > 1);
-        if shared {
-            let fresh = match self.spare_scene.take() {
-                Some(spare) if Arc::strong_count(&spare) == 1 => spare,
-                _ => Arc::default(),
-            };
+        // `Arc::get_mut` decides: a `Weak` handle also keeps a chunk from
+        // being written, though its strong count is one.
+        let unique = |chunk: &mut Arc<SceneChunk>| Arc::get_mut(chunk).is_some();
+        if !self.scene.as_mut().is_some_and(unique) {
+            let fresh = self
+                .spare_scene
+                .take()
+                .and_then(|mut spare| unique(&mut spare).then_some(spare))
+                .unwrap_or_default();
             self.spare_scene = self.scene.replace(fresh);
         }
         let chunk = self.scene.as_mut().expect("recorded chunk");

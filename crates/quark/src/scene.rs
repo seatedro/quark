@@ -233,29 +233,36 @@ impl Primitive {
     /// must already be shaped at `s`, which puts its glyphs in physical
     /// pixels.
     pub fn to_physical(&mut self, s: f32) {
+        self.make_physical(s, [0.0; 2]);
+    }
+
+    /// [`Self::to_physical`], with `shift` physical pixels added to every
+    /// coordinate before it snaps.
+    fn make_physical(&mut self, s: f32, shift: [f32; 2]) {
+        let snapped = |rect| snap(rect, s, shift);
         match self {
-            Self::Rect(p) => p.rect = snap(p.rect, s),
+            Self::Rect(p) => p.rect = snapped(p.rect),
             Self::RoundedRect(p) => {
-                p.rect = snap(p.rect, s);
+                p.rect = snapped(p.rect);
                 p.corner_radii = p.corner_radii.map(|r| r * s);
             }
             Self::Border(p) => {
-                p.rect = snap(p.rect, s);
+                p.rect = snapped(p.rect);
                 p.widths = p.widths.map(|w| snap_length(w, s));
                 p.corner_radii = p.corner_radii.map(|r| r * s);
             }
             Self::Shadow(p) => {
-                p.rect = snap(p.rect, s);
+                p.rect = snapped(p.rect);
                 p.blur_radius *= s;
                 p.corner_radius *= s;
                 p.offset = p.offset.map(|o| o * s);
             }
-            Self::TextRun(p) => p.rect = snap(p.rect, s),
-            Self::RichTextRun(p) => p.rect = snap(p.rect, s),
-            Self::Icon(p) => p.rect = snap(p.rect, s),
-            Self::Image(p) => p.rect = snap(p.rect, s),
+            Self::TextRun(p) => p.rect = snapped(p.rect),
+            Self::RichTextRun(p) => p.rect = snapped(p.rect),
+            Self::Icon(p) => p.rect = snapped(p.rect),
+            Self::Image(p) => p.rect = snapped(p.rect),
             Self::EffectQuad(p) => {
-                p.rect = snap(p.rect, s);
+                p.rect = snapped(p.rect);
                 p.corner_radius *= s;
                 // Noise is sampled per physical pixel; its frequency is per point.
                 if p.effect_type == EffectType::NoiseGradient && s > 0.0 {
@@ -263,19 +270,23 @@ impl Primitive {
                 }
             }
             Self::BlurRegion(p) => {
-                p.rect = snap(p.rect, s);
+                p.rect = snapped(p.rect);
                 p.blur_radius *= s;
                 p.corner_radii = p.corner_radii.map(|r| r * s);
             }
             Self::Path(p) => {
-                p.origin = p.origin.map(|o| (o * s).round());
+                p.origin = [0, 1].map(|i| round_half_up(p.origin[i] * s + shift[i]));
                 p.scale *= s;
             }
-            Self::LayerStart(p) => p.transform = p.transform.in_scaled_space(s),
+            Self::LayerStart(p) => {
+                p.transform = p.transform.in_scaled_space(s).offset(shift[0], shift[1]);
+            }
             Self::ClipStart(p) => {
-                p.rect = snap(p.rect, s);
+                p.rect = snapped(p.rect);
                 p.corner_radii = p.corner_radii.map(|r| r * s);
             }
+            // Only `to_physical` reaches a chunk here, with no shift:
+            // placing moves nested chunks itself.
             Self::Chunk(p) => p.scale = Some(p.scale.unwrap_or(1.0) * s),
             Self::ClipEnd
             | Self::ZIndexPush(_)
@@ -295,12 +306,13 @@ impl Primitive {
     }
 }
 
-/// Scale and round both edges, so adjacent rects share a pixel edge.
-fn snap(rect: Rect, s: f32) -> Rect {
-    let x0 = (rect.x * s).round();
-    let y0 = (rect.y * s).round();
-    let mut x1 = ((rect.x + rect.width) * s).round();
-    let mut y1 = ((rect.y + rect.height) * s).round();
+/// Scale, shift by `shift` physical pixels, and round both edges, so
+/// adjacent rects share a pixel edge.
+fn snap(rect: Rect, s: f32, [dx, dy]: [f32; 2]) -> Rect {
+    let x0 = round_half_up(rect.x * s + dx);
+    let y0 = round_half_up(rect.y * s + dy);
+    let mut x1 = round_half_up((rect.x + rect.width) * s + dx);
+    let mut y1 = round_half_up((rect.y + rect.height) * s + dy);
     if rect.width > 0.0 && x1 <= x0 {
         x1 = x0 + 1.0;
     }
@@ -313,6 +325,16 @@ fn snap(rect: Rect, s: f32) -> Rect {
         width: x1 - x0,
         height: y1 - y0,
     }
+}
+
+/// `v` rounded to the nearest whole pixel, halves up. Unlike
+/// [`f32::round`], which rounds halves away from zero, this commutes with
+/// moving by whole pixels across zero, so a chunk snapped around its own
+/// origin snaps like its primitives pushed where it lands.
+fn round_half_up(v: f32) -> f32 {
+    let r = v.round();
+    // `v - r` is exact: `r` is within half a pixel of `v`.
+    if v - r == 0.5 { r + 1.0 } else { r }
 }
 
 /// A stroke width in whole pixels, at least one when it is drawn at all.
@@ -404,9 +426,15 @@ impl SceneChunk {
 
 /// Draws a [`SceneChunk`]'s primitives in its place, each moved by
 /// `offset` and then, once the scene is in physical pixels, converted by
-/// [`Primitive::to_physical`] at `scale`. Drawing the chunk paints exactly
-/// what pushing those primitives here would; a nested chunk's offset adds
-/// to this one's.
+/// [`Primitive::to_physical`] at `scale`. Drawing the chunk paints what
+/// pushing those primitives here would (exactly, while the sums are exact
+/// in `f32`); a nested chunk's offset adds to this one's.
+///
+/// In physical pixels each primitive snaps around the chunk's
+/// [`pixel_origin`](Self::pixel_origin): shifted by its fraction, snapped,
+/// then moved by its whole pixels. Two placements with the same fraction
+/// therefore snap every edge alike, and differ by exactly the difference
+/// of their whole pixels.
 #[derive(Debug, Clone)]
 pub struct ChunkPrimitive {
     pub chunk: Arc<SceneChunk>,
@@ -435,11 +463,24 @@ impl ChunkPrimitive {
             inner.scale = self.scale;
             return placed;
         }
-        placed.offset(self.offset[0], self.offset[1]);
-        if let Some(scale) = self.scale {
-            placed.to_physical(scale);
+        match self.pixel_origin() {
+            None => placed.offset(self.offset[0], self.offset[1]),
+            Some((whole, fraction)) => {
+                placed.make_physical(self.scale.unwrap_or(1.0), fraction);
+                placed.offset(whole[0], whole[1]);
+            }
         }
         placed
+    }
+
+    /// Where the chunk's origin lands in physical pixels, as whole pixels
+    /// and the fraction left over; `None` while the scene is in logical
+    /// points.
+    pub fn pixel_origin(&self) -> Option<([f32; 2], [f32; 2])> {
+        let scale = self.scale?;
+        let at = self.offset.map(|o| o * scale);
+        let whole = at.map(f32::floor);
+        Some((whole, [at[0] - whole[0], at[1] - whole[1]]))
     }
 }
 
@@ -728,4 +769,61 @@ pub struct EffectQuadPrimitive {
     /// - LinearGradient: [angle_radians, 0.0]
     pub params: [f32; 2],
     pub corner_radius: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A chunk paints what its primitives pushed where it lands paint. It
+    // snaps them around its own whole-pixel origin, so a rounding that
+    // treats half pixels either side of zero differently would put an
+    // edge one pixel away from where the pushed primitive's edge snaps.
+    #[test]
+    fn a_placed_chunk_snaps_like_its_primitives_pushed_in_place() {
+        let mut triangle = Path::builder();
+        triangle
+            .move_to(0.0, 0.0)
+            .line_to(4.0, 0.0)
+            .line_to(2.0, 3.0);
+        let triangle = Arc::new(triangle.close().build());
+        let red = Color::rgba(255, 0, 0, 255);
+        // Each scale turns some of these into half pixels, on both sides
+        // of zero once offset; every product is exact.
+        let edges = [-2.0, -1.0, -0.75, -0.5, 0.25, 0.5, 1.0, 2.0];
+        let offsets = [-1.0, 0.5, 1.0, 2.0, 3.0];
+        for s in [1.0, 1.25, 1.5, 2.0] {
+            for x in edges {
+                for o in offsets {
+                    let rect = Rect {
+                        x,
+                        y: -x,
+                        width: 3.0,
+                        height: 2.0,
+                    };
+                    let mut primitives = Scene::default();
+                    primitives.clip(rect);
+                    primitives.rect(RectPrimitive { rect, color: red });
+                    primitives.path(PathPrimitive::new(triangle.clone(), [x, -x]));
+                    primitives.pop_clip();
+                    let mut chunk = SceneChunk::new();
+                    chunk.replace(primitives.primitives.iter().cloned());
+                    let mut chunked = Scene::default();
+                    chunked.chunk(&Arc::new(chunk), [o, o]);
+
+                    let mut pushed = primitives;
+                    for p in &mut pushed.primitives {
+                        p.offset(o, o);
+                    }
+                    for scene in [&mut chunked, &mut pushed] {
+                        for p in &mut scene.primitives {
+                            p.to_physical(s);
+                        }
+                    }
+
+                    assert_eq!(chunked.expanded(), pushed.primitives, "{x} at {o}, {s}x");
+                }
+            }
+        }
+    }
 }

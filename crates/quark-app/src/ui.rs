@@ -262,7 +262,8 @@ impl UiContext<'_, '_> {
     /// Drag `paths` out of the window as files
     /// ([`EventContext::start_drag_out`]). The platform takes the pointer,
     /// so the adapter ends its pointer capture: the drag that called this
-    /// gets its release right after.
+    /// is cancelled ([`DragHandler::on_cancel`](crate::quark_ui::element::DragHandler::on_cancel))
+    /// right after.
     pub fn start_drag_out<P: AsRef<std::path::Path>>(
         &mut self,
         paths: impl IntoIterator<Item = P>,
@@ -438,9 +439,8 @@ pub struct UiAdapter<U: UiApp> {
     /// IME state last sent to the window.
     ime_allowed: bool,
     ime_area: Option<Rect>,
-    /// The element focused when the IME last showed a composition, until
-    /// the composition ends.
-    ime_composing: Option<FocusId>,
+    /// The platform IME's composition and the element it belongs to.
+    composition: Composition,
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
     animations: AnimationTable,
@@ -498,7 +498,7 @@ impl<U: UiApp> UiAdapter<U> {
             edit_focus: None,
             ime_allowed: false,
             ime_area: None,
-            ime_composing: None,
+            composition: Composition::None,
             scale_factor: 1.0,
             animations: AnimationTable::new(),
             element_cache: ElementCache::new(),
@@ -802,7 +802,7 @@ impl<U: UiApp> UiAdapter<U> {
                 }
             }
             UiInput::Key(binding) => self.key(binding, cx),
-            UiInput::Text(text) => {
+            UiInput::Text(text) | UiInput::ImeCommit(text) => {
                 if let Some(target) = self.focused_field() {
                     self.edit(target, TextEditCommand::InsertText(text), cx);
                 }
@@ -837,8 +837,9 @@ impl<U: UiApp> UiAdapter<U> {
             .and_then(|focus| targets.iter().find(|t| t.focus_target == focus));
         let mut request = ImeRequest::default();
         let allowed = target.is_some();
-        if self.ime_composing.is_some_and(|c| Some(c) != self.focus) {
-            self.ime_composing = None;
+        self.orphan_moved_composition();
+        if self.composition == Composition::Orphaned {
+            self.composition = Composition::None;
             // Turning IME off drops the composition by itself.
             request.reset = self.ime_allowed && allowed;
         }
@@ -876,6 +877,53 @@ impl<U: UiApp> UiAdapter<U> {
         if self.cancel_stale_preedit(window_blurred) {
             redraw(Redraw::TextEdit, cx);
         }
+        if self.orphan_moved_composition() {
+            // The frame resets the platform IME.
+            redraw(Redraw::Focus, cx);
+        }
+    }
+
+    /// Orphan the composition once focus has left the element composing,
+    /// right away rather than at the next frame: the platform may still
+    /// deliver the rest of it before that frame resets the IME. Returns
+    /// whether it did.
+    fn orphan_moved_composition(&mut self) -> bool {
+        let moved =
+            matches!(self.composition, Composition::Owned(owner) if Some(owner) != self.focus);
+        if moved {
+            self.composition = Composition::Orphaned;
+        }
+        moved
+    }
+
+    /// Track the composition through an IME event, and whether the event
+    /// belongs to the element focused now. Events of an orphaned
+    /// composition, its closing empty preedit and its commit included, do
+    /// not: they reach neither the app's hook nor the text field.
+    fn ime_event_is_current(&mut self, event: &InputEvent) -> bool {
+        match (event, self.composition) {
+            (InputEvent::ImePreedit(..) | InputEvent::ImeCommit(_), Composition::Orphaned) => false,
+            (InputEvent::ImePreedit(text, _), _) => {
+                self.composition = match self.focus {
+                    Some(focus) if !text.is_empty() => Composition::Owned(focus),
+                    _ => Composition::None,
+                };
+                true
+            }
+            // A commit without a preedit, as some IMEs send for plain
+            // typing, goes to the focused element.
+            (InputEvent::ImeCommit(_), _) => {
+                self.composition = Composition::None;
+                true
+            }
+            // The focused field's preedit is cancelled with the window's
+            // focus (`cancel_stale_preedit`).
+            (InputEvent::Focused(false), Composition::Owned(_)) => {
+                self.composition = Composition::None;
+                true
+            }
+            _ => true,
+        }
     }
 
     fn update_cursor(&self, cx: &mut EventContext) {
@@ -903,6 +951,18 @@ impl<U: UiApp> UiAdapter<U> {
             CursorHint::Help => CursorIcon::Help,
         });
     }
+}
+
+/// The platform IME's composition, as IME events and focus left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Composition {
+    None,
+    /// Composing in this element, focused when its preedit began.
+    Owned(FocusId),
+    /// Focus left the element composing. Until the next frame resets the
+    /// platform IME, events still arriving for that composition are
+    /// dropped.
+    Orphaned,
 }
 
 /// IME changes for the window, applied once the frame is built.
@@ -1146,14 +1206,12 @@ impl<U: UiApp> App for UiAdapter<U> {
     }
 
     fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
-        // Seen before the app's own hook, which may take IME events for an
-        // element it drives itself (a terminal).
-        match &event {
-            InputEvent::ImePreedit(text, _) => {
-                self.ime_composing = self.focus.filter(|_| !text.is_empty());
-            }
-            InputEvent::Focused(false) => self.ime_composing = None,
-            _ => {}
+        // Checked before the app's own hook, which may take IME events for
+        // an element it drives itself (a terminal).
+        self.orphan_moved_composition();
+        if !self.ime_event_is_current(&event) {
+            tracing::debug!("dropping IME input for an element focus left: {event:?}");
+            return;
         }
         let input = UiInput::from_event(&event);
         let window_blurred = input == Some(UiInput::WindowFocus(false));
@@ -1325,7 +1383,7 @@ mod tests {
 
     use accesskit::{NodeId, Role};
     use quark::scene::ShapedText;
-    use quark_ui::element::{IntoAnyElement, div, text_input};
+    use quark_ui::element::{IntoAnyElement, canvas, div, text_input};
     use quark_ui::style::Styled;
     use quark_ui::text_input::TextField;
 
@@ -1493,19 +1551,36 @@ mod tests {
     }
 
     const OTHER_FIELD: FocusId = FocusId::from_key("other field");
+    const TERMINAL: FocusId = FocusId::from_key("terminal");
 
-    /// Two text fields, `FIELD` above `OTHER_FIELD`.
-    struct TwoFields {
+    /// Two text fields, `FIELD` above `OTHER_FIELD`, then a 200x40 pane
+    /// `TERMINAL` that takes IME input in the app's hook, as a terminal
+    /// does.
+    struct Editors {
         fields: [TextField; 2],
+        /// The text the terminal pane was sent.
+        terminal: String,
     }
 
-    impl TwoFields {
+    impl Editors {
+        fn new() -> Self {
+            Self {
+                fields: [TextField::new(""), TextField::new("")],
+                terminal: String::new(),
+            }
+        }
+
         fn field(&mut self, target: FocusId) -> &mut TextField {
             &mut self.fields[usize::from(target == OTHER_FIELD)]
         }
+
+        /// The text in `FIELD`, `OTHER_FIELD`, and `TERMINAL`.
+        fn texts(&self) -> [&str; 3] {
+            [self.fields[0].text(), self.fields[1].text(), &self.terminal]
+        }
     }
 
-    impl UiApp for TwoFields {
+    impl UiApp for Editors {
         type Action = ();
         type Message = ();
 
@@ -1524,10 +1599,38 @@ mod tests {
                 .flex_col()
                 .child(field(FIELD, &self.fields[0]))
                 .child(field(OTHER_FIELD, &self.fields[1]))
+                .child(
+                    div()
+                        .w(200.0)
+                        .h(40.0)
+                        .track_focus(TERMINAL)
+                        .on_click(quark_ui::element::NoopAction)
+                        .child(
+                            canvas(|bounds, _scene, cx| {
+                                cx.register_ime_target(TERMINAL, Some(bounds))
+                            })
+                            .w(200.0)
+                            .h(40.0),
+                        ),
+                )
                 .into_any()
         }
 
         fn update(&mut self, (): (), _cx: &mut UiContext) {}
+
+        fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
+            if cx.focus() != Some(TERMINAL) {
+                return false;
+            }
+            match event {
+                InputEvent::TextInput(text) | InputEvent::ImeCommit(text) => {
+                    self.terminal.push_str(text);
+                    true
+                }
+                InputEvent::ImePreedit(..) => true,
+                _ => false,
+            }
+        }
 
         fn edit_text(&mut self, target: FocusId, command: TextEditCommand) -> TextEditOutcome {
             self.field(target).apply(command)
@@ -1543,10 +1646,7 @@ mod tests {
     // field focused next.
     #[test]
     fn focus_leaving_a_composing_field_for_another_resets_the_ime() {
-        let app = TwoFields {
-            fields: [TextField::new(""), TextField::new("")],
-        };
-        let mut ui = UiTestHarness::new(app, (400.0, 300.0), 1.0);
+        let mut ui = UiTestHarness::new(Editors::new(), (400.0, 300.0), 1.0);
         ui.click((10.0, 20.0));
         ui.key("tab");
         ui.key("shift+tab");
@@ -1559,6 +1659,54 @@ mod tests {
         let ime = ui.ime();
         assert_eq!((ime.resets, ime.allowed), (1, true));
         assert_eq!(ui.app().fields[0].preedit(), None);
+    }
+
+    // Regression: input queued between a click that moved focus off the
+    // element composing and the frame that resets the IME, the empty
+    // preedit and commit closing that composition, landed in the element
+    // the click focused, whether a text field or a terminal taking IME
+    // input in the app's hook.
+    #[test]
+    fn a_commit_queued_after_focus_left_its_composition_lands_nowhere() {
+        // Each element's place in `Editors::texts`, and its center.
+        let slot = |target| {
+            [FIELD, OTHER_FIELD, TERMINAL]
+                .iter()
+                .position(|t| *t == target)
+        };
+        let center = |target| (100.0, 20.0 + 40.0 * slot(target).unwrap() as f32);
+        let cases = [
+            ("field to field", FIELD, OTHER_FIELD),
+            ("field to terminal", FIELD, TERMINAL),
+            ("terminal to field", TERMINAL, FIELD),
+        ];
+        for (name, from, to) in cases {
+            let mut ui = UiTestHarness::new(Editors::new(), (400.0, 300.0), 1.0);
+            ui.click(center(from));
+            ui.ime_preedit("にほ", None);
+
+            let (x, y) = center(to);
+            let button = |state| InputEvent::PointerButton {
+                button: winit::event::MouseButton::Left,
+                state,
+            };
+            ui.send_events([
+                InputEvent::PointerMoved { x, y },
+                button(winit::event::ElementState::Pressed),
+                button(winit::event::ElementState::Released),
+                InputEvent::ImePreedit(String::new(), None),
+                InputEvent::ImeCommit("日本".into()),
+            ]);
+            assert_eq!(ui.focus(), Some(to), "{name}");
+            assert_eq!(ui.app().texts(), ["", "", ""], "{name}");
+
+            // Once a frame reset the IME, its commits are the new
+            // element's again.
+            ui.ime_commit("本");
+            let mut expected = ["", "", ""];
+            expected[slot(to).unwrap()] = "本";
+            assert_eq!(ui.app().texts(), expected, "{name}: after the reset");
+        }
     }
 
     const MARK: quark::Color = quark::Color::rgba(1, 2, 3, 255);

@@ -171,9 +171,11 @@ impl TextElement {
     }
 }
 
-/// Resolved font size, the shaped content (shared with paint; unwrapped
-/// unless the wrap width is explicit), and its natural width.
+/// The element's node, resolved font size, the shaped content (shared
+/// with paint; unwrapped unless the wrap width is explicit), and its
+/// natural width.
 pub struct TextLayoutState {
+    id: LayoutId,
     font_size: f32,
     layout: Option<Arc<TextLayout>>,
     natural_width: f32,
@@ -228,6 +230,7 @@ impl Element for TextElement {
             }
         };
         let state = TextLayoutState {
+            id,
             font_size,
             layout,
             natural_width: text_width,
@@ -249,7 +252,7 @@ impl Element for TextElement {
         bounds: Bounds,
         state: &mut TextLayoutState,
         _prepaint_state: &mut (),
-        _engine: &LayoutEngine,
+        engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
@@ -267,13 +270,14 @@ impl Element for TextElement {
         let wrap = self.wrap_mode();
         let mut wrapped = false;
         match wrap {
-            // Shaped at the width layout resolved, which the last measure
-            // query may not have been (it can be an intrinsic-size probe).
+            // Shaped where measurement wrapped at the width layout
+            // resolved, which the last measure query may not have been (it
+            // can be an intrinsic-size probe).
             WrapMode::Auto => {
-                if let Some(width) = auto_wrap_width(bounds.width, natural_width)
-                    && layout.is_some()
+                if let Some(width) = engine.auto_wrap_width(state.id)
+                    && let Some(unwrapped) = &layout
                 {
-                    layout = cx.layout_text_query(&self.query(&content, font_size, Some(width)));
+                    layout = cx.layout_text_query(&unwrapped.query().wrap_width(Some(width)));
                     text_width = layout.as_ref().map_or(0.0, |l| l.size().0.ceil());
                     wrapped = true;
                 }
@@ -415,10 +419,13 @@ mod tests {
     const SENTENCE: &str = "the quick brown fox jumps over the lazy dog";
     /// 14pt text at the default 1.5 line height.
     const LINE: f32 = 21.0;
+    /// 14pt selectable text.
+    const SELECTABLE_LINE: f32 = 14.0 * 1.35;
     const SWATCH: Color = Color::rgba(10, 20, 30, 255);
 
     /// A window's text state and element cache, kept across frames.
     struct Window {
+        scale: f32,
         text: TextSystem,
         layouts: LayoutCache,
         signals: SignalStore,
@@ -426,7 +433,8 @@ mod tests {
         cache: ElementCache,
     }
 
-    /// What a frame painted: each text's rect and lines, and where the
+    /// What a frame painted: each text's (plain or rich) rect and lines,
+    /// and where the
     /// `SWATCH` box landed.
     #[derive(Debug, PartialEq)]
     struct Frame {
@@ -443,7 +451,12 @@ mod tests {
 
     impl Window {
         fn new() -> Self {
+            Self::at_scale(1.0)
+        }
+
+        fn at_scale(scale: f32) -> Self {
             Self {
+                scale,
                 text: TextSystem::vendored_only(&Default::default()),
                 layouts: LayoutCache::default(),
                 signals: SignalStore::new(),
@@ -456,7 +469,7 @@ mod tests {
             self.layouts.begin_frame();
             let mut cx = ElementContext::new(
                 &self.theme,
-                1.0,
+                self.scale,
                 &mut self.text,
                 &mut self.layouts,
                 None,
@@ -471,27 +484,29 @@ mod tests {
                 swatch: None,
             };
             for primitive in &scene.primitives {
-                match primitive {
-                    quark_render::Primitive::TextRun(run) => {
-                        let layout = run.layout.downcast_ref::<TextLayout>().expect("layout");
-                        let lines = layout
-                            .lines()
-                            .map(|line| layout.text()[line.byte_range].to_owned())
-                            .collect();
-                        frame.texts.push((run.rect, lines));
-                    }
+                let (rect, shaped) = match primitive {
+                    quark_render::Primitive::TextRun(run) => (run.rect, &run.layout),
+                    quark_render::Primitive::RichTextRun(run) => (run.rect, &run.layout),
                     quark_render::Primitive::RoundedRect(r) if r.color == SWATCH => {
                         frame.swatch = Some(r.rect);
+                        continue;
                     }
-                    _ => {}
-                }
+                    _ => continue,
+                };
+                let layout = shaped.downcast_ref::<TextLayout>().expect("layout");
+                let lines = layout
+                    .lines()
+                    .map(|line| layout.text()[line.byte_range].to_owned())
+                    .collect();
+                frame.texts.push((rect, lines));
             }
             frame
         }
 
-        /// Width of `s` on one line.
+        /// Width of `s` on one line, at the window's scale.
         fn width_of(&mut self, s: &str) -> f32 {
-            let params = TextParams::new(s, TextStyle::new(14.0).line_height(LINE));
+            let params =
+                TextParams::new(s, TextStyle::new(14.0).line_height(LINE)).scale_factor(self.scale);
             self.layouts
                 .layout(&mut self.text, &params)
                 .expect("layout")
@@ -654,6 +669,50 @@ mod tests {
         );
         let (rect, lines) = frame.text();
         assert_eq!((rect.width, lines.len()), (natural, 1));
+    }
+
+    // Catches paint rewrapping at a width other than the one measured: at
+    // a fractional width taffy rounds the box after measuring it, and text
+    // shaped at the rounded width painted one line in a box measured for
+    // two. Plain and selectable text break the same lines, each fitting
+    // the box.
+    #[test]
+    fn fractional_widths_paint_the_measured_lines() {
+        let strings = ["hello world", "one two three", "alpha beta gamma", SENTENCE];
+        for scale in [1.0, 1.5] {
+            let mut window = Window::at_scale(scale);
+            for s in strings {
+                let natural = window.width_of(s);
+                // Just under the rounded-up natural width, where the box
+                // rounds to fit the text unwrapped but measurement wraps;
+                // and a fractional width part way through.
+                for width in [
+                    natural.ceil() - 0.2,
+                    natural.ceil() - 0.6,
+                    natural * 0.6 + 0.3,
+                ] {
+                    let case = format!("{s:?} at {width} scale {scale}");
+                    let plain = window.paint(column(width, text(s).size(14.0)));
+                    let rich = window.paint(column(width, selectable_text(s).size(14.0)));
+                    for (frame, line) in [(&plain, LINE), (&rich, SELECTABLE_LINE)] {
+                        let (rect, lines) = frame.text();
+                        assert_eq!(lines.concat(), s, "{case}");
+                        assert_eq!(
+                            rect.height,
+                            (lines.len() as f32 * line).ceil(),
+                            "{case}: {lines:?}"
+                        );
+                        for painted in lines {
+                            assert!(
+                                window.width_of(painted.trim_end()) <= rect.width,
+                                "{case}: {painted:?}"
+                            );
+                        }
+                    }
+                    assert_eq!(plain.text().1, rich.text().1, "{case}");
+                }
+            }
+        }
     }
 
     // Catches measurement and paint disagreeing at a zero-width box:

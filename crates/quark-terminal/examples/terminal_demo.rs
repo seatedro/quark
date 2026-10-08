@@ -208,6 +208,10 @@ mod app {
                     cx.window.request_redraw();
                     true
                 }
+                InputEvent::ImeCommit(text) if focused => {
+                    self.term.commit_preedit(text);
+                    true
+                }
                 InputEvent::ImePreedit(text, cursor) if focused => {
                     self.term.set_preedit(text, *cursor);
                     true
