@@ -47,7 +47,7 @@ global-hotkey = { version = "0.8", optional = true }
 muda = { version = "0.21", default-features = false }
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSMenu", "NSMenuItem", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSBitmapImageRep", "NSGraphics", "NSImage", "NSImageRep", "NSPasteboard", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSMenu", "NSMenuItem", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSBitmapImageRep", "NSGraphics", "NSImage", "NSImageRep", "NSPasteboard", "NSScreen", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSBundle", "NSAppleEventDescriptor", "NSAppleEventManager", "NSSet", "NSDictionary", "NSError", "NSArray", "NSURL"] }
 # Click and action callbacks for notifications in bundled apps.
 # Login items through SMAppService (`platform::autostart`).
@@ -58,17 +58,20 @@ objc2-user-notifications = { version = "0.3", optional = true, default-features 
 version = "0.21"
 default-features = false
 
-# Taskbar overlay badges, menu accelerators, URL scheme registration, and
-# dragging files out (shell data objects, OLE drag and drop).
+# Taskbar overlay badges, menu accelerators, URL scheme registration,
+# dragging files out (shell data objects, OLE drag and drop), and the window
+# stack dock drags read (DWM frame bounds and cloaking, button state).
 # Already in every Windows build through accesskit and wgpu.
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_System_Com",
   "Win32_System_Ole",
   "Win32_System_Registry",
+  "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
@@ -92,6 +95,11 @@ features = ["std"]
 # winit, at the same versions and on the same system libraries.
 [target.'cfg(target_os = "linux")'.dependencies.wayland-client]
 version = "0.31"
+
+# Moving a torn-off window with a dock drag (`xdg_toplevel_drag_v1`).
+[target.'cfg(target_os = "linux")'.dependencies.wayland-protocols]
+version = "0.32"
+features = ["client", "staging"]
 
 [target.'cfg(target_os = "linux")'.dependencies.wayland-backend]
 version = "0.3"

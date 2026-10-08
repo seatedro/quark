@@ -2994,6 +2994,7 @@ dependencies = [
  "tungstenite",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
  "windows",
  "winit",
  "x11-dl",

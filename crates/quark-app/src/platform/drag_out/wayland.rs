@@ -30,13 +30,27 @@
 //! socket would not take yet are flushed once it is writable. A drag
 //! request touches the window's surface only under a [`ticket`] claim,
 //! while the UI still holds the window.
+//!
+//! Dock drags ([`crate::platform::dock_drag`]) start the same way, with a
+//! source offering one MIME type made for that drag alone: the session
+//! token. The seat's data device then sees the drag pass over our own
+//! windows, and an offer is accepted, and its enter, motion, leave, and
+//! drop forwarded to the UI thread, only if it carries the current token
+//! and is over one of our windows. Where the compositor has
+//! `xdg_toplevel_drag_v1`, the source gets one, and the UI attaches the
+//! torn-off window to it itself, so the request reaches the compositor
+//! before that window's first frame.
+
+// Dock drags are started only by `dock_drag`, which needs the `ui` feature.
+#![cfg_attr(not(feature = "ui"), allow(dead_code))]
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
-use std::sync::Arc;
+use std::ptr::NonNull;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -48,7 +62,7 @@ use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
 use wayland_client::protocol::wl_data_device_manager::{DndAction, WlDataDeviceManager};
-use wayland_client::protocol::wl_data_offer::WlDataOffer;
+use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
 use wayland_client::protocol::wl_data_source::{self, WlDataSource};
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
@@ -59,10 +73,14 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, event_created_child,
 };
+use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+use wayland_protocols::xdg::toplevel_drag::v1::client::xdg_toplevel_drag_manager_v1::XdgToplevelDragManagerV1;
+use wayland_protocols::xdg::toplevel_drag::v1::client::xdg_toplevel_drag_v1::XdgToplevelDragV1;
 
 use super::seat::{Refusal, Seats, Selected, Surface};
 use super::ticket::{self, Ticket};
 use super::{DragImage, DragOutError};
+use crate::runner::Waker;
 
 const URI_LIST: &str = "text/uri-list";
 
@@ -83,14 +101,34 @@ struct Wayland {
 }
 
 enum Request {
-    Window { surface: Surface, open: bool },
+    Window {
+        surface: Surface,
+        open: bool,
+    },
     Start(Start),
+    /// Give up the dock drag with this token, if it still runs.
+    DockEnd(u64),
     Stop,
 }
 
 struct Start {
     drag: Drag,
-    ticket: Ticket,
+    ticket: Answerer,
+}
+
+/// Where a start's answer goes: what each kind of drag hands back.
+enum Answerer {
+    Files(Ticket<()>),
+    Dock(Ticket<DockStarted>),
+}
+
+impl Answerer {
+    fn abandoned(&self) -> bool {
+        match self {
+            Self::Files(ticket) => ticket.abandoned(),
+            Self::Dock(ticket) => ticket.abandoned(),
+        }
+    }
 }
 
 /// What a drag starts with.
@@ -102,9 +140,103 @@ struct Drag {
     /// The same surface as the seats know it, by address: compared, never
     /// dereferenced.
     surface: Surface,
-    uris: Vec<u8>,
+    content: Content,
     seat: Option<String>,
     icon: Option<IconPixels>,
+}
+
+/// What a drag offers.
+enum Content {
+    /// A `text/uri-list` of files.
+    Files(Vec<u8>),
+    Dock(DockRequest),
+}
+
+/// A dock drag, as the UI asks for it.
+pub(crate) struct DockRequest {
+    /// Tells this drag's events from an earlier one's.
+    pub token: u64,
+    /// The one MIME type the drag offers, unique to it.
+    pub mime: String,
+    pub signals: mpsc::Sender<DockSignal>,
+    /// Woken after each signal, so the UI reads it.
+    pub waker: Waker,
+}
+
+/// What the compositor said about a dock drag, forwarded as it came.
+/// Positions are in the surface's logical coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum DockSignal {
+    /// The drag came over one of our windows, by its `wl_surface` address.
+    Enter {
+        surface: Surface,
+        x: f64,
+        y: f64,
+    },
+    Motion {
+        x: f64,
+        y: f64,
+    },
+    /// It left the window it entered.
+    Leave,
+    /// It was dropped on the window it entered.
+    Drop,
+    /// The user released the drag, wherever (`dnd_drop_performed`).
+    DropPerformed,
+    /// It ended without a drop on a window of ours that took it: released
+    /// elsewhere, or cancelled.
+    Cancelled,
+    /// The window it was dropped on is done with it.
+    Finished,
+}
+
+/// A started dock drag, for the UI thread.
+pub(crate) struct DockStarted {
+    conn: Connection,
+    /// Where the compositor has `xdg_toplevel_drag_v1`.
+    toplevel_drag: Option<XdgToplevelDragV1>,
+}
+
+impl DockStarted {
+    /// Whether a window can be attached to move with the drag.
+    pub(crate) fn can_follow(&self) -> bool {
+        self.toplevel_drag.is_some()
+    }
+
+    /// Move the window whose `xdg_toplevel` this is with the drag, `offset`
+    /// (in its logical coordinates) under the pointer. Sent from the UI
+    /// thread, which keeps the window open meanwhile, and flushed at once,
+    /// so it reaches the compositor before the window is first shown.
+    ///
+    /// # Safety
+    ///
+    /// `xdg_toplevel` is the live `xdg_toplevel` proxy of an open window.
+    pub(crate) unsafe fn attach(
+        &self,
+        xdg_toplevel: NonNull<std::ffi::c_void>,
+        (x, y): (i32, i32),
+    ) -> Result<(), DragOutError> {
+        let platform = |error: &dyn std::fmt::Display| DragOutError::Platform(error.to_string());
+        let drag = self
+            .toplevel_drag
+            .as_ref()
+            .ok_or(DragOutError::Unsupported)?;
+        // SAFETY: the caller's live proxy.
+        let id =
+            unsafe { ObjectId::from_ptr(XdgToplevel::interface(), xdg_toplevel.as_ptr().cast()) }
+                .map_err(|e| platform(&e))?;
+        let toplevel = XdgToplevel::from_id(&self.conn, id).map_err(|e| platform(&e))?;
+        drag.attach(&toplevel, x, y);
+        // A socket that would block takes it on winit's next flush, still
+        // before the window's first frame.
+        match self.conn.flush() {
+            Err(WaylandError::Io(io)) if io.kind() != std::io::ErrorKind::WouldBlock => {
+                Err(platform(&io))
+            }
+            Err(error @ WaylandError::Protocol(_)) => Err(platform(&error)),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// The drag image in a shared memory file, ready for a buffer.
@@ -124,7 +256,10 @@ struct State {
     manager: Option<WlDataDeviceManager>,
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
+    toplevel_drags: Option<XdgToplevelDragManagerV1>,
     seats: Seats<SeatObjects>,
+    /// The dock drag running, if any.
+    dock: Option<ActiveDock>,
     /// Drag requests waiting for their round trip's `done`, by the sync
     /// callback's data.
     starts: BTreeMap<u64, Start>,
@@ -132,6 +267,28 @@ struct State {
     /// Drop targets still reading the dropped files.
     transfers: Vec<Transfer>,
     outgoing: Outgoing,
+}
+
+/// The dock drag running on the thread.
+struct ActiveDock {
+    token: u64,
+    mime: String,
+    signals: mpsc::Sender<DockSignal>,
+    waker: Waker,
+    source: WlDataSource,
+    /// Destroyed once the drag is released or cancelled, as the protocol
+    /// requires.
+    toplevel_drag: Option<XdgToplevelDragV1>,
+    /// The seat whose data device has the drag over one of our windows.
+    entered: Option<u32>,
+}
+
+impl ActiveDock {
+    fn signal(&self, signal: DockSignal) {
+        if self.signals.send(signal).is_ok() {
+            self.waker.wake();
+        }
+    }
 }
 
 /// Whether requests are still waiting for the socket to take them.
@@ -229,7 +386,9 @@ fn connect(display: *mut std::ffi::c_void) -> Result<Wayland, String> {
         manager: None,
         compositor: None,
         shm: None,
+        toplevel_drags: None,
         seats: Seats::default(),
+        dock: None,
         starts: BTreeMap::new(),
         next_start: 0,
         transfers: Vec::new(),
@@ -354,6 +513,7 @@ fn run(
                     surface,
                     open: false,
                 } => state.seats.window_destroyed(surface),
+                Request::DockEnd(token) => state.end_dock(token),
                 Request::Start(start) => {
                     // Starts the UI gave up on, whose syncs never came back.
                     state.starts.retain(|_, start| !start.ticket.abandoned());
@@ -415,6 +575,37 @@ pub(super) fn start(
     seat: Option<String>,
     image: &DragImage,
 ) -> Result<(), DragOutError> {
+    request_start(
+        window,
+        Content::Files(uris),
+        seat,
+        Some(image),
+        Answerer::Files,
+    )
+}
+
+/// Start a dock drag from `window`, as [`start`] does a drag of files.
+pub(super) fn start_dock(
+    window: WindowHandle<'_>,
+    request: DockRequest,
+    seat: Option<String>,
+    image: Option<&DragImage>,
+) -> Result<DockStarted, DragOutError> {
+    request_start(window, Content::Dock(request), seat, image, Answerer::Dock)
+}
+
+/// Stop the dock drag with `token` if it still runs.
+pub(super) fn end_dock(token: u64) {
+    send(Request::DockEnd(token));
+}
+
+fn request_start<T>(
+    window: WindowHandle<'_>,
+    content: Content,
+    seat: Option<String>,
+    image: Option<&DragImage>,
+    answerer: fn(Ticket<T>) -> Answerer,
+) -> Result<T, DragOutError> {
     let RawWindowHandle::Wayland(handle) = window.as_raw() else {
         return Err(DragOutError::Unsupported);
     };
@@ -424,13 +615,13 @@ pub(super) fn start(
     let origin = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }
         .map_err(|_| DragOutError::Platform("the window has no wl_surface".into()))?;
     // Before anything about the seat, so the drag starts at once after.
-    let icon = match icon_pixels(image) {
+    let icon = image.and_then(|image| match icon_pixels(image) {
         Ok(icon) => Some(icon),
         Err(error) => {
             tracing::warn!("drag out: no drag image: {error}");
             None
         }
-    };
+    });
     WAYLAND.with(|slot| {
         let slot = slot.borrow();
         let wayland = slot
@@ -441,11 +632,11 @@ pub(super) fn start(
             drag: Drag {
                 origin,
                 surface: surface as Surface,
-                uris,
+                content,
                 seat,
                 icon,
             },
-            ticket,
+            ticket: answerer(ticket),
         }))?;
         // Holds `window` until the thread can no longer touch its surface.
         waiter.wait(ANSWER_TIMEOUT)
@@ -539,6 +730,9 @@ impl State {
             "wl_shm" if self.shm.is_none() => {
                 self.shm = Some(self.registry.bind(name, 1, qh, ()));
             }
+            "xdg_toplevel_drag_manager_v1" if self.toplevel_drags.is_none() => {
+                self.toplevel_drags = Some(self.registry.bind(name, 1, qh, ()));
+            }
             _ => {}
         }
     }
@@ -546,14 +740,31 @@ impl State {
     /// A drag request whose round trip is done: start it, unless the UI
     /// stopped waiting, when its window may be gone.
     fn serve(&mut self, qh: &QueueHandle<Self>, Start { drag, ticket }: Start) {
-        match ticket.claim() {
-            Some(claim) => claim.answer(self.start(qh, drag)),
-            None => tracing::debug!("drag out: the UI stopped waiting; not started"),
+        let unclaimed = || tracing::debug!("drag out: the UI stopped waiting; not started");
+        match ticket {
+            Answerer::Files(ticket) => match ticket.claim() {
+                Some(claim) => claim.answer(self.start(qh, drag).map(drop)),
+                None => unclaimed(),
+            },
+            Answerer::Dock(ticket) => match ticket.claim() {
+                Some(claim) => {
+                    claim.answer(self.start(qh, drag).map(|toplevel_drag| DockStarted {
+                        conn: self.conn.clone(),
+                        toplevel_drag,
+                    }))
+                }
+                None => unclaimed(),
+            },
         }
     }
 
-    /// Under a claim on the request's ticket.
-    fn start(&mut self, qh: &QueueHandle<Self>, start: Drag) -> Result<(), DragOutError> {
+    /// Under a claim on the request's ticket. A dock drag answers with its
+    /// `xdg_toplevel_drag_v1`, where the compositor has them.
+    fn start(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        start: Drag,
+    ) -> Result<Option<XdgToplevelDragV1>, DragOutError> {
         let Selected { seat, press } = self
             .seats
             .select(start.surface, start.seat.as_deref())
@@ -577,17 +788,36 @@ impl State {
             .icon
             .as_ref()
             .and_then(|pixels| self.icon(qh, pixels).map(|icon| (icon, pixels)));
+        let (offered, mime, action, dock) = match start.content {
+            Content::Files(uris) => (
+                Offered::Files(Arc::from(uris)),
+                URI_LIST.to_owned(),
+                DndAction::Copy,
+                None,
+            ),
+            Content::Dock(request) => (
+                Offered::Dock(request.token),
+                request.mime.clone(),
+                DndAction::Move,
+                Some(request),
+            ),
+        };
         let source = manager.create_data_source(
             qh,
             Payload {
-                uris: Arc::from(start.uris),
+                offered,
                 icon: icon.as_ref().map(|(icon, _)| icon.clone()),
             },
         );
-        source.offer(URI_LIST.into());
+        source.offer(mime);
         if source.version() >= 3 {
-            source.set_actions(DndAction::Copy);
+            source.set_actions(action);
         }
+        // Must come before the drag starts.
+        let toplevel_drag = dock
+            .as_ref()
+            .and(self.toplevel_drags.as_ref())
+            .map(|manager| manager.get_xdg_toplevel_drag(&source, qh, ()));
         device.start_drag(
             Some(&source),
             &origin,
@@ -603,13 +833,44 @@ impl State {
             seat,
             serial = press.serial,
             sequence = press.sequence,
+            dock = dock.is_some(),
             "drag out started"
         );
+        if let Some(request) = dock {
+            // An earlier dock drag's source, if it lingers, still cleans up
+            // after itself; its events no longer match the token.
+            self.dock = Some(ActiveDock {
+                token: request.token,
+                mime: request.mime,
+                signals: request.signals,
+                waker: request.waker,
+                source,
+                toplevel_drag: toplevel_drag.clone(),
+                entered: None,
+            });
+        }
         // Queued is started: the loop flushes the rest once the socket
         // takes it.
         self.outgoing
             .flush(&self.conn)
-            .map_err(|error| DragOutError::Platform(error.to_string()))
+            .map_err(|error| DragOutError::Platform(error.to_string()))?;
+        Ok(toplevel_drag)
+    }
+
+    /// Give up the dock drag with `token`: destroying its source ends the
+    /// drag. Its `xdg_toplevel_drag_v1` is left alone, since destroying
+    /// one before the compositor reports the drag over is a protocol
+    /// error, and no report comes for a destroyed source.
+    fn end_dock(&mut self, token: u64) {
+        if self.dock.as_ref().is_none_or(|dock| dock.token != token) {
+            return;
+        }
+        if let Some(dock) = self.dock.take() {
+            if let Some(icon) = dock.source.data::<Payload>().and_then(|p| p.icon.as_ref()) {
+                icon.destroy();
+            }
+            dock.source.destroy();
+        }
     }
 
     /// A roleless surface with a buffer of `pixels`, not yet committed.
@@ -702,10 +963,43 @@ impl Transfer {
     }
 }
 
-/// A data source's `text/uri-list` and the icon it drags with.
+/// What a data source offers, and the icon it drags with.
 struct Payload {
-    uris: Arc<[u8]>,
+    offered: Offered,
     icon: Option<Icon>,
+}
+
+enum Offered {
+    /// A `text/uri-list`.
+    Files(Arc<[u8]>),
+    /// A dock drag, by token; it sends no data.
+    Dock(u64),
+}
+
+/// What a data offer has said about itself so far.
+#[derive(Debug, Default)]
+struct OfferState {
+    mimes: Mutex<Vec<String>>,
+    /// The action the compositor settled on, from `wl_data_offer.action`.
+    action: Mutex<Option<DndAction>>,
+}
+
+impl OfferState {
+    fn offers(offer: &WlDataOffer, mime: &str) -> bool {
+        offer
+            .data::<OfferState>()
+            .is_some_and(|state| lock(&state.mimes).iter().any(|offered| offered == mime))
+    }
+
+    fn action(offer: &WlDataOffer) -> Option<DndAction> {
+        *lock(&offer.data::<OfferState>()?.action)
+    }
+}
+
+/// A plain lock: every change under these is a single assignment or push,
+/// so a panic while holding one leaves its value whole.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
@@ -808,13 +1102,71 @@ impl Dispatch<WlDataDevice, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // Known before borrowing the seat: whether it is one of ours.
+        let owned = match &event {
+            wl_data_device::Event::Enter { surface, .. } => {
+                let surface = surface.id().as_ptr() as Surface;
+                (surface != 0 && state.seats.is_window(surface)).then_some(surface)
+            }
+            _ => None,
+        };
         let Some(objects) = state.seats.get_mut(seat).map(|seat| &mut seat.objects) else {
             return;
         };
+        // Only the current dock drag's events over our windows go on.
+        let dock = state.dock.as_mut();
         match event {
-            wl_data_device::Event::Enter { id, .. } => replace(&mut objects.drag_offer, id),
-            wl_data_device::Event::Leave | wl_data_device::Event::Drop => {
-                replace(&mut objects.drag_offer, None)
+            wl_data_device::Event::Enter {
+                serial, x, y, id, ..
+            } => {
+                replace(&mut objects.drag_offer, id);
+                let (Some(dock), Some(offer)) = (dock, &objects.drag_offer) else {
+                    return;
+                };
+                if !OfferState::offers(offer, &dock.mime) {
+                    return;
+                }
+                if dock.entered == Some(seat) {
+                    dock.entered = None;
+                }
+                match owned {
+                    Some(surface) => {
+                        offer.accept(serial, Some(dock.mime.clone()));
+                        if offer.version() >= 3 {
+                            offer.set_actions(DndAction::Move, DndAction::Move);
+                        }
+                        dock.entered = Some(seat);
+                        dock.signal(DockSignal::Enter { surface, x, y });
+                    }
+                    None => offer.accept(serial, None),
+                }
+            }
+            wl_data_device::Event::Motion { x, y, .. } => {
+                if let Some(dock) = dock.filter(|dock| dock.entered == Some(seat)) {
+                    dock.signal(DockSignal::Motion { x, y });
+                }
+            }
+            wl_data_device::Event::Leave => {
+                if let Some(dock) = dock.filter(|dock| dock.entered == Some(seat)) {
+                    dock.entered = None;
+                    dock.signal(DockSignal::Leave);
+                }
+                replace(&mut objects.drag_offer, None);
+            }
+            wl_data_device::Event::Drop => {
+                if let Some(dock) = dock.filter(|dock| dock.entered == Some(seat)) {
+                    dock.entered = None;
+                    // Finishing an offer without a settled action is a
+                    // protocol error, fatal to winit's connection too.
+                    if let Some(offer) = &objects.drag_offer
+                        && offer.version() >= 3
+                        && OfferState::action(offer) == Some(DndAction::Move)
+                    {
+                        offer.finish();
+                    }
+                    dock.signal(DockSignal::Drop);
+                }
+                replace(&mut objects.drag_offer, None);
             }
             wl_data_device::Event::Selection { id } => replace(&mut objects.selection_offer, id),
             _ => {}
@@ -822,7 +1174,7 @@ impl Dispatch<WlDataDevice, u32> for State {
     }
 
     event_created_child!(State, WlDataDevice, [
-        wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, ()),
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, OfferState::default()),
     ]);
 }
 
@@ -852,6 +1204,25 @@ impl Dispatch<WlCallback, u64> for State {
     }
 }
 
+impl Dispatch<WlDataOffer, OfferState> for State {
+    fn event(
+        _: &mut Self,
+        _: &WlDataOffer,
+        event: wl_data_offer::Event,
+        offer: &OfferState,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_offer::Event::Offer { mime_type } => lock(&offer.mimes).push(mime_type),
+            wl_data_offer::Event::Action {
+                dnd_action: WEnum::Value(action),
+            } => *lock(&offer.action) = Some(action),
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<WlDataSource, Payload> for State {
     fn event(
         state: &mut Self,
@@ -861,9 +1232,22 @@ impl Dispatch<WlDataSource, Payload> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // This source's dock drag, if it is the one running.
+        let token = match payload.offered {
+            Offered::Dock(token) => Some(token),
+            Offered::Files(_) => None,
+        };
+        let dock = state.dock.as_mut().filter(|dock| Some(dock.token) == token);
         match event {
-            wl_data_source::Event::Send { mime_type, fd } if mime_type == URI_LIST => {
-                match Transfer::new(fd, Arc::clone(&payload.uris)) {
+            wl_data_source::Event::Send { mime_type, fd } => {
+                let Offered::Files(uris) = &payload.offered else {
+                    // A dock drag carries nothing; closing the pipe ends it.
+                    return;
+                };
+                if mime_type != URI_LIST {
+                    return;
+                }
+                match Transfer::new(fd, Arc::clone(uris)) {
                     Ok(mut transfer) => {
                         if !transfer.write() {
                             state.transfers.push(transfer);
@@ -874,7 +1258,26 @@ impl Dispatch<WlDataSource, Payload> for State {
                     }
                 }
             }
+            wl_data_source::Event::DndDropPerformed => {
+                if let Some(dock) = dock {
+                    if let Some(drag) = dock.toplevel_drag.take() {
+                        drag.destroy();
+                    }
+                    dock.signal(DockSignal::DropPerformed);
+                }
+            }
             wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
+                if dock.is_some()
+                    && let Some(dock) = state.dock.take()
+                {
+                    if let Some(drag) = &dock.toplevel_drag {
+                        drag.destroy();
+                    }
+                    dock.signal(match event {
+                        wl_data_source::Event::Cancelled => DockSignal::Cancelled,
+                        _ => DockSignal::Finished,
+                    });
+                }
                 source.destroy();
                 if let Some(icon) = &payload.icon {
                     icon.destroy();
@@ -904,7 +1307,8 @@ macro_rules! ignore_events {
 
 ignore_events!(
     WlDataDeviceManager,
-    WlDataOffer,
+    XdgToplevelDragManagerV1,
+    XdgToplevelDragV1,
     WlCompositor,
     WlShm,
     WlShmPool,

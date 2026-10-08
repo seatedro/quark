@@ -21,9 +21,10 @@ use std::time::Duration;
 
 use super::DragOutError;
 
-type Answer = Result<(), DragOutError>;
+/// The thread's answer: what the request made, or why it failed.
+type Answer<T> = Result<T, DragOutError>;
 
-enum Phase {
+enum Phase<T> {
     /// Sent, and neither side has acted.
     Waiting,
     /// The thread is using the window. `overdue`: the UI's timeout passed
@@ -31,18 +32,18 @@ enum Phase {
     Claimed {
         overdue: bool,
     },
-    Answered(Answer),
+    Answered(Answer<T>),
     /// The UI stopped waiting first.
     Abandoned,
 }
 
-struct Shared {
-    phase: Mutex<Phase>,
+struct Shared<T> {
+    phase: Mutex<Phase<T>>,
     changed: Condvar,
 }
 
-impl Shared {
-    fn lock(&self) -> MutexGuard<'_, Phase> {
+impl<T> Shared<T> {
+    fn lock(&self) -> MutexGuard<'_, Phase<T>> {
         // A panic while holding the lock leaves the phase consistent: every
         // change is a single assignment.
         self.phase
@@ -50,14 +51,14 @@ impl Shared {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    fn answer(&self, answer: Answer) {
+    fn answer(&self, answer: Answer<T>) {
         *self.lock() = Phase::Answered(answer);
         self.changed.notify_all();
     }
 }
 
 /// A new request's two ends: the UI's and the thread's.
-pub(super) fn ticket() -> (Waiter, Ticket) {
+pub(super) fn ticket<T>() -> (Waiter<T>, Ticket<T>) {
     let shared = Arc::new(Shared {
         phase: Mutex::new(Phase::Waiting),
         changed: Condvar::new(),
@@ -70,15 +71,16 @@ fn stopped() -> DragOutError {
 }
 
 /// The UI thread's end.
-pub(super) struct Waiter(Arc<Shared>);
+pub(super) struct Waiter<T>(Arc<Shared<T>>);
 
-impl Waiter {
+impl<T> Waiter<T> {
     /// The thread's answer. If it has not claimed the request within
     /// `timeout`, the request is abandoned and this fails; once it has, this
     /// waits for the answer however long it takes.
-    pub fn wait(self, timeout: Duration) -> Answer {
+    pub fn wait(self, timeout: Duration) -> Answer<T> {
         let shared = &*self.0;
-        let pending = |phase: &mut Phase| matches!(phase, Phase::Waiting | Phase::Claimed { .. });
+        let pending =
+            |phase: &mut Phase<T>| matches!(phase, Phase::Waiting | Phase::Claimed { .. });
         let (mut phase, _) = shared
             .changed
             .wait_timeout_while(shared.lock(), timeout, pending)
@@ -109,12 +111,12 @@ impl Waiter {
 
 /// The drag thread's end. Dropped unclaimed, it answers that the thread
 /// stopped, so the UI does not wait out its timeout.
-pub(super) struct Ticket(Option<Arc<Shared>>);
+pub(super) struct Ticket<T>(Option<Arc<Shared<T>>>);
 
-impl Ticket {
+impl<T> Ticket<T> {
     /// Take the request on, or `None` if the UI stopped waiting for it, in
     /// which case its window may be gone and nothing of it may be touched.
-    pub fn claim(mut self) -> Option<Claim> {
+    pub fn claim(mut self) -> Option<Claim<T>> {
         let shared = self.0.take()?;
         let mut phase = shared.lock();
         if !matches!(*phase, Phase::Waiting) {
@@ -133,7 +135,7 @@ impl Ticket {
     }
 }
 
-impl Drop for Ticket {
+impl<T> Drop for Ticket<T> {
     fn drop(&mut self) {
         if let Some(shared) = self.0.take()
             && matches!(*shared.lock(), Phase::Waiting)
@@ -146,10 +148,10 @@ impl Drop for Ticket {
 /// A request the thread has taken on: the UI waits, holding the window,
 /// until this answers. Dropped unanswered (a panic), it answers that the
 /// thread stopped, so the UI is never left waiting.
-pub(super) struct Claim(Option<Arc<Shared>>);
+pub(super) struct Claim<T>(Option<Arc<Shared<T>>>);
 
-impl Claim {
-    pub fn answer(mut self, answer: Answer) {
+impl<T> Claim<T> {
+    pub fn answer(mut self, answer: Answer<T>) {
         let Some(shared) = self.0.take() else {
             return;
         };
@@ -172,7 +174,7 @@ impl Claim {
     }
 }
 
-impl Drop for Claim {
+impl<T> Drop for Claim<T> {
     fn drop(&mut self) {
         if let Some(shared) = self.0.take() {
             shared.answer(Err(stopped()));
@@ -186,7 +188,7 @@ mod tests {
 
     #[test]
     fn a_start_the_ui_stopped_waiting_for_cannot_be_claimed() {
-        let (waiter, ticket) = ticket();
+        let (waiter, ticket) = ticket::<()>();
         assert_eq!(
             waiter.wait(Duration::ZERO),
             Err(DragOutError::Platform(
@@ -198,7 +200,7 @@ mod tests {
 
     #[test]
     fn a_claimed_start_holds_the_ui_past_its_timeout_until_answered() {
-        let (waiter, ticket) = ticket();
+        let (waiter, ticket) = ticket::<()>();
         let claim = ticket.claim().expect("still waited for");
         // Answers only once the UI's (zero) timeout has passed, so a waiter
         // that gave up on timeout would return the timeout error instead.
@@ -214,14 +216,15 @@ mod tests {
 
     #[test]
     fn a_start_the_thread_lets_go_of_answers_the_ui_at_once() {
-        let unclaimed = |ticket: Ticket| drop(ticket);
-        let claimed_then_dropped = |ticket: Ticket| drop(ticket.claim());
-        let cases: [(&str, &dyn Fn(Ticket)); 2] = [
-            ("dropped unclaimed, as on stop", &unclaimed),
-            ("dropped claimed, as on a panic", &claimed_then_dropped),
+        type LetGo = fn(Ticket<()>);
+        let unclaimed: LetGo = |ticket| drop(ticket);
+        let claimed_then_dropped: LetGo = |ticket| drop(ticket.claim());
+        let cases: [(&str, LetGo); 2] = [
+            ("dropped unclaimed, as on stop", unclaimed),
+            ("dropped claimed, as on a panic", claimed_then_dropped),
         ];
         for (name, let_go) in cases {
-            let (waiter, ticket) = ticket();
+            let (waiter, ticket) = ticket::<()>();
             let_go(ticket);
             // A timeout far past the test's runtime: only the answer ends it.
             assert_eq!(
