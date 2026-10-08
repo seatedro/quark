@@ -51,7 +51,7 @@ use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, DragEnd, DragLocation, DragOutcome, DragSession,
     DropPolicy, DropTargets, ElementContext, ElementHandle, ElementHandles, HandoffError,
-    ImeTarget, LayoutSnapshot, Mods, TextInputHitArea, WheelEvent, render_element,
+    ImeTarget, LayoutSnapshot, Mods, TextInputHitArea, TooltipRegion, WheelEvent, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
@@ -269,6 +269,7 @@ pub struct ViewContext<'a, 'f> {
     animations: &'a mut AnimationTable,
     geometry: &'a LayoutSnapshot,
     handles: &'a mut ElementHandles,
+    tooltips: &'a [TooltipRegion],
 }
 
 impl ViewContext<'_, '_> {
@@ -293,6 +294,19 @@ impl ViewContext<'_, '_> {
 
     pub fn release_element_handle(&mut self, handle: ElementHandle) {
         self.handles.release(handle);
+    }
+
+    /// The tooltip (`Div::tooltip`) of the innermost element under
+    /// `(x, y)` in the window's last completed frame, with that element's
+    /// bounds. The adapter collects tooltips but draws none: the app
+    /// decides when and where to show them.
+    pub fn tooltip_at(&self, x: f32, y: f32) -> Option<(&str, Rect)> {
+        // Paint order: a child's region comes after its parent's.
+        self.tooltips
+            .iter()
+            .rev()
+            .find(|t| t.bounds.contains(x, y))
+            .map(|t| (&*t.text, t.bounds))
     }
 
     /// The window's animation table, ticked to this frame's clock. Rows
@@ -1610,6 +1624,8 @@ impl<U: UiApp> App for UiAdapter<U> {
             animations: &mut win.animations,
             geometry: &win.router.frame().geometry,
             handles: &mut win.element_handles,
+            // Still the last frame's: this frame's paint takes them.
+            tooltips: &win.spare_tooltip_regions,
         });
         #[cfg(feature = "devtools")]
         let build_us = view_started.elapsed().as_micros() as u64;
