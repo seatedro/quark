@@ -70,6 +70,7 @@ struct Demo {
     reorder: Reorder,
     task_scroll: ScrollHandle,
     files_scroll: ScrollHandle,
+    gallery_scroll: ScrollHandle,
     dense: bool,
     status: String,
     menu: Option<DrawnMenuBar>,
@@ -119,6 +120,7 @@ impl Demo {
             reorder: Reorder::new(),
             task_scroll: ScrollHandle::new(),
             files_scroll: ScrollHandle::new(),
+            gallery_scroll: ScrollHandle::new(),
             dense: false,
             status: "Ready".into(),
             menu: drawn.then(|| DrawnMenuBar::new(&menus(false), Msg::Menu)),
@@ -188,16 +190,19 @@ impl Demo {
     fn gallery(&self, cx: &ViewContext) -> AnyElement {
         let theme = cx.theme;
         let gap = if self.dense { 4.0 } else { 12.0 };
+        // Scrolls within its column rather than spilling over the status bar.
         view! {
-            <div grid_cols={[repeat_fill([px(120.0)])]} gap={gap}>
-                for i in 0..14 {
-                    <div class="flex-col gap-1 p-[6] rounded-[6] bg-[theme.colors.elevated_surface]"
-                         @when {i % 5 == 0} { col_span={2} }>
-                        <div class="w-full rounded-[4] bg-[theme.colors.border]"
-                             aspect_ratio={if i % 5 == 0 { 2.0 } else { 1.0 }} />
-                        <text class="text-xs">"Card {i}"</text>
-                    </div>
-                }
+            <div class="flex-1 min-h-0 overflow-y-scroll" track_scroll={&self.gallery_scroll}>
+                <div class="w-full" grid_cols={[repeat_fill([px(120.0)])]} gap={gap}>
+                    for i in 0..14 {
+                        <div class="flex-col gap-1 p-[6] rounded-[6] bg-[theme.colors.elevated_surface]"
+                             @when {i % 5 == 0} { col_span={2} }>
+                            <div class="w-full rounded-[4] bg-[theme.colors.border]"
+                                 aspect_ratio={if i % 5 == 0 { 2.0 } else { 1.0 }} />
+                            <text class="text-xs">"Card {i}"</text>
+                        </div>
+                    }
+                </div>
             </div>
         }
     }
@@ -322,7 +327,8 @@ impl UiApp for Demo {
                     {column("Gallery", self.gallery(cx))}
                     {column("Files", self.files(cx))}
                 </div>
-                <div class="h-6 px-3 flex-row items-center border-t-[theme.colors.border]">
+                <div class="h-6 px-3 flex-row items-center border-t-[theme.colors.border]
+                            bg-[theme.colors.status_bar_background]">
                     <text class="text-xs">{self.status.clone()}</text>
                 </div>
             </div>
