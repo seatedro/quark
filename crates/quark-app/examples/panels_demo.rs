@@ -870,6 +870,25 @@ mod tests {
         assert_eq!(focused_name(&ui).as_deref(), Some("Files"));
     }
 
+    // Assistive tech can focus a tab without selecting it; Shift+F10 then
+    // acts on that tab, not the group's selected one.
+    #[test]
+    fn the_move_menu_acts_on_a_tab_focused_without_selecting_it() {
+        let mut ui = harness();
+        ax_action(
+            &mut ui,
+            &Dock::tab_id(FILES),
+            accesskit::Action::Focus,
+            None,
+        );
+        assert_eq!(focused_name(&ui).as_deref(), Some("Files"));
+        ui.key("shift+f10");
+        ui.click_node(By::role_name(Role::MenuItem, "Split right"));
+        // Files splits off into a group of its own; the selected tab stays.
+        ui.find(By::role_name(Role::TabPanel, "Files"));
+        ui.find(By::role_name(Role::TabPanel, "Preview"));
+    }
+
     #[test]
     fn the_move_menu_opens_under_the_focused_tab() {
         let mut ui = harness();

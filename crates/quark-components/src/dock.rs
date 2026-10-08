@@ -686,15 +686,21 @@ impl DockState {
             && self.drop_panel(panel, move_drop(destination, index))
     }
 
-    /// The panel whose tab has `focus`, a [`Dock::tab_focus`] target: the
-    /// active panel of that group.
+    /// The panel whose tab has `focus`: a group's [`Dock::tab_focus`]
+    /// target, meaning its active panel, or an inactive tab's own target,
+    /// which assistive technology can focus without selecting the tab.
     pub fn focused_panel(&self, focus: Option<FocusId>) -> Option<PanelId> {
         let focus = focus?;
-        self.roots
-            .iter()
-            .flat_map(PaneNode::groups)
-            .find(|g| Dock::tab_focus(g.id) == focus)?
-            .active_panel()
+        let mut groups = self.roots.iter().flat_map(PaneNode::groups);
+        groups.find_map(|g| {
+            if Dock::tab_focus(g.id) == focus {
+                return g.active_panel();
+            }
+            g.panels
+                .iter()
+                .copied()
+                .find(|&p| FocusId::from_key(&Dock::tab_id(p)) == focus)
+        })
     }
 
     /// The tab being dragged and where it would land, while a drag is over
