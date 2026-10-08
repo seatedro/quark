@@ -582,16 +582,6 @@ pub fn set_preedit(
     true
 }
 
-/// The IME composition in `target` changed. Placeholder: stream D shows
-/// the preedit and keeps Enter from sending while it is active.
-pub fn set_preedit(
-    _state: &mut State,
-    _target: FocusId,
-    _text: String,
-    _cursor: Option<(usize, usize)>,
-) {
-}
-
 /// Commands the composer owns (`FocusComposer`, `SendPrompt`, `StopRun`).
 pub fn command(state: &mut State, id: CommandId, scx: &SurfaceCx, fx: &mut Effects) -> bool {
     match id {
