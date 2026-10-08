@@ -22,6 +22,7 @@ pub mod menu;
 pub(crate) mod native_menu;
 #[cfg(feature = "notifications")]
 pub mod notification;
+pub mod placement;
 pub mod single_instance;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
