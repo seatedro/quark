@@ -164,5 +164,9 @@ pub fn popup(
         .shadow_preset(quark_app::quark_ui::design::Shadow::POPOVER)
         .rounded(8.0)
         .child(list);
-    Some(caret_popup(anchor, panel, window).into_any())
+    Some(
+        caret_popup(anchor, panel, window)
+            .prefer_above(true)
+            .into_any(),
+    )
 }

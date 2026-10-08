@@ -196,20 +196,19 @@ fn composer_send_stop_preserves_focus() {
 }
 
 // Catches suggestions opening inside the composer's layout (pushing the
-// draft) or below a composer at the bottom of the window, off screen.
+// draft), or below the caret line over the composer's own toolbar.
 #[test]
 fn composer_suggestions_open_above_the_caret_without_moving_the_draft() {
     let mut ui = review();
     type_in_composer(&mut ui, "see ");
     let before = ui.find(By::name("Message")).bounds;
-    ui.type_text("@");
+    // One match: short enough to fit below the caret line too.
+    ui.type_text("@comm");
     let list = ui.find(By::role(Role::ListBox)).bounds;
     let after = ui.find(By::name("Message")).bounds;
 
     assert_eq!(before, after);
-    assert!(
-        list.bottom() <= after.y + 22.0,
-        "list {list:?} field {after:?}"
-    );
+    let caret_top = after.y + ui.app().composer.editor().cursor_pos.y;
+    assert!(list.bottom() <= caret_top, "list {list:?} field {after:?}");
     assert!(list.y >= 0.0);
 }
