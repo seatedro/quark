@@ -158,7 +158,7 @@ impl RenderOnce for Slider {
         let width = self.width.unwrap_or((220.0 * scale).round());
         let value_text = format!("{value:.*}", range.decimals());
         let (fill, rest, knob) = if self.disabled {
-            (tc.text_muted, tc.element_background, tc.text_muted)
+            (tc.text_disabled, tc.element_background, tc.text_disabled)
         } else {
             (tc.accent, tc.element_background, tc.text_strong)
         };
@@ -222,7 +222,7 @@ impl RenderOnce for Slider {
                     bounds: probe,
                 }}
                 if self.show_value {
-                    <text class="text-sm" color={if self.disabled { tc.text_muted } else { tc.text }}>
+                    <text class="text-sm" color={if self.disabled { tc.text_disabled } else { tc.text }}>
                         {value_text}
                     </text>
                 }

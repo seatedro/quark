@@ -96,6 +96,10 @@ tokens! {
         /// field's fills (`element_background`, and `surface` while
         /// focused).
         placeholder,
+        /// Text and marks of a disabled control. In high contrast it stays
+        /// readable (4.5:1) but clearly lighter than `text` and
+        /// `text_muted`, which are too close there to tell states apart.
+        text_disabled,
         text_accent,
         icon,
         element_background,
@@ -394,6 +398,7 @@ fn dark_colors(
         text: n[Text],
         text_muted: n[Solid],
         placeholder: n[TextSubtle],
+        text_disabled: n[Solid],
         text_accent: b[TextSubtle],
         icon: n[TextSubtle],
         gutter_text: n[BorderStrong],
@@ -498,6 +503,7 @@ fn light_colors(
         text: n[TextStrong],
         text_muted: n[TextSubtle],
         placeholder: n[TextSubtle],
+        text_disabled: n[TextSubtle],
         text_accent: b[TextSubtle],
         icon: n[TextSubtle],
         gutter_text: n[Solid],
@@ -614,6 +620,7 @@ fn high_contrast_dark_colors() -> ThemeColors {
         text: rgb(0xffffff),
         text_muted: rgb(0xe0e0e0),
         placeholder: rgb(0xacacac),
+        text_disabled: rgb(0x949494),
         text_accent: rgb(0xb0d9ff),
         icon: rgb(0xe6e6e6),
         element_background: rgb(0x0f0f0f),
@@ -683,6 +690,7 @@ fn high_contrast_light_colors() -> ThemeColors {
         text: rgb(0x000000),
         text_muted: rgb(0x2e2e2e),
         placeholder: rgb(0x595959),
+        text_disabled: rgb(0x646464),
         text_accent: rgb(0x00317f),
         icon: rgb(0x1f1f1f),
         element_background: rgb(0xf0f0f0),
@@ -958,7 +966,7 @@ mod tests {
             (CODE, CODE_BACKGROUNDS, 7.0),
             (GUTTER, GUTTER_BACKGROUNDS, 7.0),
             (&["on_accent"], &["accent", "accent_strong"], 7.0),
-            (&["placeholder"], CONTROL_BACKGROUNDS, 4.5),
+            (&["placeholder", "text_disabled"], CONTROL_BACKGROUNDS, 4.5),
             (BOUNDARIES, CONTROL_BACKGROUNDS, 3.0),
         ];
         for theme in [Theme::high_contrast_dark(), Theme::high_contrast_light()] {
@@ -993,6 +1001,24 @@ mod tests {
                 }
             }
             assert!(failures.is_empty(), "{:?}: {failures:#?}", theme.mode);
+        }
+    }
+
+    // Catches disabled controls looking enabled in high contrast: the light
+    // theme's disabled radio (#2E2E2E, text_muted) was hard to tell from an
+    // enabled one (#000).
+    #[test]
+    fn high_contrast_disabled_text_stands_apart_from_enabled_text() {
+        for theme in [Theme::high_contrast_dark(), Theme::high_contrast_light()] {
+            let c = &theme.colors;
+            for (name, enabled) in [("text", c.text), ("text_muted", c.text_muted)] {
+                let ratio = contrast_ratio(c.text_disabled, enabled);
+                assert!(
+                    ratio >= 2.0,
+                    "{:?}: text_disabled vs {name}: {ratio:.2}",
+                    theme.mode
+                );
+            }
         }
     }
 

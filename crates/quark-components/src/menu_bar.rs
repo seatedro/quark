@@ -315,7 +315,7 @@ impl MenuBar {
                          @when {menu.enabled} {
                              on:click={on_title(index)} hover_bg={tc.sidebar_row_hover}
                          }>
-                        <text class="text-sm" color={if menu.enabled { tc.text } else { tc.text_muted }}>
+                        <text class="text-sm" color={if menu.enabled { tc.text } else { tc.text_disabled }}>
                             {menu.label.as_str()}
                         </text>
                     </div>

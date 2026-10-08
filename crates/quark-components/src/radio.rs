@@ -125,6 +125,9 @@ impl RenderOnce for RadioGroup {
                          }>
                         <div class="shrink-0 items-center justify-center" w={size} h={size}
                              rounded={size / 2.0}
+                             // Filled when disabled, as a disabled checkbox is,
+                             // so the state does not rest on color alone.
+                             @when {option.disabled} { bg={tc.element_background} }
                              border={match (option.disabled, self.selected == Some(i)) {
                                  (true, _) => tc.border_variant,
                                  (false, true) => tc.accent,
@@ -132,11 +135,11 @@ impl RenderOnce for RadioGroup {
                              }}>
                             if self.selected == Some(i) {
                                 <div w={dot} h={dot} rounded={dot / 2.0}
-                                     bg={if option.disabled { tc.text_muted } else { tc.accent }} />
+                                     bg={if option.disabled { tc.text_disabled } else { tc.accent }} />
                             }
                         </div>
                         <text class="text-sm"
-                              color={if option.disabled { tc.text_muted } else { tc.text }}>
+                              color={if option.disabled { tc.text_disabled } else { tc.text }}>
                             {option.label.clone()}
                         </text>
                     </div>
