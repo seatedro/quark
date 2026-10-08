@@ -11,6 +11,8 @@
 //! flags, and metrics, so a hit recomputes those from the attributes at its
 //! glyph. The memo is keyed by exactly the inputs above, so a hit yields
 //! what shaping the run again would.
+// Upstream's `shape-run-cache` replaces the memo's lookups.
+#![cfg_attr(feature = "shape-run-cache", allow(dead_code))]
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec::Vec};
