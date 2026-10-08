@@ -474,40 +474,62 @@ jobs:
         include:
           - name: quark
             args: "-p quark --harness fenwick:: --harness geometry::"
+            package: quark
+            cache-writer: true
           - name: quark hit
             args: "-p quark --harness hit::"
+            package: quark
           - name: quark reactive
             args: "-p quark --harness reactive::"
+            package: quark
           - name: quark-ui
             args: "-p quark-ui --harness virtual_list::"
+            package: quark-ui
+            cache-writer: true
           - name: quark-ui scroll
             args: "-p quark-ui --harness scroll::"
+            package: quark-ui
           - name: quark-app
             args: -p quark-app
+            package: quark-app
+            cache-writer: true
           - name: quark-components
             args: "-p quark-components --harness list_nav:: --harness slider::"
+            package: quark-components
+            cache-writer: true
           # pane_tree's dividers are separate harnesses so they prove in
           # parallel.
           - name: quark-components pane_tree 0
             args: "-p quark-components --harness pane_tree::verification::push_divider_0"
+            package: quark-components
           - name: quark-components pane_tree 1
             args: "-p quark-components --harness pane_tree::verification::push_divider_1"
+            package: quark-components
           - name: quark-components pane_tree 2
             args: "-p quark-components --harness pane_tree::verification::push_divider_2"
+            package: quark-components
           - name: quark-components split 0/1
             args: "-p quark-components --harness split_resize_pane0_flex1"
+            package: quark-components
           - name: quark-components split 0/2
             args: "-p quark-components --harness split_resize_pane0_flex2"
+            package: quark-components
           - name: quark-components split 1/0
             args: "-p quark-components --harness split_resize_pane1_flex0"
+            package: quark-components
           - name: quark-components split 1/2
             args: "-p quark-components --harness split_resize_pane1_flex2"
+            package: quark-components
           - name: quark-components split 2/0
             args: "-p quark-components --harness split_resize_pane2_flex0"
+            package: quark-components
           - name: quark-components split 2/1
             args: "-p quark-components --harness split_resize_pane2_flex1"
+            package: quark-components
           - name: quark-diff
             args: -p quark-diff
+            package: quark-diff
+            cache-writer: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -519,12 +541,41 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev
+            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev time
 
-      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+      # Install only: the steps below compile and then prove, so their
+      # timings separate the two.
+      - name: Install Kani
+        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: "0.68.0"
-          args: ${{ matrix.args }}
+          command: cargo-kani
+          args: --version
+
+      # Kani's build of the package and its dependencies. A restore is only a
+      # head start: cargo kani rebuilds whatever is stale and still proves
+      # every selected harness. One entry per package (cache-writer) saves,
+      # on master, when the dependencies changed.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        id: kani-build
+        with:
+          path: target/kani
+          key: kani-${{ matrix.package }}-${{ runner.os }}-${{ runner.arch }}-0.68.0-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/**') }}
+          restore-keys: |
+            kani-${{ matrix.package }}-${{ runner.os }}-${{ runner.arch }}-0.68.0-
+
+      - name: Kani compile
+        id: kani-compile
+        run: /usr/bin/time -v cargo kani ${{ matrix.args }} --only-codegen
+
+      - name: Kani prove
+        run: /usr/bin/time -v cargo kani ${{ matrix.args }}
+
+      - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        if: always() && steps.kani-compile.outcome == 'success' && matrix.cache-writer && github.ref == 'refs/heads/master' && steps.kani-build.outputs.cache-hit != 'true'
+        with:
+          path: target/kani
+          key: ${{ steps.kani-build.outputs.cache-primary-key }}
 
   # The faster proofs from the kani matrix above, for runs that are not full
   # verification. The slow pane_tree and split harnesses run only there.
@@ -540,20 +591,28 @@ jobs:
         include:
           - name: quark
             args: "-p quark --harness fenwick:: --harness geometry::"
+            package: quark
           - name: quark hit
             args: "-p quark --harness hit::"
+            package: quark
           - name: quark reactive
             args: "-p quark --harness reactive::"
+            package: quark
           - name: quark-ui
             args: "-p quark-ui --harness virtual_list::"
+            package: quark-ui
           - name: quark-ui scroll
             args: "-p quark-ui --harness scroll::"
+            package: quark-ui
           - name: quark-app
             args: -p quark-app
+            package: quark-app
           - name: quark-components
             args: "-p quark-components --harness list_nav:: --harness slider::"
+            package: quark-components
           - name: quark-diff
             args: -p quark-diff
+            package: quark-diff
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -565,12 +624,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev
+            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev time
 
-      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+      - name: Install Kani
+        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           kani-version: "0.68.0"
-          args: ${{ matrix.args }}
+          command: cargo-kani
+          args: --version
+
+      # The build the kani job saves on master; see there.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        id: kani-build
+        with:
+          path: target/kani
+          key: kani-${{ matrix.package }}-${{ runner.os }}-${{ runner.arch }}-0.68.0-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '.cargo/**') }}
+          restore-keys: |
+            kani-${{ matrix.package }}-${{ runner.os }}-${{ runner.arch }}-0.68.0-
+
+      - name: Kani compile
+        id: kani-compile
+        run: /usr/bin/time -v cargo kani ${{ matrix.args }} --only-codegen
+
+      - name: Kani prove
+        run: /usr/bin/time -v cargo kani ${{ matrix.args }}
 
   # One check to require: fails on any failed, cancelled or unexpectedly
   # skipped job. The only expected skips are the event split between full
