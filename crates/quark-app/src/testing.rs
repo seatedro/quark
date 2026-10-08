@@ -42,6 +42,36 @@ use winit::keyboard::{ModifiersState, NamedKey};
 use crate::runner::HeadlessRunner;
 use crate::{App, AppEvent, InputEvent, KeyChord, KeyKind, UiAdapter, UiApp, UiSender};
 
+/// What the app asked of the window's IME, as the frames so far left it
+/// ([`UiTestHarness::ime`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct ImeState {
+    pub allowed: bool,
+    /// Where the candidate window was last placed, in points.
+    pub cursor_area: Option<Rect>,
+    /// Times a frame made the IME drop its composition.
+    pub resets: u32,
+}
+
+impl ImeState {
+    pub(crate) fn apply(&mut self, frame: crate::runner::FrameIme) {
+        if frame.reset {
+            self.resets += 1;
+        }
+        if let Some(allowed) = frame.allowed {
+            self.allowed = allowed;
+        }
+        if let Some((x, y, width, height)) = frame.cursor_area {
+            self.cursor_area = Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            });
+        }
+    }
+}
+
 /// Pointer moves [`UiTestHarness::drag`] makes between its press and
 /// release, so drag handlers see motion rather than a jump.
 const DRAG_STEPS: u32 = 4;
@@ -313,6 +343,12 @@ impl<U: UiApp> UiTestHarness<U> {
     /// or selection at the byte range `cursor`. Empty text cancels it.
     pub fn ime_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
         self.send_event(InputEvent::ImePreedit(text.to_owned(), cursor));
+    }
+
+    /// What frames asked of the window's IME so far: whether it is on,
+    /// where its candidate window was placed, and how often it was reset.
+    pub fn ime(&self) -> ImeState {
+        self.runner.ime
     }
 
     /// End the composition by committing `text`, as an IME does: the

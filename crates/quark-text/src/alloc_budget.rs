@@ -234,9 +234,11 @@ fn assert_budgets(system: &mut TextSystem, cases: Vec<(&str, Vec<Input>, Vec<Inp
 }
 
 // What laying out unseen text still allocates is all inside cosmic-text and
-// its dependencies: unicode-bidi's paragraph analysis (five vectors per
-// paragraph), cosmic-text's attribute span maps, and its per-word glyph
-// vectors (which word gets which retained vector varies, so one can grow).
+// its dependencies: cosmic-text's attribute span map (one per styled
+// paragraph), its per-word glyph vectors (which word gets which retained
+// vector varies, so one can grow), and, only for paragraphs with
+// right-to-left text or explicit bidi controls, unicode-bidi's analysis
+// (five vectors or more per paragraph).
 // The budgets sit just above that, so storage quark-text allocates or grows
 // per layout (each one costs at least 14 glyph columns) breaks them.
 #[test]
@@ -246,19 +248,20 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             "short ascii line",
             vec![ui(PANGRAM.into()), ui("jumpy otter".into())],
             vec![ui("brisk eagle".into())],
-            6,
+            1,
         ),
         (
             "80-column styled row",
             vec![styled_row(1), styled_row(2)],
             vec![styled_row(3)],
-            6,
+            1,
         ),
         (
             "30 fresh rows",
             (0..30).map(plain_row).collect(),
             (30..60).map(plain_row).collect(),
-            30 * 6,
+            // Words longer than the word that last had their glyph vector.
+            30,
         ),
         (
             "bidi and emoji paragraph",
@@ -289,13 +292,13 @@ fn fresh_text_with_ligatures_off_copies_features_per_span_only() {
             "80-column styled row",
             vec![styled_row(1), styled_row(2)],
             vec![styled_row(3)],
-            6 + 3,
+            1 + 3,
         ),
         (
             "row of words",
             vec![word_row(1), word_row(2)],
             vec![word_row(3)],
-            5 + 1,
+            1,
         ),
         (
             "bidi and emoji paragraph",
@@ -325,13 +328,10 @@ fn stream_past_cache_capacity_refills_evicted_layouts() {
         }
         last
     });
-    // Each row's residual is unicode-bidi's five vectors. Its 19 words'
-    // monospace fallback candidates reuse one vector, its lines' reordering
-    // reuses another, and the evictions themselves must add nothing.
-    assert!(
-        allocations <= 64 * 5 + 2,
-        "{allocations} allocations for 64 rows"
-    );
+    // Left-to-right rows skip the bidi analysis, its 19 words' monospace
+    // fallback candidates reuse one vector, its lines' reordering reuses
+    // another, and the evictions themselves must add nothing.
+    assert!(allocations <= 2, "{allocations} allocations for 64 rows");
     let last = last.expect("layout");
     assert_eq!(last.text().as_ref(), rows[95].text);
     assert_eq!(last.verify_integrity(), Ok(()));
@@ -354,6 +354,6 @@ fn layout_released_after_eviction_is_refilled() {
     drop(held);
     let fresh = ui("brisk eagle".into());
     let (layout, allocations) = count(|| cache.layout_query(&mut system, &fresh.query()));
-    assert!(allocations <= 6, "{allocations} allocations");
+    assert!(allocations <= 1, "{allocations} allocations");
     assert_eq!(layout.expect("layout").text().as_ref(), fresh.text);
 }

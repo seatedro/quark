@@ -590,6 +590,7 @@ impl Terminal {
             );
             let cursor = Cursor {
                 at: (c.visible && c.viewport_has_value).then_some((c.viewport_x, c.viewport_y)),
+                cell: c.viewport_has_value.then_some((c.viewport_x, c.viewport_y)),
                 wide: c.viewport_has_value && c.wide_tail,
                 shape: match c.visual_style {
                     sys::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => CursorShape::Bar,

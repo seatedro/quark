@@ -14,7 +14,7 @@ use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
 use super::{
     Block, BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState,
-    MeasureSpec, RULE_HEIGHT,
+    MeasureKey, MeasureSpec, RULE_HEIGHT,
 };
 use crate::element::{CodeBlock, SelectableText, StyledSpan};
 
@@ -102,8 +102,12 @@ impl BlockGeometry for TextGeometry {
 impl BlockMeasurer for TextMeasurer<'_> {
     type Geometry = TextGeometry;
 
-    fn settings_key(&self) -> u64 {
-        (u64::from(self.font_size.to_bits()) << 32) | u64::from(self.scale_factor.to_bits())
+    fn settings_key(&self) -> MeasureKey {
+        MeasureKey {
+            settings: (u64::from(self.font_size.to_bits()) << 32)
+                | u64::from(self.scale_factor.to_bits()),
+            fonts: Some(self.text.font_epoch()),
+        }
     }
 
     fn background_spec(&self) -> Option<MeasureSpec> {

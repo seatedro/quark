@@ -33,6 +33,9 @@ pub struct ElementContext<'a> {
     transition_keys: Vec<AnimKey>,
     pub debug_wireframe: bool,
     pub text_input_hit_areas: Vec<TextInputHitArea>,
+    /// Elements that take IME input while focused, in paint order; see
+    /// [`Self::register_ime_target`].
+    pub ime_targets: Vec<ImeTarget>,
     pub selectable_text_runs: Vec<SelectableTextRegion>,
     pub tooltip_regions: Vec<TooltipRegion>,
     pub accessibility: AccessibilityFrame,
@@ -110,6 +113,7 @@ impl<'a> ElementContext<'a> {
             transition_keys: Vec::new(),
             debug_wireframe: false,
             text_input_hit_areas: Vec::new(),
+            ime_targets: Vec::new(),
             selectable_text_runs: Vec::new(),
             tooltip_regions: Vec::new(),
             accessibility: AccessibilityFrame::default(),
@@ -456,6 +460,51 @@ impl<'a> ElementContext<'a> {
         node.set_transform(self.current_transform());
         let parent = self.accessible_semantic_ancestor();
         self.accessibility.push_child(node, parent)
+    }
+
+    /// Push an accessibility node under `parent`, a node this frame already
+    /// has, with its bounds in layout coordinates like
+    /// [`Self::push_accessibility`]: for a part of an element's own node,
+    /// such as the composition shown in a terminal.
+    pub fn push_accessibility_child(
+        &mut self,
+        mut node: AccessibilityNode,
+        parent: accesskit::NodeId,
+    ) -> accesskit::NodeId {
+        if !self.accessibility_enabled {
+            return crate::accessibility::ROOT_ID;
+        }
+        node.set_transform(self.current_transform());
+        self.accessibility.push_child(node, Some(parent))
+    }
+
+    /// Register the element painting now as an IME target: while `focus`
+    /// has keyboard focus, the host turns IME on and places the candidate
+    /// window at `caret` (layout coordinates). Text fields register
+    /// themselves; call this from `paint` for other elements that take
+    /// composition, such as a terminal.
+    ///
+    /// The caret is dropped (the target stays) under a transform that
+    /// flattens it or where the current clips hide it. A cache boundary
+    /// around the call paints fresh each frame, so the registration is
+    /// never replayed with stale geometry.
+    pub fn register_ime_target(&mut self, focus: FocusId, caret: Option<Rect>) {
+        let space = self.current_paint_space();
+        let caret = caret
+            .filter(|_| space.transform.invert().is_some())
+            .map(|caret| window_rect(space.transform, caret))
+            .filter(|caret| {
+                let clip = space.window_clip;
+                caret.x <= clip.right()
+                    && caret.right() >= clip.x
+                    && caret.y <= clip.bottom()
+                    && caret.bottom() >= clip.y
+            });
+        self.volatile_reads += 1;
+        self.ime_targets.push(ImeTarget {
+            focus_target: focus,
+            caret,
+        });
     }
 
     /// Like [`Self::push_accessibility`], and records that the node represents

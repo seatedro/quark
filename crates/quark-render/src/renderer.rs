@@ -23,8 +23,8 @@ use crate::shaders::{
 mod chunks;
 
 use crate::text::{
-    RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width, positioned_glyphs,
-    prepare_text_areas,
+    GlyphOwner, RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width,
+    positioned_glyphs, prepare_text_areas,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -859,6 +859,7 @@ pub struct Renderer {
     pub(crate) text_path: TextPath,
     /// Buffer path only.
     recolored: RecoloredBuffers,
+    glyph_owner: GlyphOwner,
     /// `(font size, TextSystem generation, width)` of the last measurement.
     cached_mono_char_width: Option<(f32, quark_text::FontEpoch, f32)>,
     flattener: Flattener,
@@ -1043,6 +1044,7 @@ impl Renderer {
             text_ready: true,
             text_path: TextPath::default(),
             recolored: RecoloredBuffers::default(),
+            glyph_owner: GlyphOwner::default(),
             cached_mono_char_width: None,
             flattener: Flattener::default(),
             expanded: Vec::new(),
@@ -1723,6 +1725,8 @@ impl Renderer {
     /// unpinned. False when this frame's glyphs do not fit and its text is
     /// skipped. On the positioned path the vertices still need uploading.
     fn prepare_frame_text(&mut self, frames: &[TargetFrame], text: &mut TextSystem) -> bool {
+        self.glyph_owner
+            .adopt(text, &mut self.atlas, &mut self.recolored);
         if self.text_path == TextPath::Buffer {
             self.recolored
                 .prepare(frames.iter().map(|frame| &frame.flat.rich_texts[..]), text);

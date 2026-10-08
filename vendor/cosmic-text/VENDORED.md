@@ -80,17 +80,30 @@ own pull request.
   keeps, where it cloned `BidiInfo::levels` per paragraph. Remove once
   upstream reuses that storage; `wrapped_bidi_lines_paint_their_runs_in_visual_order`
   and `layout_bidi_paragraph_separators_start_new_lines` check the levels.
+- Left-to-right bidi fast path (`src/shape.rs`): `ShapeLine::build` skips
+  `unicode_bidi::BidiInfo` for a non-empty line with no character of
+  class R, AL, AN, LRE, RLE, LRO, RLO, LRI, RLI, FSI, or B, and builds the
+  one level-0 span the full pass would produce. Those are the classes that
+  clear unicode-bidi's own pure-LTR flag (which makes it return the
+  paragraph level everywhere), plus paragraph separators, which would split
+  the line into several paragraphs. With no right-to-left character the
+  paragraph level is 0, so the output is identical; the check is one
+  table lookup per char. This removes the five unicode-bidi allocations
+  below from every left-to-right line, the whole residual of a plain
+  terminal row. Remove once upstream skips the pass the same way;
+  `shape::tests::bidi_fast_path_matches_full_pass` compares both paths over
+  each class, and the stream budget in `quark-text/src/alloc_budget.rs`
+  checks the skip.
 
 ## Not patched: bidi analysis
 
-`ShapeLine::build` runs `unicode_bidi::BidiInfo::new` per line, and
-unicode-bidi 0.3.18 has no way to reuse storage: `BidiInfo` owns its
-vectors and every constructor builds new ones. That leaves five
-allocations per paragraph of plain text (`original_classes`, `levels`, the
-`processing_classes` copy, `paragraphs`, and the per-paragraph flags) and
-more for text with RTL runs or isolates (the explicit-embedding status
-stack, level runs, isolating run sequences, and bracket pairs). These are
-the whole residual of an 80-column terminal row.
+For lines the fast path above does not take, `ShapeLine::build` runs
+`unicode_bidi::BidiInfo::new`, and unicode-bidi 0.3.18 has no way to reuse
+storage: `BidiInfo` owns its vectors and every constructor builds new ones.
+That costs five allocations per paragraph (`original_classes`, `levels`,
+the `processing_classes` copy, `paragraphs`, and the per-paragraph flags)
+and more for text with RTL runs or isolates (the explicit-embedding status
+stack, level runs, isolating run sequences, and bracket pairs).
 
 Removing them needs an upstream unicode-bidi API rather than a quark copy
 of the algorithm: a `BidiInfo` (or `ParagraphBidiInfo`) that can be

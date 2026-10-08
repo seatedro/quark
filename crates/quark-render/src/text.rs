@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use glyphon::{
     Attrs, AttrsList, AttrsOwned, Buffer, Color as GlyphonColor, FontSystem, LayoutGlyph,
-    LayoutRun, PositionedGlyph, TextArea, TextBounds,
+    LayoutRun, PositionedGlyph, TextArea, TextAtlas, TextBounds,
 };
 use quark::scene::ShapedText;
 use quark::{Color, FontKind};
-use quark_text::{TextLayout, TextParams, TextStyle, TextSystem};
+use quark_text::{TextLayout, TextParams, TextStyle, TextSystem, TextSystemId};
 
 use crate::renderer::{ClippedRichText, ClippedText, fade_color};
 use crate::scene::{Rect, RectPrimitive, Scene, TextDecoration, TextDecorationKind};
@@ -23,6 +23,31 @@ pub(crate) enum TextPath {
     /// multi-colored layouts drawn from [`RecoloredBuffers`]. The fallback
     /// the positioned path is checked against.
     Buffer,
+}
+
+/// The text system whose fonts the renderer's glyph atlas and recolored
+/// buffers were filled from. Both hold cosmic-text face ids, which another
+/// system's font database hands out again from the start, so after a
+/// replacement a cached glyph would draw for an unrelated glyph of the new
+/// fonts. A font change within one system keeps its ids.
+#[derive(Default)]
+pub(super) struct GlyphOwner(Option<TextSystemId>);
+
+impl GlyphOwner {
+    /// Records `text` as the system this frame draws with, first emptying
+    /// `atlas` and `recolored` when another system filled them.
+    pub(super) fn adopt(
+        &mut self,
+        text: &TextSystem,
+        atlas: &mut TextAtlas,
+        recolored: &mut RecoloredBuffers,
+    ) {
+        let system = text.font_epoch().system;
+        if self.0.replace(system).is_some_and(|old| old != system) {
+            atlas.clear();
+            recolored.entries.clear();
+        }
+    }
 }
 
 /// The glyphs of `texts` then `rich_texts`, in glyphon's order for the same
@@ -563,6 +588,121 @@ mod tests {
             red > 50,
             "{red} red pixels: the emoji drew without its colors"
         );
+    }
+
+    /// A font file with every `from` in its names changed to `to`, which
+    /// must be as long, so a vendored-only system has no family by the new
+    /// name.
+    fn renamed(file: &[u8], from: &str, to: &str) -> Vec<u8> {
+        let utf16 =
+            |name: &str| -> Vec<u8> { name.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+        let mut bytes = file.to_vec();
+        for (from, to) in [
+            (from.as_bytes().to_vec(), to.as_bytes().to_vec()),
+            (utf16(from), utf16(to)),
+        ] {
+            let mut at = 0;
+            while let Some(i) = bytes[at..].windows(from.len()).position(|w| w == from) {
+                bytes[at + i..at + i + from.len()].copy_from_slice(&to);
+                at += i + from.len();
+            }
+        }
+        bytes
+    }
+
+    // Regression: the glyph atlas is keyed by face id, and a replacement
+    // text system's database hands out the old ids again. A glyph cached
+    // from the old fonts drew where the new fonts have another glyph under
+    // the same face and glyph id.
+    #[test]
+    fn replaced_text_system_draws_its_own_glyphs() {
+        use crate::renderer::{RenderError, Renderer};
+        use crate::scene::{Primitive, TextPrimitive};
+        use quark_text::cosmic_text::fontdb;
+
+        fn renderer() -> Option<Renderer> {
+            match Renderer::new_headless(48, 48, 1.0) {
+                Ok(renderer) => Some(renderer),
+                Err(RenderError::NoAdapter) => {
+                    assert!(
+                        std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                        "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+                    );
+                    None
+                }
+                Err(error) => panic!("headless renderer failed: {error}"),
+            }
+        }
+        /// A vendored-only system that draws its UI text in the font in
+        /// `file`, loaded after the vendored faces under a new family.
+        fn system(file: &[u8], from: &str, to: &str, family: &str) -> TextSystem {
+            let mut system = TextSystem::vendored_only(&FontSettings {
+                ui_family: family.into(),
+                ..FontSettings::default()
+            });
+            system.load_font_data(Arc::new(renamed(file, from, to)));
+            system
+        }
+        fn shape(text: &mut TextSystem, s: &str) -> TextLayout {
+            text.layout(&TextParams::new(s, TextStyle::new(32.0)))
+                .expect("layout")
+        }
+        fn first_glyph(layout: &TextLayout) -> Option<(fontdb::ID, u16)> {
+            let run = layout.buffer().layout_runs().next()?;
+            run.glyphs.first().map(|g| (g.font_id, g.glyph_id))
+        }
+        fn render(renderer: &mut Renderer, text: &mut TextSystem, s: &str) -> Vec<u8> {
+            let layout = shape(text, s);
+            let mut scene = Scene::default();
+            scene.push(Primitive::TextRun(TextPrimitive {
+                rect: Rect {
+                    x: 4.0,
+                    y: 4.0,
+                    width: 40.0,
+                    height: 40.0,
+                },
+                layout: ShapedText::new(Arc::new(layout)),
+                color: Color::rgba(255, 255, 255, 255),
+            }));
+            renderer
+                .render_to_rgba(&scene, text, 48, 48)
+                .expect("offscreen render")
+        }
+
+        let Some(mut reused) = renderer() else {
+            return;
+        };
+        let mut old = system(
+            include_bytes!("../../quark-text/assets/fonts/Geist-Regular.otf"),
+            "Geist",
+            "Gaust",
+            "Gaust",
+        );
+        let mut new = system(
+            include_bytes!("../../quark-text/assets/fonts/SourceSans3-Regular.ttf"),
+            "Source",
+            "Sorcer",
+            "Sorcer Sans 3",
+        );
+        // A character the old fonts shape to the same face and glyph id as
+        // "M" in the new fonts, so both glyphs share an atlas key.
+        let target = first_glyph(&shape(&mut new, "M"));
+        assert!(target.is_some(), "M shapes to a glyph");
+        let twin = ('!'..'\u{3000}')
+            .map(String::from)
+            .find(|c| first_glyph(&shape(&mut old, c)) == target)
+            .expect("the loaded faces share an id and a glyph id");
+
+        let twin_pixels = render(&mut reused, &mut old, &twin);
+        let pixels = render(&mut reused, &mut new, "M");
+
+        let mut fresh = renderer().expect("a second renderer");
+        let expected = render(&mut fresh, &mut new, "M");
+        assert!(
+            twin_pixels != expected,
+            "the fonts draw the glyphs differently"
+        );
+        assert!(pixels == expected, "drew the old fonts' glyph");
     }
 
     // Regression: the default vendored faces (Geist, Geist Mono) have no

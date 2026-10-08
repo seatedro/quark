@@ -322,7 +322,10 @@ impl<A: App> Runner<A> {
         };
         let mut scene = scene;
         let ime = cx.ime;
-        if let Some(allowed) = ime.allowed {
+        if ime.reset {
+            state.window.set_ime_allowed(false);
+        }
+        if let Some(allowed) = ime.allowed.or(ime.reset.then_some(true)) {
             state.window.set_ime_allowed(allowed);
         }
         if let Some((x, y, width, height)) = ime.cursor_area {
