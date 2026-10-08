@@ -33,6 +33,7 @@ pub mod fonts;
 mod layout;
 pub mod offset;
 mod row;
+mod source;
 mod system;
 
 pub use cache::{LayoutCache, LayoutCacheLimits, LayoutCacheMemory, LayoutCacheStats, LayoutKey};
@@ -45,4 +46,5 @@ pub use layout::{
 };
 pub use offset::{TextOffset, ToTextOffset};
 pub use row::{RowHeights, RowMeasure};
+pub use source::TextSource;
 pub use system::{TextSystem, TextSystemRecipe};

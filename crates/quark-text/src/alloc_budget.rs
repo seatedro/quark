@@ -227,7 +227,7 @@ fn assert_budgets(system: &mut TextSystem, cases: Vec<(&str, Vec<Input>, Vec<Inp
         });
         assert!(allocations <= budget, "{name}: {allocations} > {budget}");
         for (layout, input) in layouts.iter().zip(&measured) {
-            assert_eq!(layout.text().as_ref(), input.text, "{name}");
+            assert_eq!(layout.text(), input.text, "{name}");
             assert_eq!(layout.verify_integrity(), Ok(()), "{name}");
         }
     }
@@ -333,7 +333,7 @@ fn stream_past_cache_capacity_refills_evicted_layouts() {
     // another, and the evictions themselves must add nothing.
     assert!(allocations <= 2, "{allocations} allocations for 64 rows");
     let last = last.expect("layout");
-    assert_eq!(last.text().as_ref(), rows[95].text);
+    assert_eq!(last.text(), rows[95].text);
     assert_eq!(last.verify_integrity(), Ok(()));
 }
 
@@ -355,5 +355,5 @@ fn layout_released_after_eviction_is_refilled() {
     let fresh = ui("brisk eagle".into());
     let (layout, allocations) = count(|| cache.layout_query(&mut system, &fresh.query()));
     assert!(allocations <= 1, "{allocations} allocations");
-    assert_eq!(layout.expect("layout").text().as_ref(), fresh.text);
+    assert_eq!(layout.expect("layout").text(), fresh.text);
 }

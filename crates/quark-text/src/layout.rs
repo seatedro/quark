@@ -11,6 +11,7 @@ use quark::{FontKind, FontWeight, Rect};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::offset::{TextOffset, ToTextOffset};
+use crate::source::TextSource;
 
 /// Line height multiplier quark has always used for text.
 pub const DEFAULT_LINE_HEIGHT_FACTOR: f32 = 1.35;
@@ -152,35 +153,6 @@ fn no_spans() -> Arc<[TextSpan]> {
     static EMPTY: std::sync::LazyLock<Arc<[TextSpan]>> =
         std::sync::LazyLock::new(|| Arc::from(Vec::new()));
     EMPTY.clone()
-}
-
-/// The empty text every rebuilt layout starts from.
-fn empty_text() -> Arc<str> {
-    static EMPTY: std::sync::LazyLock<Arc<str>> = std::sync::LazyLock::new(|| Arc::from(""));
-    EMPTY.clone()
-}
-
-/// Sets `dst` to a copy of `src`, writing over `dst`'s allocation when
-/// nothing else holds it and it is the same length.
-fn copy_text(dst: &mut Arc<str>, src: &str) {
-    match Arc::get_mut(dst) {
-        Some(own) if own.len() == src.len() => {
-            // SAFETY: every byte is overwritten with `src`, which is valid
-            // UTF-8 of exactly this length.
-            unsafe { own.as_bytes_mut() }.copy_from_slice(src.as_bytes());
-        }
-        _ if src.is_empty() => *dst = empty_text(),
-        _ => *dst = Arc::from(src),
-    }
-}
-
-/// [`copy_text`] for spans.
-fn copy_spans(dst: &mut Arc<[TextSpan]>, src: &[TextSpan]) {
-    match Arc::get_mut(dst) {
-        Some(own) if own.len() == src.len() => own.clone_from_slice(src),
-        _ if src.is_empty() => *dst = no_spans(),
-        _ => *dst = Arc::from(src),
-    }
 }
 
 /// [`TextParams`] borrowed: what a cache lookup needs, so a hit costs no
@@ -480,8 +452,7 @@ fn fit_rtl_lines(fs: &mut FontSystem, buffer: &mut Buffer) -> f32 {
 /// hit-testing, selection, and painting.
 #[derive(Debug)]
 pub struct TextLayout {
-    text: Arc<str>,
-    spans: Arc<[TextSpan]>,
+    source: TextSource,
     style: TextStyle,
     wrap_width: Option<f32>,
     scale_factor: f32,
@@ -515,8 +486,7 @@ impl TextLayout {
     /// A layout with no text, for [`Self::rebuild`] to fill.
     pub(crate) fn empty() -> Self {
         Self {
-            text: empty_text(),
-            spans: no_spans(),
+            source: TextSource::empty(),
             style: TextStyle::new(1.0),
             wrap_width: None,
             scale_factor: 1.0,
@@ -555,7 +525,7 @@ impl TextLayout {
     ) -> Result<Self, TextError> {
         params.validate()?;
         let mut layout = Self::empty();
-        layout.share_inputs(params);
+        layout.copy_inputs(&params.query());
         layout.rebuild_with(fs, scratch, synth, emoji, ligatures, keep);
         Ok(layout)
     }
@@ -609,23 +579,30 @@ impl TextLayout {
                 .chain(&self.spare_lines)
                 .map(BufferLine::storage_bytes)
                 .sum::<usize>();
-        let inputs = self.text.len() + self.spans.len() * size_of::<TextSpan>();
+        let inputs = self.source.storage_bytes();
         size_of::<Self>() + glyphs + lines + runs + buffer + inputs
     }
 
-    /// Takes `params`' text and spans, sharing their allocations.
-    pub(crate) fn share_inputs(&mut self, params: &TextParams) {
-        self.text = params.text.clone();
-        self.spans = params.spans.clone();
-        self.set_settings(&params.query());
+    /// Copies `query`'s text and spans, into this layout's own source when
+    /// nothing else holds it.
+    pub(crate) fn copy_inputs(&mut self, query: &TextQuery) {
+        self.source.set(query.text, query.spans);
+        self.set_settings(query);
     }
 
-    /// Copies `query`'s text and spans, over this layout's own copies when
-    /// nothing else holds them and they are the same length.
-    pub(crate) fn copy_inputs(&mut self, query: &TextQuery) {
-        copy_text(&mut self.text, query.text);
-        copy_spans(&mut self.spans, query.spans);
-        self.set_settings(query);
+    /// `pooled` refilled by `fill`, or a new layout when there is none or
+    /// something reached it after all. Only [`Arc::get_mut`] decides that
+    /// nothing else holds a layout.
+    pub(crate) fn refill(pooled: Option<Arc<Self>>, fill: impl FnOnce(&mut Self)) -> Arc<Self> {
+        if let Some(mut layout) = pooled
+            && let Some(own) = Arc::get_mut(&mut layout)
+        {
+            fill(own);
+            return layout;
+        }
+        let mut layout = Self::empty();
+        fill(&mut layout);
+        Arc::new(layout)
     }
 
     fn set_settings(&mut self, query: &TextQuery) {
@@ -634,8 +611,7 @@ impl TextLayout {
         self.scale_factor = query.scale_factor;
     }
 
-    /// Shapes and lays out the inputs [`Self::share_inputs`] or
-    /// [`Self::copy_inputs`] set, which must be valid params, reusing this
+    /// Shapes and lays out the inputs [`Self::copy_inputs`] set, which must be valid params, reusing this
     /// layout's buffer, lines, and columns.
     pub(crate) fn rebuild(
         &mut self,
@@ -657,10 +633,10 @@ impl TextLayout {
         ligatures: bool,
         keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
     ) {
-        // Reference counts, not copies: the fields below are borrowed
+        // A reference count, not a copy: the fields below are borrowed
         // mutably while the text is read.
-        let (text, spans) = (self.text.clone(), self.spans.clone());
-        let text = text.as_ref();
+        let source = self.source.clone();
+        let (text, spans) = (source.as_str(), source.spans());
         let style = self.style;
         let scale = self.scale_factor;
         let wrap = self.wrap_width.map(|w| (w * scale).max(1.0));
@@ -918,7 +894,7 @@ impl TextLayout {
             });
         }
 
-        let text = self.text.as_ref();
+        let text = self.text();
         let in_text = |start: usize, end: usize| {
             start <= end
                 && end <= text.len()
@@ -969,11 +945,11 @@ impl TextLayout {
             if !on_line {
                 return Err(IntegrityError::GlyphLine { glyph, line });
             }
-            if g.span[glyph] as usize > self.spans.len() {
+            if g.span[glyph] as usize > self.spans().len() {
                 return Err(IntegrityError::GlyphSpan {
                     glyph,
                     span: g.span[glyph],
-                    spans: self.spans.len(),
+                    spans: self.spans().len(),
                 });
             }
         }
@@ -1007,16 +983,22 @@ impl TextLayout {
         Ok(())
     }
 
-    pub fn text(&self) -> &Arc<str> {
-        &self.text
+    pub fn text(&self) -> &str {
+        self.source.as_str()
+    }
+
+    /// The text and spans, shared: hold this to keep the text of what was
+    /// painted without copying it.
+    pub fn source(&self) -> &TextSource {
+        &self.source
     }
 
     /// The inputs this layout was laid out from, borrowed: look it up again
     /// at another wrap width without copying the text.
     pub fn query(&self) -> TextQuery<'_> {
         TextQuery {
-            text: &self.text,
-            spans: &self.spans,
+            text: self.source.as_str(),
+            spans: self.source.spans(),
             style: self.style,
             wrap_width: self.wrap_width,
             scale_factor: self.scale_factor,
@@ -1028,7 +1010,7 @@ impl TextLayout {
     /// trailing spaces: the narrowest wrap width that splits no word. Below
     /// it, wrapping falls back to breaking between glyphs.
     pub fn min_content_width(&self) -> f32 {
-        let text: &str = &self.text;
+        let text = self.text();
         // No-break spaces do not end a word.
         let breaking_space =
             |c: char| c.is_whitespace() && !matches!(c, '\u{a0}' | '\u{2007}' | '\u{202f}');
@@ -1058,8 +1040,8 @@ impl TextLayout {
         segments.iter().fold(0.0, |widest, s| widest.max(s.2))
     }
 
-    pub fn spans(&self) -> &Arc<[TextSpan]> {
-        &self.spans
+    pub fn spans(&self) -> &[TextSpan] {
+        self.source.spans()
     }
 
     pub fn style(&self) -> TextStyle {
@@ -1159,7 +1141,7 @@ impl TextLayout {
         if range.is_empty() {
             // An empty line can start inside a grapheme ("\n\r\n" is "\n\r"
             // plus "\n" to the layout but "\n" plus "\r\n" as graphemes).
-            return TextOffset::snap(&self.text, self.lines.byte_start[line] as usize);
+            return TextOffset::snap(self.text(), self.lines.byte_start[line] as usize);
         }
         // Glyph storage order is not visual (RTL runs are stored logically),
         // so scan for the containing glyph and the visual extremes.
@@ -1198,14 +1180,14 @@ impl TextLayout {
         };
         let start = self.lines.byte_start[line] as usize;
         let end = self.lines.byte_end[line] as usize;
-        TextOffset::snap(&self.text, byte.clamp(start, end))
+        TextOffset::snap(self.text(), byte.clamp(start, end))
     }
 
     /// Caret position for an offset (a raw index is clamped and snapped down
     /// to a grapheme boundary). At a soft wrap the caret goes to the start
     /// of the next line.
     pub fn caret(&self, offset: impl ToTextOffset) -> Caret {
-        let byte = offset.to_offset(&self.text).get();
+        let byte = offset.to_offset(self.text()).get();
         let line = self.line_for_byte(byte);
         Caret {
             x: self.x_for_byte(line, byte),
@@ -1219,10 +1201,10 @@ impl TextLayout {
     /// order), one or more per line; RTL/mixed runs may produce several per
     /// line. Visits only the lines the range touches.
     pub fn selection_rects(&self, range: Range<impl ToTextOffset>) -> std::vec::IntoIter<Rect> {
-        let len = self.text.len();
+        let len = self.text().len();
         // Snap like `caret` so arbitrary offsets never slice inside a char
         // and rect edges line up with carets.
-        let range = crate::offset::ordered(&self.text, range);
+        let range = crate::offset::ordered(self.text(), range);
         let (a, b) = (range.start.get(), range.end.get());
         let mut rects = Vec::new();
         if a == b {
@@ -1395,10 +1377,10 @@ impl TextLayout {
     fn x_in_cluster(&self, i: usize, byte: usize) -> f32 {
         let g = &self.glyphs;
         let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
-        let cluster = self.text.get(gs..ge).unwrap_or_default();
+        let cluster = self.text().get(gs..ge).unwrap_or_default();
         let total = cluster.graphemes(true).count().max(1);
         let before = self
-            .text
+            .text()
             .get(gs..byte.clamp(gs, ge))
             .map_or(0, |s| s.graphemes(true).count());
         let mut frac = before as f32 / total as f32;
@@ -1414,7 +1396,7 @@ impl TextLayout {
     fn cluster_byte_at(&self, i: usize, frac: f32) -> usize {
         let g = &self.glyphs;
         let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
-        let cluster = self.text.get(gs..ge).unwrap_or_default();
+        let cluster = self.text().get(gs..ge).unwrap_or_default();
         let total = cluster.graphemes(true).count().max(1);
         let k = (frac * total as f32).round() as usize;
         if k >= total {
@@ -2147,7 +2129,7 @@ mod tests {
             ui_family: "Inter".into(),
             ..FontSettings::default()
         });
-        reused.share_inputs(&params);
+        reused.copy_inputs(&params.query());
         system.rebuild(&mut reused);
         let fresh = system.layout(&params).expect("layout");
         assert_ne!(

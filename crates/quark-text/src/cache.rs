@@ -312,7 +312,7 @@ impl LayoutCache {
         system: &mut TextSystem,
         params: &TextParams,
     ) -> Result<Arc<TextLayout>, TextError> {
-        self.lookup(system, &params.query(), Some(params))
+        self.lookup(system, &params.query())
     }
 
     /// [`Self::layout`] for borrowed params: a hit allocates nothing, a
@@ -322,16 +322,16 @@ impl LayoutCache {
         system: &mut TextSystem,
         query: &TextQuery,
     ) -> Result<Arc<TextLayout>, TextError> {
-        self.lookup(system, query, None)
+        self.lookup(system, query)
     }
 
-    /// Looks `params` up, laying them out on a miss. The layout shares
-    /// `shared`'s text and spans when given, and copies them otherwise.
+    /// Looks `params` up, laying them out on a miss. A miss copies the text
+    /// and spans into the layout's source, over a pooled one's storage when
+    /// it can.
     fn lookup(
         &mut self,
         system: &mut TextSystem,
         params: &TextQuery,
-        shared: Option<&TextParams>,
     ) -> Result<Arc<TextLayout>, TextError> {
         let fonts = system.font_epoch();
         if self.fonts != Some(fonts) {
@@ -361,11 +361,8 @@ impl LayoutCache {
         self.stats.misses += 1;
         params.validate()?;
         let pooled = self.pool.take(params.text);
-        let layout = refill(pooled, |own| {
-            match shared {
-                Some(shared) => own.share_inputs(shared),
-                None => own.copy_inputs(params),
-            }
+        let layout = TextLayout::refill(pooled, |own| {
+            own.copy_inputs(params);
             system.rebuild(own);
         });
         let bytes = layout.storage_bytes();
@@ -533,21 +530,6 @@ enum CacheError {
     Pool(PoolError),
 }
 
-/// `pooled` refilled by `fill`, or a new layout when there is none or
-/// something reached it after all. Only [`Arc::get_mut`] decides that
-/// nothing else holds a layout.
-fn refill(pooled: Option<Arc<TextLayout>>, fill: impl FnOnce(&mut TextLayout)) -> Arc<TextLayout> {
-    if let Some(mut layout) = pooled
-        && let Some(own) = Arc::get_mut(&mut layout)
-    {
-        fill(own);
-        return layout;
-    }
-    let mut layout = TextLayout::empty();
-    fill(&mut layout);
-    Arc::new(layout)
-}
-
 /// Layouts the cache evicted, kept so a miss refills one instead of
 /// allocating its storage and `Arc`. `free` layouts are held by nothing
 /// else. `retired` ones were still held elsewhere (by a scene, say) when
@@ -622,8 +604,8 @@ impl LayoutPool {
     }
 
     /// An unshared layout to rebuild for `text`: preferably one with room
-    /// for its glyphs (one per char, roughly), the least room among those,
-    /// and text of the same length so the copy can overwrite it.
+    /// for its glyphs (one per char, roughly), then for its text, the least
+    /// room among those.
     fn take(&mut self, text: &str) -> Option<Arc<TextLayout>> {
         // One turn of the queue: freed retirees leave it, the rest go
         // back in their order.
@@ -643,7 +625,7 @@ impl LayoutPool {
             let room = layout.glyph_capacity();
             let fits = room >= chars;
             let snug = if fits { usize::MAX - room } else { room };
-            (fits, layout.text().len() == text.len(), snug)
+            (fits, layout.source().capacity() >= text.len(), snug)
         })?;
         let spare = self.free.swap_remove(i);
         self.free_bytes -= spare.bytes;
@@ -687,10 +669,8 @@ impl Default for LayoutCache {
 }
 
 fn same_inputs(layout: &TextLayout, params: &TextQuery) -> bool {
-    let text_eq =
-        std::ptr::eq(layout.text().as_ref(), params.text) || layout.text().as_ref() == params.text;
-    let spans_eq = std::ptr::eq(layout.spans().as_ref(), params.spans)
-        || layout.spans().as_ref() == params.spans;
+    let text_eq = std::ptr::eq(layout.text(), params.text) || layout.text() == params.text;
+    let spans_eq = std::ptr::eq(layout.spans(), params.spans) || layout.spans() == params.spans;
     text_eq && spans_eq && layout.style() == params.style
 }
 
@@ -811,7 +791,7 @@ mod tests {
         cache
             .layout_query(&mut sys, &query(&other))
             .expect("layout");
-        assert_eq!(held.text().as_ref(), TEXT);
+        assert_eq!(held.text(), TEXT);
         assert_eq!(format!("{:?}", held.glyphs()), glyphs);
     }
 
@@ -842,7 +822,7 @@ mod tests {
             cache.trim();
             // The same length, so it could be copied over the held text.
             cache.layout_query(&mut sys, &query(other)).expect("layout");
-            assert_eq!(held.text().as_ref(), text, "round {round}");
+            assert_eq!(held.text(), text, "round {round}");
             assert_eq!(format!("{:?}", held.glyphs()), glyphs, "round {round}");
         }
     }
@@ -871,7 +851,7 @@ mod tests {
             let layout = cache
                 .layout_query(&mut sys, &TextQuery::new(&row, TextStyle::new(14.0)))
                 .expect("layout");
-            assert_eq!(layout.text().as_ref(), row);
+            assert_eq!(layout.text(), row);
             drop(layout);
             let memory = cache.memory();
             assert!(
@@ -909,7 +889,7 @@ mod tests {
         let memory = cache.memory();
         assert_eq!(memory.pinned_bytes, held_bytes, "{memory:?}");
         for ((layout, row), glyphs) in held.iter().zip(&rows).zip(&glyphs) {
-            assert_eq!(layout.text().as_ref(), row.as_str());
+            assert_eq!(layout.text(), row.as_str());
             assert_eq!(&format!("{:?}", layout.glyphs()), glyphs);
         }
     }
