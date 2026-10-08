@@ -567,7 +567,7 @@ mod tests {
                 240,
             ),
             // Onto a blank cell, so no glyph under the cursor needs shaping.
-            ("a cursor move", "\x1b[22;2H".into(), "$ ech", 2, 2),
+            ("a cursor move", "\x1b[22;2H".into(), "$ ech", 0, 0),
         ];
         for (name, input, shown, warm, idled) in cases {
             for (idle_frames, budget) in [(0, warm), (300, idled)] {

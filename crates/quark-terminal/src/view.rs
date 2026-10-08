@@ -166,6 +166,13 @@ struct Screen {
     composition: Option<(Preedit, (u16, u16))>,
 }
 
+thread_local! {
+    /// Row order by hash, and each row's occurrence among equal hashes.
+    static ROW_SCRATCH: std::cell::RefCell<(Vec<usize>, Vec<u64>)> = const {
+        std::cell::RefCell::new((Vec::new(), Vec::new()))
+    };
+}
+
 fn build(
     frame: &Frame,
     grid: &Rc<Grid>,
@@ -193,14 +200,21 @@ fn build(
     // their cache keys apart, and the terminal's id keeps them apart from
     // another terminal's rows. Sorting by hash finds each row's occurrence
     // without comparing every pair.
-    let mut by_hash: Vec<usize> = (0..grid.rows.len()).collect();
-    by_hash.sort_unstable_by_key(|&i| (grid.rows[i].hash, i));
-    let mut nth = vec![0u64; grid.rows.len()];
-    for pair in by_hash.windows(2) {
-        if grid.rows[pair[0]].hash == grid.rows[pair[1]].hash {
-            nth[pair[1]] = nth[pair[0]] + 1;
+    // The two vectors live in a per-thread scratch so a frame that rebuilds
+    // the rows (a cursor move) allocates nothing once warm.
+    let nth = ROW_SCRATCH.with_borrow_mut(|(by_hash, nth)| {
+        by_hash.clear();
+        by_hash.extend(0..grid.rows.len());
+        by_hash.sort_unstable_by_key(|&i| (grid.rows[i].hash, i));
+        nth.clear();
+        nth.resize(grid.rows.len(), 0);
+        for pair in by_hash.windows(2) {
+            if grid.rows[pair[0]].hash == grid.rows[pair[1]].hash {
+                nth[pair[1]] = nth[pair[0]] + 1;
+            }
         }
-    }
+        std::mem::take(nth)
+    });
     let terminal = quark::stable_hash(frame.id);
     for (i, row) in grid.rows.iter().enumerate() {
         let key = CacheKey(inputs_hash(&(terminal, row.hash, nth[i])));
@@ -218,6 +232,7 @@ fn build(
             .h(m.cell_h),
         );
     }
+    ROW_SCRATCH.with_borrow_mut(|(_, spare)| *spare = nth);
     if let Some(Screen {
         text: (text, caret),
         composition,
