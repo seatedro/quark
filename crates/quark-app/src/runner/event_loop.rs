@@ -608,18 +608,19 @@ impl<A: App> ApplicationHandler for Runner<A> {
         }
         self.started = true;
         self.focused = Some(handle);
+        // macOS and Windows report the theme through the window; on Linux it
+        // comes from the settings portal. Read before the app can force the
+        // window's own theme, which the window then reports instead.
+        let theme = self
+            .windows
+            .get(handle)
+            .and_then(WindowEntry::open)
+            .and_then(|state| state.window.theme());
         self.with_event_cx(event_loop, Some(handle), |app, cx| {
             app.init(cx);
             app.app_event(AppEvent::WindowOpened(handle), cx);
         });
-        // macOS and Windows report the theme through the window; on Linux it
-        // comes from the settings portal.
-        if let Some(theme) = self
-            .windows
-            .get(handle)
-            .and_then(WindowEntry::open)
-            .and_then(|state| state.window.theme())
-        {
+        if let Some(theme) = theme {
             self.theme_changed(event_loop, Some(handle), theme);
         }
         self.flags.redraw_all = true;

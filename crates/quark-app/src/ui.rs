@@ -57,7 +57,7 @@ use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
     TextEditCommand, TextEditOutcome, TextPointer, TextPointerEvent, command_for_binding,
 };
-use quark_ui::theme::Theme;
+use quark_ui::theme::{Theme, ThemeMode};
 use quark_ui::{Action, FocusId};
 use winit::window::{CursorIcon, Theme as SystemTheme};
 
@@ -519,6 +519,7 @@ impl UiContext<'_, '_> {
     pub fn set_theme(&mut self, theme: Theme) {
         self.shared.theme_choice = ThemeChoice::Fixed;
         self.apply_theme(theme);
+        self.shared.theme_native_windows(self.window);
     }
 
     /// Paint with `light` or `dark` as the desktop prefers, from the next
@@ -533,6 +534,7 @@ impl UiContext<'_, '_> {
             dark: Box::new(dark),
         };
         self.apply_theme(theme);
+        self.shared.theme_native_windows(self.window);
     }
 
     fn apply_theme(&mut self, theme: Theme) {
@@ -743,6 +745,35 @@ struct Shared {
     ended: Vec<DragEnd>,
     /// Windows whose focus the app set from another window's callback.
     refocused: Vec<WindowHandle>,
+}
+
+impl Shared {
+    /// The native theme (title bar, window decorations) that matches the
+    /// painted one: forced to a fixed theme's mode, and left to the desktop
+    /// when following it.
+    fn native_theme(&self) -> Option<SystemTheme> {
+        match self.theme_choice {
+            ThemeChoice::Fixed => Some(match self.theme.mode {
+                ThemeMode::Light => SystemTheme::Light,
+                ThemeMode::Dark => SystemTheme::Dark,
+            }),
+            ThemeChoice::System { .. } => None,
+        }
+    }
+
+    /// Give every open window [`Self::native_theme`]. Windows still opening
+    /// get it from [`AppEvent::WindowOpened`].
+    fn theme_native_windows(&self, cx: &EventContext) {
+        for window in cx.windows() {
+            self.theme_native_window(window, cx);
+        }
+    }
+
+    fn theme_native_window(&self, window: WindowHandle, cx: &EventContext) {
+        if let Some(native) = cx.window_by_handle(window) {
+            native.set_theme(self.native_theme());
+        }
+    }
 }
 
 /// Runs a [`UiApp`] as an [`App`].
@@ -1693,6 +1724,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         }
         match event {
             AppEvent::WindowOpened(window) => {
+                self.shared.theme_native_window(window, cx);
                 self.with_app(cx, |app, ucx| app.window_opened(window, ucx));
             }
             AppEvent::WindowClosed { window, reason } => {
