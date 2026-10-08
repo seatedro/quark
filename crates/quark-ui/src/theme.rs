@@ -91,6 +91,11 @@ tokens! {
         focus_border,
         text,
         text_muted,
+        /// Hint text in an empty field. Opaque, so its contrast does not
+        /// depend on how the renderer blends: at least 4.5:1 over the
+        /// field's fills (`element_background`, and `surface` while
+        /// focused).
+        placeholder,
         text_accent,
         icon,
         element_background,
@@ -388,6 +393,7 @@ fn dark_colors(
         text_strong: Color::rgba(240, 240, 245, 255),
         text: n[Text],
         text_muted: n[Solid],
+        placeholder: n[TextSubtle],
         text_accent: b[TextSubtle],
         icon: n[TextSubtle],
         gutter_text: n[BorderStrong],
@@ -491,6 +497,7 @@ fn light_colors(
         text_strong: n[TextStrong],
         text: n[TextStrong],
         text_muted: n[TextSubtle],
+        placeholder: n[TextSubtle],
         text_accent: b[TextSubtle],
         icon: n[TextSubtle],
         gutter_text: n[Solid],
@@ -606,6 +613,7 @@ fn high_contrast_dark_colors() -> ThemeColors {
         focus_border: rgb(0xffd60a),
         text: rgb(0xffffff),
         text_muted: rgb(0xe0e0e0),
+        placeholder: rgb(0xacacac),
         text_accent: rgb(0xb0d9ff),
         icon: rgb(0xe6e6e6),
         element_background: rgb(0x0f0f0f),
@@ -674,6 +682,7 @@ fn high_contrast_light_colors() -> ThemeColors {
         focus_border: rgb(0x7a00cc),
         text: rgb(0x000000),
         text_muted: rgb(0x2e2e2e),
+        placeholder: rgb(0x595959),
         text_accent: rgb(0x00317f),
         icon: rgb(0x1f1f1f),
         element_background: rgb(0xf0f0f0),
@@ -844,7 +853,8 @@ mod tests {
 
     // Catches a high-contrast token edited below its target for a pair a
     // control paints: text, code, and diff text at 7:1, marks over the
-    // accent at 7:1, and borders, focus rings, and accent marks at 3:1.
+    // accent at 7:1, placeholders at 4.5:1, and borders, focus rings, and
+    // accent marks at 3:1.
     #[test]
     fn high_contrast_pairs_meet_their_targets() {
         const SURFACES: &[&str] = &[
@@ -948,6 +958,7 @@ mod tests {
             (CODE, CODE_BACKGROUNDS, 7.0),
             (GUTTER, GUTTER_BACKGROUNDS, 7.0),
             (&["on_accent"], &["accent", "accent_strong"], 7.0),
+            (&["placeholder"], CONTROL_BACKGROUNDS, 4.5),
             (BOUNDARIES, CONTROL_BACKGROUNDS, 3.0),
         ];
         for theme in [Theme::high_contrast_dark(), Theme::high_contrast_light()] {
@@ -982,6 +993,27 @@ mod tests {
                 }
             }
             assert!(failures.is_empty(), "{:?}: {failures:#?}", theme.mode);
+        }
+    }
+
+    // Catches a standard theme's placeholder dropping below WCAG AA over
+    // the fills a text field paints behind it, as the old translucent
+    // text_muted did (about 2:1 once blended).
+    #[test]
+    fn standard_placeholders_are_readable_in_fields() {
+        for theme in [Theme::default_dark(), Theme::default_light()] {
+            let c = &theme.colors;
+            for (name, fill) in [
+                ("element_background", c.element_background),
+                ("surface", c.surface),
+            ] {
+                let ratio = contrast_ratio(c.placeholder, fill);
+                assert!(
+                    c.placeholder.a == 255 && ratio >= 4.5,
+                    "{:?}: placeholder on {name}: {ratio:.2}",
+                    theme.mode
+                );
+            }
         }
     }
 

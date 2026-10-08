@@ -437,7 +437,7 @@ impl Element for TextInput {
             self.value.clone()
         };
         let text_color = if is_placeholder {
-            theme.colors.text_muted.with_alpha(Alpha::PLACEHOLDER)
+            theme.colors.placeholder
         } else {
             theme.colors.text
         };

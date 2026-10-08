@@ -111,7 +111,6 @@ impl Alpha {
     pub const HOVER: u8 = 230;
     pub const HOVER_ALT: u8 = 220;
     pub const STRONG: u8 = 180;
-    pub const PLACEHOLDER: u8 = 140;
     pub const MEDIUM: u8 = 120;
     pub const MUTED: u8 = 100;
     pub const SOFT: u8 = 80;
