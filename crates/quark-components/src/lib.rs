@@ -54,6 +54,7 @@ pub use context_menu::*;
 pub use diff_view::{
     CopySide, DiffEvent, DiffKey, DiffOutcome, DiffStyle, DiffViewState, diff_view,
 };
+pub use disclosure::{DISCLOSURE_MS, DisclosurePhase, DisclosureState};
 pub use dock::{
     Boundary, Dock, DockDestination, DockEffects, DockEvent, DockIntegrityError, DockLayout,
     DockLocation, DockOutcome, DockRegion, DockSnapshot, DockSplit, DockState, FloatingSnapshot,
