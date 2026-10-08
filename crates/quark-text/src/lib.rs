@@ -28,6 +28,7 @@ macro_rules! profile_scope {
 #[cfg(test)]
 mod alloc_budget;
 mod cache;
+mod epoch;
 pub mod fonts;
 mod layout;
 pub mod offset;
@@ -36,6 +37,7 @@ mod system;
 
 pub use cache::{LayoutCache, LayoutCacheStats, LayoutKey};
 pub use cosmic_text;
+pub use epoch::{FontEpoch, TextSystemId};
 pub use fonts::{BundledFallback, FontRole, FontSettings, MONO_FAMILY, UI_FAMILY};
 pub use layout::{
     Caret, DEFAULT_LINE_HEIGHT_FACTOR, GlyphColumns, GlyphRun, IntegrityError, LineInfo, TextError,

@@ -200,6 +200,8 @@ fn run(jobs: Receiver<Job>, done: Sender<RowHeight>, epoch: &AtomicU64, measure:
                     .is_none_or(|(recipe, _)| *recipe != spec.fonts)
                 {
                     text = Some((spec.fonts.clone(), spec.fonts.build()));
+                    // Its layouts were shaped with the old fonts.
+                    layouts.clear();
                 }
                 let (_, system) = text.as_mut()?;
                 let mut measurer =
@@ -646,6 +648,38 @@ mod tests {
 
         let expected = ui.synchronous_heights();
         assert_eq!(ui.heights(), expected);
+    }
+
+    // Catches the worker reusing layouts its previous fonts shaped. Rows
+    // added after the fonts change hold the text the worker measured
+    // before, so each one looks up text the old system shaped.
+    #[test]
+    fn rows_measured_after_a_font_change_get_heights_in_the_new_fonts() {
+        let text = "iiiiMMMM ".repeat(16);
+        let rows = |keys: std::ops::Range<u64>| keys.map(|i| entry(i, text.clone())).collect();
+        let mut ui = Ui::new(rows(0..10), (300.0, 1.0));
+        ui.md.finish_measures();
+        let before = ui.heights();
+
+        ui.text.set_font_settings(&quark_text::FontSettings {
+            ui_family: "Inter".into(),
+            ..Default::default()
+        });
+        ui.md.extend(rows(10..20)).unwrap();
+        ui.frame();
+        ui.md.finish_measures();
+
+        // Rows measured before the change keep their heights; compare the
+        // added ones.
+        let added = |heights: String| heights.split(' ').skip(10).collect::<Vec<_>>().join(" ");
+        let expected = added(ui.synchronous_heights());
+        let height = |heights: &str| heights.split([' ', ':']).nth(1).unwrap_or("").to_owned();
+        assert_ne!(
+            height(&before),
+            height(&expected),
+            "the fonts wrap the text differently"
+        );
+        assert_eq!(added(ui.heights()), expected);
     }
 
     proptest! {

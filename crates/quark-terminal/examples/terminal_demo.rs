@@ -422,6 +422,62 @@ mod tests {
         }
     }
 
+    /// Whole-frame allocations for each kind of change, after the warmup
+    /// above, and again after idling past the layout cache's 240-frame
+    /// horizon, when the runner's periodic trim has evicted the warmup's
+    /// layouts and misses refill their storage. The budgets are the counts
+    /// measured plus a little slack; lower them as reuse improves.
+    #[test]
+    fn a_changed_frame_stays_within_its_allocation_budget() {
+        // (case, input, text it shows, budget warm, budget after idling)
+        // Measured: 73/32, 80/36, 1655/690, 17/17.
+        let cases: &[(&str, String, &str, u64, u64)] = &[
+            ("a typed character", "o".into(), "$ echo", 75, 34),
+            (
+                "one new line",
+                "\r\nfresh output line".into(),
+                "fresh output line",
+                82,
+                38,
+            ),
+            (
+                "thirty new lines",
+                format!("\r\n{}", lines(9, 30)),
+                "output 9.29 of a build step",
+                1680,
+                700,
+            ),
+            // Onto a blank cell, so no glyph under the cursor needs shaping.
+            ("a cursor move", "\x1b[22;2H".into(), "$ ech", 18, 18),
+        ];
+        for (name, input, shown, warm, idled) in cases {
+            for (idle_frames, budget) in [(0, warm), (300, idled)] {
+                let mut ui = harness(None);
+                ui.set_accessibility_active(false);
+                for seed in 0..3 {
+                    ui.app_mut().term.feed(lines(seed, 30).as_bytes());
+                    ui.frame();
+                }
+                for _ in 0..idle_frames {
+                    ui.frame();
+                }
+                ui.app_mut().term.feed(b"$ ech");
+                ui.frame();
+
+                ui.app_mut().term.feed(input.as_bytes());
+                let ((), allocations) = test_alloc::count(|| {
+                    ui.frame();
+                });
+                assert!(
+                    allocations <= *budget,
+                    "{name} after {idle_frames} idle frames: {allocations} allocations"
+                );
+                let painted = ui.painted_text();
+                assert!(painted.contains(shown), "{name}: {painted}");
+            }
+        }
+    }
+
     /// A frame that repeats the last one replays the grid from the element
     /// cache and allocates nothing.
     #[test]

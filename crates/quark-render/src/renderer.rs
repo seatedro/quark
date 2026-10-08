@@ -857,7 +857,7 @@ pub struct Renderer {
     /// Buffer path only.
     recolored: RecoloredBuffers,
     /// `(font size, TextSystem generation, width)` of the last measurement.
-    cached_mono_char_width: Option<(f32, u64, f32)>,
+    cached_mono_char_width: Option<(f32, quark_text::FontEpoch, f32)>,
     flattener: Flattener,
     /// The window's target, then each offscreen layer's by target number.
     frames: Vec<TargetFrame>,
@@ -1080,17 +1080,16 @@ impl Renderer {
     pub fn text_metrics(&mut self, text: &mut TextSystem) -> TextMetrics {
         let scale = self.scale_factor as f32;
         let mono_font_size = 13.0 * scale;
-        let generation = text.generation();
+        let fonts = text.font_epoch();
         let char_w = match self.cached_mono_char_width {
-            Some((cached_size, cached_generation, cached_w))
-                if (cached_size - mono_font_size).abs() < 0.001
-                    && cached_generation == generation =>
+            Some((cached_size, cached_fonts, cached_w))
+                if (cached_size - mono_font_size).abs() < 0.001 && cached_fonts == fonts =>
             {
                 cached_w
             }
             _ => {
                 let w = measure_mono_char_width(text, mono_font_size);
-                self.cached_mono_char_width = Some((mono_font_size, generation, w));
+                self.cached_mono_char_width = Some((mono_font_size, fonts, w));
                 w
             }
         };
@@ -1755,7 +1754,7 @@ impl Renderer {
                     TextPath::Positioned => renderer.prepare_glyphs(
                         &self.device,
                         &self.queue,
-                        text.font_system_mut(),
+                        text.raster_font_system(),
                         &mut self.atlas,
                         viewport,
                         positioned_glyphs(texts, rich_texts),
@@ -1764,7 +1763,7 @@ impl Renderer {
                     TextPath::Buffer => renderer.prepare(
                         &self.device,
                         &self.queue,
-                        text.font_system_mut(),
+                        text.raster_font_system(),
                         &mut self.atlas,
                         viewport,
                         prepare_text_areas(texts, rich_texts, &self.recolored),

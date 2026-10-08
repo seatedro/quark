@@ -246,7 +246,7 @@ impl RecoloredBuffers {
             }
             let buffer = recolor(
                 layout,
-                text.font_system_mut(),
+                text.raster_font_system(),
                 default_color,
                 span_colors,
                 alpha,

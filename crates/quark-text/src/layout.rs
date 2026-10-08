@@ -2065,7 +2065,7 @@ mod tests {
     fn layout_with_no_shaped_runs_still_hits_and_places_carets() {
         let params = TextParams::new("ab", TextStyle::new(14.0));
         let mut system = test_system();
-        let fs = system.font_system_mut();
+        let fs = system.raster_font_system();
         let synth = SyntheticItalic::new(fs);
         let mut scratch = LayoutScratch::default();
         let layout =

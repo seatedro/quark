@@ -293,9 +293,7 @@ impl<A: App> Runner<A> {
         };
         let renderer = &mut state.renderer;
         let timing = state.frame_clock.tick(Instant::now(), self.launch_at);
-        // Idle time counts in this window's own redraws, so a busy window
-        // doesn't evict layouts an idle one still shows.
-        self.text.layouts.begin_frame_for(handle.scope_id());
+        self.text.begin_frame(handle.scope_id());
         let scale = state.scale_factor as f32;
         let text_metrics = logical_metrics(renderer.text_metrics(&mut self.text.system), scale);
         let mut cx = FrameContext {
@@ -372,11 +370,7 @@ impl<A: App> Runner<A> {
             }
             Err(error) => tracing::error!("render failed: {error}"),
         }
-        // Trimming walks the whole cache, and entries live for many frames
-        // anyway, so a periodic sweep evicts the same entries for less.
-        if self.text.layouts.frame().is_multiple_of(TRIM_LAYOUTS_EVERY) {
-            self.text.layouts.trim();
-        }
+        self.text.end_frame();
         #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
         crate::profile::finish_frame();
 
@@ -676,9 +670,6 @@ impl<A: App> ApplicationHandler for Runner<A> {
         }
     }
 }
-
-/// Frames between sweeps of idle text layouts out of the cache.
-const TRIM_LAYOUTS_EVERY: u64 = 32;
 
 /// The renderer measures in physical pixels; apps size text in points.
 fn logical_metrics(metrics: TextMetrics, scale: f32) -> TextMetrics {
