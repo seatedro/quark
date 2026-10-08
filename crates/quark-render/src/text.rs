@@ -9,7 +9,7 @@ use quark::scene::ShapedText;
 use quark::{Color, FontKind};
 use quark_text::{TextLayout, TextParams, TextStyle, TextSystem};
 
-use crate::renderer::{ClippedRichText, ClippedText};
+use crate::renderer::{ClippedRichText, ClippedText, fade_color};
 use crate::scene::{Rect, RectPrimitive, Scene, TextDecoration, TextDecorationKind};
 
 /// How text primitives reach glyphon.
@@ -47,11 +47,14 @@ pub(super) fn positioned_glyphs<'a>(
     let rich = rich_texts.iter().flat_map(|text| {
         let primitive = &text.primitive;
         let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+        let alpha = text.alpha;
         let layout = primitive.layout.downcast_ref::<TextLayout>();
         layout.into_iter().flat_map(move |layout| {
             layout_glyphs(layout, primitive.rect, text.clip, move |glyph| {
                 let color = span_color(glyph.metadata as u32, default_color, span_colors);
-                glyph.color_opt.unwrap_or(glyphon_color(color))
+                glyph
+                    .color_opt
+                    .unwrap_or(glyphon_color(fade_color(color, alpha)))
             })
         })
     });
@@ -124,14 +127,7 @@ pub(super) fn prepare_text_areas<'a>(
     let rich = rich_texts.iter().filter_map(|text| {
         let primitive = &text.primitive;
         let layout = primitive.layout.downcast_ref::<TextLayout>()?;
-        Some(rich_text_area(
-            layout,
-            primitive.rect,
-            text.clip,
-            primitive.default_color,
-            &primitive.span_colors,
-            recolored,
-        ))
+        Some(rich_text_area(layout, text, recolored))
     });
     plain.chain(rich)
 }
@@ -211,6 +207,7 @@ struct Recolored {
     _layout: ShapedText,
     default_color: Color,
     span_colors: Arc<[Color]>,
+    alpha: f32,
     buffer: Buffer,
     last_used: u64,
 }
@@ -233,25 +230,34 @@ impl RecoloredBuffers {
                 continue;
             };
             let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+            let alpha = text_run.alpha;
             if uniform_color(layout, default_color, span_colors).is_some() {
                 continue;
             }
             let key = std::ptr::from_ref(layout) as usize;
             if let Some(entry) = self.entries.get_mut(&key)
                 && entry.default_color == default_color
+                && entry.alpha == alpha
                 && (Arc::ptr_eq(&entry.span_colors, span_colors)
                     || entry.span_colors == *span_colors)
             {
                 entry.last_used = self.frame;
                 continue;
             }
-            let buffer = recolor(layout, text.font_system_mut(), default_color, span_colors);
+            let buffer = recolor(
+                layout,
+                text.font_system_mut(),
+                default_color,
+                span_colors,
+                alpha,
+            );
             self.entries.insert(
                 key,
                 Recolored {
                     _layout: primitive.layout.clone(),
                     default_color,
                     span_colors: span_colors.clone(),
+                    alpha,
                     buffer,
                     last_used: self.frame,
                 },
@@ -268,12 +274,14 @@ impl RecoloredBuffers {
     }
 }
 
-/// A copy of `layout`'s buffer, reshaped with every glyph colored by its span.
+/// A copy of `layout`'s buffer, reshaped with every glyph colored by its
+/// span and faded by `alpha`.
 fn recolor(
     layout: &TextLayout,
     font_system: &mut FontSystem,
     default_color: Color,
     span_colors: &[Color],
+    alpha: f32,
 ) -> Buffer {
     let source = layout.buffer();
     let mut buffer = Buffer::new_empty(source.metrics());
@@ -284,7 +292,7 @@ fn recolor(
     buffer.set_monospace_width(font_system, source.monospace_width());
     let colored = |attrs: Attrs<'_>| {
         let color = span_color(attrs.metadata as u32, default_color, span_colors);
-        AttrsOwned::new(&attrs.color(glyphon_color(color)))
+        AttrsOwned::new(&attrs.color(glyphon_color(fade_color(color, alpha))))
     };
     buffer.lines = source
         .lines
@@ -308,16 +316,16 @@ fn recolor(
 
 fn rich_text_area<'a>(
     layout: &'a TextLayout,
-    origin: Rect,
-    clip: Rect,
-    default_color: Color,
-    span_colors: &[Color],
+    text: &ClippedRichText,
     recolored: &'a RecoloredBuffers,
 ) -> TextArea<'a> {
+    let primitive = &text.primitive;
+    let (origin, clip, alpha) = (primitive.rect, text.clip, text.alpha);
+    let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
     if let Some(color) = uniform_color(layout, default_color, span_colors) {
-        return text_area(layout, origin, clip, color);
+        return text_area(layout, origin, clip, fade_color(color, alpha));
     }
-    let mut area = text_area(layout, origin, clip, default_color);
+    let mut area = text_area(layout, origin, clip, fade_color(default_color, alpha));
     // `RecoloredBuffers::prepare` ran over this frame's rich texts, so the
     // copy exists; without it the text still draws, in one color.
     if let Some(buffer) = recolored.get(layout) {

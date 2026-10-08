@@ -28,6 +28,18 @@ against that commit shows the whole patch.
   for wgpu's `Send` chain, as in quark-render.
 - `prepare` and `prepare_glyphs` share the bounds clipping and glyph
   rasterization helpers they used to inline.
+- Atlas growth copies (`src/text_atlas.rs`): atlas textures also have
+  `COPY_SRC`, and `InnerAtlas::grow` copies the old texture into the
+  corner of the larger one with `copy_texture_to_texture`, submitted on
+  the queue at once. etagere's `grow` already keeps every allocation in
+  place, so cached glyphs keep their atlas coordinates and nothing is
+  rasterized or uploaded again. Upstream's re-rasterizing loop remains as
+  the fallback for an old texture without `COPY_SRC`, which no atlas
+  made here lacks.
+- `AtlasStats` and `TextAtlas::stats` (`src/text_atlas.rs`, counted in
+  `src/text_render.rs`): glyph misses, evictions, growths, glyphs
+  re-rasterized by a growth, and glyph bytes uploaded, for tests and
+  devtools. quark-render exposes them as `Renderer::text_atlas_stats`.
 
 ## Dropping the vendor
 
@@ -39,3 +51,7 @@ from its own atlas):
 2. Move `quark-render`'s positioned path to the upstream API, then run
    `cargo test -p quark-render --features headless-render`:
    `positioned_text_draws_the_buffer_paths_pixels` compares both paths.
+3. Check that the upstream atlas still grows without re-rasterizing, or
+   keep that patch: `atlas_growth_rasterizes_no_cached_glyph_again` and
+   `atlas_growth_keeps_cached_glyph_pixels` cover it, and the counters
+   they read would need another source.

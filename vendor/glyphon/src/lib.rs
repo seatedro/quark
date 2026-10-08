@@ -20,7 +20,7 @@ pub use custom_glyph::{
     ContentType, CustomGlyph, CustomGlyphId, RasterizeCustomGlyphRequest, RasterizedCustomGlyph,
 };
 pub use error::{PrepareError, RenderError};
-pub use text_atlas::{ColorMode, TextAtlas};
+pub use text_atlas::{AtlasStats, ColorMode, TextAtlas};
 pub use text_render::TextRenderer;
 pub use viewport::Viewport;
 

@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
+/// Glyph atlas work counters, from [`Renderer::text_atlas_stats`].
+pub use glyphon::AtlasStats as TextAtlasStats;
 use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
 use quark_text::TextSystem;
 use thiserror::Error;
@@ -862,6 +864,7 @@ pub struct Renderer {
     /// Targets in use this frame.
     active_frames: usize,
     plans: Vec<LayerPlan>,
+    layer_scratch: LayerScratch,
     /// Viewport uniform and glyphon viewport of layer target `i + 1`.
     layer_uniforms: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     layer_viewports: Vec<Viewport>,
@@ -904,6 +907,12 @@ impl Renderer {
     /// to share it with another window.
     pub fn gpu(&self) -> &GpuContext {
         &self.gpu
+    }
+
+    /// Glyph atlas work since this renderer was created: cache misses,
+    /// evictions, growths, and bytes uploaded.
+    pub fn text_atlas_stats(&self) -> TextAtlasStats {
+        self.atlas.stats()
     }
 
     fn for_surface(
@@ -1034,6 +1043,7 @@ impl Renderer {
             frames: Vec::new(),
             active_frames: 0,
             plans: Vec::new(),
+            layer_scratch: LayerScratch::default(),
             layer_uniforms: Vec::new(),
             layer_viewports: Vec::new(),
             segment_texture: None,
@@ -1367,7 +1377,7 @@ impl Renderer {
             width: width as f32,
             height: height as f32,
         };
-        let offscreen = plan_layers(scene, viewport, &mut self.plans);
+        let offscreen = plan_layers(scene, viewport, &mut self.plans, &mut self.layer_scratch);
         self.active_frames = 1 + offscreen;
         if self.frames.len() < self.active_frames {
             self.frames
@@ -2745,6 +2755,9 @@ pub(super) struct ClippedRichText {
     pub(super) key: DrawKey,
     pub(super) primitive: RichTextPrimitive,
     pub(super) clip: Rect,
+    /// Inline layer opacity, applied to each glyph's color as it is
+    /// prepared so a fade allocates no faded copy of the span colors.
+    pub(super) alpha: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -3012,7 +3025,7 @@ impl ActiveClip {
 fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> FlattenedScene {
     let mut out = FlattenedScene::default();
     let mut plans = Vec::new();
-    plan_layers(scene, viewport, &mut plans);
+    plan_layers(scene, viewport, &mut plans, &mut LayerScratch::default());
     flatten_scene_into(
         &scene.primitives,
         0..scene.primitives.len(),
@@ -3032,7 +3045,7 @@ fn fade(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
     color
 }
 
-fn fade_color(color: quark::Color, alpha: f32) -> quark::Color {
+pub(super) fn fade_color(color: quark::Color, alpha: f32) -> quark::Color {
     if alpha >= 1.0 {
         return color;
     }
@@ -3155,23 +3168,14 @@ fn flatten_scene_into(
                 let rect = fl.shift(text.rect);
                 if let Some(intersection) = rect.intersection(clip.scissor) {
                     let key = fl.place(PrimKind::Text, intersection);
-                    let mut primitive = RichTextPrimitive {
-                        rect,
-                        ..text.clone()
-                    };
-                    if fl.alpha < 1.0 {
-                        let alpha = fl.alpha;
-                        primitive.default_color = fade_color(text.default_color, alpha);
-                        primitive.span_colors = text
-                            .span_colors
-                            .iter()
-                            .map(|c| fade_color(*c, alpha))
-                            .collect();
-                    }
                     out.rich_texts.push(ClippedRichText {
                         key,
-                        primitive,
+                        primitive: RichTextPrimitive {
+                            rect,
+                            ..text.clone()
+                        },
                         clip: intersection,
+                        alpha: fl.alpha,
                     });
                 }
             }
@@ -3520,17 +3524,32 @@ struct OpenLayer {
     drawables: u32,
 }
 
+/// Working storage of [`plan_layers`], kept so planning a frame with layers
+/// allocates nothing once warm.
+#[derive(Default)]
+struct LayerScratch {
+    open: Vec<OpenLayer>,
+    /// Clip rects in the coordinates of the innermost open layer's content.
+    clips: Vec<Rect>,
+}
+
 /// Plan every layer of `scene` (in scene order) and number the offscreen
 /// ones' targets from 1. Returns how many render offscreen.
-fn plan_layers(scene: &Scene, viewport: Rect, plans: &mut Vec<LayerPlan>) -> usize {
+fn plan_layers(
+    scene: &Scene,
+    viewport: Rect,
+    plans: &mut Vec<LayerPlan>,
+    scratch: &mut LayerScratch,
+) -> usize {
     plans.clear();
     let prims = &scene.primitives;
     if !prims.iter().any(|p| matches!(p, Primitive::LayerStart(_))) {
         return 0;
     }
-    let mut open: Vec<OpenLayer> = Vec::new();
-    // Clip rects in the coordinates of the innermost open layer's content.
-    let mut clips = vec![viewport];
+    let LayerScratch { open, clips } = scratch;
+    open.clear();
+    clips.clear();
+    clips.push(viewport);
     for (index, primitive) in prims.iter().enumerate() {
         match primitive {
             Primitive::LayerStart(layer) => {
@@ -3565,7 +3584,7 @@ fn plan_layers(scene: &Scene, viewport: Rect, plans: &mut Vec<LayerPlan>) -> usi
             }
             Primitive::LayerEnd => {
                 if let Some(layer) = open.pop() {
-                    close_layer(layer, index, plans, &mut open, &mut clips);
+                    close_layer(layer, index, plans, open, clips);
                 }
             }
             Primitive::ClipStart(clip) => {
@@ -3592,7 +3611,7 @@ fn plan_layers(scene: &Scene, viewport: Rect, plans: &mut Vec<LayerPlan>) -> usi
         }
     }
     while let Some(layer) = open.pop() {
-        close_layer(layer, prims.len(), plans, &mut open, &mut clips);
+        close_layer(layer, prims.len(), plans, open, clips);
     }
     let mut targets = 0;
     for plan in plans.iter_mut() {
@@ -4294,6 +4313,81 @@ mod tests {
         assert!(!has_pixels(&image, RED), "old keyword color left");
     }
 
+    /// The code layout alone in a layer of `opacity`. A single drawable,
+    /// so flattening folds the opacity into the text instead of drawing the
+    /// layer offscreen.
+    fn faded_code_scene(layout: &ShapedText, colors: [quark::Color; 3], opacity: f32) -> Scene {
+        let mut scene = Scene::default();
+        scene.push(layer(opacity, Transform2D::IDENTITY));
+        scene.rich_text(RichTextPrimitive {
+            rect: rect(4.0, 4.0, 190.0, 100.0),
+            layout: layout.clone(),
+            default_color: colors[0],
+            span_colors: Arc::from([colors[1], colors[2]]),
+        });
+        scene.push(Primitive::LayerEnd);
+        scene
+    }
+
+    // Regression: fading rich text collected a faded copy of its span
+    // colors every frame it was flattened.
+    #[test]
+    fn fading_rich_text_allocates_nothing() {
+        let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
+            return;
+        };
+        let mut text = test_text();
+        let layout = code_layout(&mut text);
+        let colors = [quark::Color::rgba(255, 255, 255, 255), RED, GREEN];
+        render_code(
+            &mut renderer,
+            &faded_code_scene(&layout, colors, 0.9),
+            &mut text,
+        );
+
+        // A fade animation's next frame: same text, another opacity.
+        let scene = faded_code_scene(&layout, colors, 0.5);
+        let ((), flattening) = quark_ui::test_alloc::count(|| {
+            renderer.flatten(&scene, CODE_SIZE.0, CODE_SIZE.1);
+        });
+        assert_eq!(flattening, 0);
+        let (ready, preparing) = count_text_preparation(&mut renderer, &scene, &mut text);
+        assert!(ready);
+        assert_eq!(preparing, 0);
+    }
+
+    // Faded rich text draws what the same text with its colors' alpha
+    // already halved draws, on both text paths.
+    #[test]
+    fn faded_rich_text_draws_its_colors_at_reduced_alpha() {
+        let mut text = test_text();
+        let layout = code_layout(&mut text);
+        let [white, red, blue] = [quark::Color::rgba(255, 255, 255, 255), RED, BLUE];
+        let faded = faded_code_scene(&layout, [white, red, blue], 0.5);
+        // 255 * 0.5, rounded.
+        let half = |c: quark::Color| quark::Color::rgba(c.r, c.g, c.b, 128);
+        let prefaded = faded_code_scene(&layout, [half(white), half(red), half(blue)], 1.0);
+        for path in [TextPath::Positioned, TextPath::Buffer] {
+            let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
+                return;
+            };
+            renderer.text_path = path;
+            let faded = render_code(&mut renderer, &faded, &mut text);
+            let prefaded = render_code(&mut renderer, &prefaded, &mut text);
+            let lit = faded.pixels().filter(|p| p.0[..3] != [0, 0, 0]).count();
+            assert!(
+                lit > 200,
+                "{path:?}: {lit} lit pixels, the fixture drew too little"
+            );
+            let differing = faded
+                .pixels()
+                .zip(prefaded.pixels())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differing, 0, "{path:?}: faded pixels differ");
+        }
+    }
+
     // The positioned path must draw what glyphon draws from text areas:
     // fractional origins, a clip through a line, an overflowing RTL line
     // shifted inside its box, a color glyph, and multi-colored spans.
@@ -4783,6 +4877,75 @@ mod tests {
             any_light_pixel(&sparse, rect(0.0, 0.0, 64.0, 64.0)),
             "text did not recover after the atlas filled"
         );
+    }
+
+    /// The frames around a glyph atlas growth: `Kept glyphs` alone, then
+    /// again beside enough large glyphs that the 256 px atlas grows while
+    /// the first text's glyphs are pinned, then alone once more. Returns
+    /// each frame's pixels and the atlas counters after it.
+    fn frames_around_atlas_growth() -> Option<Vec<(image::RgbaImage, TextAtlasStats)>> {
+        const SIZE: (u32, u32) = (256, 128);
+        let mut renderer = gpu_renderer(SIZE.0, SIZE.1)?;
+        let mut text = test_text();
+        let kept = white_text_with(&mut text, rect(4.0, 4.0, 248.0, 24.0), "Kept glyphs");
+        let large = text.layout(&TextParams::new(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            TextStyle::new(64.0),
+        ));
+        let large = Primitive::TextRun(TextPrimitive {
+            rect: rect(0.0, 40.0, 256.0, 88.0),
+            layout: ShapedText::new(Arc::new(large.expect("layout"))),
+            color: quark::Color::rgba(255, 255, 255, 255),
+        });
+        let mut alone = Scene::default();
+        alone.push(kept.clone());
+        let mut crowded = alone.clone();
+        crowded.push(large);
+        let frames = [&alone, &crowded, &alone].map(|scene| {
+            let pixels = renderer
+                .render_to_rgba(scene, &mut text, SIZE.0, SIZE.1)
+                .expect("offscreen render");
+            let image = image::RgbaImage::from_raw(SIZE.0, SIZE.1, pixels).expect("pixel size");
+            (image, renderer.text_atlas_stats())
+        });
+        let growths = frames[1].1.growths - frames[0].1.growths;
+        assert!(growths > 0, "the large glyphs did not grow the atlas");
+        Some(frames.into())
+    }
+
+    // Regression: growing the glyph atlas replaced its texture and
+    // rasterized and uploaded every cached glyph again.
+    #[test]
+    fn atlas_growth_rasterizes_no_cached_glyph_again() {
+        let Some(frames) = frames_around_atlas_growth() else {
+            return;
+        };
+        let [first, grown, again] = [frames[0].1, frames[1].1, frames[2].1];
+        assert_eq!(grown.rerasterized, first.rerasterized);
+        // The kept glyphs are all still cached after the growth.
+        assert_eq!(again.misses, grown.misses);
+        assert_eq!(again.upload_bytes, grown.upload_bytes);
+    }
+
+    // Glyphs cached before the atlas grows draw the same pixels after it,
+    // both in the frame that grows it and in later ones.
+    #[test]
+    fn atlas_growth_keeps_cached_glyph_pixels() {
+        let Some(frames) = frames_around_atlas_growth() else {
+            return;
+        };
+        let [first, grown, again] = [&frames[0].0, &frames[1].0, &frames[2].0];
+        let kept = rect(0.0, 0.0, 256.0, 32.0);
+        assert!(count_pixels(first, kept, |p| p[0] > 128) > 50);
+        let differing = |a: &image::RgbaImage, b: &image::RgbaImage, area: Rect| {
+            (area.y as u32..area.bottom() as u32)
+                .flat_map(|y| (area.x as u32..area.right() as u32).map(move |x| (x, y)))
+                .filter(|&(x, y)| a.get_pixel(x, y) != b.get_pixel(x, y))
+                .count()
+        };
+        assert_eq!(differing(first, grown, kept), 0, "frame that grew");
+        let whole = rect(0.0, 0.0, 256.0, 128.0);
+        assert_eq!(differing(first, again, whole), 0, "frame after");
     }
 
     // Two windows share one device: an image uploaded while drawing one

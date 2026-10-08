@@ -39,7 +39,9 @@ pub mod scene {
 pub use text::{push_text_decorations, text_decoration_rects};
 
 pub use quark_text::TextSystem;
-pub use renderer::{FrameStats, GpuContext, OffscreenTarget, RenderError, Renderer, TextMetrics};
+pub use renderer::{
+    FrameStats, GpuContext, OffscreenTarget, RenderError, Renderer, TextAtlasStats, TextMetrics,
+};
 pub use scene::{
     BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive, EffectType, FontKind,
     FontStyle, FontWeight, ImagePrimitive, LayerPrimitive, Path, PathBuilder, PathPrimitive,
