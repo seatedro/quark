@@ -841,6 +841,8 @@ pub struct Document<G = TextGeometry> {
     adornments: Vec<VisibleAdornment>,
     /// A row materialized even outside the window, while it holds focus.
     kept_row: Option<RowKey>,
+    /// A row the next prepare keeps at its place in the viewport.
+    held_row: Option<RowKey>,
     /// Geometry of the blocks measured for the current window; materialize
     /// reuses it instead of measuring every visible block every frame.
     measured: HashMap<BlockKey, Measured<G>>,
@@ -906,6 +908,7 @@ impl<G: BlockGeometry> Document<G> {
             blocks: Vec::new(),
             adornments: Vec::new(),
             kept_row: None,
+            held_row: None,
             measured: HashMap::new(),
             measured_spare: HashMap::new(),
             measure_key: None,
@@ -1564,7 +1567,26 @@ impl<G: BlockGeometry> Document<G> {
         self.size = (width, height);
         self.autoscroll(now_ms);
 
+        let held = self.held_row.take().and_then(|row| {
+            let top = self.list.rows().offset_of(row)? - self.list.scroll_offset();
+            Some((row, top))
+        });
         self.measure_window(source, measurer);
+        if let Some((row, top)) = held {
+            // Rows measured on the way can move it again; two passes
+            // settle it, as for a reveal.
+            for _ in 0..2 {
+                let Some(offset) = self.list.rows().offset_of(row) else {
+                    break;
+                };
+                let delta = offset - self.list.scroll_offset() - top;
+                if delta.abs() < 0.5 {
+                    break;
+                }
+                self.set_scroll_offset(self.list.scroll_offset() + delta);
+                self.measure_window(source, measurer);
+            }
+        }
         if self.list.is_stuck_to_bottom() {
             self.content_below = false;
         }
@@ -1755,6 +1777,17 @@ impl<G: BlockGeometry> Document<G> {
     /// until focus moves on, and clear it then.
     pub fn keep_materialized(&mut self, row: Option<RowKey>) {
         self.kept_row = row;
+    }
+
+    /// Keeps `row`'s top where it is in the viewport through the next
+    /// prepare, whatever happens to the rows around it and to its own
+    /// height: call it with the row whose disclosure was just toggled, so
+    /// the control stays under the pointer even while the view follows
+    /// the bottom. Scrolling away from the bottom this way stops following
+    /// it. The view never scrolls past the end, so a row that shrinks
+    /// near the end still moves down.
+    pub fn hold_in_place(&mut self, row: RowKey) {
+        self.held_row = Some(row);
     }
 
     pub fn viewport_size(&self) -> (f32, f32) {

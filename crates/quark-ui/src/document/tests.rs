@@ -2544,3 +2544,26 @@ fn a_table_publishes_header_and_data_cells_with_their_text() {
         )
     );
 }
+
+// Catches a card's disclosure jumping away under the pointer when the card
+// expands while the view follows the bottom: the growth would push the
+// card up by the height it gained.
+#[test]
+fn a_held_row_keeps_its_place_while_it_grows_at_the_bottom() {
+    let card = |height: f32| {
+        message(8).with_adornments(vec![blank_adornment(1, AdornmentSlot::Start, height)])
+    };
+    let mut doc = Doc::new((0..8).map(message).chain([card(20.0)]).chain([message(9)]));
+    doc.size.1 = 400.0;
+    doc.view.scroll_to_bottom();
+    doc.frame();
+    let before = doc.screen_top(8);
+
+    let expanded = card(200.0);
+    doc.view.update(&expanded).unwrap();
+    doc.messages.insert(expanded.key, expanded);
+    doc.view.hold_in_place(RowKey(8));
+    doc.frame();
+
+    assert_eq!(doc.screen_top(8), before);
+}
