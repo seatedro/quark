@@ -153,6 +153,35 @@ fn no_spans() -> Arc<[TextSpan]> {
     EMPTY.clone()
 }
 
+/// The empty text every rebuilt layout starts from.
+fn empty_text() -> Arc<str> {
+    static EMPTY: std::sync::LazyLock<Arc<str>> = std::sync::LazyLock::new(|| Arc::from(""));
+    EMPTY.clone()
+}
+
+/// Sets `dst` to a copy of `src`, writing over `dst`'s allocation when
+/// nothing else holds it and it is the same length.
+fn copy_text(dst: &mut Arc<str>, src: &str) {
+    match Arc::get_mut(dst) {
+        Some(own) if own.len() == src.len() => {
+            // SAFETY: every byte is overwritten with `src`, which is valid
+            // UTF-8 of exactly this length.
+            unsafe { own.as_bytes_mut() }.copy_from_slice(src.as_bytes());
+        }
+        _ if src.is_empty() => *dst = empty_text(),
+        _ => *dst = Arc::from(src),
+    }
+}
+
+/// [`copy_text`] for spans.
+fn copy_spans(dst: &mut Arc<[TextSpan]>, src: &[TextSpan]) {
+    match Arc::get_mut(dst) {
+        Some(own) if own.len() == src.len() => own.clone_from_slice(src),
+        _ if src.is_empty() => *dst = no_spans(),
+        _ => *dst = Arc::from(src),
+    }
+}
+
 /// [`TextParams`] borrowed: what a cache lookup needs, so a hit costs no
 /// allocation. The cache builds owned params only on a miss.
 #[derive(Debug, Clone, Copy)]
@@ -200,6 +229,36 @@ impl<'a> TextQuery<'a> {
             scale_factor: self.scale_factor,
         }
     }
+
+    pub(crate) fn validate(&self) -> Result<(), TextError> {
+        let style = &self.style;
+        if !(style.font_size.is_finite() && style.font_size > 0.0) {
+            return Err(TextError::InvalidFontSize(style.font_size));
+        }
+        if !(style.line_height.is_finite() && style.line_height > 0.0) {
+            return Err(TextError::InvalidLineHeight(style.line_height));
+        }
+        if !(self.scale_factor.is_finite() && self.scale_factor > 0.0) {
+            return Err(TextError::InvalidScaleFactor(self.scale_factor));
+        }
+        if self.wrap_width.is_some_and(f32::is_nan) {
+            return Err(TextError::InvalidWrapWidth);
+        }
+        if u32::try_from(self.text.len()).is_err() {
+            return Err(TextError::TextTooLong);
+        }
+        for (index, span) in self.spans.iter().enumerate() {
+            let Range { start, end } = span.range;
+            let valid = start <= end
+                && end <= self.text.len()
+                && self.text.is_char_boundary(start)
+                && self.text.is_char_boundary(end);
+            if !valid {
+                return Err(TextError::InvalidSpan { index, start, end });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl TextParams {
@@ -240,33 +299,7 @@ impl TextParams {
     }
 
     fn validate(&self) -> Result<(), TextError> {
-        let style = &self.style;
-        if !(style.font_size.is_finite() && style.font_size > 0.0) {
-            return Err(TextError::InvalidFontSize(style.font_size));
-        }
-        if !(style.line_height.is_finite() && style.line_height > 0.0) {
-            return Err(TextError::InvalidLineHeight(style.line_height));
-        }
-        if !(self.scale_factor.is_finite() && self.scale_factor > 0.0) {
-            return Err(TextError::InvalidScaleFactor(self.scale_factor));
-        }
-        if self.wrap_width.is_some_and(f32::is_nan) {
-            return Err(TextError::InvalidWrapWidth);
-        }
-        if u32::try_from(self.text.len()).is_err() {
-            return Err(TextError::TextTooLong);
-        }
-        for (index, span) in self.spans.iter().enumerate() {
-            let Range { start, end } = span.range;
-            let valid = start <= end
-                && end <= self.text.len()
-                && self.text.is_char_boundary(start)
-                && self.text.is_char_boundary(end);
-            if !valid {
-                return Err(TextError::InvalidSpan { index, start, end });
-            }
-        }
-        Ok(())
+        self.query().validate()
     }
 }
 
@@ -338,6 +371,29 @@ impl GlyphColumns {
     fn rtl(&self, i: usize) -> bool {
         self.level[i] % 2 == 1
     }
+
+    /// Empties every column, keeping room for `glyphs` glyphs.
+    fn clear_reserve(&mut self, glyphs: usize) {
+        clear_reserve(&mut self.x, glyphs);
+        clear_reserve(&mut self.advance, glyphs);
+        clear_reserve(&mut self.line, glyphs);
+        clear_reserve(&mut self.byte_start, glyphs);
+        clear_reserve(&mut self.byte_end, glyphs);
+        clear_reserve(&mut self.level, glyphs);
+        clear_reserve(&mut self.span, glyphs);
+        clear_reserve(&mut self.font_id, glyphs);
+        clear_reserve(&mut self.glyph_id, glyphs);
+        clear_reserve(&mut self.font_size, glyphs);
+        clear_reserve(&mut self.font_weight, glyphs);
+        clear_reserve(&mut self.flags, glyphs);
+        clear_reserve(&mut self.phys_x, glyphs);
+        clear_reserve(&mut self.phys_y, glyphs);
+    }
+}
+
+fn clear_reserve<T>(column: &mut Vec<T>, len: usize) {
+    column.clear();
+    column.reserve(len);
 }
 
 #[derive(Debug, Default, Clone)]
@@ -353,6 +409,20 @@ struct LineColumns {
     rtl: Vec<bool>,
 }
 
+impl LineColumns {
+    fn clear_reserve(&mut self, lines: usize) {
+        clear_reserve(&mut self.byte_start, lines);
+        clear_reserve(&mut self.byte_end, lines);
+        clear_reserve(&mut self.top, lines);
+        clear_reserve(&mut self.height, lines);
+        clear_reserve(&mut self.baseline, lines);
+        clear_reserve(&mut self.width, lines);
+        clear_reserve(&mut self.glyph_start, lines);
+        clear_reserve(&mut self.glyph_end, lines);
+        clear_reserve(&mut self.rtl, lines);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct RunColumns {
     line: Vec<u32>,
@@ -360,6 +430,16 @@ struct RunColumns {
     rtl: Vec<bool>,
     glyph_start: Vec<u32>,
     glyph_end: Vec<u32>,
+}
+
+impl RunColumns {
+    fn clear_reserve(&mut self, runs: usize) {
+        clear_reserve(&mut self.line, runs);
+        clear_reserve(&mut self.span, runs);
+        clear_reserve(&mut self.rtl, runs);
+        clear_reserve(&mut self.glyph_start, runs);
+        clear_reserve(&mut self.glyph_end, runs);
+    }
 }
 
 /// Lay `buffer` out again at its widest line when a line runs right to
@@ -414,23 +494,56 @@ pub struct TextLayout {
     // Kept so the renderer can hand it to glyphon's TextRenderer, which only
     // accepts Buffers. Shaped at physical size; draw it with `scale: 1.0`.
     buffer: Buffer,
+    /// Lines a longer text left in `buffer`, kept for their storage when
+    /// the layout is rebuilt; the buffer lays out every line it holds.
+    spare_lines: Vec<BufferLine>,
+}
+
+/// Temporaries of a layout build. The [`TextSystem`](crate::TextSystem)
+/// keeps them, so a build allocates only what its result keeps.
+#[derive(Debug, Default)]
+pub(crate) struct LayoutScratch {
+    paragraphs: Vec<(Range<usize>, LineEnding)>,
+    /// The paragraph of each visual line.
+    line_paragraph: Vec<usize>,
 }
 
 impl TextLayout {
+    /// A layout with no text, for [`Self::rebuild`] to fill.
+    pub(crate) fn empty() -> Self {
+        Self {
+            text: empty_text(),
+            spans: no_spans(),
+            style: TextStyle::new(1.0),
+            wrap_width: None,
+            scale_factor: 1.0,
+            width: 0.0,
+            height: 0.0,
+            glyphs: GlyphColumns::default(),
+            lines: LineColumns::default(),
+            runs: RunColumns::default(),
+            buffer_x: 0.0,
+            buffer: Buffer::new_empty(Metrics::new(1.0, 1.0)),
+            spare_lines: Vec::new(),
+        }
+    }
+
     pub(crate) fn build(
         fs: &mut FontSystem,
+        scratch: &mut LayoutScratch,
         params: &TextParams,
         synth: SyntheticItalic,
         emoji: Option<&'static str>,
         ligatures: bool,
     ) -> Result<Self, TextError> {
-        Self::build_with(fs, params, synth, emoji, ligatures, |_| true)
+        Self::build_with(fs, scratch, params, synth, emoji, ligatures, |_| true)
     }
 
     /// [`Self::build`] keeping only the shaped runs `keep` accepts, so tests
     /// can reproduce a shaper that yields no lines.
     fn build_with(
         fs: &mut FontSystem,
+        scratch: &mut LayoutScratch,
         params: &TextParams,
         synth: SyntheticItalic,
         emoji: Option<&'static str>,
@@ -438,49 +551,147 @@ impl TextLayout {
         keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
     ) -> Result<Self, TextError> {
         params.validate()?;
-        let text = params.text.as_ref();
-        let style = params.style;
-        let scale = params.scale_factor;
+        let mut layout = Self::empty();
+        layout.share_inputs(params);
+        layout.rebuild_with(fs, scratch, synth, emoji, ligatures, keep);
+        Ok(layout)
+    }
 
-        let mut buffer = Buffer::new_empty(Metrics::new(
-            style.font_size * scale,
-            style.line_height * scale,
-        ));
-        buffer.set_wrap(fs, Wrap::WordOrGlyph);
-        buffer.set_size(fs, params.wrap_width.map(|w| (w * scale).max(1.0)), None);
+    /// How many glyphs the columns hold without growing.
+    pub(crate) fn glyph_capacity(&self) -> usize {
+        self.glyphs.x.capacity()
+    }
 
-        let paragraphs = split_paragraphs(text);
+    /// Takes `params`' text and spans, sharing their allocations.
+    pub(crate) fn share_inputs(&mut self, params: &TextParams) {
+        self.text = params.text.clone();
+        self.spans = params.spans.clone();
+        self.set_settings(&params.query());
+    }
+
+    /// Copies `query`'s text and spans, over this layout's own copies when
+    /// nothing else holds them and they are the same length.
+    pub(crate) fn copy_inputs(&mut self, query: &TextQuery) {
+        copy_text(&mut self.text, query.text);
+        copy_spans(&mut self.spans, query.spans);
+        self.set_settings(query);
+    }
+
+    fn set_settings(&mut self, query: &TextQuery) {
+        self.style = query.style;
+        self.wrap_width = query.wrap_width;
+        self.scale_factor = query.scale_factor;
+    }
+
+    /// Shapes and lays out the inputs [`Self::share_inputs`] or
+    /// [`Self::copy_inputs`] set, which must be valid params, reusing this
+    /// layout's buffer, lines, and columns.
+    pub(crate) fn rebuild(
+        &mut self,
+        fs: &mut FontSystem,
+        scratch: &mut LayoutScratch,
+        synth: SyntheticItalic,
+        emoji: Option<&'static str>,
+        ligatures: bool,
+    ) {
+        self.rebuild_with(fs, scratch, synth, emoji, ligatures, |_| true);
+    }
+
+    fn rebuild_with(
+        &mut self,
+        fs: &mut FontSystem,
+        scratch: &mut LayoutScratch,
+        synth: SyntheticItalic,
+        emoji: Option<&'static str>,
+        ligatures: bool,
+        keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
+    ) {
+        // Reference counts, not copies: the fields below are borrowed
+        // mutably while the text is read.
+        let (text, spans) = (self.text.clone(), self.spans.clone());
+        let text = text.as_ref();
+        let style = self.style;
+        let scale = self.scale_factor;
+        let wrap = self.wrap_width.map(|w| (w * scale).max(1.0));
+        let Self {
+            buffer,
+            spare_lines,
+            glyphs,
+            lines,
+            runs,
+            ..
+        } = &mut *self;
+
+        split_paragraphs(text, &mut scratch.paragraphs);
+        let paragraphs = &scratch.paragraphs;
         let features = font_features(ligatures);
         let base = base_attrs(&style).font_features(features.clone());
-        buffer.lines = paragraphs
-            .iter()
-            .map(|(range, ending)| {
-                let mut attrs = AttrsList::new(&base);
-                for (i, span) in params.spans.iter().enumerate() {
-                    let start = span.range.start.max(range.start);
-                    let end = span.range.end.min(range.end);
-                    if start < end {
-                        let span_attrs =
-                            span_attrs(&style, span, i, synth).font_features(features.clone());
-                        attrs.add_span(start - range.start..end - range.start, &span_attrs);
-                    }
+        while buffer.lines.len() > paragraphs.len() {
+            spare_lines.extend(buffer.lines.pop());
+        }
+        for (line_i, (range, ending)) in paragraphs.iter().enumerate() {
+            let mut attrs = AttrsList::new(&base);
+            for (i, span) in spans.iter().enumerate() {
+                let start = span.range.start.max(range.start);
+                let end = span.range.end.min(range.end);
+                if start < end {
+                    let span_attrs =
+                        span_attrs(&style, span, i, synth).font_features(features.clone());
+                    attrs.add_span(start - range.start..end - range.start, &span_attrs);
                 }
-                let paragraph = text.get(range.clone()).unwrap_or_default();
-                if let Some(emoji) = emoji {
-                    emoji_spans(&mut attrs, paragraph, emoji);
+            }
+            let paragraph = text.get(range.clone()).unwrap_or_default();
+            if let Some(emoji) = emoji {
+                emoji_spans(&mut attrs, paragraph, emoji);
+            }
+            let reused = match buffer.lines.get_mut(line_i) {
+                Some(line) => Some(line),
+                None => spare_lines.pop().map(|line| {
+                    buffer.lines.push(line);
+                    &mut buffer.lines[line_i]
+                }),
+            };
+            match reused {
+                Some(line) => {
+                    line.set_text(paragraph, *ending, attrs);
+                    // `set_text` keeps the old shaping when text and
+                    // attributes are unchanged, but the fonts they resolve
+                    // to may have changed since. Resetting keeps the shaping
+                    // storage for the next shape.
+                    line.reset();
                 }
-                BufferLine::new(paragraph, *ending, attrs, Shaping::Advanced)
-            })
-            .collect();
+                None => buffer.lines.push(BufferLine::new(
+                    paragraph,
+                    *ending,
+                    attrs,
+                    Shaping::Advanced,
+                )),
+            }
+        }
+        buffer.set_wrap(fs, Wrap::WordOrGlyph);
+        buffer.set_metrics_and_size(
+            fs,
+            Metrics::new(style.font_size * scale, style.line_height * scale),
+            wrap,
+            None,
+        );
         for line_i in 0..buffer.lines.len() {
             buffer.line_layout(fs, line_i);
         }
-        let buffer_x = fit_rtl_lines(fs, &mut buffer);
+        let buffer_x = fit_rtl_lines(fs, buffer);
 
         let inv = 1.0 / scale;
-        let mut glyphs = GlyphColumns::default();
-        let mut lines = LineColumns::default();
-        let mut line_paragraph: Vec<usize> = Vec::new();
+        let line_paragraph = &mut scratch.line_paragraph;
+        line_paragraph.clear();
+        let (glyph_count, run_count) = buffer
+            .layout_runs()
+            .filter(|run| keep(run))
+            .fold((0, 0), |(g, r), run| (g + run.glyphs.len(), r + 1));
+        // Room for a glyph per char lets a later text of as many chars,
+        // with fewer ligatures, refill this layout without growing it.
+        glyphs.clear_reserve(glyph_count.max(text.chars().count()));
+        // One more for the line made below when no run was kept.
+        lines.clear_reserve(run_count.max(1));
         let mut width = 0.0_f32;
         let mut height = 0.0_f32;
 
@@ -582,23 +793,11 @@ impl TextLayout {
             };
         }
 
-        let runs = build_runs(&glyphs, &lines);
-        let layout = Self {
-            text: params.text.clone(),
-            spans: params.spans.clone(),
-            style,
-            wrap_width: params.wrap_width,
-            scale_factor: scale,
-            width,
-            height,
-            glyphs,
-            lines,
-            runs,
-            buffer_x,
-            buffer,
-        };
-        debug_assert_eq!(layout.verify_integrity(), Ok(()));
-        Ok(layout)
+        build_runs(glyphs, lines, runs);
+        self.width = width;
+        self.height = height;
+        self.buffer_x = buffer_x;
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
 
     /// Checks the column invariants hit-testing, carets, and painting rely
@@ -1134,29 +1333,35 @@ fn rect_span(x0: f32, x1: f32, y: f32, height: f32) -> Rect {
     }
 }
 
-fn build_runs(glyphs: &GlyphColumns, lines: &LineColumns) -> RunColumns {
-    let mut runs = RunColumns::default();
-    for line in 0..lines.top.len() {
-        let (start, end) = (
-            lines.glyph_start[line] as usize,
-            lines.glyph_end[line] as usize,
-        );
-        let mut run_start = start;
-        for i in start..end {
-            let next_breaks = i + 1 == end
-                || glyphs.span[i + 1] != glyphs.span[i]
-                || glyphs.rtl(i + 1) != glyphs.rtl(i);
-            if next_breaks {
-                runs.line.push(line as u32);
-                runs.span.push(glyphs.span[i]);
-                runs.rtl.push(glyphs.rtl(i));
-                runs.glyph_start.push(run_start as u32);
-                runs.glyph_end.push((i + 1) as u32);
-                run_start = i + 1;
-            }
-        }
+/// Refills `runs` with each line's maximal glyph ranges of one span and
+/// direction.
+fn build_runs(glyphs: &GlyphColumns, lines: &LineColumns, runs: &mut RunColumns) {
+    let breaks = || {
+        (0..lines.top.len()).flat_map(move |line| {
+            let (start, end) = (
+                lines.glyph_start[line] as usize,
+                lines.glyph_end[line] as usize,
+            );
+            (start..end).filter_map(move |i| {
+                let next_breaks = i + 1 == end
+                    || glyphs.span[i + 1] != glyphs.span[i]
+                    || glyphs.rtl(i + 1) != glyphs.rtl(i);
+                next_breaks.then_some((line, i))
+            })
+        })
+    };
+    runs.clear_reserve(breaks().count());
+    let mut run_start = 0;
+    for (line, i) in breaks() {
+        // A line's first run starts at the line's first glyph.
+        let start = run_start.max(lines.glyph_start[line] as usize);
+        runs.line.push(line as u32);
+        runs.span.push(glyphs.span[i]);
+        runs.rtl.push(glyphs.rtl(i));
+        runs.glyph_start.push(start as u32);
+        runs.glyph_end.push((i + 1) as u32);
+        run_start = i + 1;
     }
-    runs
 }
 
 /// Splits on `\n`, `\r\n`, `\r`, `\n\r` like cosmic-text's
@@ -1166,9 +1371,9 @@ fn build_runs(glyphs: &GlyphColumns, lines: &LineColumns) -> RunColumns {
 ///
 /// cosmic-text asserts that a line is one bidi paragraph, so a separator
 /// followed by text of the other direction would panic if left inside.
-fn split_paragraphs(text: &str) -> Vec<(Range<usize>, LineEnding)> {
+fn split_paragraphs(text: &str, out: &mut Vec<(Range<usize>, LineEnding)>) {
     const OTHER_SEPARATORS: [char; 5] = ['\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2029}'];
-    let mut out = Vec::new();
+    out.clear();
     let mut start = 0;
     let rest = |at: usize| text.get(at..).unwrap_or_default();
     while let Some(i) =
@@ -1194,7 +1399,6 @@ fn split_paragraphs(text: &str) -> Vec<(Range<usize>, LineEnding)> {
         start = end + len;
     }
     out.push((start..text.len(), LineEnding::None));
-    out
 }
 
 fn family(kind: FontKind) -> Family<'static> {
@@ -1327,7 +1531,8 @@ mod tests {
     use unicode_segmentation::UnicodeSegmentation;
 
     use super::*;
-    use crate::system::test_system;
+    use crate::fonts::FontSettings;
+    use crate::system::{TextSystem, test_system};
 
     const LOREM: &str = "The quick brown fox jumps over the lazy dog while the sleepy cat \
                          watches from a sunny windowsill and dreams of mice.";
@@ -1335,6 +1540,38 @@ mod tests {
     fn layout(text: &str, wrap: Option<f32>) -> TextLayout {
         let params = TextParams::new(text, TextStyle::new(14.0)).wrap_width(wrap);
         test_system().layout(&params).expect("layout")
+    }
+
+    /// Everything hit-testing, carets, and painting read from a layout, as
+    /// text.
+    fn dump(layout: &TextLayout) -> String {
+        let buffer_runs: Vec<_> = layout
+            .buffer()
+            .layout_runs()
+            .map(|run| (run.line_i, run.line_w, run.glyphs.to_vec()))
+            .collect();
+        format!(
+            "{:?}\n{:?}\n{:?}\n{:?}\nbuffer_x {}\n{buffer_runs:?}",
+            layout.size(),
+            layout.lines().collect::<Vec<_>>(),
+            layout.glyph_runs().collect::<Vec<_>>(),
+            layout.glyphs(),
+            layout.buffer_x(),
+        )
+    }
+
+    /// A span styling `text` up to the char boundary at or before `end`.
+    fn prefix_span(text: &str, end: usize, style: FontStyle) -> Vec<TextSpan> {
+        let end = (0..=end.min(text.len()))
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0);
+        vec![TextSpan {
+            range: 0..end,
+            weight: Some(FontWeight::Bold),
+            style: Some(style),
+            kind: None,
+        }]
     }
 
     fn grapheme_boundaries(text: &str) -> Vec<usize> {
@@ -1484,6 +1721,31 @@ mod tests {
         // Catches selection painting outside the measured box: right-to-left
         // lines aligned against the wrap width, or a cluster wider than the
         // wrap pushed to negative x.
+        // Catches state a rebuild carries over from the layout whose storage
+        // it reuses: extra paragraphs, stale glyphs, runs, or line ranges.
+        #[test]
+        fn layout_rebuilt_in_another_layouts_storage_matches_fresh_layout(
+            first in mixed_text(),
+            second in mixed_text(),
+            wraps in (wrap(), wrap()),
+            span_ends in (0usize..40, 0usize..40),
+        ) {
+            let style = TextStyle::new(14.0);
+            let first_spans = prefix_span(&first, span_ends.0, FontStyle::Italic);
+            let second_spans = prefix_span(&second, span_ends.1, FontStyle::Normal);
+            let mut system = test_system();
+            let first = TextParams::new(first, style).spans(first_spans).wrap_width(wraps.0);
+            let mut reused = system.layout(&first).expect("layout");
+            let second = TextQuery {
+                spans: &second_spans,
+                ..TextQuery::new(&second, style).wrap_width(wraps.1)
+            };
+            reused.copy_inputs(&second);
+            system.rebuild(&mut reused);
+            let fresh = system.layout(&second.to_params()).expect("layout");
+            prop_assert_eq!(dump(&reused), dump(&fresh));
+        }
+
         #[test]
         fn layout_selection_rects_stay_within_layout_bounds(
             text in mixed_text(),
@@ -1735,12 +1997,40 @@ mod tests {
         let mut system = test_system();
         let fs = system.font_system_mut();
         let synth = SyntheticItalic::new(fs);
+        let mut scratch = LayoutScratch::default();
         let layout =
-            TextLayout::build_with(fs, &params, synth, None, true, |_| false).expect("layout");
+            TextLayout::build_with(fs, &mut scratch, &params, synth, None, true, |_| false)
+                .expect("layout");
         assert_eq!(layout.line_count(), 1);
         assert_eq!(layout.hit(50.0, 50.0), 0);
         let caret = layout.caret(2);
         assert_eq!((caret.line, caret.x, caret.y), (0, 0.0, 0.0));
+    }
+
+    // cosmic-text keeps a line's shaping when its text and attributes are
+    // unchanged, so without a reset a rebuild after a font change would
+    // keep glyphs from the old fonts.
+    #[test]
+    fn layout_rebuilt_after_font_change_matches_fresh_layout() {
+        // Its own system: changing fonts on the shared one would race other
+        // tests.
+        let mut system = TextSystem::vendored_only(&FontSettings::default());
+        let params = TextParams::new("office", TextStyle::new(14.0));
+        let mut reused = system.layout(&params).expect("layout");
+        let old_font = reused.glyphs().font_id[0];
+        system.set_font_settings(&FontSettings {
+            ui_family: "Inter".into(),
+            ..FontSettings::default()
+        });
+        reused.share_inputs(&params);
+        system.rebuild(&mut reused);
+        let fresh = system.layout(&params).expect("layout");
+        assert_ne!(
+            fresh.glyphs().font_id[0],
+            old_font,
+            "fixture lost its font change"
+        );
+        assert_eq!(dump(&reused), dump(&fresh));
     }
 
     #[test]
