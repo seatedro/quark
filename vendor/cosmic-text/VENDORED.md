@@ -123,6 +123,20 @@ own pull request.
   storage; the cache's byte-limit tests in
   `quark-text/src/cache.rs` use it.
 
+- Deferred monospace candidates (`src/font/fallback/mod.rs`): for a
+  monospace default family, `FontFallbackIter` returns the default
+  monospace font first and collects the other monospace candidates only
+  when a second font is asked for, where it collected them for every word.
+  The default font sorts before every candidate (it has no weight
+  difference), so it came first whatever they were, and without the
+  `monospace_fallback` feature every font's codepoint list is empty, so
+  every word of monospace text looked up every monospace face's font and
+  codepoint counts: about 700 ns a word, over half the time of laying out
+  a terminal row.
+  The candidates and their order are unchanged. Remove once upstream
+  collects candidates lazily;
+  `fallback::tests::deferred_monospace_candidates_keep_the_fallback_order`
+  compares the whole fallback order against collecting them first.
 - ASCII table skips (`src/shape.rs`): `shape_run`'s script scan returns at
   once for an ASCII run (ASCII is all Common or Latin, which it skips),
   and the left-to-right bidi check classes ASCII chars without the table

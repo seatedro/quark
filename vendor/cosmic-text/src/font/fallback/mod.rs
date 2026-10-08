@@ -221,6 +221,14 @@ pub struct FontFallbackIter<'a> {
     other_i: usize,
     end: bool,
     ideal_weight: fontdb::Weight,
+    /// The default monospace family's font, already returned before the
+    /// other monospace candidates were collected. The candidates are
+    /// collected when a next font is asked for, as most words never ask.
+    deferred_mono: Option<FontMatchKey>,
+    /// Collects the monospace candidates before returning the default
+    /// monospace font, as upstream does, for tests that compare the two.
+    #[cfg(test)]
+    eager_mono: bool,
 }
 
 impl<'a> FontFallbackIter<'a> {
@@ -248,6 +256,9 @@ impl<'a> FontFallbackIter<'a> {
             other_i: 0,
             end: false,
             ideal_weight,
+            deferred_mono: None,
+            #[cfg(test)]
+            eager_mono: false,
         }
     }
 
@@ -313,7 +324,68 @@ impl<'a> FontFallbackIter<'a> {
             .find(|m_key| self.face_contains_family(m_key.id, default_family_name))
     }
 
+    /// How many of the word's chars font `id` lacks, or `None` when the
+    /// font does not load.
+    fn codepoint_non_matches(&mut self, id: fontdb::ID) -> Option<usize> {
+        let supported = self.font_system.get_font_supported_codepoints_in_word(
+            id,
+            self.ideal_weight,
+            self.word,
+        )?;
+        Some(self.word.chars().count() - supported)
+    }
+
+    /// Queues every monospace font but the default (`default_id`) as a
+    /// fallback candidate, fewest missing chars first.
+    fn queue_mono_candidates(&mut self, default_id: Option<fontdb::ID>) {
+        let mono_ids_for_scripts = if self.scripts.is_empty() {
+            Vec::new()
+        } else {
+            let scripts = self.scripts.iter().filter_map(|script| {
+                let script_as_lower = script.short_name().to_lowercase();
+                <[u8; 4]>::try_from(script_as_lower.as_bytes()).ok()
+            });
+            self.font_system.get_monospace_ids_for_scripts(scripts)
+        };
+
+        // Every weight: a monospace face of another weight beats a
+        // proportional one.
+        for m_key in self.font_match_keys {
+            if Some(m_key.id) == default_id {
+                continue;
+            }
+            let is_mono_id = if mono_ids_for_scripts.is_empty() {
+                self.font_system.is_monospace(m_key.id)
+            } else {
+                mono_ids_for_scripts.binary_search(&m_key.id).is_ok()
+            };
+            if is_mono_id {
+                if let Some(codepoint_non_matches) = self.codepoint_non_matches(m_key.id) {
+                    let fallback_info = MonospaceFallbackInfo {
+                        font_weight_diff: Some(m_key.font_weight_diff),
+                        codepoint_non_matches: Some(codepoint_non_matches),
+                        font_weight: m_key.font_weight,
+                        id: m_key.id,
+                    };
+                    assert!(self
+                        .font_system
+                        .monospace_fallbacks_buffer
+                        .insert(fallback_info));
+                }
+            }
+        }
+    }
+
     fn next_item(&mut self, fallbacks: &Fallbacks) -> Option<<Self as Iterator>::Item> {
+        // The default monospace font went out first. Unless it has every
+        // char of the word, the other monospace fonts come next, as they
+        // would have had they been queued with it.
+        if let Some(default) = self.deferred_mono.take() {
+            if self.codepoint_non_matches(default.id) != Some(0) {
+                self.queue_mono_candidates(Some(default.id));
+            }
+        }
+
         if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
             if let Some(font) = self
                 .font_system
@@ -333,29 +405,6 @@ impl<'a> FontFallbackIter<'a> {
             self.default_i += 1;
             let is_mono = self.default_families[self.default_i - 1] == &Family::Monospace;
             let default_font_match_key = self.default_font_match_key().copied();
-            let word_chars_count = self.word.chars().count();
-
-            macro_rules! mk_mono_fallback_info {
-                ($m_key:expr) => {{
-                    let supported_cp_count_opt =
-                        self.font_system.get_font_supported_codepoints_in_word(
-                            $m_key.id,
-                            self.ideal_weight,
-                            self.word,
-                        );
-
-                    supported_cp_count_opt.map(|supported_cp_count| {
-                        let codepoint_non_matches = word_chars_count - supported_cp_count;
-
-                        MonospaceFallbackInfo {
-                            font_weight_diff: Some($m_key.font_weight_diff),
-                            codepoint_non_matches: Some(codepoint_non_matches),
-                            font_weight: $m_key.font_weight,
-                            id: $m_key.id,
-                        }
-                    })
-                }};
-            }
 
             match (is_mono, default_font_match_key.as_ref()) {
                 (false, None) => break 'DEF_FAM,
@@ -367,71 +416,45 @@ impl<'a> FontFallbackIter<'a> {
                 }
                 (true, None) => (),
                 (true, Some(m_key)) => {
-                    // Default Monospace font
-                    if let Some(mut fallback_info) = mk_mono_fallback_info!(m_key) {
-                        fallback_info.font_weight_diff = None;
-
+                    // The default monospace font, when it loads, sorts
+                    // before every candidate (it has no weight difference),
+                    // so it comes first whatever they are; they are only
+                    // collected when a next font is asked for.
+                    #[cfg(test)]
+                    let deferred = !self.eager_mono;
+                    #[cfg(not(test))]
+                    let deferred = true;
+                    if deferred {
+                        if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
+                            self.deferred_mono = Some(*m_key);
+                            return Some(font);
+                        }
+                    } else if let Some(codepoint_non_matches) = self.codepoint_non_matches(m_key.id)
+                    {
                         // Return early if default Monospace font supports all word codepoints.
                         // Otherewise, add to fallbacks set
-                        if fallback_info.codepoint_non_matches == Some(0) {
+                        if codepoint_non_matches == 0 {
                             if let Some(font) =
                                 self.font_system.get_font(m_key.id, self.ideal_weight)
                             {
                                 return Some(font);
                             }
                         } else {
-                            assert!(self
-                                .font_system
-                                .monospace_fallbacks_buffer
-                                .insert(fallback_info));
+                            assert!(self.font_system.monospace_fallbacks_buffer.insert(
+                                MonospaceFallbackInfo {
+                                    font_weight_diff: None,
+                                    codepoint_non_matches: Some(codepoint_non_matches),
+                                    font_weight: m_key.font_weight,
+                                    id: m_key.id,
+                                }
+                            ));
                         }
                     }
                 }
             }
 
-            let mono_ids_for_scripts = if is_mono && !self.scripts.is_empty() {
-                let scripts = self.scripts.iter().filter_map(|script| {
-                    let script_as_lower = script.short_name().to_lowercase();
-                    <[u8; 4]>::try_from(script_as_lower.as_bytes()).ok()
-                });
-                self.font_system.get_monospace_ids_for_scripts(scripts)
-            } else {
-                Vec::new()
-            };
-
-            for m_key in font_match_keys_iter(is_mono) {
-                if Some(m_key.id) != default_font_match_key.as_ref().map(|m_key| m_key.id) {
-                    let is_mono_id = if mono_ids_for_scripts.is_empty() {
-                        self.font_system.is_monospace(m_key.id)
-                    } else {
-                        mono_ids_for_scripts.binary_search(&m_key.id).is_ok()
-                    };
-
-                    if is_mono_id {
-                        let supported_cp_count_opt =
-                            self.font_system.get_font_supported_codepoints_in_word(
-                                m_key.id,
-                                self.ideal_weight,
-                                self.word,
-                            );
-                        if let Some(supported_cp_count) = supported_cp_count_opt {
-                            let codepoint_non_matches =
-                                self.word.chars().count() - supported_cp_count;
-
-                            let fallback_info = MonospaceFallbackInfo {
-                                font_weight_diff: Some(m_key.font_weight_diff),
-                                codepoint_non_matches: Some(codepoint_non_matches),
-                                font_weight: m_key.font_weight,
-                                id: m_key.id,
-                            };
-                            assert!(self
-                                .font_system
-                                .monospace_fallbacks_buffer
-                                .insert(fallback_info));
-                        }
-                    }
-                }
-            }
+            // Only a monospace default family gets here.
+            self.queue_mono_candidates(default_font_match_key.map(|m_key| m_key.id));
             // If default family is Monospace fallback to first monospaced font
             if let Some(fallback_info) = self.font_system.monospace_fallbacks_buffer.pop_first() {
                 if let Some(font) = self
@@ -512,5 +535,80 @@ impl Iterator for FontFallbackIter<'_> {
         let item = self.next_item(&fallbacks);
         mem::swap(&mut fallbacks, &mut self.font_system.fallbacks);
         item
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Attrs, Weight};
+
+    /// Two weights of a monospace family, other monospace families (one
+    /// variable), and a proportional family, from quark-text's assets.
+    fn font_system() -> FontSystem {
+        const FONTS: [&[u8]; 6] = [
+            include_bytes!("../../../../../crates/quark-text/assets/fonts/GeistMono-Regular.otf"),
+            include_bytes!("../../../../../crates/quark-text/assets/fonts/GeistMono-Bold.otf"),
+            include_bytes!(
+                "../../../../../crates/quark-text/assets/fonts/JetBrainsMono-Variable.ttf"
+            ),
+            include_bytes!("../../../../../crates/quark-text/assets/fonts/FiraCode-Variable.ttf"),
+            include_bytes!("../../../../../crates/quark-text/assets/fonts/IBMPlexMono-Regular.ttf"),
+            include_bytes!("../../../../../crates/quark-text/assets/fonts/Geist-Regular.otf"),
+        ];
+        let mut db = fontdb::Database::new();
+        for font in FONTS {
+            db.load_font_data(font.to_vec());
+        }
+        db.set_monospace_family("Geist Mono");
+        db.set_sans_serif_family("Geist");
+        FontSystem::new_with_locale_and_db_and_fallback("en-US".into(), db, PlatformFallback)
+    }
+
+    /// Every font `word` falls back through, in order.
+    fn fallback_order(
+        fs: &mut FontSystem,
+        family: Family,
+        weight: u16,
+        word: &str,
+        eager: bool,
+    ) -> Vec<fontdb::ID> {
+        let attrs = Attrs::new().family(family).weight(Weight(weight));
+        let mut scripts = Vec::new();
+        crate::shape::collect_scripts(word, &mut scripts);
+        let fonts = fs.get_font_matches(&attrs);
+        let families = [&attrs.family];
+        let mut iter = FontFallbackIter::new(fs, &fonts, &families, &scripts, word, attrs.weight);
+        iter.eager_mono = eager;
+        iter.map(|font| font.id()).collect()
+    }
+
+    // The default monospace font goes out before the other monospace
+    // candidates are collected. Every font after it must come in the order
+    // collecting them first gave, for words the default font covers and
+    // words it lacks, at its own weights and others.
+    #[test]
+    fn deferred_monospace_candidates_keep_the_fallback_order() {
+        let mut fs = font_system();
+        let words = [
+            "abc",
+            " ",
+            "a\u{3b1}",
+            "\u{65e5}\u{672c}",
+            "a\u{2603}",
+            "\u{1f600}",
+            "e\u{301}",
+            "\u{5e9}\u{5dc}",
+        ];
+        for word in words {
+            for weight in [300, 400, 700] {
+                for family in [Family::Monospace, Family::SansSerif] {
+                    let deferred = fallback_order(&mut fs, family, weight, word, false);
+                    let eager = fallback_order(&mut fs, family, weight, word, true);
+                    assert!(deferred.len() > 1, "{word:?} {weight} {family:?}");
+                    assert_eq!(deferred, eager, "{word:?} {weight} {family:?}");
+                }
+            }
+        }
     }
 }
