@@ -2247,7 +2247,10 @@ struct StripData {
 /// built for. Lives in [`DockState`] (the one thing a [`Dock`] borrows from
 /// frame to frame); it is a cache, so it is neither compared nor cloned.
 #[derive(Default)]
-pub(crate) struct StripMemo(std::cell::RefCell<HashMap<(HostId, PaneId), (u64, Rc<StripData>)>>);
+pub(crate) struct StripMemo(std::cell::RefCell<HashMap<(HostId, PaneId), BuiltStrip>>);
+
+/// A strip's data and the inputs hash it was built for.
+type BuiltStrip = (u64, Rc<StripData>);
 
 impl StripMemo {
     fn get(
