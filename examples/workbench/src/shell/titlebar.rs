@@ -25,7 +25,7 @@ pub fn leading_zone() -> f32 {
 
 fn icon_button(icon: &'static str, label: &'static str, command: CommandId) -> AnyElement {
     view! {
-        <Button on:click={command} icon={icon} label={label} tooltip={label}
+        <Button on:click={command} icon={icon} tooltip={label}
                 size={ButtonSize::Compact} fixed_size={tokens::ICON_BUTTON} />
     }
     .into_any()
