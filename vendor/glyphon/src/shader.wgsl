@@ -13,6 +13,9 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) @interpolate(flat) content_type: u32,
+    // Linear correction: x is 1 when on, y the background's linear
+    // luminance.
+    @location(3) @interpolate(flat) correction: vec2<f32>,
 };
 
 struct Params {
@@ -43,6 +46,18 @@ fn srgb_to_linear(c: f32) -> f32 {
     } else {
         return pow((c + 0.055) / 1.055, 2.4);
     }
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 {
+        return c * 12.92;
+    } else {
+        return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    }
+}
+
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
 @vertex
@@ -77,7 +92,12 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     vert_output.position.y *= -1.0;
 
     let content_type = in_vert.content_type_with_srgb & 0xffffu;
-    let srgb = (in_vert.content_type_with_srgb & 0xffff0000u) >> 16u;
+    let upper = (in_vert.content_type_with_srgb & 0xffff0000u) >> 16u;
+    let srgb = upper & 1u;
+    vert_output.correction = vec2<f32>(
+        f32((upper >> 1u) & 1u),
+        srgb_to_linear(f32(upper >> 8u) / 255.0),
+    );
 
     switch srgb {
         case 0u: {
@@ -126,7 +146,20 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             return textureSampleLevel(color_atlas_texture, atlas_sampler, in_frag.uv, 0.0);
         }
         case 1u: {
-            return vec4<f32>(in_frag.color.rgb, in_frag.color.a * textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x);
+            var a = textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x;
+            if in_frag.correction.x > 0.5 {
+                // Ghostty's linear-corrected blending: blend the two
+                // luminances in sRGB space, then pick the coverage that
+                // gives that luminance when blended linearly, so text has
+                // the weight of sRGB blending without its color fringes.
+                let fg_l = luminance(in_frag.color.rgb);
+                let bg_l = in_frag.correction.y;
+                if abs(fg_l - bg_l) > 0.001 {
+                    let blend_l = srgb_to_linear(linear_to_srgb(fg_l) * a + linear_to_srgb(bg_l) * (1.0 - a));
+                    a = clamp((blend_l - bg_l) / (fg_l - bg_l), 0.0, 1.0);
+                }
+            }
+            return vec4<f32>(in_frag.color.rgb, in_frag.color.a * a);
         }
         default: {
             return vec4<f32>(0.0);

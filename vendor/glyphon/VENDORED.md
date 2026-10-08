@@ -76,3 +76,11 @@ from its own atlas):
    keep that patch: `atlas_growth_rasterizes_no_cached_glyph_again` and
    `atlas_growth_keeps_cached_glyph_pixels` cover it, and the counters
    they read would need another source.
+- Linear-corrected blending (`src/text_render.rs`, `src/shader.wgsl`): a
+  glyph whose cache key has the vendored cosmic-text's `LINEAR_CORRECTED`
+  flag passes it and the background luminance in the upper half of the
+  vertex's content type (bit 1, bits 8 to 15). The fragment shader then
+  maps mask coverage the way Ghostty's `linear-corrected` alpha blending
+  does: it blends the foreground and background luminances in sRGB space
+  and solves for the coverage that gives that luminance when the target
+  blends linearly. A terminal uses it so text has Ghostty's weight.

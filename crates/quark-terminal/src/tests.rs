@@ -918,9 +918,13 @@ fn white_on_black() -> crate::TerminalStyle {
 
 /// `output` drawn at `scale` on a GPU, with the cell size in device
 /// pixels and the grid's top-left device pixel; `None` without a GPU.
-fn render(output: &str, scale: f32) -> Option<(quark_app::testing::Pixels, (u32, u32), u32)> {
+fn render(
+    output: &str,
+    scale: f32,
+    style: crate::TerminalStyle,
+) -> Option<(quark_app::testing::Pixels, (u32, u32), u32)> {
     let mut t = TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal"))
-        .with_style(white_on_black());
+        .with_style(style);
     t.feed(output.as_bytes());
     let mut ui = quark_app::testing::UiTestHarness::new(Probe(t), (320.0, 200.0), scale);
     ui.frame();
@@ -950,7 +954,7 @@ fn ink(pixels: &quark_app::testing::Pixels, x: u32, y: u32) -> bool {
 fn blocks_and_box_lines_tile_without_gaps() {
     for scale in [1.0, 1.5, 2.0] {
         let screen = "████████\r\n████████\r\n████████\r\n────────\r\n│\r\n│\r\n│";
-        let Some((pixels, (cw, ch), o)) = render(screen, scale) else {
+        let Some((pixels, (cw, ch), o)) = render(screen, scale, white_on_black()) else {
             return;
         };
         let cells = 8 * cw;
@@ -1049,4 +1053,43 @@ fn style_colors_reach_the_cells() {
         runs(&grid.rows[0]),
         format!("0+3\"red\" fg={red} 3+1\" \" fg={fg} 4+1\"x\" fg=#010203 5+6\" plain\" fg={fg}")
     );
+}
+
+/// Linear correction gives glyph edges the weight blending in sRGB space
+/// gives, as Ghostty draws: dark text on light gains ink over plain linear
+/// blending, light text on dark loses it.
+#[test]
+fn linear_correction_weighs_text_like_srgb_blending() {
+    use crate::AlphaBlending;
+    let white = Rgb::new(255, 255, 255);
+    let black = Rgb::new(0, 0, 0);
+    // (case, foreground, background, corrected draws more ink)
+    let table = [("dark on light", black, white, true), ("light on dark", white, black, false)];
+    for (name, fg, bg, heavier) in table {
+        let ink = |blending| {
+            let style = crate::TerminalStyle {
+                colors: crate::TerminalColors {
+                    foreground: Some(fg),
+                    background: Some(bg),
+                    ..Default::default()
+                },
+                alpha_blending: blending,
+                ..Default::default()
+            };
+            let (pixels, (cw, ch), o) = render("WMWMWMWM", 1.0, style)?;
+            let mut ink = 0u64;
+            for y in o..o + ch {
+                for x in o..o + 8 * cw {
+                    ink += u64::from(pixels.pixel(x, y)[0].abs_diff(bg.r));
+                }
+            }
+            Some(ink)
+        };
+        let (Some(linear), Some(corrected)) =
+            (ink(AlphaBlending::Linear), ink(AlphaBlending::LinearCorrected))
+        else {
+            return;
+        };
+        assert_eq!(corrected > linear, heavier, "{name}: {corrected} vs {linear}");
+    }
 }

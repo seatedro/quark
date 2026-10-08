@@ -13,6 +13,28 @@ bitflags::bitflags! {
         const PIXEL_FONT = 4;
         /// Embolden outlines slightly, to thicken thin strokes
         const THICKEN = 8;
+        /// Blend coverage so the result matches blending in sRGB space
+        /// against a background whose sRGB-encoded luminance is in bits 8
+        /// to 15 (see [`CacheKeyFlags::linear_corrected`]). Rasterization
+        /// ignores it; the renderer reads it.
+        const LINEAR_CORRECTED = 16;
+        /// The background luminance of `LINEAR_CORRECTED`.
+        const BLEND_BACKGROUND = 0xff00;
+    }
+}
+
+impl CacheKeyFlags {
+    /// `self` with `LINEAR_CORRECTED` against a background of sRGB-encoded
+    /// luminance `luminance`.
+    pub fn linear_corrected(self, luminance: u8) -> Self {
+        let bits = self.bits() & !Self::BLEND_BACKGROUND.bits();
+        Self::from_bits_retain(bits | Self::LINEAR_CORRECTED.bits() | u32::from(luminance) << 8)
+    }
+
+    /// The background luminance when `LINEAR_CORRECTED` is set.
+    pub fn blend_background(self) -> Option<u8> {
+        self.contains(Self::LINEAR_CORRECTED)
+            .then_some((self.bits() >> 8) as u8)
     }
 }
 

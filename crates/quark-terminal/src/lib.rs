@@ -88,8 +88,8 @@ pub use input::KeyPress;
 pub use metrics::{InvalidModifier, MetricModifier};
 pub use pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 pub use state::{
-    INPUT_BACKLOG, PointerInput, Preedit, TerminalColors, TerminalEvent, TerminalOutcome,
-    TerminalSignal, TerminalState, TerminalStyle,
+    AlphaBlending, INPUT_BACKLOG, PointerInput, Preedit, TerminalColors, TerminalEvent,
+    TerminalOutcome, TerminalSignal, TerminalState, TerminalStyle,
 };
 pub use view::{TerminalEnv, terminal_view};
 pub use vt::UnsafePaste;

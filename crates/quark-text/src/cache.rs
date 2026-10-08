@@ -34,6 +34,7 @@ impl LayoutKey {
         style.family.hash(&mut attrs);
         attrs.write_u32(style.letter_spacing.to_bits());
         attrs.write_u8(u8::from(style.thicken));
+        style.linear_correction.hash(&mut attrs);
         attrs.write_usize(params.spans.len());
         for span in params.spans.iter() {
             attrs.write_usize(span.range.start);

@@ -283,6 +283,7 @@ mod tests {
         family: None,
         letter_spacing: 0.0,
         thicken: false,
+        linear_correction: None,
     };
 
     /// Everything a layout shows and hits against.

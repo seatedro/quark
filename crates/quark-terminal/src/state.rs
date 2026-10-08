@@ -52,6 +52,22 @@ pub struct TerminalStyle {
     pub minimum_contrast: f32,
     /// Embolden glyph outlines slightly (Ghostty's `font-thicken`).
     pub font_thicken: bool,
+    /// How glyph edges blend with the background (Ghostty's
+    /// `alpha-blending`).
+    pub alpha_blending: AlphaBlending,
+}
+
+/// How glyph edges blend into the cell background. quark renders into an
+/// sRGB target, so blending is linear; `LinearCorrected` adjusts glyph
+/// coverage to look like blending in sRGB space, which is how Ghostty draws
+/// by default on every platform (`native` on macOS looks the same).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum AlphaBlending {
+    /// Linear blending: dark text on a light background draws thinner,
+    /// light text on a dark one heavier.
+    Linear,
+    #[default]
+    LinearCorrected,
 }
 
 impl Default for TerminalStyle {
@@ -65,6 +81,7 @@ impl Default for TerminalStyle {
             colors: TerminalColors::default(),
             minimum_contrast: 1.0,
             font_thicken: false,
+            alpha_blending: AlphaBlending::default(),
         }
     }
 }
@@ -216,6 +233,8 @@ pub(crate) struct Palette {
     pub link: quark::Color,
     /// See [`TerminalStyle::minimum_contrast`].
     pub minimum_contrast: f32,
+    /// Correct linear blending of glyph edges toward sRGB blending.
+    pub linear_correction: bool,
     /// The terminal's default background, which minimum contrast holds
     /// text against where a cell has none; the view sets it from the grid.
     pub background: Rgb,
@@ -229,6 +248,7 @@ impl std::hash::Hash for Palette {
         self.cursor_text.map(|c| [c.r, c.g, c.b, c.a]).hash(state);
         self.minimum_contrast.to_bits().hash(state);
         self.background.hash(state);
+        self.linear_correction.hash(state);
     }
 }
 
@@ -1348,6 +1368,7 @@ pub(crate) fn palette(theme: &Theme, style: &TerminalStyle) -> Palette {
         cursor_text: custom.cursor_text.map(color),
         link: c.text_accent,
         minimum_contrast: style.minimum_contrast,
+        linear_correction: style.alpha_blending == AlphaBlending::LinearCorrected,
         background: Rgb::new(c.editor_surface.r, c.editor_surface.g, c.editor_surface.b),
     }
 }

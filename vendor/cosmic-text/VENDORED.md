@@ -204,3 +204,9 @@ allocations they remove):
   `TextStyle::thicken`, which a terminal uses for Ghostty's
   `font-thicken`. Upstream has no equivalent; it could go up as a
   general faux-bold strength option.
+- Linear-corrected blending flag (`src/glyph_cache.rs`): a
+  `LINEAR_CORRECTED` cache key flag with the background's luminance in
+  bits 8 to 15 (`CacheKeyFlags::linear_corrected`, `blend_background`).
+  Rasterization ignores it; it travels with the glyph to the vendored
+  glyphon, which blends its edges as Ghostty's `linear-corrected` does.
+  quark-text sets it for `TextStyle::linear_correction`.

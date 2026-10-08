@@ -405,6 +405,19 @@ enum TextColorConversion {
     ConvertToLinear = 1,
 }
 
+/// The upper half of the vertex's content type for a glyph whose cache key
+/// asks for linear correction: bit 1 set, and the background's
+/// sRGB-encoded luminance in bits 8 to 15. Bit 0 is the color conversion.
+fn linear_correction(key: &GlyphonCacheKey) -> u16 {
+    match key {
+        GlyphonCacheKey::Text(key) => key
+            .flags
+            .blend_background()
+            .map_or(0, |luminance| 2 | u16::from(luminance) << 8),
+        GlyphonCacheKey::Custom(_) => 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum GlyphonCacheKey {
     Text(cosmic_text::CacheKey),
@@ -701,7 +714,8 @@ where
             match system.atlas.color_mode {
                 ColorMode::Accurate => TextColorConversion::ConvertToLinear,
                 ColorMode::Web => TextColorConversion::None,
-            } as u16,
+            } as u16
+                | linear_correction(&metadata.cache_key),
         ],
         depth,
     }))

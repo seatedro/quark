@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::grid::Rgb;
-use crate::state::TerminalStyle;
+use crate::state::{AlphaBlending, TerminalStyle};
 
 /// Ghostty's default font, bundled with quark-text.
 pub const GHOSTTY_FONT_FAMILY: &str = "JetBrains Mono";
@@ -25,7 +25,7 @@ impl TerminalStyle {
     /// [`Self::ghostty`] with the settings of a Ghostty config file
     /// applied, and a message for each line that was not understood or is
     /// not supported. Supported keys: `font-family` (the first one),
-    /// `font-size`, `adjust-cell-height`, `font-thicken`,
+    /// `font-size`, `adjust-cell-height`, `font-thicken`, `alpha-blending`,
     /// `minimum-contrast`, `foreground`, `background`, `cursor-color`,
     /// `cursor-text`, `selection-background`, and `palette`. Colors are
     /// hex (`#rrggbb`, `rrggbb`, or `#rgb`); `theme` and `config-file` are
@@ -112,6 +112,14 @@ fn apply(
             style.adjust_cell_height = Some(value.parse().map_err(|e| format!("{e}"))?);
         }
         "font-thicken" => style.font_thicken = boolean(value)?,
+        // Ghostty's native blending on macOS looks like linear-corrected.
+        "alpha-blending" => {
+            style.alpha_blending = match value {
+                "native" | "linear-corrected" => AlphaBlending::LinearCorrected,
+                "linear" => AlphaBlending::Linear,
+                _ => return Err(format!("unknown mode {value:?}")),
+            }
+        }
         "minimum-contrast" => style.minimum_contrast = number(value)?.clamp(1.0, 21.0),
         "foreground" => c.foreground = Some(color(value)?),
         "background" => c.background = Some(color(value)?),

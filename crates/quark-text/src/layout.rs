@@ -109,6 +109,12 @@ pub struct TextStyle {
     /// Rasterize glyph outlines slightly emboldened (color glyphs are
     /// left alone), like Ghostty's `font-thicken`.
     pub thicken: bool,
+    /// Blend glyph coverage as Ghostty's `linear-corrected` does, for text
+    /// over a background of this sRGB-encoded luminance (0 to 255): the
+    /// weight sRGB-space blending gives, without its color fringes.
+    /// Linear blending, the default, draws dark text on light backgrounds
+    /// thinner and light text on dark ones heavier.
+    pub linear_correction: Option<u8>,
 }
 
 impl TextStyle {
@@ -121,6 +127,7 @@ impl TextStyle {
             family: None,
             letter_spacing: 0.0,
             thicken: false,
+            linear_correction: None,
         }
     }
 
@@ -151,6 +158,11 @@ impl TextStyle {
 
     pub fn thicken(mut self, thicken: bool) -> Self {
         self.thicken = thicken;
+        self
+    }
+
+    pub fn linear_correction(mut self, background_luminance: Option<u8>) -> Self {
+        self.linear_correction = background_luminance;
         self
     }
 }
@@ -1621,10 +1633,14 @@ fn base_attrs(style: &TextStyle) -> Attrs<'static> {
 
 /// Rasterization flags the whole block's style asks for.
 fn style_flags(style: &TextStyle) -> CacheKeyFlags {
-    if style.thicken {
+    let flags = if style.thicken {
         CacheKeyFlags::THICKEN
     } else {
         CacheKeyFlags::empty()
+    };
+    match style.linear_correction {
+        Some(luminance) => flags.linear_corrected(luminance),
+        None => flags,
     }
 }
 

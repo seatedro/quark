@@ -430,7 +430,10 @@ fn paint_row(
             continue;
         }
         let ascii = text.len() == usize::from(run.cols);
-        let (style, italic) = text_style(m, run.style, text.len(), ascii);
+        let blend = palette
+            .linear_correction
+            .then(|| run.style.bg.map_or(color(palette.background), color));
+        let (style, italic) = text_style(m, run.style, text.len(), ascii, blend);
         let block = row_text.block(at, drawn, text, italic.as_slice());
         drawn += 1;
         let Ok(layout) = block.layout(cx.text, style, None, cx.scale_factor) else {
@@ -512,9 +515,8 @@ fn text_color(style: CellStyle, palette: Palette, fg: Option<Color>) -> Color {
     c
 }
 
-/// `fg`, or black or white (whichever contrasts more with `bg`) when `fg`
-/// has less than `min` contrast with it (Ghostty's `contrasted_color`).
-fn contrasted(fg: Color, bg: Color, min: f32) -> Color {
+/// Relative luminance of an sRGB color, linear.
+fn luminance(c: Color) -> f32 {
     let lin = |c: u8| {
         let c = f32::from(c) / 255.0;
         if c <= 0.04045 {
@@ -523,7 +525,23 @@ fn contrasted(fg: Color, bg: Color, min: f32) -> Color {
             ((c + 0.055) / 1.055).powf(2.4)
         }
     };
-    let luminance = |c: Color| 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// The luminance of `c`, encoded back to sRGB as a byte.
+fn srgb_luminance(c: Color) -> u8 {
+    let l = luminance(c);
+    let encoded = if l <= 0.003_130_8 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// `fg`, or black or white (whichever contrasts more with `bg`) when `fg`
+/// has less than `min` contrast with it (Ghostty's `contrasted_color`).
+fn contrasted(fg: Color, bg: Color, min: f32) -> Color {
     let ratio = |a: f32, b: f32| (a.max(b) + 0.05) / (a.min(b) + 0.05);
     let bg_l = luminance(bg);
     if ratio(luminance(fg), bg_l) >= min {
@@ -537,14 +555,16 @@ fn contrasted(fg: Color, bg: Color, min: f32) -> Color {
 }
 
 /// The text style of a run in `style`, and its italic span over `len`
-/// bytes when italic. ASCII runs step by whole cells.
+/// bytes when italic. ASCII runs step by whole cells. `blend` is the
+/// background to correct linear blending against.
 fn text_style(
     m: &Metrics,
     style: CellStyle,
     len: usize,
     ascii: bool,
+    blend: Option<Color>,
 ) -> (TextStyle, Option<TextSpan>) {
-    let mut text_style = m.text_style();
+    let mut text_style = m.text_style().linear_correction(blend.map(srgb_luminance));
     if ascii {
         text_style = text_style.letter_spacing(m.letter_spacing);
     }
@@ -744,7 +764,8 @@ fn paint_cursor(
                 if let Some(cp) = sprite::sprite_char(text) {
                     paint_sprite(scene, m, cp, cols, (rect.x, rect.y), 0, fg);
                 } else if !text.trim().is_empty() {
-                    let (style, italic) = text_style(m, run.style, text.len(), ascii);
+                    let blend = palette.linear_correction.then_some(cursor_color);
+                    let (style, italic) = text_style(m, run.style, text.len(), ascii, blend);
                     let query = TextQuery {
                         spans: italic.as_slice(),
                         ..TextQuery::new(text, style)
