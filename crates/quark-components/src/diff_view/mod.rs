@@ -40,7 +40,9 @@ use quark_diff::{
 };
 use quark_render::FontKind;
 use quark_render::scene::Rect;
-use quark_syntax::{GrammarStore, HighlightKind, HighlightSpan, HighlightWorker, LanguageId};
+use quark_syntax::{
+    GrammarStore, HighlightKind, HighlightSpan, HighlightWorker, Highlighted, LanguageId,
+};
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, WHEEL_LINE_PX};
@@ -327,6 +329,9 @@ pub struct DiffViewState {
     content_w: [f32; 2],
     syntax: Option<HighlightWorker>,
     highlights: Vec<[Option<Arc<[HighlightSpan]>>; 2]>,
+    /// Revision of each held highlight, which a newer result of the same
+    /// document must exceed (grammars arriving recolor it).
+    highlight_rev: Vec<[Option<u32>; 2]>,
     highlight_gen: Vec<u32>,
     revision: u64,
     /// Bumped with every frame `prepare` builds.
@@ -364,6 +369,7 @@ impl DiffViewState {
             content_w: [0.0; 2],
             syntax: None,
             highlights: Vec::new(),
+            highlight_rev: Vec::new(),
             highlight_gen: Vec::new(),
             revision: 0,
             frame_id: 0,
@@ -1306,6 +1312,7 @@ impl DiffViewState {
     fn reset_highlights(&mut self) {
         let files = self.doc.file_count() as usize;
         self.highlights = vec![[None, None]; files];
+        self.highlight_rev = vec![[None, None]; files];
         self.highlight_gen = vec![0; files];
     }
 
@@ -1331,15 +1338,30 @@ impl DiffViewState {
         let Some(worker) = &self.syntax else {
             return;
         };
+        let mut results = Vec::new();
         while let Ok(Some(done)) = worker.try_recv() {
-            let (file, side) = ((done.slot / 2) as usize, (done.slot % 2) as usize);
-            if done.generation != self.doc_generation || file >= self.highlights.len() {
-                continue;
-            }
-            self.highlights[file][side] = Some(done.spans.into());
-            self.highlight_gen[file] += 1;
-            self.revision += 1;
+            results.push(done);
         }
+        for done in results {
+            self.take_highlight(done);
+        }
+    }
+
+    /// Keeps a result for the current document unless the file side holds
+    /// the same or a later revision; results for earlier documents are
+    /// dropped.
+    fn take_highlight(&mut self, done: Highlighted) {
+        let (file, side) = ((done.slot / 2) as usize, (done.slot % 2) as usize);
+        if done.generation != self.doc_generation || file >= self.highlights.len() {
+            return;
+        }
+        if self.highlight_rev[file][side].is_some_and(|held| held >= done.revision) {
+            return;
+        }
+        self.highlight_rev[file][side] = Some(done.revision);
+        self.highlights[file][side] = Some(done.spans.into());
+        self.highlight_gen[file] += 1;
+        self.revision += 1;
     }
 }
 
@@ -1441,4 +1463,54 @@ fn floor_boundary(text: &str, byte: usize) -> usize {
         at -= 1;
     }
     at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PATCH: &str = "diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-fn a() {}
++fn b() {}
+";
+
+    // Catches progressive highlights being dropped or stale ones winning:
+    // later revisions for the shown document recolor it, while earlier
+    // revisions and results for a replaced document do not.
+    #[test]
+    fn highlights_replace_only_when_newer_for_the_shown_document() {
+        let doc = || quark_diff::parse_unified(PATCH).unwrap();
+        let mut state = DiffViewState::new("test.diff", FocusId::new(1), doc());
+        state.set_document(doc());
+        let slot = Side::New as u64;
+        let mut held = Vec::new();
+        // (document generation, revision, highlighted length)
+        for (generation, revision, length) in
+            [(1, 0, 2), (1, 1, 5), (1, 0, 1), (0, 2, 9), (1, 1, 7)]
+        {
+            state.take_highlight(Highlighted {
+                slot,
+                generation,
+                revision,
+                source: Arc::from("fn b() {}\n"),
+                spans: vec![HighlightSpan {
+                    offset: 0,
+                    length,
+                    kind: HighlightKind::Keyword,
+                }],
+                pending: false,
+                unresolved: Vec::new(),
+            });
+            let (spans, _) = state.syntax_spans(0, Side::New, 0..9);
+            held.push(spans.first().map(|span| span.range.clone()));
+        }
+
+        assert_eq!(
+            held,
+            [Some(0..2), Some(0..5), Some(0..5), Some(0..5), Some(0..5)]
+        );
+    }
 }
