@@ -566,6 +566,7 @@ where
                 };
                 let atlas_min = allocation.rectangle.min;
 
+                inner.stats.upload_bytes += image.data.len() as u64;
                 state.queue.write_texture(
                     TexelCopyTextureInfo {
                         texture: &inner.texture,
@@ -604,6 +605,7 @@ where
                 (GpuCacheStatus::SkipRasterization, None, inner)
             };
 
+            inner.stats.misses += 1;
             inner.glyphs_in_use.insert(metadata.cache_key);
             // Insert the glyph into the cache and return the details reference
             inner

@@ -7,9 +7,9 @@ use lru::LruCache;
 use rustc_hash::FxHasher;
 use std::{collections::HashSet, hash::BuildHasherDefault};
 use wgpu::{
-    BindGroup, DepthStencilState, Device, Extent3d, MultisampleState, Origin3d, Queue,
-    RenderPipeline, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+    BindGroup, CommandEncoderDescriptor, DepthStencilState, Device, Extent3d, MultisampleState,
+    Origin3d, Queue, RenderPipeline, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
+    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
 };
 
@@ -25,7 +25,46 @@ pub(crate) struct InnerAtlas {
     pub glyph_cache: LruCache<GlyphonCacheKey, GlyphDetails, Hasher>,
     pub glyphs_in_use: HashSet<GlyphonCacheKey, Hasher>,
     pub max_texture_dimension_2d: u32,
+    // quark patch: work counters, summed by `TextAtlas::stats`.
+    pub stats: AtlasStats,
 }
+
+// quark patch: atlas work counters for tests and devtools.
+/// Counts of the work a [`TextAtlas`] has done since it was created.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AtlasStats {
+    /// Glyphs rasterized because the cache did not hold them.
+    pub misses: u64,
+    /// Cached glyphs dropped to make room for others.
+    pub evictions: u64,
+    /// Times an atlas texture grew.
+    pub growths: u64,
+    /// Glyphs rasterized again because a growth could not copy the old
+    /// texture into the new one.
+    pub rerasterized: u64,
+    /// Bytes of glyph images written into atlas textures.
+    pub upload_bytes: u64,
+}
+
+impl std::ops::Add for AtlasStats {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            misses: self.misses + other.misses,
+            evictions: self.evictions + other.evictions,
+            growths: self.growths + other.growths,
+            rerasterized: self.rerasterized + other.rerasterized,
+            upload_bytes: self.upload_bytes + other.upload_bytes,
+        }
+    }
+}
+
+/// Usages of every atlas texture. quark patch: `COPY_SRC`, so growing can
+/// copy the old texture into the new one.
+const ATLAS_USAGE: TextureUsages = TextureUsages::TEXTURE_BINDING
+    .union(TextureUsages::COPY_DST)
+    .union(TextureUsages::COPY_SRC);
 
 impl InnerAtlas {
     const INITIAL_SIZE: u32 = 256;
@@ -48,7 +87,7 @@ impl InnerAtlas {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: kind.texture_format(),
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage: ATLAS_USAGE,
             view_formats: &[],
         });
 
@@ -66,6 +105,7 @@ impl InnerAtlas {
             glyph_cache,
             glyphs_in_use,
             max_texture_dimension_2d,
+            stats: AtlasStats::default(),
         }
     }
 
@@ -90,6 +130,7 @@ impl InnerAtlas {
                 }
 
                 let _ = self.glyph_cache.pop_lru();
+                self.stats.evictions += 1;
 
                 (key, value) = self.glyph_cache.peek_lru()?;
             }
@@ -101,6 +142,7 @@ impl InnerAtlas {
 
             let (_, value) = self.glyph_cache.pop_lru().unwrap();
             self.packer.deallocate(value.atlas_id.unwrap());
+            self.stats.evictions += 1;
         }
     }
 
@@ -129,6 +171,9 @@ impl InnerAtlas {
 
         self.packer.grow(size2(new_size as i32, new_size as i32));
 
+        // quark patch: kept to copy from below.
+        let old_texture = self.texture.clone();
+
         // Create a texture to use for our atlas
         self.texture = state.device.create_texture(&TextureDescriptor {
             label: Some("glyphon atlas"),
@@ -141,9 +186,38 @@ impl InnerAtlas {
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: self.kind.texture_format(),
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            usage: ATLAS_USAGE,
             view_formats: &[],
         });
+        self.stats.growths += 1;
+
+        // quark patch: the allocations stayed put, so copying the old
+        // texture into the new one's corner keeps every cached glyph without
+        // rasterizing it again. Same format and sample count, so the copy is
+        // valid whenever the old texture allows copying from it, as every
+        // texture made here does. Queued glyph writes reach the old texture
+        // before this submission runs, and later ones land on the new
+        // texture before the caller's next submission.
+        if old_texture.usage().contains(TextureUsages::COPY_SRC) {
+            let mut encoder = state
+                .device
+                .create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("glyphon atlas growth"),
+                });
+            encoder.copy_texture_to_texture(
+                old_texture.as_image_copy(),
+                self.texture.as_image_copy(),
+                Extent3d {
+                    width: self.size,
+                    height: self.size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            state.queue.submit([encoder.finish()]);
+            self.texture_view = self.texture.create_view(&TextureViewDescriptor::default());
+            self.size = new_size;
+            return true;
+        }
 
         // Re-upload glyphs
         for (&cache_key, glyph) in &self.glyph_cache {
@@ -185,6 +259,8 @@ impl InnerAtlas {
                 }
             };
 
+            self.stats.rerasterized += 1;
+            self.stats.upload_bytes += image_data.len() as u64;
             state.queue.write_texture(
                 TexelCopyTextureInfo {
                     texture: &self.texture,
@@ -334,6 +410,12 @@ impl TextAtlas {
     pub fn trim(&mut self) {
         self.mask_atlas.trim();
         self.color_atlas.trim();
+    }
+
+    // quark patch: atlas work counters.
+    /// Work done by both atlas textures since this atlas was created.
+    pub fn stats(&self) -> AtlasStats {
+        self.mask_atlas.stats + self.color_atlas.stats
     }
 
     pub(crate) fn grow(

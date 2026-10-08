@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
+/// Glyph atlas work counters, from [`Renderer::text_atlas_stats`].
+pub use glyphon::AtlasStats as TextAtlasStats;
 use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
 use quark_text::TextSystem;
 use thiserror::Error;
@@ -905,6 +907,12 @@ impl Renderer {
     /// to share it with another window.
     pub fn gpu(&self) -> &GpuContext {
         &self.gpu
+    }
+
+    /// Glyph atlas work since this renderer was created: cache misses,
+    /// evictions, growths, and bytes uploaded.
+    pub fn text_atlas_stats(&self) -> TextAtlasStats {
+        self.atlas.stats()
     }
 
     fn for_surface(
@@ -4869,6 +4877,75 @@ mod tests {
             any_light_pixel(&sparse, rect(0.0, 0.0, 64.0, 64.0)),
             "text did not recover after the atlas filled"
         );
+    }
+
+    /// The frames around a glyph atlas growth: `Kept glyphs` alone, then
+    /// again beside enough large glyphs that the 256 px atlas grows while
+    /// the first text's glyphs are pinned, then alone once more. Returns
+    /// each frame's pixels and the atlas counters after it.
+    fn frames_around_atlas_growth() -> Option<Vec<(image::RgbaImage, TextAtlasStats)>> {
+        const SIZE: (u32, u32) = (256, 128);
+        let mut renderer = gpu_renderer(SIZE.0, SIZE.1)?;
+        let mut text = test_text();
+        let kept = white_text_with(&mut text, rect(4.0, 4.0, 248.0, 24.0), "Kept glyphs");
+        let large = text.layout(&TextParams::new(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            TextStyle::new(64.0),
+        ));
+        let large = Primitive::TextRun(TextPrimitive {
+            rect: rect(0.0, 40.0, 256.0, 88.0),
+            layout: ShapedText::new(Arc::new(large.expect("layout"))),
+            color: quark::Color::rgba(255, 255, 255, 255),
+        });
+        let mut alone = Scene::default();
+        alone.push(kept.clone());
+        let mut crowded = alone.clone();
+        crowded.push(large);
+        let frames = [&alone, &crowded, &alone].map(|scene| {
+            let pixels = renderer
+                .render_to_rgba(scene, &mut text, SIZE.0, SIZE.1)
+                .expect("offscreen render");
+            let image = image::RgbaImage::from_raw(SIZE.0, SIZE.1, pixels).expect("pixel size");
+            (image, renderer.text_atlas_stats())
+        });
+        let growths = frames[1].1.growths - frames[0].1.growths;
+        assert!(growths > 0, "the large glyphs did not grow the atlas");
+        Some(frames.into())
+    }
+
+    // Regression: growing the glyph atlas replaced its texture and
+    // rasterized and uploaded every cached glyph again.
+    #[test]
+    fn atlas_growth_rasterizes_no_cached_glyph_again() {
+        let Some(frames) = frames_around_atlas_growth() else {
+            return;
+        };
+        let [first, grown, again] = [frames[0].1, frames[1].1, frames[2].1];
+        assert_eq!(grown.rerasterized, first.rerasterized);
+        // The kept glyphs are all still cached after the growth.
+        assert_eq!(again.misses, grown.misses);
+        assert_eq!(again.upload_bytes, grown.upload_bytes);
+    }
+
+    // Glyphs cached before the atlas grows draw the same pixels after it,
+    // both in the frame that grows it and in later ones.
+    #[test]
+    fn atlas_growth_keeps_cached_glyph_pixels() {
+        let Some(frames) = frames_around_atlas_growth() else {
+            return;
+        };
+        let [first, grown, again] = [&frames[0].0, &frames[1].0, &frames[2].0];
+        let kept = rect(0.0, 0.0, 256.0, 32.0);
+        assert!(count_pixels(first, kept, |p| p[0] > 128) > 50);
+        let differing = |a: &image::RgbaImage, b: &image::RgbaImage, area: Rect| {
+            (area.y as u32..area.bottom() as u32)
+                .flat_map(|y| (area.x as u32..area.right() as u32).map(move |x| (x, y)))
+                .filter(|&(x, y)| a.get_pixel(x, y) != b.get_pixel(x, y))
+                .count()
+        };
+        assert_eq!(differing(first, grown, kept), 0, "frame that grew");
+        let whole = rect(0.0, 0.0, 256.0, 128.0);
+        assert_eq!(differing(first, again, whole), 0, "frame after");
     }
 
     // Two windows share one device: an image uploaded while drawing one
