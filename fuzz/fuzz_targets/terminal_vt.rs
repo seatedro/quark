@@ -140,6 +140,11 @@ fn snapshot(term: &mut Terminal, grid: &mut Grid) {
             assert!(from <= to && to < cols, "row {y} selection {from}..={to}");
         }
     }
+    // The view keys per-row caches by id.
+    let mut ids: Vec<u64> = grid.rows.iter().map(|r| r.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), grid.rows.len(), "row ids repeat");
     if let Some((x, y)) = grid.cursor.at {
         assert!(
             x < cols && y < rows,
@@ -153,16 +158,24 @@ fn snapshot(term: &mut Terminal, grid: &mut Grid) {
     );
 }
 
-/// The grid as text precise enough to tell two grids apart.
+/// The grid as text precise enough to tell two grids apart by what they
+/// draw. Row ids are left out: an id names a row's storage, unique in the
+/// process, so two grids never share one.
 fn dump(grid: &Grid) -> String {
-    format!(
-        "{}x{} {:?} {:?}\n{:#?}",
+    let mut out = format!(
+        "{}x{} {:?} {:?}\n",
         grid.cols,
         grid.rows.len(),
         grid.cursor,
-        grid.colors,
-        grid.rows
-    )
+        grid.colors
+    );
+    for row in &grid.rows {
+        out += &format!(
+            "{:?} {:?} {:?} {} {:016x}\n",
+            row.text, row.runs, row.selection, row.wrapped, row.hash
+        );
+    }
+    out
 }
 
 fn take_effects(term: &mut Terminal, out: &mut Outcome) {
