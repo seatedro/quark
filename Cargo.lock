@@ -3109,6 +3109,7 @@ dependencies = [
  "sys-locale",
  "thiserror 2.0.21",
  "tracing",
+ "unicode-linebreak",
  "unicode-script",
  "unicode-segmentation",
 ]

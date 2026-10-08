@@ -12,6 +12,21 @@ pub enum TextAlign {
     Right,
 }
 
+/// How a [`TextElement`] breaks into lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum WrapMode {
+    /// Wrap to the width layout gives the element: as wide as the text up
+    /// to the width offered, and as tall as the lines it wraps into. In a
+    /// flex row it shrinks down to its widest word.
+    #[default]
+    Auto,
+    /// One line at the text's natural width, which never shrinks.
+    NoWrap,
+    /// Wrap at this many points. The element is this wide whatever its
+    /// container offers, so it can overflow a narrower one.
+    Explicit(f32),
+}
+
 pub struct TextElement {
     content: String,
     font_size: f32,
@@ -21,7 +36,7 @@ pub struct TextElement {
     font_weight: FontWeight,
     align: TextAlign,
     truncate: bool,
-    wrap_width: Option<f32>,
+    wrap: WrapMode,
 }
 
 pub fn text(content: impl Into<String>) -> TextElement {
@@ -34,7 +49,7 @@ pub fn text(content: impl Into<String>) -> TextElement {
         font_weight: FontWeight::Normal,
         align: TextAlign::Left,
         truncate: false,
-        wrap_width: None,
+        wrap: WrapMode::Auto,
     }
 }
 
@@ -99,6 +114,8 @@ impl TextElement {
         self
     }
 
+    /// One line that shrinks with an ellipsis when its box is narrower
+    /// than the text. Truncated text does not wrap automatically.
     pub fn truncate(mut self) -> Self {
         self.truncate = true;
         self
@@ -108,16 +125,39 @@ impl TextElement {
     /// as the wrapped text. Alignment and truncation apply to unwrapped text
     /// only.
     pub fn wrap_width(mut self, width: f32) -> Self {
-        self.wrap_width = Some(width.max(1.0));
+        self.wrap = WrapMode::Explicit(width.max(1.0));
         self
     }
 
-    fn query<'s>(&self, content: &'s str, font_size: f32) -> TextQuery<'s> {
+    /// Keep the text on one line at its natural width instead of wrapping
+    /// it to its box.
+    pub fn no_wrap(mut self) -> Self {
+        self.wrap = WrapMode::NoWrap;
+        self
+    }
+
+    pub fn wrap(mut self, mode: WrapMode) -> Self {
+        self.wrap = match mode {
+            WrapMode::Explicit(width) => WrapMode::Explicit(width.max(1.0)),
+            mode => mode,
+        };
+        self
+    }
+
+    /// The wrap mode in effect: truncation keeps text on one line.
+    fn wrap_mode(&self) -> WrapMode {
+        match self.wrap {
+            WrapMode::Auto if self.truncate => WrapMode::NoWrap,
+            mode => mode,
+        }
+    }
+
+    fn query<'s>(&self, content: &'s str, font_size: f32, wrap: Option<f32>) -> TextQuery<'s> {
         let style = TextStyle::new(font_size)
             .kind(self.font_kind)
             .weight(self.font_weight)
             .line_height(font_size * self.line_height_factor);
-        TextQuery::new(content, style).wrap_width(self.wrap_width)
+        TextQuery::new(content, style).wrap_width(wrap)
     }
 
     fn resolve_font_size(&self, theme: &Theme) -> f32 {
@@ -131,8 +171,8 @@ impl TextElement {
     }
 }
 
-/// Resolved font size, the shaped content (shared with paint), and its
-/// natural width.
+/// Resolved font size, the shaped content (shared with paint; unwrapped
+/// unless the wrap width is explicit), and its natural width.
 pub struct TextLayoutState {
     font_size: f32,
     layout: Option<Arc<TextLayout>>,
@@ -150,30 +190,43 @@ impl Element for TextElement {
     ) -> (LayoutId, Self::LayoutState) {
         let font_size = self.resolve_font_size(cx.theme);
         let line_height = font_size * self.line_height_factor;
-        let layout = cx.layout_text_query(&self.query(&self.content, font_size));
+        let wrap = self.wrap_mode();
+        let explicit = match wrap {
+            WrapMode::Explicit(width) => Some(width),
+            WrapMode::Auto | WrapMode::NoWrap => None,
+        };
+        let layout = cx.layout_text_query(&self.query(&self.content, font_size, explicit));
         let (layout_width, layout_height) = layout.as_ref().map_or((0.0, 0.0), |l| l.size());
         let text_width = layout_width.ceil();
-        let (width, height) = match self.wrap_width {
-            Some(wrap) => (wrap, layout_height.max(line_height).ceil()),
-            None => (text_width, line_height),
+
+        let id = match (wrap, &layout) {
+            // Sized by layout: shrinks in a flex row, wrapping as it does.
+            (WrapMode::Auto, Some(unwrapped)) => engine.request_text_layout(
+                &taffy::Style::default(),
+                TextMeasure::new(unwrapped.clone(), line_height),
+            ),
+            _ => {
+                let (width, height) = match explicit {
+                    Some(wrap) => (wrap, layout_height.max(line_height).ceil()),
+                    None => (text_width, line_height),
+                };
+                // Unwrapped text shrinks only when `.truncate()` is set;
+                // otherwise it holds its natural width so it isn't crushed
+                // next to flex_shrink:0 siblings like SvgIcon.
+                let shrink = if self.truncate { 1.0 } else { 0.0 };
+                engine.request_layout(
+                    taffy::Style {
+                        size: taffy::Size {
+                            width: taffy::Dimension::length(width),
+                            height: taffy::Dimension::length(height),
+                        },
+                        flex_shrink: shrink,
+                        ..Default::default()
+                    },
+                    &[],
+                )
+            }
         };
-
-        // Only allow shrinking when `.truncate()` is set; otherwise the text
-        // holds its natural width so it isn't crushed next to flex_shrink:0 siblings
-        // like SvgIcon.
-        let shrink = if self.truncate { 1.0 } else { 0.0 };
-
-        let id = engine.request_layout(
-            taffy::Style {
-                size: taffy::Size {
-                    width: taffy::Dimension::length(width),
-                    height: taffy::Dimension::length(height),
-                },
-                flex_shrink: shrink,
-                ..Default::default()
-            },
-            &[],
-        );
         let state = TextLayoutState {
             font_size,
             layout,
@@ -211,24 +264,41 @@ impl Element for TextElement {
         let mut layout = state.layout.take();
         let mut text_width = natural_width;
 
-        let wraps = self.wrap_width.is_some();
-        if self.truncate && !wraps && bounds.width > 0.0 && natural_width > bounds.width {
-            let (truncated, truncated_width) = truncate_text_to_fit(
-                cx,
-                &content,
-                font_size,
-                self.font_kind,
-                self.font_weight,
-                natural_width,
-                bounds.width,
-            );
-            layout = cx.layout_text_query(&self.query(&truncated, font_size));
-            content = truncated;
-            text_width = truncated_width;
+        let wrap = self.wrap_mode();
+        let mut wrapped = false;
+        match wrap {
+            // Shaped at the width layout resolved, which the last measure
+            // query may not have been (it can be an intrinsic-size probe).
+            WrapMode::Auto => {
+                if let Some(width) = auto_wrap_width(bounds.width, natural_width)
+                    && layout.is_some()
+                {
+                    layout = cx.layout_text_query(&self.query(&content, font_size, Some(width)));
+                    text_width = layout.as_ref().map_or(0.0, |l| l.size().0.ceil());
+                    wrapped = true;
+                }
+            }
+            WrapMode::NoWrap
+                if self.truncate && bounds.width > 0.0 && natural_width > bounds.width =>
+            {
+                let (truncated, truncated_width) = truncate_text_to_fit(
+                    cx,
+                    &content,
+                    font_size,
+                    self.font_kind,
+                    self.font_weight,
+                    natural_width,
+                    bounds.width,
+                );
+                layout = cx.layout_text_query(&self.query(&truncated, font_size, None));
+                content = truncated;
+                text_width = truncated_width;
+            }
+            WrapMode::NoWrap | WrapMode::Explicit(_) => {}
         }
 
         let x_offset = match self.align {
-            _ if wraps => 0.0,
+            _ if matches!(wrap, WrapMode::Explicit(_)) => 0.0,
             TextAlign::Left => 0.0,
             TextAlign::Center => ((bounds.width - text_width) * 0.5).max(0.0),
             TextAlign::Right => (bounds.width - text_width).max(0.0),
@@ -278,7 +348,7 @@ impl Element for TextElement {
         if cx.debug_wireframe {
             let measured =
                 cx.measure_text_width(&content, font_size, self.font_kind, self.font_weight);
-            let crushed = bounds.width > 0.0 && bounds.width < measured * 0.9;
+            let crushed = !wrapped && bounds.width > 0.0 && bounds.width < measured * 0.9;
             let wire_color = if crushed {
                 Color::rgba(255, 40, 40, 200) // red = text is crushed
             } else {
@@ -335,5 +405,286 @@ impl From<String> for AnyElement {
 impl IntoAnyElement for String {
     fn into_any(self) -> AnyElement {
         element_into_any(text(self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SENTENCE: &str = "the quick brown fox jumps over the lazy dog";
+    /// 14pt text at the default 1.5 line height.
+    const LINE: f32 = 21.0;
+    const SWATCH: Color = Color::rgba(10, 20, 30, 255);
+
+    /// A window's text state and element cache, kept across frames.
+    struct Window {
+        text: TextSystem,
+        layouts: LayoutCache,
+        signals: SignalStore,
+        theme: Theme,
+        cache: ElementCache,
+    }
+
+    /// What a frame painted: each text's rect and lines, and where the
+    /// `SWATCH` box landed.
+    #[derive(Debug, PartialEq)]
+    struct Frame {
+        texts: Vec<(Rect, Vec<String>)>,
+        swatch: Option<Rect>,
+    }
+
+    impl Frame {
+        fn text(&self) -> &(Rect, Vec<String>) {
+            assert_eq!(self.texts.len(), 1, "{self:?}");
+            &self.texts[0]
+        }
+    }
+
+    impl Window {
+        fn new() -> Self {
+            Self {
+                text: TextSystem::vendored_only(&Default::default()),
+                layouts: LayoutCache::default(),
+                signals: SignalStore::new(),
+                theme: Theme::default_dark(),
+                cache: ElementCache::new(),
+            }
+        }
+
+        fn paint(&mut self, root: impl IntoAnyElement) -> Frame {
+            self.layouts.begin_frame();
+            let mut cx = ElementContext::new(
+                &self.theme,
+                1.0,
+                &mut self.text,
+                &mut self.layouts,
+                None,
+                &self.signals,
+            )
+            .with_accessibility(false)
+            .with_element_cache(&mut self.cache);
+            let mut scene = Scene::default();
+            render_element(&mut root.into_any(), &mut scene, &mut cx, 400.0, 300.0);
+            let mut frame = Frame {
+                texts: Vec::new(),
+                swatch: None,
+            };
+            for primitive in &scene.primitives {
+                match primitive {
+                    quark_render::Primitive::TextRun(run) => {
+                        let layout = run.layout.downcast_ref::<TextLayout>().expect("layout");
+                        let lines = layout
+                            .lines()
+                            .map(|line| layout.text()[line.byte_range].to_owned())
+                            .collect();
+                        frame.texts.push((run.rect, lines));
+                    }
+                    quark_render::Primitive::RoundedRect(r) if r.color == SWATCH => {
+                        frame.swatch = Some(r.rect);
+                    }
+                    _ => {}
+                }
+            }
+            frame
+        }
+
+        /// Width of `s` on one line.
+        fn width_of(&mut self, s: &str) -> f32 {
+            let params = TextParams::new(s, TextStyle::new(14.0).line_height(LINE));
+            self.layouts
+                .layout(&mut self.text, &params)
+                .expect("layout")
+                .size()
+                .0
+        }
+    }
+
+    fn swatch() -> Div {
+        div().w(10.0).h(10.0).bg(SWATCH)
+    }
+
+    fn sentence() -> TextElement {
+        text(SENTENCE).size(14.0)
+    }
+
+    /// `content` above the swatch in a column `width` wide.
+    fn column(width: f32, content: impl IntoAnyElement) -> Div {
+        div().w(width).flex_col().child(content).child(swatch())
+    }
+
+    /// Lines that are not a whole number of words of `SENTENCE`, or that
+    /// do not tile it.
+    fn assert_word_lines(lines: &[String]) {
+        assert_eq!(lines.concat(), SENTENCE, "{lines:?}");
+        for line in lines {
+            assert!(!line.starts_with(' '), "{lines:?}");
+        }
+    }
+
+    // Catches text that ignores the width layout leaves it (the old fixed
+    // natural width), measured and painted heights that disagree (the
+    // swatch would overlap or float below the lines), and text that wraps
+    // when it has room.
+    #[test]
+    fn text_wraps_to_the_width_layout_resolves() {
+        type Build = fn() -> Div;
+        let cases: &[(&str, Build, f32)] = &[
+            (
+                "row beside a fixed sibling",
+                || {
+                    column(
+                        200.0,
+                        div()
+                            .flex_row()
+                            .child(div().w(50.0).h(5.0).flex_shrink_0())
+                            .child(sentence()),
+                    )
+                },
+                150.0,
+            ),
+            (
+                "row beside a wider sibling",
+                || {
+                    column(
+                        200.0,
+                        div()
+                            .flex_row()
+                            .child(div().w(100.0).h(5.0).flex_shrink_0())
+                            .child(sentence()),
+                    )
+                },
+                100.0,
+            ),
+            (
+                "padded column",
+                || column(160.0, div().flex_col().p(10.0).child(sentence())),
+                140.0,
+            ),
+        ];
+        for (name, build, width) in cases {
+            let mut window = Window::new();
+            let frame = window.paint(build());
+            let (rect, lines) = frame.text();
+            assert_eq!(rect.width, *width, "{name}");
+            assert!(lines.len() > 1, "{name}: {lines:?}");
+            assert_word_lines(lines);
+            for line in lines {
+                assert!(
+                    window.width_of(line.trim_end()) <= *width,
+                    "{name}: {line:?}"
+                );
+            }
+            let swatch = frame.swatch.expect("swatch");
+            let padding = if name.contains("padded") { 10.0 } else { 0.0 };
+            assert_eq!(
+                swatch.y,
+                rect.y + lines.len() as f32 * LINE + padding,
+                "{name}"
+            );
+        }
+    }
+
+    // Catches max-content probes that wrap: a row with room keeps the text
+    // on one line at its natural width.
+    #[test]
+    fn text_with_room_keeps_one_line_at_its_natural_width() {
+        let mut window = Window::new();
+        let natural = window.width_of(SENTENCE).ceil();
+        let frame = window.paint(div().w(400.0).flex_row().items_start().child(sentence()));
+        let (rect, lines) = frame.text();
+        assert_eq!((rect.width, lines.len()), (natural, 1));
+    }
+
+    // Catches the node keeping a size measured for another width: the same
+    // tree in a narrower container lays out as a fresh window would.
+    #[test]
+    fn a_narrower_container_rewraps_its_text() {
+        let mut window = Window::new();
+        window.paint(column(300.0, sentence()));
+        let narrow = window.paint(column(120.0, sentence()));
+        assert_eq!(narrow, Window::new().paint(column(120.0, sentence())));
+        assert!(narrow.text().1.len() > 2, "{narrow:?}");
+    }
+
+    // Catches the opt-outs following automatic wrapping: no-wrap and
+    // truncated text stay on one line, and an explicit width holds even
+    // past a narrower container.
+    #[test]
+    fn wrap_modes_override_the_container_width() {
+        let mut window = Window::new();
+        let natural = window.width_of(SENTENCE).ceil();
+        let no_wrap = window.paint(column(100.0, sentence().no_wrap()));
+        assert_eq!(
+            (no_wrap.text().0.width, no_wrap.text().1.len()),
+            (natural, 1)
+        );
+
+        let explicit = window.paint(column(100.0, sentence().wrap_width(150.0)));
+        let (rect, lines) = explicit.text();
+        assert_eq!(rect.width, 150.0);
+        assert_word_lines(lines);
+        assert_eq!(
+            explicit.swatch.expect("swatch").y,
+            lines.len() as f32 * LINE
+        );
+
+        let row = div().w(100.0).flex_row().child(sentence().truncate());
+        let truncated = window.paint(row);
+        let (rect, lines) = truncated.text();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with('\u{2026}'), "{lines:?}");
+        assert!(window.width_of(&lines[0]) <= rect.width);
+    }
+
+    // Catches a min-content width below the widest word: in a flex row too
+    // narrow for it, an unbroken word keeps its width on one line rather
+    // than splitting between glyphs.
+    #[test]
+    fn an_unbroken_word_holds_its_width_in_a_narrow_row() {
+        let word = "supercalifragilisticexpialidocious";
+        let mut window = Window::new();
+        let natural = window.width_of(word).ceil();
+        let frame = window.paint(
+            div()
+                .w(60.0)
+                .flex_row()
+                .child(div().w(20.0).h(5.0))
+                .child(text(word).size(14.0)),
+        );
+        let (rect, lines) = frame.text();
+        assert_eq!((rect.width, lines.len()), (natural, 1));
+    }
+
+    // Catches measurement and paint disagreeing at a zero-width box:
+    // forced narrower than any word, text breaks between glyphs, and the
+    // height layout gave it holds every painted line. Inside a cache
+    // boundary the text is a block child, whose final measure query
+    // offers the width without saying it is known.
+    #[test]
+    fn a_zero_width_box_holds_its_painted_lines() {
+        type Build = fn() -> Div;
+        let cases: &[(&str, Build)] = &[
+            ("flex column", || column(0.0, text("ab cd").size(14.0))),
+            ("cache boundary", || {
+                let boundary = cached("text", 1, || text("ab cd").size(14.0)).w(0.0);
+                div()
+                    .flex_col()
+                    .items_start()
+                    .child(boundary)
+                    .child(swatch())
+            }),
+        ];
+        for (name, build) in cases {
+            let frame = Window::new().paint(build());
+            let (rect, lines) = frame.text();
+            assert_eq!(lines.concat(), "ab cd", "{name}");
+            assert!(lines.len() > 2, "{name}: {lines:?}");
+            assert_eq!(
+                frame.swatch.expect("swatch").y,
+                rect.y + lines.len() as f32 * LINE,
+                "{name}"
+            );
+        }
     }
 }

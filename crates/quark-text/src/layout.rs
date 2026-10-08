@@ -955,6 +955,53 @@ impl TextLayout {
         &self.text
     }
 
+    /// The inputs this layout was laid out from, borrowed: look it up again
+    /// at another wrap width without copying the text.
+    pub fn query(&self) -> TextQuery<'_> {
+        TextQuery {
+            text: &self.text,
+            spans: &self.spans,
+            style: self.style,
+            wrap_width: self.wrap_width,
+            scale_factor: self.scale_factor,
+        }
+    }
+
+    /// Logical width of the widest piece of text between two line break
+    /// opportunities (UAX #14, where wrapping breaks first), without its
+    /// trailing spaces: the narrowest wrap width that splits no word. Below
+    /// it, wrapping falls back to breaking between glyphs.
+    pub fn min_content_width(&self) -> f32 {
+        let text: &str = &self.text;
+        // No-break spaces do not end a word.
+        let breaking_space =
+            |c: char| c.is_whitespace() && !matches!(c, '\u{a0}' | '\u{2007}' | '\u{202f}');
+        // `(end, end without trailing spaces, width)` per segment, in text
+        // order; glyphs are not in text order, so each one finds its
+        // segment by binary search.
+        let mut start = 0;
+        let mut segments: Vec<(usize, usize, f32)> = unicode_linebreak::linebreaks(text)
+            .map(|(end, _)| {
+                let segment = text.get(start..end).unwrap_or_default();
+                let trimmed = start + segment.trim_end_matches(breaking_space).len();
+                let item = (end, trimmed, 0.0);
+                start = end;
+                item
+            })
+            .collect();
+        let glyphs = &self.glyphs;
+        for (i, &byte) in glyphs.byte_start.iter().enumerate() {
+            let byte = byte as usize;
+            let at = segments.partition_point(|&(end, _, _)| end <= byte);
+            if let Some((_, trimmed, width)) = segments.get_mut(at)
+                && byte < *trimmed
+            {
+                *width += glyphs.advance[i];
+            }
+        }
+        segments.iter().fold(0.0, |widest, s| widest.max(s.2))
+    }
+
     pub fn spans(&self) -> &Arc<[TextSpan]> {
         &self.spans
     }
@@ -1926,6 +1973,29 @@ mod tests {
         let end = layout.caret(text.len());
         assert!((end.x - layout.size().0).abs() < 0.01, "{end:?}");
         assert_eq!(layout.hit(end.x, end.y + 1.0), text.len());
+    }
+
+    // Catches a min-content width that splits words (glyph widths), keeps
+    // whole phrases (space-only breaking misses CJK and hyphens), or counts
+    // the spaces a line drops at a wrap.
+    #[test]
+    fn min_content_width_is_the_widest_unbreakable_piece() {
+        let cases = [
+            ("a quick brownish fox", "brownish"),
+            ("wide      x", "wide"),
+            ("well-known x", "known"),
+            ("\u{65e5}\u{672c}\u{8a9e}", "\u{65e5}"),
+            ("one\nlongest\ntwo", "longest"),
+            ("keep\u{a0}together x", "keep\u{a0}together"),
+        ];
+        for (text, widest) in cases {
+            let expected = layout(widest, None).size().0;
+            let min = layout(text, None).min_content_width();
+            assert!(
+                (min - expected).abs() < 0.5,
+                "{text:?}: {min} vs {widest:?} {expected}"
+            );
+        }
     }
 
     // Regression: found by layout_caret_then_hit property. Glyph wrapping

@@ -20,6 +20,7 @@ unicode-segmentation.workspace = true
 # The versions cosmic-text uses: its Fallback trait takes a unicode-script
 # Script, and its own locale lookup is private.
 unicode-script = "0.5"
+unicode-linebreak = "0.1"
 sys-locale = "0.3"
 profiling = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
