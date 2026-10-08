@@ -188,7 +188,7 @@ pub fn size_label(len: usize) -> String {
 pub fn chips(attachments: &Attachments, theme: &Theme) -> AnyElement {
     let colors = &theme.colors;
     view! {
-        <div class="flex-row flex-wrap gap-[6]">
+        <div class="flex-row gap-[6]">
             for a in &attachments.items {
                 <div accessibility_role={Role::Group} aria-label={a.name.clone()}
                      class="flex-row items-center gap-[6] pl-2 pr-1 h-7 rounded-[6]"

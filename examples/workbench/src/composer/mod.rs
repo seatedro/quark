@@ -230,18 +230,25 @@ impl State {
 /// The height the composer needs, as of its last frame; the timeline gets
 /// the rest of the thread panel. A change shows on the next frame, which
 /// the view asks for.
-pub fn height(state: &State, _scx: &SurfaceCx) -> f32 {
-    total_height(state, state.text_height)
+pub fn height(state: &State, scx: &SurfaceCx) -> f32 {
+    total_height(state, state.text_height, zoom(scx.theme))
 }
 
-fn total_height(state: &State, text_height: f32) -> f32 {
-    let mut h = OUTER_TOP + OUTER_BOTTOM + 2.0 * CARD_PAD;
-    h += text_height + 2.0 * TEXT_PAD + GAP + TOOLBAR_HEIGHT;
+/// The theme's zoom: the design's points are at 100%.
+fn zoom(theme: &quark_app::quark_ui::theme::Theme) -> f32 {
+    theme.metrics.ui_scale()
+}
+
+/// Everything but the text area is fixed: the padding around the card and
+/// inside it, the optional error and chip rows, and the toolbar.
+fn total_height(state: &State, text_height: f32, z: f32) -> f32 {
+    let mut h = (OUTER_TOP + OUTER_BOTTOM + 2.0 * CARD_PAD) * z;
+    h += text_height + (2.0 * TEXT_PAD + GAP + TOOLBAR_HEIGHT) * z;
     if !state.attachments.items.is_empty() {
-        h += CHIPS_HEIGHT + GAP;
+        h += (CHIPS_HEIGHT + GAP) * z;
     }
     if state.attachments.error.is_some() {
-        h += ERROR_HEIGHT + GAP;
+        h += (ERROR_HEIGHT + GAP) * z;
     }
     h
 }
@@ -251,21 +258,24 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     state.answer_lookups(scx);
     let theme = scx.theme;
     let colors = &theme.colors;
+    let z = zoom(theme);
     let (width, _) = scx.size;
-    let column = (width - 32.0).clamp(0.0, MAX_WIDTH);
-    let text_w = (column - 2.0 * CARD_PAD - 4.0).max(40.0);
+    let column = (width - 32.0 * z).clamp(0.0, MAX_WIDTH * z);
+    let text_w = (column - (2.0 * CARD_PAD + 4.0) * z).max(40.0);
 
     let before = height(state, scx);
     state
         .editor
         .set_clock(vcx.frame.elapsed().as_millis() as u64);
+    state.editor.set_font_size(FONT_SIZE * z);
+    state.editor.set_line_height(Some(LINE_HEIGHT * z));
     state.text_height = state.editor.flush_fit(
         &mut vcx.frame.text().system,
         text_w,
-        MIN_TEXT_HEIGHT - 2.0 * TEXT_PAD,
-        MAX_TEXT_HEIGHT - 2.0 * TEXT_PAD,
+        (MIN_TEXT_HEIGHT - 2.0 * TEXT_PAD) * z,
+        (MAX_TEXT_HEIGHT - 2.0 * TEXT_PAD) * z,
     );
-    let height = total_height(state, state.text_height);
+    let height = total_height(state, state.text_height, z);
     if (height - before).abs() > 0.5 || (height - scx.size.1).abs() > 0.5 {
         vcx.frame.request_frame();
     }
@@ -288,7 +298,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     .label("Message")
     .placeholder("Ask for a change, or type @ to mention a file")
     .focused(scx.is_focused(INPUT))
-    .font_size(FONT_SIZE)
+    .font_size(FONT_SIZE * z)
     .text_color(colors.text)
     .w(text_w)
     .h(state.text_height);
@@ -297,13 +307,13 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
         Action::Model(m).into()
     })
     .label("Model")
-    .width(132.0)
+    .width(132.0 * z)
     .viewport(window);
     let reasoning = select(&state.reasoning, state.reasoning_options.clone(), |m| {
         Action::Reasoning(m).into()
     })
     .label("Reasoning")
-    .width(156.0)
+    .width(156.0 * z)
     .viewport(window);
 
     let popup = completions::popup(
@@ -315,24 +325,26 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     let error = state.attachments.error.clone();
 
     view! {
-        <div w={width} h={height} class="flex-col items-center" pt={OUTER_TOP} pb={OUTER_BOTTOM}
-             bg={colors.background}>
-            <div w={column} class="flex-col gap-[8]">
+        <div w={width} h={height} class="flex-col items-center" pt={OUTER_TOP * z}
+             pb={OUTER_BOTTOM * z} bg={colors.background}>
+            <div w={column} class="flex-col" gap={GAP * z}>
                 if let Some(error) = error {
                     <div accessibility_role={Role::Alert} aria-label={error.clone()}
                          test_id="composer.error"
-                         class="flex-row items-center gap-[6] px-2 rounded-[6]" h={ERROR_HEIGHT}>
+                         class="flex-row items-center gap-[6] px-2 rounded-[6]" h={ERROR_HEIGHT * z}>
                         {svg_icon(lucide::ALERT_CIRCLE, 14.0).color(colors.status_error)}
                         <text class="text-xs" color={colors.status_error}>{error}</text>
                     </div>
                 }
-                <div class="flex-col rounded-[12] gap-[8]" p={CARD_PAD}
+                <div class="flex-col" rounded={12.0 * z} gap={GAP * z} p={CARD_PAD * z}
                      border={colors.border} bg={colors.surface}>
                     if !state.attachments.items.is_empty() {
-                        {attachments::chips(&state.attachments, theme)}
+                        <div h={CHIPS_HEIGHT * z} class="flex-row overflow-hidden">
+                            {attachments::chips(&state.attachments, theme)}
+                        </div>
                     }
-                    <div class="px-[2]" py={TEXT_PAD}>{editor}</div>
-                    <div class="flex-row items-center gap-[8]" h={TOOLBAR_HEIGHT}>
+                    <div px={2.0 * z} py={TEXT_PAD * z}>{editor}</div>
+                    <div class="flex-row items-center" gap={GAP * z} h={TOOLBAR_HEIGHT * z}>
                         {model}
                         {reasoning}
                         <div class="flex-1" />
