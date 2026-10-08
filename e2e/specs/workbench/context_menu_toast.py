@@ -5,14 +5,17 @@ menu at the pointer; Copy title copies it and shows one toast, announced
 once; the palette's "Apply proposed changes" shows a toast whose Undo
 button reverts the files ("Changes undone")."""
 
-from quark_e2e import Announcements, Cua, app_pid, app_tree, center, main, wait_for, xdotool
+from quark_e2e import Announcements, Cua, app_pid, app_tree, center, main, resize_window, wait_for, xdotool
 
 THREAD = "Offline tile cache"
+TITLE = "Quark Workbench"
 COPIED = f"Copied “{THREAD}”"
 
 
 def spec(cua: Cua):
     pid = app_pid()
+    # The default 1440x900 window overflows the 1280x800 desktop.
+    resize_window(TITLE, 1240, 740)
     row = app_tree().require("list item", THREAD)
     x, y = center(row)
     xdotool("mousemove", "--sync", x, y)

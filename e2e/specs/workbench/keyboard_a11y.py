@@ -4,9 +4,10 @@ focus inside, where Ctrl+B and Ctrl+K do nothing and Tab never leaves the
 dialog; Escape closes it; Ctrl+K opens the palette; and a run's tool and
 run completions are each announced once."""
 
-from quark_e2e import STATE_FOCUSED, Announcements, Cua, app_pid, app_tree, main, wait_for
+from quark_e2e import STATE_FOCUSED, Announcements, Cua, app_pid, app_tree, main, resize_window, wait_for
 
 THREAD = "Add keyboard shortcuts"
+TITLE = "Quark Workbench"
 
 
 def keys(cua, pid, *names):
@@ -28,6 +29,8 @@ def focused_names(node, inside=False):
 
 def spec(cua: Cua):
     pid = app_pid()
+    # The default 1440x900 window overflows the 1280x800 desktop.
+    resize_window(TITLE, 1240, 740)
     app_tree()
     # The first key can arrive before the window takes keyboard focus
     # under Xvfb; send it again rather than wait out the whole timeout.
