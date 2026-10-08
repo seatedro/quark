@@ -38,6 +38,9 @@ pub struct ElementContext<'a> {
     pub tooltip_regions: Vec<TooltipRegion>,
     pub accessibility: AccessibilityFrame,
     pub semantic: SemanticFrame,
+    /// Where this frame's identified elements landed, in paint order so
+    /// far; becomes the frame's [`LayoutSnapshot`].
+    pub geometry: LayoutSnapshot,
     /// Inspector recording, style overrides, and phase timings.
     #[cfg(feature = "devtools")]
     pub devtools: crate::inspector::FrameProbe,
@@ -64,6 +67,10 @@ pub struct ElementContext<'a> {
     /// Hit spaces of the transformed subtrees being prepainted, innermost
     /// last.
     hit_spaces: Vec<quark::HitSpace>,
+    /// The transforms and clips of the elements being painted, innermost
+    /// last, mirroring the scene's layers and clips: what geometry,
+    /// accessibility bounds, and text hit regions are mapped through.
+    paint_spaces: Vec<PaintSpace>,
     element_offset_stack: Vec<(f32, f32)>,
     text_color_stack: Vec<Color>,
     icon_color_stack: Vec<Color>,
@@ -109,6 +116,11 @@ impl<'a> ElementContext<'a> {
             tooltip_regions: Vec::new(),
             accessibility: AccessibilityFrame::default(),
             semantic: SemanticFrame::default(),
+            geometry: {
+                let mut geometry = LayoutSnapshot::default();
+                geometry.reset();
+                geometry
+            },
             #[cfg(feature = "devtools")]
             devtools: Default::default(),
             hovered: Vec::new(),
@@ -122,6 +134,7 @@ impl<'a> ElementContext<'a> {
             volatile_reads: 0,
             z_index_stack: Vec::new(),
             hit_spaces: Vec::new(),
+            paint_spaces: Vec::new(),
             element_offset_stack: Vec::new(),
             text_color_stack: Vec::new(),
             icon_color_stack: Vec::new(),
@@ -258,9 +271,11 @@ impl<'a> ElementContext<'a> {
         frame.hits.reset();
         frame.handlers.clear();
         frame.semantic.clear();
+        frame.geometry.reset();
         self.hit_table = frame.hits;
         self.handlers = frame.handlers;
         self.semantic = frame.semantic;
+        self.geometry = frame.geometry;
         self
     }
 
@@ -434,10 +449,13 @@ impl<'a> ElementContext<'a> {
 
     /// Push an accessibility node under the nearest semantic ancestor that has
     /// an accessibility node, or under the window when none does.
-    pub fn push_accessibility(&mut self, node: AccessibilityNode) -> accesskit::NodeId {
+    /// The node's bounds are in layout coordinates; it is published at the
+    /// window bounds of their four corners under the current transform.
+    pub fn push_accessibility(&mut self, mut node: AccessibilityNode) -> accesskit::NodeId {
         if !self.accessibility_enabled {
             return crate::accessibility::ROOT_ID;
         }
+        node.set_transform(self.current_transform());
         let parent = self.accessible_semantic_ancestor();
         self.accessibility.push_child(node, parent)
     }
@@ -536,6 +554,109 @@ impl<'a> ElementContext<'a> {
         if self.hit_spaces.pop().is_some() {
             self.clip_stack.pop();
         }
+    }
+
+    fn current_paint_space(&self) -> PaintSpace {
+        self.paint_spaces
+            .last()
+            .copied()
+            .unwrap_or(PaintSpace::WINDOW)
+    }
+
+    /// Where layout coordinates painted now land in the window: the
+    /// transforms of the elements being painted, innermost first. Identity
+    /// outside transformed subtrees and outside paint.
+    pub fn current_transform(&self) -> quark::Transform2D {
+        self.current_paint_space().transform
+    }
+
+    /// Paint what follows, until [`Self::pop_paint_transform`], through
+    /// `transform` (layout coordinates to where they land in the parent):
+    /// the paint-time twin of [`Self::push_transform`], pushed with the
+    /// scene layer that draws it.
+    pub fn push_paint_transform(&mut self, transform: quark::Transform2D) {
+        let space = self.current_paint_space();
+        self.paint_spaces.push(PaintSpace {
+            transform: transform.then(space.transform),
+            window_clip: space.window_clip,
+            // A transformed subtree is never replayed (see
+            // `push_transform`), so its recording-relative clips are moot.
+            local_clip: quark::hit::UNCLIPPED,
+        });
+    }
+
+    pub fn pop_paint_transform(&mut self) {
+        self.paint_spaces.pop();
+    }
+
+    /// Clip what follows, until [`Self::pop_paint_clip`], to `rect` (in
+    /// layout coordinates), with the scene clip that draws it.
+    pub fn push_paint_clip(&mut self, rect: Rect) {
+        let space = self.current_paint_space();
+        self.paint_spaces.push(PaintSpace {
+            transform: space.transform,
+            window_clip: intersect(space.window_clip, window_rect(space.transform, rect)),
+            local_clip: intersect(space.local_clip, rect),
+        });
+    }
+
+    pub fn pop_paint_clip(&mut self) {
+        self.paint_spaces.pop();
+    }
+
+    /// Record that the element named by `id`, `test_id`, or `handle` was
+    /// painted at `layout` (layout coordinates, before the current
+    /// transform), for [`LayoutSnapshot`] lookups. Does nothing without a
+    /// name.
+    pub fn record_geometry(
+        &mut self,
+        id: Option<&UiNodeId>,
+        test_id: Option<&TestId>,
+        handle: Option<ElementHandle>,
+        layout: Rect,
+    ) {
+        let key = GeometryKey {
+            id: id.cloned(),
+            test_id: test_id.cloned(),
+            handle,
+        };
+        if key.is_empty() {
+            return;
+        }
+        self.push_geometry(key, layout, quark::hit::UNCLIPPED);
+    }
+
+    /// Push a geometry row clipped to `clip` (layout coordinates) within
+    /// the current clips: how a replayed cache boundary republishes its
+    /// rows under the current transform.
+    pub(super) fn push_geometry(&mut self, key: GeometryKey, layout: Rect, clip: Rect) {
+        let space = self.current_paint_space();
+        self.geometry.push(GeometryRow {
+            key,
+            layout,
+            transform: space.transform,
+            window_clip: intersect(space.window_clip, window_rect(space.transform, clip)),
+            local_clip: intersect(space.local_clip, clip),
+        });
+    }
+
+    /// Start recording the geometry rows a cache boundary paints: their
+    /// clips are kept relative to the boundary. Returns the first row.
+    pub(super) fn begin_geometry_recording(&mut self) -> usize {
+        let space = self.current_paint_space();
+        self.paint_spaces.push(PaintSpace {
+            local_clip: quark::hit::UNCLIPPED,
+            ..space
+        });
+        self.geometry.len()
+    }
+
+    /// End a recording: the rows' clips become relative to the enclosing
+    /// recording boundary, if any.
+    pub(super) fn end_geometry_recording(&mut self, start: usize) {
+        self.paint_spaces.pop();
+        let outer = self.current_paint_space().local_clip;
+        self.geometry.clip_local_from(start, outer);
     }
 
     /// Register a hit entry at the current z and clip. Bind it to its
@@ -640,8 +761,30 @@ impl<'a> ElementContext<'a> {
             hits: std::mem::take(&mut self.hit_table),
             handlers: std::mem::take(&mut self.handlers),
             semantic: std::mem::take(&mut self.semantic),
+            geometry: std::mem::take(&mut self.geometry),
         }
     }
+}
+
+/// One level of the paint space stack.
+#[derive(Clone, Copy)]
+struct PaintSpace {
+    /// Layout coordinates to window coordinates.
+    transform: quark::Transform2D,
+    /// Intersection of the clips so far, in window coordinates (the bounds
+    /// of a transformed clip).
+    window_clip: Rect,
+    /// Intersection of the clips pushed since the innermost recording
+    /// cache boundary, in layout coordinates.
+    local_clip: Rect,
+}
+
+impl PaintSpace {
+    const WINDOW: Self = Self {
+        transform: quark::Transform2D::IDENTITY,
+        window_clip: quark::hit::UNCLIPPED,
+        local_clip: quark::hit::UNCLIPPED,
+    };
 }
 
 /// One level of the hit clip stack: the clip in window space, and the clip
@@ -671,6 +814,7 @@ pub(super) struct FrameBuffers {
     hovered: Vec<HitId>,
     local_hit_clips: Vec<Rect>,
     local_hit_ids: Vec<HitId>,
+    paint_spaces: Vec<PaintSpace>,
     scroll_stack: Vec<ScrollHandle>,
     scroll_watches: Vec<ScrollWatch>,
     /// Kept apart: the context needs its keys until `finish_frame`.
@@ -699,6 +843,7 @@ macro_rules! swap_buffers {
         std::mem::swap(&mut $buffers.hovered, &mut $cx.hovered);
         std::mem::swap(&mut $buffers.local_hit_clips, &mut $cx.local_hit_clips);
         std::mem::swap(&mut $buffers.local_hit_ids, &mut $cx.local_hit_ids);
+        std::mem::swap(&mut $buffers.paint_spaces, &mut $cx.paint_spaces);
         std::mem::swap(&mut $buffers.scroll_stack, &mut $cx.scroll_stack);
         std::mem::swap(&mut $buffers.scroll_watches, &mut $cx.scroll_watches);
     };
@@ -739,6 +884,7 @@ impl ElementContext<'_> {
         buffers.hovered.clear();
         buffers.local_hit_clips.clear();
         buffers.local_hit_ids.clear();
+        buffers.paint_spaces.clear();
         buffers.scroll_stack.clear();
         buffers.scroll_watches.clear();
         if let Some(cache) = self.cache.as_deref_mut() {

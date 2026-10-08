@@ -269,6 +269,81 @@ fn assistive_tech_connecting_rebuilds_with_accessibility() {
     );
 }
 
+/// A cached, named 120x30 row `top` points down a column clipped at 120
+/// points, under a parent scaled by `scale` about the window's center.
+fn named_row(top: f32, scale: f32, cache: bool, builds: &Rc<Cell<u32>>) -> AnyElement {
+    let builds = builds.clone();
+    let row = move || {
+        builds.set(builds.get() + 1);
+        div()
+            .test_id("row")
+            .w(120.0)
+            .h(30.0)
+            .accessibility_role(AccessibilityRole::Button)
+            .accessibility_label("Row")
+            .into_any()
+    };
+    let column = div()
+        .w(400.0)
+        .h(120.0)
+        .clip()
+        .flex_col()
+        .child(div().h(top).flex_shrink_0());
+    let column = if cache {
+        column.child(cached("row", 1, row))
+    } else {
+        column.child(row())
+    };
+    div()
+        .w(400.0)
+        .h(300.0)
+        .scale(scale)
+        .child(column)
+        .into_any()
+}
+
+// Catches a replayed boundary that republishes no geometry, or keeps the
+// clip it was recorded under: moved 100 points down, the row now pokes
+// out of its 120 point column.
+#[test]
+fn replay_republishes_geometry_under_the_current_clip() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    window.paint(named_row(0.0, 1.0, true, &builds));
+    let moved = window.paint(named_row(100.0, 1.0, true, &builds));
+    assert_eq!(builds.get(), 1, "the move replayed");
+
+    let row = moved.input.geometry.by_test_id("row").expect("one row");
+    let rect = |x, y, width, height| Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    assert_eq!(row.bounds, rect(0.0, 100.0, 120.0, 30.0));
+    assert_eq!(row.visible, Some(rect(0.0, 100.0, 120.0, 20.0)));
+}
+
+// Catches replayed accessibility nodes and geometry that keep the
+// transform of the frame that recorded them: the parent's scale changed,
+// the cached row did not.
+#[test]
+fn replay_under_a_changed_ancestor_transform_matches_a_build() {
+    let mut window = Window::new();
+    let builds = Rc::new(Cell::new(0));
+    window.paint(named_row(0.0, 1.0, true, &builds));
+    let scaled = window.paint(named_row(0.0, 2.0, true, &builds));
+    let built = window.paint_with(named_row(0.0, 2.0, false, &builds), false);
+    assert_eq!(builds.get(), 2, "the scaled frame replayed");
+
+    assert_eq!(
+        dump_accessibility(&scaled.accessibility),
+        dump_accessibility(&built.accessibility)
+    );
+    let bounds = |frame: &Frame| frame.input.geometry.by_test_id("row").map(|g| g.bounds);
+    assert_eq!(bounds(&scaled), bounds(&built));
+}
+
 #[test]
 fn hover_inside_a_cached_subtree_updates() {
     let mut window = Window::new();

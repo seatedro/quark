@@ -42,6 +42,7 @@ pub struct Div {
     semantic_id: Option<UiNodeId>,
     semantic_key: Option<UiKey>,
     test_id: Option<TestId>,
+    element_handle: Option<ElementHandle>,
     semantic_role: Option<SemanticRole>,
     focus_scope: Option<FocusScopeId>,
     trap_focus: bool,
@@ -93,6 +94,7 @@ pub fn div() -> Div {
         semantic_id: None,
         semantic_key: None,
         test_id: None,
+        element_handle: None,
         semantic_role: None,
         focus_scope: None,
         trap_focus: false,
@@ -240,6 +242,13 @@ impl Div {
 
     pub fn test_id(mut self, id: impl Into<TestId>) -> Self {
         self.test_id = Some(id.into());
+        self
+    }
+
+    /// Name the div by `handle` for [`LayoutSnapshot::by_handle`]. Adds no
+    /// layout node and no semantic node of its own.
+    pub fn element_handle(mut self, handle: ElementHandle) -> Self {
+        self.element_handle = Some(handle);
         self
     }
 
@@ -867,6 +876,10 @@ impl Element for Div {
                 prepaint_state.matrix.unwrap_or(Transform2D::IDENTITY),
             );
         }
+        if let Some(matrix) = prepaint_state.matrix {
+            cx.push_paint_transform(matrix);
+        }
+        self.record_geometry(bounds, cx);
 
         // Shadows
         for s in &style.shadows {
@@ -1157,6 +1170,7 @@ impl Element for Div {
             } else {
                 scene.clip(bounds);
             }
+            cx.push_paint_clip(bounds);
         }
 
         let pushed_text_color = if hovered {
@@ -1205,6 +1219,7 @@ impl Element for Div {
         prepaint_state.scrollbars.paint(scene, cx);
 
         if should_clip {
+            cx.pop_paint_clip();
             scene.pop_clip();
         }
 
@@ -1228,6 +1243,9 @@ impl Element for Div {
             });
         }
 
+        if prepaint_state.matrix.is_some() {
+            cx.pop_paint_transform();
+        }
         if layered {
             scene.pop_layer();
         }
@@ -1264,6 +1282,30 @@ impl Div {
                 .map(|id| UiKey::new(id.as_str()))
                 .or_else(|| self.accessibility_id.as_deref().map(UiKey::from))
         })
+    }
+}
+
+impl Div {
+    /// A geometry row for the div when something names it.
+    fn record_geometry(&self, bounds: Bounds, cx: &mut ElementContext) {
+        if self.semantic_id.is_none()
+            && self.accessibility_id.is_none()
+            && self.test_id.is_none()
+            && self.element_handle.is_none()
+        {
+            return;
+        }
+        // The stable id the semantic node gets.
+        let id = self
+            .semantic_id
+            .clone()
+            .or_else(|| self.accessibility_id.clone().map(UiNodeId::from));
+        cx.record_geometry(
+            id.as_ref(),
+            self.test_id.as_ref(),
+            self.element_handle,
+            bounds,
+        );
     }
 }
 

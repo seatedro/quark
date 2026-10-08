@@ -509,21 +509,25 @@ impl Element for TextEditorElement {
                 }),
             );
         }
-        cx.text_input_hit_areas.push(TextInputHitArea {
-            bounds,
-            focus_target: target,
-            text_rect: Rect {
-                x: text_x,
-                y: text_y,
-                width: text_area_w,
-                height: bounds.height,
+        register_text_input_area(
+            cx,
+            TextInputHitArea {
+                bounds,
+                focus_target: target,
+                text_rect: Rect {
+                    x: text_x,
+                    y: text_y,
+                    width: text_area_w,
+                    height: bounds.height,
+                },
+                caret,
+                content: TextHitContent::Multiline {
+                    layout: hit_layout,
+                    scroll_y: self.scroll_y,
+                },
+                transform: quark::Transform2D::IDENTITY,
             },
-            caret,
-            content: TextHitContent::Multiline {
-                layout: hit_layout,
-                scroll_y: self.scroll_y,
-            },
-        });
+        );
     }
 }
 

@@ -161,15 +161,33 @@ impl Styled for TextInput {
 /// can be mapped through what is on screen.
 #[derive(Debug, Clone)]
 pub struct TextInputHitArea {
+    /// The field's box in layout coordinates (before `transform`).
     pub bounds: Rect,
     pub focus_target: FocusId,
-    /// The text area in window coordinates. Pointers past its edges along
+    /// The text area in layout coordinates. Pointers past its edges along
     /// the scroll axis autoscroll.
     pub text_rect: Rect,
-    /// Caret rect in window coordinates while focused, for placing the IME
-    /// candidate window.
+    /// Bounds of the caret in window coordinates while focused, for placing
+    /// the IME candidate window. `None` under a transform that flattens the
+    /// field, where no caret shows.
     pub caret: Option<Rect>,
     pub content: TextHitContent,
+    /// Layout coordinates to window coordinates: the transforms of the
+    /// field's ancestors.
+    pub transform: Transform2D,
+}
+
+/// Register `area` under the current transform, its `caret` given in
+/// layout coordinates. A transform that flattens the field (a zero scale)
+/// keeps the area, so keys still edit a focused field, but drops its caret
+/// and takes no pointer input.
+pub(crate) fn register_text_input_area(cx: &mut ElementContext, mut area: TextInputHitArea) {
+    area.transform = cx.current_transform();
+    area.caret = area
+        .caret
+        .filter(|_| area.transform.invert().is_some())
+        .map(|caret| window_rect(area.transform, caret));
+    cx.text_input_hit_areas.push(area);
 }
 
 /// How a [`TextInputHitArea`] maps points to offsets of its text.
@@ -202,7 +220,16 @@ impl TextInputHitArea {
         }
     }
 
-    /// Window position of the layout origin.
+    /// A window point in layout coordinates; `None` under a flattening
+    /// transform.
+    pub fn to_layout(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        if self.transform.is_identity() {
+            return Some((x, y));
+        }
+        Some(self.transform.invert()?.apply(x, y))
+    }
+
+    /// Position of the layout origin, in layout coordinates.
     pub fn origin(&self) -> (f32, f32) {
         let (x, y) = (self.text_rect.x, self.text_rect.y);
         match self.content {
@@ -214,9 +241,10 @@ impl TextInputHitArea {
     /// Offset into the field's text under a window point. A point past an
     /// edge maps to text scrolled out of view there, so a drag selection
     /// past the edge extends into it and the next frame scrolls it in.
-    /// `None` when there is no layout.
+    /// `None` when there is no layout, or the field is flattened.
     pub fn offset_at_point(&self, x: f32, y: f32) -> Option<TextOffset> {
         let layout = self.layout()?;
+        let (x, y) = self.to_layout(x, y)?;
         let (ox, oy) = self.origin();
         let y = match self.content {
             TextHitContent::SingleLine { .. } => self.text_rect.height * 0.5,
@@ -239,6 +267,9 @@ impl TextInputHitArea {
     /// Whether a point is past the edge the field scrolls along: left or
     /// right for single-line fields, above or below for editors.
     pub(crate) fn is_past_edge(&self, x: f32, y: f32) -> bool {
+        let Some((x, y)) = self.to_layout(x, y) else {
+            return false;
+        };
         let r = &self.text_rect;
         match self.content {
             TextHitContent::SingleLine { .. } => x < r.x || x > r.x + r.width,
@@ -579,17 +610,21 @@ impl Element for TextInput {
             if let Some(node) = accessibility {
                 cx.push_accessibility_for_semantic(node, index);
             }
-            cx.text_input_hit_areas.push(TextInputHitArea {
-                bounds,
-                focus_target: target,
-                text_rect,
-                caret,
-                content: TextHitContent::SingleLine {
-                    layout: value_layout.filter(|_| composition.is_none()).cloned(),
-                    scroll_x,
-                    masked: self.masked.then(|| self.value.clone()),
+            register_text_input_area(
+                cx,
+                TextInputHitArea {
+                    bounds,
+                    focus_target: target,
+                    text_rect,
+                    caret,
+                    content: TextHitContent::SingleLine {
+                        layout: value_layout.filter(|_| composition.is_none()).cloned(),
+                        scroll_x,
+                        masked: self.masked.then(|| self.value.clone()),
+                    },
+                    transform: Transform2D::IDENTITY,
                 },
-            });
+            );
         } else if on_click.is_some() {
             let mut semantic_node = SemanticNode::new(bounds)
                 .role(SemanticRole::TextInput)

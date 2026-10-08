@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use accesskit::Role as AccessibilityRole;
 use quark::hit::{CursorHint, HitFlags, HitId};
-use quark::{SemanticActions, SemanticNode, SemanticRole};
+use quark::{SemanticActions, SemanticNode, SemanticRole, Transform2D};
 use quark_render::scene::Rect;
 use quark_render::{ImagePrimitive, RoundedRectPrimitive, Scene};
 
@@ -1017,16 +1017,21 @@ impl Element for DocumentElement {
             },
         );
         let origin = (bounds.x, bounds.y);
-        cx.handlers.on_drag(
-            list,
-            DragStart::new(move |event| {
-                Box::new(SelectDrag {
-                    origin,
-                    press: event,
-                    on_event: on_event.clone(),
-                })
-            }),
-        );
+        // Under a transform that flattens the list nothing can be pressed,
+        // so it registers no drag.
+        if let Some(to_layout) = cx.current_transform().invert() {
+            cx.handlers.on_drag(
+                list,
+                DragStart::new(move |event| {
+                    Box::new(SelectDrag {
+                        to_layout,
+                        origin,
+                        press: event,
+                        on_event: on_event.clone(),
+                    })
+                }),
+            );
+        }
         let label: Arc<str> = match &self.label {
             Cow::Borrowed(label) => list_label(label),
             Cow::Owned(label) => Arc::from(label.as_str()),
@@ -1061,6 +1066,10 @@ impl IntoAnyElement for DocumentElement {
 /// A drag-select gesture. The press is reported at press time so the
 /// anchor lands on the text under the pointer before content streams in.
 struct SelectDrag {
+    /// Window coordinates to the list's layout coordinates, through the
+    /// transforms of its ancestors.
+    to_layout: Transform2D,
+    /// The list's top left in layout coordinates.
     origin: (f32, f32),
     press: ClickEvent,
     on_event: EventMap,
@@ -1068,6 +1077,7 @@ struct SelectDrag {
 
 impl SelectDrag {
     fn local(&self, x: f32, y: f32) -> (f32, f32) {
+        let (x, y) = self.to_layout.apply(x, y);
         (x - self.origin.0, y - self.origin.1)
     }
 }

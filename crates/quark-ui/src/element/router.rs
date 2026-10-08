@@ -484,6 +484,8 @@ pub struct InputFrame {
     pub hits: HitTable,
     pub handlers: InputHandlers,
     pub semantic: SemanticFrame,
+    /// Where the frame's identified elements landed.
+    pub geometry: LayoutSnapshot,
 }
 
 /// The outcome of routing one event: the semantic node that handled it
@@ -528,6 +530,7 @@ impl InputRouter {
         if let Some(capture) = &mut self.capture {
             let identities = node_identities(&self.frame.semantic);
             capture.node = identities.iter().position(|id| *id == capture.identity);
+            capture.drag.set_geometry(&self.frame.geometry);
         }
     }
 
@@ -598,6 +601,7 @@ impl InputRouter {
         if let Some(node) = drag.node
             && let Some(mut drag) = handlers.start_drag(node, x, y)
         {
+            drag.set_geometry(&self.frame.geometry);
             let actions = drag.on_press();
             self.capture = Some(Capture {
                 identity: node_identities(&self.frame.semantic)[node],

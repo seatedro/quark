@@ -50,6 +50,7 @@ use quark_render::scene::{
 use quark_render::{FontKind, TextPrimitive};
 use quark_text::{LayoutCache, TextLayout, TextParams, TextQuery, TextSpan, TextStyle, TextSystem};
 
+mod bounds;
 mod cache;
 mod canvas;
 mod code_block;
@@ -74,6 +75,7 @@ mod transition;
 #[cfg(test)]
 mod tests;
 
+pub use bounds::*;
 pub use cache::{CacheKey, Cached, ElementCache, cached, inputs_hash};
 pub use canvas::*;
 pub use code_block::*;

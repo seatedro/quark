@@ -1297,6 +1297,54 @@ fn link_click_emits_the_document_link_action() {
     assert_eq!(opened, [&Open(Arc::from("https://example.com/docs"))]);
 }
 
+// Catches document drag selection mapped through untransformed
+// coordinates: under a parent scaled about its center, dragging across
+// "brave" where it is painted selects "brave".
+#[test]
+fn drag_selection_follows_a_scaled_document() {
+    let mut md = markdown_document("hello brave world");
+    let theme = Theme::default_dark();
+    let mut text = TextSystem::vendored_only(&Default::default());
+    let mut layouts = LayoutCache::default();
+    md.prepare(
+        400.0,
+        300.0,
+        0,
+        &mut TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0),
+    );
+    let element = md.element(&theme, |ev| Ev(ev).into());
+    let signals = SignalStore::new();
+    let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+    cx.semantic = SemanticFrame::new(400.0, 300.0);
+    let mut root = div().w(400.0).h(300.0).scale(1.5).child(element).into_any();
+    render_element(&mut root, &mut Scene::default(), &mut cx, 400.0, 300.0);
+    let region = cx.selectable_text_runs[0].clone();
+    let mut router = InputRouter::default();
+    router.set_frame(cx.take_input_frame());
+    // Window points on the edges of "brave", halfway down its line, scaled
+    // about the window's center.
+    let scaled = quark::Transform2D::scale(1.5, 1.5).around(200.0, 150.0);
+    let at = |offset: usize| {
+        let caret = region.layout.caret(offset);
+        scaled.apply(
+            region.text_origin.0 + caret.x,
+            region.text_origin.1 + caret.y + caret.height / 2.0,
+        )
+    };
+    let ((x0, y0), (x1, y1)) = (at(6), at(11));
+
+    let mut actions = router.pointer_down(x0, y0, &mut None).actions;
+    actions.extend(router.pointer_move(x1, y1).actions);
+    actions.extend(router.pointer_up().actions);
+    for action in &actions {
+        if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
+            md.handle(*event);
+        }
+    }
+
+    assert_eq!(md.selected_text(), "brave");
+}
+
 // Catches markdown span flags not reaching the painted decorations.
 #[test]
 fn strikethrough_markdown_paints_a_line_through_its_run() {
