@@ -22,6 +22,7 @@
 #![deny(clippy::string_slice)]
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
+mod anchor;
 mod atoms;
 mod buffer;
 mod completion;
@@ -39,6 +40,10 @@ mod trigger;
 mod undo;
 mod view;
 
+pub use anchor::{
+    CaretAnchor, CaretGeometry, CaretPlacement, CaretPopup, CaretPopupLayout, caret_popup,
+    place_at_caret,
+};
 pub use atoms::{AtomId, AtomIntegrityError, InlineAtom, RichClipboard, RichText};
 pub use completion::{
     Answer, Completion, CompletionItem, CompletionKey, CompletionProvider, CompletionQuery,

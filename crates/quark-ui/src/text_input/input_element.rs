@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::anchor::{CaretAnchor, CaretGeometry};
 use super::editor::{gutter_digits, gutter_width_in, syntax_layout_spans};
 use super::text_pointer_drag;
 use super::view::{FrameScale, caret_blink};
@@ -33,6 +34,8 @@ pub struct TextEditorElement {
     content_height: f32,
     scroll_y: f32,
     font_size: f32,
+    /// The snapshotted editor's line height; else 1.35 times the font size.
+    line_height: Option<f32>,
     text_color: crate::theme::Color,
     mode: EditorMode,
     text: Arc<str>,
@@ -52,6 +55,10 @@ pub struct TextEditorElement {
     on_scroll: ScrollActionBuilder,
     /// The snapshotted editor's frame scale, set during paint.
     frame_scale: Option<FrameScale>,
+    /// The snapshotted editor's caret anchor, set during prepaint.
+    caret_anchor: Option<CaretAnchor>,
+    /// The caret in layout coordinates even while hidden, for the anchor.
+    caret_at: (f32, f32),
     base_style: ElementStyle,
 }
 
@@ -73,6 +80,7 @@ pub fn text_editor_element(
         content_height: 0.0,
         scroll_y: 0.0,
         font_size: 14.0,
+        line_height: None,
         text_color: crate::theme::Color::rgba(255, 255, 255, 255),
         mode: EditorMode::ProseInput,
         text: Arc::from(""),
@@ -87,6 +95,8 @@ pub fn text_editor_element(
         focus_target,
         on_scroll,
         frame_scale: None,
+        caret_anchor: None,
+        caret_at: (0.0, 0.0),
         base_style: ElementStyle::default(),
     }
 }
@@ -180,12 +190,31 @@ impl TextEditorElement {
         self.line_tops = editor.logical_line_tops().clone();
         self.gutter_width = Some(editor.gutter_width());
         self.frame_scale = Some(editor.frame_scale.clone());
+        self.line_height = Some(editor.scroll_line_height_px());
+        self.caret_anchor = Some(editor.caret_anchor().clone());
+        self.caret_at = (editor.cursor_pos.x, editor.cursor_pos.y);
         self
     }
 
     pub fn focus_target(mut self, target: FocusId) -> Self {
         self.focus_target = target;
         self
+    }
+}
+
+impl TextEditorElement {
+    fn line_height(&self) -> f32 {
+        self.line_height.unwrap_or(self.font_size * 1.35)
+    }
+
+    /// The line-number gutter's width in a box `width` wide.
+    fn gutter_width_in(&self, width: f32) -> f32 {
+        let lines = self.line_tops.last().map_or(0, |(line, _)| *line);
+        match self.gutter_width {
+            Some(width) => width,
+            None if self.mode.is_code() => gutter_width_in(self.font_size, lines, width),
+            None => 0.0,
+        }
     }
 }
 
@@ -215,6 +244,18 @@ impl Element for TextEditorElement {
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> HitId {
+        if let Some(anchor) = &self.caret_anchor {
+            let (x, y) = self.caret_at;
+            anchor.set(Some(CaretGeometry {
+                caret: Rect {
+                    x: bounds.x + self.gutter_width_in(bounds.width) + x,
+                    y: bounds.y - self.scroll_y + y,
+                    width: Sz::CURSOR_WIDTH,
+                    height: self.line_height(),
+                },
+                field: bounds,
+            }));
+        }
         cx.insert_hit(
             bounds,
             HitFlags::TEXT | HitFlags::SCROLL | HitFlags::DRAG,
@@ -238,13 +279,9 @@ impl Element for TextEditorElement {
             self.placeholder.clone()
         };
         let font_size = self.font_size;
-        let line_height = font_size * 1.35;
+        let line_height = self.line_height();
         let lines = self.line_tops.last().map_or(0, |(line, _)| *line);
-        let gutter_w = match self.gutter_width {
-            Some(width) => width,
-            None if self.mode.is_code() => gutter_width_in(font_size, lines, bounds.width),
-            None => 0.0,
-        };
+        let gutter_w = self.gutter_width_in(bounds.width);
         let text_area_w = (bounds.width - gutter_w).max(0.0);
         let text_x = bounds.x + gutter_w;
         let text_y = bounds.y;
@@ -614,7 +651,7 @@ mod tests {
     use super::*;
     use crate::Action;
     use crate::text_input::TextEditCommand::*;
-    use crate::text_input::TextOffset;
+    use crate::text_input::{TextOffset, caret_popup};
     use crate::theme::Theme;
     use quark::reactive::SignalStore;
     use quark_render::Primitive;
@@ -854,5 +891,172 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].y > start.y + 14.0 * 1.35 * 0.5, "{:?}", lines[0]);
+    }
+
+    const POPUP: crate::theme::Color = crate::theme::Color::rgba(1, 2, 3, 255);
+
+    /// A 400x300 window with an editor at (20, 240) holding two lines, and
+    /// an 80pt popup at its caret before or after it in the tree. Returns
+    /// the painted popup and editor text rects, and the frame asked for.
+    fn render_caret_popup(
+        editor: &Editor,
+        text: &mut quark_text::TextSystem,
+        popup_first: bool,
+    ) -> (Option<Rect>, Option<Rect>, Option<u64>) {
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 1.0, text, &mut layouts, None, &signals);
+        let field = text_editor_element(
+            FocusId::from_key("e"),
+            ScrollActionBuilder::new(Action::new),
+        )
+        .editor_snapshot(editor)
+        .w(300.0)
+        .h(44.0)
+        .into_any();
+        let popup = caret_popup(
+            editor.caret_anchor(),
+            div().w(120.0).h(80.0).bg(POPUP),
+            (400.0, 300.0),
+        )
+        .into_any();
+        let children = if popup_first {
+            [popup, field]
+        } else {
+            [field, popup]
+        };
+        let mut root = div()
+            .w(400.0)
+            .h(300.0)
+            .pt(240.0)
+            .pl(20.0)
+            .children(children)
+            .into_any();
+        let mut scene = Scene::default();
+        render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
+        let popup = scene.primitives.iter().find_map(|p| match p {
+            Primitive::RoundedRect(r) if r.color == POPUP => Some(r.rect),
+            Primitive::Rect(r) if r.color == POPUP => Some(r.rect),
+            _ => None,
+        });
+        let draft = scene.primitives.iter().find_map(|p| match p {
+            Primitive::RichTextRun(run) => Some(run.rect),
+            _ => None,
+        });
+        (popup, draft, cx.next_frame_ms())
+    }
+
+    fn two_line_editor(text: &mut quark_text::TextSystem) -> Editor {
+        let mut editor = Editor::new(EditorMode::ProseInput);
+        editor.sync_size(300.0, 44.0);
+        editor.set_text("first\nsecond @ma");
+        editor.flush(text);
+        editor
+    }
+
+    // Catches a completion popup that is not placed against the caret
+    // painted this frame, or does not flip above a composer at the bottom.
+    #[test]
+    fn a_caret_popup_after_the_editor_sits_above_its_caret_in_the_same_frame() {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let editor = two_line_editor(&mut text);
+        let (popup, _, next_frame) = render_caret_popup(&editor, &mut text, false);
+
+        let caret = (20.0 + editor.cursor_pos.x, 240.0 + editor.cursor_pos.y);
+        let popup = popup.expect("popup painted");
+        let bottom = popup.y + popup.height + 4.0;
+        assert!(
+            (popup.x - caret.0).abs() < 0.01 && (bottom - caret.1).abs() < 0.01,
+            "popup {popup:?} caret {caret:?}"
+        );
+        assert_eq!(next_frame, None, "no second frame needed");
+    }
+
+    // Catches a popup earlier in the tree than its editor staying where
+    // last frame's caret was.
+    #[test]
+    fn a_caret_popup_before_the_editor_reaches_the_caret_on_the_next_frame() {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let editor = two_line_editor(&mut text);
+
+        let (first, _, next_frame) = render_caret_popup(&editor, &mut text, true);
+        let (second, _, _) = render_caret_popup(&editor, &mut text, true);
+
+        assert_eq!(first, None, "nothing to anchor to yet");
+        assert_eq!(next_frame, Some(0));
+        let popup = second.expect("popup painted");
+        let caret_y = 240.0 + editor.cursor_pos.y;
+        assert!((popup.y + popup.height + 4.0 - caret_y).abs() < 0.01);
+    }
+
+    // Catches suggestions taking space in the composer's layout, which
+    // pushed the draft down while they were open.
+    #[test]
+    fn opening_a_caret_popup_leaves_the_draft_in_place() {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let editor = two_line_editor(&mut text);
+        let (_, with_popup, _) = render_caret_popup(&editor, &mut text, false);
+
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+        let field = text_editor_element(
+            FocusId::from_key("e"),
+            ScrollActionBuilder::new(Action::new),
+        )
+        .editor_snapshot(&editor)
+        .w(300.0)
+        .h(44.0);
+        let mut root = div()
+            .w(400.0)
+            .h(300.0)
+            .pt(240.0)
+            .pl(20.0)
+            .child(field)
+            .into_any();
+        let mut scene = Scene::default();
+        render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
+        let alone = scene.primitives.iter().find_map(|p| match p {
+            Primitive::RichTextRun(run) => Some(run.rect),
+            _ => None,
+        });
+
+        assert!(alone.is_some());
+        assert_eq!(with_popup, alone);
+    }
+
+    // Catches the element painting the caret at its own 1.35em line height
+    // instead of the editor's, so it no longer spans the line it sits on.
+    #[test]
+    fn the_painted_caret_spans_the_editors_line_height() {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut editor = Editor::new(EditorMode::ProseInput);
+        editor.set_line_height(Some(22.0));
+        editor.sync_size(300.0, 60.0);
+        editor.set_text("first\nsecond");
+        editor.flush(&mut text);
+
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &signals);
+        let mut root = text_editor_element(
+            FocusId::from_key("e"),
+            ScrollActionBuilder::new(Action::new),
+        )
+        .editor_snapshot(&editor)
+        .focused(true)
+        .w(300.0)
+        .h(60.0)
+        .into_any();
+        render_element(&mut root, &mut Scene::default(), &mut cx, 300.0, 60.0);
+
+        let caret = cx.text_input_hit_areas[0].caret.expect("caret");
+        assert_eq!(
+            (caret.y, caret.y + caret.height),
+            (22.0 + 1.0, 44.0 + 1.0 - Sz::CURSOR_WIDTH)
+        );
     }
 }
