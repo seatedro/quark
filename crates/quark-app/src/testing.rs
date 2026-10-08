@@ -496,6 +496,25 @@ impl<U: UiApp> UiTestHarness<U> {
         self.main().send_events(events);
     }
 
+    /// Deliver `events`, each to its window, back to back with no frame
+    /// between them, as the platform queues input for several windows
+    /// that arrives before their next redraw; then run until idle.
+    ///
+    /// # Panics
+    ///
+    /// When a window is not open.
+    #[track_caller]
+    pub fn send_window_events(
+        &mut self,
+        events: impl IntoIterator<Item = (WindowHandle, InputEvent)>,
+    ) {
+        for (window, event) in events {
+            self.open(window);
+            self.dispatch(window, event);
+        }
+        self.run_until_idle();
+    }
+
     // ---- Queries ---------------------------------------------------------
 
     /// The main window's last accessibility tree, one node per line,
@@ -509,8 +528,7 @@ impl<U: UiApp> UiTestHarness<U> {
     /// The last frame's accessibility tree as AccessKit receives it,
     /// announcements included, with bounds in points.
     pub fn accessibility_update(&self) -> TreeUpdate {
-        self.adapter_state(self.main_window());
-        self.adapter.logical_accessibility_tree()
+        self.accessibility_update_in(self.main_window())
     }
 
     /// Deliver a request from assistive tech (a click, focus, text
@@ -545,8 +563,7 @@ impl<U: UiApp> UiTestHarness<U> {
     /// Where the last frame's identified elements landed, as
     /// `UiContext::geometry` sees it.
     pub fn geometry(&self) -> &quark_ui::element::LayoutSnapshot {
-        self.adapter_state(self.main_window());
-        self.adapter.geometry()
+        self.state(self.main_window()).geometry()
     }
 
     /// The node holding keyboard focus, if focus is on one.
@@ -558,8 +575,7 @@ impl<U: UiApp> UiTestHarness<U> {
 
     /// The app's focus target, whether or not a node shows it.
     pub fn focus(&self) -> Option<FocusId> {
-        self.adapter_state(self.main_window());
-        self.adapter.focus()
+        self.state(self.main_window()).focus()
     }
 
     /// The innermost node under `at` that a click there would reach, by the
@@ -622,25 +638,28 @@ impl<U: UiApp> UiTestHarness<U> {
         &self.open(window).scene
     }
 
-    /// Check that the adapter's state is `window`'s. The adapter keeps one
-    /// window's interaction state (hit regions, focus, accessibility), and
-    /// it holds the state of the window it drew last; reading it for
-    /// another window would answer for the wrong one.
+    /// The UI adapter's state for `window`: its hit regions, focus, and
+    /// accessibility as its last frame and input left them.
     #[track_caller]
-    fn adapter_state(&self, window: WindowHandle) {
-        let last = self.runner.last_drawn();
-        assert!(
-            last.is_none_or(|last| last == window),
-            "UiTestHarness: the UI adapter holds the state of {last:?}, the window it drew \
-             last, not {window:?}; draw {window:?} first with `ui.window(handle).frame()`"
-        );
+    fn state(&self, window: WindowHandle) -> &crate::ui::WindowUiState {
+        self.open(window);
+        self.adapter
+            .window_state(window)
+            .unwrap_or_else(|| panic!("UiTestHarness: the app never heard of {window:?}"))
+    }
+
+    #[track_caller]
+    fn accessibility_update_in(&self, window: WindowHandle) -> TreeUpdate {
+        self.open(window);
+        self.adapter
+            .logical_accessibility_tree(window)
+            .unwrap_or_else(|| panic!("UiTestHarness: the app never heard of {window:?}"))
     }
 
     /// Hand one event to `window`, keeping its pointer and modifiers in step
     /// as the platform layer does.
     #[track_caller]
     fn dispatch(&mut self, window: WindowHandle, event: InputEvent) {
-        self.adapter_state(window);
         self.runner.input(&mut self.adapter, window, event);
     }
 
@@ -688,9 +707,10 @@ impl<U: UiApp> UiTestHarness<U> {
 
     fn hit_test_in(&self, window: WindowHandle, (x, y): (f32, f32)) -> Option<Node> {
         let nodes = self.nodes(window);
-        let semantic = self.adapter.semantic_frame();
-        let accessibility = self.adapter.accessibility_frame();
-        let hit = self.adapter.semantic_node_at(x, y)?;
+        let state = self.state(window);
+        let semantic = state.semantic_frame();
+        let accessibility = state.accessibility_frame();
+        let hit = state.semantic_node_at(x, y)?;
         semantic.ancestors_inclusive(hit).find_map(|index| {
             let owner = accessibility.semantic_owner(index);
             nodes
@@ -707,16 +727,16 @@ impl<U: UiApp> UiTestHarness<U> {
     /// semantic nodes that have a test id but no accessibility node after.
     #[track_caller]
     fn nodes(&self, window: WindowHandle) -> Vec<Node> {
-        self.adapter_state(window);
-        let tree = self.adapter.logical_accessibility_tree();
+        let state = self.state(window);
+        let tree = self.accessibility_update_in(window);
         let mut nodes = Vec::new();
         if let Some(root) = tree.tree.as_ref().map(|tree| tree.root) {
-            let focused = self.adapter.focus().is_some().then_some(tree.focus);
+            let focused = state.focus().is_some().then_some(tree.focus);
             push_subtree(&tree, root, 0, focused, &mut nodes);
         }
 
-        let accessibility = self.adapter.accessibility_frame();
-        for (index, semantic) in self.adapter.semantic_frame().nodes().iter().enumerate() {
+        let accessibility = state.accessibility_frame();
+        for (index, semantic) in state.semantic_frame().nodes().iter().enumerate() {
             let Some(test_id) = &semantic.test_id else {
                 continue;
             };
@@ -737,7 +757,7 @@ impl<U: UiApp> UiTestHarness<U> {
                 id: None,
                 test_id: Some(test_id),
                 bounds: semantic.bounds,
-                focused: semantic.focus.is_some() && semantic.focus == self.adapter.focus(),
+                focused: semantic.focus.is_some() && semantic.focus == state.focus(),
                 depth: 1,
                 accessibility: None,
                 semantic: Some(index),
@@ -750,11 +770,8 @@ impl<U: UiApp> UiTestHarness<U> {
 /// One window of a [`UiTestHarness`], from [`UiTestHarness::window`]: its
 /// input, queries, and the controls a desktop user has over it. Each method
 /// does what the harness method of the same name does for the main window.
-///
-/// The UI adapter keeps one window's interaction state, so input and
-/// queries other than painted text need the window to be the one drawn
-/// last, and panic otherwise. Painted text and window controls work for
-/// any window.
+/// Every window keeps its own hit regions, focus, IME, and accessibility
+/// tree, so input and queries work for any window in any order.
 pub struct UiWindow<'a, U: UiApp> {
     ui: &'a mut UiTestHarness<U>,
     window: WindowHandle,
@@ -1016,7 +1033,6 @@ impl<U: UiApp> UiWindow<'_, U> {
     pub fn accessibility_action(&mut self, request: ActionRequest) {
         let window = self.window;
         let ui = &mut *self.ui;
-        ui.adapter_state(window);
         ui.runner
             .callback_in(window, &mut ui.adapter, |adapter, cx| {
                 App::accessibility_action(adapter, request, cx)
@@ -1028,6 +1044,21 @@ impl<U: UiApp> UiWindow<'_, U> {
 
     pub fn accessibility_tree(&self) -> String {
         self.ui.accessibility_tree_in(self.window)
+    }
+
+    pub fn accessibility_update(&self) -> TreeUpdate {
+        self.ui.accessibility_update_in(self.window)
+    }
+
+    /// The window's focus target, whether or not a node shows it; see
+    /// [`UiTestHarness::focus`]. (Not [`Self::focus`], which gives the
+    /// native window keyboard focus.)
+    pub fn focus_target(&self) -> Option<FocusId> {
+        self.ui.state(self.window).focus()
+    }
+
+    pub fn geometry(&self) -> &quark_ui::element::LayoutSnapshot {
+        self.ui.state(self.window).geometry()
     }
 
     #[track_caller]
