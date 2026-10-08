@@ -900,25 +900,20 @@ impl<U: UiApp> UiAdapter<U> {
     /// belongs to the element focused now. Events of an orphaned
     /// composition, its closing empty preedit and its commit included, do
     /// not: they reach neither the app's hook nor the text field.
+    ///
+    /// The owner is kept through the closing empty preedit and a window
+    /// blur, since the platform sends the commit after both: only the
+    /// commit or the IME reset ends the composition.
     fn ime_event_is_current(&mut self, event: &InputEvent) -> bool {
         match (event, self.composition) {
             (InputEvent::ImePreedit(..) | InputEvent::ImeCommit(_), Composition::Orphaned) => false,
-            (InputEvent::ImePreedit(text, _), _) => {
-                self.composition = match self.focus {
-                    Some(focus) if !text.is_empty() => Composition::Owned(focus),
-                    _ => Composition::None,
-                };
+            (InputEvent::ImePreedit(text, _), _) if !text.is_empty() => {
+                self.composition = self.focus.map_or(Composition::None, Composition::Owned);
                 true
             }
             // A commit without a preedit, as some IMEs send for plain
             // typing, goes to the focused element.
             (InputEvent::ImeCommit(_), _) => {
-                self.composition = Composition::None;
-                true
-            }
-            // The focused field's preedit is cancelled with the window's
-            // focus (`cancel_stale_preedit`).
-            (InputEvent::Focused(false), Composition::Owned(_)) => {
                 self.composition = Composition::None;
                 true
             }
@@ -957,7 +952,8 @@ impl<U: UiApp> UiAdapter<U> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Composition {
     None,
-    /// Composing in this element, focused when its preedit began.
+    /// Composing in this element, focused when its preedit began, until
+    /// the commit ends it.
     Owned(FocusId),
     /// Focus left the element composing. Until the next frame resets the
     /// platform IME, events still arriving for that composition are
@@ -1665,9 +1661,11 @@ mod tests {
     // element composing and the frame that resets the IME, the empty
     // preedit and commit closing that composition, landed in the element
     // the click focused, whether a text field or a terminal taking IME
-    // input in the app's hook.
+    // input in the app's hook, and whether the empty preedit or a window
+    // blur came before the click or after it.
     #[test]
     fn a_commit_queued_after_focus_left_its_composition_lands_nowhere() {
+        use winit::event::{ElementState, MouseButton};
         // Each element's place in `Editors::texts`, and its center.
         let slot = |target| {
             [FIELD, OTHER_FIELD, TERMINAL]
@@ -1675,37 +1673,59 @@ mod tests {
                 .position(|t| *t == target)
         };
         let center = |target| (100.0, 20.0 + 40.0 * slot(target).unwrap() as f32);
-        let cases = [
+        let moves = [
             ("field to field", FIELD, OTHER_FIELD),
             ("field to terminal", FIELD, TERMINAL),
             ("terminal to field", TERMINAL, FIELD),
         ];
-        for (name, from, to) in cases {
-            let mut ui = UiTestHarness::new(Editors::new(), (400.0, 300.0), 1.0);
-            ui.click(center(from));
-            ui.ime_preedit("にほ", None);
-
-            let (x, y) = center(to);
+        let click = |(x, y)| {
             let button = |state| InputEvent::PointerButton {
-                button: winit::event::MouseButton::Left,
+                button: MouseButton::Left,
                 state,
             };
-            ui.send_events([
+            [
                 InputEvent::PointerMoved { x, y },
-                button(winit::event::ElementState::Pressed),
-                button(winit::event::ElementState::Released),
-                InputEvent::ImePreedit(String::new(), None),
-                InputEvent::ImeCommit("日本".into()),
-            ]);
-            assert_eq!(ui.focus(), Some(to), "{name}");
-            assert_eq!(ui.app().texts(), ["", "", ""], "{name}");
+                button(ElementState::Pressed),
+                button(ElementState::Released),
+            ]
+        };
+        let closed = || InputEvent::ImePreedit(String::new(), None);
+        let commit = || InputEvent::ImeCommit("日本".into());
+        type Closing = fn(Vec<InputEvent>, InputEvent, InputEvent) -> Vec<InputEvent>;
+        let closings: [(&str, Closing); 3] = [
+            ("preedit closed after the click", |click, closed, commit| {
+                [click, vec![closed, commit]].concat()
+            }),
+            (
+                "preedit closed before the click",
+                |click, closed, commit| [vec![closed], click, vec![commit]].concat(),
+            ),
+            (
+                "window blurred before the click",
+                |click, closed, commit| {
+                    let blur = vec![InputEvent::Focused(false), InputEvent::Focused(true)];
+                    [blur, click, vec![closed, commit]].concat()
+                },
+            ),
+        ];
+        for (closing, sequence) in closings {
+            for (name, from, to) in moves {
+                let name = format!("{name}, {closing}");
+                let mut ui = UiTestHarness::new(Editors::new(), (400.0, 300.0), 1.0);
+                ui.click(center(from));
+                ui.ime_preedit("にほ", None);
 
-            // Once a frame reset the IME, its commits are the new
-            // element's again.
-            ui.ime_commit("本");
-            let mut expected = ["", "", ""];
-            expected[slot(to).unwrap()] = "本";
-            assert_eq!(ui.app().texts(), expected, "{name}: after the reset");
+                ui.send_events(sequence(click(center(to)).to_vec(), closed(), commit()));
+                assert_eq!(ui.focus(), Some(to), "{name}");
+                assert_eq!(ui.app().texts(), ["", "", ""], "{name}");
+
+                // Once a frame reset the IME, its commits are the new
+                // element's again.
+                ui.ime_commit("本");
+                let mut expected = ["", "", ""];
+                expected[slot(to).unwrap()] = "本";
+                assert_eq!(ui.app().texts(), expected, "{name}: after the reset");
+            }
         }
     }
 

@@ -25,8 +25,9 @@
 //!
 //! Nothing on the thread blocks but its poll, which the wake pipe ends, so
 //! a stop request always gets through: the round trip is a `wl_display.sync`
-//! whose `done` the loop dispatches like any other event, and the dropped
-//! files are written to each drop target as its pipe takes them. A drag
+//! whose `done` the loop dispatches like any other event, the dropped files
+//! are written to each drop target as its pipe takes them, and requests the
+//! socket would not take yet are flushed once it is writable. A drag
 //! request touches the window's surface only under a [`ticket`] claim,
 //! while the UI still holds the window.
 
@@ -40,7 +41,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use raw_window_handle::{RawWindowHandle, WindowHandle};
-use wayland_client::backend::{Backend, ObjectId};
+use wayland_client::backend::{Backend, ObjectId, WaylandError};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_buffer::WlBuffer;
 use wayland_client::protocol::wl_callback::{self, WlCallback};
@@ -130,6 +131,39 @@ struct State {
     next_start: u64,
     /// Drop targets still reading the dropped files.
     transfers: Vec<Transfer>,
+    outgoing: Outgoing,
+}
+
+/// Whether requests are still waiting for the socket to take them.
+#[derive(Debug, Default)]
+struct Outgoing {
+    pending: bool,
+}
+
+impl Outgoing {
+    fn flush(&mut self, conn: &Connection) -> Result<(), WaylandError> {
+        self.flushed(conn.flush())
+    }
+
+    /// Note a flush's result. A socket that would block takes the rest
+    /// later, so that is no failure: the connection is polled for writing
+    /// until a flush gets through.
+    fn flushed(&mut self, result: Result<(), WaylandError>) -> Result<(), WaylandError> {
+        self.pending = match &result {
+            Err(WaylandError::Io(io)) => io.kind() == std::io::ErrorKind::WouldBlock,
+            _ => false,
+        };
+        if self.pending { Ok(()) } else { result }
+    }
+
+    /// What to poll the connection for.
+    fn poll_events(&self) -> libc::c_short {
+        if self.pending {
+            libc::POLLIN | libc::POLLOUT
+        } else {
+            libc::POLLIN
+        }
+    }
 }
 
 /// One seat's objects on our queue.
@@ -199,6 +233,7 @@ fn connect(display: *mut std::ffi::c_void) -> Result<Wayland, String> {
         starts: BTreeMap::new(),
         next_start: 0,
         transfers: Vec::new(),
+        outgoing: Outgoing::default(),
     };
     for global in globals.contents().clone_list() {
         state.global(&qh, global.name, &global.interface, global.version);
@@ -254,7 +289,10 @@ fn run(
             tracing::warn!("drag out: Wayland dispatch failed: {error}");
             return state;
         }
-        let _ = state.conn.flush();
+        if let Err(error) = state.outgoing.flush(&state.conn) {
+            tracing::warn!("drag out: Wayland flush failed: {error}");
+            return state;
+        }
         // None: events arrived for our queue meanwhile; dispatch them.
         let Some(guard) = queue.prepare_read() else {
             continue;
@@ -265,7 +303,10 @@ fn run(
             revents: 0,
         };
         let mut fds = vec![
-            pollfd(guard.connection_fd().as_raw_fd(), libc::POLLIN),
+            pollfd(
+                guard.connection_fd().as_raw_fd(),
+                state.outgoing.poll_events(),
+            ),
             pollfd(woken.as_raw_fd(), libc::POLLIN),
         ];
         fds.extend(
@@ -278,7 +319,8 @@ fn run(
         if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
             continue;
         }
-        if fds[0].revents != 0 {
+        // Only writable: the next turn flushes.
+        if fds[0].revents & !libc::POLLOUT != 0 {
             if let Err(error) = guard.read()
                 && !matches!(&error, wayland_client::backend::WaylandError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock)
             {
@@ -563,8 +605,10 @@ impl State {
             sequence = press.sequence,
             "drag out started"
         );
-        self.conn
-            .flush()
+        // Queued is started: the loop flushes the rest once the socket
+        // takes it.
+        self.outgoing
+            .flush(&self.conn)
             .map_err(|error| DragOutError::Platform(error.to_string()))
     }
 
@@ -874,7 +918,8 @@ mod tests {
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::sync::Arc;
 
-    use super::Transfer;
+    use super::{Outgoing, Transfer};
+    use wayland_client::backend::WaylandError;
 
     /// A blocking pipe, as a drop target hands over: its read end, and the
     /// write end for the transfer.
@@ -930,5 +975,30 @@ mod tests {
         }
         drop(transfer);
         assert!(reading.join().unwrap()[..] == uris[..]);
+    }
+
+    // Regression: a flush the socket would not take was ignored, so the
+    // queued requests (a drag's start among them) waited for an unrelated
+    // event, and a drag reported failure though it was queued.
+    #[test]
+    fn requests_the_socket_would_not_take_are_queued_and_polled_for_writing() {
+        use libc::{POLLIN, POLLOUT};
+        use std::io::ErrorKind::{BrokenPipe, WouldBlock};
+        let io = |kind: std::io::ErrorKind| Err(WaylandError::Io(kind.into()));
+        let mut outgoing = Outgoing::default();
+        let flushes = [
+            ("would block", io(WouldBlock), true, POLLIN | POLLOUT),
+            ("would block again", io(WouldBlock), true, POLLIN | POLLOUT),
+            ("got through", Ok::<(), WaylandError>(()), true, POLLIN),
+            ("connection broke", io(BrokenPipe), false, POLLIN),
+        ];
+        for (name, result, accepted, events) in flushes {
+            let got = outgoing.flushed(result);
+            assert_eq!(
+                (got.is_ok(), outgoing.poll_events()),
+                (accepted, events),
+                "{name}"
+            );
+        }
     }
 }
