@@ -6,11 +6,12 @@
 //! generation it was asked under. An answer to a query the user has typed
 //! past, or to a thread they have switched away from, is dropped.
 
-use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div};
+use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, svg_icon, text};
+use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{
     self, AtomId, Completion, CompletionItem, CompletionProvider, CompletionQuery, Insertion,
-    RichText, TriggerRule, caret_popup, completion_list,
+    RichText, TriggerRule, caret_popup,
 };
 use quark_app::quark_ui::theme::Theme;
 
@@ -22,8 +23,10 @@ pub const RULES: [TriggerRule; 2] = [TriggerRule::word('@'), TriggerRule::line_s
 pub const MAX_RESULTS: usize = 6;
 /// [`AtomId::kind`] of a file mention chip.
 pub const FILE_CHIP: u32 = 1;
-/// Width of the suggestion popup.
+/// Width of the suggestion popup (the design's floor is 280).
 const POPUP_WIDTH: f32 = 320.0;
+/// Height of one suggestion row.
+const ROW_HEIGHT: f32 = 32.0;
 /// Above the timeline and the dock; below modal overlays.
 const POPUP_Z: i32 = 300;
 
@@ -149,24 +152,117 @@ pub fn deliver(completion: &mut Completion, provider: &Provider, answer: Answer)
 }
 
 /// The open suggestion list at the editor's caret, out of flow, or `None`
-/// while closed.
+/// while closed. `inset` is how far the composer's card reaches above
+/// its text field: the popup opens above the card, so it never covers
+/// the draft or the card's edge.
 pub fn popup(
     completion: &Completion,
     anchor: &text_input::CaretAnchor,
+    inset: f32,
     theme: &Theme,
     window: (f32, f32),
 ) -> Option<AnyElement> {
-    let list = completion_list(completion, theme, |i| Action::Pick(i).into())?;
-    let panel = div()
-        .w(POPUP_WIDTH)
+    let list = list(completion, theme)?;
+    let scale = theme.metrics.ui_scale();
+    let recipe = theme.components.popover;
+    let mut panel = div()
+        .w((POPUP_WIDTH * scale).round())
         .z_index(POPUP_Z)
         .test_id("composer.suggestions")
-        .shadow_preset(quark_app::quark_ui::design::Shadow::POPOVER)
-        .rounded(8.0)
         .child(list);
+    if let Some(shadow) = recipe.shadow {
+        panel = panel.shadow(
+            shadow.blur * scale,
+            shadow.offset_y * scale,
+            quark_app::quark_ui::theme::Color::rgba(0, 0, 0, shadow.alpha),
+        );
+    }
+    // From the caret line up to the card's top edge, plus a gap.
+    let gap = anchor
+        .get()
+        .map_or(4.0, |g| g.caret.y - g.field.y + inset + 6.0 * scale);
     Some(
         caret_popup(anchor, panel, window)
+            .gap(gap)
             .prefer_above(true)
+            .into_any(),
+    )
+}
+
+/// The rows: an icon by kind (file or command), the label in strong
+/// text, and the path or description muted after it, at most
+/// [`MAX_RESULTS`]. Same roles and names as quark's `completion_list`.
+fn list(completion: &Completion, theme: &Theme) -> Option<AnyElement> {
+    if !completion.is_open() {
+        return None;
+    }
+    let colors = &theme.colors;
+    let scale = theme.metrics.ui_scale();
+    let px = |points: f32| (points * scale).round();
+    let rows = completion
+        .items()
+        .iter()
+        .take(MAX_RESULTS)
+        .enumerate()
+        .map(|(i, item)| {
+            let selected = i == completion.selected();
+            let icon = if item.label.starts_with('/') {
+                lucide::COMMAND
+            } else {
+                lucide::FILE_CODE
+            };
+            let mut row = div()
+                .flex_row()
+                .items_center()
+                .flex_shrink_0()
+                .w_full()
+                .h(px(ROW_HEIGHT))
+                .px(px(8.0))
+                .gap(px(8.0))
+                .rounded(px(6.0))
+                .on_click(Action::Pick(i))
+                .accessibility_role(accesskit::Role::ListBoxOption)
+                .accessibility_label(item.label.clone())
+                .accessibility_selected(selected)
+                .child(svg_icon(icon, px(14.0)).color(if selected {
+                    colors.accent
+                } else {
+                    colors.icon
+                }))
+                .child(
+                    text(item.label.clone())
+                        .size(px(13.0))
+                        .color(colors.text_strong),
+                );
+            if !item.detail.is_empty() {
+                row = row.child(
+                    div().flex_1().min_w(0.0).overflow_hidden().child(
+                        text(item.detail.clone())
+                            .size(px(12.0))
+                            .color(colors.text_muted)
+                            .truncate(),
+                    ),
+                );
+            }
+            if selected {
+                row = row.bg(colors.sidebar_row_selected);
+            } else {
+                row = row.hover_bg(colors.sidebar_row_hover);
+            }
+            row.into_any()
+        });
+    Some(
+        div()
+            .flex_col()
+            .w_full()
+            .p(px(4.0))
+            .gap(px(2.0))
+            .rounded(px(8.0))
+            .bg(colors.elevated_surface)
+            .border(colors.border)
+            .accessibility_role(accesskit::Role::ListBox)
+            .accessibility_label(quark_app::quark_ui::i18n::tr("quark-suggestions"))
+            .children(rows)
             .into_any(),
     )
 }

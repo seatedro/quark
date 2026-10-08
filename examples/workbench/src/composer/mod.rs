@@ -320,6 +320,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     let popup = completions::popup(
         &state.completion,
         state.editor.caret_anchor(),
+        (TEXT_PAD + CARD_PAD) * z,
         theme,
         window,
     );
@@ -338,7 +339,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
                     </div>
                 }
                 <div class="flex-col" rounded={12.0 * z} gap={GAP * z} p={CARD_PAD * z}
-                     border={colors.border} bg={colors.surface}>
+                     border={colors.border_variant} bg={colors.surface}>
                     if !state.attachments.items.is_empty() {
                         <div h={CHIPS_HEIGHT * z} class="flex-row overflow-hidden">
                             {attachments::chips(&state.attachments, theme)}
