@@ -4,6 +4,7 @@
 //! side panel with a spring; click it again mid-slide and the panel turns
 //! around with its velocity intact instead of restarting. Escape quits.
 
+use quark::view;
 use quark_app::quark_ui::Action;
 use quark_app::quark_ui::animation::{Curve, Motion, Prop};
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
@@ -30,21 +31,13 @@ struct AnimationDemo {
 }
 
 fn button(key: &str, label: &str, idle: Color, hover: Color, msg: Option<Msg>) -> AnyElement {
-    let button = div()
-        .key(key)
-        .test_id(key)
-        .px(16.0)
-        .h(36.0)
-        .items_center()
-        .justify_center()
-        .rounded(8.0)
-        .bg(idle)
-        .hover_bg(hover)
-        .transition(Prop::Background, Motion::tween(180, Curve::EaseOutCubic))
-        .child(text(label).semibold());
-    match msg {
-        Some(msg) => button.on_click(msg).into_any(),
-        None => button.into_any(),
+    view! {
+        <div key={key} test_id={key} class="px-4 h-9 items-center justify-center rounded-[8] bg-[idle]"
+             hover_bg={hover}
+             transition={(Prop::Background, Motion::tween(180, Curve::EaseOutCubic))}
+             on:click={if let Some(msg) = msg { msg }}>
+            <text class="font-semibold">{label}</text>
+        </div>
     }
 }
 
@@ -80,52 +73,33 @@ impl UiApp for AnimationDemo {
         } else {
             -PANEL_W - 24.0
         };
-        div()
-            .w(width)
-            .h(height)
-            .bg(colors.background)
-            .child(
-                div()
-                    .key("demo.panel")
-                    .test_id("demo.panel")
-                    .absolute()
-                    .top(0.0)
-                    .left(0.0)
-                    .w(PANEL_W)
-                    .h(height)
-                    .p(24.0)
-                    .flex_col()
-                    .gap(12.0)
-                    .bg(colors.surface)
-                    .clip()
-                    .translate(panel_x, 0.0)
-                    // Underdamped so the slide settles with a small overshoot.
-                    .transition(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))
-                    .child(text("Panel").text_lg().bold())
-                    .child(text("Sprung with stiffness 260, damping 22.").color(colors.text_muted)),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .flex_col()
-                    .gap(16.0)
-                    .child(
-                        div().flex_row().gap(8.0).children(swatches.into_iter().map(
-                            |(key, label, idle, hover)| button(key, label, idle, hover, None),
-                        )),
-                    )
-                    .child(button(
+        view! {
+            <div w={width} h={height} class="bg-[colors.background]">
+                <div key="demo.panel" test_id="demo.panel"
+                     class="absolute top-0 left-0 w-[PANEL_W] h-[height] p-6 flex-col gap-3
+                            bg-[colors.surface] overflow-clip"
+                     translate={(panel_x, 0.0)}
+                     // Underdamped so the slide settles with a small overshoot.
+                     transition={(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))}>
+                    <text class="text-lg font-bold">"Panel"</text>
+                    <text color={colors.text_muted}>"Sprung with stiffness 260, damping 22."</text>
+                </div>
+                <div class="w-full h-full items-center justify-center flex-col gap-4">
+                    <div class="flex-row gap-2">
+                        for (key, label, idle, hover) in swatches {
+                            {button(key, label, idle, hover, None)}
+                        }
+                    </div>
+                    {button(
                         "demo.toggle",
                         "Toggle panel",
                         colors.accent,
                         colors.accent_strong,
                         Some(Msg::TogglePanel),
-                    )),
-            )
-            .into_any()
+                    )}
+                </div>
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {

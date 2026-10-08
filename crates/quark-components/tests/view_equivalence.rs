@@ -17,7 +17,11 @@ use quark_ui::accessibility::{AccessibilityFrame, dump_accessibility_tree};
 use quark_ui::element::*;
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
+use quark_ui::test_alloc::{self, Counting};
 use quark_ui::theme::{Color, Theme};
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Pick(&'static str);
@@ -253,6 +257,56 @@ fn control_flow_matches_builder_children() {
         let (m, b) = build(show, status, label);
         assert_same("control flow", m, b);
     }
+}
+
+// Catches control flow lowering to a `Vec` per branch or loop body: views
+// run every frame, so `if`, `match`, and `for` must allocate exactly what
+// the builder calls they stand for do.
+#[test]
+fn control_flow_allocates_like_builder_children() {
+    let items = ["a", "b", "c"];
+    let from_macro = || {
+        view! {
+            <div>
+                for item in items {
+                    <text>{item}</text>
+                    <spacer/>
+                }
+                if items.len() > 1 {
+                    <text>"x"</text>
+                    <text>"y"</text>
+                }
+                match items.len() {
+                    0 => <spacer/>
+                    _ => {
+                        <text>"m"</text>
+                        <text>"n"</text>
+                    }
+                }
+            </div>
+        }
+    };
+    let from_builders = || {
+        let mut b = div();
+        for item in items {
+            b = b.child(text(item)).child(spacer());
+        }
+        if items.len() > 1 {
+            b = b.child(text("x")).child(text("y"));
+        }
+        b = match items.len() {
+            0 => b.child(spacer()),
+            _ => b.child(text("m")).child(text("n")),
+        };
+        b.into_any()
+    };
+    // The first build fills the element pools; later ones reuse them.
+    drop((from_macro(), from_builders()));
+    let (tree, by_macro) = test_alloc::count(from_macro);
+    drop(tree);
+    let (tree, by_builders) = test_alloc::count(from_builders);
+    drop(tree);
+    assert_eq!(by_macro, by_builders);
 }
 
 #[test]

@@ -179,15 +179,6 @@ impl RenderOnce for Button {
             .unwrap_or_default();
         let accessibility_id = format!("button:{action:?}:{accessibility_label}");
 
-        let label_el = label_text.map(|label| {
-            let mut txt = text(label).medium().color(text_color);
-            match self.size {
-                ButtonSize::Default => txt = txt.text_sm(),
-                ButtonSize::Compact => txt = txt.text_xs(),
-            }
-            txt
-        });
-
         view! { scale,
             <div class="shrink-0" bg={bg}
                  cursor={cursor}
@@ -217,7 +208,13 @@ impl RenderOnce for Button {
                 if icon.is_some() {
                     <icon svg={icon.unwrap()} size={icon_size} color={icon_color} />
                 }
-                {?label_el}
+                if let Some(label) = label_text {
+                    <text class="font-medium" color={text_color}
+                          @when {self.size == ButtonSize::Default} { class="text-sm" }
+                          @when {self.size == ButtonSize::Compact} { class="text-xs" }>
+                        {label}
+                    </text>
+                }
                 {...children.into_iter().map(Child::into_any)}
             </div>
         }

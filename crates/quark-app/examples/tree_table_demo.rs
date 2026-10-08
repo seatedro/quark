@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::style::Styled;
@@ -83,19 +84,18 @@ impl TableData for Files {
     /// Sizes right-aligned in kilobytes; the rest as plain text.
     fn render_cell(&self, row: usize, column: usize, style: &CellStyle) -> AnyElement {
         if column != SIZE {
-            return text(self.cell_text(row, column).into_owned())
-                .text_sm()
-                .color(style.text)
-                .truncate()
-                .into_any();
+            return view! {
+                <text class="text-sm" color={style.text} class="truncate">
+                    {self.cell_text(row, column).into_owned()}
+                </text>
+            };
         }
         let kb = self.sizes[row] as f64 / 1024.0;
-        div()
-            .w_full()
-            .flex_row()
-            .justify_end()
-            .child(text(format!("{kb:.1} KB")).text_sm().color(style.muted))
-            .into_any()
+        view! {
+            <div class="w-full flex-row justify-end">
+                <text class="text-sm" color={style.muted}>"{kb:.1} KB"</text>
+            </div>
+        }
     }
 }
 
@@ -179,22 +179,15 @@ impl UiApp for Demo {
             |event| Msg::Table(event).into(),
         );
         let colors = &cx.theme.colors;
-        div()
-            .w(width)
-            .h(height)
-            .flex_row()
-            .bg(colors.background)
-            .child(
-                div()
-                    .w(TREE_WIDTH)
-                    .h(height)
-                    .flex_shrink_0()
-                    .bg(colors.sidebar_background)
-                    .border_r(colors.border)
-                    .child(tree),
-            )
-            .child(table)
-            .into_any()
+        view! {
+            <div w={width} h={height} class="flex-row bg-[colors.background]">
+                <div w={TREE_WIDTH} h={height}
+                     class="shrink-0 bg-[colors.sidebar_background] border-r-[colors.border]">
+                    {tree}
+                </div>
+                {table}
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {

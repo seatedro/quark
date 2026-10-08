@@ -6,6 +6,7 @@
 //! control. Escape quits.
 
 use accesskit::Role;
+use quark::view;
 use quark_app::quark_ui::accessibility::Politeness;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text, text_input};
 use quark_app::quark_ui::style::Styled;
@@ -44,21 +45,14 @@ struct A11yDemo {
 impl A11yDemo {
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
-        div()
-            .accessibility_id(id)
-            .accessibility_role(Role::Button)
-            .accessibility_label(label)
-            .focus_ring(FocusId::from_key(id))
-            .on_click(msg)
-            .px(16.0)
-            .h(36.0)
-            .items_center()
-            .justify_center()
-            .rounded(8.0)
-            .bg(colors.accent)
-            .hover_bg(colors.accent_strong)
-            .child(text(label).color(colors.text_strong).semibold())
-            .into_any()
+        view! {
+            <div accessibility_id={id} accessibility_role={Role::Button} aria-label={label}
+                 focus_ring={FocusId::from_key(id)} on:click={msg}
+                 class="px-4 h-9 items-center justify-center rounded-[8] bg-[colors.accent]"
+                 hover_bg={colors.accent_strong}>
+                <text color={colors.text_strong} class="font-semibold">{label}</text>
+            </div>
+        }
     }
 }
 
@@ -82,52 +76,24 @@ impl UiApp for A11yDemo {
         )
         .build();
         let colors = &cx.theme.colors;
-        div()
-            .w(width)
-            .h(height)
-            .bg(colors.background)
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .accessibility_id("a11y.dialog")
-                    .accessibility_role(Role::Dialog)
-                    .accessibility_label("Settings")
-                    .w(420.0)
-                    .p(24.0)
-                    .gap(16.0)
-                    .flex_col()
-                    .rounded(16.0)
-                    .bg(colors.surface)
-                    .child(
-                        text_input("Name", "")
-                            .field(&self.name)
-                            .placeholder("Your name")
-                            .focus_target(NAME_FIELD)
-                            .focused(cx.is_focused(NAME_FIELD))
-                            .w_full()
-                            .h(52.0),
-                    )
-                    .child(
-                        checkbox(self.remember)
-                            .label("Remember me")
-                            .on_toggle(Msg::Remember),
-                    )
-                    .child(
-                        toggle(self.notify)
-                            .label("Notifications")
-                            .on_toggle(Msg::Notify),
-                    )
-                    .child(
-                        div()
-                            .flex_row()
-                            .gap(8.0)
-                            .child(Self::button("a11y.save", "Save", Msg::Save, cx))
-                            .child(Self::button("a11y.check", "Check", Msg::Check, cx)),
-                    ),
-            )
-            .child(toasts)
-            .into_any()
+        view! {
+            <div w={width} h={height} class="bg-[colors.background] items-center justify-center">
+                <div accessibility_id="a11y.dialog" accessibility_role={Role::Dialog}
+                     aria-label="Settings"
+                     class="w-[420] p-6 gap-4 flex-col rounded-[16] bg-[colors.surface]">
+                    <text_input("Name", "") field={&self.name} placeholder="Your name"
+                                focus_target={NAME_FIELD} focused={cx.is_focused(NAME_FIELD)}
+                                class="w-full" h={52.0} />
+                    <checkbox(self.remember) label="Remember me" on:toggle={Msg::Remember} />
+                    <toggle(self.notify) label="Notifications" on:toggle={Msg::Notify} />
+                    <div class="flex-row gap-2">
+                        {Self::button("a11y.save", "Save", Msg::Save, cx)}
+                        {Self::button("a11y.check", "Check", Msg::Check, cx)}
+                    </div>
+                </div>
+                {toasts}
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {

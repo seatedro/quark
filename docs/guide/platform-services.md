@@ -9,6 +9,7 @@ This doctest from [crates/quark-app/src/lib.rs](../../crates/quark-app/src/lib.r
 sets a menu bar and a badge, and handles the menu pick:
 
 ```rust
+use quark::view;
 use quark_app::platform::menu::{Menu, MenuAction};
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div};
 use quark_app::{AppEvent, UiApp, UiContext, ViewContext};
@@ -42,7 +43,7 @@ impl UiApp for Notes {
     }
 
     fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
-        div().into_any()
+        view! { <div /> }
     }
 
     fn update(&mut self, _: (), _cx: &mut UiContext) {}

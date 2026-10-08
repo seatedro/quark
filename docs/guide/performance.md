@@ -24,6 +24,7 @@ doctest from [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs)
 caches each row of a list:
 
 ```rust
+use quark::view;
 use quark_ui::element::{AnyElement, IntoAnyElement, cached, div, inputs_hash, text};
 use quark_ui::style::Styled;
 
@@ -34,19 +35,22 @@ struct Row {
 }
 
 fn rows(rows: &[Row], selected: Option<u64>) -> AnyElement {
-    div()
-        .flex_col()
-        .children(rows.iter().map(|row| {
-            let is_selected = selected == Some(row.id);
-            let label = row.label.clone();
-            // The hash covers everything the closure reads.
-            cached(row.id, inputs_hash(&(row.revision, is_selected)), move || {
-                let line = text(label);
-                if is_selected { line.semibold() } else { line }
-            })
-            .into_any()
-        }))
-        .into_any()
+    view! {
+        <div class="flex-col">
+            for row in rows {
+                {row_view(row, selected == Some(row.id))}
+            }
+        </div>
+    }
+}
+
+fn row_view(row: &Row, is_selected: bool) -> AnyElement {
+    let label = row.label.clone();
+    // The hash covers everything the closure reads.
+    let build = move || view! {
+        <text @when {is_selected} { class="font-semibold" }>{label}</text>
+    };
+    view! { <cached(row.id, inputs_hash(&(row.revision, is_selected)), build) /> }
 }
 ```
 

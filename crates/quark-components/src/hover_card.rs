@@ -11,7 +11,7 @@
 //! pointer move, calls [`HoverCardState::tick`] on frames, and schedules a
 //! frame at [`HoverCardState::next_wake_ms`].
 
-use quark::SemanticRole;
+use quark::view;
 use quark_render::Rect;
 use quark_ui::design::Shadow;
 use quark_ui::element::{AnyElement, IntoAnyElement, div};
@@ -230,29 +230,16 @@ impl HoverCardState {
         );
         self.card = Some(rect);
         let tc = &theme.colors;
-        Some(
-            div()
-                .absolute()
-                .left(rect.x)
-                .top(rect.y)
-                .w(rect.width)
-                .h(rect.height)
-                .z_index(450)
-                .flex_col()
-                .p(m.spacing_md)
-                .bg(tc.elevated_surface)
-                .border(tc.border)
-                .rounded(m.panel_radius)
-                .shadow_preset(Shadow::POPOVER)
-                .overflow_hidden()
-                .id("hover-card")
-                .test_id("hover-card")
-                .semantic_role(SemanticRole::Group)
-                .accessibility_role(accesskit::Role::Tooltip)
-                .accessibility_id(format!("hover-card:{}", self.key))
-                .child(content)
-                .into_any(),
-        )
+        Some(view! {
+            <div class="absolute" left={rect.x} top={rect.y} w={rect.width} h={rect.height}
+                 z_index={450} class="flex-col" p={m.spacing_md} bg={tc.elevated_surface}
+                 border={tc.border} rounded={m.panel_radius} shadow_preset={Shadow::POPOVER}
+                 class="overflow-hidden" id="hover-card" test_id="hover-card" role="group"
+                 accessibility_role={accesskit::Role::Tooltip}
+                 accessibility_id={format!("hover-card:{}", self.key)}>
+                {content}
+            </div>
+        })
     }
 }
 

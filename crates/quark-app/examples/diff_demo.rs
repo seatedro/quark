@@ -13,6 +13,7 @@
 
 use std::rc::Rc;
 
+use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, cached, div, inputs_hash, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::{Action, FocusId};
@@ -95,106 +96,59 @@ impl UiApp for Demo {
 
         let (mode, wrap) = (self.diff.mode(), self.diff.style().wrap);
         let title = self.title.clone();
-        let toolbar = cached(
-            "demo.toolbar",
-            inputs_hash(&(mode, wrap, width.to_bits())),
-            {
-                move || {
-                    let toggle = |label: &'static str, on: bool, msg: Msg| {
-                        let mut b = div()
-                            .px(10.0)
-                            .h(24.0)
-                            .rounded(4.0)
-                            .flex_row()
-                            .items_center()
-                            .hover_bg(colors.element_hover)
-                            .on_click(msg)
-                            .child(text(label).text_sm().color(colors.text));
-                        if on {
-                            b = b.bg(colors.element_selected);
-                        }
-                        b
-                    };
-                    div()
-                        .w(width)
-                        .h(TOOLBAR_H)
-                        .flex_row()
-                        .items_center()
-                        .gap(6.0)
-                        .px(10.0)
-                        .bg(colors.title_bar_background)
-                        .border_b(colors.border)
-                        .child(text(&*title).text_sm().semibold().color(colors.text))
-                        .child(div().flex_1())
-                        .child(toggle(
-                            "Unified",
-                            mode == Mode::Unified,
-                            Msg::Mode(Mode::Unified),
-                        ))
-                        .child(toggle(
-                            "Side by side",
-                            mode == Mode::Split,
-                            Msg::Mode(Mode::Split),
-                        ))
-                        .child(toggle("Wrap", wrap, Msg::ToggleWrap))
+        let toolbar = move || {
+            let toggle = |label: &'static str, on: bool, msg: Msg| {
+                view! {
+                    <div class="px-[10] h-6 rounded-[4] flex-row items-center"
+                         hover_bg={colors.element_hover} on:click={msg}
+                         @when {on} { bg={colors.element_selected} }>
+                        <text class="text-sm" color={colors.text}>{label}</text>
+                    </div>
                 }
-            },
-        );
+            };
+            view! {
+                <div w={width} h={TOOLBAR_H}
+                     class="flex-row items-center gap-[6] px-[10] bg-[colors.title_bar_background]
+                            border-b-[colors.border]">
+                    <text class="text-sm font-semibold" color={colors.text}>{&*title}</text>
+                    <div class="flex-1" />
+                    {toggle("Unified", mode == Mode::Unified, Msg::Mode(Mode::Unified))}
+                    {toggle("Side by side", mode == Mode::Split, Msg::Mode(Mode::Split))}
+                    {toggle("Wrap", wrap, Msg::ToggleWrap)}
+                </div>
+            }
+        };
         let files = self.files.clone();
-        let list = cached(
-            "demo.files",
-            inputs_hash(&(sidebar.to_bits(), height.to_bits())),
-            {
-                move || {
-                    let mut list = div()
-                        .w(sidebar)
-                        .h(height - TOOLBAR_H)
-                        .flex_col()
-                        .clip()
-                        .bg(colors.sidebar_background)
-                        .border_r(colors.border);
+        let list = move || {
+            view! {
+                <div w={sidebar} h={height - TOOLBAR_H}
+                     class="flex-col overflow-clip bg-[colors.sidebar_background] border-r-[colors.border]">
                     for (i, (path, status, adds, dels)) in files.iter().enumerate() {
-                        list = list.child(
-                            div()
-                                .w_full()
-                                .h(28.0)
-                                .flex_row()
-                                .items_center()
-                                .gap(6.0)
-                                .px(10.0)
-                                .hover_bg(colors.sidebar_row_hover)
-                                .on_click(Msg::OpenFile(i as u32))
-                                .child(text(*status).text_xs().color(colors.text_muted))
-                                .child(text(path.as_str()).text_sm().color(colors.text).truncate())
-                                .child(div().flex_1())
-                                .child(
-                                    text(format!("+{adds}"))
-                                        .text_xs()
-                                        .color(colors.line_add_text),
-                                )
-                                .child(
-                                    text(format!("-{dels}"))
-                                        .text_xs()
-                                        .color(colors.line_del_text),
-                                ),
-                        );
+                        <div class="w-full h-7 flex-row items-center gap-[6] px-[10]"
+                             hover_bg={colors.sidebar_row_hover} on:click={Msg::OpenFile(i as u32)}>
+                            <text class="text-xs" color={colors.text_muted}>{*status}</text>
+                            <text class="text-sm" color={colors.text} class="truncate">{path.as_str()}</text>
+                            <div class="flex-1" />
+                            <text class="text-xs" color={colors.line_add_text}>"+{adds}"</text>
+                            <text class="text-xs" color={colors.line_del_text}>"-{dels}"</text>
+                        </div>
                     }
-                    list
-                }
-            },
-        );
-        let mut body = div().w(width).h(height - TOOLBAR_H).flex_row();
-        if sidebar > 0.0 {
-            body = body.child(list.w(sidebar).h(height - TOOLBAR_H));
+                </div>
+            }
+        };
+        view! {
+            <div w={width} h={height} class="flex-col bg-[colors.background]">
+                <cached("demo.toolbar", inputs_hash(&(mode, wrap, width.to_bits())), toolbar)
+                        w={width} h={TOOLBAR_H} />
+                <div w={width} h={height - TOOLBAR_H} class="flex-row">
+                    if sidebar > 0.0 {
+                        <cached("demo.files", inputs_hash(&(sidebar.to_bits(), height.to_bits())), list)
+                                w={sidebar} h={height - TOOLBAR_H} />
+                    }
+                    {view}
+                </div>
+            </div>
         }
-        div()
-            .w(width)
-            .h(height)
-            .flex_col()
-            .bg(colors.background)
-            .child(toolbar.w(width).h(TOOLBAR_H))
-            .child(body.child(view))
-            .into_any()
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {

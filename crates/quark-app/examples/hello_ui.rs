@@ -68,13 +68,6 @@ impl UiApp for HelloUi {
         } else {
             self.greeting.clone()
         };
-        let name = text_input("Name", "")
-            .field(&self.name)
-            .placeholder("Your name")
-            .focus_target(NAME_FIELD)
-            .focused(cx.is_focused(NAME_FIELD))
-            .w_full()
-            .h(52.0);
         view! {
             <div w={width} h={height} class="items-center justify-center bg-[colors.background]">
                 <div accessibility_id="hello.dialog" role="dialog" aria-label="Hello Quark"
@@ -82,7 +75,9 @@ impl UiApp for HelloUi {
                     <div accessibility_id="hello.heading" role="heading" aria-label="Hello from Quark">
                         <text class="text-lg font-bold">"Hello from Quark"</text>
                     </div>
-                    {name}
+                    <text_input("Name", "") field={&self.name} placeholder="Your name"
+                                focus_target={NAME_FIELD} focused={cx.is_focused(NAME_FIELD)}
+                                class="w-full" h={52.0} />
                     <text color={colors.text}>{greeting}</text>
                     <div class="flex-row gap-2">
                         {Self::button("hello.greet", "Greet", Msg::Greet, cx)}

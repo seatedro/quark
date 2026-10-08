@@ -1,4 +1,4 @@
-use quark::{Props, SemanticRole, view};
+use quark::{Props, view};
 
 use quark_ui::Action;
 use quark_ui::animation::{Curve, Motion, Prop};
@@ -176,52 +176,32 @@ impl RenderOnce for Switch {
         let click_action = self.on_toggle.filter(|_| !self.disabled);
         let accessibility_id = format!("switch:{:?}:{accessibility_label}", click_action);
 
-        // Keyed by the switch, so the slide animates across frames.
-        let thumb = div()
-            .absolute()
-            .top(thumb_inset)
-            .left(thumb_inset)
-            .w(thumb_size)
-            .h(thumb_size)
-            .rounded(thumb_size / 2.0)
-            .bg(thumb_bg)
-            .shadow_preset(Shadow::SUBTLE)
-            .key(format!("{accessibility_id}:thumb"))
-            .translate(if self.on { travel } else { 0.0 }, 0.0)
-            .transition(Prop::Transform, Motion::tween(140, Curve::EaseOutCubic));
-        let track = div()
-            .flex_shrink_0()
-            .w(track_w)
-            .h(track_h)
-            .bg(track_bg)
-            .rounded(track_h / 2.0)
-            .when(!self.disabled, |t| t.hover_bg(hover_bg))
-            .child(thumb);
-
         let label_color = if self.disabled {
             tc.text_muted
         } else {
             tc.text
         };
-        let mut row = div()
-            .flex_row()
-            .items_center()
-            .gap(m.spacing_sm)
-            .rounded(track_h / 2.0)
-            .id(accessibility_id.clone())
-            .key(accessibility_label.clone())
-            .test_id("switch")
-            .semantic_role(SemanticRole::Switch)
-            .accessibility_role(accesskit::Role::Switch)
-            .accessibility_id(accessibility_id)
-            .accessibility_label(accessibility_label)
-            .accessibility_toggled(self.on)
-            .accessibility_disabled(self.disabled)
-            .child(track)
-            .optional_child(label_text.map(|label| text(label).text_sm().color(label_color)));
-        if let Some(action) = click_action {
-            row = row.on_click(action);
+        // Keyed by the switch, so the slide animates across frames.
+        let thumb_key = format!("{accessibility_id}:thumb");
+        view! {
+            <div class="flex-row items-center" gap={m.spacing_sm} rounded={track_h / 2.0}
+                 id={accessibility_id.clone()} key={accessibility_label.clone()} test_id="switch"
+                 role="switch" accessibility_role={accesskit::Role::Switch}
+                 accessibility_id={accessibility_id} aria-label={accessibility_label}
+                 aria-checked={self.on} aria-disabled={self.disabled}
+                 @when {let Some(action) = click_action} { on:click={action} }>
+                <div class="shrink-0" w={track_w} h={track_h} bg={track_bg} rounded={track_h / 2.0}
+                     @when {!self.disabled} { hover_bg={hover_bg} }>
+                    <div class="absolute" top={thumb_inset} left={thumb_inset} w={thumb_size}
+                         h={thumb_size} rounded={thumb_size / 2.0} bg={thumb_bg}
+                         shadow_preset={Shadow::SUBTLE} key={thumb_key}
+                         translate={(if self.on { travel } else { 0.0 }, 0.0)}
+                         transition={(Prop::Transform, Motion::tween(140, Curve::EaseOutCubic))} />
+                </div>
+                if let Some(label) = label_text {
+                    <text class="text-sm" color={label_color}>{label}</text>
+                }
+            </div>
         }
-        row.into_any()
     }
 }

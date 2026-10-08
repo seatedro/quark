@@ -664,6 +664,39 @@ fn component_value_slots_and_constructor_args() {
     );
 }
 
+// Catches `<name(args)>` not calling the in-scope function, or dropping
+// its attributes or children.
+#[test]
+fn lowercase_tag_with_arguments_calls_the_function() {
+    fn panel(title: &str) -> El {
+        div().test_id(title)
+    }
+    let el = view! {
+        <panel("inbox") gap={2.0}>
+            <text>"a"</text>
+            if true { "b" }
+        </panel>
+    };
+    assert_eq!(el.calls, ["test_id(\"inbox\")", "gap(2.0)"]);
+    assert_eq!(kids(&el), ["a", "b"]);
+}
+
+// Catches `<{expr}>` not applying its attributes and children to the
+// builder value the expression evaluates to.
+#[test]
+fn expression_tag_applies_attributes_to_a_builder_value() {
+    let base = div().test_id("base");
+    let el = view! {
+        <{base} gap={2.0}>
+            <text>"a"</text>
+        </>
+    };
+    assert_eq!(el.calls, ["test_id(\"base\")", "gap(2.0)"]);
+    assert_eq!(kids(&el), ["a"]);
+    let lone = view! { <{Button::new("save")} tooltip="Save" /> };
+    assert_eq!(lone.calls, ["action(save)", "tooltip(Save)"]);
+}
+
 #[test]
 fn component_child_slots_map_to_repeated_builder_calls() {
     let el = view! {
@@ -768,6 +801,41 @@ fn event_handler_attribute_binds_closure() {
     handler();
     handler();
     assert_eq!(clicks.get(), 2);
+}
+
+// Catches `on:event={if ..}` failing to compile or setting a handler when
+// the condition does not hold.
+#[test]
+fn conditional_event_handler_is_set_only_when_present() {
+    let make = |handler: Option<fn()>| {
+        view! { <div on:click={if let Some(h) = handler { h }} /> }
+    };
+    assert_eq!(make(Some(|| {})).calls, ["on_click"]);
+    assert!(make(None).calls.is_empty());
+}
+
+// Catches `<icon svg={if ..}>` being rejected: svg and size are
+// constructor arguments, so they need the value of the whole `if`.
+#[test]
+fn icon_takes_a_conditional_svg() {
+    let make = |open: bool| view! { <icon svg={if open { "up" } else { "down" }} size={8.0} /> };
+    assert_eq!(make(true).value.as_deref(), Some("up@8"));
+    assert_eq!(make(false).value.as_deref(), Some("down@8"));
+}
+
+// Catches `@for` not applying its attributes once per item, in order.
+#[test]
+fn for_attribute_applies_its_attributes_per_item() {
+    let keys = ["a", "b"];
+    let el = view! { <div @for key in keys { on_key={(key, "type")} } gap={1.0} /> };
+    assert_eq!(
+        el.calls,
+        [
+            "on_key(\"a\", \"type\")",
+            "on_key(\"b\", \"type\")",
+            "gap(1.0)"
+        ]
+    );
 }
 
 #[test]

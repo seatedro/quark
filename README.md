@@ -28,11 +28,12 @@ allocations.
 
 ## A minimal app
 
-An app implements `UiApp`: `view` builds the element tree, and `update`
-handles the actions its elements emit.
+An app implements `UiApp`: `view` builds the element tree, written with
+the `view!` macro ([docs/guide/writing-views.md](docs/guide/writing-views.md)),
+and `update` handles the actions its elements emit.
 
 ```rust
-use quark_app::quark_ui::accessibility::AccessibilityRole;
+use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::Action;
@@ -60,29 +61,17 @@ impl UiApp for Counter {
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
         let (width, height) = cx.frame.size();
-        div()
-            .w(width)
-            .h(height)
-            .items_center()
-            .justify_center()
-            .gap(12.0)
-            .bg(colors.background)
-            .child(text(format!("Clicked {} times", self.count)).color(colors.text))
-            .child(
-                div()
-                    .accessibility_role(AccessibilityRole::Button)
-                    .accessibility_label("Increment")
-                    .test_id("counter.increment")
-                    .on_click(Msg::Increment)
-                    .px(16.0)
-                    .h(36.0)
-                    .items_center()
-                    .rounded(8.0)
-                    .bg(colors.accent)
-                    .hover_bg(colors.accent_strong)
-                    .child(text("Increment").color(colors.text_strong)),
-            )
-            .into_any()
+        view! {
+            <div w={width} h={height} class="items-center justify-center gap-3 bg-[colors.background]">
+                <text color={colors.text}>"Clicked {self.count} times"</text>
+                <div role="button" aria-label="Increment" test_id="counter.increment"
+                     on:click={Msg::Increment}
+                     class="px-4 h-9 items-center rounded-[8] bg-[colors.accent]
+                            hover:bg-[colors.accent_strong]">
+                    <text color={colors.text_strong}>"Increment"</text>
+                </div>
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut UiContext) {

@@ -16,7 +16,7 @@
 //! A complete app:
 //!
 //! ```no_run
-//! use quark_app::quark_ui::accessibility::AccessibilityRole;
+//! use quark::view;
 //! use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 //! use quark_app::quark_ui::style::Styled;
 //! use quark_app::quark_ui::Action;
@@ -44,29 +44,17 @@
 //!     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
 //!         let colors = &cx.theme.colors;
 //!         let (width, height) = cx.frame.size();
-//!         div()
-//!             .w(width)
-//!             .h(height)
-//!             .items_center()
-//!             .justify_center()
-//!             .gap(12.0)
-//!             .bg(colors.background)
-//!             .child(text(format!("Clicked {} times", self.count)).color(colors.text))
-//!             .child(
-//!                 div()
-//!                     .accessibility_role(AccessibilityRole::Button)
-//!                     .accessibility_label("Increment")
-//!                     .test_id("counter.increment")
-//!                     .on_click(Msg::Increment)
-//!                     .px(16.0)
-//!                     .h(36.0)
-//!                     .items_center()
-//!                     .rounded(8.0)
-//!                     .bg(colors.accent)
-//!                     .hover_bg(colors.accent_strong)
-//!                     .child(text("Increment").color(colors.text_strong)),
-//!             )
-//!             .into_any()
+//!         view! {
+//!             <div w={width} h={height} class="items-center justify-center gap-3 bg-[colors.background]">
+//!                 <text color={colors.text}>"Clicked {self.count} times"</text>
+//!                 <div role="button" aria-label="Increment" test_id="counter.increment"
+//!                      on:click={Msg::Increment}
+//!                      class="px-4 h-9 items-center rounded-[8] bg-[colors.accent]
+//!                             hover:bg-[colors.accent_strong]">
+//!                     <text color={colors.text_strong}>"Increment"</text>
+//!                 </div>
+//!             </div>
+//!         }
 //!     }
 //!
 //!     fn update(&mut self, msg: Msg, _cx: &mut UiContext) {
@@ -93,6 +81,7 @@
 //! the app headlessly the way a user would:
 //!
 //! ```
+//! use quark::view;
 //! use quark_app::quark_ui::accessibility::AccessibilityRole;
 //! use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 //! use quark_app::quark_ui::style::Styled;
@@ -122,17 +111,14 @@
 //!     type Message = Loaded;
 //!
 //!     fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
-//!         div()
-//!             .flex_col()
-//!             .child(text(self.text.clone()))
-//!             .child(
-//!                 div()
-//!                     .accessibility_role(AccessibilityRole::Button)
-//!                     .accessibility_label("Refresh")
-//!                     .on_click(Refresh)
-//!                     .child(text("Refresh")),
-//!             )
-//!             .into_any()
+//!         view! {
+//!             <div class="flex-col">
+//!                 <text>{self.text.clone()}</text>
+//!                 <div role="button" aria-label="Refresh" on:click={Refresh}>
+//!                     <text>"Refresh"</text>
+//!                 </div>
+//!             </div>
+//!         }
 //!     }
 //!
 //!     fn update(&mut self, _: Refresh, cx: &mut UiContext) {
@@ -161,6 +147,7 @@
 //! back as [`AppEvent`]s:
 //!
 //! ```no_run
+//! use quark::view;
 //! use quark_app::platform::menu::{Menu, MenuAction};
 //! use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div};
 //! use quark_app::{AppEvent, UiApp, UiContext, ViewContext};
@@ -194,7 +181,7 @@
 //!     }
 //!
 //!     fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
-//!         div().into_any()
+//!         view! { <div /> }
 //!     }
 //!
 //!     fn update(&mut self, _: (), _cx: &mut UiContext) {}
