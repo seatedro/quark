@@ -7,21 +7,28 @@
 //! panel's edge to split it. The right panel is sealed: its tabs split and
 //! reorder inside it but never leave, and other tabs cannot enter. Middle
 //! click a tab to close it.
+//! On a focused tab, Mod+Shift+Page Up and Page Down move it into the
+//! previous or next group that takes it, and Shift+F10 opens a "Move to
+//! group" menu of every such group. The terminal drawer's sessions are a
+//! `TabBar` whose tabs close by their close button, a middle click, or
+//! Delete.
 //! Mod+B toggles the sidebar, Mod+Alt+B the right panel, Mod+J the drawer.
 //! The layout is saved to the system temp directory and restored on the
-//! next launch. Escape quits.
+//! next launch. Escape closes the menu, else quits.
 
 use std::path::PathBuf;
 
 use quark::view;
 use quark_app::quark_ui::Action;
-use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
+use quark_app::quark_ui::accessibility::Politeness;
+use quark_app::quark_ui::element::{AnyElement, Binding, IntoAnyElement, NoopAction, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Theme;
 use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
 use quark_components::{
-    Dock, DockEvent, DockLayout, DockRegion, DockSnapshot, DockState, Pane, PanelId, TabPolicy,
+    ContextMenuEntry, ContextMenuOutcome, ContextMenuState, Dock, DockEvent, DockLayout,
+    DockRegion, DockSnapshot, DockState, Pane, PaneId, PanelId, TabItem, TabPolicy, tab_bar,
 };
 
 const THREADS: PanelId = PanelId(1);
@@ -51,9 +58,18 @@ fn title(id: PanelId) -> &'static str {
         .map_or("Panel", |(_, t)| t)
 }
 
+/// The terminal drawer's sessions, as `(id, name)`.
+const SESSIONS: [(u32, &str); 3] = [(1, "zsh"), (2, "cargo watch"), (3, "dev server")];
+
+fn session_key(id: u32) -> String {
+    format!("session:{id}")
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
     Dock(DockEvent),
+    SelectSession(u32),
+    CloseSession(u32),
 }
 
 impl From<Msg> for Action {
@@ -64,6 +80,12 @@ impl From<Msg> for Action {
 
 struct PanelsDemo {
     dock: DockState,
+    /// The "Move to group" menu.
+    menu: ContextMenuState,
+    sessions: Vec<(u32, &'static str)>,
+    session: u32,
+    /// The window's size as of the last frame, to place the menu.
+    size: (f32, f32),
     /// Where settled layout changes are saved; `None` in tests.
     save_to: Option<PathBuf>,
 }
@@ -89,7 +111,112 @@ impl PanelsDemo {
         dock.set_visible(DockRegion::Bottom, false);
         Self {
             dock,
+            menu: ContextMenuState::default(),
+            sessions: SESSIONS.to_vec(),
+            session: SESSIONS[0].0,
+            size: (0.0, 0.0),
             save_to: None,
+        }
+    }
+
+    /// A group's name for the menu and announcements: its region's label,
+    /// numbered when the region is split.
+    fn group_name(&self, pane: PaneId) -> String {
+        DockRegion::ALL
+            .into_iter()
+            .find_map(|region| {
+                let groups = self.dock.root(region).groups();
+                let at = groups.iter().position(|g| g.id == pane)?;
+                let label = self.dock.label(region);
+                Some(if groups.len() == 1 {
+                    label.to_owned()
+                } else {
+                    format!("{label} {}", at + 1)
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Open the "Move to group" menu for `panel`, listing every group the
+    /// dock lets it move into.
+    fn open_move_menu(&mut self, panel: PanelId) {
+        let mut entries: Vec<ContextMenuEntry> = self
+            .dock
+            .move_targets(panel)
+            .into_iter()
+            .map(|destination| {
+                let event = DockEvent::MoveTab {
+                    panel,
+                    destination,
+                    index: None,
+                };
+                ContextMenuEntry::item(
+                    format!("Move to {}", self.group_name(destination)),
+                    Msg::Dock(event),
+                )
+            })
+            .collect();
+        if entries.is_empty() {
+            entries.push(ContextMenuEntry::item("No group takes this tab", NoopAction).disabled());
+        }
+        // Nothing reports the tab's bounds yet, so the menu opens near the
+        // top of the window, centered.
+        let x = (self.size.0 / 2.0 - 110.0).max(0.0);
+        self.menu.open(entries, x, self.size.1 / 4.0);
+    }
+
+    fn close_session(&mut self, id: u32, cx: &mut UiContext) {
+        let Some(at) = self.sessions.iter().position(|(s, _)| *s == id) else {
+            return;
+        };
+        let key = session_key(id);
+        let had_focus = [TabItem::focus_id(&key), TabItem::close_focus_id(&key)]
+            .into_iter()
+            .any(|f| cx.focus() == Some(f));
+        self.sessions.remove(at);
+        // The session after it takes over, or the one before at the end.
+        if self.session == id
+            && let Some((next, _)) = self.sessions.get(at).or(self.sessions.last())
+        {
+            self.session = *next;
+        }
+        if had_focus {
+            let next = self.sessions.iter().find(|(s, _)| *s == self.session);
+            cx.set_focus(next.map(|(s, _)| TabItem::focus_id(&session_key(*s))));
+        }
+    }
+
+    fn drawer(&self, (width, height): (f32, f32), theme: &Theme) -> AnyElement {
+        let colors = &theme.colors;
+        let tabs = self
+            .sessions
+            .iter()
+            .map(|&(id, name)| {
+                TabItem::new(name, Msg::SelectSession(id))
+                    .id(session_key(id))
+                    .active(id == self.session)
+                    .on_close(Msg::CloseSession(id))
+            })
+            .collect();
+        let current = self
+            .sessions
+            .iter()
+            .find(|(s, _)| *s == self.session)
+            .map_or("No session", |(_, name)| name);
+        view! {
+            <div w={width} h={height} class="flex-col">
+                {tab_bar(tabs)}
+                <div class="p-3 gap-[6] flex-col">
+                    <text class="font-semibold" color={colors.text_strong}>{current}</text>
+                    <text class="text-sm" color={colors.text_muted}>"$ cargo test"</text>
+                </div>
+            </div>
+        }
+    }
+
+    fn run(&mut self, action: Action, cx: &mut UiContext) {
+        if let Some(msg) = action.downcast_ref::<Msg>().cloned() {
+            self.update(msg, cx);
         }
     }
 
@@ -127,8 +254,9 @@ impl UiApp for PanelsDemo {
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let size = cx.frame.size();
+        self.size = size;
         let theme = cx.theme;
-        Dock::new(&self.dock, size, |e| Msg::Dock(e).into())
+        let dock = Dock::new(&self.dock, size, |e| Msg::Dock(e).into())
             .toggle_key(DockRegion::Left, "mod+b")
             .toggle_key(DockRegion::Right, "mod+alt+b")
             .toggle_key(DockRegion::Bottom, "mod+j")
@@ -139,14 +267,48 @@ impl UiApp for PanelsDemo {
             .build(
                 theme,
                 |id| title(id).to_owned(),
-                |id, size| Self::content(id, size, theme),
-            )
+                |id, size| match id {
+                    DRAWER => self.drawer(size, theme),
+                    _ => Self::content(id, size, theme),
+                },
+            );
+        let menu = self.menu.render(size, theme);
+        view! {
+            <div class="relative" w={size.0} h={size.1}>
+                {dock}
+                if let Some(menu) = menu {
+                    {menu}
+                }
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
-        let Msg::Dock(event) = msg;
+        let event = match msg {
+            Msg::Dock(event) => event,
+            Msg::SelectSession(id) => {
+                self.session = id;
+                return;
+            }
+            Msg::CloseSession(id) => {
+                self.close_session(id, cx);
+                return;
+            }
+        };
+        // A choice from the menu, or anything else done in the dock,
+        // closes it.
+        self.menu.close();
         let now_ms = cx.window.elapsed().as_millis() as u64;
-        if self.dock.apply(event, now_ms)
+        let outcome = self.dock.apply_event(event, now_ms);
+        if let Some(moved) = outcome.moved {
+            cx.set_focus(outcome.focus());
+            let to = self.group_name(moved.pane);
+            cx.announce(
+                format!("Moved {} to {to}", title(moved.panel)),
+                Politeness::Polite,
+            );
+        }
+        if outcome.settled
             && let Some(path) = &self.save_to
             && let Ok(json) = serde_json::to_string(&self.dock.snapshot())
         {
@@ -155,13 +317,31 @@ impl UiApp for PanelsDemo {
     }
 
     fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
-        match event {
-            InputEvent::KeyPress(chord) if chord.named() == Some(NamedKey::Escape) => {
-                cx.window.exit();
-                true
+        let InputEvent::KeyPress(chord) = event else {
+            return false;
+        };
+        if let Some(pressed) = chord.binding() {
+            if let Some(outcome) = self.menu.handle_key(&pressed) {
+                if let ContextMenuOutcome::Activate(action) = outcome {
+                    self.run(action, cx);
+                }
+                cx.window.request_redraw();
+                return true;
             }
-            _ => false,
+            let menu_key: Binding = "shift+f10".parse().expect("valid binding");
+            if menu_key.matches(&pressed)
+                && let Some(panel) = self.dock.focused_panel(cx.focus())
+            {
+                self.open_move_menu(panel);
+                cx.window.request_redraw();
+                return true;
+            }
         }
+        if chord.named() == Some(NamedKey::Escape) {
+            cx.window.exit();
+            return true;
+        }
+        false
     }
 }
 
@@ -483,6 +663,110 @@ mod tests {
         }
         assert!(ui.try_find(By::role(Role::TabList)).is_none());
         assert_eq!(announced(&ui, "Right panel"), None);
+    }
+
+    /// What the app last asked assistive tech to speak.
+    fn announcement(ui: &UiTestHarness<PanelsDemo>) -> Option<String> {
+        ui.accessibility_update()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::Status)
+            .and_then(|(_, node)| node.label().map(str::to_owned))
+    }
+
+    fn focused_name(ui: &UiTestHarness<PanelsDemo>) -> Option<String> {
+        ui.focused().and_then(|n| n.name)
+    }
+
+    /// The tabs of the strip named `list`, in order.
+    fn strip(ui: &UiTestHarness<PanelsDemo>, list: &str) -> Vec<String> {
+        let tree = dock_tree(ui);
+        let header = format!("TabList \"{list}\"");
+        let mut lines = tree
+            .lines()
+            .skip_while(|l| !l.trim_start().starts_with(&header));
+        let depth = |l: &str| l.len() - l.trim_start().len();
+        let Some(first) = lines.next() else {
+            return Vec::new();
+        };
+        let below = depth(first);
+        lines
+            .take_while(|l| depth(l) > below)
+            .filter_map(|l| l.trim_start().strip_prefix("Tab \""))
+            .filter_map(|l| l.split('"').next().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn move_keys_move_the_focused_tab_to_the_next_group() {
+        let mut ui = harness();
+        // The first Tab stop is the sidebar's tab.
+        ui.key("tab");
+        ui.key("mod+shift+pagedown");
+        assert_eq!(strip(&ui, "Chat"), ["Chat", "Threads"]);
+        ui.find(By::role_name(Role::TabPanel, "Threads"));
+        assert_eq!(focused_name(&ui).as_deref(), Some("Threads"));
+        assert_eq!(announcement(&ui).as_deref(), Some("Moved Threads to Chat"));
+    }
+
+    #[test]
+    fn a_refused_move_leaves_the_dock_and_focus() {
+        // (active tab, key): the sidebar is first in tree order, and the
+        // sealed right panel takes nothing and gives nothing.
+        let cases = [
+            ("Threads", "mod+shift+pageup"),
+            ("Preview", "mod+shift+pagedown"),
+            ("Preview", "mod+shift+pageup"),
+        ];
+        for (tab, key) in cases {
+            let mut ui = harness();
+            ui.click_node(By::role_name(Role::Tab, tab));
+            let before = dock_tree(&ui);
+            ui.key(key);
+            assert_eq!(dock_tree(&ui), before, "{tab} {key}");
+            assert_eq!(focused_name(&ui).as_deref(), Some(tab), "{tab} {key}");
+            assert_eq!(announcement(&ui), None, "{tab} {key}");
+        }
+    }
+
+    #[test]
+    fn the_move_to_group_menu_moves_the_focused_tab() {
+        let mut ui = harness();
+        ui.key("mod+j");
+        ui.click_node(By::role_name(Role::Tab, "Threads"));
+        ui.key("shift+f10");
+        let items: Vec<String> = ui
+            .find_all(By::role(Role::MenuItem))
+            .into_iter()
+            .filter_map(|n| n.name)
+            .collect();
+        assert_eq!(items, ["Move to Chat", "Move to Drawer"]);
+
+        ui.click_node(By::role_name(Role::MenuItem, "Move to Drawer"));
+        assert!(ui.try_find(By::role(Role::Menu)).is_none());
+        assert_eq!(strip(&ui, "Drawer"), ["Terminal drawer", "Threads"]);
+        assert_eq!(focused_name(&ui).as_deref(), Some("Threads"));
+        assert_eq!(
+            announcement(&ui).as_deref(),
+            Some("Moved Threads to Drawer")
+        );
+    }
+
+    #[test]
+    fn closing_the_focused_session_focuses_the_next_one() {
+        let mut ui = harness();
+        ui.key("mod+j");
+        ui.click_node(By::role_name(Role::Tab, "zsh"));
+        ui.key("delete");
+        assert!(ui.try_find(By::role_name(Role::Tab, "zsh")).is_none());
+        let states = quark_app::quark_ui::accessibility::dump_accessibility_states(
+            &ui.accessibility_update(),
+        );
+        assert!(
+            states.contains("| Tab | cargo watch | selected"),
+            "{states}"
+        );
+        assert_eq!(focused_name(&ui).as_deref(), Some("cargo watch"));
     }
 
     #[test]
