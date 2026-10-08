@@ -5,7 +5,10 @@ as a snapshot or ignores its zoom. Typed into the Terminal panel,
 run. In Files, README.md opens in the source view, and Ctrl+A there
 selects all of it. The Snapshot preview names itself so, fits the image
 inside the panel, and at 100% shows it at 960 points. Saves terminal.png,
-files.png, and preview-actual.png."""
+files.png, and preview-actual.png, in the light theme (the other dock
+specs run dark)."""
+
+# quark-e2e-env: QUARK_WORKBENCH_THEME=light
 
 from quark_e2e import (
     Cua,
