@@ -189,14 +189,18 @@ pub fn set_region_visible(state: &mut State, region: DockRegion, visible: bool) 
     state.layout.set_visible(region, visible);
 }
 
-/// Make `panel` active wherever it is, focus its content, and make sure
-/// the main window shows the right dock when the panel lives there.
+/// Make `panel` active wherever it is and focus its content. In the main
+/// window the app reveals it, through the shell's width policy, so the
+/// shell's idea of whether the dock is wanted stays true.
 fn show(state: &mut State, panel: PanelId, focus: FocusId, fx: &mut Effects) {
-    state.layout.open(DockRegion::Right, panel);
-    if let Some((at, _)) = state.layout.location(panel)
-        && at.host == quark_components::HostId::MAIN
-    {
-        fx.push(Effect::SetRegionVisible(at.region, true));
+    let floating = state
+        .layout
+        .location(panel)
+        .is_some_and(|(at, _)| at.host != quark_components::HostId::MAIN);
+    if floating {
+        reveal_panel(state, panel);
+    } else {
+        fx.push(Effect::RevealPanel(panel));
     }
     fx.push(Effect::Focus(Some(focus)));
 }
@@ -372,8 +376,9 @@ fn menu_input(state: &mut State, event: &InputEvent, cx: &mut UiContext) -> bool
     }
 }
 
-/// Make `panel` the active tab of its group (the app has already asked
-/// the shell to show the dock).
+/// Make `panel` the active tab of its group wherever it lives, adding it
+/// to the right dock when no group has it (for the main window, the app
+/// has already asked the shell to show the dock).
 pub fn reveal_panel(state: &mut State, panel: PanelId) {
     state.layout.open(DockRegion::Right, panel);
 }

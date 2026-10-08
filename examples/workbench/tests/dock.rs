@@ -169,3 +169,19 @@ fn dock_theme_changes_reach_floating_panels() {
         ]
     );
 }
+
+// Catches a panel command that shows the dock behind the shell's back:
+// after Mod+Alt+B hides the dock, Mod+J brings the terminal back, and a
+// single Mod+Alt+B hides it again.
+#[test]
+fn dock_terminal_command_keeps_the_dock_toggle_in_step() {
+    let mut ui = harness(ScenarioKind::Review);
+    ui.key("mod+alt+b");
+    let hidden = ui.try_find(tab("Terminal")).is_none();
+    ui.key("mod+j");
+    let shown = ui.try_find(tab("Terminal")).is_some();
+    ui.key("mod+alt+b");
+    let hidden_again = ui.try_find(tab("Terminal")).is_none();
+
+    assert_eq!((hidden, shown, hidden_again), (true, true, true));
+}
