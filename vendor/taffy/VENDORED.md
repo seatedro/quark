@@ -16,9 +16,13 @@ leaves upstream's code alone. `git diff` against that commit shows the
 whole patch.
 
 The published crate ships no license file; its `Cargo.toml` declares MIT.
-Upstream's generated layout tests (`tests/generated`) are not published
-either, so the tests here are the crate's own unit tests plus a
-differential test.
+`LICENSE.md` is copied from upstream at commit `8f30e394` (the v0.9.2
+release). Upstream's generated layout tests (`tests/generated`) are not
+published either, so the tests here are the crate's own unit tests plus a
+differential test. Upstream's full test suite, including all 2,060
+generated layout tests, also passes against the patched `src` (checked by
+copying it over a checkout of `8f30e394` and running `cargo test --tests`);
+rerun that after changing a patch.
 
 ## Differential test
 
