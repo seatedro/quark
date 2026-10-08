@@ -264,8 +264,17 @@ fn block_style(doc: &MarkdownDoc, index: usize) -> BlockStyle {
         muted: quote > 0,
         // Consecutive list blocks sit closer together.
         tight: index > 0 && depth > 0 && doc.indent(index - 1) > 0,
-        copy_prefix: Arc::from(prefix),
-        copy_line_prefix: Arc::from(quote_prefix),
+        copy_prefix: shared(prefix),
+        copy_line_prefix: shared(quote_prefix),
+    }
+}
+
+/// `text` as a shared string, the shared empty one when it is empty.
+fn shared(text: String) -> Arc<str> {
+    if text.is_empty() {
+        super::empty_str()
+    } else {
+        Arc::from(text)
     }
 }
 

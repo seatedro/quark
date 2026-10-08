@@ -2,6 +2,7 @@
 //! and the chrome around them. Each model [`Row`] becomes one document row
 //! keyed by its [`MessageId`]; tool rows are composed in `tool_card`.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use quark::view;
@@ -58,6 +59,16 @@ pub struct RowContent {
     pub markdown: String,
     pub chrome: RowChrome,
     pub adornments: Vec<RowAdornment>,
+}
+
+/// Everything besides a prose row's markdown that [`content`] reads.
+pub fn shape(row: &Row, expanded: bool) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (row.role as u8, &row.at, row.streaming, row.retry, expanded).hash(&mut hasher);
+    if let Some(call) = &row.tool {
+        (&call.verb, &call.target, &call.duration, call.status as u8).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// `row` as a document row. `expanded` applies to tool rows only.

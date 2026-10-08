@@ -255,10 +255,20 @@ impl Default for BlockStyle {
             marker: None,
             muted: false,
             tight: false,
-            copy_prefix: Arc::from(""),
-            copy_line_prefix: Arc::from(""),
+            copy_prefix: empty_str(),
+            copy_line_prefix: empty_str(),
         }
     }
+}
+
+thread_local! {
+    static EMPTY_STR: Arc<str> = Arc::from("");
+}
+
+/// A shared empty string, so plain blocks' styles allocate no prefixes:
+/// a streamed answer rebuilds its last block's style on every chunk.
+pub(crate) fn empty_str() -> Arc<str> {
+    EMPTY_STR.with(Arc::clone)
 }
 
 impl BlockStyle {

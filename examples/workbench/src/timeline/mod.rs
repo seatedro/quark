@@ -83,6 +83,9 @@ pub struct ThreadView {
     /// Disclosure focus targets of the thread's tool cards, so the
     /// document's keys work while one of them has focus.
     disclosures: HashMap<FocusId, MessageId>,
+    /// What each row's chrome and adornments were last built from, so a
+    /// streamed chunk only replaces the row's markdown.
+    shapes: HashMap<MessageId, u64>,
 }
 
 impl ThreadView {
@@ -101,6 +104,7 @@ impl ThreadView {
             seq: thread.transcript.last_seq(),
             expanded: HashMap::new(),
             disclosures: HashMap::new(),
+            shapes: HashMap::new(),
         };
         let entries: Vec<(MarkdownEntry, _)> = thread
             .transcript
@@ -139,7 +143,9 @@ impl ThreadView {
             self.disclosures
                 .insert(tool_card::disclosure_focus(ToolId(row.id.0)), row.id);
         }
-        let content = rows::content(row, self.is_expanded(row));
+        let expanded = self.is_expanded(row);
+        self.shapes.insert(row.id, rows::shape(row, expanded));
+        let content = rows::content(row, expanded);
         (
             MarkdownEntry {
                 row: RowKey(row.id.0),
@@ -172,7 +178,14 @@ impl ThreadView {
     /// Brings `row`'s document row up to date.
     fn refresh(&mut self, row: &Row) {
         let key = RowKey(row.id.0);
-        let content = rows::content(row, self.is_expanded(row));
+        let expanded = self.is_expanded(row);
+        let shape = rows::shape(row, expanded);
+        if row.tool.is_none() && self.shapes.get(&row.id) == Some(&shape) {
+            let _ = self.doc.set_markdown(key, &row.markdown);
+            return;
+        }
+        self.shapes.insert(row.id, shape);
+        let content = rows::content(row, expanded);
         let _ = self.doc.set_markdown(key, &content.markdown);
         let _ = self.doc.set_chrome(key, content.chrome);
         let _ = self.doc.set_adornments(key, content.adornments);
@@ -225,6 +238,17 @@ impl State {
     /// The document of `thread`, once the timeline has shown it.
     pub fn thread_view(&self, thread: ThreadId) -> Option<&ThreadView> {
         self.threads.get(&thread)
+    }
+
+    /// Measures every transcript row still holding an estimate, blocking
+    /// until done, so tests and perf runs compare settled frames rather
+    /// than frames racing the background measurer.
+    pub fn finish_measures(&mut self) {
+        for view in self.threads.values_mut() {
+            view.doc.finish_measures();
+            view.doc.finish_highlights();
+            view.doc.finish_images();
+        }
     }
 
     /// The selected thread's view, once shown, with the thread.
