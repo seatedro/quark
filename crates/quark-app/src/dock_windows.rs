@@ -206,7 +206,7 @@ impl DockWindows {
         }
     }
 
-    /// Title floating windows "<their tabs> - `title`".
+    /// Title floating windows by their tabs and `title`: "Diff - App".
     pub fn app_title(mut self, title: impl Into<String>) -> Self {
         self.app_title = title.into();
         self
