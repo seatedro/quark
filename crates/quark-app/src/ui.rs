@@ -226,7 +226,17 @@ impl UiContext<'_, '_> {
         &mut self,
         paths: impl IntoIterator<Item = P>,
     ) -> Result<(), crate::platform::drag_out::DragOutError> {
-        self.window.start_drag_out(paths)?;
+        self.start_drag_out_with_options(paths, &Default::default())
+    }
+
+    /// [`Self::start_drag_out`] with a drag image or a Wayland seat
+    /// ([`EventContext::start_drag_out_with_options`]).
+    pub fn start_drag_out_with_options<P: AsRef<std::path::Path>>(
+        &mut self,
+        paths: impl IntoIterator<Item = P>,
+        options: &crate::platform::drag_out::DragOutOptions,
+    ) -> Result<(), crate::platform::drag_out::DragOutError> {
+        self.window.start_drag_out_with_options(paths, options)?;
         *self.pointer_taken = true;
         Ok(())
     }
