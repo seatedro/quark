@@ -182,6 +182,7 @@ pub struct TextInputHitArea {
 /// keeps the area, so keys still edit a focused field, but drops its caret
 /// and takes no pointer input.
 pub(crate) fn register_text_input_area(cx: &mut ElementContext, mut area: TextInputHitArea) {
+    cx.register_ime_target(area.focus_target, area.caret);
     area.transform = cx.current_transform();
     area.caret = area
         .caret
