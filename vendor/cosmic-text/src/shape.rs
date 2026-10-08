@@ -116,6 +116,9 @@ pub struct ShapeBuffer {
     /// Buffer for sets of layout glyphs.
     glyph_sets: Vec<Vec<LayoutGlyph>>,
 
+    /// Buffer for a line's bidi levels, adjusted for whitespace.
+    bidi_levels: Vec<unicode_bidi::Level>,
+
     /// Buffers for a visual line's bidi levels and reordered level runs.
     reorder_levels: Vec<unicode_bidi::Level>,
     reorder_runs: Vec<Range<usize>>,
@@ -142,6 +145,7 @@ impl Default for ShapeBuffer {
             visual_lines: Vec::new(),
             cached_visual_lines: Vec::new(),
             glyph_sets: Vec::new(),
+            bidi_levels: Vec::new(),
             reorder_levels: Vec::new(),
             reorder_runs: Vec::new(),
             rb_font_features: Vec::new(),
@@ -1027,12 +1031,13 @@ impl ShapeLine {
 
         log::trace!("Line {}: '{}'", if rtl { "RTL" } else { "LTR" }, line);
 
+        let mut levels = mem::take(&mut font_system.shape_buffer.bidi_levels);
         for para_info in &bidi.paragraphs {
             let line_rtl = para_info.level.is_rtl();
             assert_eq!(line_rtl, rtl);
 
             let line_range = para_info.range.clone();
-            let levels = Self::adjust_levels(&unicode_bidi::Paragraph::new(&bidi, para_info));
+            Self::adjust_levels(&unicode_bidi::Paragraph::new(&bidi, para_info), &mut levels);
 
             // Find consecutive level runs. We use this to create Spans.
             // Each span is a set of characters with equal levels.
@@ -1096,18 +1101,20 @@ impl ShapeLine {
         self.spans = spans;
         self.metrics_opt = attrs_list.defaults_ref().metrics_opt.map(Into::into);
 
-        // Return the buffer for later reuse.
+        // Return the buffers for later reuse.
         font_system.shape_buffer.spans = cached_spans;
+        font_system.shape_buffer.bidi_levels = levels;
     }
 
     // A modified version of first part of unicode_bidi::bidi_info::visual_run
-    fn adjust_levels(para: &unicode_bidi::Paragraph) -> Vec<unicode_bidi::Level> {
+    // Fills `levels`, which it clears first.
+    fn adjust_levels(para: &unicode_bidi::Paragraph, levels: &mut Vec<unicode_bidi::Level>) {
         use unicode_bidi::BidiClass::{B, BN, FSI, LRE, LRI, LRO, PDF, PDI, RLE, RLI, RLO, S, WS};
         let text = para.info.text;
-        let levels = &para.info.levels;
         let original_classes = &para.info.original_classes;
 
-        let mut levels = levels.clone();
+        levels.clear();
+        levels.extend_from_slice(&para.info.levels);
         let line_classes = &original_classes[..];
         let line_levels = &mut levels[..];
 
@@ -1150,7 +1157,6 @@ impl ShapeLine {
                 *level = para.para.level;
             }
         }
-        levels
     }
 
     // A modified version of second part of unicode_bidi::bidi_info::visual run

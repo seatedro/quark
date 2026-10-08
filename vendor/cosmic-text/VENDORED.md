@@ -75,3 +75,44 @@ own pull request.
   its shaping loops (or makes `Attrs` borrow them);
   `ligatures_off_reach_every_span_and_paragraph` checks the features still
   apply, and the ligatures-off budgets check the copies.
+- Adjusted bidi levels (`src/shape.rs`): `ShapeLine::adjust_levels` writes
+  a paragraph's whitespace-adjusted levels into a vector `ShapeBuffer`
+  keeps, where it cloned `BidiInfo::levels` per paragraph. Remove once
+  upstream reuses that storage; `wrapped_bidi_lines_paint_their_runs_in_visual_order`
+  and `layout_bidi_paragraph_separators_start_new_lines` check the levels.
+
+## Not patched: bidi analysis
+
+`ShapeLine::build` runs `unicode_bidi::BidiInfo::new` per line, and
+unicode-bidi 0.3.18 has no way to reuse storage: `BidiInfo` owns its
+vectors and every constructor builds new ones. That leaves five
+allocations per paragraph of plain text (`original_classes`, `levels`, the
+`processing_classes` copy, `paragraphs`, and the per-paragraph flags) and
+more for text with RTL runs or isolates (the explicit-embedding status
+stack, level runs, isolating run sequences, and bracket pairs). These are
+the whole residual of an 80-column terminal row.
+
+Removing them needs an upstream unicode-bidi API rather than a quark copy
+of the algorithm: a `BidiInfo` (or `ParagraphBidiInfo`) that can be
+recomputed in place for new text, keeping its vectors, such as
+`BidiInfo::reset(&mut self, text, default_para_level)` or a
+`BidiStorage` value passed to `new_with_storage`, with the internal
+scratch (status stack, level runs, run sequences, bracket pairs) kept in
+the same storage. The `BidiInfo<'text>` borrow of the text would have to
+move to the call (or the storage be separate from the borrowing view) so
+one value outlives each line's text. cosmic-text would then keep that
+storage in `ShapeBuffer`. unicode-bidi's `smallvec` feature only moves
+small level-run and run-sequence lists inline, so it would not remove the
+five vectors.
+
+## Dropping the vendor
+
+Once upstream carries the patches above (or quark-text accepts the
+allocations they remove):
+
+1. Delete `vendor/cosmic-text`, its `members` entry, and its line in the
+   `[patch.crates-io]` section of the workspace `Cargo.toml`.
+2. Point `layout_with_evicting_shape_plan_cache_matches_cold_layout`'s
+   `set_shape_plan_capacity` call at upstream's equivalent, then run
+   `cargo test -p quark-text`: the allocation budgets in
+   `src/alloc_budget.rs` show which patch upstream lacks.
