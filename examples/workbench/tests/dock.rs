@@ -99,6 +99,31 @@ fn dock_terminal_bytes_produce_visible_output() {
     );
 }
 
+// Catches terminal sessions sharing one screen: "New terminal" opens a
+// second session with only a prompt, and switching back to the first
+// shows what ran there.
+#[test]
+fn dock_terminal_sessions_keep_their_own_screens() {
+    let mut ui = harness(ScenarioKind::Review);
+    let listing = "App.tsx  commands.ts  styles.css  trips.ts";
+    let help = "Demo terminal: a scripted shell";
+    ui.click_node(tab("Terminal"));
+    ui.click_node(By::role(Role::Terminal));
+    ui.type_text("ls src\n");
+
+    ui.click_node(By::role_name(Role::Button, "New terminal"));
+    ui.type_text("help\n");
+    let second = ui.painted_text();
+    ui.click_node(tab("Shell 1"));
+    let first = ui.painted_text();
+
+    assert!(
+        second.contains(help) && !second.contains(listing),
+        "{second}"
+    );
+    assert!(first.contains(listing) && !first.contains(help), "{first}");
+}
+
 // Catches panel content kept per window: the file picked in the Files
 // panel is still open after the panel moves to a window of its own.
 #[test]
