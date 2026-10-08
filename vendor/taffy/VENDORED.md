@@ -29,9 +29,8 @@ rerun that after changing a patch.
 `src/compute/differential_tests.rs` lays out flex growth and shrinkage,
 min and max clamping, wrapping (definite and under min-content), baseline
 alignment, percentages, nested and reversed containers, auto margins,
-block flow with collapsing margins, blocks sized by their content around
-flex containers, aspect ratios, scroll containers, and absolutely
-positioned and hidden children through `TaffyTree`, once with
+block flow with collapsing margins, aspect ratios, scroll containers, and
+absolutely positioned and hidden children through `TaffyTree`, once with
 `src/compute/upstream_flexbox.rs` and `upstream_block.rs` (byte for byte
 the published `flexbox.rs` and `block.rs`, compiled only for tests) and
 once with the patched code, and asserts every node's unrounded and
@@ -72,27 +71,6 @@ own pull request.
   geometry, and quark-ui's `warmed_relayout_allocates_nothing` and the
   terminal demo budgets check the allocations.
 
-- Measuring blocks (`src/compute/block.rs`, `src/compute/mod.rs`,
-  `src/tree/taffy_tree.rs`, `src/lib.rs`): a block container measured in
-  `RunMode::ComputeSize` measures its in-flow flex and grid containers
-  where it laid them out, and leaves their layouts alone. Laying one out
-  lays out all of its descendants at the inputs of the measurement, and
-  leaves them there when a later final layout of an ancestor is answered
-  from the cache. A flex or grid container's layout output carries no
-  collapsible margins and never collapses through, so the block uses only
-  its size, which measuring computes the same way. Blocks and leaves in a
-  block are still laid out: their margins can collapse through them. New
-  `compute_root_size` and `TaffyTree::compute_size_with_measure` compute
-  the size `compute_root_layout` gives a root, in `ComputeSize` and with
-  the same inputs, without writing any layout. quark-ui sizes cache
-  boundaries with it (`Subtree::size` in
-  `crates/quark-ui/src/element/layout.rs`): a boundary's root is a block
-  around its content, so measuring it no longer lays the content out.
-  Remove once upstream offers both; the differential test checks the
-  geometry, `root_size_is_the_size_layout_gives_the_root` the new entry
-  point, and quark-ui's `measured_subtrees_lay_out_as_laid_out_ones`
-  the boundaries.
-
 ## Dropping the vendor
 
 Once an upstream release lets a tree keep flexbox and block storage
@@ -104,8 +82,3 @@ across layouts (and stops collecting unfrozen items):
 3. Run quark-ui's `element::layout::tests` and the terminal demo's
    `a_changed_frame_stays_within_its_allocation_budget`; both fail if
    layout allocates again.
-
-quark-ui calls `TaffyTree::compute_size_with_measure`, which the published
-crate lacks. Until a release has an equivalent, keep that patch, or size
-boundaries by layout again: `Subtree::size` falls back to `Subtree::layout`
-when `measures` is false.

@@ -16,8 +16,7 @@ use crate::util::debug::{debug_log, debug_log_node};
 use crate::util::sys::{new_vec_with_capacity, ChildrenVec, Vec};
 
 use crate::compute::{
-    compute_cached_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout, compute_root_size,
-    round_layout,
+    compute_cached_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout, round_layout,
 };
 use crate::CacheTree;
 #[cfg(feature = "block_layout")]
@@ -947,23 +946,6 @@ impl<NodeContext> TaffyTree<NodeContext> {
             round_layout(&mut taffy_view, node_id);
         }
         Ok(())
-    }
-
-    /// Computes the size [`compute_layout_with_measure`](Self::compute_layout_with_measure) would give `node`,
-    /// without laying out its descendants or updating any stored layout; see [`compute_root_size`]. The size is
-    /// unrounded.
-    pub fn compute_size_with_measure<MeasureFunction>(
-        &mut self,
-        node_id: NodeId,
-        available_space: Size<AvailableSpace>,
-        measure_function: MeasureFunction,
-    ) -> Result<Size<f32>, TaffyError>
-    where
-        MeasureFunction:
-            FnMut(Size<Option<f32>>, Size<AvailableSpace>, NodeId, Option<&mut NodeContext>, &Style) -> Size<f32>,
-    {
-        let mut taffy_view = TaffyView { taffy: self, measure_function };
-        Ok(compute_root_size(&mut taffy_view, node_id, available_space))
     }
 
     /// Updates the stored layout of the provided `node` and its children
