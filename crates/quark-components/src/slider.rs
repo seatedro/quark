@@ -271,6 +271,12 @@ impl DragHandler for SliderDrag {
         DragReleaseResult::empty()
     }
 
+    /// The value follows the pointer as it moves, so cancelling keeps the
+    /// value dragged to, like a release.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        Vec::new()
+    }
+
     fn cursor(&self) -> CursorHint {
         CursorHint::Grabbing
     }

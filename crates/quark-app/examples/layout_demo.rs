@@ -275,6 +275,10 @@ impl DragHandler for DragOutRow {
     fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult::empty()
     }
+
+    fn on_cancel(&mut self) -> Vec<Action> {
+        Vec::new()
+    }
 }
 
 impl UiApp for Demo {

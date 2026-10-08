@@ -610,6 +610,11 @@ impl DragHandler for SelectDrag {
         }
     }
 
+    /// The selection made so far stays; the release only ends the drag.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        self.on_release().actions
+    }
+
     fn cursor(&self) -> CursorHint {
         CursorHint::Text
     }

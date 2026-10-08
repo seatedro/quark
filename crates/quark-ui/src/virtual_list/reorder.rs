@@ -109,7 +109,7 @@ pub enum ReorderMsg {
         dy: f32,
     },
     Release,
-    /// Abandon the drag (Escape); the list stays as it was.
+    /// Abandon the drag (Escape, focus loss); the list stays as it was.
     Cancel,
     /// Move row `index` by `delta` places, from the keyboard.
     Step {
@@ -364,6 +364,10 @@ impl DragHandler for RowDrag {
         }
     }
 
+    fn on_cancel(&mut self) -> Vec<Action> {
+        vec![(self.wrap)(ReorderMsg::Cancel)]
+    }
+
     fn cursor(&self) -> CursorHint {
         CursorHint::Grabbing
     }
@@ -401,5 +405,35 @@ mod tests {
             let to = dropped.map_or(from, |event| event.to);
             assert_eq!(to, expected, "row {from} dragged {dy}");
         }
+    }
+
+    // Regression: a cancelled drag fell back to its release, so focus loss
+    // or Escape mid-drag dropped the row wherever the pointer was.
+    #[test]
+    fn cancelling_a_drag_moves_no_row() {
+        let mut reorder = Reorder::new();
+        let mut drag = Reorder::drag_start(2, crate::Action::new)(ClickEvent { x: 10.0, y: 100.0 });
+        let msgs = |actions: Vec<Action>| -> Vec<ReorderMsg> {
+            actions
+                .iter()
+                .map(|a| *a.downcast_ref::<ReorderMsg>().unwrap())
+                .collect()
+        };
+        for msg in msgs(drag.on_press())
+            .into_iter()
+            .chain(msgs(drag.on_move(10.0, 190.0)))
+        {
+            reorder.update(msg, &ROWS, 0.0);
+        }
+        let held = reorder.drop_indicator(&ROWS);
+
+        let moved: Vec<_> = msgs(drag.on_cancel())
+            .into_iter()
+            .filter_map(|msg| reorder.update(msg, &ROWS, 0.0))
+            .collect();
+
+        assert_eq!(held, Some(200.0), "row 2 was over row 4");
+        assert_eq!(moved, []);
+        assert_eq!(reorder.drop_indicator(&ROWS), None);
     }
 }

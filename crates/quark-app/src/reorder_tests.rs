@@ -10,6 +10,7 @@ use quark_ui::virtual_list::{
     KEY_MOVE_DOWN, KEY_MOVE_UP, Reorder, ReorderMsg, RowGeometry, UniformRows,
 };
 
+use crate::InputEvent;
 use crate::testing::{By, UiTestHarness};
 use crate::ui::{UiApp, UiContext, ViewContext};
 
@@ -111,6 +112,17 @@ impl UiApp for List {
         list.into_any()
     }
 
+    /// Escape mid-drag cancels it, as most apps do.
+    fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
+        let escape = matches!(event, InputEvent::KeyPress(chord)
+            if chord.named() == Some(winit::keyboard::NamedKey::Escape));
+        if escape && cx.is_dragging() {
+            cx.cancel_drag();
+            return true;
+        }
+        false
+    }
+
     fn update(&mut self, Msg(msg): Msg, cx: &mut UiContext) {
         let rows = self.rows();
         if let Some(event) = self.reorder.update(msg, &rows, self.scroll.offset().1) {
@@ -155,6 +167,32 @@ fn dragging_a_row_past_two_middles_drops_it_two_places_down() {
         announcement(&ui).as_deref(),
         Some("Moved r0 to position 3 of 10")
     );
+}
+
+// Regression: a cancelled drag fell back to its release and dropped the
+// row wherever the pointer was.
+#[test]
+fn a_cancelled_drag_leaves_the_order_alone() {
+    type Cancel = fn(&mut UiTestHarness<List>);
+    let cancels: [(&str, Cancel); 2] = [
+        ("focus loss", |ui| ui.focus_loss()),
+        ("cancel_drag", |ui| ui.key("escape")),
+    ];
+    for (name, cancel) in cancels {
+        let mut ui = harness();
+        let (x, y) = ui.find(By::test_id("r0")).center();
+
+        ui.pointer_down((x, y));
+        ui.pointer_move((x, y + 90.0));
+        let held = ui.try_find(By::test_id("drop-indicator")).is_some();
+        cancel(&mut ui);
+        ui.frame();
+        let shown = ui.try_find(By::test_id("drop-indicator")).is_some();
+        ui.pointer_up((x, y + 90.0));
+
+        assert!(held && !shown, "{name}: indicator {held} then {shown}");
+        assert_eq!(ui.app().order(), "r0 r1 r2 r3 r4 r5 r6 r7 r8 r9", "{name}");
+    }
 }
 
 #[test]

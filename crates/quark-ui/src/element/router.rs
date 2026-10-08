@@ -1112,6 +1112,7 @@ mod tests {
         Scroll(&'static str, i32),
         Move(i32, i32),
         Release,
+        Cancel,
     }
 
     impl From<Msg> for Action {
@@ -1309,6 +1310,10 @@ mod tests {
                 actions: vec![Msg::Release.into()],
             }
         }
+
+        fn on_cancel(&mut self) -> Vec<Action> {
+            vec![Msg::Cancel.into()]
+        }
     }
 
     #[test]
@@ -1365,7 +1370,7 @@ mod tests {
     // Regression: a drag interrupted by the window losing focus never got a
     // release, so it kept the pointer captured forever.
     #[test]
-    fn cancel_pointer_releases_the_drag_and_ends_capture() {
+    fn cancel_pointer_cancels_the_drag_and_ends_capture() {
         let root = div().w(400.0).h(400.0).child(
             div()
                 .w(50.0)
@@ -1381,7 +1386,7 @@ mod tests {
         let moved = router.pointer_move(300.0, 300.0);
         let moved = dump(&router, moved);
 
-        assert_eq!([cancelled, moved], ["handle [Release]", "-"]);
+        assert_eq!([cancelled, moved], ["handle [Cancel]", "-"]);
     }
 
     // Regression: capture kept the pressed node's index, so once a new frame
