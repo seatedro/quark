@@ -124,6 +124,17 @@ fn wide_characters_span_two_columns() {
     );
 }
 
+/// The alternate screen does not reflow, so narrowing it can leave a wide
+/// character in the last column with no room for its second half. Its run
+/// stays inside the grid. (Found by the terminal_vt fuzz target.)
+#[test]
+fn a_wide_character_cut_off_by_a_resize_stays_in_the_grid() {
+    let mut t = term(4, 2);
+    t.feed("\x1b[?1049hab\u{ff16}".as_bytes());
+    t.vt_mut().resize(3, 2, 8, 16);
+    assert_eq!(first_row(&mut t), "0+2\"ab\" 2+1\"\u{ff16}\"");
+}
+
 #[test]
 fn output_past_the_bottom_goes_to_scrollback() {
     let mut t = term(10, 3);
@@ -380,4 +391,67 @@ fn query_replies_go_back_to_the_program() {
     let mut t = term(20, 4);
     t.feed(b"ab\x1b[6n");
     assert_eq!(t.take_input(), b"\x1b[1;3R");
+}
+
+/// A paste larger than the PTY's input queue reaches the program whole:
+/// the state keeps what the queue turned away and sends it as room frees.
+#[cfg(unix)]
+#[test]
+fn a_paste_larger_than_the_input_queue_arrives_whole() {
+    let len = 3 * crate::pty::INPUT_QUEUE;
+    let mut t = term(40, 4);
+    let ui = std::thread::current();
+    let command = crate::PtyCommand::new("sh")
+        .arg("-c")
+        .arg(format!("stty raw -echo; printf R; head -c {len} | wc -c"));
+    t.spawn(&command, move || ui.unpark()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut pasted = false;
+    while !t.has_exited() {
+        assert!(std::time::Instant::now() < deadline, "{}", screen(&mut t));
+        std::thread::park_timeout(std::time::Duration::from_millis(100));
+        t.read_pty();
+        // Once the terminal is raw.
+        if !pasted && screen(&mut t).starts_with('R') {
+            let text: String = (0..len)
+                .map(|i| char::from(b'a' + (i % 26) as u8))
+                .collect();
+            t.paste(&text, false).unwrap();
+            pasted = true;
+        }
+    }
+    // wc pads its count on some platforms.
+    let shown: String = screen(&mut t).split_whitespace().collect();
+    assert_eq!(shown, format!("R{len}"));
+}
+
+/// A terminal that was sized before the monospace family changed matches
+/// one made after it: columns, the cell under a point, and the pixel size
+/// it reports to the program.
+#[test]
+fn a_font_change_resizes_an_existing_terminal_like_a_fresh_one() {
+    use quark_text::{FontSettings, LayoutCache, TextSystem};
+    use quark_ui::theme::Theme;
+
+    let theme = Theme::default_dark();
+    let mut text = TextSystem::vendored_only(&FontSettings::default());
+    let mut layouts = LayoutCache::new(1);
+    let mut sized = |t: &mut TerminalState, text: &mut TextSystem| {
+        t.set_viewport(640.0, 400.0);
+        t.prepare(text, &mut layouts, 1.0, &theme);
+        t.feed(b"\x1b[14t");
+        (t.size(), t.cell_at(300.0, 100.0), t.take_input())
+    };
+    let new = || TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal"));
+    let mut existing = new();
+    let before = sized(&mut existing, &mut text);
+    // Any family can be the monospace one; Inter's digits are narrower.
+    text.set_font_settings(&FontSettings {
+        mono_family: "Inter".to_owned(),
+        ..FontSettings::default()
+    });
+    let after = sized(&mut existing, &mut text);
+    let fresh = sized(&mut new(), &mut text);
+    assert_ne!(before.0, fresh.0, "the fonts have the same advance");
+    assert_eq!(after, fresh);
 }

@@ -719,6 +719,14 @@ impl Terminal {
             last.text.end -= cut;
             last.cols -= cut as u16;
         }
+        // A wide character in the last column has no second half when a
+        // resize did not reflow the screen (the alternate screen); keep its
+        // run inside the grid.
+        if let Some(last) = row.runs.last_mut()
+            && last.col + last.cols > col
+        {
+            last.cols = col - last.col;
+        }
         debug_assert_eq!(row.verify_integrity(), Ok(()));
     }
 

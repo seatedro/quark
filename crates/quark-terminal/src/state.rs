@@ -8,7 +8,7 @@ use quark_render::FontKind;
 use quark_render::scene::Rect;
 use quark_text::{LayoutCache, TextParams, TextStyle, TextSystem};
 use quark_ui::FocusId;
-use quark_ui::element::ScrollHandle;
+use quark_ui::element::{DragStart, ScrollHandle};
 use quark_ui::theme::Theme;
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -178,8 +178,12 @@ pub struct TerminalState {
     pty: Option<Pty>,
     /// Bytes for the program while no PTY is attached (tests read them).
     outbox: Vec<u8>,
+    /// Input for the PTY that did not fit its queue yet, oldest first.
+    unsent: Vec<u8>,
     style: TerminalStyle,
-    metrics: Option<(Metrics, u32)>,
+    /// The cell metrics and what they were measured for: the scale
+    /// factor's bits and the text system's font generation.
+    metrics: Option<(Metrics, (u32, u64))>,
     colors: Option<(Rgb, Rgb)>,
     viewport: (f32, f32),
     /// Grid size in cells, and the scale it was sized at.
@@ -202,6 +206,9 @@ pub struct TerminalState {
     nonce: u64,
     /// The rows block's bounds in the window as of the last frame.
     bounds: Rc<Cell<Rect>>,
+    /// The rows' drag start for the view's `on_event` (by address), kept so
+    /// a rebuilt frame registers it without allocating.
+    drag_start: Option<(usize, DragStart)>,
     drag: Option<SelectDrag>,
     last_click: Option<(u64, (u16, u16), u8)>,
     modifiers: ModifiersState,
@@ -238,6 +245,7 @@ impl TerminalState {
             vt,
             pty: None,
             outbox: Vec::new(),
+            unsent: Vec::new(),
             style,
             metrics: None,
             colors: None,
@@ -254,6 +262,7 @@ impl TerminalState {
             pending_scroll: false,
             nonce: 0,
             bounds: Rc::default(),
+            drag_start: None,
             drag: None,
             last_click: None,
             modifiers: ModifiersState::empty(),
@@ -353,6 +362,7 @@ impl TerminalState {
     ) -> std::io::Result<()> {
         let pty = Pty::spawn(command, self.geometry(), on_ready)?;
         self.pty = Some(pty);
+        self.unsent.clear();
         self.exited = false;
         self.flush();
         Ok(())
@@ -375,6 +385,7 @@ impl TerminalState {
         let Some(inbox) = self.pty.as_ref().map(Pty::inbox) else {
             return false;
         };
+        self.send_unsent();
         let mut any = false;
         inbox.drain(|event| {
             any = true;
@@ -389,6 +400,7 @@ impl TerminalState {
             PtyEvent::Exited(code) => {
                 self.exited = true;
                 self.pty = None;
+                self.unsent.clear();
                 self.signals.push(TerminalSignal::Exited(code));
             }
         }
@@ -419,13 +431,27 @@ impl TerminalState {
     }
 
     fn send(&mut self, bytes: &[u8]) {
-        match &mut self.pty {
-            Some(pty) => {
-                // A write fails once the program has exited; its exit event
-                // is on the way.
-                let _ = pty.write(bytes);
-            }
-            None => self.outbox.extend_from_slice(bytes),
+        if self.pty.is_none() {
+            self.outbox.extend_from_slice(bytes);
+            return;
+        }
+        self.unsent.extend_from_slice(bytes);
+        self.send_unsent();
+    }
+
+    /// Offers the PTY the input its queue turned away. The PTY wakes the
+    /// app ([`Self::read_pty`]) once there is room again.
+    fn send_unsent(&mut self) {
+        let Some(pty) = &mut self.pty else {
+            return;
+        };
+        if self.unsent.is_empty() {
+            return;
+        }
+        match pty.write(&self.unsent) {
+            Ok(n) => drop(self.unsent.drain(..n)),
+            // The program has exited; its exit event is on the way.
+            Err(_) => self.unsent.clear(),
         }
     }
 
@@ -793,7 +819,11 @@ impl TerminalState {
         scale: f32,
         theme: &Theme,
     ) {
-        if self.metrics.is_none_or(|(_, s)| s != scale.to_bits()) {
+        // Remeasure when the scale or the fonts changed (a new monospace
+        // family has its own advance), and resize to match.
+        let key = (scale.to_bits(), text.generation());
+        let remeasured = self.metrics.is_none_or(|(_, k)| k != key);
+        if remeasured {
             let style = TextStyle::new(self.style.font_size).kind(FontKind::Mono);
             let params = TextParams::new("0000000000", style).scale_factor(scale);
             let cell_w = layouts
@@ -801,7 +831,7 @@ impl TerminalState {
                 .map_or(self.style.font_size * 0.6, |l| l.size().0 / 10.0);
             let mut m = self.metrics();
             m.cell_w = cell_w;
-            self.metrics = Some((m, scale.to_bits()));
+            self.metrics = Some((m, key));
             self.dirty = true;
         }
         let c = &theme.colors;
@@ -821,7 +851,7 @@ impl TerminalState {
         let rows = ((self.viewport.1 - m.pad * 2.0) / m.cell_h)
             .floor()
             .max(1.0) as u16;
-        if (cols, rows, scale.to_bits()) != self.size {
+        if remeasured || (cols, rows, scale.to_bits()) != self.size {
             self.size = (cols, rows, scale.to_bits());
             self.vt.resize(
                 cols,
@@ -939,6 +969,14 @@ impl TerminalState {
     pub(crate) fn bounds_cell(&self) -> Rc<Cell<Rect>> {
         self.bounds.clone()
     }
+
+    /// The drag start kept for `key`, made by `make` when there is none.
+    pub(crate) fn drag_start(&mut self, key: usize, make: impl FnOnce() -> DragStart) -> DragStart {
+        match &self.drag_start {
+            Some((k, start)) if *k == key => start.clone(),
+            _ => self.drag_start.insert((key, make())).1.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -948,7 +986,7 @@ impl TerminalState {
     pub(crate) fn headless(cols: u16, rows: u16) -> Self {
         let mut state = Self::new("test", FocusId::from_key("test.terminal"));
         let m = state.metrics();
-        state.metrics = Some((m, 1f32.to_bits()));
+        state.metrics = Some((m, (1f32.to_bits(), 0)));
         state.size = (cols, rows, 1f32.to_bits());
         state
             .vt

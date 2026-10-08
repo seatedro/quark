@@ -7,21 +7,18 @@
 //! selects while a program has mouse reporting on.
 //!
 //! Needs Zig 0.16 to build libghostty-vt (see quark-terminal's build.rs).
-//! On Windows the terminal is not available yet and the demo exits.
 
 use quark_app::quark_ui::element::AnyElement;
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::{UiApp, UiContext, ViewContext, WindowOptions};
 use quark_terminal::PtyCommand;
 
-#[cfg(not(windows))]
 use quark_terminal::{TerminalEvent, TerminalState};
 
 const TERM_FOCUS: FocusId = FocusId::from_key("demo.terminal");
 
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
-    #[cfg(not(windows))]
     Term(TerminalEvent),
 }
 
@@ -32,35 +29,32 @@ impl From<Msg> for Action {
 }
 
 struct Demo {
-    #[cfg(not(windows))]
     term: TerminalState,
     /// What to run once the window opens; `None` runs nothing (tests feed
     /// the terminal directly).
     command: Option<PtyCommand>,
     /// Called on the PTY thread after each wake, so tests can wait for
     /// output without polling.
-    #[cfg(all(test, not(windows)))]
+    #[cfg(test)]
     on_pty: Option<std::sync::mpsc::Sender<()>>,
     /// Allocations the last frame's `TerminalState::prepare` made.
-    #[cfg(all(test, not(windows)))]
+    #[cfg(test)]
     prepare_allocations: u64,
 }
 
 impl Demo {
     fn new(command: Option<PtyCommand>) -> Self {
         Self {
-            #[cfg(not(windows))]
             term: TerminalState::new("demo.terminal", TERM_FOCUS),
             command,
-            #[cfg(all(test, not(windows)))]
+            #[cfg(test)]
             on_pty: None,
-            #[cfg(all(test, not(windows)))]
+            #[cfg(test)]
             prepare_allocations: 0,
         }
     }
 }
 
-#[cfg(not(windows))]
 mod app {
     use quark_app::InputEvent;
     use quark_app::KeyKind;
@@ -108,6 +102,8 @@ mod app {
     fn open(uri: &str) {
         let opener = if cfg!(target_os = "macos") {
             "open"
+        } else if cfg!(windows) {
+            "explorer"
         } else {
             "xdg-open"
         };
@@ -238,28 +234,6 @@ mod app {
     }
 }
 
-/// Without libghostty-vt (Windows) the demo has nothing to show.
-#[cfg(windows)]
-impl UiApp for Demo {
-    type Action = Msg;
-    type Message = ();
-
-    fn init(&mut self, cx: &mut UiContext) {
-        let _ = (&self.command, TERM_FOCUS);
-        eprintln!("quark-terminal is not available on Windows yet");
-        cx.window.exit();
-    }
-
-    fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
-        use quark_app::quark_ui::element::{IntoAnyElement, div};
-        quark::view! { <div /> }
-    }
-
-    fn update(&mut self, msg: Msg, _cx: &mut UiContext) {
-        match msg {}
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     let command = match args.next() {
@@ -277,7 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests {
     use accesskit::Role;
     use quark_app::quark_ui::test_alloc::{self, Counting};
@@ -308,6 +282,8 @@ mod tests {
         )
     }
 
+    // Runs `sh`; ConPTY's own coverage is in pty.rs.
+    #[cfg(unix)]
     #[test]
     fn typed_input_reaches_the_program_and_its_output_shows() {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -383,6 +359,62 @@ mod tests {
                 format!("\x1b[32m{n:04}\x1b[0m {text:<74}\r\n")
             })
             .collect()
+    }
+
+    /// Whether a scrollbar thumb is painted at the window's right edge (the
+    /// track is the faint rounded rect beside it).
+    fn scrollbar_shown(ui: &UiTestHarness<Demo>) -> bool {
+        ui.scene().primitives.iter().any(|p| {
+            matches!(p, quark::scene::Primitive::RoundedRect(r)
+                if r.rect.x > SIZE.0 - 20.0 && r.color.a != 10)
+        })
+    }
+
+    /// Scrolling the history shows the scrollbar for a moment, even with
+    /// the pointer gone from the terminal, and it hides again with no more
+    /// output or pointer movement.
+    #[test]
+    fn scrolling_shows_the_scrollbar_until_it_lingers_out() {
+        let mut ui = harness(None);
+        ui.app_mut().term.feed(lines(0, 100).as_bytes());
+        ui.frame();
+        ui.advance(5_000);
+        assert!(!scrollbar_shown(&ui), "before scrolling");
+        let bottom = ui.app().term.scrollbar().offset;
+
+        ui.pointer_move((100.0, 100.0));
+        ui.wheel(0.0, -200.0);
+        ui.pointer_leave();
+        ui.frame();
+        assert!(ui.app().term.scrollbar().offset < bottom, "did not scroll");
+        assert!(scrollbar_shown(&ui), "while scrolling");
+
+        ui.advance(500);
+        assert!(scrollbar_shown(&ui), "half a second later");
+        ui.advance(1_000);
+        assert!(!scrollbar_shown(&ui), "after the linger");
+    }
+
+    /// A wheel the program takes as mouse reports moves no history, so it
+    /// shows no scrollbar once the pointer leaves.
+    #[test]
+    fn a_wheel_reported_to_the_program_shows_no_scrollbar() {
+        let mut ui = harness(None);
+        ui.app_mut().term.feed(lines(0, 100).as_bytes());
+        ui.app_mut().term.feed(b"\x1b[?1000h");
+        ui.frame();
+        ui.advance(5_000);
+        let _ = ui.app_mut().term.take_input();
+
+        ui.pointer_move((100.0, 100.0));
+        ui.wheel(0.0, -200.0);
+        ui.pointer_leave();
+        ui.frame();
+        assert!(
+            ui.app_mut().term.take_input().starts_with(b"\x1b[M"),
+            "no wheel report"
+        );
+        assert!(!scrollbar_shown(&ui));
     }
 
     /// With no screen reader, preparing a changed frame allocates nothing

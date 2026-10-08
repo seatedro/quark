@@ -34,17 +34,14 @@
 //!
 //! # Platforms
 //!
-//! Linux and macOS. On Windows the crate builds without the terminal (only
-//! [`Pty`]): libghostty-vt's MSVC build is not wired up yet.
+//! Linux, macOS, and Windows on x86-64 with the MSVC toolchain. Building
+//! for another Windows target fails unless a prebuilt libghostty-vt is
+//! supplied (see build.rs).
 
-#[cfg(ghostty_vt)]
 mod grid;
-#[cfg(ghostty_vt)]
 pub mod input;
 mod pty;
-#[cfg(ghostty_vt)]
 mod state;
-#[cfg(ghostty_vt)]
 #[allow(
     dead_code,
     non_camel_case_types,
@@ -55,12 +52,10 @@ mod state;
     clippy::all
 )]
 mod sys;
-#[cfg(ghostty_vt)]
 mod view;
-#[cfg(ghostty_vt)]
 pub mod vt;
 
-#[cfg(all(test, ghostty_vt))]
+#[cfg(test)]
 mod tests;
 // build.rs's manifest parsing, here so its unit tests run with the crate's.
 // Counts allocations for the budget tests.
@@ -73,19 +68,11 @@ static ALLOCATOR: quark_ui::test_alloc::Counting = quark_ui::test_alloc::Countin
 #[allow(dead_code)]
 mod ghostty_deps;
 
-#[cfg(ghostty_vt)]
 pub use grid::{CellStyle, Colors, Cursor, CursorShape, Grid, GridRow, Rgb, Run, Underline};
-#[cfg(ghostty_vt)]
 pub use input::KeyPress;
-pub use pty::{Pty, PtyCommand, PtyEvent, PtyGeometry};
-#[cfg(ghostty_vt)]
+pub use pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 pub use state::{
     PointerInput, TerminalEvent, TerminalOutcome, TerminalSignal, TerminalState, TerminalStyle,
 };
-#[cfg(ghostty_vt)]
 pub use view::{TerminalEnv, terminal_view};
-#[cfg(ghostty_vt)]
 pub use vt::UnsafePaste;
-
-/// Whether this build has the terminal (libghostty-vt). False on Windows.
-pub const AVAILABLE: bool = cfg!(ghostty_vt);
