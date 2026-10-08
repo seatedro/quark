@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Publishes signed syntax packs to the pack host, an nginx directory served
-# as $PACK_BASE_URL behind Cloudflare, over SSH.
+# Publishes signed syntax packs to the quark-packs R2 bucket, served as
+# $PACK_BASE_URL through its Cloudflare custom domain.
 #
 #   publish.sh PACKS_DIR
 #
@@ -10,18 +10,19 @@
 # 1. `syntax-pack verify` every target's index: signed by $PACK_INDEX_KEY,
 #    every pinned language, local files matching, immutable URLs. Nothing
 #    is uploaded unless every target passes.
-# 2. Upload each file to the path its URL names, never replacing a file
-#    already there. URLs carry the file's SHA-256, so an existing file
+# 2. Upload each file to the key its URL names, never replacing an object
+#    already there. URLs carry the file's SHA-256, so an existing object
 #    should already be identical.
 # 3. Download every file through the public URL and check its SHA-256.
-# 4. Only then replace each <target>/index.json, atomically on the host,
-#    and check the public copies.
+# 4. Only then replace each <target>/index.json (a single PUT, so readers
+#    see the old index or the new one) and check the public copies.
 #
 # Environment: SYNTAX_PACK (the tool binary), PACK_BASE_URL, PACK_INDEX_KEY,
-# TARGETS (space-separated), PACK_SSH_DEST (user@host), PACK_REMOTE_DIR
-# (the directory served as PACK_BASE_URL), and optionally
-# PACK_SSH_KEY_FILE and PACK_SSH_KNOWN_HOSTS_FILE. PACK_DRY_RUN=1 stops
-# after step 1 and prints the URLs it would upload.
+# TARGETS (space-separated), PACK_R2_ENDPOINT, PACK_R2_BUCKET, and the
+# bucket credentials in AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (the
+# `aws` CLI talks to R2's S3 API). Object keys are the URL path below the
+# host, so PACK_BASE_URL https://host/v1 maps to keys under v1/.
+# PACK_DRY_RUN=1 stops after step 1 and prints the URLs it would upload.
 set -euo pipefail
 
 packs=${1:?usage: publish.sh PACKS_DIR}
@@ -51,19 +52,26 @@ if [ "${PACK_DRY_RUN:-}" = 1 ]; then
   exit 0
 fi
 
-: "${PACK_SSH_DEST:?}" "${PACK_REMOTE_DIR:?}"
-remote=${PACK_REMOTE_DIR%/}
-ssh_cmd=(ssh -o BatchMode=yes -o StrictHostKeyChecking=yes)
-if [ -n "${PACK_SSH_KEY_FILE:-}" ]; then
-  ssh_cmd+=(-i "$PACK_SSH_KEY_FILE" -o IdentitiesOnly=yes)
-fi
-if [ -n "${PACK_SSH_KNOWN_HOSTS_FILE:-}" ]; then
-  ssh_cmd+=(-o "UserKnownHostsFile=$PACK_SSH_KNOWN_HOSTS_FILE")
-fi
-rsync_ssh="${ssh_cmd[*]}"
+require() { : "${PACK_R2_ENDPOINT:?}" "${PACK_R2_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"; }
+require
+export AWS_DEFAULT_REGION=auto
+# The URL path below the host is the key prefix: https://host/v1 -> v1.
+prefix=$(printf '%s' "$base" | sed -E 's#^[a-z]+://[^/]+/?##')
+s3() { aws s3api "$@" --bucket "$PACK_R2_BUCKET" --endpoint-url "$PACK_R2_ENDPOINT"; }
 
-rsync -rt --ignore-existing --chmod=D755,F644 -e "$rsync_ssh" \
-  "$stage/" "$PACK_SSH_DEST:$remote/"
+uploaded=0
+while IFS= read -r -d '' file; do
+  rel=${file#"$stage"/}
+  key=${prefix:+$prefix/}$rel
+  if s3 head-object --key "$key" >/dev/null 2>&1; then
+    continue
+  fi
+  s3 put-object --key "$key" --body "$file" \
+    --cache-control "public, max-age=31536000, immutable" \
+    --content-type application/octet-stream >/dev/null
+  uploaded=$((uploaded + 1))
+done < <(find "$stage" -type f -print0)
+echo "uploaded $uploaded new pack files"
 
 sha_of_url() {
   curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "$1" | sha256sum | cut -d' ' -f1
@@ -81,11 +89,8 @@ for target in $TARGETS; do
 done
 
 for target in $TARGETS; do
-  tmp=".index.json.$$"
-  rsync -t --chmod=F644 -e "$rsync_ssh" \
-    "$packs/$target/index.json" "$PACK_SSH_DEST:$remote/$target/$tmp"
-  "${ssh_cmd[@]}" "$PACK_SSH_DEST" \
-    "mv -f $(printf %q "$remote/$target/$tmp") $(printf %q "$remote/$target/index.json")"
+  s3 put-object --key "${prefix:+$prefix/}$target/index.json" --body "$packs/$target/index.json" \
+    --cache-control no-cache --content-type application/json >/dev/null
 done
 
 for target in $TARGETS; do

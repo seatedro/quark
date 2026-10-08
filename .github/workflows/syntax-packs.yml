@@ -179,7 +179,7 @@ jobs:
     if: inputs.publish && inputs.languages == '' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # Holds the pack host's SSH credentials; protect it like signing.
+    # Holds the quark-packs R2 credentials; protect it like signing.
     environment: syntax-packs-publish
     # One publication at a time across every ref, so two runs cannot
     # interleave their index replacements.
@@ -204,28 +204,18 @@ jobs:
 
       - name: Publish packs, then indexes
         env:
-          SSH_KEY: ${{ secrets.QUARK_PACKS_SSH_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.QUARK_PACKS_SSH_KNOWN_HOSTS }}
-          PACK_SSH_DEST: ${{ secrets.QUARK_PACKS_SSH_DEST }}
-          PACK_REMOTE_DIR: ${{ secrets.QUARK_PACKS_REMOTE_DIR }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.QUARK_PACKS_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.QUARK_PACKS_R2_SECRET_ACCESS_KEY }}
+          PACK_R2_ENDPOINT: https://d996894143090cc02f1539e379655b2c.r2.cloudflarestorage.com
+          PACK_R2_BUCKET: quark-packs
         run: |
-          for name in SSH_KEY SSH_KNOWN_HOSTS PACK_SSH_DEST PACK_REMOTE_DIR; do
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
             if [ -z "${!name}" ]; then
-              echo "::error::$name is empty; set the QUARK_PACKS_* secrets in the syntax-packs-publish environment"
+              echo "::error::$name is empty; set the QUARK_PACKS_R2_* secrets in the syntax-packs-publish environment"
               exit 1
             fi
           done
-          umask 077
-          printf '%s\n' "$SSH_KEY" >"$RUNNER_TEMP/pack-host-key"
-          printf '%s\n' "$SSH_KNOWN_HOSTS" >"$RUNNER_TEMP/pack-host-known-hosts"
-          SYNTAX_PACK=target/release/syntax-pack \
-          PACK_SSH_KEY_FILE="$RUNNER_TEMP/pack-host-key" \
-          PACK_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/pack-host-known-hosts" \
-            tools/syntax-pack/publish.sh packs
-
-      - name: Remove SSH key
-        if: always()
-        run: rm -f "$RUNNER_TEMP/pack-host-key"
+          SYNTAX_PACK=target/release/syntax-pack tools/syntax-pack/publish.sh packs
 
   smoke:
     needs: publish

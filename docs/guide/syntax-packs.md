@@ -133,8 +133,9 @@ older file can never be mistaken for its replacement.
 
 ## Publishing packs
 
-Packs are served from `https://quark.seated.ro/v1`, an nginx directory
-behind Cloudflare: `<base>/<target>/index.json` is each target's signed
+Packs are served from `https://quark.seated.ro/v1`, the `v1/` prefix of
+the `quark-packs` Cloudflare R2 bucket through its custom domain:
+`<base>/<target>/index.json` is each target's signed
 index, and the chat and diff demos fetch it, trusting the public key the
 workflow's `PACK_INDEX_KEY` also names. The [Syntax packs](../../.github/workflows/syntax-packs.yml)
 workflow runs on manual dispatch only and has four jobs:
@@ -143,15 +144,17 @@ workflow runs on manual dispatch only and has four jobs:
 |---|---|---|
 | `build` | Always, on a native runner per target: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` (`macos-15`), `x86_64-apple-darwin` (`macos-15-intel`), `x86_64-pc-windows-msvc`. Builds every pack, loads it, checks its sample, and uploads `syntax-packs-unsigned-<target>`. It fails when the runner's host triple is not the target, so no pack goes unloaded. | No secrets |
 | `sign` | Only when `languages` is empty. Signs each target's index with `--base-url`, then checks it with `syntax-pack verify` against the key the demos ship. Reads the build artifacts as data and restores no cache. Uploads `syntax-packs-signed`. | `QUARK_SYNTAX_SIGNING_KEY` |
-| `publish` | Only with `publish` checked, `languages` empty, on `master`. Runs [publish.sh](../../tools/syntax-pack/publish.sh). One run at a time across refs. | `QUARK_PACKS_*` SSH secrets |
+| `publish` | Only with `publish` checked, `languages` empty, on `master`. Runs [publish.sh](../../tools/syntax-pack/publish.sh). One run at a time across refs. | `QUARK_PACKS_R2_*` bucket credentials |
 | `smoke` | After `publish`, on every target's runner. `syntax-pack remote-check` downloads each pack through the public index with quark-syntax's downloader and highlights its sample. | No secrets |
 
 publish.sh verifies every target's index first (signature, every pinned
 language, local files, URLs) and uploads nothing unless all pass. It then
-copies each file to the path its URL names with `rsync --ignore-existing`,
-so a published file is never replaced, downloads every file through the
-public URL to check its SHA-256, and only then replaces each
-`index.json` with an atomic rename on the host. A subset dispatch cannot
+uploads each file to the key its URL names through R2's S3 API, skipping
+keys that already exist so a published file is never replaced, downloads
+every file through the public URL to check its SHA-256, and only then
+replaces each `index.json` with a single PUT (readers see the old index or
+the new one). Pack files are served with an immutable cache header and
+indexes with `no-cache`. A subset dispatch cannot
 reach the public index: `sign` and `publish` skip it, and `syntax-pack
 index` refuses any language set other than the complete pinned one.
 
@@ -167,10 +170,10 @@ index` refuses any language set other than the complete pinned one.
   and update `PACK_INDEX_KEY` in the workflow. Use a key separate from the
   update key. To rotate, ship the new public key beside the old one before
   signing with it.
-- In `syntax-packs-publish`, set `QUARK_PACKS_SSH_DEST` (`user@host` of the
-  origin), `QUARK_PACKS_REMOTE_DIR` (the directory nginx serves as `/v1`),
-  `QUARK_PACKS_SSH_KEY` (a private key allowed to write only there), and
-  `QUARK_PACKS_SSH_KNOWN_HOSTS` (the host's `ssh-keyscan` line).
+- In `syntax-packs-publish`, set `QUARK_PACKS_R2_ACCESS_KEY_ID` and
+  `QUARK_PACKS_R2_SECRET_ACCESS_KEY`: the S3 credentials of a Cloudflare
+  API token limited to object read and write on the `quark-packs` bucket.
+  The bucket and its account endpoint are named in the workflow.
 - Let non-browser clients through Cloudflare for `/v1/*`: apps download
   with ureq, and the publish job checks every URL with curl.
 
