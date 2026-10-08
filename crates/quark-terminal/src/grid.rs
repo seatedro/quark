@@ -5,6 +5,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// An sRGB color.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -84,20 +85,65 @@ pub struct GridRow {
     /// Identifies the row's content, runs, and selection: equal hashes draw
     /// the same pixels.
     pub hash: u64,
+    /// Identifies this row's storage for as long as it lives, unique in the
+    /// process. A row that scrolls to another line keeps it when the
+    /// terminal can tell the content is the same, so per-row state a view
+    /// keys by it (cached drawing, text layouts) follows the content; a row
+    /// read anew reuses some row's storage and id.
+    pub id: u64,
+    /// The raw cells the row was read from, to recognize it after it
+    /// moves.
+    pub(crate) cells: Vec<u64>,
+    /// Some cell's text or style came from the terminal's tables (a style,
+    /// a color, a grapheme cluster) rather than from its raw value alone.
+    pub(crate) looked_up: bool,
 }
 
 impl GridRow {
+    /// An empty row with a new [`Self::id`].
+    pub(crate) fn new() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.runs.clear();
         self.selection = None;
         self.wrapped = false;
+        self.looked_up = false;
     }
 
     pub(crate) fn rehash(&mut self) {
         let mut h = std::hash::DefaultHasher::new();
         self.text.hash(&mut h);
-        self.runs.hash(&mut h);
+        h.write_usize(self.runs.len());
+        // Each run packed into three words: a few large writes hash several
+        // times faster than the derived field-by-field ones.
+        let rgb = |c: Rgb| u64::from(c.r) << 16 | u64::from(c.g) << 8 | u64::from(c.b);
+        let some_rgb = |c: Option<Rgb>| c.map_or(0, |c| 1 << 24 | rgb(c));
+        for run in &self.runs {
+            let s = &run.style;
+            h.write_u64(
+                u64::from(run.col) << 48 | u64::from(run.cols) << 32 | u64::from(run.text.end),
+            );
+            let flags = [
+                s.bold,
+                s.italic,
+                s.faint,
+                s.blink,
+                s.strikethrough,
+                s.overline,
+                s.hyperlink,
+            ]
+            .iter()
+            .fold(0, |bits, &on| bits << 1 | u64::from(on));
+            h.write_u64(rgb(s.fg) << 40 | some_rgb(s.bg) << 15 | (s.underline as u64) << 7 | flags);
+            h.write_u64(some_rgb(s.underline_color) << 32 | u64::from(run.text.start));
+        }
         self.selection.hash(&mut h);
         self.wrapped.hash(&mut h);
         self.hash = h.finish();

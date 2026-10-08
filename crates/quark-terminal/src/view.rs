@@ -14,7 +14,7 @@ use accesskit::Role;
 use quark::Color;
 use quark_render::scene::{BorderPrimitive, Rect, RectPrimitive, RichTextPrimitive, ShapedText};
 use quark_render::{FontStyle, FontWeight, Scene};
-use quark_text::{TextQuery, TextSpan};
+use quark_text::{FontEpoch, TextBlock, TextLayout, TextQuery, TextSpan, TextStyle};
 use quark_ui::accessibility::{AccessibilityNode, AccessibleText};
 use quark_ui::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult,
@@ -27,6 +27,7 @@ use quark_ui::{Action, FocusId};
 
 use crate::grid::{CellStyle, CursorShape, Grid, GridRow, Rgb, Underline};
 use crate::state::{Frame, Metrics, Palette, Preedit, TerminalEvent, TerminalState, palette};
+use crate::vt::timed;
 
 /// Cursor blink half-period.
 const BLINK_MS: u64 = 600;
@@ -60,6 +61,7 @@ pub fn terminal_view(
     env: TerminalEnv,
     on_event: fn(TerminalEvent) -> Action,
 ) -> AnyElement {
+    timed!(View);
     if !env.focused {
         state.cancel_preedit();
     }
@@ -98,8 +100,20 @@ pub fn terminal_view(
         })
     });
     let (grid_frame, rows_grid) = (frame.clone(), grid.clone());
+    let row_text = state.row_text();
     let content = cached(frame.id, hash, move || {
-        build(&grid_frame, &rows_grid, screen, top, palette, drag)
+        timed!(
+            Build,
+            build(
+                &grid_frame,
+                &rows_grid,
+                &row_text,
+                screen,
+                top,
+                palette,
+                drag
+            )
+        )
     })
     .w(width)
     .h(height);
@@ -166,16 +180,50 @@ struct Screen {
     composition: Option<(Preedit, (u16, u16))>,
 }
 
-thread_local! {
-    /// Row order by hash, and each row's occurrence among equal hashes.
-    static ROW_SCRATCH: std::cell::RefCell<(Vec<usize>, Vec<u64>)> = const {
-        std::cell::RefCell::new((Vec::new(), Vec::new()))
-    };
+/// The text blocks each row lays its runs out with, by row id (see
+/// [`GridRow::id`]), so a redrawn row lays out into storage it already
+/// grew rather than into the shared layout cache, and nothing a row no
+/// longer shows stays alive there. A block's earlier layouts are still
+/// held for a frame or two after the row redraws (by the recording it
+/// replaced and that recording's spare scene chunk), so a row's blocks stop
+/// allocating from its third content on.
+#[derive(Default)]
+pub(crate) struct RowText {
+    rows: Vec<(u64, Vec<TextBlock>)>,
+    /// The fonts the blocks were laid out with.
+    epoch: Option<FontEpoch>,
 }
 
+impl RowText {
+    /// Drops the blocks of rows `grid` no longer has.
+    pub(crate) fn retain(&mut self, grid: &Grid) {
+        self.rows
+            .retain(|(id, _)| grid.rows.iter().any(|row| row.id == *id));
+    }
+
+    /// The blocks of row `id`, for fonts `epoch`. A font change drops them
+    /// all, since a block keeps its layout for the same text and style.
+    fn blocks(&mut self, id: u64, epoch: FontEpoch) -> &mut Vec<TextBlock> {
+        if self.epoch != Some(epoch) {
+            self.epoch = Some(epoch);
+            self.rows.clear();
+        }
+        let i = match self.rows.iter().position(|(row, _)| *row == id) {
+            Some(i) => i,
+            None => {
+                self.rows.push((id, Vec::new()));
+                self.rows.len() - 1
+            }
+        };
+        &mut self.rows[i].1
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build(
     frame: &Frame,
     grid: &Rc<Grid>,
+    row_text: &Rc<std::cell::RefCell<RowText>>,
     screen: Option<Screen>,
     top: f32,
     palette: Palette,
@@ -196,34 +244,21 @@ fn build(
         .flex_col()
         .cursor(CursorHint::Text)
         .on_drag_start(drag);
-    // Rows that repeat (blank lines) share a hash; the occurrence keeps
-    // their cache keys apart, and the terminal's id keeps them apart from
-    // another terminal's rows. Sorting by hash finds each row's occurrence
-    // without comparing every pair.
-    // The two vectors live in a per-thread scratch so a frame that rebuilds
-    // the rows (a cursor move) allocates nothing once warm.
-    let nth = ROW_SCRATCH.with_borrow_mut(|(by_hash, nth)| {
-        by_hash.clear();
-        by_hash.extend(0..grid.rows.len());
-        by_hash.sort_unstable_by_key(|&i| (grid.rows[i].hash, i));
-        nth.clear();
-        nth.resize(grid.rows.len(), 0);
-        for pair in by_hash.windows(2) {
-            if grid.rows[pair[0]].hash == grid.rows[pair[1]].hash {
-                nth[pair[1]] = nth[pair[0]] + 1;
-            }
-        }
-        std::mem::take(nth)
-    });
-    let terminal = quark::stable_hash(frame.id);
+    // Each row is a boundary keyed by its id, unique in the process (so
+    // repeated rows and another terminal's rows stay apart), and redrawn
+    // when its hash (content and selection) or the drawing settings change.
+    // A row that scrolled keeps its id and replays where it now is.
     for (i, row) in grid.rows.iter().enumerate() {
-        let key = CacheKey(inputs_hash(&(terminal, row.hash, nth[i])));
-        let grid = grid.clone();
+        let key = CacheKey(row.id.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ ROW_KEY_SALT);
+        let (grid, row_text) = (grid.clone(), row_text.clone());
         let hash = inputs_hash(&(row.hash, grid.colors, m.cell_w.to_bits(), palette));
         rows = rows.child(
             cached(key, hash, move || {
                 canvas(move |bounds, scene, cx| {
-                    paint_row(bounds, scene, cx, &grid.rows[i], &m, palette)
+                    let row = &grid.rows[i];
+                    let mut row_text = row_text.borrow_mut();
+                    let blocks = row_text.blocks(row.id, cx.text.font_epoch());
+                    paint_row(bounds, scene, cx, row, blocks, &m, palette);
                 })
                 .w(grid_w)
                 .h(m.cell_h)
@@ -232,7 +267,6 @@ fn build(
             .h(m.cell_h),
         );
     }
-    ROW_SCRATCH.with_borrow_mut(|(_, spare)| *spare = nth);
     if let Some(Screen {
         text: (text, caret),
         composition,
@@ -295,12 +329,16 @@ fn build(
 
 static NO_SPAN_COLORS: LazyLock<Arc<[Color]>> = LazyLock::new(|| Arc::from(Vec::new()));
 
+/// Keeps row cache keys apart from other elements' hashed keys.
+const ROW_KEY_SALT: u64 = 0x7465_726d_2e72_6f77;
+
 /// Paints one row: backgrounds, selection, text runs, then decorations.
 fn paint_row(
     bounds: Bounds,
     scene: &mut Scene,
     cx: &mut ElementContext,
     row: &GridRow,
+    blocks: &mut Vec<TextBlock>,
     m: &Metrics,
     palette: Palette,
 ) {
@@ -329,16 +367,26 @@ fn paint_row(
             color: palette.selection,
         });
     }
+    let mut drawn = 0;
     for run in &row.runs {
         let text = row.run_text(run);
         if text.trim().is_empty() {
             continue;
         }
-        draw_text(
+        if drawn == blocks.len() {
+            blocks.push(TextBlock::new());
+        }
+        let block = &mut blocks[drawn];
+        drawn += 1;
+        let (style, italic) = text_style(m, run.style, text.len());
+        block.set(text, italic.as_slice());
+        let Ok(layout) = block.layout(cx.text, style, None, cx.scale_factor) else {
+            continue;
+        };
+        draw_layout(
             scene,
-            cx,
             m,
-            text,
+            layout,
             run.style,
             x_of(run.col),
             bounds.y,
@@ -359,37 +407,35 @@ fn paint_row(
     }
 }
 
-/// Lays out and draws `text` in `style` at `(x, y)`, `cols` cells wide.
-/// `fg` overrides the style's color (the glyph under a block cursor).
+/// The text style of a run in `style`, and its italic span over `len`
+/// bytes when italic.
+fn text_style(m: &Metrics, style: CellStyle, len: usize) -> (TextStyle, Option<TextSpan>) {
+    let mut text_style = m.text_style();
+    if style.bold {
+        text_style = text_style.weight(FontWeight::Bold);
+    }
+    let italic = style.italic.then_some(TextSpan {
+        range: 0..len,
+        weight: None,
+        style: Some(FontStyle::Italic),
+        kind: None,
+    });
+    (text_style, italic)
+}
+
+/// Draws `layout`, text in `style`, at `(x, y)`, `cols` cells wide. `fg`
+/// overrides the style's color (the glyph under a block cursor).
 #[allow(clippy::too_many_arguments)]
-fn draw_text(
+fn draw_layout(
     scene: &mut Scene,
-    cx: &mut ElementContext,
     m: &Metrics,
-    text: &str,
+    layout: Arc<TextLayout>,
     style: CellStyle,
     x: f32,
     y: f32,
     cols: u16,
     fg: Option<Color>,
 ) {
-    let mut text_style = m.text_style();
-    if style.bold {
-        text_style = text_style.weight(FontWeight::Bold);
-    }
-    let italic = [TextSpan {
-        range: 0..text.len(),
-        weight: None,
-        style: Some(FontStyle::Italic),
-        kind: None,
-    }];
-    let query = TextQuery {
-        spans: if style.italic { &italic } else { &[] },
-        ..TextQuery::new(text, text_style)
-    };
-    let Some(layout) = cx.layout_text_query(&query) else {
-        return;
-    };
     let mut default_color = fg.unwrap_or(color(style.fg));
     if style.faint && fg.is_none() {
         default_color = default_color.with_alpha(140);
@@ -539,19 +585,16 @@ fn paint_cursor(
                 } else {
                     (text, run.cols)
                 };
-                if !text.trim().is_empty() {
+                let (style, italic) = text_style(m, run.style, text.len());
+                let query = TextQuery {
+                    spans: italic.as_slice(),
+                    ..TextQuery::new(text, style)
+                };
+                if !text.trim().is_empty()
+                    && let Some(layout) = cx.layout_text_query(&query)
+                {
                     let bg = color(grid.colors.background);
-                    draw_text(
-                        scene,
-                        cx,
-                        m,
-                        text,
-                        run.style,
-                        rect.x,
-                        rect.y,
-                        cols,
-                        Some(bg),
-                    );
+                    draw_layout(scene, m, layout, run.style, rect.x, rect.y, cols, Some(bg));
                 }
             }
         }

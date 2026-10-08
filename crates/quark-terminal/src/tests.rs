@@ -83,6 +83,16 @@ fn sgr_sequences_style_runs() {
             r#"0+3"dim" faint 3+3"hid" fg=#111111 faint"#,
         ),
         ("\x1b[48;2;1;2;3m  \x1b[0m", r#"0+2"  " bg=#010203"#),
+        // Erasing with a background leaves cells that hold only a color.
+        (
+            "\x1b[48;2;1;2;3m\x1b[2X\x1b[2C\x1b[48;2;4;5;6m\x1b[2X",
+            r#"0+2"  " bg=#010203 2+2"  " bg=#040506"#,
+        ),
+        // A style reused after a plain cell, a combining mark, a link.
+        (
+            "\x1b[1mA\x1b[0mb\x1b[1mC\x1b[0me\u{301}\x1b]8;;http://a\x1b\\ln\x1b]8;;\x1b\\k",
+            r#"0+1"A" bold 1+1"b" 2+1"C" bold 3+1"e\u{301}" 4+2"ln" link 6+1"k""#,
+        ),
     ];
     for (input, expected) in cases {
         let mut t = term(20, 3);
@@ -642,5 +652,197 @@ proptest::proptest! {
         proptest::prop_assert!(range.start <= range.end && range.end <= text.len());
         proptest::prop_assert!(text.is_char_boundary(range.start));
         proptest::prop_assert!(text.is_char_boundary(range.end));
+    }
+}
+
+/// Everything a grid row draws, one line per row.
+fn dump(grid: &Grid) -> String {
+    grid.rows
+        .iter()
+        .map(|row| format!("{} {:?} {}\n", runs(row), row.selection, row.wrapped))
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+enum Op {
+    /// A line of these pieces.
+    Line(Vec<&'static str>),
+    /// Erase the line above and write this there instead.
+    Rewrite(&'static str),
+    /// Move the viewport.
+    Scroll(isize),
+    /// Change palette color 1, which the red pieces use.
+    Recolor(u8),
+}
+
+fn op() -> impl proptest::strategy::Strategy<Value = Op> {
+    use proptest::prelude::*;
+    const PIECES: &[&str] = &[
+        "plain text",
+        "\x1b[31mred\x1b[0m",
+        "\x1b[1;4mbold\x1b[0m",
+        "\x1b[34mred\x1b[0m",
+        "e\u{301}",
+        "\u{6f22}",
+        "\x1b]8;;http://a\x1b\\link\x1b]8;;\x1b\\",
+        "\x1b[41m\x1b[3X\x1b[0m",
+        "dup",
+    ];
+    prop_oneof![
+        4 => prop::collection::vec(prop::sample::select(PIECES), 0..3).prop_map(Op::Line),
+        1 => prop::sample::select(PIECES).prop_map(Op::Rewrite),
+        2 => (-6isize..6).prop_map(Op::Scroll),
+        1 => any::<u8>().prop_map(Op::Recolor),
+    ]
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    // Snapshots between writes and scrolls move rows they recognize
+    // rather than reading them again; the grid must still match one read
+    // from scratch.
+    #[test]
+    fn a_grid_kept_across_updates_matches_a_fresh_one(
+        ops in proptest::collection::vec(op(), 1..24),
+    ) {
+        let mut kept = term(12, 4);
+        let mut bytes = Vec::new();
+        for op in &ops {
+            let start = bytes.len();
+            match op {
+                Op::Line(pieces) => {
+                    bytes.extend(pieces.concat().bytes());
+                    bytes.extend(b"\r\n");
+                }
+                Op::Rewrite(piece) => {
+                    bytes.extend(format!("\x1b[A\x1b[2K{piece}\r\n").bytes());
+                }
+                Op::Recolor(v) => {
+                    bytes.extend(format!("\x1b]4;1;rgb:{v:02x}/40/80\x1b\\").bytes());
+                }
+                Op::Scroll(rows) => kept.vt_mut().scroll(Scroll::Delta(*rows)),
+            }
+            kept.feed(&bytes[start..]);
+            kept.refresh();
+        }
+        let mut fresh = term(12, 4);
+        fresh.feed(&bytes);
+        fresh.vt_mut().scroll(Scroll::Row(kept.scrollbar().offset as usize));
+        proptest::prop_assert_eq!(dump(kept.refresh()), dump(fresh.refresh()));
+    }
+}
+
+/// Release-mode time per phase of a terminal frame for each kind of
+/// change, on the fixture of terminal_demo's allocation budget tests (an
+/// 80x22 terminal after three screens of output and a prompt). Prints
+/// medians over fresh harnesses, then the per-cell cost of reading a full
+/// screen. Run with `cargo test --release -p quark-terminal --lib --
+/// --ignored --nocapture report_frame_timing`.
+#[test]
+#[ignore = "measurement, prints a report"]
+fn report_frame_timing() {
+    use std::time::{Duration, Instant};
+
+    use quark_app::testing::UiTestHarness;
+    use quark_app::{UiApp, UiContext, ViewContext};
+    use quark_ui::Action;
+    use quark_ui::element::AnyElement;
+
+    use crate::view::{TerminalEnv, terminal_view};
+    use crate::vt::timing;
+
+    struct Probe(TerminalState);
+
+    impl UiApp for Probe {
+        type Action = TerminalEvent;
+        type Message = ();
+
+        fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+            let (width, height) = cx.frame.size();
+            self.0.set_viewport(width, height);
+            let scale = cx.frame.scale_factor();
+            let text = cx.frame.text();
+            self.0
+                .prepare(&mut text.system, &mut text.layouts, scale, cx.theme);
+            let env = TerminalEnv {
+                focused: true,
+                accessible: false,
+            };
+            terminal_view(&mut self.0, cx.theme, env, Action::new)
+        }
+
+        fn update(&mut self, _event: TerminalEvent, _cx: &mut UiContext) {}
+    }
+
+    fn lines(seed: usize, count: usize) -> String {
+        (0..count)
+            .map(|n| {
+                let text = format!("output {seed}.{n} of a build step");
+                format!("\x1b[32m{n:04}\x1b[0m {text:<74}\r\n")
+            })
+            .collect()
+    }
+
+    fn median(mut v: Vec<Duration>) -> Duration {
+        v.sort();
+        v[v.len() / 2]
+    }
+
+    const RUNS: usize = 41;
+    let cases: [(&str, String); 4] = [
+        ("typed char", "o".into()),
+        ("scrolled line", "\r\nfresh output line".into()),
+        ("30-line redraw", format!("\r\n{}", lines(9, 30))),
+        ("cursor move", "\x1b[22;2H".into()),
+    ];
+    for (name, input) in &cases {
+        let mut frames = Vec::new();
+        let mut scopes: Vec<Vec<(Duration, u32)>> = vec![Vec::new(); timing::SCOPES.len()];
+        let mut costs = None;
+        for _ in 0..RUNS {
+            let mut ui = UiTestHarness::new(
+                Probe(TerminalState::new(
+                    "probe",
+                    quark_ui::FocusId::from_key("probe"),
+                )),
+                (640.0, 400.0),
+                1.0,
+            );
+            ui.set_accessibility_active(false);
+            for seed in 0..3 {
+                ui.app_mut().0.feed(lines(seed, 30).as_bytes());
+                ui.frame();
+            }
+            ui.app_mut().0.feed(b"$ ech");
+            ui.frame();
+            assert_eq!(ui.app().0.size(), (80, 22));
+
+            ui.app_mut().0.feed(input.as_bytes());
+            timing::take();
+            let started = Instant::now();
+            ui.frame();
+            frames.push(started.elapsed());
+            for (i, (_, d, n)) in timing::take().into_iter().enumerate() {
+                scopes[i].push((d, n));
+            }
+            if costs.is_none() && *name == "30-line redraw" {
+                costs = Some(ui.app_mut().0.vt_mut().cell_read_costs(2000));
+            }
+        }
+        eprintln!("{name}: frame {:?}", median(frames));
+        for (scope, samples) in timing::SCOPES.iter().zip(scopes) {
+            let n = samples[0].1;
+            let d = median(samples.into_iter().map(|(d, _)| d).collect());
+            if n > 0 {
+                eprintln!("  {scope:?} x{n}: {d:?}");
+            }
+        }
+        if let Some(costs) = costs {
+            eprintln!("  per full screen of cells (22 rows):");
+            for (step, d) in costs {
+                eprintln!("    {step}: {d:?}");
+            }
+        }
     }
 }

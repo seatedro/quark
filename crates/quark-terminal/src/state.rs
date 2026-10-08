@@ -17,6 +17,8 @@ use winit::keyboard::{ModifiersState, NamedKey};
 use crate::grid::{Grid, Rgb};
 use crate::input::{self, KeyPress};
 use crate::pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
+use crate::view::RowText;
+use crate::vt::timed;
 use crate::vt::{
     KeyAction, KeyInput, Mode, Mods, MouseAction, MouseButton, MouseGeometry, Scroll, Terminal,
     UnsafePaste,
@@ -241,6 +243,8 @@ pub struct TerminalState {
     nonce: u64,
     /// The rows block's bounds in the window as of the last frame.
     bounds: Rc<Cell<Rect>>,
+    /// Text storage of the view's rows.
+    row_text: Rc<std::cell::RefCell<RowText>>,
     /// The rows' drag start for the view's `on_event` (by address), kept so
     /// a rebuilt frame registers it without allocating.
     drag_start: Option<(usize, DragStart)>,
@@ -300,6 +304,7 @@ impl TerminalState {
             pending_scroll: false,
             nonce: 0,
             bounds: Rc::default(),
+            row_text: Rc::default(),
             drag_start: None,
             drag: None,
             last_click: None,
@@ -941,6 +946,7 @@ impl TerminalState {
         scale: f32,
         theme: &Theme,
     ) {
+        timed!(Prepare);
         // Remeasure when the scale or the fonts changed (a new monospace
         // family has its own advance), and resize to match.
         let key = (scale.to_bits(), Some(text.font_epoch()));
@@ -988,7 +994,7 @@ impl TerminalState {
             self.flush();
             self.dirty = true;
         }
-        self.sync_scroll(m);
+        timed!(SyncScroll, self.sync_scroll(m));
         if !self.dirty && self.frame.is_some() {
             return;
         }
@@ -996,6 +1002,8 @@ impl TerminalState {
         // The last frame's views of the grid are dropped by now, so this
         // updates it in place; a copy an app still holds is cloned first.
         let changes = self.vt.snapshot(Rc::make_mut(&mut self.grid));
+        timed!(Frame);
+
         let sb = self.vt.scrollbar();
         let leftover = (self.viewport.1 - f32::from(rows) * m.cell_h).max(0.0);
         let content_h = sb.total as f32 * m.cell_h + leftover;
@@ -1012,6 +1020,7 @@ impl TerminalState {
             return;
         }
         self.revision += 1;
+        self.row_text.borrow_mut().retain(&self.grid);
         self.frame = Some(Frame {
             id: self.id,
             focus: self.focus,
@@ -1086,6 +1095,10 @@ impl TerminalState {
 
     pub(crate) fn shared_grid(&self) -> Rc<Grid> {
         self.grid.clone()
+    }
+
+    pub(crate) fn row_text(&self) -> Rc<std::cell::RefCell<RowText>> {
+        self.row_text.clone()
     }
 
     pub(crate) fn bounds_cell(&self) -> Rc<Cell<Rect>> {

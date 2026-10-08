@@ -508,6 +508,49 @@ mod tests {
         assert_eq!(ui.accessibility_tree().trim_end(), expected);
     }
 
+    /// Each painted text and the grid row it sits on.
+    fn painted_rows(ui: &UiTestHarness<Demo>) -> Vec<(u16, String)> {
+        let node = ui.find(By::role(Role::Terminal));
+        let rows = ui.app().term.size().1;
+        let cell_h = node.bounds.height / f32::from(rows);
+        ui.painted_texts()
+            .into_iter()
+            .map(|run| {
+                let row = ((run.bounds.y - node.bounds.y) / cell_h).round() as u16;
+                (row, run.text)
+            })
+            .collect()
+    }
+
+    /// Rows that output scrolls replay their drawing where they land, and
+    /// repeated rows each paint: what is painted on each row is that row's
+    /// text.
+    #[test]
+    fn scrolled_and_repeated_rows_paint_on_their_own_lines() {
+        let mut ui = harness(None);
+        for chunk in [
+            lines(0, 10),
+            "same\r\nsame\r\n\r\nsame\r\n".into(),
+            lines(1, 15),
+            "\x1b[2J\x1b[Hsame\r\nsame".into(),
+        ] {
+            ui.app_mut().term.feed(chunk.as_bytes());
+            ui.frame();
+            let grid = ui.app().term.grid();
+            let expected: Vec<(u16, String)> = (0u16..)
+                .zip(&grid.rows)
+                .flat_map(|(y, row)| {
+                    row.runs
+                        .iter()
+                        .map(|run| row.run_text(run))
+                        .filter(|text| !text.trim().is_empty())
+                        .map(move |text| (y, text.to_owned()))
+                })
+                .collect();
+            assert_eq!(painted_rows(&ui), expected, "after {chunk:?}");
+        }
+    }
+
     /// With no screen reader, preparing a changed frame allocates nothing
     /// once the rows have held lines as long: the grid updates in place and
     /// no screen text is built.
@@ -548,27 +591,32 @@ mod tests {
     /// Whole-frame allocations for each kind of change, after the warmup
     /// above, and again after idling past the layout cache's 240-frame
     /// horizon, when the runner's periodic trim has evicted the warmup's
-    /// layouts and misses refill their storage. The budgets are the counts
-    /// measured plus a little slack; lower them as reuse improves.
+    /// layouts. Rows lay out into text blocks of their own, so idling
+    /// changes nothing. A typed character and a new line each lay out one
+    /// row whose block has no released layout yet (the prompt's earlier
+    /// one is still held by the recording it replaced); thirty new lines
+    /// lay out into released ones and allocate only the redrawn rows'
+    /// scene chunks. The budgets are the counts measured plus a little
+    /// slack; lower them as reuse improves.
     #[test]
     fn a_changed_frame_stays_within_its_allocation_budget() {
         // (case, input, text it shows, budget warm, budget after idling)
-        // Measured: 31/1, 34/3, 882/6, 0/0.
+        // Measured: 30/30, 35/35, 42/42, 0/0.
         let cases: &[(&str, String, &str, u64, u64)] = &[
-            ("a typed character", "o".into(), "$ echo", 33, 2),
+            ("a typed character", "o".into(), "$ echo", 32, 32),
             (
                 "one new line",
                 "\r\nfresh output line".into(),
                 "fresh output line",
-                36,
-                4,
+                37,
+                37,
             ),
             (
                 "thirty new lines",
                 format!("\r\n{}", lines(9, 30)),
                 "output 9.29 of a build step",
-                900,
-                8,
+                45,
+                45,
             ),
             // Onto a blank cell, so no glyph under the cursor needs shaping.
             ("a cursor move", "\x1b[22;2H".into(), "$ ech", 0, 0),
