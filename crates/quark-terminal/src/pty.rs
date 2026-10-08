@@ -5,6 +5,12 @@
 //! queue that a writer thread feeds to the program, so the UI never waits
 //! on a program that is busy writing instead of reading. Resizes go
 //! through [`Pty`] on the UI thread.
+//!
+//! Closing a [`Pty`] returns at once and its threads end soon after, even
+//! when the program neither reads nor writes: on Unix they poll the master
+//! together with a pipe the [`Pty`] closes, and a program that ignores
+//! SIGHUP is killed shortly after; on Windows the program is
+//! terminated, which closes the pseudoconsole and with it both pipes.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -117,6 +123,12 @@ const BUFFER_LEN: usize = 64 * 1024;
 pub const INPUT_QUEUE: usize = 1024 * 1024;
 /// Bytes the writer thread takes from the queue per write.
 const WRITE_CHUNK: usize = 64 * 1024;
+
+/// How long a program has to exit after its [`Pty`] is dropped before it
+/// is killed (Unix; Windows terminates it outright). About what
+/// `portable-pty` allows between SIGHUP and SIGKILL in its own `kill`.
+#[cfg(unix)]
+const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Output passed from the reader thread to the UI thread in a fixed set of
 /// buffers, so reading allocates nothing after spawn.
@@ -366,6 +378,207 @@ impl Outbox {
     }
 }
 
+/// The PTY master on Unix as one thread sees it: read and written without
+/// blocking, waiting in `poll` on the master and on a pipe that the [`Pty`]
+/// closes, so a read or write the program would hold up forever ends when
+/// the [`Pty`] goes.
+#[cfg(unix)]
+struct Transport {
+    file: std::fs::File,
+    /// Readable (at end of file) once the [`Pty`] closed the other end.
+    closed: Arc<io::PipeReader>,
+}
+
+#[cfg(unix)]
+impl Transport {
+    /// A copy of `master`, which the caller keeps open meanwhile.
+    fn new(master: std::os::fd::RawFd, closed: Arc<io::PipeReader>) -> io::Result<Self> {
+        // SAFETY: the caller's MasterPty owns `master` and keeps it open
+        // through this call; the copy is ours.
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(master) }.try_clone_to_owned()?;
+        Ok(Self {
+            file: fd.into(),
+            closed,
+        })
+    }
+
+    /// Waits until the master is ready for `events`, or hung up. False once
+    /// the [`Pty`] is closed.
+    fn wait(&self, events: libc::c_short) -> io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        let mut fds = [
+            libc::pollfd {
+                fd: self.file.as_raw_fd(),
+                events,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.closed.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        loop {
+            // SAFETY: `fds` holds two initialized pollfds.
+            if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } >= 0 {
+                break;
+            }
+            let e = io::Error::last_os_error();
+            if e.kind() != io::ErrorKind::Interrupted {
+                return Err(e);
+            }
+        }
+        if fds[1].revents != 0 {
+            return Ok(false);
+        }
+        if fds[0].revents & libc::POLLNVAL != 0 {
+            // Would spin: the read or write after it would not block.
+            return Err(io::Error::other("poll does not support the pty"));
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(unix)]
+impl Read for Transport {
+    /// End of file once the [`Pty`] is closed.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if !self.wait(libc::POLLIN)? {
+                return Ok(0);
+            }
+            match (&self.file).read(buf) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Write for Transport {
+    /// Fails once the [`Pty`] is closed.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            if !self.wait(libc::POLLOUT)? {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            match (&self.file).write(buf) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    // SAFETY: plain fcntl calls on an open descriptor.
+    let ok = unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The child's life on Unix, kept apart from the transport: the waiter
+/// thread marks the exit before it reaps the child, and once the [`Pty`]
+/// is dropped the reader thread gives a program that ignores SIGHUP
+/// [`HANGUP_GRACE`] before it sends SIGKILL.
+#[cfg(unix)]
+struct Reap {
+    pid: Option<u32>,
+    state: Mutex<ReapState>,
+    changed: Condvar,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ReapState {
+    exited: bool,
+    dropped: bool,
+}
+
+#[cfg(unix)]
+impl Reap {
+    fn new(pid: Option<u32>) -> Self {
+        Self {
+            pid,
+            state: Mutex::default(),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn update(&self, f: impl FnOnce(&mut ReapState)) {
+        f(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()));
+        self.changed.notify_all();
+    }
+
+    /// The waiter thread: waits for the exit, marks it, then reaps.
+    fn wait(&self, child: &mut (dyn Child + Send + Sync)) -> Option<u32> {
+        if let Some(pid) = self.pid {
+            loop {
+                // SAFETY: an all-zero siginfo_t is valid for waitid to fill.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // WNOWAIT leaves the child unreaped, so its pid is not reused
+                // before `exited` is set (see `kill_once_dropped`).
+                // SAFETY: `info` is a valid out pointer.
+                let result = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        pid as libc::id_t,
+                        &mut info,
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                };
+                if result == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    break;
+                }
+            }
+        }
+        self.update(|state| state.exited = true);
+        exit_code(child)
+    }
+
+    /// Returns once the child exited; if the [`Pty`] is dropped first,
+    /// kills the child when it has not exited [`HANGUP_GRACE`] later.
+    fn kill_once_dropped(&self) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self
+            .changed
+            .wait_while(state, |s| !s.exited && !s.dropped)
+            .unwrap_or_else(|e| e.into_inner());
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, HANGUP_GRACE, |s| !s.exited)
+            .unwrap_or_else(|e| e.into_inner());
+        if !state.exited
+            && let Some(pid) = self.pid
+        {
+            // Still unreaped while `exited` is false and the lock is held,
+            // so the pid is the child's.
+            // SAFETY: kill has no memory effects.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+}
+
 /// A running child on a PTY. Dropping it kills the child.
 pub struct Pty {
     /// `None` once the child exited on Windows (see [`Pty::spawn`]).
@@ -374,6 +587,12 @@ pub struct Pty {
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     geometry: PtyGeometry,
     inbox: Arc<Inbox>,
+    #[cfg(unix)]
+    reap: Arc<Reap>,
+    /// Dropped with the Pty, which stops the reader and writer threads'
+    /// reads and writes (see [`Transport`]).
+    #[cfg(unix)]
+    _close: io::PipeWriter,
 }
 
 impl std::fmt::Debug for Pty {
@@ -412,15 +631,35 @@ impl Pty {
         // after it exits, so the reader would never see end of file.
         drop(pair.slave);
         let killer = child.clone_killer();
-        let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-        let mut writer = pair.master.take_writer().map_err(io::Error::other)?;
+        #[cfg(unix)]
+        let (mut reader, mut writer, close, reap) = {
+            let fd = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| io::Error::other("the pty has no file descriptor"))?;
+            // On the open file, so for every copy of the master.
+            set_nonblocking(fd)?;
+            let (closed, close) = io::pipe()?;
+            let closed = Arc::new(closed);
+            (
+                Transport::new(fd, Arc::clone(&closed))?,
+                Transport::new(fd, closed)?,
+                close,
+                Arc::new(Reap::new(child.process_id())),
+            )
+        };
+        #[cfg(windows)]
+        let (mut reader, mut writer) = (
+            pair.master.try_clone_reader().map_err(io::Error::other)?,
+            pair.master.take_writer().map_err(io::Error::other)?,
+        );
         let inbox = Arc::new(Inbox::new(on_ready));
         let shared = Arc::clone(&inbox);
         let outbox = Arc::new(Outbox::new());
         {
             let (outbox, inbox) = (Arc::clone(&outbox), Arc::clone(&inbox));
-            // Blocks in a write while the program is not reading; dropping
-            // the Pty kills the program, which fails the write and ends it.
+            // Blocks in a write while the program is not reading, until the
+            // Pty closes (Unix) or its program is terminated (Windows).
             std::thread::Builder::new()
                 .name("quark-terminal-write".into())
                 .spawn(move || outbox.run(&mut writer, &inbox))?;
@@ -428,9 +667,14 @@ impl Pty {
         let master = Arc::new(Mutex::new(Some(pair.master)));
         #[cfg(windows)]
         let console = Arc::clone(&master);
+        #[cfg(unix)]
+        let waiting = Arc::clone(&reap);
         let waiter = std::thread::Builder::new()
             .name("quark-terminal-wait".into())
             .spawn(move || {
+                #[cfg(unix)]
+                let code = waiting.wait(child.as_mut());
+                #[cfg(windows)]
                 let code = exit_code(child.as_mut());
                 // ConPTY keeps its output pipe open after the child exits,
                 // until the pseudoconsole closes, so the reader would never
@@ -440,10 +684,18 @@ impl Pty {
                 drop(console.lock().unwrap_or_else(|e| e.into_inner()).take());
                 code
             })?;
+        #[cfg(unix)]
+        let reaping = Arc::clone(&reap);
         std::thread::Builder::new()
             .name("quark-terminal-pty".into())
             .spawn(move || {
                 shared.pump(&mut reader);
+                // Our copy of the master closes before any wait for the
+                // child: once all are closed, the program's terminal hangs
+                // up.
+                drop(reader);
+                #[cfg(unix)]
+                reaping.kill_once_dropped();
                 shared.finish(waiter.join().ok().flatten());
             })?;
         Ok(Self {
@@ -452,6 +704,10 @@ impl Pty {
             killer,
             geometry,
             inbox,
+            #[cfg(unix)]
+            reap,
+            #[cfg(unix)]
+            _close: close,
         })
     }
 
@@ -504,6 +760,10 @@ impl Drop for Pty {
     fn drop(&mut self) {
         self.inbox.close();
         self.outbox.close();
+        #[cfg(unix)]
+        self.reap.update(|state| state.dropped = true);
+        // SIGHUP on Unix (then `_close` drops, ending the transport);
+        // TerminateProcess on Windows.
         let _ = self.killer.kill();
     }
 }
@@ -754,6 +1014,95 @@ mod tests {
         let started = std::time::Instant::now();
         drop(pty);
         assert!(started.elapsed() < Duration::from_secs(2), "closing waited");
+    }
+
+    /// Polls `done` until it holds or `secs` pass.
+    #[cfg(unix)]
+    fn eventually(secs: u64, mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        done()
+    }
+
+    /// Dropping a PTY whose program has stopped reading, with input queued,
+    /// returns at once and closes the master: a program that ignores
+    /// SIGHUP still sees its terminal hang up (its read ends), and every
+    /// worker thread lets go of the PTY.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_pty_hangs_up_a_program_that_stopped_reading() {
+        let marker = std::env::temp_dir().join(format!("quark-pty-hangup-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        // The rest runs in the background so that killing the shell, which
+        // ignores SIGHUP too, does not stop it. It reads nothing for a
+        // while, so the queued input fills the terminal and the writer
+        // blocks. An asynchronous list reads /dev/null unless given stdin.
+        let mut pty = raw_sh(&format!(
+            "trap '' HUP; exec 3<&0; \
+             {{ sleep 0.2; cat <&3 >/dev/null; echo hung up >'{}'; }} & printf R; wait",
+            marker.display()
+        ));
+        let mut ready = false;
+        assert!(eventually(10, || {
+            thread::park_timeout(Duration::from_millis(10));
+            pty.read(|event| ready |= matches!(event, PtyEvent::Output(_)));
+            ready
+        }));
+        let paste = input(INPUT_QUEUE);
+        assert_eq!(pty.write(&paste).unwrap(), INPUT_QUEUE);
+        let inbox = pty.inbox();
+        let started = std::time::Instant::now();
+        drop(pty);
+        assert!(started.elapsed() < Duration::from_secs(1), "closing waited");
+        assert!(
+            eventually(10, || marker.exists()),
+            "the program's terminal never hung up"
+        );
+        assert!(
+            eventually(10, || Arc::strong_count(&inbox) == 1),
+            "worker threads still hold the pty"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    /// Dropping a PTY kills a program that ignores SIGHUP, and reaps it.
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_pty_kills_a_program_that_ignores_hangup() {
+        let pty = raw_sh("trap '' HUP; printf '%s;' $$; exec sleep 30");
+        let mut out = Vec::new();
+        assert!(eventually(10, || {
+            thread::park_timeout(Duration::from_millis(10));
+            pty.read(|event| {
+                if let PtyEvent::Output(bytes) = event {
+                    out.extend_from_slice(bytes);
+                }
+            });
+            out.ends_with(b";")
+        }));
+        let pid: libc::pid_t = std::str::from_utf8(&out[..out.len() - 1])
+            .unwrap()
+            .parse()
+            .unwrap();
+        let inbox = pty.inbox();
+        let started = std::time::Instant::now();
+        drop(pty);
+        assert!(started.elapsed() < Duration::from_secs(1), "closing waited");
+        // SAFETY: signal 0 only checks that the process exists; a zombie
+        // still does, so this waits for it to be reaped too.
+        assert!(
+            eventually(10, || unsafe { libc::kill(pid, 0) } != 0),
+            "the program outlived its pty"
+        );
+        assert!(
+            eventually(10, || Arc::strong_count(&inbox) == 1),
+            "worker threads still hold the pty"
+        );
     }
 
     /// A reader waiting for a buffer the UI never returns stops when the

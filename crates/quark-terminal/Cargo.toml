@@ -19,6 +19,11 @@ winit.workspace = true
 # Unix PTYs and Windows ConPTY behind one interface.
 portable-pty = "0.9"
 
+[target.'cfg(unix)'.dependencies]
+# Polling the PTY so closing it stops blocked reads and writes, and killing
+# a program that ignores SIGHUP without racing its reaping.
+libc = "0.2"
+
 [features]
 default = ["zig-build"]
 # Build libghostty-vt from the pinned Ghostty source with Zig 0.16 (see

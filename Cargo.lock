@@ -3088,6 +3088,7 @@ name = "quark-terminal"
 version = "0.1.0"
 dependencies = [
  "accesskit",
+ "libc",
  "portable-pty",
  "proptest",
  "quark",
