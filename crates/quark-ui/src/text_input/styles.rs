@@ -502,6 +502,88 @@ fn escape_html(out: &mut String, s: &str) {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const LEN: usize = 3;
+    const INSERT: usize = 2;
+    const ASCII: &str = "aaaaa";
+
+    /// Canonical runs for one style per byte (0 is plain), the model the
+    /// list must match.
+    fn runs(styles: &[u8]) -> Vec<StyleSpan> {
+        // Reserved up front so no push reallocates under CBMC.
+        let mut out: Vec<StyleSpan> = Vec::with_capacity(LEN + INSERT);
+        for (i, &style) in styles.iter().enumerate() {
+            match out.last_mut() {
+                _ if style == 0 => {}
+                Some(last) if last.range.end == i && last.format.style.0 == style => {
+                    last.range.end = i + 1;
+                }
+                _ => out.push(StyleSpan::new(i..i + 1, InlineStyle(style))),
+            }
+        }
+        out
+    }
+
+    fn style_at(spans: &[StyleSpan], at: usize) -> u8 {
+        spans
+            .iter()
+            .find(|s| s.range.contains(&at))
+            .map_or(0, |s| s.format.style.0)
+    }
+
+    /// Plain, bold, or italic.
+    fn any_styles<const N: usize>() -> [u8; N] {
+        let styles: [u8; N] = kani::any();
+        for style in styles {
+            kani::assume(style <= 2);
+        }
+        styles
+    }
+
+    /// Replacing any bytes of any formatted three-byte text with up to two
+    /// formatted bytes leaves a canonical list that gives every byte the
+    /// format it had before (or was inserted with), and returns the
+    /// removed bytes' runs.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn splice_keeps_every_byte_format_and_the_list_canonical() {
+        let old = any_styles::<LEN>();
+        let inserted = any_styles::<INSERT>();
+        let at: usize = kani::any();
+        let removed_len: usize = kani::any();
+        let inserted_len: usize = kani::any();
+        kani::assume(at <= LEN && removed_len <= LEN - at && inserted_len <= INSERT);
+        let mut list = StyleList(runs(&old));
+
+        let removed = list.splice(
+            at,
+            removed_len,
+            &runs(&inserted[..inserted_len]),
+            inserted_len,
+        );
+
+        let len = LEN - removed_len + inserted_len;
+        assert!(verify(&ASCII[..len], list.as_slice()).is_ok());
+        for i in 0..len {
+            let expected = if i < at {
+                old[i]
+            } else if i < at + inserted_len {
+                inserted[i - at]
+            } else {
+                old[i - inserted_len + removed_len]
+            };
+            assert!(style_at(list.as_slice(), i) == expected);
+        }
+        assert!(verify(&ASCII[..removed_len], &removed).is_ok());
+        for i in 0..removed_len {
+            assert!(style_at(&removed, i) == old[at + i]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
