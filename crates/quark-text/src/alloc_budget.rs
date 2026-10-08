@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::cache::LayoutCache;
 use crate::fonts::FontSettings;
 use crate::layout::{TextQuery, TextSpan, TextStyle};
-use crate::system::{TextSystem, test_system};
+use crate::system::TextSystem;
 
 struct Counting;
 
@@ -102,6 +102,15 @@ fn profile<R>(f: impl FnOnce() -> R) -> (R, Vec<(String, u64)>) {
     let mut sites: Vec<_> = SITES.with(|sites| sites.borrow_mut().drain().collect());
     sites.sort_by_key(|site| std::cmp::Reverse(site.1));
     (result, sites)
+}
+
+/// A text system no other test has used. The shared `test_system()` keeps
+/// what earlier tests left in cosmic-text's scratch pools (visual lines
+/// whose range vectors have whatever capacity those tests grew, reused in
+/// an order that rotates with every layout), so a budget measured on it
+/// depends on which tests ran before.
+fn fresh_system() -> TextSystem {
+    TextSystem::vendored_only(&FontSettings::default())
 }
 
 /// Warms cosmic-text's per-codepoint font lookups for the ASCII inputs.
@@ -282,7 +291,7 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             20,
         ),
     ];
-    assert_budgets(&mut test_system(), cases);
+    assert_budgets(&mut fresh_system(), cases);
 }
 
 // With ligatures off every attribute set carries a feature vector, so
@@ -322,7 +331,7 @@ fn fresh_text_with_ligatures_off_copies_features_per_span_only() {
 // measured frames; the evicted layouts must come back as storage.
 #[test]
 fn stream_past_cache_capacity_refills_evicted_layouts() {
-    let mut system = test_system();
+    let mut system = fresh_system();
     let rows: Vec<Input> = (0..96).map(word_row).collect();
     let mut cache = LayoutCache::new(240).with_max_entries(8);
     cache.begin_frame();
@@ -349,7 +358,7 @@ fn stream_past_cache_capacity_refills_evicted_layouts() {
 // its holder drops it, the next miss must reuse it.
 #[test]
 fn layout_released_after_eviction_is_refilled() {
-    let mut system = test_system();
+    let mut system = fresh_system();
     // The one pooled layout, with an anagram of the measured text so the
     // fonts' codepoint lookups are warm too.
     let mut cache = warmed_cache(&mut system, &[ui("eagle brisk".into())]);
@@ -373,7 +382,7 @@ fn layout_released_after_eviction_is_refilled() {
 // goes to a longer word than it last held.
 #[test]
 fn block_edits_within_warmed_capacity_copy_no_text() {
-    let mut system = test_system();
+    let mut system = fresh_system();
     let style = TextStyle::new(14.0);
     let mut block = crate::block::TextBlock::new();
     let edits = [
@@ -409,7 +418,7 @@ fn block_edits_within_warmed_capacity_copy_no_text() {
 // another block released, rather than allocating a layout and a source.
 #[test]
 fn a_block_lays_out_into_storage_another_block_gave() {
-    let mut system = test_system();
+    let mut system = fresh_system();
     let style = TextStyle::new(14.0);
     let layout = |block: &mut crate::block::TextBlock, system: &mut TextSystem, text: &str| {
         block.set_text(text);
