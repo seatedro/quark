@@ -485,25 +485,30 @@ impl ThemeRegistry {
         paths.sort();
         let mut errors = Vec::new();
         for path in paths {
-            let parsed = std::fs::read_to_string(&path)
-                .map_err(|error| ThemeError {
-                    file: None,
-                    issues: vec![ThemeIssue {
-                        path: String::new(),
-                        message: format!("could not read: {error}"),
-                    }],
-                })
-                .and_then(|json| ThemeFamily::from_json(&json));
-            match parsed {
+            match load_file(&path) {
                 Ok(family) => self.insert(family),
-                Err(mut error) => {
-                    error.file = Some(path);
-                    errors.push(error);
-                }
+                Err(error) => errors.push(error),
             }
         }
         errors
     }
+}
+
+/// Read and parse the theme file at `path`; an error names the file.
+pub(super) fn load_file(path: &Path) -> Result<ThemeFamily, ThemeError> {
+    std::fs::read_to_string(path)
+        .map_err(|error| ThemeError {
+            file: None,
+            issues: vec![ThemeIssue {
+                path: String::new(),
+                message: format!("could not read: {error}"),
+            }],
+        })
+        .and_then(|json| ThemeFamily::from_json(&json))
+        .map_err(|mut error| {
+            error.file = Some(path.to_owned());
+            error
+        })
 }
 
 #[cfg(test)]

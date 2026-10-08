@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 pub use quark::Color;
 
 mod file;
+mod watch;
 
 pub use file::{ThemeError, ThemeFamily, ThemeIssue, ThemeRegistry, parse_color};
+pub use watch::{ThemeReload, ThemeWatcher};
 
 /// A struct of named tokens of one type, with lookup by name for theme
 /// files.
