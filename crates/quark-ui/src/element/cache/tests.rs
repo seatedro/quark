@@ -82,6 +82,38 @@ impl Window {
     fn paint(&mut self, root: AnyElement) -> Frame {
         self.paint_with(root, true)
     }
+
+    /// Paint `root` into `last`'s buffers, as a host does every frame, so
+    /// what a frame allocates is the elements' and the cache's own.
+    fn repaint(&mut self, mut root: AnyElement, last: Frame) -> Frame {
+        let Frame {
+            mut scene,
+            input,
+            mut accessibility,
+        } = last;
+        scene.primitives.clear();
+        accessibility.reset(400.0, 300.0);
+        self.layouts.begin_frame();
+        let mut cx = ElementContext::new(
+            &self.theme,
+            self.scale,
+            &mut self.text,
+            &mut self.layouts,
+            self.pointer,
+            &self.signals,
+        )
+        .with_accessibility(self.accessibility)
+        .with_element_cache(&mut self.cache)
+        .with_input_frame(input);
+        cx.semantic.reset(400.0, 300.0);
+        cx.accessibility = accessibility;
+        render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
+        Frame {
+            scene,
+            input: cx.take_input_frame(),
+            accessibility: std::mem::take(&mut cx.accessibility),
+        }
+    }
 }
 
 impl Frame {
@@ -311,10 +343,10 @@ fn scroller(handle: &ScrollHandle) -> AnyElement {
 }
 
 impl Frame {
-    /// Top edge of the rect filled with `color`.
-    fn top_of(&self, color: Color) -> Option<f32> {
+    /// The rect filled with `color`.
+    fn rect_of(&self, color: Color) -> Option<Rect> {
         self.scene.primitives.iter().find_map(|p| match p {
-            quark_render::Primitive::RoundedRect(r) if r.color == color => Some(r.rect.y),
+            quark_render::Primitive::RoundedRect(r) if r.color == color => Some(r.rect),
             _ => None,
         })
     }
@@ -336,16 +368,112 @@ fn a_moved_scroll_handle_repaints_its_cached_subtree() {
         scroll(&handle);
         let frame = window.paint(scroller(&handle));
         assert_eq!(
-            frame.top_of(Color::rgba(3, 0, 0, 255)),
+            frame.rect_of(Color::rgba(3, 0, 0, 255)).map(|r| r.y),
             Some(0.0),
             "{name}: row 3 at the top"
         );
     }
 }
 
+/// A label in a cached boundary, followed by a `BUTTON` swatch: the
+/// swatch sits where the boundary's measured width ends.
+fn label_then_swatch() -> AnyElement {
+    div()
+        .flex_row()
+        .child(cached("label", 1, || text("Hello, wide world").size(14.0)))
+        .child(div().w(10.0).h(10.0).bg(BUTTON))
+        .into_any()
+}
+
+// Catches replaying geometry shaped with the old fonts: a replay looks up
+// no text, so nothing but the cache's font dependency notices the change.
+#[test]
+fn a_font_change_lays_out_a_cached_boundary_again() {
+    let inter = quark_text::FontSettings {
+        ui_family: "Inter".into(),
+        ..Default::default()
+    };
+    let mut window = Window::new();
+    let geist = window.paint(label_then_swatch()).rect_of(BUTTON);
+    window.text.set_font_settings(&inter);
+    let changed = window.paint(label_then_swatch()).rect_of(BUTTON);
+
+    let mut fresh = Window::new();
+    fresh.text.set_font_settings(&inter);
+    let expected = fresh.paint(label_then_swatch()).rect_of(BUTTON);
+    assert_ne!(
+        expected, geist,
+        "the two fonts set the label at different widths"
+    );
+    assert_eq!(changed, expected);
+}
+
 // ---------------------------------------------------------------------------
 // Frame budget: the regression guard for per-frame waste
 // ---------------------------------------------------------------------------
+
+/// A cached, clickable 100x30 box whose canvas paints `color`, under
+/// `key`. The boundary is the window's root and sized like a terminal
+/// row, so layout comes from Taffy's caches and what a rebuild allocates
+/// is the element tree's and the cache's own.
+fn swatch(key: u64, color: Color, action: &Action) -> AnyElement {
+    let action = action.clone();
+    let hash = inputs_hash(&(color.r, color.g, color.b, color.a));
+    cached(key, hash, move || {
+        div().w(100.0).h(30.0).on_click(action).child(
+            canvas(move |bounds, scene, _| {
+                scene.rounded_rect(quark_render::RoundedRectPrimitive::uniform(
+                    bounds, 0.0, color,
+                ));
+            })
+            .w(100.0)
+            .h(30.0),
+        )
+    })
+    .w(100.0)
+    .h(30.0)
+    .into_any()
+}
+
+// Catches per-rebuild bookkeeping allocations: the recorded handler
+// columns, the boundary's live state, and the canvas closure.
+#[test]
+fn rebuilding_a_boundary_with_new_content_allocates_nothing() {
+    let mut window = Window::new();
+    window.accessibility = false;
+    let action = Action::from(Pressed(1));
+    let unseen = Color::rgba(1, 2, 3, 255);
+    let mut frame = window.paint(swatch(0, BUTTON, &action));
+    frame = window.repaint(swatch(0, HOVER, &action), frame);
+
+    let (frame, allocated) =
+        test_alloc::count(|| window.repaint(swatch(0, unseen, &action), frame));
+
+    assert_eq!(frame.fills(), [unseen]);
+    assert_eq!(allocated, 0);
+    assert_eq!(frame.click(10.0, 10.0), vec![Pressed(1)]);
+}
+
+// Catches a new entry allocating fresh buffers while evicted rows' paint
+// records and measure memos sit unused: a boundary keyed by its content
+// gets a new key whenever the content changes.
+#[test]
+fn a_boundary_under_a_new_key_reuses_an_evicted_rows_buffers() {
+    let mut window = Window::new();
+    window.accessibility = false;
+    let action = Action::from(Pressed(1));
+    let mut frame = window.paint(swatch(0, BUTTON, &action));
+    for key in 1..=EVICT_AFTER_PASSES + 2 {
+        frame = window.repaint(swatch(key, BUTTON, &action), frame);
+    }
+    let unseen = EVICT_AFTER_PASSES + 3;
+
+    let (frame, allocated) =
+        test_alloc::count(|| window.repaint(swatch(unseen, HOVER, &action), frame));
+
+    assert_eq!(frame.fills(), [HOVER]);
+    assert_eq!(allocated, 0);
+}
 
 const ROWS: usize = 2_000;
 

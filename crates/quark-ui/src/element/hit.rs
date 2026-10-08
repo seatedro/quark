@@ -11,22 +11,32 @@ pub type Bounds = Rect;
 // ---------------------------------------------------------------------------
 
 /// Click callback. Stored as `Rc<Fn>` so it can be cloned and invoked
-/// repeatedly.
+/// repeatedly; a plain action is kept as itself, so `on_click(action)`
+/// registers without allocating a closure every frame.
 #[derive(Clone)]
-pub struct ClickHandler(Rc<dyn Fn(ClickEvent) -> Vec<Action>>);
+pub struct ClickHandler(Click);
+
+#[derive(Clone)]
+enum Click {
+    Action(Action),
+    Fn(Rc<dyn Fn(ClickEvent) -> Vec<Action>>),
+}
 
 impl ClickHandler {
     pub fn new(f: impl Fn(ClickEvent) -> Vec<Action> + 'static) -> Self {
-        Self(Rc::new(f))
+        Self(Click::Fn(Rc::new(f)))
     }
 
     /// Emit `action` on every click.
     pub fn from_action(action: Action) -> Self {
-        Self::new(move |_| vec![action.clone()])
+        Self(Click::Action(action))
     }
 
     pub fn invoke(&self, event: ClickEvent) -> Vec<Action> {
-        (self.0)(event)
+        match &self.0 {
+            Click::Action(action) => vec![action.clone()],
+            Click::Fn(f) => f(event),
+        }
     }
 }
 

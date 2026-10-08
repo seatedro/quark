@@ -7,27 +7,32 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// A leaf element that delegates painting to a caller-provided closure.
-/// Participates in layout via its Taffy style.
-type PaintFn = Box<dyn FnOnce(Bounds, &mut Scene, &mut ElementContext)>;
-
-pub struct Canvas {
+/// Participates in layout via its Taffy style. The closure is stored
+/// inline: the element's pooled box holds it, so building a canvas does
+/// not allocate.
+pub struct Canvas<F> {
     style: taffy::Style,
-    paint_fn: Option<PaintFn>,
+    paint_fn: Option<F>,
     clips: bool,
 }
 
 /// Create a canvas element that calls `paint` with its resolved bounds.
-pub fn canvas(paint: impl FnOnce(Bounds, &mut Scene, &mut ElementContext) + 'static) -> Canvas {
+pub fn canvas<F>(paint: F) -> Canvas<F>
+where
+    F: FnOnce(Bounds, &mut Scene, &mut ElementContext) + 'static,
+{
     Canvas {
         style: taffy::Style::default(),
-        paint_fn: Some(Box::new(paint)),
+        paint_fn: Some(paint),
         clips: false,
     }
 }
 
 /// A canvas that draws vector paths (charts, sparklines, custom shapes)
 /// through a [`CanvasPainter`], in coordinates local to the canvas.
-pub fn path_canvas(paint: impl FnOnce(&mut CanvasPainter<'_>) + 'static) -> Canvas {
+pub fn path_canvas(
+    paint: impl FnOnce(&mut CanvasPainter<'_>) + 'static,
+) -> Canvas<impl FnOnce(Bounds, &mut Scene, &mut ElementContext) + 'static> {
     canvas(move |bounds, scene, _cx| paint(&mut CanvasPainter { scene, bounds }))
 }
 
@@ -107,7 +112,7 @@ pub fn sparkline_path(values: &[f32], width: f32, height: f32) -> Path {
     }))
 }
 
-impl Canvas {
+impl<F> Canvas<F> {
     pub fn w(mut self, v: f32) -> Self {
         self.style.size.width = taffy::Dimension::length(v);
         self
@@ -132,7 +137,7 @@ impl Canvas {
     }
 }
 
-impl Element for Canvas {
+impl<F: FnOnce(Bounds, &mut Scene, &mut ElementContext) + 'static> Element for Canvas<F> {
     type LayoutState = ();
     type PrepaintState = ();
 
@@ -175,7 +180,7 @@ impl Element for Canvas {
     }
 }
 
-impl IntoAnyElement for Canvas {
+impl<F: FnOnce(Bounds, &mut Scene, &mut ElementContext) + 'static> IntoAnyElement for Canvas<F> {
     fn into_any(self) -> AnyElement {
         element_into_any(self)
     }
