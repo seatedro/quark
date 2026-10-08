@@ -631,7 +631,8 @@ impl<A: App> ApplicationHandler for Runner<A> {
             }
         }
 
-        for (target, at) in std::mem::take(&mut self.flags.frame_at) {
+        // Drain, not take: the request vectors keep their capacity.
+        for (target, at) in self.flags.frame_at.drain(..) {
             for (handle, entry) in self.windows.iter_mut() {
                 if let WindowEntry::Open(state) = entry
                     && target.is_none_or(|target| target == handle)
@@ -657,7 +658,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
             None => ControlFlow::Wait,
         });
 
-        let redraw = std::mem::take(&mut self.flags.redraw);
+        let redraw = self.flags.redraw.drain(..);
         if std::mem::take(&mut self.flags.redraw_all) {
             for (_, entry) in self.windows.iter() {
                 if let Some(state) = entry.open() {

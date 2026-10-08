@@ -147,6 +147,43 @@ fn a_repeated_frame_of_labeled_rows_allocates_nothing() {
     assert_eq!(allocated, 0);
 }
 
+/// Asks for another frame from every view, at the next vsync and later,
+/// as a running animation and a pending timer do.
+struct Animating;
+
+impl UiApp for Animating {
+    type Action = ();
+    type Message = ();
+
+    fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+        cx.frame.request_frame();
+        cx.frame
+            .request_frame_in(std::time::Duration::from_millis(100));
+        div().size_full().into_any()
+    }
+
+    fn update(&mut self, _action: (), _cx: &mut UiContext) {}
+}
+
+// Scheduling follow-up frames reuses the runner's request and frame-time
+// storage instead of allocating a fresh vector and set each frame.
+#[test]
+fn a_frame_that_schedules_the_next_allocates_nothing() {
+    let mut ui = UiTestHarness::new(Animating, (200.0, 100.0), 1.0);
+    ui.set_accessibility_active(false);
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let ((), allocated) = test_alloc::count(|| {
+        ui.frame();
+    });
+    assert_eq!(allocated, 0);
+    assert_eq!(
+        ui.next_frame_in(),
+        Some(std::time::Duration::from_millis(16))
+    );
+}
+
 #[test]
 fn a_streaming_frame_allocates_for_the_changed_rows_only() {
     let mut ui = list();

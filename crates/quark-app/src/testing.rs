@@ -135,6 +135,14 @@ impl<U: UiApp> UiTestHarness<U> {
     }
 
     /// Draw a frame now whether or not one was asked for, and return it.
+    ///
+    /// It then runs [`Self::run_until_idle`], which can draw more frames
+    /// before returning: those that delivered messages and wakes make due,
+    /// and any requested for a clock time at or before now. A frame's own
+    /// requests to draw again right away go to the next 16 ms vsync, which
+    /// only [`Self::advance`] reaches. An allocation count around this call
+    /// therefore covers the drawn frame plus that follow-up work, and the
+    /// returned scene is the last frame drawn.
     pub fn frame(&mut self) -> &Scene {
         let scene = self.runner.draw(&mut self.adapter);
         self.keep_scene(scene);
