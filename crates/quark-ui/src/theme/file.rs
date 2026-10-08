@@ -17,7 +17,17 @@
 //! ```
 //!
 //! Token names are the field names of [`ThemeColors`] and
-//! [`ThemeMetrics`]. Colors are `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`.
+//! [`ThemeMetrics`]. Colors are `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`,
+//! or `"$name"` for an entry of the variant's `"palette"`, so one edit to a
+//! palette color reaches every token that names it:
+//!
+//! ```json
+//! "light": {
+//!   "palette": { "iris": "#6257d9" },
+//!   "colors": { "accent": "$iris", "focus_border": "$iris" }
+//! }
+//! ```
+//!
 //! Parsing reports every problem in a file at once, each with its path in
 //! the file and, for a misspelled token, the token it was probably meant
 //! to be.
@@ -298,15 +308,28 @@ fn parse_variant(
         }
     };
     let mut theme = Theme::for_mode_and_contrast(mode, contrast);
+    // Read before the colors that name its entries.
+    let palette = parse_palette(variant.get("palette"), &format!("{path}.palette"), issues);
     for (key, value) in variant {
         let at = format!("{path}.{key}");
         match (key.as_str(), value) {
-            ("contrast", _) => {}
+            ("contrast" | "palette", _) => {}
             ("colors", Value::Object(colors)) => {
                 for (token, value) in colors {
                     let at = format!("{at}.{token}");
                     let color = match value {
-                        Value::String(text) => parse_color(text),
+                        Value::String(text) => match text.strip_prefix('$') {
+                            Some(name) => match palette.iter().find(|(n, _)| n == name) {
+                                Some((_, color)) => Ok(*color),
+                                None => {
+                                    let names: Vec<&str> =
+                                        palette.iter().map(|(n, _)| n.as_str()).collect();
+                                    unknown(issues, &at, name, &names);
+                                    continue;
+                                }
+                            },
+                            None => parse_color(text),
+                        },
                         _ => Err(format!("expected a color string, found {value}")),
                     };
                     match color {
@@ -348,11 +371,40 @@ fn parse_variant(
                 issues,
                 &at,
                 key,
-                &["colors", "metrics", "reduced_motion", "contrast"],
+                &["colors", "metrics", "reduced_motion", "contrast", "palette"],
             ),
         }
     }
     theme
+}
+
+/// A variant's named colors, in file order.
+fn parse_palette(
+    value: Option<&Value>,
+    path: &str,
+    issues: &mut Vec<ThemeIssue>,
+) -> Vec<(String, Color)> {
+    let entries = match value {
+        None => return Vec::new(),
+        Some(Value::Object(entries)) => entries,
+        Some(_) => {
+            issue(issues, path, "expected an object of named colors");
+            return Vec::new();
+        }
+    };
+    entries
+        .iter()
+        .filter_map(|(name, value)| {
+            let color = match value {
+                Value::String(text) => parse_color(text),
+                _ => Err(format!("expected a color string, found {value}")),
+            };
+            color
+                .map_err(|message| issue(issues, format!("{path}.{name}"), message))
+                .ok()
+                .map(|color| (name.clone(), color))
+        })
+        .collect()
 }
 
 /// Report `name` at `path` as unknown, suggesting the closest of `known`.
@@ -486,6 +538,23 @@ mod tests {
     }
 
     #[test]
+    fn colors_can_name_palette_entries() {
+        let family = ThemeFamily::from_json(
+            r##"{"name": "Iris", "light": {
+                "palette": {"iris": "#6257d9"},
+                "colors": {"accent": "$iris", "focus_border": "$iris"}
+            }}"##,
+        )
+        .expect("valid");
+        let theme = family.theme(ThemeMode::Light);
+        let iris = Color::rgba(0x62, 0x57, 0xd9, 255);
+        assert_eq!(
+            (theme.colors.accent, theme.colors.focus_border),
+            (iris, iris)
+        );
+    }
+
+    #[test]
     fn a_high_contrast_variant_overrides_the_high_contrast_theme() {
         let family = ThemeFamily::from_json(
             r##"{"name": "Harbor HC", "light": {"colors": {"accent": "#002266"}, "contrast": "high"}}"##,
@@ -520,6 +589,15 @@ mod tests {
                 &[
                     "dark.colors.accent: expected a color like",
                     "dark.colors.backgound: unknown key \"backgound\"; did you mean \"background\"?",
+                ],
+            ),
+            (
+                "a misspelled palette name and a bad palette color",
+                r##"{"name": "x", "dark": {"palette": {"iris": "#123456", "sky": "blue"},
+                    "colors": {"accent": "$irs"}}}"##,
+                &[
+                    "dark.palette.sky: expected a color like",
+                    "dark.colors.accent: unknown key \"irs\"; did you mean \"iris\"?",
                 ],
             ),
             (
