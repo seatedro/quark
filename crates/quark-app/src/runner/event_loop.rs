@@ -558,6 +558,9 @@ impl<A: App> Runner<A> {
         }
         let posted: Vec<_> = self.app_events.try_iter().collect();
         for posted in posted {
+            // Without `ui` the match has one arm, which clippy would have
+            // written as a `let`.
+            #[cfg_attr(not(feature = "ui"), allow(clippy::infallible_destructuring_match))]
             let event = match posted {
                 Posted::App(event) => event,
                 #[cfg(feature = "ui")]
