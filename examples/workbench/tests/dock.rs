@@ -7,10 +7,13 @@ use std::collections::HashMap;
 
 use accesskit::{NodeId, Role, TreeUpdate};
 use common::*;
-use quark_app::WindowHandle;
+use quark::scene::Primitive;
 use quark_app::testing::{By, UiTestHarness};
+use quark_app::winit::window::Theme as SystemTheme;
+use quark_app::{AppEvent, WindowHandle};
 use quark_workbench::Workbench;
-use quark_workbench::contracts::ScenarioKind;
+use quark_workbench::contracts::{ScenarioKind, ThemeChoice};
+use quark_workbench::design;
 use quark_workbench::dock::files::SOURCE_LABEL;
 
 fn tab(name: &str) -> By {
@@ -123,4 +126,44 @@ fn dock_closing_floating_host_redocks_once() {
 
     assert_eq!(ui.windows(), [ui.main_window()]);
     assert_eq!((while_floating, tab_count(&ui, "Diff")), (0, 1));
+}
+
+/// The color painted in the terminal's padding in `window`, just inside
+/// its top-left corner: the last filled rect drawn over that point.
+fn terminal_background(
+    ui: &mut UiTestHarness<Workbench>,
+    window: WindowHandle,
+) -> Option<quark::Color> {
+    let w = ui.window(window);
+    let term = w.find(By::role(Role::Terminal)).bounds;
+    let (x, y) = (term.x - 3.0, term.y - 3.0);
+    w.scene().primitives.iter().rev().find_map(|p| match p {
+        Primitive::Rect(r) if r.rect.contains(x, y) => Some(r.color),
+        Primitive::RoundedRect(r) if r.rect.contains(x, y) => Some(r.color),
+        _ => None,
+    })
+}
+
+// Catches a floating window keeping the theme it opened with: a system
+// theme change repaints the detached terminal in the new theme's editor
+// surface, both ways.
+#[test]
+fn dock_theme_changes_reach_floating_panels() {
+    let mut ui = harness(ScenarioKind::Review);
+    let window = move_to_new_window(&mut ui, "Terminal");
+    let (light, dark) = design::themes_for(ThemeChoice::System);
+
+    let mut seen = Vec::new();
+    for system in [SystemTheme::Light, SystemTheme::Dark] {
+        ui.app_event(AppEvent::ThemeChanged(system));
+        seen.push(terminal_background(&mut ui, window));
+    }
+
+    assert_eq!(
+        seen,
+        [
+            Some(light.colors.editor_surface),
+            Some(dark.colors.editor_surface)
+        ]
+    );
 }
