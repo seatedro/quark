@@ -124,6 +124,17 @@ fn wide_characters_span_two_columns() {
     );
 }
 
+/// The alternate screen does not reflow, so narrowing it can leave a wide
+/// character in the last column with no room for its second half. Its run
+/// stays inside the grid. (Found by the terminal_vt fuzz target.)
+#[test]
+fn a_wide_character_cut_off_by_a_resize_stays_in_the_grid() {
+    let mut t = term(4, 2);
+    t.feed("\x1b[?1049hab\u{ff16}".as_bytes());
+    t.vt_mut().resize(3, 2, 8, 16);
+    assert_eq!(first_row(&mut t), "0+2\"ab\" 2+1\"\u{ff16}\"");
+}
+
 #[test]
 fn output_past_the_bottom_goes_to_scrollback() {
     let mut t = term(10, 3);
