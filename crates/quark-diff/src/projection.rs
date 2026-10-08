@@ -111,15 +111,25 @@ impl Expansion {
     /// Lines of `gap` still hidden. A remainder of [`MIN_HIDDEN`] lines or
     /// fewer is shown, so it counts as none.
     pub fn hidden(&self, doc: &DiffDocument, gap: GapId) -> u32 {
+        self.hidden_of(gap, Self::gap_len(doc, gap))
+    }
+
+    /// [`Self::hidden`] for a gap of `len` lines.
+    fn hidden_of(&self, gap: GapId, len: u32) -> u32 {
         let (top, bottom) = self.revealed(gap);
-        let hidden = Self::gap_len(doc, gap).saturating_sub(top + bottom);
+        let hidden = len.saturating_sub(top + bottom);
         if hidden <= MIN_HIDDEN { 0 } else { hidden }
     }
 
     /// Reveals up to `amount` more lines of `gap`. A trailing gap only
     /// reveals downward. Returns whether anything changed.
     pub fn reveal(&mut self, doc: &DiffDocument, gap: GapId, reveal: Reveal, amount: u32) -> bool {
-        let hidden = self.hidden(doc, gap);
+        self.reveal_of(gap, Self::gap_len(doc, gap), reveal, amount)
+    }
+
+    /// [`Self::reveal`] for a gap of `len` lines.
+    fn reveal_of(&mut self, gap: GapId, len: u32, reveal: Reveal, amount: u32) -> bool {
+        let hidden = self.hidden_of(gap, len);
         if hidden == 0 {
             return false;
         }
@@ -450,4 +460,87 @@ pub enum ProjectionError {
     ColumnLength,
     Line { row: u32 },
     RowList { row: u32 },
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const MAX_LEN: u32 = 8;
+
+    fn any_reveal() -> Reveal {
+        match kani::any::<u8>() % 3 {
+            0 => Reveal::Down,
+            1 => Reveal::Up,
+            _ => Reveal::All,
+        }
+    }
+
+    /// A gap of up to eight lines, above a hunk or trailing a file, after
+    /// any two reveals of any amount from either end: its rows show every
+    /// line once and in order, the lines still hidden sit under one gap
+    /// row that agrees with `Expansion::hidden`, a gap of `MIN_HIDDEN`
+    /// lines or fewer is shown instead, and the lines revealed upward sit
+    /// below the gap row.
+    #[kani::proof]
+    #[kani::unwind(11)]
+    fn gap_rows_show_every_line_once_after_any_reveals() {
+        let len: u32 = kani::any();
+        kani::assume(len <= MAX_LEN);
+        let id = GapId {
+            file: 0,
+            hunk: kani::any::<bool>().then_some(0),
+        };
+        let mut expansion = Expansion {
+            above: vec![(0, 0)],
+            after: vec![0],
+        };
+        expansion.reveal_of(id, len, any_reveal(), kani::any());
+        expansion.reveal_of(id, len, any_reveal(), kani::any());
+        let old = u32::from(kani::any::<u8>());
+        let new = u32::from(kani::any::<u8>());
+        let mut p = Projection::default();
+        // Room for every row up front, so no push reallocates under CBMC.
+        let rows = MAX_LEN as usize + 1;
+        for column in [
+            &mut p.file,
+            &mut p.hunk,
+            &mut p.old,
+            &mut p.new,
+            &mut p.pair,
+        ] {
+            column.reserve(rows);
+        }
+        p.kind.reserve(rows);
+        p.gaps.reserve(1);
+        p.old_rows.reserve(rows);
+        p.new_rows.reserve(rows);
+
+        p.push_gap(id, (old, new), len, &expansion);
+
+        let hidden = expansion.hidden_of(id, len);
+        let (mut line, mut gap_rows, mut below) = (0, 0, 0);
+        for row in 0..p.kind.len() {
+            match p.kind[row] {
+                RowKind::Context => {
+                    assert!(p.old[row] == old + line && p.new[row] == new + line);
+                    line += 1;
+                    below += gap_rows;
+                }
+                RowKind::Gap => {
+                    let gap = p.gaps[p.hunk[row] as usize];
+                    assert!(gap.id == id && gap.hidden == hidden && hidden > MIN_HIDDEN);
+                    assert!(gap.old_start == old + line && gap.new_start == new + line);
+                    line += gap.hidden;
+                    gap_rows += 1;
+                }
+                _ => panic!("a gap pushes only context and gap rows"),
+            }
+        }
+        assert!(line == len);
+        assert!(gap_rows == u32::from(hidden > 0));
+        if hidden > 0 {
+            assert!(below == expansion.revealed(id).1);
+        }
+    }
 }
