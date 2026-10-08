@@ -29,7 +29,7 @@ use std::rc::Rc;
 use accesskit::Role;
 use quark::{TabStop, view};
 use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
-use quark_ui::design::Shadow;
+use quark_ui::design::{Shadow, Sz};
 use quark_ui::element::{
     AnyElement, ClickEvent, CursorHint, DragHandler, DragPreview, DragReleaseResult,
     ElementGeometry, ElementHandle, IntoAnyElement, LayoutSnapshot, div, svg_icon, text,
@@ -1644,6 +1644,9 @@ impl<'a> Dock<'a> {
                          preview: tab_preview(panel, &drag_title, (tab_width, tab_height)),
                      }) as Box<dyn DragHandler>
                  }}
+                 // The strip clips to its height and regions to their
+                 // edges, so the ring is drawn inside the tab.
+                 focus_ring_offset={-Sz::FOCUS_RING_W}
                  @when {selected} {
                      bg={colors.background} focus_ring={Self::tab_focus(pane)}
                      on_key={("left", select(prev))} on_key={("right", select(next))}

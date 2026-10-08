@@ -901,6 +901,33 @@ mod tests {
         assert_eq!(focused_name(&ui).as_deref(), Some("Files"));
     }
 
+    // Catches a tab's focus ring cut off: the strip clips to its height and
+    // the sidebar's tab sits against the window's left edge, which hid the
+    // ring's top and left sides.
+    #[test]
+    fn a_focused_tabs_ring_lies_inside_the_tab() {
+        for name in ["Threads", "Files"] {
+            let mut ui = harness();
+            ui.click_node(By::role_name(Role::Tab, name));
+            let tab = ui.find(By::role_name(Role::Tab, name)).bounds;
+            let ring_color = ui.theme().colors.focus_border;
+            let ring = ui
+                .scene()
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    quark::Primitive::Border(b) if b.color == ring_color => Some(b.rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name}: no ring"));
+            let inside = ring.x >= tab.x
+                && ring.y >= tab.y
+                && ring.x + ring.width <= tab.x + tab.width
+                && ring.y + ring.height <= tab.y + tab.height;
+            assert!(inside, "{name}: ring {ring:?} outside tab {tab:?}");
+        }
+    }
+
     // Assistive tech can focus a tab without selecting it; Shift+F10 then
     // acts on that tab, not the group's selected one.
     #[test]

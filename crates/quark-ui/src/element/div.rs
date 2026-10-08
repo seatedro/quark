@@ -445,7 +445,9 @@ impl Div {
     /// Draw the focus ring `gap` points outside the element instead of
     /// against its edge. For controls without a visible boundary of their
     /// own (a radio row, a switch with its label), whose content reaches
-    /// their bounds and would otherwise touch the ring.
+    /// their bounds and would otherwise touch the ring. A negative gap of
+    /// the ring's width draws it just inside, for elements whose parent
+    /// clips them (a tab in a strip).
     pub fn focus_ring_offset(mut self, gap: f32) -> Self {
         self.focus_ring_offset = gap;
         self
