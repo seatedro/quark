@@ -114,6 +114,8 @@ pub struct Editor {
     buffer: TextBuffer,
     /// Layout of the text, as of the last flush.
     layout: Option<Arc<TextLayout>>,
+    /// The text `layout` was laid out from, shared for [`Self::text_arc`].
+    layout_text: Arc<str>,
     /// Layout of the text with the preedit spliced in, while composing.
     display: Option<Arc<TextLayout>>,
     composition: Option<Composition>,
@@ -328,6 +330,7 @@ impl Editor {
             mode,
             buffer,
             layout: None,
+            layout_text: Arc::from(""),
             display: None,
             composition: None,
             dirty: true,
@@ -604,7 +607,8 @@ impl Editor {
             } else {
                 style_layout_spans(self.buffer.styles())
             };
-            let params = self.layout_params(Arc::from(self.buffer.text()), spans);
+            self.layout_text = Arc::from(self.buffer.text());
+            let params = self.layout_params(self.layout_text.clone(), spans);
             self.layout = text_system.layout(&params).ok().map(Arc::new);
             self.span_kinds = kinds.into();
             self.line_tops = self.compute_line_tops().into();
@@ -651,9 +655,9 @@ impl Editor {
             return;
         };
         let selection = self.buffer.selection();
-        let spans = self.layout.as_ref().map(|l| l.spans().clone());
+        let spans = self.layout.as_ref().map(|l| l.spans());
         let (spans, kinds) = shift_spans(
-            spans.as_deref().unwrap_or_default(),
+            spans.unwrap_or_default(),
             &self.span_kinds,
             selection.start.get()..selection.end.get(),
             composition.preedit.end.get() - composition.preedit.start.get(),
@@ -672,7 +676,7 @@ impl Editor {
     /// layout is current.
     pub fn text_arc(&self) -> Arc<str> {
         match &self.layout {
-            Some(layout) if !self.dirty => layout.text().clone(),
+            Some(_) if !self.dirty => self.layout_text.clone(),
             _ => Arc::from(self.buffer.text()),
         }
     }

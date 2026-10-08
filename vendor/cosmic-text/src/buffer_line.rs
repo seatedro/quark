@@ -3,7 +3,8 @@ use alloc::{string::String, vec::Vec};
 use core::mem;
 
 use crate::{
-    Align, Attrs, AttrsList, Cached, FontSystem, LayoutLine, LineEnding, ShapeLine, Shaping, Wrap,
+    Align, Attrs, AttrsList, Cached, FontSystem, LayoutGlyph, LayoutLine, LineEnding, ShapeLine,
+    Shaping, Wrap,
 };
 
 /// A line (or paragraph) of text that is shaped and laid out
@@ -59,6 +60,26 @@ impl BufferLine {
         self.layout_opt.set_unused();
         self.shaping = shaping;
         self.metadata = None;
+    }
+
+    /// Heap bytes the line keeps, at capacity: its text, attributes, and
+    /// shaping and layout, including those kept unused for reuse.
+    pub fn storage_bytes(&self) -> usize {
+        let shape = match &self.shape_opt {
+            Cached::Empty => 0,
+            Cached::Unused(shape) | Cached::Used(shape) => shape.storage_bytes(),
+        };
+        let layout = match &self.layout_opt {
+            Cached::Empty => 0,
+            Cached::Unused(lines) | Cached::Used(lines) => {
+                lines.capacity() * mem::size_of::<LayoutLine>()
+                    + lines
+                        .iter()
+                        .map(|line| line.glyphs.capacity() * mem::size_of::<LayoutGlyph>())
+                        .sum::<usize>()
+            }
+        };
+        self.text.capacity() + self.attrs_list.storage_bytes() + shape + layout
     }
 
     /// Get current text
