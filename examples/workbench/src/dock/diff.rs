@@ -22,9 +22,10 @@ use crate::model::Model;
 
 pub const FOCUS: FocusId = FocusId::from_key("workbench.diff");
 
-/// Narrowest panel that offers side by side: two columns of about 45
-/// characters of 13-point code beside their line numbers.
-pub const SPLIT_MIN_WIDTH: f32 = 720.0;
+/// Narrowest panel that offers side by side: two columns of about 32
+/// characters of 13-point code beside their line numbers. A 1240-point
+/// window with the sidebar docked can still widen the dock this far.
+pub const SPLIT_MIN_WIDTH: f32 = 600.0;
 
 const TOOLBAR_H: f32 = 40.0;
 
