@@ -14,7 +14,7 @@ use quark_app::winit::event::{ElementState, MouseButton};
 use quark_components::PALETTE_INPUT;
 use quark_workbench::Workbench;
 use quark_workbench::composer;
-use quark_workbench::contracts::ScenarioKind;
+use quark_workbench::contracts::{Options, ScenarioKind};
 use quark_workbench::settings::forms::LIMIT;
 
 type Ui = UiTestHarness<Workbench>;
@@ -330,10 +330,45 @@ fn overlays_completion_announced_once() {
     type_in_composer(&mut ui, "Make it layout independent");
     ui.key("enter");
     let spoken = announcements_over(&mut ui, 7_000);
-    let count = |prefix: &str| spoken.iter().filter(|s| s.starts_with(prefix)).count();
     assert_eq!(
-        (count("Tool finished"), count("Run complete")),
+        (
+            mentions(&spoken, "Tool finished"),
+            mentions(&spoken, "Run complete")
+        ),
         (3, 1),
         "{spoken:?}"
+    );
+}
+
+/// How often `phrase` occurs across `spoken`.
+fn mentions(spoken: &[String], phrase: &str) -> usize {
+    spoken.iter().map(|s| s.matches(phrase).count()).sum()
+}
+
+// Catches completions that arrive together overwriting each other: when a
+// frame finally plays the whole run at once (the window was hidden, or the
+// manual clock jumped), every completion is still spoken.
+#[test]
+fn overlays_batched_completions_all_announced() {
+    let mut ui = harness_with(
+        Options {
+            manual_clock: true,
+            ..Options::default()
+        },
+        WIDE,
+    );
+    type_in_composer(&mut ui, "Make it layout independent");
+    ui.key("enter");
+    let spoken_before = announcements_over(&mut ui, 100);
+    ui.app_mut().clock.set(10_000);
+    ui.frame();
+    let spoken = announcements_over(&mut ui, 100);
+    assert_eq!(
+        (
+            mentions(&spoken, "Tool finished"),
+            mentions(&spoken, "Run complete")
+        ),
+        (3, 1),
+        "{spoken_before:?} then {spoken:?}"
     );
 }

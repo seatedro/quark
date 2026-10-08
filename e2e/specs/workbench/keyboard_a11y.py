@@ -67,12 +67,13 @@ def spec(cua: Cua):
         cua.call("press_key", pid=pid, key="return", delivery_mode="foreground")
         wait_for(
             "the run to complete",
-            lambda: any(m.startswith("Run complete") for m in announcements.messages),
+            lambda: any("Run complete" in m for m in announcements.messages),
             timeout=30.0,
         )
-        tools = [m for m in announcements.messages if m == "Tool finished"]
-        runs = [m for m in announcements.messages if m.startswith("Run complete")]
-        assert (len(tools), len(runs)) == (3, 1), announcements.messages
+        # Completions a frame plays together share one announcement.
+        tools = sum(m.count("Tool finished") for m in announcements.messages)
+        runs = sum(m.count("Run complete") for m in announcements.messages)
+        assert (tools, runs) == (3, 1), announcements.messages
     finally:
         announcements.close()
 
