@@ -51,8 +51,9 @@ macro_rules! surface_cx {
 /// Values the app sends itself.
 #[derive(Debug)]
 pub enum Message {
-    /// Play scenario events due by now and load the next history batch.
-    Pump,
+    /// Announce what playback queued during the last frame (views have no
+    /// `UiContext` to announce through).
+    Flush,
 }
 
 pub struct Workbench {
@@ -70,8 +71,8 @@ pub struct Workbench {
     fx: Effects,
     events: Vec<Event>,
     sender: Option<UiSender<Message>>,
-    /// A Pump is queued and not yet delivered.
-    pump_queued: bool,
+    /// Announcements playback queued for the next `Message::Flush`.
+    announcements: Vec<String>,
     /// Runner time of the latest callback, for text edits (which get no
     /// context).
     runner_ms: u64,
@@ -111,7 +112,7 @@ impl Workbench {
             fx: Effects::default(),
             events: Vec::new(),
             sender: None,
-            pump_queued: false,
+            announcements: Vec::new(),
             runner_ms: 0,
             main_size: (0.0, 0.0),
             policy: WidthPolicy {
@@ -127,17 +128,11 @@ impl Workbench {
         self.clock.now(self.runner_ms)
     }
 
-    fn queue_pump(&mut self) {
-        if !self.pump_queued
-            && let Some(sender) = &self.sender
-        {
-            self.pump_queued = sender.send(Message::Pump);
-        }
-    }
-
     /// Apply scenario events due by now and adopt one batch of queued
-    /// history. Returns whether anything changed.
-    fn pump(&mut self, cx: &mut UiContext) -> bool {
+    /// history. Runs at the top of each main-window frame, so a frame
+    /// drawn at an event's due time shows it. Returns whether anything
+    /// changed.
+    fn pump(&mut self) -> bool {
         let now = self.now_ms();
         self.scenario.advance_to(now, &mut self.events);
         let mut changed = false;
@@ -146,16 +141,17 @@ impl Workbench {
                 continue;
             }
             changed = true;
+            // Completions are announced once; streamed chunks never are.
             match &event.kind {
                 EventKind::ToolDone { status, .. } => {
                     let word = match status {
                         crate::model::ToolStatus::Failed => "Tool failed",
                         _ => "Tool finished",
                     };
-                    cx.announce(word, Politeness::Polite);
+                    self.announcements.push(word.to_owned());
                 }
                 EventKind::Done { summary } => {
-                    cx.announce(format!("Run complete. {summary}"), Politeness::Polite);
+                    self.announcements.push(format!("Run complete. {summary}"));
                 }
                 _ => {}
             }
@@ -167,7 +163,27 @@ impl Workbench {
             }
             changed = true;
         }
+        if !self.announcements.is_empty()
+            && let Some(sender) = &self.sender
+        {
+            sender.send(Message::Flush);
+        }
         changed
+    }
+
+    /// Ask for the frame that plays the next due event, and for the next
+    /// history batch.
+    fn schedule(&mut self, vcx: &mut ViewContext) {
+        if self.model.history_pending() > 0 {
+            vcx.frame.request_frame();
+        }
+        if self.clock.is_manual() {
+            return;
+        }
+        if let Some(due) = self.scenario.next_due() {
+            let wait = due.saturating_sub(self.now_ms());
+            vcx.frame.request_frame_in(Duration::from_millis(wait));
+        }
     }
 
     fn apply_effects(&mut self, cx: &mut UiContext) {
@@ -247,7 +263,6 @@ impl Workbench {
         };
         self.scenario.start(thread, generation, self.now_ms());
         cx.announce("Prompt sent", Politeness::Polite);
-        self.queue_pump();
     }
 
     fn apply_diff(&mut self) {
@@ -306,7 +321,6 @@ impl Workbench {
             CommandId::AdvanceDemoStep => {
                 if let Some(due) = self.scenario.next_due() {
                     self.clock.set(due);
-                    self.queue_pump();
                 }
             }
             CommandId::ResetDemo => {
@@ -364,23 +378,6 @@ impl Workbench {
         }
         .into_any()
     }
-
-    fn schedule_pump(&mut self, vcx: &mut ViewContext) {
-        if self.clock.is_manual() && self.model.history_pending() == 0 {
-            return;
-        }
-        let now = self.now_ms();
-        match self.scenario.next_due() {
-            Some(due) if due <= now => self.queue_pump(),
-            Some(due) if !self.clock.is_manual() => {
-                vcx.frame.request_frame_in(Duration::from_millis(due - now));
-            }
-            _ => {}
-        }
-        if self.model.history_pending() > 0 {
-            self.queue_pump();
-        }
-    }
 }
 
 impl UiApp for Workbench {
@@ -390,20 +387,20 @@ impl UiApp for Workbench {
     fn init(&mut self, cx: &mut UiContext) {
         self.sender = Some(cx.sender::<Message>());
         dock::init(&mut self.dock, cx);
-        if self.model.history_pending() > 0 {
-            self.queue_pump();
-        }
     }
 
     fn view(&mut self, vcx: &mut ViewContext) -> AnyElement {
         let window = vcx.window_handle();
         let size = vcx.frame.size();
         self.runner_ms = vcx.frame.elapsed().as_millis() as u64;
-        self.schedule_pump(vcx);
         let Some(host) = self.dock.windows.host(window) else {
             return div().w(size.0).h(size.1).into_any();
         };
         let main = host == HostId::MAIN;
+        if main {
+            self.pump();
+            self.schedule(vcx);
+        }
         if main {
             self.main_size = size;
             self.policy = shell::sync_width(&mut self.shell, size.0, &mut self.fx);
@@ -535,10 +532,9 @@ impl UiApp for Workbench {
     fn message(&mut self, message: Message, cx: &mut UiContext) {
         self.runner_ms = cx.window.elapsed().as_millis() as u64;
         match message {
-            Message::Pump => {
-                self.pump_queued = false;
-                if self.pump(cx) {
-                    cx.window.request_redraw_all();
+            Message::Flush => {
+                for text in self.announcements.drain(..) {
+                    cx.announce(text, Politeness::Polite);
                 }
             }
         }

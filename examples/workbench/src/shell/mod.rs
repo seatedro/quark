@@ -40,6 +40,8 @@ pub struct State {
     pub sidebar_overlay: bool,
     /// The policy last applied to the dock.
     pub applied: Option<WidthPolicy>,
+    /// The title bar's content as of the last frame.
+    title: Option<std::rc::Rc<titlebar::TitleData>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +65,7 @@ pub fn new_state() -> State {
         dock_forced: false,
         sidebar_overlay: false,
         applied: None,
+        title: None,
     }
 }
 
