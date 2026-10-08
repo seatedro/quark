@@ -193,6 +193,12 @@ impl TextSystem {
     /// nothing here notices a change made through it, so caches would keep
     /// layouts shaped with the old fonts. Use [`Self::set_font_settings`]
     /// and [`Self::load_font_data`].
+    ///
+    /// It stays a plain `&mut FontSystem` because glyphon's `prepare` and
+    /// cosmic-text's `SwashCache::get_image` take one, and a `FontSystem`
+    /// borrowed mutably can always reach its database: a handle that
+    /// rasterizes without changing fonts needs both vendored crates to
+    /// accept it.
     pub fn raster_font_system(&mut self) -> &mut FontSystem {
         &mut self.font_system
     }
