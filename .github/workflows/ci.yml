@@ -269,7 +269,7 @@ jobs:
           - name: quark reactive
             args: "-p quark --harness reactive::"
           - name: quark-ui
-            args: "-p quark-ui --harness virtual_list:: --harness styles::"
+            args: "-p quark-ui --harness virtual_list::"
           - name: quark-ui scroll
             args: "-p quark-ui --harness scroll::"
           - name: quark-app

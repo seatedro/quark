@@ -466,7 +466,9 @@ pub enum ProjectionError {
 mod verification {
     use super::*;
 
-    const MAX_LEN: u32 = 8;
+    /// Long enough for a gap row between lines revealed from both ends.
+    /// At eight lines the runner shut down while CBMC built the formula.
+    const MAX_LEN: u32 = 6;
 
     fn any_reveal() -> Reveal {
         match kani::any::<u8>() % 3 {
@@ -476,14 +478,14 @@ mod verification {
         }
     }
 
-    /// A gap of up to eight lines, above a hunk or trailing a file, after
+    /// A gap of up to six lines, above a hunk or trailing a file, after
     /// any two reveals of any amount from either end: its rows show every
     /// line once and in order, the lines still hidden sit under one gap
     /// row that agrees with `Expansion::hidden`, a gap of `MIN_HIDDEN`
     /// lines or fewer is shown instead, and the lines revealed upward sit
     /// below the gap row.
     #[kani::proof]
-    #[kani::unwind(11)]
+    #[kani::unwind(8)]
     fn gap_rows_show_every_line_once_after_any_reveals() {
         let len: u32 = kani::any();
         kani::assume(len <= MAX_LEN);

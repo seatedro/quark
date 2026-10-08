@@ -113,7 +113,9 @@ mod verification {
                 assert!(r.width > 0.0 && r.height > 0.0);
                 assert!(r.contains(x, y) == (a.contains(x, y) && b.contains(x, y)));
             }
-            None => assert!(!(inside(a, x, y) && inside(b, x, y))),
+            None => {
+                assert!(!(inside(a, x, y) && inside(b, x, y)));
+            }
         }
     }
 }

@@ -809,6 +809,8 @@ mod verification {
 
     #[kani::proof]
     #[kani::unwind(5)]
+    // CaDiCaL, the default, ran past the 30 minute job on this float work.
+    #[kani::solver(kissat)]
     fn split_resize_pushes_far_panes_and_keeps_minimums() {
         let pane: usize = kani::any();
         kani::assume(pane < N);

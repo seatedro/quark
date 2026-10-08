@@ -680,6 +680,10 @@ mod verification {
     /// its own value, and a disposed one never resolves again, even once
     /// a later signal reuses its slot. Generation wraparound after 2^32
     /// reuses of one slot is beyond this bound.
+    ///
+    /// Values are read from the slot rather than through `read`: that path
+    /// reaches memo recompute and its thread local, whose destructor
+    /// machinery uses an intrinsic Kani 0.68 cannot compile.
     #[kani::proof]
     #[kani::unwind(7)]
     fn reused_slots_never_alias_a_handle() {
@@ -699,15 +703,18 @@ mod verification {
                 }
             }
         }
+        let inner = store.inner_ref();
         let mut live = 0;
         for j in 0..OPS {
             let Some(signal) = made[j] else { continue };
-            assert!(store.inner_ref().live(signal.id) == alive[j]);
+            assert!(inner.live(signal.id) == alive[j]);
             if alive[j] {
-                assert!(store.read_untracked(signal) == j as u8);
+                let value = inner.nodes[signal.id.index as usize].value.as_ref();
+                assert!(value.unwrap().downcast_ref::<u8>() == Some(&(j as u8)));
                 live += 1;
             }
         }
+        drop(inner);
         assert!(store.len() == live);
     }
 }
