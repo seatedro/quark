@@ -1074,6 +1074,9 @@ impl TerminalState {
             let m = self
                 .measure(text, layouts, scale)
                 .unwrap_or_else(|| self.metrics());
+            // Measuring may register the family's other weights, which
+            // moves the font epoch.
+            let key = (scale.to_bits(), Some(text.font_epoch()));
             self.metrics = Some((m, key));
             self.dirty = true;
         }
@@ -1174,6 +1177,9 @@ impl TerminalState {
                 .faces()
                 .any(|face| face.families.iter().any(|(family, _)| family == name))
         });
+        if let Some(family) = family {
+            text.fill_family_weights(family);
+        }
         let style = TextStyle::new(self.style.font_size)
             .kind(FontKind::Mono)
             .family(family);

@@ -247,7 +247,10 @@ impl QuarkFallback {
 /// Register each of `families` again under every text weight it lacks, as
 /// a copy of the face fontdb's own query picks for that weight; copies
 /// share the original's bytes.
-fn fill_weights<'a>(db: &mut fontdb::Database, families: impl IntoIterator<Item = &'a str>) {
+pub(crate) fn fill_weights<'a>(
+    db: &mut fontdb::Database,
+    families: impl IntoIterator<Item = &'a str>,
+) {
     let mut copies = Vec::new();
     for family in families {
         for weight in TEXT_WEIGHTS {
