@@ -98,7 +98,9 @@ fn gallery() -> AnyElement {
         ]))
         .child(tab_bar(vec![
             TabItem::new("Files", Pick("files")).active(true),
-            TabItem::new("Logs", Pick("logs")),
+            TabItem::new("Logs", Pick("logs"))
+                .id("logs")
+                .on_close(Pick("close logs")),
         ]))
         .child(
             dropdown(
@@ -125,6 +127,7 @@ fn components_publish_their_roles_and_states() {
          TabList | -\n\
          Tab | Files | selected\n\
          Tab | Logs | unselected\n\
+         Button | Close Logs\n\
          ComboBox | Sort | expanded\n\
          Menu | -\n\
          MenuItem | Newest | selected\n\
