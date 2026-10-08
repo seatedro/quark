@@ -9,6 +9,7 @@ files.png, and preview-actual.png, in the light theme (the other dock
 specs run dark)."""
 
 # quark-e2e-env: QUARK_WORKBENCH_THEME=light
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
 from quark_e2e import (
     Cua,

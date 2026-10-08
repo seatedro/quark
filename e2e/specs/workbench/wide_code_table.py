@@ -4,6 +4,8 @@ code copying less than the whole block, and a table published as loose
 text or copied as something other than a markdown table. Saves
 wide-code-scrolled.png, wide-code-wrapped.png, and table.png."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import Cua, app_pid, app_tree, center, main, pointer_drag, resize_window, save_screenshot, wait_for, xdotool
 
 TITLE = "Quark Workbench"

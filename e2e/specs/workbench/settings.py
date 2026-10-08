@@ -5,6 +5,8 @@ list and Escape closes only the list; an out-of-range Tool output limit
 keeps the dialog open on Save, with the error as the field's description
 and focus in the field; Escape then cancels."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, save_tree, wait_for
 
 ERROR = "Enter a whole number from 100 to 10,000."

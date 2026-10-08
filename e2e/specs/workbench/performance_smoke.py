@@ -8,6 +8,7 @@ timings smoke-test the loading path and certify no hardware frame rate."""
 
 # quark-e2e-env: QUARK_WORKBENCH_SCENARIO=stress
 # quark-e2e-env: QUARK_WORKBENCH_MARKS=1
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
 import os
 

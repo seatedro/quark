@@ -5,6 +5,8 @@ menu at the pointer; Copy title copies it and shows one toast, announced
 once; the palette's "Apply proposed changes" shows a toast whose Undo
 button reverts the files ("Changes undone")."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import Announcements, Cua, app_pid, app_tree, center, main, resize_window, wait_for, xdotool
 
 THREAD = "Offline tile cache"

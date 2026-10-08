@@ -4,6 +4,7 @@ Enter must send it (the field empties and Send turns into Stop), and Stop
 must end the run and bring Send back. Saves composer-multiline.png."""
 
 # quark-e2e-env: QUARK_WORKBENCH_THEME=light
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
 from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
 

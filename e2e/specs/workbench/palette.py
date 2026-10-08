@@ -4,6 +4,8 @@ field focused; typing "Settings" and Enter opens the Settings dialog, the
 same one Ctrl+, opens; Escape closes that, and a second Ctrl+K then Escape
 gives focus back to the composer."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, save_tree, wait_for
 
 TITLE = "Quark Workbench"

@@ -5,6 +5,8 @@ AT-SPI EXPANDED state, so the spec reads the output instead.) Works on the faile
 keyboard shortcuts". Saves tool-card-failed.png (expanded, failed) and
 tool-card-collapsed.png."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 import subprocess
 
 from quark_e2e import Cua, app_pid, app_tree, center, main, resize_window, save_screenshot, wait_for, xdotool

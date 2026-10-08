@@ -10,6 +10,8 @@ window closes. Then Shift+F10 on the Files tab and "Move to new window"
 open "Files - Quark Workbench", and closing it (Alt+F4) docks Files back.
 Saves dock-floating.png with the floating terminal over the main window."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import (
     STATE_FOCUSED,
     Cua,

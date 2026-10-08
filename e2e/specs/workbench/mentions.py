@@ -5,6 +5,7 @@ the file's chip; Ctrl+Z must bring the typed query back. Saves
 composer-suggestions.png."""
 
 # quark-e2e-env: QUARK_WORKBENCH_THEME=dark
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
 from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
 

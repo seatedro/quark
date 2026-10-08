@@ -4,6 +4,8 @@ materialized. The drag runs from the start of the user's question into
 the assistant's answer below it; Select all must reach the thread's first
 prompt, scrolled far out of view. Saves timeline-selection.png."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import Cua, app_pid, app_tree, main, pointer_drag, resize_window, save_screenshot, wait_for
 
 TITLE = "Quark Workbench"

@@ -5,6 +5,8 @@ composer into its pickers, and from a dock tab into its panel; each stop
 is saved as a screenshot (focus-*.png) for checking that the focus ring
 is drawn whole, not cut by the container's edge."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
 
 TITLE = "Quark Workbench"

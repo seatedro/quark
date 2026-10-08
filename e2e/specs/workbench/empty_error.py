@@ -7,6 +7,7 @@ whose "Review changes" starter sends a real prompt. Saves shell-dark.png
 
 # quark-e2e-env: QUARK_WORKBENCH_SCENARIO=error
 # quark-e2e-env: QUARK_WORKBENCH_THEME=dark
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
 from quark_e2e import Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
 

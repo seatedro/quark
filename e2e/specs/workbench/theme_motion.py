@@ -12,6 +12,8 @@ in the theme it found and in the edited one.
     QUARK_E2E_BIN_DIR=$PWD/target/debug e2e/run.sh e2e/specs/workbench/theme_motion.py
 """
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 import json
 import os
 import time

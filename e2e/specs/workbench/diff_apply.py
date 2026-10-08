@@ -7,6 +7,8 @@ reads "Updated from proposed changes"; Undo restores all three. Widening
 the right dock past 600 points offers Split, which selects. Saves
 diff-unified.png and diff-split.png."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import (
     STATE_CHECKED,
     Cua,

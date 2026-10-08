@@ -6,6 +6,7 @@ while the composer stays on screen. Saves shell-light.png at 1240x740 and
 shell-narrow.png at 1000x700 for review."""
 
 # quark-e2e-env: QUARK_WORKBENCH_THEME=light
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
 from quark_e2e import Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
 

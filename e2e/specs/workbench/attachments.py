@@ -4,6 +4,7 @@ as a named chip; its Remove button must take it away and return focus to
 the composer, and Ctrl+Z must put it back. Saves composer-attachment.png."""
 
 # quark-e2e-env: QUARK_WORKBENCH_THEME=light
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
 from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
 

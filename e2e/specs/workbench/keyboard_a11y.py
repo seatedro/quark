@@ -4,6 +4,8 @@ focus inside, where Ctrl+B and Ctrl+K do nothing and Tab never leaves the
 dialog; Escape closes it; Ctrl+K opens the palette; and a run's tool and
 run completions are each announced once."""
 
+# quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
+
 from quark_e2e import STATE_FOCUSED, Announcements, Cua, app_pid, app_tree, main, resize_window, wait_for
 
 THREAD = "Add keyboard shortcuts"
