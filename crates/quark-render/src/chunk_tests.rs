@@ -176,14 +176,17 @@ fn just(scene: &mut Scene, chunk: Primitive) {
 }
 
 /// Every pixel of `scene` drawn from its chunks, on a renderer that drew
-/// `warm` first, against the scene expanded on a fresh renderer.
-fn assert_draws_expanded(name: &str, warm: &Scene, scene: &Scene, text: &mut TextSystem) {
+/// `warm` first, against the scene expanded on a fresh renderer. Drawn
+/// three times: a chunk drawn where it was last drawn records its
+/// placement the first time and draws from the record after.
+fn assert_draws_expanded(name: &str, warm: &[&Scene], scene: &Scene, text: &mut TextSystem) {
     let (w, h) = SIZE;
     let Some(mut chunked) = gpu_renderer(w, h) else {
         return;
     };
-    chunked.render_to_rgba(warm, text, w, h).expect("render");
-    let drawn = chunked.render_to_rgba(scene, text, w, h).expect("render");
+    for warm in warm {
+        chunked.render_to_rgba(warm, text, w, h).expect("render");
+    }
     let mut fresh = gpu_renderer(w, h).expect("renderer");
     let expected = fresh
         .render_to_rgba(&expanded(scene), text, w, h)
@@ -197,15 +200,18 @@ fn assert_draws_expanded(name: &str, warm: &Scene, scene: &Scene, text: &mut Tex
         lit > 3000,
         "{name}: {lit} lit pixels, the fixture drew too little"
     );
-    let differing = pixels(&drawn)
-        .iter()
-        .zip(pixels(&expected))
-        .filter(|(a, b)| *a != b)
-        .count();
-    assert_eq!(
-        differing, 0,
-        "{name}: pixels differ from the expanded scene"
-    );
+    for draw in 1..=3 {
+        let drawn = chunked.render_to_rgba(scene, text, w, h).expect("render");
+        let differing = pixels(&drawn)
+            .iter()
+            .zip(pixels(&expected))
+            .filter(|(a, b)| *a != b)
+            .count();
+        assert_eq!(
+            differing, 0,
+            "{name}: draw {draw} differs from the expanded scene"
+        );
+    }
 }
 
 // A chunk drawn again, moved, clipped, scaled, or grouped by layers, paints
@@ -237,7 +243,24 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         chunk_primitive(&card, [0.0, 0.0]),
         Primitive::LayerEnd,
     ]);
-    let cases: [(&str, Scene, Scene); 8] = [
+    // Text under the card that the card's backdrop must cover: drawn
+    // before the chunk, it splits the quads around it into segments.
+    let label = text
+        .layout(&TextParams::new(
+            "under the card".to_owned(),
+            TextStyle::new(30.0),
+        ))
+        .expect("layout");
+    let label = ShapedText::new(Arc::new(label));
+    let covered = |scene: &mut Scene, chunk: Primitive| {
+        scene.text(TextPrimitive {
+            rect: rect(12.0, 14.0, 180.0, 40.0),
+            layout: label.clone(),
+            color: color(255, 255, 255),
+        });
+        scene.push(chunk);
+    };
+    let cases: [(&str, Scene, Scene); 9] = [
         (
             "unchanged",
             framed(&card, [10.0, 10.0], just),
@@ -278,9 +301,15 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
             framed(&layered, [10.0, 10.0], just),
             framed(&layered, [16.0, 40.0], just),
         ),
+        (
+            "where it was, over new primitives",
+            framed(&card, [10.0, 10.0], just),
+            framed(&card, [10.0, 10.0], covered),
+        ),
     ];
     for (name, warm, scene) in &cases {
-        assert_draws_expanded(name, warm, scene, &mut text);
+        // Twice, so the chunk can record its placement before `scene`.
+        assert_draws_expanded(name, &[warm, warm], scene, &mut text);
     }
 }
 
@@ -329,20 +358,23 @@ fn chunks_moved_by_whole_pixels_snap_like_their_primitives() {
             render(&at(start));
             for (dx, dy) in [(1.0, 1.0), (2.0, 3.0), (3.0, 2.0), (6.0, 5.0)] {
                 let moved = at([start[0] + dx, start[1] + dy]);
-                let drawn = render(&moved);
                 let expected = render(&expanded(&moved));
                 assert!(expected.iter().any(|&b| b > 200), "nothing drew");
-                let differing = drawn
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(expected.as_chunks::<4>().0)
-                    .filter(|(a, b)| a != b)
-                    .count();
-                assert_eq!(
-                    differing, 0,
-                    "at {scale}x, from {start:?} moved by ({dx}, {dy})"
-                );
+                // Moved, then recorded in place, then drawn from the record.
+                for draw in 1..=3 {
+                    let drawn = render(&moved);
+                    let differing = drawn
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(expected.as_chunks::<4>().0)
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    assert_eq!(
+                        differing, 0,
+                        "at {scale}x, from {start:?} moved by ({dx}, {dy}), draw {draw}"
+                    );
+                }
             }
         }
     }
@@ -400,6 +432,107 @@ fn kept_text_draws_again_after_the_atlas_forgets_its_glyphs() {
         rows(&drawn) == rows(&expected),
         "kept text drew other glyphs"
     );
+}
+
+/// Rows of plain and rich text, each a chunk at its origin. Every second
+/// row clips its own text through the middle of its glyphs, so the clip
+/// moves with the text.
+fn scrolling_rows(text: &mut TextSystem, scale: f32) -> Vec<Arc<SceneChunk>> {
+    let px = |v: f32| v / scale;
+    (0..8)
+        .map(|i| {
+            let line = format!("Row {i} gets scrolled, Ag");
+            let spans = vec![TextSpan {
+                range: 4..6,
+                weight: None,
+                style: None,
+                kind: None,
+            }];
+            let params = TextParams::new(line.clone(), TextStyle::new(15.0 * scale)).spans(spans);
+            let layout = ShapedText::new(Arc::new(text.layout(&params).expect("layout")));
+            let mut primitives = vec![Primitive::Rect(RectPrimitive {
+                rect: rect(0.0, 0.0, px(180.0), px(22.0)),
+                color: color(30, 40, 60),
+            })];
+            if i % 2 == 1 {
+                primitives.push(Primitive::ClipStart(ClipPrimitive {
+                    rect: rect(px(4.0), px(3.0), px(150.0), px(9.0)),
+                    corner_radii: [0.0; 4],
+                }));
+            }
+            primitives.push(if i % 3 == 0 {
+                Primitive::TextRun(TextPrimitive {
+                    rect: rect(px(4.0), px(2.0), px(170.0), px(20.0)),
+                    layout,
+                    color: color(255, 255, 255),
+                })
+            } else {
+                Primitive::RichTextRun(RichTextPrimitive {
+                    rect: rect(px(4.0), px(2.0), px(170.0), px(20.0)),
+                    layout,
+                    default_color: color(230, 230, 230),
+                    span_colors: Arc::from([color(255, 200, 0)]),
+                })
+            });
+            if i % 2 == 1 {
+                primitives.push(Primitive::ClipEnd);
+            }
+            chunk(primitives)
+        })
+        .collect()
+}
+
+// Text scrolled by whole pixels draws its kept glyphs moved, exactly where
+// preparing them again draws them: rows scrolled one or more pixels at a
+// time, by fractions, back up, across a clip that cuts their glyphs at the
+// edges, with clips of their own that move with them, at several scales.
+#[test]
+fn scrolled_text_draws_the_pixels_of_text_prepared_again() {
+    let (w, h) = SIZE;
+    let mut text = test_text();
+    let gpu = match GpuContext::headless() {
+        Ok(gpu) => gpu,
+        Err(RenderError::NoAdapter) => {
+            assert!(
+                std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+            );
+            return;
+        }
+        Err(error) => panic!("headless context failed: {error}"),
+    };
+    for scale in [1.0, 1.5, 2.0] {
+        let rows = scrolling_rows(&mut text, scale);
+        // Scroll positions in physical pixels.
+        let list = |scroll: f32| {
+            let mut scene = Scene::default();
+            scene.clip(rect(0.0, 20.0 / scale, 190.0 / scale, 110.0 / scale));
+            for (i, row) in rows.iter().enumerate() {
+                let y = 24.0 + i as f32 * 26.0 - scroll;
+                scene.chunk(row, [5.0 / scale, y / scale]);
+            }
+            scene.pop_clip();
+            physical(scene, scale)
+        };
+        let mut scrolled = Renderer::headless_with_gpu(&gpu, w, h, 1.0);
+        for scroll in [
+            0.0, 1.0, 2.0, 3.0, 7.0, 7.5, 8.5, 9.5, 21.0, 40.0, 41.0, 13.0, 12.0,
+        ] {
+            let scene = list(scroll);
+            let drawn = scrolled.render_to_rgba(&scene, &mut text, w, h).unwrap();
+            let expected = Renderer::headless_with_gpu(&gpu, w, h, 1.0)
+                .render_to_rgba(&expanded(&scene), &mut text, w, h)
+                .unwrap();
+            let differing = drawn
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(expected.as_chunks::<4>().0)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differing, 0, "at {scale}x, scrolled to {scroll}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,57 +618,65 @@ fn terminal_scene(rows: &[Arc<SceneChunk>]) -> Scene {
 const LIST_ROWS: usize = 60;
 const ROW_H: f32 = 40.0;
 
-/// A scrolled list: each row is a chunk (a rounded card, its border, a
-/// title, a subtitle, a badge), clipped to an 800 pixel viewport.
-fn list_scene(text: &mut TextSystem, scroll: f32) -> Scene {
+/// The rows of a list, each a chunk at its origin: a rounded card, its
+/// border, a title, a subtitle, a badge.
+fn list_rows(text: &mut TextSystem) -> Vec<Arc<SceneChunk>> {
+    (0..LIST_ROWS)
+        .map(|i| {
+            let title = text
+                .layout(&TextParams::new(
+                    format!("Conversation {i}"),
+                    TextStyle::new(14.0),
+                ))
+                .expect("layout");
+            let subtitle = text
+                .layout(&TextParams::new(
+                    format!("Last message in thread {i}, a few words long"),
+                    TextStyle::new(12.0),
+                ))
+                .expect("layout");
+            chunk(vec![
+                Primitive::RoundedRect(RoundedRectPrimitive::uniform(
+                    rect(4.0, 2.0, 592.0, ROW_H - 4.0),
+                    6.0,
+                    color(44, 44, 52),
+                )),
+                Primitive::Border(BorderPrimitive::uniform(
+                    rect(4.0, 2.0, 592.0, ROW_H - 4.0),
+                    1.0,
+                    6.0,
+                    color(70, 70, 80),
+                )),
+                Primitive::TextRun(TextPrimitive {
+                    rect: rect(12.0, 4.0, 400.0, 18.0),
+                    layout: ShapedText::new(Arc::new(title)),
+                    color: color(240, 240, 240),
+                }),
+                Primitive::TextRun(TextPrimitive {
+                    rect: rect(12.0, 21.0, 400.0, 16.0),
+                    layout: ShapedText::new(Arc::new(subtitle)),
+                    color: color(170, 170, 180),
+                }),
+                Primitive::RoundedRect(RoundedRectPrimitive::uniform(
+                    rect(560.0, 12.0, 20.0, 14.0),
+                    7.0,
+                    color(80, 120, 220),
+                )),
+            ])
+        })
+        .collect()
+}
+
+/// `rows` scrolled by `scroll` pixels, clipped to an 800 pixel viewport.
+fn list_scene(rows: &[Arc<SceneChunk>], scroll: f32) -> Scene {
     let mut scene = Scene::default();
     scene.rect(RectPrimitive {
         rect: rect(0.0, 0.0, 800.0, 820.0),
         color: color(30, 30, 34),
     });
     scene.clip(rect(0.0, 10.0, 600.0, 800.0));
-    for i in 0..LIST_ROWS {
-        let title = text
-            .layout(&TextParams::new(
-                format!("Conversation {i}"),
-                TextStyle::new(14.0),
-            ))
-            .expect("layout");
-        let subtitle = text
-            .layout(&TextParams::new(
-                format!("Last message in thread {i}, a few words long"),
-                TextStyle::new(12.0),
-            ))
-            .expect("layout");
-        let row = chunk(vec![
-            Primitive::RoundedRect(RoundedRectPrimitive::uniform(
-                rect(4.0, 2.0, 592.0, ROW_H - 4.0),
-                6.0,
-                color(44, 44, 52),
-            )),
-            Primitive::Border(BorderPrimitive::uniform(
-                rect(4.0, 2.0, 592.0, ROW_H - 4.0),
-                1.0,
-                6.0,
-                color(70, 70, 80),
-            )),
-            Primitive::TextRun(TextPrimitive {
-                rect: rect(12.0, 4.0, 400.0, 18.0),
-                layout: ShapedText::new(Arc::new(title)),
-                color: color(240, 240, 240),
-            }),
-            Primitive::TextRun(TextPrimitive {
-                rect: rect(12.0, 21.0, 400.0, 16.0),
-                layout: ShapedText::new(Arc::new(subtitle)),
-                color: color(170, 170, 180),
-            }),
-            Primitive::RoundedRect(RoundedRectPrimitive::uniform(
-                rect(560.0, 12.0, 20.0, 14.0),
-                7.0,
-                color(80, 120, 220),
-            )),
-        ]);
-        scene.chunk(&row, [0.0, 10.0 + i as f32 * ROW_H - scroll]);
+    for (i, row) in rows.iter().enumerate() {
+        scene.chunk(row, [0.0, 10.0 + i as f32 * ROW_H - scroll]);
     }
     scene.pop_clip();
     physical(scene, 1.0)
@@ -546,6 +687,14 @@ fn list_scene(text: &mut TextSystem, scroll: f32) -> Scene {
 /// outside the timing.
 fn frame_cost(renderer: &mut Renderer, scene: &Scene, text: &mut TextSystem) -> (u64, u64, u64) {
     let (w, h) = (renderer.size.width, renderer.size.height);
+    // As `render` does; glyphs outside the viewport's resolution are culled.
+    renderer.viewport.update(
+        &renderer.queue,
+        Resolution {
+            width: w,
+            height: h,
+        },
+    );
     let target = renderer.texture_pool.acquire(&renderer.device, w, h);
     let view = renderer.texture_pool.view(&target).clone();
     let mut encoder = renderer
@@ -589,8 +738,8 @@ fn cycled_cost(scenes: &[Scene], text: &mut TextSystem) -> Option<(u64, u64, u64
 
 /// Prints the CPU cost of frames of a cached terminal and a cached list,
 /// drawn from chunks and from the same scenes expanded: repeated, with one
-/// terminal row changing every frame, and with the list scrolling by a
-/// pixel every frame. Run with `--ignored --nocapture` on a GPU (lavapipe
+/// terminal row changing every frame, and with the list's rows scrolling
+/// by a pixel every frame. Run with `--ignored --nocapture` on a GPU (lavapipe
 /// works).
 #[test]
 #[ignore = "measurement, prints a report"]
@@ -599,16 +748,17 @@ fn report_chunk_frame_cost() {
     let rows = terminal_rows(&mut text);
     let mut changed = rows.clone();
     changed[10] = terminal_row(&mut text, &format!("{:<80}", "0010 a changed row"));
+    let list = list_rows(&mut text);
     let cases = [
         ("terminal, repeated", vec![terminal_scene(&rows)]),
         (
             "terminal, a row changes",
             vec![terminal_scene(&rows), terminal_scene(&changed)],
         ),
-        ("list, repeated", vec![list_scene(&mut text, 0.0)]),
+        ("list, repeated", vec![list_scene(&list, 0.0)]),
         (
             "list, scrolling",
-            vec![list_scene(&mut text, 0.0), list_scene(&mut text, 1.0)],
+            (0..20).map(|y| list_scene(&list, y as f32)).collect(),
         ),
     ];
     for (name, scenes) in &cases {

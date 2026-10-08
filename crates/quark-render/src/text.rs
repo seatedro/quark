@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use glyphon::{
     Attrs, AttrsList, AttrsOwned, Buffer, Color as GlyphonColor, FontSystem, LayoutGlyph,
-    LayoutRun, PositionedGlyph, TextArea, TextAtlas, TextBounds,
+    PositionedGlyph, TextArea, TextAtlas, TextBounds,
 };
 use quark::scene::ShapedText;
 use quark::{Color, FontKind};
@@ -50,45 +51,59 @@ impl GlyphOwner {
     }
 }
 
-/// The glyphs of `texts` then `rich_texts`, in glyphon's order for the same
-/// primitives as text areas, so overlapping glyphs blend the same way.
-/// Nothing is shaped or copied; layouts must come from the `TextSystem`
-/// passed to glyphon's prepare, because glyph cache keys carry that font
-/// database's face ids.
-pub(super) fn positioned_glyphs<'a>(
-    texts: &'a [ClippedText],
-    rich_texts: &'a [ClippedRichText],
-) -> impl Iterator<Item = PositionedGlyph> + 'a {
-    let plain = texts.iter().flat_map(|text| {
-        let primitive = &text.primitive;
-        let color = glyphon_color(primitive.color);
-        let layout = primitive.layout.downcast_ref::<TextLayout>();
-        layout.into_iter().flat_map(move |layout| {
-            layout_glyphs(layout, primitive.rect, text.clip, move |glyph| {
-                glyph.color_opt.unwrap_or(color)
-            })
-        })
+/// Append the glyphs of `texts` then `rich_texts` to `out`; see
+/// [`visit_positioned_glyphs`].
+pub(super) fn push_positioned_glyphs(
+    texts: &[ClippedText],
+    rich_texts: &[ClippedRichText],
+    out: &mut Vec<PositionedGlyph>,
+) {
+    let _ = visit_positioned_glyphs(texts, rich_texts, |glyph| {
+        out.push(glyph);
+        ControlFlow::Continue(())
     });
-    let rich = rich_texts.iter().flat_map(|text| {
-        let primitive = &text.primitive;
-        let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
-        let alpha = text.alpha;
-        let layout = primitive.layout.downcast_ref::<TextLayout>();
-        layout.into_iter().flat_map(move |layout| {
-            layout_glyphs(layout, primitive.rect, text.clip, move |glyph| {
-                let color = span_color(glyph.metadata as u32, default_color, span_colors);
-                glyph
-                    .color_opt
-                    .unwrap_or(glyphon_color(fade_color(color, alpha)))
-            })
-        })
-    });
-    plain.chain(rich)
 }
 
-/// `layout`'s glyphs on lines that reach `clip`, placed as glyphon places a
-/// text area's: the same physical position, rounded baseline, and line
-/// culling, so both paths draw identical pixels.
+/// Call `visit` with the glyphs of `texts` then `rich_texts` until it
+/// breaks, in glyphon's order for the same primitives as text areas, so
+/// overlapping glyphs blend the same way. Nothing is shaped or copied;
+/// layouts must come from the `TextSystem` passed to glyphon's prepare,
+/// because glyph cache keys carry that font database's face ids.
+pub(super) fn visit_positioned_glyphs(
+    texts: &[ClippedText],
+    rich_texts: &[ClippedRichText],
+    mut visit: impl FnMut(PositionedGlyph) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    // Plain loops: nested `flat_map`s cost several times the glyph math.
+    for text in texts {
+        let primitive = &text.primitive;
+        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
+            continue;
+        };
+        let color = glyphon_color(primitive.color);
+        visit_layout_glyphs(layout, primitive.rect, text.clip, &mut visit, |glyph| {
+            glyph.color_opt.unwrap_or(color)
+        })?;
+    }
+    for text in rich_texts {
+        let primitive = &text.primitive;
+        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
+            continue;
+        };
+        let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+        visit_layout_glyphs(layout, primitive.rect, text.clip, &mut visit, |glyph| {
+            let color = span_color(glyph.metadata as u32, default_color, span_colors);
+            glyph
+                .color_opt
+                .unwrap_or(glyphon_color(fade_color(color, text.alpha)))
+        })?;
+    }
+    ControlFlow::Continue(())
+}
+
+/// Visit `layout`'s glyphs on lines that reach `clip`, placed as glyphon
+/// places a text area's: the same physical position, rounded baseline,
+/// and line culling, so both paths draw identical pixels.
 ///
 /// Positions come from the layout's cosmic-text buffer. The glyph columns
 /// cannot replace it yet: their `phys_y` adds the baseline before
@@ -96,39 +111,42 @@ pub(super) fn positioned_glyphs<'a>(
 /// glyphs on fractional baselines by a pixel. Drawing from the columns
 /// needs quark-text to keep each glyph's rounded baseline apart from its
 /// offset.
-fn layout_glyphs<'a>(
-    layout: &'a TextLayout,
+fn visit_layout_glyphs(
+    layout: &TextLayout,
     origin: Rect,
     clip: Rect,
-    color: impl Fn(&LayoutGlyph) -> GlyphonColor + Copy + 'a,
-) -> impl Iterator<Item = PositionedGlyph> + 'a {
+    visit: &mut impl FnMut(PositionedGlyph) -> ControlFlow<()>,
+    color: impl Fn(&LayoutGlyph) -> GlyphonColor,
+) -> ControlFlow<()> {
     // The layout's hit-testing and carets already include this shift.
     let (left, top) = (origin.x + layout.buffer_x(), origin.y);
     let bounds = text_bounds(clip);
-    let visible = move |run: &LayoutRun<'_>| {
+    let mut reached = false;
+    for run in layout.buffer().layout_runs() {
         let start = (top + run.line_top) as i32;
         let end = start + run.line_height as i32;
-        start <= bounds.bottom && bounds.top <= end
-    };
-    layout
-        .buffer()
-        .layout_runs()
-        .skip_while(move |run| !visible(run))
-        .take_while(move |run| visible(run))
-        .flat_map(move |run| {
-            let line_y = run.line_y.round() as i32;
-            run.glyphs.iter().map(move |glyph| {
-                // The buffer is already shaped at physical size.
-                let physical = glyph.physical((left, top), 1.0);
-                PositionedGlyph {
-                    cache_key: physical.cache_key,
-                    x: physical.x,
-                    y: physical.y + line_y,
-                    color: color(glyph),
-                    bounds,
-                }
-            })
-        })
+        if !(start <= bounds.bottom && bounds.top <= end) {
+            // Lines run top to bottom: past the visible ones, stop.
+            if reached {
+                break;
+            }
+            continue;
+        }
+        reached = true;
+        let line_y = run.line_y.round() as i32;
+        for glyph in run.glyphs {
+            // The buffer is already shaped at physical size.
+            let physical = glyph.physical((left, top), 1.0);
+            visit(PositionedGlyph {
+                cache_key: physical.cache_key,
+                x: physical.x,
+                y: physical.y + line_y,
+                color: color(glyph),
+                bounds,
+            })?;
+        }
+    }
+    ControlFlow::Continue(())
 }
 
 /// Builds glyphon areas straight from the shaped layouts; nothing is shaped
