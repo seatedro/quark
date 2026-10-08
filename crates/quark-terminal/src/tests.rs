@@ -424,3 +424,34 @@ fn a_paste_larger_than_the_input_queue_arrives_whole() {
     let shown: String = screen(&mut t).split_whitespace().collect();
     assert_eq!(shown, format!("R{len}"));
 }
+
+/// A terminal that was sized before the monospace family changed matches
+/// one made after it: columns, the cell under a point, and the pixel size
+/// it reports to the program.
+#[test]
+fn a_font_change_resizes_an_existing_terminal_like_a_fresh_one() {
+    use quark_text::{FontSettings, LayoutCache, TextSystem};
+    use quark_ui::theme::Theme;
+
+    let theme = Theme::default_dark();
+    let mut text = TextSystem::vendored_only(&FontSettings::default());
+    let mut layouts = LayoutCache::new(1);
+    let mut sized = |t: &mut TerminalState, text: &mut TextSystem| {
+        t.set_viewport(640.0, 400.0);
+        t.prepare(text, &mut layouts, 1.0, &theme);
+        t.feed(b"\x1b[14t");
+        (t.size(), t.cell_at(300.0, 100.0), t.take_input())
+    };
+    let new = || TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal"));
+    let mut existing = new();
+    let before = sized(&mut existing, &mut text);
+    // Any family can be the monospace one; Inter's digits are narrower.
+    text.set_font_settings(&FontSettings {
+        mono_family: "Inter".to_owned(),
+        ..FontSettings::default()
+    });
+    let after = sized(&mut existing, &mut text);
+    let fresh = sized(&mut new(), &mut text);
+    assert_ne!(before.0, fresh.0, "the fonts have the same advance");
+    assert_eq!(after, fresh);
+}

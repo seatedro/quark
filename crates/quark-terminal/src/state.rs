@@ -181,7 +181,9 @@ pub struct TerminalState {
     /// Input for the PTY that did not fit its queue yet, oldest first.
     unsent: Vec<u8>,
     style: TerminalStyle,
-    metrics: Option<(Metrics, u32)>,
+    /// The cell metrics and what they were measured for: the scale
+    /// factor's bits and the text system's font generation.
+    metrics: Option<(Metrics, (u32, u64))>,
     colors: Option<(Rgb, Rgb)>,
     viewport: (f32, f32),
     /// Grid size in cells, and the scale it was sized at.
@@ -813,7 +815,11 @@ impl TerminalState {
         scale: f32,
         theme: &Theme,
     ) {
-        if self.metrics.is_none_or(|(_, s)| s != scale.to_bits()) {
+        // Remeasure when the scale or the fonts changed (a new monospace
+        // family has its own advance), and resize to match.
+        let key = (scale.to_bits(), text.generation());
+        let remeasured = self.metrics.is_none_or(|(_, k)| k != key);
+        if remeasured {
             let style = TextStyle::new(self.style.font_size).kind(FontKind::Mono);
             let params = TextParams::new("0000000000", style).scale_factor(scale);
             let cell_w = layouts
@@ -821,7 +827,7 @@ impl TerminalState {
                 .map_or(self.style.font_size * 0.6, |l| l.size().0 / 10.0);
             let mut m = self.metrics();
             m.cell_w = cell_w;
-            self.metrics = Some((m, scale.to_bits()));
+            self.metrics = Some((m, key));
             self.dirty = true;
         }
         let c = &theme.colors;
@@ -841,7 +847,7 @@ impl TerminalState {
         let rows = ((self.viewport.1 - m.pad * 2.0) / m.cell_h)
             .floor()
             .max(1.0) as u16;
-        if (cols, rows, scale.to_bits()) != self.size {
+        if remeasured || (cols, rows, scale.to_bits()) != self.size {
             self.size = (cols, rows, scale.to_bits());
             self.vt.resize(
                 cols,
@@ -968,7 +974,7 @@ impl TerminalState {
     pub(crate) fn headless(cols: u16, rows: u16) -> Self {
         let mut state = Self::new("test", FocusId::from_key("test.terminal"));
         let m = state.metrics();
-        state.metrics = Some((m, 1f32.to_bits()));
+        state.metrics = Some((m, (1f32.to_bits(), 0)));
         state.size = (cols, rows, 1f32.to_bits());
         state
             .vt
