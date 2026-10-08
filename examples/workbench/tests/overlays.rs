@@ -256,10 +256,10 @@ fn overlays_toast_undo_runs_command() {
 
 // Catches a toast stack laid out against something smaller than the
 // window (it once anchored to a zero-size overlay layer and drew above the
-// top edge): once in, the toast sits wholly inside the window's bottom
-// edge.
+// top edge), or one drawn over the composer's Send: once in, the toast
+// sits in the window's lower half, above the composer.
 #[test]
-fn overlays_toast_rests_at_the_window_bottom() {
+fn overlays_toast_rests_above_the_composer() {
     let mut ui = harness(ScenarioKind::Review);
     ui.key("mod+k");
     ui.type_text("Apply proposed");
@@ -267,10 +267,11 @@ fn overlays_toast_rests_at_the_window_bottom() {
     ui.advance(300);
 
     let undo = toast_button(&ui, "Undo").bounds;
+    let send = ui.find(By::role_name(Role::Button, "Send")).bounds;
     let (_, height) = WIDE;
     assert!(
-        undo.y > height / 2.0 && undo.y + undo.height <= height,
-        "{undo:?}"
+        undo.y > height / 2.0 && undo.y + undo.height <= send.y,
+        "{undo:?} over {send:?}"
     );
 }
 

@@ -67,8 +67,9 @@ impl Toasts {
         self.queue.pointer_moved(pointer, self.now_ms);
     }
 
-    /// The stack for this frame of `host`'s window, or `None` when empty.
-    pub fn view(&mut self, now_ms: u64, vcx: &mut ViewContext) -> Option<AnyElement> {
+    /// The stack for this frame of `host`'s window, `inset` points above its
+    /// bottom edge, or `None` when empty.
+    pub fn view(&mut self, now_ms: u64, inset: f32, vcx: &mut ViewContext) -> Option<AnyElement> {
         self.now_ms = now_ms;
         for toast in self.pending.drain(..) {
             let kind = match toast.kind {
@@ -110,7 +111,7 @@ impl Toasts {
             vcx.animations(),
             window,
             scale,
-            0.0,
+            inset,
             now_ms,
             &[],
             |index| Action::Toast(ToastEvent::Dismiss(index)).into(),

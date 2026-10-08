@@ -530,6 +530,10 @@ impl UiApp for Workbench {
             }
             .into_any()
         });
+        if main {
+            let inset = composer::height(&self.composer, &base);
+            overlays::set_toast_inset(&mut self.overlays, host, inset);
+        }
         let overlays = overlays::view(&mut self.overlays, &base, vcx);
         let settings = settings::view(&mut self.settings, &base, vcx);
         let notice = self.dock.windows.notice(window).map(str::to_owned);

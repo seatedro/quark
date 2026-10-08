@@ -77,6 +77,8 @@ struct Host {
     /// A menu asked for from the keyboard, anchored at its target's bounds
     /// in the next frame.
     pending_key_menu: Option<(MenuTarget, Option<FocusId>)>,
+    /// Space kept clear under the toast stack (the main window's composer).
+    toast_inset: f32,
 }
 
 impl Host {
@@ -91,6 +93,7 @@ impl Host {
             composing: false,
             pending_click: None,
             pending_key_menu: None,
+            toast_inset: 0.0,
         }
     }
 
@@ -184,6 +187,12 @@ pub fn new_state() -> State {
     State::default()
 }
 
+/// Keep `inset` points at the bottom of `host`'s window clear of toasts,
+/// so the stack sits above the composer instead of over Send.
+pub fn set_toast_inset(state: &mut State, host: HostId, inset: f32) {
+    state.host_mut(host).toast_inset = inset;
+}
+
 /// The overlay layer of `scx.window`, drawn above everything; `None`
 /// when nothing is open there.
 pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> Option<AnyElement> {
@@ -219,7 +228,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> Option
     let host = state.host_mut(scx.host);
     let blocked = modal || !host.stack.is_empty();
     let tooltip = host.tooltip.view(host.pointer, blocked, now_ms, vcx);
-    let toasts = host.toasts.view(now_ms, vcx);
+    let toasts = host.toasts.view(now_ms, host.toast_inset, vcx);
     let menu = host.menu.render(window, vcx.theme);
     let palette = if palette_here {
         state
