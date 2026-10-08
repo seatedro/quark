@@ -1,194 +1,201 @@
 //! Named starting states, one per live capture this demo reproduces, so a
 //! screenshot can be compared with its reference (`--scene NAME` or
-//! `QUARK_CODEX_SCENE`). Each scene names its capture.
+//! `QUARK_CODEX_SCENE`). Each scene names its capture; `u*` captures are
+//! ChatGPT 26.1007 in Codex mode, numbered ones Codex 26.623.
 
 use crate::data::{self, Item, ProjectId, Status, ThreadId};
-use crate::{Codex, Menu, Scope, Screen, Tab, settings::Page};
+use crate::{Codex, Menu, Screen, Tab, settings::Page};
 
 type Setup = fn(&mut Codex);
 
 /// Scene name, reference capture, setup.
 pub const SCENES: &[(&str, &str, Setup)] = &[
-    ("home", "04b-home-no-banner", home),
-    ("home-banner", "04-home-new-chat", |a| {
+    ("home", "u73-home-new-chat-dark", home),
+    ("home-light", "u70-home-new-chat-light", home),
+    ("permissions-menu", "u03-permissions-menu-dark", |a| {
         home(a);
-        a.banner = true;
+        a.composer.editor.set_text(data::TURN1_PROMPT);
+        a.menu = Some(Menu::Permissions);
     }),
-    ("approval-menu", "05-approval-mode-menu", |a| {
+    ("model-menu", "u04-model-menu-dark", |a| {
         home(a);
-        a.banner = true;
-        a.menu = Some(Menu::Approval);
-    }),
-    ("model-menu", "06-model-picker", |a| {
-        home(a);
-        a.banner = true;
+        a.composer.editor.set_text(data::TURN1_PROMPT);
         a.menu = Some(Menu::Model);
     }),
-    ("model-submenu", "07-model-submenu", |a| {
+    ("mode-menu", "u05-mode-switcher-dark", |a| {
         home(a);
-        a.banner = true;
-        a.menu = Some(Menu::ModelList);
+        a.composer.editor.set_text(data::TURN1_PROMPT);
+        a.menu = Some(Menu::Mode);
     }),
-    ("speed-submenu", "08-speed-submenu", |a| {
-        home(a);
-        a.banner = true;
-        a.menu = Some(Menu::Speed);
-    }),
-    ("add-menu", "09-add-menu", |a| {
+    ("add-menu", "u74-add-menu-dark", |a| {
         home(a);
         a.menu = Some(Menu::Add);
     }),
-    ("choose-project", "11-choose-project-menu", |a| {
+    ("slash-menu", "u75-slash-menu-dark", |a| {
         home(a);
-        a.menu = Some(Menu::ChooseProject);
-    }),
-    ("project-home", "13-new-chat-in-project", project_home),
-    ("work-location", "14-work-location-menu", |a| {
-        project_home(a);
-        a.menu = Some(Menu::WorkLocation);
-    }),
-    ("branch-menu", "15-branch-menu", |a| {
-        project_home(a);
-        a.menu = Some(Menu::Branch);
-    }),
-    ("headline-project", "17-headline-project-picker", |a| {
-        project_home(a);
-        a.menu = Some(Menu::HeadlineProject);
-    }),
-    ("slash-menu", "18-slash-menu", |a| {
-        project_home(a);
         a.composer.editor.set_text("/");
     }),
-    ("at-mention", "21-at-mention-file-search", |a| {
-        project_home(a);
-        a.composer.editor.set_text("@car");
+    ("prompt", "u02-composer-prompt-dark", |a| {
+        home(a);
+        a.composer.editor.set_text(data::TURN1_PROMPT);
     }),
-    ("prompt", "22-composer-with-prompt", |a| {
-        project_home(a);
-        a.composer.editor.set_text(data::DEMO_PROMPT);
+    ("starting", "u06-turn-starting-dark", |a| running(a, 0)),
+    ("thinking", "u07-turn-thinking-dark", |a| running(a, 1)),
+    ("streaming", "u08-preamble-streaming-shimmer-dark", |a| {
+        running(a, 2)
     }),
-    ("thinking", "23-turn-thinking", |a| {
-        thread(a, 1);
-        if let Some(t) = a.data.thread_mut(ThreadId(1)) {
-            t.items.push(Item::Thinking);
-            t.status = Status::Running;
-        }
+    ("running-row", "u09-running-command-row-dark", |a| {
+        running(a, 3)
     }),
-    ("error", "24-turn-error-model-unsupported", |a| thread(a, 2)),
-    ("thread", "27-thread-two-errors-model-changed", |a| {
-        thread(a, 5);
-        a.model = 2;
+    ("turn1", "u12-turn1-final-dark", |a| {
+        turn1(a, false, false, false)
     }),
-    ("chat-actions", "28-thread-chat-actions-menu", |a| {
-        thread(a, 5);
-        a.model = 2;
-        a.menu = Some(Menu::ChatActions);
+    ("worked-open", "u13-worked-for-expanded-dark", |a| {
+        turn1(a, true, false, false)
     }),
-    ("open-in", "29-open-in-menu", |a| {
-        thread(a, 5);
-        a.model = 2;
-        a.menu = Some(Menu::OpenIn);
+    (
+        "group-open",
+        "u14-read-files-ran-commands-expanded-dark",
+        |a| turn1(a, true, true, false),
+    ),
+    (
+        "shell-card",
+        "u15-command-card-npm-test-expanded-dark",
+        |a| turn1(a, true, true, true),
+    ),
+    ("editing-pill", "u16-editing-files-changed-pill-dark", |a| {
+        failing(a);
+        let mut items = data::turn1(false, false, false);
+        items.push(Item::User {
+            text: data::TURN2_PROMPT.to_owned(),
+            time: "11:03 PM",
+        });
+        items.push(Item::Work {
+            took: "3s",
+            running: true,
+            open: true,
+            steps: vec![
+                data::Step::Prose {
+                    text: "I’ll fix the quantity calculation and percentage discount in `cart.js`, then rerun the tests.",
+                    pending: "",
+                },
+                data::Step::Live {
+                    glyph: data::Glyph::Pencil,
+                    text: "Editing files",
+                },
+            ],
+        });
+        set(a, items, Status::Running);
+        a.data.thread_mut(data::FAILING_THREAD).unwrap().pill = Some((2, 2));
     }),
-    ("summary", "30-summary-panel", |a| {
-        thread(a, 5);
-        a.model = 2;
-        a.menu = Some(Menu::Summary);
+    (
+        "file-change",
+        "u20-turn2-final-file-change-card-dark",
+        |a| turn2(a, false, false),
+    ),
+    ("diff-open", "u23-edit-row-diff-expanded-dark", |a| {
+        turn2(a, true, true)
     }),
-    ("review-scope", "32-review-scope-menu", |a| {
-        review(a);
-        a.scope = Scope::Branch;
-        a.menu = Some(Menu::ReviewScope);
+    ("changes", "u25-view-changes-review-panel-dark", |a| {
+        turn2(a, true, true);
+        a.side_panel = true;
     }),
-    ("review", "33-review-unstaged-diff", review),
-    ("review-no-sidebar", "34-review-diff-sidebar-hidden", |a| {
-        review(a);
+    (
+        "changes-no-sidebar",
+        "u26-review-panel-sidebar-hidden-dark",
+        |a| {
+            turn2(a, true, true);
+            a.side_panel = true;
+            a.sidebar_open = false;
+        },
+    ),
+    ("changes-options", "u27-changes-options-menu-dark", |a| {
+        turn2(a, true, true);
+        a.side_panel = true;
         a.sidebar_open = false;
+        a.menu = Some(Menu::ChangesOptions);
     }),
-    ("review-split", "35-review-split-diff", |a| {
-        review(a);
+    ("changes-scope", "u28-changes-scope-menu-dark", |a| {
+        turn2(a, true, true);
+        a.side_panel = true;
         a.sidebar_open = false;
-        a.split = true;
+        a.menu = Some(Menu::ChangesScope);
     }),
-    ("review-expanded", "36-review-expanded-panel", |a| {
-        review(a);
-        a.split = true;
-        a.panel_expanded = true;
+    ("changes-full", "u29-changes-full-view-dark", |a| {
+        turn2(a, true, true);
+        a.side_panel = true;
+        a.full_view = true;
     }),
-    ("panel-tab-menu", "37-side-panel-tab-menu", |a| {
-        review(a);
-        a.split = true;
-        a.panel_expanded = true;
-        a.menu = Some(Menu::PanelTab);
+    ("approval", "u34-command-approval-prompt-dark", approval),
+    ("approval-options", "u35-approval-options-menu-dark", |a| {
+        approval(a);
+        a.menu = Some(Menu::ApprovalOptions);
     }),
-    ("terminal", "38-terminal-tab", |a| {
-        review(a);
-        a.panel_expanded = true;
-        a.tabs = vec![Tab::Review, Tab::Terminal];
+    ("activity", "u47-activity-panel-dark", |a| {
+        turn2(a, false, false);
+        a.activity = true;
+    }),
+    ("profile-menu", "u48-profile-menu-dark", |a| {
+        turn2(a, false, false);
+        a.activity = true;
+        a.menu = Some(Menu::Profile);
+    }),
+    ("settings-general", "u51-settings-general-1-dark", |a| {
+        a.screen = Screen::Settings(Page::General)
+    }),
+    (
+        "settings-appearance",
+        "u51-settings-appearance-1-dark",
+        |a| a.screen = Screen::Settings(Page::Appearance),
+    ),
+    ("turn1-light", "u61-thread-finished-light", |a| {
+        turn1(a, false, false, false)
+    }),
+    (
+        "diff-light",
+        "u64-edit-diff-and-file-change-card-light",
+        |a| turn2(a, true, true),
+    ),
+    ("add-menu-light", "u71-add-menu-light", |a| {
+        home(a);
+        a.menu = Some(Menu::Add);
+    }),
+    // 26.623 surfaces the update was not captured on.
+    ("errors", "27-thread-two-errors-model-changed-dark", |a| {
+        a.screen = Screen::Thread(data::ERRORS_THREAD);
+        set_errors(a, 5);
+    }),
+    ("terminal", "38-terminal-tab-dark", |a| {
+        turn2(a, false, false);
+        a.side_panel = true;
+        a.full_view = true;
+        a.tabs = vec![Tab::Changes, Tab::Terminal];
         a.tab = Tab::Terminal;
     }),
-    ("file-viewer", "40-file-viewer", |a| {
-        review(a);
-        a.panel_expanded = true;
-        a.tabs = vec![Tab::Review, Tab::Terminal, Tab::File];
+    ("file-viewer", "40-file-viewer-dark", |a| {
+        turn2(a, false, false);
+        a.side_panel = true;
+        a.full_view = true;
+        a.tabs = vec![Tab::Changes, Tab::Terminal, Tab::File];
         a.tab = Tab::File;
         a.open_file = Some("cart.js");
     }),
-    ("thread-full", "43-try-gpt52-light", |a| {
-        thread(a, 11);
-        a.model = 3;
-        a.reasoning = 0;
-    }),
-    ("account-menu", "48-account-menu", |a| {
-        thread(a, 11);
-        a.model = 3;
-        a.reasoning = 0;
-        a.menu = Some(Menu::Account);
-    }),
-    ("palette", "51-search-palette", |a| {
-        thread(a, 11);
-        a.model = 3;
-        a.reasoning = 0;
+    ("palette", "51-search-palette-dark", |a| {
+        turn2(a, false, false);
         a.palette = Some(crate::palette::State::new());
     }),
-    ("settings-general", "58-settings-general-1", |a| {
-        a.screen = Screen::Settings(Page::General)
+    (
+        "settings-shortcuts",
+        "58-settings-keyboard-shortcuts-1-dark",
+        |a| a.screen = Screen::Settings(Page::KeyboardShortcuts),
+    ),
+    ("narrow-640", "62-narrow-640-dark", |a| {
+        a.screen = Screen::Thread(data::ERRORS_THREAD);
+        set_errors(a, 11);
     }),
-    ("settings-appearance", "58-settings-appearance-1", |a| {
-        a.screen = Screen::Settings(Page::Appearance)
-    }),
-    ("narrow-640", "62-narrow-640", |a| {
-        thread(a, 11);
-        a.model = 3;
-        a.reasoning = 0;
-    }),
-    ("narrow-480", "63-narrow-min", |a| {
-        thread(a, 11);
-        a.model = 3;
-        a.reasoning = 0;
-    }),
-    ("launcher", "77-side-panel-launcher", |a| {
-        thread(a, 11);
-        a.model = 3;
-        a.reasoning = 0;
-        a.side_panel = true;
-        a.tabs.clear();
-    }),
-    ("agent-turn", "pub-03 / pub-04 (public)", |a| {
-        a.project = Some(ProjectId(1));
-        let id = ThreadId(2);
-        a.data.threads.insert(
-            0,
-            data::Thread {
-                id,
-                project: ProjectId(1),
-                title: "Fix applyDiscount so the cart tests pass.".to_owned(),
-                age: "now",
-                status: Status::Idle,
-                cloud: false,
-                items: data::agent_turn_items(),
-            },
-        );
-        a.screen = Screen::Thread(id);
+    ("narrow-480", "63-narrow-min-dark", |a| {
+        a.screen = Screen::Thread(data::ERRORS_THREAD);
+        set_errors(a, 11);
     }),
 ];
 
@@ -199,33 +206,63 @@ pub fn apply(app: &mut Codex, name: &str) {
     }
 }
 
-/// The home screen before any project was opened: no codex-demo.
 fn home(a: &mut Codex) {
-    a.data.threads.retain(|t| t.project != ProjectId(1));
-    a.project = None;
-    a.screen = Screen::Home;
-}
-
-fn project_home(a: &mut Codex) {
-    a.data.threads.retain(|t| t.project != ProjectId(1));
     a.project = Some(ProjectId(1));
     a.screen = Screen::Home;
 }
 
-/// The demo thread with its first `items` transcript entries.
-fn thread(a: &mut Codex, items: usize) {
+fn failing(a: &mut Codex) {
     a.project = Some(ProjectId(1));
-    if let Some(t) = a.data.thread_mut(ThreadId(1)) {
-        t.items = data::demo_items()[..items].to_vec();
-        t.status = Status::Error;
+    a.screen = Screen::Thread(data::FAILING_THREAD);
+}
+
+fn set(a: &mut Codex, items: Vec<Item>, status: Status) {
+    if let Some(t) = a.data.thread_mut(data::FAILING_THREAD) {
+        t.items = items;
+        t.status = status;
     }
-    a.screen = Screen::Thread(ThreadId(1));
 }
 
-fn review(a: &mut Codex) {
-    thread(a, 5);
-    a.model = 2;
-    a.side_panel = true;
-    a.tabs = vec![Tab::Review];
-    a.tab = Tab::Review;
+fn running(a: &mut Codex, stage: u8) {
+    failing(a);
+    if let Some(t) = a.data.thread_mut(data::FAILING_THREAD) {
+        t.title = data::TURN1_PROMPT.to_owned();
+    }
+    set(a, data::running_turn(stage), Status::Running);
+}
+
+fn turn1(a: &mut Codex, work: bool, group: bool, shell: bool) {
+    failing(a);
+    set(a, data::turn1(work, group, shell), Status::Idle);
+}
+
+fn turn2(a: &mut Codex, work: bool, diff: bool) {
+    failing(a);
+    set(
+        a,
+        [data::turn1(false, false, false), data::turn2(work, diff)].concat(),
+        Status::Idle,
+    );
+}
+
+fn approval(a: &mut Codex) {
+    failing(a);
+    set(
+        a,
+        [
+            data::turn1(false, false, false),
+            data::turn2(false, false),
+            data::turn3_waiting(),
+        ]
+        .concat(),
+        Status::Awaiting,
+    );
+    a.pending = Some(data::turn3_approval());
+}
+
+fn set_errors(a: &mut Codex, n: usize) {
+    a.project = Some(ProjectId(1));
+    if let Some(t) = a.data.thread_mut(ThreadId(2)) {
+        t.items = data::error_items()[..n].to_vec();
+    }
 }

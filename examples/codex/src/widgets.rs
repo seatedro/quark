@@ -99,11 +99,15 @@ pub struct Item<'a> {
     pub shortcut: Option<&'a str>,
     pub hi: bool,
     pub dim: bool,
+    /// Title, description, and icon in this color (Full access's orange).
+    pub tint: Option<Color>,
 }
 
 pub fn menu_item(p: &Pal, item: Item, action: impl Into<Action>) -> Div {
     let tall = item.desc_below && item.desc.is_some();
-    let title_color = if item.dim {
+    let title_color = if let Some(t) = item.tint {
+        t
+    } else if item.dim {
         p.menu_desc
     } else if item.hi {
         p.text
@@ -115,7 +119,14 @@ pub fn menu_item(p: &Pal, item: Item, action: impl Into<Action>) -> Div {
         label = label
             .flex_col()
             .child(txt(item.title, BODY, title_color))
-            .child(txt(item.desc.unwrap_or(""), SMALL, p.menu_desc).truncate());
+            .child(
+                txt(
+                    item.desc.unwrap_or(""),
+                    SMALL,
+                    item.tint.unwrap_or(p.menu_desc),
+                )
+                .truncate(),
+            );
     } else {
         label = label
             .flex_row()
@@ -144,7 +155,12 @@ pub fn menu_item(p: &Pal, item: Item, action: impl Into<Action>) -> Div {
         let icon = if item.icon_colored {
             svg_icon(svg, 16.0)
         } else {
-            ico(svg, 16.0, if item.dim { p.menu_desc } else { p.menu_title })
+            ico(
+                svg,
+                16.0,
+                item.tint
+                    .unwrap_or(if item.dim { p.menu_desc } else { p.menu_title }),
+            )
         };
         row = row.child(
             div()
@@ -227,4 +243,19 @@ pub fn toggle(p: &Pal, on: bool) -> Div {
         .px(2.0)
         .when(on, |d| d.justify_end())
         .child(knob)
+}
+
+/// Text and icon colors for everything under a div: an inherited color
+/// wins over a child's own (how Full access turns orange).
+pub trait TintAll {
+    fn text_color_all(self, color: Color) -> Self;
+}
+
+impl TintAll for Div {
+    fn text_color_all(mut self, color: Color) -> Self {
+        let style = self.element_style_mut();
+        style.text_color = Some(color);
+        style.icon_color = Some(color);
+        self
+    }
 }

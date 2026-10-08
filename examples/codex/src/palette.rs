@@ -80,7 +80,10 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> AnyElement {
         );
     }
     for (i, t) in matches.iter().enumerate() {
-        let project = app.data.project(t.project).map_or("", |p| p.name);
+        let project = t
+            .project
+            .and_then(|id| app.data.project(id))
+            .map_or("", |p| p.name);
         panel = panel.child(
             hrow()
                 .h(31.0)
