@@ -318,8 +318,10 @@ jobs:
         run: cargo miri test -p quark
 
   kani:
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: kani (${{ matrix.name }})
+    # Full verification only (master pushes, merge groups, manual runs); other
+    # runs get the faster kani-pr job instead.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     # Harnesses cover HashMap-free cores only: std's SipHash makes Kani's
     # search blow up (an earlier BlockOrder harness ran 87 minutes). Slow
@@ -376,3 +378,80 @@ jobs:
         with:
           kani-version: "0.68.0"
           args: ${{ matrix.args }}
+
+  # The faster proofs from the kani matrix above, for runs that are not full
+  # verification. The slow pane_tree and split harnesses run only there.
+  # Arguments must match the full matrix entry of the same name.
+  kani-pr:
+    name: kani-pr (${{ matrix.name }})
+    if: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: quark
+            args: "-p quark --harness fenwick:: --harness geometry::"
+          - name: quark hit
+            args: "-p quark --harness hit::"
+          - name: quark reactive
+            args: "-p quark --harness reactive::"
+          - name: quark-ui
+            args: "-p quark-ui --harness virtual_list::"
+          - name: quark-ui scroll
+            args: "-p quark-ui --harness scroll::"
+          - name: quark-app
+            args: -p quark-app
+          - name: quark-components
+            args: "-p quark-components --harness list_nav:: --harness slider::"
+          - name: quark-diff
+            args: -p quark-diff
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install system dependencies
+        # A stalled mirror otherwise hangs the job until its 6 h limit.
+        timeout-minutes: 10
+        run: |
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/80timeouts >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev
+
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          kani-version: "0.68.0"
+          args: ${{ matrix.args }}
+
+  # One check to require: fails on any failed, cancelled or unexpectedly
+  # skipped job. The only expected skips are the event split between full
+  # verification and the faster PR jobs.
+  ci-result:
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: [check, platform, fuzz, miri, kani, kani-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          FULL: ${{ github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master') }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          fast=$([ "$FULL" = true ] && echo false || echo true)
+          fail=0
+          # expect JOB SHOULD_RUN: a job that should run must succeed; one that
+          # should not must be skipped.
+          expect() {
+            result=$(jq -r --arg job "$1" '.[$job].result' <<<"$NEEDS")
+            want=$([ "$2" = true ] && echo success || echo skipped)
+            echo "$1: $result (want $want)"
+            [ "$result" = "$want" ] || fail=1
+          }
+          expect check true
+          expect platform true
+          expect fuzz true
+          expect miri true
+          expect kani "$FULL"
+          expect kani-pr "$fast"
+          exit "$fail"
