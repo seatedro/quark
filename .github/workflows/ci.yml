@@ -26,6 +26,13 @@ jobs:
   check:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
+    env:
+      # CI builds drop debuginfo (dev keeps debug = 1 for local work) and
+      # incremental state, which a fresh runner never reuses. Assertions and
+      # overflow checks stay on. Rerun without these for full debuginfo.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -96,6 +103,10 @@ jobs:
       - name: Build test grammar packs
         run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline
 
+      # Compiled apart from the run so step timings separate the two.
+      - name: Build tests
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax --no-run
+
       - name: Test
         env:
           # Turns a missing wgpu adapter into a failure in the headless render
@@ -144,6 +155,12 @@ jobs:
     env:
       QUARK_REQUIRE_GPU: "1"
       WGPU_BACKEND: ${{ matrix.backend }}
+      # CI builds drop debuginfo (dev keeps debug = 1 for local work) and
+      # incremental state, which a fresh runner never reuses. Assertions and
+      # overflow checks stay on. Rerun without these for full debuginfo.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -212,6 +229,10 @@ jobs:
       # the tests load a dylib or DLL the way apps do.
       - name: Build test grammar packs
         run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline
+
+      # Compiled apart from the run so step timings separate the two.
+      - name: Build tests
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax --no-run
 
       - name: Test
         env:

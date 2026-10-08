@@ -23,6 +23,13 @@ jobs:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # CI builds drop debuginfo (dev keeps debug = 1 for local work) and
+      # incremental state, which a fresh runner never reuses. Assertions and
+      # overflow checks stay on. Rerun without these for full debuginfo.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
