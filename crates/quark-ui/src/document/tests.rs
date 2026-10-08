@@ -113,6 +113,7 @@ fn message_with(i: u64, blocks: &[&str]) -> DocumentRow {
             .enumerate()
             .map(|(b, text)| Block::plain(BlockKey(i * 10 + b as u64), *text))
             .collect(),
+        adornments: Vec::new(),
     }
 }
 
@@ -892,6 +893,7 @@ fn markdown_message_with(
             &mut ImageStore::new(),
             keys,
         ),
+        adornments: Vec::new(),
     }
 }
 
@@ -2014,4 +2016,230 @@ fn decorator_background_fills_exactly_the_rows_it_returns_a_color_for() {
         })
         .collect();
     assert_eq!(painted, expected);
+}
+
+// ---------------------------------------------------------------------------
+// Row adornments
+// ---------------------------------------------------------------------------
+
+/// An adornment whose band holds nothing.
+fn blank_adornment(key: u64, slot: AdornmentSlot, height: f32) -> RowAdornment {
+    RowAdornment::new(AdornmentKey(key), slot, height, 0, |_| div().into_any())
+}
+
+/// What an adornment's builder shows: "row {key}" text and a "Retry {key}"
+/// button that emits `Retry(row)`.
+#[derive(Debug, Clone, PartialEq)]
+struct Retry(u64);
+
+impl From<Retry> for Action {
+    fn from(retry: Retry) -> Self {
+        Action::new(retry)
+    }
+}
+
+fn retry_bar(revision: u64) -> RowAdornment {
+    RowAdornment::new(
+        AdornmentKey(1),
+        AdornmentSlot::Start,
+        30.0,
+        revision,
+        |cx| {
+            let row = cx.row.0;
+            div()
+                .w(cx.width)
+                .h(cx.height)
+                .flex_row()
+                .child(crate::element::text(format!("row {row}")))
+                .child(
+                    div()
+                        .w(80.0)
+                        .h(cx.height)
+                        .on_click(Retry(row))
+                        .accessibility_label(format!("Retry {row}")),
+                )
+                .into_any()
+        },
+    )
+}
+
+/// `Role name` of every published node, without author ids.
+fn accessible_names(painted: &Painted) -> Vec<String> {
+    let update = painted.accessibility.tree_update("Test", None);
+    crate::accessibility::dump_accessibility_states(&update)
+        .lines()
+        .map(|line| {
+            let mut parts = line.split(" | ").skip(1);
+            format!(
+                "{} {}",
+                parts.next().unwrap_or(""),
+                parts.next().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+// Catches adornments not taking their band in the row's flow: blocks
+// below them would overlap them, and the row would be too short.
+#[test]
+fn adornments_take_their_slot_in_the_rows_flow() {
+    use AdornmentSlot::{Before, End, Start};
+    // Row 0 holds blocks 0 and 1, one 20px line each, below a 20px header.
+    let cases: [(&[(AdornmentSlot, f32)], &str); 4] = [
+        (&[(Start, 30.0)], "a0@30 b0@70 b1@100 =130"),
+        (&[(Before(BlockKey(1)), 16.0)], "b0@30 a0@60 b1@86 =116"),
+        // Zero height takes no space; a missing block sends it to the end.
+        (&[(Start, 0.0), (End, 16.0)], "b0@30 b1@60 a1@90 =116"),
+        (&[(Before(BlockKey(99)), 16.0)], "b0@30 b1@60 a0@90 =116"),
+    ];
+    for (adornments, expected) in cases {
+        let row = message(0).with_adornments(
+            adornments
+                .iter()
+                .enumerate()
+                .map(|(i, &(slot, height))| blank_adornment(i as u64, slot, height))
+                .collect(),
+        );
+        let doc = Doc::new([row]);
+
+        let row = &doc.view.visible_rows()[0];
+        let mut items: Vec<(f32, String)> = doc.view.visible_blocks()[row.blocks.clone()]
+            .iter()
+            .map(|b| (b.offset_in_row, format!("b{}@{}", b.key.0, b.offset_in_row)))
+            .chain(
+                doc.view.visible_adornments()[row.adornments.clone()]
+                    .iter()
+                    .map(|a| (a.offset_in_row, format!("a{}@{}", a.key.0, a.offset_in_row))),
+            )
+            .collect();
+        items.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut dump: Vec<String> = items.into_iter().map(|(_, s)| s).collect();
+        dump.push(format!("={}", row.height));
+        assert_eq!(dump.join(" "), expected, "{adornments:?}");
+    }
+}
+
+// Catches a labelled row hiding its adornment's controls along with the
+// header text, and the policy not hiding the text it names.
+#[test]
+fn adornment_controls_stay_accessible_in_a_labelled_row() {
+    let cases = [
+        (AdornmentAccessibility::Exposed, true),
+        (AdornmentAccessibility::ControlsOnly, false),
+    ];
+    for (policy, text_published) in cases {
+        let mut rows = real_document(1);
+        let row = rows.get_mut(&RowKey(0)).unwrap();
+        row.adornments = vec![retry_bar(0).accessibility(policy)];
+        let mut view = real_view(&rows);
+
+        let names = accessible_names(&paint(&mut view, &rows, (400.0, 300.0), 0.0));
+
+        let has = |name: &str| names.iter().any(|n| n == name);
+        assert_eq!(
+            (
+                has("ListItem author 0"),
+                has("Label row 0"),
+                has("Button Retry 0")
+            ),
+            (true, text_published, true),
+            "{policy:?}: {names:#?}"
+        );
+    }
+}
+
+// Catches a press on an adornment's button starting a text selection
+// instead of reaching the button, which sits over the document's drag
+// surface.
+#[test]
+fn clicking_an_adornment_button_emits_its_action_and_selects_nothing() {
+    let mut rows = real_document(3);
+    rows.get_mut(&RowKey(1)).unwrap().adornments = vec![retry_bar(0)];
+    let mut view = real_view(&rows);
+    let mut painted = paint(&mut view, &rows, (400.0, 600.0), 0.0);
+    let update = painted.accessibility.tree_update("Test", None);
+    let button = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some("Retry 1"))
+        .and_then(|(_, n)| n.bounds())
+        .expect("the button is published");
+    let (x, y) = (
+        ((button.x0 + button.x1) * 0.5) as f32,
+        ((button.y0 + button.y1) * 0.5) as f32,
+    );
+
+    let mut actions = painted.router.pointer_down(x, y, &mut None).actions;
+    actions.extend(painted.router.pointer_up().actions);
+    for action in &actions {
+        if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
+            view.handle(*event);
+        }
+    }
+
+    let retries: Vec<&Retry> = actions.iter().filter_map(|a| a.downcast_ref()).collect();
+    assert_eq!(
+        (retries, view.selected_text(&rows)),
+        (vec![&Retry(1)], String::new())
+    );
+}
+
+// Catches a cached row replaying an adornment whose revision changed: a
+// tool card would keep showing "Running" after it finished.
+#[test]
+fn a_new_adornment_revision_rebuilds_the_cached_row() {
+    let label = Rc::new(std::cell::Cell::new("Running"));
+    let bar = |revision: u64| {
+        let label = label.clone();
+        RowAdornment::new(
+            AdornmentKey(1),
+            AdornmentSlot::Start,
+            30.0,
+            revision,
+            move |_| crate::element::text(label.get()).into_any(),
+        )
+    };
+    let mut rows = real_document(2);
+    rows.get_mut(&RowKey(0)).unwrap().adornments = vec![bar(1)];
+    let mut view = real_view(&rows);
+    let mut painter = CachedPainter::new();
+    let size = (400.0, 300.0);
+    painter.frame(&mut view, &rows, size, true);
+
+    label.set("Done");
+    let row = rows.get_mut(&RowKey(0)).unwrap();
+    row.adornments = vec![bar(2)];
+    view.update(&rows[&RowKey(0)]).unwrap();
+    let frame = painter.frame(&mut view, &rows, size, true);
+
+    assert!(
+        frame.contains("Label | Done") && !frame.contains("Running"),
+        "{frame}"
+    );
+}
+
+// Catches a focused adornment control leaving the tree when its row
+// scrolls out of the window, which would drop keyboard focus.
+#[test]
+fn a_kept_row_stays_in_the_tree_while_scrolled_away() {
+    for kept in [false, true] {
+        let mut rows = real_document(40);
+        rows.get_mut(&RowKey(0)).unwrap().adornments = vec![retry_bar(0)];
+        let mut view = real_view(&rows);
+        view.keep_materialized(kept.then_some(RowKey(0)));
+        view.scroll_to_bottom();
+        paint(&mut view, &rows, (400.0, 300.0), 0.0);
+
+        let names = accessible_names(&paint(&mut view, &rows, (400.0, 300.0), 0.0));
+
+        let row_0_visible = view
+            .visible_rows()
+            .iter()
+            .any(|r| r.key == RowKey(0) && r.top + r.height > 0.0);
+        assert_eq!(
+            (row_0_visible, names.iter().any(|n| n == "Button Retry 0")),
+            (false, kept),
+            "kept {kept}"
+        );
+    }
 }

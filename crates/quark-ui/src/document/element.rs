@@ -19,8 +19,9 @@ use quark::selection::BlockKey;
 
 use super::measure::{failed_image_spans, image_extent};
 use super::{
-    Block, BlockContent, BlockGeometry, Decorator, Document, DocumentSource, ImageState, LIST_STEP,
-    Palette, QUOTE_STEP, RowChrome, VisibleRow,
+    AdornmentAccessibility, AdornmentCx, Block, BlockContent, BlockGeometry, Decorator, Document,
+    DocumentSource, ImageState, LIST_STEP, Palette, QUOTE_STEP, RowAdornment, RowChrome,
+    VisibleRow,
 };
 use crate::accessibility::{AccessibilityAction, AccessibilityNode};
 use crate::action::Action;
@@ -155,6 +156,8 @@ struct RowBuild {
     font_size: f32,
     colors: RowColors,
     blocks: Vec<BlockBuild>,
+    /// Adornments with their bands relative to the row, in flow order.
+    adornments: Vec<(RowAdornment, Rect)>,
     /// Find highlights: rectangles relative to the row, and whether each is
     /// the current match.
     highlights: Vec<(Rect, bool)>,
@@ -276,14 +279,15 @@ impl<G: BlockGeometry> Document<G> {
         for row in &self.rows {
             let content = source.row(row.key);
             let blocks = content.map_or(&[][..], |r| &r.blocks[..]);
+            let adornments = content.map_or(&[][..], |r| &r.adornments[..]);
             let chrome = content.map(|r| &r.chrome);
-            let hash = self.row_hash(row, chrome, blocks, theme_hash, row_count);
+            let hash = self.row_hash(row, chrome, (blocks, adornments), theme_hash, row_count);
             let build = match builds.remove(&row.key) {
                 Some(entry) if entry.hash == hash => entry.build,
                 _ => Rc::new(self.row_build(
                     row,
                     chrome,
-                    blocks,
+                    (blocks, adornments),
                     (&palette, colors),
                     (&mut painted, &mut kept),
                     row_count,
@@ -341,7 +345,7 @@ impl<G: BlockGeometry> Document<G> {
         &self,
         row: &VisibleRow,
         chrome: Option<&RowChrome>,
-        blocks: &[Block],
+        (blocks, adornments): (&[Block], &[RowAdornment]),
         theme_hash: u64,
         row_count: usize,
     ) -> u64 {
@@ -373,7 +377,19 @@ impl<G: BlockGeometry> Document<G> {
                 find.hash_block(block.key, &mut hasher);
             }
         }
+        for visible in self.visible_row_adornments(row) {
+            if let Some(adornment) = adornments
+                .get(visible.index)
+                .filter(|a| a.key == visible.key)
+            {
+                (adornment, visible.offset_in_row.to_bits()).hash(&mut hasher);
+            }
+        }
         hasher.finish()
+    }
+
+    fn visible_row_adornments(&self, row: &VisibleRow) -> &[super::VisibleAdornment] {
+        &self.adornments[row.adornments.clone()]
     }
 
     /// The inputs of `row`'s subtree.
@@ -381,7 +397,7 @@ impl<G: BlockGeometry> Document<G> {
         &self,
         row: &VisibleRow,
         chrome: Option<&RowChrome>,
-        blocks: &[Block],
+        (blocks, adornments): (&[Block], &[RowAdornment]),
         (palette, colors): (&Palette, RowColors),
         (painted, kept): (
             &mut HashMap<BlockKey, PaintedSpans>,
@@ -451,25 +467,51 @@ impl<G: BlockGeometry> Document<G> {
             font_size: style.font_size,
             colors,
             blocks: built,
+            adornments: self
+                .visible_row_adornments(row)
+                .iter()
+                .filter_map(|visible| {
+                    let adornment = adornments.get(visible.index)?;
+                    let rect = Rect {
+                        y: visible.offset_in_row,
+                        ..visible.rect
+                    };
+                    (adornment.key == visible.key).then(|| (adornment.clone(), rect))
+                })
+                .collect(),
             highlights,
         }
     }
 }
 
-/// One row: its chrome background, find highlights, chrome header, and
-/// blocks, with the row's list item node. Built inside the row's cached
-/// boundary, so it paints relative to the row's top left.
+/// One row: its chrome background, find highlights, chrome header,
+/// blocks, and adornments, with the row's list item node. Built inside the
+/// row's cached boundary, so it paints relative to the row's top left.
 struct RowElement {
     build: Rc<RowBuild>,
     /// The decorator's header, built at layout, where the theme is known.
     header: Option<AnyElement>,
-    children: Vec<Placed>,
+    /// Block elements and adornment slots in flow order, so assistive tech
+    /// reads them as they appear.
+    children: Vec<RowChild>,
+}
+
+enum RowChild {
+    Placed(Placed),
+    /// The adornment at this index of the build, and its element once
+    /// built at layout.
+    Adornment(usize, Option<AnyElement>),
 }
 
 impl RowElement {
     fn new(build: Rc<RowBuild>, links: &LinkHandler) -> Self {
-        let mut children = Vec::with_capacity(build.blocks.len() * 2);
+        let mut children = Vec::with_capacity(build.blocks.len() * 2 + build.adornments.len());
+        let mut placed = Vec::new();
+        let mut adornments = build.adornments.iter().enumerate().peekable();
         for b in &build.blocks {
+            while let Some((i, _)) = adornments.next_if(|(_, (_, rect))| rect.y <= b.rect.y) {
+                children.push(RowChild::Adornment(i, None));
+            }
             block_elements(
                 &b.block,
                 b.spans.clone(),
@@ -481,9 +523,11 @@ impl RowElement {
                     colors: &build.colors,
                     scroll: b.scroll.as_ref(),
                 },
-                &mut children,
+                &mut placed,
             );
+            children.extend(placed.drain(..).map(RowChild::Placed));
         }
+        children.extend(adornments.map(|(i, _)| RowChild::Adornment(i, None)));
         Self {
             build,
             header: None,
@@ -511,13 +555,29 @@ impl Element for RowElement {
         }
         if let Some(header) = &mut self.header {
             let header = header.request_layout(engine, cx);
-            ids.push(engine.request_layout(absolute(self.build.header), &[header]));
+            ids.push(engine.request_layout(absolute(build.header), &[header]));
         }
-        for placed in &mut self.children {
-            let child = placed.element.request_layout(engine, cx);
-            ids.push(engine.request_layout(absolute(placed.rect), &[child]));
+        for child in &mut self.children {
+            let (rect, element) = match child {
+                RowChild::Placed(placed) => (placed.rect, &mut placed.element),
+                RowChild::Adornment(i, element) => {
+                    let (adornment, rect) = &build.adornments[*i];
+                    let element = element.get_or_insert_with(|| {
+                        adornment.build(&AdornmentCx {
+                            row: build.key,
+                            key: adornment.key,
+                            width: rect.width,
+                            height: rect.height,
+                            theme: cx.theme,
+                        })
+                    });
+                    (*rect, element)
+                }
+            };
+            let id = element.request_layout(engine, cx);
+            ids.push(engine.request_layout(absolute(rect), &[id]));
         }
-        let (width, height) = self.build.size;
+        let (width, height) = build.size;
         let id = engine.request_layout(
             taffy::Style {
                 size: taffy::Size {
@@ -542,8 +602,12 @@ impl Element for RowElement {
         if let Some(header) = &mut self.header {
             header.prepaint(engine, cx);
         }
-        for placed in &mut self.children {
-            placed.element.prepaint(engine, cx);
+        for child in &mut self.children {
+            match child {
+                RowChild::Placed(placed) => placed.element.prepaint(engine, cx),
+                RowChild::Adornment(_, Some(element)) => element.prepaint(engine, cx),
+                RowChild::Adornment(_, None) => {}
+            }
         }
     }
 
@@ -596,8 +660,9 @@ impl Element for RowElement {
         cx.push_semantic_parent(item);
 
         if let Some(header) = &mut self.header {
-            // A labelled row is named by its label; keep the header out of
-            // the tree so it is not read twice.
+            // A labelled row is named by its label; keep the header's text
+            // out of the tree so it is not read twice. Controls with their
+            // own labels stay.
             cx.push_accessibility_text_hidden(build.chrome.label.is_some());
             cx.push_text_color(build.colors.muted);
             header.paint(engine, scene, cx);
@@ -605,8 +670,19 @@ impl Element for RowElement {
             cx.pop_accessibility_text_hidden();
         }
 
-        for placed in &mut self.children {
-            placed.element.paint(engine, scene, cx);
+        for child in &mut self.children {
+            match child {
+                RowChild::Placed(placed) => placed.element.paint(engine, scene, cx),
+                RowChild::Adornment(i, Some(element)) => {
+                    let policy = build.adornments[*i].0.accessibility;
+                    cx.push_accessibility_text_hidden(
+                        policy == AdornmentAccessibility::ControlsOnly,
+                    );
+                    element.paint(engine, scene, cx);
+                    cx.pop_accessibility_text_hidden();
+                }
+                RowChild::Adornment(_, None) => {}
+            }
         }
         cx.pop_semantic_parent();
     }
