@@ -144,6 +144,15 @@ impl PaintRecord {
         Arc::get_mut(chunk).expect("unshared chunk")
     }
 
+    /// Lets go of what the spare chunk draws once no scene holds it, keeping
+    /// its buffer, so the text layouts in a replaced recording can be laid
+    /// out into again before the boundary next records.
+    fn release_spare(&mut self) {
+        if let Some(chunk) = self.spare_scene.as_mut().and_then(Arc::get_mut) {
+            chunk.clear();
+        }
+    }
+
     /// Whether every scroll handle the subtree painted is where it was.
     pub(super) fn scroll_unchanged(&self) -> bool {
         self.scroll.iter().all(ScrollWatch::unchanged)
@@ -469,6 +478,7 @@ pub(super) fn replay_prepaint(row: u32, bounds: Bounds, cx: &mut ElementContext)
         return false;
     }
     let mut record = take_record(cx, row);
+    record.release_spare();
     record.hit_ids.clear();
     for i in 0..record.hit_bounds.len() {
         let id = cx.insert_hit_clipped(
