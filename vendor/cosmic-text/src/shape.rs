@@ -3,6 +3,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::fallback::FontFallbackIter;
+use crate::run_memo::RunMemo;
 use crate::{
     math, Align, AttrsList, CacheKeyFlags, Color, Font, FontSystem, LayoutGlyph, LayoutLine,
     Metrics, Wrap,
@@ -56,7 +57,7 @@ impl Shaping {
             #[cfg(feature = "swash")]
             Self::Basic => shape_skip(font_system, glyphs, line, attrs_list, start_run, end_run),
             #[cfg(not(feature = "shape-run-cache"))]
-            Self::Advanced => shape_run(
+            Self::Advanced => shape_run_memo(
                 glyphs,
                 font_system,
                 line,
@@ -131,6 +132,9 @@ pub struct ShapeBuffer {
     missing: Vec<usize>,
     fb_missing: Vec<usize>,
     fb_glyphs: Vec<ShapeGlyph>,
+
+    /// Glyphs of short runs already shaped.
+    pub(crate) run_memo: RunMemo,
 }
 
 impl Default for ShapeBuffer {
@@ -152,6 +156,7 @@ impl Default for ShapeBuffer {
             missing: Vec::new(),
             fb_missing: Vec::new(),
             fb_glyphs: Vec::new(),
+            run_memo: RunMemo::default(),
         }
     }
 }
@@ -497,6 +502,41 @@ fn shape_run(
     font_system.shape_buffer.missing = missing;
     font_system.shape_buffer.fb_missing = fb_missing;
     font_system.shape_buffer.fb_glyphs = fb_glyphs;
+}
+
+/// [`shape_run`], answered from the run memo when it has the run.
+#[cfg(not(feature = "shape-run-cache"))]
+fn shape_run_memo(
+    glyphs: &mut Vec<ShapeGlyph>,
+    font_system: &mut FontSystem,
+    line: &str,
+    attrs_list: &AttrsList,
+    start_run: usize,
+    end_run: usize,
+    span_rtl: bool,
+) {
+    let memo = &font_system.shape_buffer.run_memo;
+    if memo.get(glyphs, line, attrs_list, start_run, end_run, span_rtl) {
+        return;
+    }
+    let glyph_start = glyphs.len();
+    shape_run(
+        glyphs,
+        font_system,
+        line,
+        attrs_list,
+        start_run,
+        end_run,
+        span_rtl,
+    );
+    font_system.shape_buffer.run_memo.insert(
+        &glyphs[glyph_start..],
+        line,
+        attrs_list,
+        start_run,
+        end_run,
+        span_rtl,
+    );
 }
 
 #[cfg(feature = "shape-run-cache")]

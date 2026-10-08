@@ -145,6 +145,25 @@ own pull request.
   a terminal row. Remove once upstream skips them;
   `shape::tests::ascii_runs_collect_the_scripts_a_full_scan_does` and
   `bidi_fast_path_matches_full_pass` check every ASCII char.
+- Shaped run memo (`src/run_memo.rs`, `src/shape.rs`,
+  `src/font/system.rs`): advanced shaping answers runs of up to 16 bytes
+  from a 256-slot direct-mapped memo of runs it shaped, keyed by what
+  decides their glyphs (text, direction, and the family, stretch, style,
+  weight, and features at the run's start) and recomputing what each glyph
+  copies from its own attributes (letter spacing, color, weight, metadata,
+  flags, metrics). A terminal row's words are mostly blanks and words it
+  repeats, and each cost a fallback walk and a harfrust shape. The memo is
+  allocated once (about 140 KB), on first use, so runs kept later allocate
+  nothing; `FontSystem::db_mut` clears it, and
+  `FontSystem::set_shape_run_memo` turns it off. Runs whose glyphs carry
+  letter spacing are not kept, so the advance kept is the bare one. With
+  the `shape-run-cache` feature, upstream's cache replaces it. Remove once
+  upstream caches shaped words without allocating per lookup (its
+  `shape-run-cache` copies the text and attributes into a new key for
+  every run); quark-text's `memoized_shaping_*` and
+  `memoized_runs_take_each_glyphs_own_attributes` tests compare layouts
+  and shaped lines with the memo on and off.
+
 ## Not patched: bidi analysis
 
 For lines the fast path above does not take, `ShapeLine::build` runs

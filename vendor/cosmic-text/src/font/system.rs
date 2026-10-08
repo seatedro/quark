@@ -250,7 +250,15 @@ impl FontSystem {
 
     pub fn db_mut(&mut self) -> &mut fontdb::Database {
         self.font_matches_cache.clear();
+        // Shaped runs name the fonts they were shaped with.
+        self.shape_buffer.run_memo.clear();
         &mut self.db
+    }
+
+    /// Turns the memo of shaped short runs on (the default) or off. Off,
+    /// every run is shaped again; the glyphs are the same either way.
+    pub fn set_shape_run_memo(&mut self, enabled: bool) {
+        self.shape_buffer.run_memo.set_enabled(enabled);
     }
 
     /// Consume this [`FontSystem`] and return the locale and database.
