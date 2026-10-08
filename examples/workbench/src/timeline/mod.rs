@@ -245,9 +245,11 @@ impl State {
     /// than frames racing the background measurer.
     pub fn finish_measures(&mut self) {
         for view in self.threads.values_mut() {
-            view.doc.finish_measures();
+            // Highlights and images rebuild their rows, which then need
+            // measuring again: take them first.
             view.doc.finish_highlights();
             view.doc.finish_images();
+            view.doc.finish_measures();
         }
     }
 

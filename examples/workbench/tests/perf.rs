@@ -156,6 +156,11 @@ fn streamed_update(ui: &mut UiTestHarness<Workbench>) -> (u64, u64) {
     ui.set_accessibility_active(false);
     // Into the second prose segment, past the tool card's start.
     ui.advance(1_600);
+    // Take the code highlights of the rows streamed so far now, so a
+    // highlight worker finishing during the measured chunk (only when
+    // grammar packs are installed) does not land in its count.
+    ui.app_mut().timeline.finish_measures();
+    ui.frame();
     let frames = ui.frame_count();
     let ((), allocated) = test_alloc::count(|| ui.advance(40));
     (ui.frame_count() - frames, allocated)
