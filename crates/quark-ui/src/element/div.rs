@@ -22,7 +22,8 @@ pub struct Div {
     on_click_handler: Option<ClickHandler>,
     on_middle_click: Option<Action>,
     on_drag: Option<DragStart>,
-    key_bindings: Vec<(String, Action)>,
+    /// Literal bindings stay borrowed, so declaring one allocates nothing.
+    key_bindings: Vec<(std::borrow::Cow<'static, str>, Action)>,
     on_scroll: Option<ScrollActionBuilder>,
     cursor: CursorHint,
     scroll_y: f32,
@@ -214,7 +215,11 @@ impl Div {
 
     /// Emit `action` when `binding` (keymap format, e.g. `"enter"`) is pressed
     /// while this element or a descendant has focus.
-    pub fn on_key(mut self, binding: impl Into<String>, action: impl Into<Action>) -> Self {
+    pub fn on_key(
+        mut self,
+        binding: impl Into<std::borrow::Cow<'static, str>>,
+        action: impl Into<Action>,
+    ) -> Self {
         self.key_bindings.push((binding.into(), action.into()));
         self
     }
