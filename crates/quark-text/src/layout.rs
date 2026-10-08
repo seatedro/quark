@@ -1,3 +1,4 @@
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -506,6 +507,8 @@ pub(crate) struct LayoutScratch {
     paragraphs: Vec<(Range<usize>, LineEnding)>,
     /// The paragraph of each visual line.
     line_paragraph: Vec<usize>,
+    /// The font features every span gets.
+    features: cosmic_text::FontFeatures,
 }
 
 impl TextLayout {
@@ -624,8 +627,11 @@ impl TextLayout {
 
         split_paragraphs(text, &mut scratch.paragraphs);
         let paragraphs = &scratch.paragraphs;
-        let features = font_features(ligatures);
-        let base = base_attrs(&style).font_features(features.clone());
+        set_font_features(&mut scratch.features, ligatures);
+        // One features vector moves between the base and each span's
+        // attributes: an `Attrs` owns its features, so a clone per span
+        // would allocate whenever ligatures are off.
+        let mut base = base_attrs(&style).font_features(mem::take(&mut scratch.features));
         while buffer.lines.len() > paragraphs.len() {
             spare_lines.extend(buffer.lines.pop());
         }
@@ -635,9 +641,10 @@ impl TextLayout {
                 let start = span.range.start.max(range.start);
                 let end = span.range.end.min(range.end);
                 if start < end {
-                    let span_attrs =
-                        span_attrs(&style, span, i, synth).font_features(features.clone());
+                    let span_attrs = span_attrs(&style, span, i, synth)
+                        .font_features(mem::take(&mut base.font_features));
                     attrs.add_span(start - range.start..end - range.start, &span_attrs);
+                    base.font_features = span_attrs.font_features;
                 }
             }
             let paragraph = text.get(range.clone()).unwrap_or_default();
@@ -668,6 +675,7 @@ impl TextLayout {
                 )),
             }
         }
+        scratch.features = base.font_features;
         buffer.set_wrap(fs, Wrap::WordOrGlyph);
         buffer.set_metrics_and_size(
             fs,
@@ -1486,10 +1494,10 @@ fn emoji_spans(attrs: &mut AttrsList, paragraph: &str, emoji: &'static str) {
     }
 }
 
-/// No features (the font's defaults) with ligatures on; otherwise the
-/// ligature features turned off.
-fn font_features(ligatures: bool) -> cosmic_text::FontFeatures {
-    let mut features = cosmic_text::FontFeatures::new();
+/// Sets `features` to none (the font's defaults) with ligatures on;
+/// otherwise the ligature features turned off.
+fn set_font_features(features: &mut cosmic_text::FontFeatures, ligatures: bool) {
+    features.features.clear();
     if !ligatures {
         for tag in [
             cosmic_text::FeatureTag::STANDARD_LIGATURES,
@@ -1499,7 +1507,6 @@ fn font_features(ligatures: bool) -> cosmic_text::FontFeatures {
             features.disable(tag);
         }
     }
-    features
 }
 
 fn base_attrs(style: &TextStyle) -> Attrs<'static> {
@@ -2263,6 +2270,43 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    // With ligatures off every span and paragraph carries the features
+    // that turn them off, so Fira Code's `==`, `<=`, and `&&` shape as each
+    // character alone inside and after italic spans and in a later
+    // paragraph.
+    #[test]
+    fn ligatures_off_reach_every_span_and_paragraph() {
+        let mut system = TextSystem::vendored_only(&FontSettings {
+            mono_family: crate::fonts::FIRA_CODE_FAMILY.to_owned(),
+            ligatures: false,
+            ..FontSettings::default()
+        });
+        let style = TextStyle::new(16.0).kind(FontKind::Mono);
+        let alone = |system: &mut TextSystem, c: char| {
+            let layout = system.layout(&TextParams::new(c.to_string(), style));
+            layout.expect("layout").glyphs().glyph_id[0]
+        };
+        let text = "== <= &&\n&& == <=";
+        let italic = |range| TextSpan {
+            range,
+            weight: None,
+            style: Some(FontStyle::Italic),
+            kind: None,
+        };
+        let params = TextParams::new(text, style).spans(vec![italic(0..2), italic(6..11)]);
+        let layout = system.layout(&params).expect("layout");
+        let g = layout.glyphs();
+        let shaped: Vec<(usize, u16)> = (0..g.len())
+            .map(|i| (g.byte_start[i] as usize, g.glyph_id[i]))
+            .collect();
+        let expected: Vec<(usize, u16)> = text
+            .char_indices()
+            .filter(|&(_, c)| c != '\n')
+            .map(|(i, c)| (i, alone(&mut system, c)))
+            .collect();
+        assert_eq!(shaped, expected);
     }
 
     #[test]

@@ -63,3 +63,15 @@ own pull request.
   Remove once upstream reuses that storage; the bidi and emoji budget
   checks it, and `layout_with_evicting_shape_plan_cache_matches_cold_layout`
   shapes fallback text after other fallback text.
+- Borrowed span attributes (`src/attrs.rs`, `src/shape.rs`): shaping reads
+  a span's attributes through `AttrsList::get_span_ref` and
+  `defaults_ref`, which borrow the stored `AttrsOwned`, where
+  `get_span` and `defaults` built an `Attrs` that clones the font
+  features. Font matching gets an `Attrs` without features, which it does
+  not read. With any font features set (quark-text's ligatures off), the
+  clones allocated per glyph, per word, and per shaped run: 139 of the 146
+  allocations of an 80-column row of words. An unused `defaults()` copy
+  per ASCII word is gone. Remove once upstream stops cloning features in
+  its shaping loops (or makes `Attrs` borrow them);
+  `ligatures_off_reach_every_span_and_paragraph` checks the features still
+  apply, and the ligatures-off budgets check the copies.

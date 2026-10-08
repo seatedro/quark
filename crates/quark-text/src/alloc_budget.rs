@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use crate::cache::LayoutCache;
+use crate::fonts::FontSettings;
 use crate::layout::{TextQuery, TextSpan, TextStyle};
 use crate::system::{TextSystem, test_system};
 
@@ -213,16 +214,34 @@ fn warmed_cache(system: &mut TextSystem, warm: &[Input]) -> LayoutCache {
     cache
 }
 
+/// Lays out each case's measured inputs in a cache warmed with its warm
+/// inputs, failing when that allocates more than the case's budget.
+fn assert_budgets(system: &mut TextSystem, cases: Vec<(&str, Vec<Input>, Vec<Input>, u64)>) {
+    for (name, warm, measured, budget) in cases {
+        let mut cache = warmed_cache(system, &warm);
+        let mut layouts = Vec::with_capacity(measured.len());
+        let ((), allocations) = count(|| {
+            for input in &measured {
+                layouts.push(cache.layout_query(system, &input.query()).expect("layout"));
+            }
+        });
+        assert!(allocations <= budget, "{name}: {allocations} > {budget}");
+        for (layout, input) in layouts.iter().zip(&measured) {
+            assert_eq!(layout.text().as_ref(), input.text, "{name}");
+            assert_eq!(layout.verify_integrity(), Ok(()), "{name}");
+        }
+    }
+}
+
 // What laying out unseen text still allocates is all inside cosmic-text and
 // its dependencies: unicode-bidi's paragraph analysis (six vectors per
 // paragraph), cosmic-text's attribute span maps, and its per-word glyph
-// vectors (which word gets which retained vector varies, so one can grow). The budgets sit just above that, so storage quark-text
-// allocates or grows per layout (each one costs at least 14 glyph columns)
-// breaks them.
+// vectors (which word gets which retained vector varies, so one can grow).
+// The budgets sit just above that, so storage quark-text allocates or grows
+// per layout (each one costs at least 14 glyph columns) breaks them.
 #[test]
 fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
-    let mut system = test_system();
-    let cases: [(&str, Vec<Input>, Vec<Input>, u64); 4] = [
+    let cases = vec![
         (
             "short ascii line",
             vec![ui(PANGRAM.into()), ui("jumpy otter".into())],
@@ -252,24 +271,40 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             24,
         ),
     ];
-    for (name, warm, measured, budget) in cases {
-        let mut cache = warmed_cache(&mut system, &warm);
-        let mut layouts = Vec::with_capacity(measured.len());
-        let ((), allocations) = count(|| {
-            for input in &measured {
-                layouts.push(
-                    cache
-                        .layout_query(&mut system, &input.query())
-                        .expect("layout"),
-                );
-            }
-        });
-        assert!(allocations <= budget, "{name}: {allocations} > {budget}");
-        for (layout, input) in layouts.iter().zip(&measured) {
-            assert_eq!(layout.text().as_ref(), input.text, "{name}");
-            assert_eq!(layout.verify_integrity(), Ok(()), "{name}");
-        }
-    }
+    assert_budgets(&mut test_system(), cases);
+}
+
+// With ligatures off every attribute set carries a feature vector, so
+// copies of it per glyph, word, or span would allocate. What is left is
+// one copy per attribute span (and a few per emoji cluster) on top of the
+// residual above.
+#[test]
+fn fresh_text_with_ligatures_off_copies_features_per_span_only() {
+    let mut system = TextSystem::vendored_only(&FontSettings {
+        ligatures: false,
+        ..FontSettings::default()
+    });
+    let cases = vec![
+        (
+            "80-column styled row",
+            vec![styled_row(1), styled_row(2)],
+            vec![styled_row(3)],
+            7 + 3,
+        ),
+        (
+            "row of words",
+            vec![word_row(1), word_row(2)],
+            vec![word_row(3)],
+            6 + 1,
+        ),
+        (
+            "bidi and emoji paragraph",
+            vec![bidi_emoji(1)],
+            vec![bidi_emoji(2)],
+            24 + 9,
+        ),
+    ];
+    assert_budgets(&mut system, cases);
 }
 
 // A stream of fresh rows past the cache's entry cap evicts inside the

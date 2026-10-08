@@ -208,7 +208,7 @@ fn shape_fallback(
     let rtl = matches!(buffer.direction(), harfrust::Direction::RightToLeft);
     assert_eq!(rtl, span_rtl);
 
-    let attrs = attrs_list.get_span(start_run);
+    let attrs = attrs_list.get_span_ref(start_run);
     let mut rb_font_features = mem::take(&mut scratch.rb_font_features);
     rb_font_features.clear();
 
@@ -272,7 +272,7 @@ fn shape_fallback(
             missing.push(start_glyph);
         }
 
-        let attrs = attrs_list.get_span(start_glyph);
+        let attrs = attrs_list.get_span_ref(start_glyph);
         let x_advance = pos.x_advance as f32 / font_scale
             + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
         let y_advance = pos.y_advance as f32 / font_scale;
@@ -362,7 +362,7 @@ fn shape_run(
 
     log::trace!("      Run {:?}: '{}'", &scripts, &line[start_run..end_run],);
 
-    let attrs = attrs_list.get_span(start_run);
+    let attrs = attrs_list.get_span_ref(start_run).as_match_attrs();
 
     let fonts = font_system.get_font_matches(&attrs);
 
@@ -741,7 +741,6 @@ impl ShapeWord {
             word.is_ascii() && !word.chars().any(|c| c.is_ascii_control() && c != '\t');
 
         if is_simple_ascii && !word.is_empty() {
-            let _attrs = attrs_list.defaults();
             shaping.run(
                 &mut glyphs,
                 font_system,
@@ -754,11 +753,11 @@ impl ShapeWord {
         } else {
             // Complex text path: Full grapheme iteration and attribute processing
             let mut start_run = word_range.start;
-            let mut attrs = attrs_list.defaults();
+            let mut attrs = attrs_list.defaults_ref();
             for (egc_i, _egc) in word.grapheme_indices(true) {
                 let start_egc = word_range.start + egc_i;
-                let attrs_egc = attrs_list.get_span(start_egc);
-                if !attrs.compatible(&attrs_egc) {
+                let attrs_egc = attrs_list.get_span_ref(start_egc);
+                if !attrs.compatible(attrs_egc) {
                     shaping.run(
                         &mut glyphs,
                         font_system,
@@ -1095,7 +1094,7 @@ impl ShapeLine {
 
         self.rtl = rtl;
         self.spans = spans;
-        self.metrics_opt = attrs_list.defaults().metrics_opt.map(Into::into);
+        self.metrics_opt = attrs_list.defaults_ref().metrics_opt.map(Into::into);
 
         // Return the buffer for later reuse.
         font_system.shape_buffer.spans = cached_spans;

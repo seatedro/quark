@@ -388,6 +388,24 @@ impl AttrsOwned {
         }
     }
 
+    /// Whether this can be shaped with `other`, as [`Attrs::compatible`].
+    pub(crate) fn compatible(&self, other: &Self) -> bool {
+        self.family_owned == other.family_owned
+            && self.stretch == other.stretch
+            && self.style == other.style
+            && self.weight == other.weight
+    }
+
+    /// The attributes font matching reads, without cloning the font
+    /// features [`Self::as_attrs`] would copy.
+    pub(crate) fn as_match_attrs(&self) -> Attrs<'_> {
+        Attrs::new()
+            .family(self.family_owned.as_family())
+            .stretch(self.stretch)
+            .style(self.style)
+            .weight(self.weight)
+    }
+
     pub fn as_attrs(&self) -> Attrs<'_> {
         Attrs {
             color_opt: self.color_opt,
@@ -449,6 +467,17 @@ impl AttrsList {
         }
 
         self.spans.insert(range, AttrsOwned::new(attrs));
+    }
+
+    /// The default attributes, borrowed.
+    pub(crate) const fn defaults_ref(&self) -> &AttrsOwned {
+        &self.defaults
+    }
+
+    /// The attributes at `index`, borrowed: [`Self::get_span`] without
+    /// cloning the font features.
+    pub(crate) fn get_span_ref(&self, index: usize) -> &AttrsOwned {
+        self.spans.get(&index).unwrap_or(&self.defaults)
     }
 
     /// Get the attribute span for an index
