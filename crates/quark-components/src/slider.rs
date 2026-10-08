@@ -319,6 +319,32 @@ impl IntoAnyElement for BoundsProbe {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// For any range and step in quarter points (exact in `f32`, as are
+    /// the snapped values), a snapped value is in range, on a step from
+    /// `min` unless it is `max`, and the nearest such value to the input.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn snap_lands_on_the_nearest_step_in_range() {
+        let quarters = |q: i16| f32::from(q) / 4.0;
+        let min = quarters(kani::any::<i8>().into());
+        let max = min + quarters((kani::any::<u8>() % 128).into());
+        let step = quarters((kani::any::<u8>() % 32 + 1).into());
+        let range = SliderRange { min, max, step };
+        let value = quarters(kani::any::<i16>() % 1024);
+
+        let snapped = range.snap(value);
+
+        assert!(min <= snapped && snapped <= max);
+        let steps = (snapped - min) / step;
+        assert!(snapped == max || steps == steps.round());
+        assert!((snapped - value.clamp(min, max)).abs() <= step / 2.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
