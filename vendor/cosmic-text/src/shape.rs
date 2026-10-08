@@ -803,6 +803,23 @@ impl ShapeWord {
     }
 }
 
+/// Whether the Unicode bidi algorithm gives `line` one left-to-right
+/// paragraph with every level 0, so it need not run: the line is not empty
+/// and has no paragraph separator, no strong right-to-left or Arabic number
+/// character, and no explicit embedding, override, or isolate initiator.
+/// These are the characters that clear unicode-bidi's own pure-LTR flag,
+/// plus paragraph separators, which would split the line.
+fn bidi_levels_all_ltr(line: &str) -> bool {
+    use unicode_bidi::BidiClass::{AL, AN, B, FSI, LRE, LRI, LRO, R, RLE, RLI, RLO};
+    !line.is_empty()
+        && line.chars().all(|c| {
+            !matches!(
+                unicode_bidi::bidi_class(c),
+                AL | AN | B | FSI | LRE | LRI | LRO | R | RLE | RLI | RLO
+            )
+        })
+}
+
 /// A shaped span (for bidirectional processing)
 #[derive(Clone, Debug)]
 pub struct ShapeSpan {
@@ -1022,63 +1039,82 @@ impl ShapeLine {
         cached_spans.clear();
         cached_spans.extend(spans.drain(..).rev());
 
-        let bidi = unicode_bidi::BidiInfo::new(line, None);
-        let rtl = if bidi.paragraphs.is_empty() {
-            false
-        } else {
-            bidi.paragraphs[0].level.is_rtl()
-        };
-
-        log::trace!("Line {}: '{}'", if rtl { "RTL" } else { "LTR" }, line);
-
-        let mut levels = mem::take(&mut font_system.shape_buffer.bidi_levels);
-        for para_info in &bidi.paragraphs {
-            let line_rtl = para_info.level.is_rtl();
-            assert_eq!(line_rtl, rtl);
-
-            let line_range = para_info.range.clone();
-            Self::adjust_levels(&unicode_bidi::Paragraph::new(&bidi, para_info), &mut levels);
-
-            // Find consecutive level runs. We use this to create Spans.
-            // Each span is a set of characters with equal levels.
-            let mut start = line_range.start;
-            let mut run_level = levels[start];
-            spans.reserve(line_range.end - start + 1);
-
-            for (i, &new_level) in levels
-                .iter()
-                .enumerate()
-                .take(line_range.end)
-                .skip(start + 1)
-            {
-                if new_level != run_level {
-                    // End of the previous run, start of a new one.
-                    let mut span = cached_spans.pop().unwrap_or_else(ShapeSpan::empty);
-                    span.build(
-                        font_system,
-                        line,
-                        attrs_list,
-                        start..i,
-                        line_rtl,
-                        run_level,
-                        shaping,
-                    );
-                    spans.push(span);
-                    start = i;
-                    run_level = new_level;
-                }
-            }
+        let rtl;
+        if bidi_levels_all_ltr(line) {
+            // The full pass would find one left-to-right paragraph at level
+            // 0 throughout, so build its one span without running it.
+            rtl = false;
             let mut span = cached_spans.pop().unwrap_or_else(ShapeSpan::empty);
             span.build(
                 font_system,
                 line,
                 attrs_list,
-                start..line_range.end,
-                line_rtl,
-                run_level,
+                0..line.len(),
+                false,
+                unicode_bidi::Level::ltr(),
                 shaping,
             );
             spans.push(span);
+        } else {
+            let bidi = unicode_bidi::BidiInfo::new(line, None);
+            rtl = if bidi.paragraphs.is_empty() {
+                false
+            } else {
+                bidi.paragraphs[0].level.is_rtl()
+            };
+
+            log::trace!("Line {}: '{}'", if rtl { "RTL" } else { "LTR" }, line);
+
+            let mut levels = mem::take(&mut font_system.shape_buffer.bidi_levels);
+            for para_info in &bidi.paragraphs {
+                let line_rtl = para_info.level.is_rtl();
+                assert_eq!(line_rtl, rtl);
+
+                let line_range = para_info.range.clone();
+                Self::adjust_levels(&unicode_bidi::Paragraph::new(&bidi, para_info), &mut levels);
+
+                // Find consecutive level runs. We use this to create Spans.
+                // Each span is a set of characters with equal levels.
+                let mut start = line_range.start;
+                let mut run_level = levels[start];
+                spans.reserve(line_range.end - start + 1);
+
+                for (i, &new_level) in levels
+                    .iter()
+                    .enumerate()
+                    .take(line_range.end)
+                    .skip(start + 1)
+                {
+                    if new_level != run_level {
+                        // End of the previous run, start of a new one.
+                        let mut span = cached_spans.pop().unwrap_or_else(ShapeSpan::empty);
+                        span.build(
+                            font_system,
+                            line,
+                            attrs_list,
+                            start..i,
+                            line_rtl,
+                            run_level,
+                            shaping,
+                        );
+                        spans.push(span);
+                        start = i;
+                        run_level = new_level;
+                    }
+                }
+                let mut span = cached_spans.pop().unwrap_or_else(ShapeSpan::empty);
+                span.build(
+                    font_system,
+                    line,
+                    attrs_list,
+                    start..line_range.end,
+                    line_rtl,
+                    run_level,
+                    shaping,
+                );
+                spans.push(span);
+            }
+            font_system.shape_buffer.bidi_levels = levels;
         }
 
         // Adjust for tabs
@@ -1103,7 +1139,6 @@ impl ShapeLine {
 
         // Return the buffers for later reuse.
         font_system.shape_buffer.spans = cached_spans;
-        font_system.shape_buffer.bidi_levels = levels;
     }
 
     // A modified version of first part of unicode_bidi::bidi_info::visual_run
@@ -1788,5 +1823,77 @@ impl ShapeLine {
         scratch.glyph_sets = cached_glyph_sets;
         scratch.reorder_levels = reorder_levels;
         scratch.reorder_runs = new_order;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bidi_levels_all_ltr, ShapeLine};
+    use alloc::vec::Vec;
+    use core::ops::Range;
+    use unicode_bidi::{BidiInfo, Level, Paragraph};
+
+    /// What the full bidi pass gives `line`: each paragraph's range and
+    /// level, and every byte's level after whitespace adjustment.
+    fn full_pass(line: &str) -> (Vec<(Range<usize>, Level)>, Vec<Level>) {
+        let bidi = BidiInfo::new(line, None);
+        let mut all = Vec::new();
+        let mut levels = Vec::new();
+        for para in &bidi.paragraphs {
+            ShapeLine::adjust_levels(&Paragraph::new(&bidi, para), &mut levels);
+            all.extend_from_slice(&levels[para.range.clone()]);
+        }
+        let paragraphs = bidi
+            .paragraphs
+            .iter()
+            .map(|p| (p.range.clone(), p.level))
+            .collect();
+        (paragraphs, all)
+    }
+
+    // The fast path must take exactly the lines the full pass resolves to
+    // one level-0 paragraph, and every class that can raise a level (or
+    // split the line) must send the line through the full pass.
+    #[test]
+    fn bidi_fast_path_matches_full_pass() {
+        let cases: &[(&str, bool)] = &[
+            ("hello world", true),
+            ("\u{416}\u{438}\u{437}\u{43d}\u{44c} \u{65e5}\u{672c}", true),
+            ("123 + 4.5% = $6, (7) / 8:9", true),
+            ("-- ... !? [] {} <>", true),
+            (
+                "tab\there e\u{301} soft\u{ad}hyphen zero\u{200b}width",
+                true,
+            ),
+            ("emoji \u{1f600} \u{1f469}\u{200d}\u{1f4bb}", true),
+            ("stray pdf\u{202c} and pdi\u{2069}", true),
+            ("   ", true),
+            ("", false),
+            ("ab \u{5e9}\u{5dc}\u{5d5}\u{5dd}", false),
+            ("ab \u{633}\u{644}\u{627}\u{645}", false),
+            ("ab \u{661}\u{662}\u{663}", false),
+            ("ab \u{202a}cd\u{202c}", false),
+            ("ab \u{202b}cd\u{202c}", false),
+            ("ab \u{202d}cd\u{202c}", false),
+            ("ab \u{202e}cd\u{202c}", false),
+            ("ab \u{2066}cd\u{2069}", false),
+            ("ab \u{2067}cd\u{2069}", false),
+            ("ab \u{2068}cd\u{2069}", false),
+            ("file 12 \u{5e9}\u{5dc} (34) end", false),
+            ("ab\u{2029}cd", false),
+        ];
+        for &(line, fast) in cases {
+            assert_eq!(bidi_levels_all_ltr(line), fast, "{line:?}");
+            let (paragraphs, levels) = full_pass(line);
+            let one_ltr_paragraph = paragraphs == [(0..line.len(), Level::ltr())]
+                && levels.iter().all(|&level| level == Level::ltr());
+            // A separator splits an otherwise left-to-right line, and an
+            // empty line has no paragraph; every other slow case raises a
+            // level somewhere.
+            assert_eq!(
+                one_ltr_paragraph, fast,
+                "{line:?}: {paragraphs:?} {levels:?}"
+            );
+        }
     }
 }
