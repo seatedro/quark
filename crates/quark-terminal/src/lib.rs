@@ -81,8 +81,8 @@ pub use grid::{CellStyle, Colors, Cursor, CursorShape, Grid, GridRow, Rgb, Run, 
 pub use input::KeyPress;
 pub use pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 pub use state::{
-    PointerInput, Preedit, TerminalEvent, TerminalOutcome, TerminalSignal, TerminalState,
-    TerminalStyle,
+    INPUT_BACKLOG, PointerInput, Preedit, TerminalEvent, TerminalOutcome, TerminalSignal,
+    TerminalState, TerminalStyle,
 };
 pub use view::{TerminalEnv, terminal_view};
 pub use vt::UnsafePaste;
