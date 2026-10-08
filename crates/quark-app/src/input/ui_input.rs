@@ -34,8 +34,10 @@ pub enum UiInput {
     },
     /// A key press that spells a binding.
     Key(Binding),
-    /// Typed text or an IME commit.
+    /// Typed text.
     Text(String),
+    /// Text the IME committed, ending its composition.
+    ImeCommit(String),
     /// The IME composition changed; empty text ends it.
     Preedit {
         text: String,
@@ -77,6 +79,7 @@ impl UiInput {
             }
             InputEvent::KeyPress(chord) => Self::Key(chord.binding()?),
             InputEvent::TextInput(text) => Self::Text(text.clone()),
+            InputEvent::ImeCommit(text) => Self::ImeCommit(text.clone()),
             InputEvent::ImePreedit(text, cursor) => Self::Preedit {
                 text: text.clone(),
                 cursor: *cursor,

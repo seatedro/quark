@@ -22,6 +22,7 @@ pub use ui_input::{PointerButton, UiInput};
 /// the app draws. [`InputNormalizer`] converts winit's physical values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
+    /// Text a key press typed.
     TextInput(String),
     KeyPress(KeyChord),
     KeyRelease(KeyChord),
@@ -40,7 +41,14 @@ pub enum InputEvent {
         phase: TouchPhase,
     },
     Focused(bool),
+    /// The IME composition changed: its text, with the caret or selection
+    /// at a byte range. Empty text ends it.
     ImePreedit(String, Option<(usize, usize)>),
+    /// The IME committed text, ending its composition. Kept apart from
+    /// [`Self::TextInput`] so a commit can be told from typing: one that
+    /// belongs to an element focus has left is dropped, not inserted in
+    /// the element focused now.
+    ImeCommit(String),
     FileHovered(PathBuf),
     FileHoverCancelled,
     FileDropped(PathBuf),
@@ -383,7 +391,7 @@ impl InputNormalizer {
             }
             Ime::Commit(text) => {
                 self.ime_composing = false;
-                vec![InputEvent::TextInput(text)]
+                vec![InputEvent::ImeCommit(text)]
             }
             // Turning IME off mid-composition drops the preedit; say so,
             // or the field keeps painting it.
@@ -454,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn ime_commit_ends_composition_and_inserts_text() {
+    fn ime_commit_ends_composition_and_stays_a_commit() {
         let mut input = InputNormalizer::default();
         let preedit = input.normalize(WindowEvent::Ime(Ime::Preedit("ni".into(), Some((2, 2)))));
         assert_eq!(
@@ -464,7 +472,7 @@ mod tests {
         assert!(input.ime_composing());
 
         let commit = input.normalize(WindowEvent::Ime(Ime::Commit("你".into())));
-        assert_eq!(commit, vec![InputEvent::TextInput("你".into())]);
+        assert_eq!(commit, vec![InputEvent::ImeCommit("你".into())]);
         assert!(!input.ime_composing());
     }
 }
