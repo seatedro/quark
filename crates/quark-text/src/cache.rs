@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
@@ -321,10 +321,18 @@ impl LayoutCache {
 /// else. `retired` ones were still held elsewhere (by a scene, say) when
 /// evicted; they stay unchanged for those holders and become free once the
 /// last holder drops them.
+///
+/// Only [`Arc::get_mut`] decides that a layout is unshared. Reading the
+/// strong and weak counts one after the other is not enough: another thread
+/// can upgrade a `Weak` between the two reads and then drop the `Weak`, so
+/// the counts read 1 and 0 while that thread holds the layout. `get_mut`
+/// locks out new `Weak`s while it checks, and once a layout is free nothing
+/// but the pool can reach it.
 #[derive(Debug, Default)]
 struct LayoutPool {
     free: Vec<Arc<TextLayout>>,
-    retired: Vec<Arc<TextLayout>>,
+    /// Oldest first.
+    retired: VecDeque<Arc<TextLayout>>,
     /// [`spare_bytes`] of the `free` layouts.
     free_bytes: usize,
 }
@@ -351,16 +359,16 @@ enum PoolError {
 }
 
 impl LayoutPool {
-    fn recycle(&mut self, layout: Arc<TextLayout>) {
-        if unshared(&layout) {
+    fn recycle(&mut self, mut layout: Arc<TextLayout>) {
+        if Arc::get_mut(&mut layout).is_some() {
             self.free(layout);
         } else {
             // A holder that never lets go must not block later ones, so
             // the oldest retiree gives way.
             if self.retired.len() == POOL_CAP {
-                self.retired.swap_remove(0);
+                self.retired.pop_front();
             }
-            self.retired.push(layout);
+            self.retired.push_back(layout);
         }
         debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
@@ -378,13 +386,16 @@ impl LayoutPool {
     /// for its glyphs (one per char, roughly), the least room among those,
     /// and text of the same length so the copy can overwrite it.
     fn take(&mut self, text: &str) -> Option<Arc<TextLayout>> {
-        let mut i = 0;
-        while i < self.retired.len() {
-            if unshared(&self.retired[i]) {
-                let layout = self.retired.swap_remove(i);
+        // One turn of the queue: freed retirees leave it, the rest go
+        // back in their order.
+        for _ in 0..self.retired.len() {
+            let Some(mut layout) = self.retired.pop_front() else {
+                break;
+            };
+            if Arc::get_mut(&mut layout).is_some() {
                 self.free(layout);
             } else {
-                i += 1;
+                self.retired.push_back(layout);
             }
         }
         let chars = text.chars().count();
@@ -408,6 +419,8 @@ impl LayoutPool {
                 retired: self.retired.len(),
             });
         }
+        // Free layouts stay unshared once `get_mut` found them so, which
+        // makes reading the counts here exact.
         if let Some(index) = self.free.iter().position(|layout| !unshared(layout)) {
             return Err(PoolError::SharedFree { index });
         }
@@ -422,8 +435,8 @@ impl LayoutPool {
     }
 }
 
-/// Whether `layout` is the only reference, so it can be rebuilt without
-/// any holder seeing it change.
+/// Whether `layout` is the only reference. Only exact for a layout no other
+/// thread can reach; see [`LayoutPool`].
 fn unshared(layout: &Arc<TextLayout>) -> bool {
     Arc::strong_count(layout) == 1 && Arc::weak_count(layout) == 0
 }
@@ -561,6 +574,38 @@ mod tests {
             .expect("layout");
         assert_eq!(held.text().as_ref(), TEXT);
         assert_eq!(format!("{:?}", held.glyphs()), glyphs);
+    }
+
+    // Misses refill retired layouts once nothing else holds them. A layout
+    // only a `Weak` reaches is retired, but whoever upgrades the `Weak`
+    // holds it again, so it must stay unchanged however often the cache
+    // evicts and refills around it.
+    #[test]
+    fn layout_cache_reuse_leaves_a_layout_upgraded_from_weak_unchanged() {
+        let mut sys = test_system();
+        let mut cache = LayoutCache::new(0);
+        let query = |text| TextQuery::new(text, TextStyle::new(14.0)).wrap_width(Some(150.0));
+        let reversed: String = TEXT.chars().rev().collect();
+        for round in 0..4 {
+            let (text, other) = if round % 2 == 0 {
+                (TEXT, reversed.as_str())
+            } else {
+                (reversed.as_str(), TEXT)
+            };
+            cache.begin_frame();
+            let weak = Arc::downgrade(&cache.layout_query(&mut sys, &query(text)).expect("layout"));
+            cache.begin_frame();
+            cache.trim();
+            let held = weak.upgrade().expect("retired, not dropped");
+            drop(weak);
+            let glyphs = format!("{:?}", held.glyphs());
+            cache.begin_frame();
+            cache.trim();
+            // The same length, so it could be copied over the held text.
+            cache.layout_query(&mut sys, &query(other)).expect("layout");
+            assert_eq!(held.text().as_ref(), text, "round {round}");
+            assert_eq!(format!("{:?}", held.glyphs()), glyphs, "round {round}");
+        }
     }
 
     // Every way the fonts change must reach the cache, or it hands out
