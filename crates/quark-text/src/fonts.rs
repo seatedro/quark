@@ -338,6 +338,9 @@ pub(crate) struct TextFaces {
     /// family (named, else generic) and weight. Font queries allocate, so
     /// layouts reuse the answers.
     faces: HashMap<FacesKey, Faces>,
+    /// Rasterizes a candidate's glyph once, to skip faces swash cannot
+    /// draw (bitmap-only glyphs, such as Unifont's on some systems).
+    raster: Option<cosmic_text::SwashCache>,
 }
 
 impl TextFaces {
@@ -399,6 +402,38 @@ impl TextFaces {
         })
     }
 
+    /// Whether face `id` draws `c` with any ink.
+    fn draws(&mut self, fs: &mut cosmic_text::FontSystem, id: fontdb::ID, c: char) -> bool {
+        use cosmic_text::skrifa::MetadataProvider as _;
+        let Some((glyph, weight)) = fs.db().face(id).and_then(|face| {
+            let weight = face.weight;
+            fs.db()
+                .with_face_data(id, |data, index| {
+                    let font = cosmic_text::skrifa::FontRef::from_index(data, index).ok()?;
+                    font.charmap().map(c)
+                })
+                .flatten()
+                .map(|glyph| (glyph, weight))
+        }) else {
+            return false;
+        };
+        let Ok(glyph) = u16::try_from(glyph.to_u32()) else {
+            return false;
+        };
+        let (key, _, _) = cosmic_text::CacheKey::new(
+            id,
+            glyph,
+            16.0,
+            (0.0, 0.0),
+            weight,
+            cosmic_text::CacheKeyFlags::empty(),
+        );
+        self.raster
+            .get_or_insert_with(cosmic_text::SwashCache::new)
+            .get_image_uncached(fs, key)
+            .is_some_and(|image| image.data.iter().any(|&a| a != 0))
+    }
+
     /// The family `c` should draw in instead of the fallback cosmic-text
     /// would pick, for text whose own face is `primary`; `None` to leave
     /// it to the fallback. Only characters `emoji` (the color emoji
@@ -406,11 +441,12 @@ impl TextFaces {
     /// color.
     pub(crate) fn text_family(
         &mut self,
-        db: &fontdb::Database,
+        fs: &mut cosmic_text::FontSystem,
         c: char,
         (primary, emoji): Faces,
     ) -> Option<Arc<str>> {
         let emoji = emoji?;
+        let db = fs.db();
         if !self.covers(db, emoji, c) || primary.is_some_and(|id| self.covers(db, id, c)) {
             return None;
         }
@@ -432,8 +468,11 @@ impl TextFaces {
             .collect();
         let found = candidates
             .into_iter()
-            .find(|&id| self.covers(db, id, c) && !self.is_color(db, id))
-            .and_then(|id| db.face(id))
+            .find(|&id| {
+                let db = fs.db();
+                self.covers(db, id, c) && !self.is_color(db, id) && self.draws(fs, id, c)
+            })
+            .and_then(|id| fs.db().face(id))
             .and_then(|face| face.families.first())
             .map(|(name, _)| Arc::from(name.as_str()));
         self.families.insert(c, found.clone());

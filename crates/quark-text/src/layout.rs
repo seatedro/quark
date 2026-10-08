@@ -704,13 +704,7 @@ impl TextLayout {
                     let faces = scratch
                         .text_faces
                         .faces(fs.db(), key, style_family(&style), emoji);
-                    text_spans(
-                        &mut attrs,
-                        paragraph,
-                        fs.db(),
-                        &mut scratch.text_faces,
-                        faces,
-                    );
+                    text_spans(&mut attrs, paragraph, fs, &mut scratch.text_faces, faces);
                 }
             }
             let reused = match buffer.lines.get_mut(line_i) {
@@ -1561,7 +1555,7 @@ fn emoji_spans(attrs: &mut AttrsList, paragraph: &str, emoji: &'static str) {
 fn text_spans(
     attrs: &mut AttrsList,
     paragraph: &str,
-    db: &fontdb::Database,
+    fs: &mut FontSystem,
     faces: &mut crate::fonts::TextFaces,
     faces_of_text: crate::fonts::Faces,
 ) {
@@ -1572,9 +1566,10 @@ fn text_spans(
         if crate::fonts::is_emoji_presentation(grapheme) {
             continue;
         }
-        let Some(family) = faces.text_family(db, c, faces_of_text) else {
+        let Some(family) = faces.text_family(fs, c, faces_of_text) else {
             continue;
         };
+        let db = fs.db();
         let owned = AttrsOwned::new(&attrs.get_span(start));
         // cosmic-text takes a named family only at a weight it has, so ask
         // for the face nearest the text's weight.
