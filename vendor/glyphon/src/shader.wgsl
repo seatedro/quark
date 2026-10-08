@@ -32,6 +32,11 @@ var atlas_sampler: sampler;
 @group(1) @binding(0)
 var<uniform> params: Params;
 
+// Per-draw offsets, two to a vector: the draw at slot `s` (vertices
+// `4 * s` to `4 * s + 4`) moves its glyphs by offset `s`.
+@group(1) @binding(1)
+var<uniform> offsets: array<vec4<i32>, 1024>;
+
 fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         return c / 12.92;
@@ -42,7 +47,9 @@ fn srgb_to_linear(c: f32) -> f32 {
 
 @vertex
 fn vs_main(in_vert: VertexInput) -> VertexOutput {
-    var pos = in_vert.pos;
+    let slot = in_vert.vertex_idx >> 2u;
+    let pair = offsets[slot >> 1u];
+    var pos = in_vert.pos + select(pair.xy, pair.zw, (slot & 1u) == 1u);
     let width = in_vert.dim & 0xffffu;
     let height = (in_vert.dim & 0xffff0000u) >> 16u;
     let color = in_vert.color;

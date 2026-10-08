@@ -1,4 +1,4 @@
-use crate::{GlyphToRender, Params};
+use crate::{viewport::DRAW_OFFSETS_SIZE, GlyphToRender, Params};
 use std::{
     borrow::Cow,
     mem,
@@ -130,16 +130,28 @@ impl Cache {
         });
 
         let uniforms_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(mem::size_of::<Params>() as u64),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(mem::size_of::<Params>() as u64),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(DRAW_OFFSETS_SIZE),
+                    },
+                    count: None,
+                },
+            ],
             label: Some("glyphon uniforms bind group layout"),
         });
 
@@ -185,13 +197,24 @@ impl Cache {
         })
     }
 
-    pub(crate) fn create_uniforms_bind_group(&self, device: &Device, buffer: &Buffer) -> BindGroup {
+    pub(crate) fn create_uniforms_bind_group(
+        &self,
+        device: &Device,
+        buffer: &Buffer,
+        offsets: &Buffer,
+    ) -> BindGroup {
         device.create_bind_group(&BindGroupDescriptor {
             layout: &self.0.uniforms_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: offsets.as_entire_binding(),
+                },
+            ],
             label: Some("glyphon uniforms bind group"),
         })
     }

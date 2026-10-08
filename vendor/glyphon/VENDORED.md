@@ -42,6 +42,18 @@ against that commit shows the whole patch.
 - `TextAtlas::epoch` (`src/text_atlas.rs`): counts evictions and
   clears, the events that can move a cached glyph. quark-render draws a
   text run's vertices again without preparing them while it is unchanged.
+- Draw offsets (`src/shader.wgsl`, `src/viewport.rs`, `src/cache.rs`,
+  `src/text_render.rs`): a viewport has a second uniform of
+  `MAX_DRAW_OFFSETS` pixel offsets, set with `Viewport::set_draw_offsets`
+  (one buffer write, only when an offset changed).
+  `TextRenderer::render_at` draws with offset `slot`, passing the slot as
+  the first vertex (`4 * slot`), and the vertex shader moves every glyph
+  by the offset its vertex index selects; `render` draws at slot 0.
+  quark-render gives each run's renderer a slot and, when a run moved by
+  whole pixels with its clip and places exactly the glyphs prepared moved
+  alike, draws the prepared vertices at the new offset instead of
+  preparing and uploading them again. `PositionedGlyph` also derives
+  `PartialEq` and `Eq` for that comparison.
 - `AtlasStats` and `TextAtlas::stats` (`src/text_atlas.rs`, counted in
   `src/text_render.rs`): glyph misses, evictions, growths, glyphs
   re-rasterized by a growth, and glyph bytes uploaded, for tests and
@@ -57,7 +69,10 @@ from its own atlas):
 2. Move `quark-render`'s positioned path to the upstream API, then run
    `cargo test -p quark-render --features headless-render`:
    `positioned_text_draws_the_buffer_paths_pixels` compares both paths.
-3. Check that the upstream atlas still grows without re-rasterizing, or
+3. Keep the draw offsets patch, or have quark-render move kept glyph
+   vertices on the CPU and upload them again:
+   `scrolled_text_draws_the_pixels_of_text_prepared_again` covers it.
+4. Check that the upstream atlas still grows without re-rasterizing, or
    keep that patch: `atlas_growth_rasterizes_no_cached_glyph_again` and
    `atlas_growth_keeps_cached_glyph_pixels` cover it, and the counters
    they read would need another source.

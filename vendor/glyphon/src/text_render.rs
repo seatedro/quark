@@ -367,6 +367,22 @@ impl TextRenderer {
         viewport: &Viewport,
         pass: &mut RenderPass<'_>,
     ) -> Result<(), RenderError> {
+        self.render_at(atlas, viewport, pass, 0)
+    }
+
+    /// Like [`Self::render`], moving every glyph by the viewport's draw
+    /// offset `slot` (see [`Viewport::set_draw_offsets`]), clip included.
+    /// Drawing glyphs prepared earlier where the same glyphs moved by
+    /// whole pixels, with their bounds moved alike and inside the viewport
+    /// both times, would be prepared, needs no preparing or uploading
+    /// again. `slot` must be below [`crate::MAX_DRAW_OFFSETS`].
+    pub fn render_at(
+        &self,
+        atlas: &TextAtlas,
+        viewport: &Viewport,
+        pass: &mut RenderPass<'_>,
+        slot: u32,
+    ) -> Result<(), RenderError> {
         if self.glyph_vertices.is_empty() {
             return Ok(());
         }
@@ -375,7 +391,8 @@ impl TextRenderer {
         pass.set_bind_group(0, &atlas.bind_group, &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..4, 0..self.glyph_vertices.len() as u32);
+        // The vertex shader reads the slot from the vertex index.
+        pass.draw(slot * 4..slot * 4 + 4, 0..self.glyph_vertices.len() as u32);
 
         Ok(())
     }

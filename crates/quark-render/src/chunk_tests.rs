@@ -434,6 +434,107 @@ fn kept_text_draws_again_after_the_atlas_forgets_its_glyphs() {
     );
 }
 
+/// Rows of plain and rich text, each a chunk at its origin. Every second
+/// row clips its own text through the middle of its glyphs, so the clip
+/// moves with the text.
+fn scrolling_rows(text: &mut TextSystem, scale: f32) -> Vec<Arc<SceneChunk>> {
+    let px = |v: f32| v / scale;
+    (0..8)
+        .map(|i| {
+            let line = format!("Row {i} gets scrolled, Ag");
+            let spans = vec![TextSpan {
+                range: 4..6,
+                weight: None,
+                style: None,
+                kind: None,
+            }];
+            let params = TextParams::new(line.clone(), TextStyle::new(15.0 * scale)).spans(spans);
+            let layout = ShapedText::new(Arc::new(text.layout(&params).expect("layout")));
+            let mut primitives = vec![Primitive::Rect(RectPrimitive {
+                rect: rect(0.0, 0.0, px(180.0), px(22.0)),
+                color: color(30, 40, 60),
+            })];
+            if i % 2 == 1 {
+                primitives.push(Primitive::ClipStart(ClipPrimitive {
+                    rect: rect(px(4.0), px(3.0), px(150.0), px(9.0)),
+                    corner_radii: [0.0; 4],
+                }));
+            }
+            primitives.push(if i % 3 == 0 {
+                Primitive::TextRun(TextPrimitive {
+                    rect: rect(px(4.0), px(2.0), px(170.0), px(20.0)),
+                    layout,
+                    color: color(255, 255, 255),
+                })
+            } else {
+                Primitive::RichTextRun(RichTextPrimitive {
+                    rect: rect(px(4.0), px(2.0), px(170.0), px(20.0)),
+                    layout,
+                    default_color: color(230, 230, 230),
+                    span_colors: Arc::from([color(255, 200, 0)]),
+                })
+            });
+            if i % 2 == 1 {
+                primitives.push(Primitive::ClipEnd);
+            }
+            chunk(primitives)
+        })
+        .collect()
+}
+
+// Text scrolled by whole pixels draws its kept glyphs moved, exactly where
+// preparing them again draws them: rows scrolled one or more pixels at a
+// time, by fractions, back up, across a clip that cuts their glyphs at the
+// edges, with clips of their own that move with them, at several scales.
+#[test]
+fn scrolled_text_draws_the_pixels_of_text_prepared_again() {
+    let (w, h) = SIZE;
+    let mut text = test_text();
+    let gpu = match GpuContext::headless() {
+        Ok(gpu) => gpu,
+        Err(RenderError::NoAdapter) => {
+            assert!(
+                std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+            );
+            return;
+        }
+        Err(error) => panic!("headless context failed: {error}"),
+    };
+    for scale in [1.0, 1.5, 2.0] {
+        let rows = scrolling_rows(&mut text, scale);
+        // Scroll positions in physical pixels.
+        let list = |scroll: f32| {
+            let mut scene = Scene::default();
+            scene.clip(rect(0.0, 20.0 / scale, 190.0 / scale, 110.0 / scale));
+            for (i, row) in rows.iter().enumerate() {
+                let y = 24.0 + i as f32 * 26.0 - scroll;
+                scene.chunk(row, [5.0 / scale, y / scale]);
+            }
+            scene.pop_clip();
+            physical(scene, scale)
+        };
+        let mut scrolled = Renderer::headless_with_gpu(&gpu, w, h, 1.0);
+        for scroll in [
+            0.0, 1.0, 2.0, 3.0, 7.0, 7.5, 8.5, 9.5, 21.0, 40.0, 41.0, 13.0, 12.0,
+        ] {
+            let scene = list(scroll);
+            let drawn = scrolled.render_to_rgba(&scene, &mut text, w, h).unwrap();
+            let expected = Renderer::headless_with_gpu(&gpu, w, h, 1.0)
+                .render_to_rgba(&expanded(&scene), &mut text, w, h)
+                .unwrap();
+            let differing = drawn
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(expected.as_chunks::<4>().0)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differing, 0, "at {scale}x, scrolled to {scroll}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Measurement scenes
 // ---------------------------------------------------------------------------

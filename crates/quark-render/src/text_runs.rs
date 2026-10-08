@@ -8,15 +8,26 @@
 //! without preparing or uploading anything. Vertices point into the glyph
 //! atlas, so they hold only while no cached glyph has been evicted or
 //! cleared since: the atlas epoch.
+//!
+//! A run that moved by whole pixels (a scrolled row) draws a renderer's
+//! vertices as they are, moved on the GPU by the renderer's draw offset,
+//! when every glyph it would prepare is one that renderer prepared, moved
+//! by exactly as much: the same glyph, subpixel position, and color, and
+//! a clip moved alike inside the target. Nothing is prepared or uploaded
+//! but the offsets. Anything else (a fractional move, a clip that now
+//! cuts the text differently, a glyph evicted since) prepares it again.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::ops::ControlFlow;
 
-use glyphon::{PrepareError, TextRenderer};
-use quark_text::TextSystem;
+use glyphon::{
+    MAX_DRAW_OFFSETS, PositionedGlyph, PrepareError, Resolution, TextBounds, TextRenderer, Viewport,
+};
+use quark_text::{TextLayout, TextSystem};
 
 use super::{ClippedRichText, ClippedText, Renderer, TargetFrame, TextRunItems};
-use crate::text::{TextPath, positioned_glyphs, prepare_text_areas};
+use crate::text::{TextPath, prepare_text_areas, push_positioned_glyphs, visit_positioned_glyphs};
 
 /// Run hashes are already mixed.
 #[derive(Default)]
@@ -43,6 +54,9 @@ impl Hasher for Passthrough {
 pub(super) struct TextRuns {
     renderers: Vec<TextRenderer>,
     memos: Vec<RunMemo>,
+    /// Per renderer: how far its glyphs moved since they were prepared,
+    /// its draw offset.
+    offsets: Vec<[i32; 2]>,
     /// This frame's renderer of each run.
     slots: Vec<usize>,
     hashes: Vec<u64>,
@@ -53,6 +67,10 @@ pub(super) struct TextRuns {
     pending: Vec<bool>,
     /// Last frame's renderer by run hash.
     lookup: HashMap<u64, usize, BuildHasherDefault<Passthrough>>,
+    /// This frame's run hashes, and last frame's renderers, without the
+    /// texts' places.
+    moved_hashes: Vec<u64>,
+    moved_lookup: HashMap<u64, usize, BuildHasherDefault<Passthrough>>,
 }
 
 /// The texts a renderer's vertices were prepared from.
@@ -60,9 +78,12 @@ pub(super) struct TextRuns {
 struct RunMemo {
     valid: bool,
     target: usize,
+    resolution: Option<Resolution>,
     epoch: u64,
     texts: Vec<ClippedText>,
     rich_texts: Vec<ClippedRichText>,
+    /// The glyphs prepared, on the positioned path.
+    glyphs: Vec<PositionedGlyph>,
 }
 
 impl RunMemo {
@@ -90,10 +111,109 @@ impl RunMemo {
                 .all(|(a, b)| a.primitive == b.primitive && a.clip == b.clip && a.alpha == b.alpha)
     }
 
+    /// How far `texts` and `rich_texts` moved, in whole pixels, when they
+    /// are the texts prepared, each moved with its clip by that much, in
+    /// a target of the same size. Their glyphs may still differ.
+    fn moved_by(
+        &self,
+        target: usize,
+        resolution: Resolution,
+        epoch: u64,
+        texts: &[ClippedText],
+        rich_texts: &[ClippedRichText],
+    ) -> Option<(i32, i32)> {
+        if !(self.valid
+            && self.target == target
+            && self.resolution == Some(resolution)
+            && self.epoch == epoch
+            && self.texts.len() == texts.len()
+            && self.rich_texts.len() == rich_texts.len())
+        {
+            return None;
+        }
+        let first = |texts: &[ClippedText], rich_texts: &[ClippedRichText]| {
+            texts
+                .first()
+                .map(|text| text.primitive.rect)
+                .or_else(|| rich_texts.first().map(|text| text.primitive.rect))
+        };
+        let (was, now) = (
+            first(&self.texts, &self.rich_texts)?,
+            first(texts, rich_texts)?,
+        );
+        let (dx, dy) = (now.x - was.x, now.y - was.y);
+        // Whole pixels that fit an i32 exactly.
+        let whole = |d: f32| d.fract() == 0.0 && d.abs() < 16_777_216.0;
+        if !(whole(dx) && whole(dy)) {
+            return None;
+        }
+        let moved = |a: crate::scene::Rect, b: crate::scene::Rect| a.offset(dx, dy) == b;
+        let plain = self.texts.iter().zip(texts).all(|(a, b)| {
+            a.primitive.layout == b.primitive.layout
+                && a.primitive.color == b.primitive.color
+                && moved(a.primitive.rect, b.primitive.rect)
+                && moved(a.clip, b.clip)
+        });
+        let rich = self.rich_texts.iter().zip(rich_texts).all(|(a, b)| {
+            a.primitive.layout == b.primitive.layout
+                && a.primitive.default_color == b.primitive.default_color
+                && a.primitive.span_colors == b.primitive.span_colors
+                && a.alpha == b.alpha
+                && moved(a.primitive.rect, b.primitive.rect)
+                && moved(a.clip, b.clip)
+        });
+        (plain && rich).then_some((dx as i32, dy as i32))
+    }
+
     fn forget(&mut self) {
         self.valid = false;
         self.texts.clear();
         self.rich_texts.clear();
+        self.glyphs.clear();
+    }
+}
+
+/// Whether `texts` and `rich_texts` place exactly the glyphs `prepared`
+/// moved by `(dx, dy)`, clips included, with every clip inside
+/// `resolution` both times, so glyphon's clamp to the viewport changes
+/// none.
+fn glyphs_moved(
+    prepared: &[PositionedGlyph],
+    (texts, rich_texts): (&[ClippedText], &[ClippedRichText]),
+    (dx, dy): (i32, i32),
+    resolution: Resolution,
+) -> bool {
+    let (width, height) = (resolution.width as i32, resolution.height as i32);
+    let inside =
+        |b: TextBounds| b.left >= 0 && b.top >= 0 && b.right <= width && b.bottom <= height;
+    let mut prepared = prepared.iter();
+    let same = visit_positioned_glyphs(texts, rich_texts, |glyph| {
+        let moved = prepared.next().is_some_and(|was| {
+            glyph
+                == PositionedGlyph {
+                    x: was.x + dx,
+                    y: was.y + dy,
+                    bounds: moved_bounds(was.bounds, (dx, dy)),
+                    ..*was
+                }
+                && inside(glyph.bounds)
+                && inside(was.bounds)
+        });
+        if moved {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    });
+    same.is_continue() && prepared.next().is_none()
+}
+
+fn moved_bounds(bounds: TextBounds, (dx, dy): (i32, i32)) -> TextBounds {
+    TextBounds {
+        left: bounds.left + dx,
+        top: bounds.top + dy,
+        right: bounds.right + dx,
+        bottom: bounds.bottom + dy,
     }
 }
 
@@ -122,6 +242,33 @@ fn run_hash(target: usize, texts: &[ClippedText], rich_texts: &[ClippedRichText]
     h
 }
 
+/// Mix of what decides a run's vertices apart from where its texts are;
+/// runs that differ only by a move hash equal.
+fn moved_hash(target: usize, texts: &[ClippedText], rich_texts: &[ClippedRichText]) -> u64 {
+    let mut h = target as u64 ^ 0x2545_f491_4f6c_dd1d;
+    let mut mix = |value: u64| {
+        h = (h ^ value)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(29)
+    };
+    let layout = |text: &quark::scene::ShapedText| {
+        text.downcast_ref::<TextLayout>()
+            .map_or(0, |layout| std::ptr::from_ref(layout) as u64)
+    };
+    let size =
+        |r: crate::scene::Rect| u64::from(r.width.to_bits()) << 32 | u64::from(r.height.to_bits());
+    for text in texts {
+        let c = text.primitive.color;
+        mix(layout(&text.primitive.layout) ^ size(text.clip).rotate_left(7));
+        mix(u64::from(u32::from_be_bytes([c.r, c.g, c.b, c.a])));
+    }
+    for text in rich_texts {
+        mix(layout(&text.primitive.layout) ^ size(text.clip).rotate_left(7) ^ 1);
+        mix(u64::from(text.alpha.to_bits()));
+    }
+    h
+}
+
 fn run_items<'a>(
     frame: &'a TargetFrame,
     run: &TextRunItems,
@@ -134,17 +281,28 @@ fn run_items<'a>(
 }
 
 impl TextRuns {
-    /// The renderer that draws run `run` of this frame.
-    pub(super) fn renderer(&self, run: usize) -> &TextRenderer {
-        &self.renderers[self.slots[run]]
+    /// The renderer that draws run `run` of this frame, and its draw
+    /// offset slot.
+    pub(super) fn renderer(&self, run: usize) -> (&TextRenderer, u32) {
+        let slot = self.slots[run];
+        (&self.renderers[slot], draw_slot(slot))
     }
 
-    /// Upload the vertices prepared since the last upload.
-    pub(super) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+    /// Upload the vertices prepared since the last upload, and the draw
+    /// offsets to the `viewports` that draw them.
+    pub(super) fn upload<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        viewports: impl IntoIterator<Item = &'a mut Viewport>,
+    ) {
         for (renderer, pending) in self.renderers.iter_mut().zip(&mut self.pending) {
             if std::mem::take(pending) {
                 renderer.upload(device, queue);
             }
+        }
+        for viewport in viewports {
+            viewport.set_draw_offsets(queue, &self.offsets);
         }
     }
 
@@ -152,7 +310,49 @@ impl TextRuns {
     pub(super) fn forget(&mut self) {
         self.memos.iter_mut().for_each(RunMemo::forget);
         self.lookup.clear();
+        self.moved_lookup.clear();
     }
+
+    /// Draw `slot`'s vertices moved, when they are the run's texts
+    /// prepared and moved by whole pixels.
+    fn translate(
+        &mut self,
+        slot: usize,
+        (target, resolution, epoch): (usize, Resolution, u64),
+        texts: &[ClippedText],
+        rich_texts: &[ClippedRichText],
+    ) -> bool {
+        let memo = &mut self.memos[slot];
+        let Some(moved) = memo.moved_by(target, resolution, epoch, texts, rich_texts) else {
+            return false;
+        };
+        if !glyphs_moved(&memo.glyphs, (texts, rich_texts), moved, resolution) {
+            return false;
+        }
+        for glyph in &mut memo.glyphs {
+            glyph.x += moved.0;
+            glyph.y += moved.1;
+            glyph.bounds = moved_bounds(glyph.bounds, moved);
+        }
+        memo.texts.clear();
+        memo.texts.extend_from_slice(texts);
+        memo.rich_texts.clear();
+        memo.rich_texts.extend_from_slice(rich_texts);
+        let offset = &mut self.offsets[slot];
+        *offset = [offset[0] + moved.0, offset[1] + moved.1];
+        true
+    }
+}
+
+/// The draw offset slot of renderer `index`. Renderers past the offsets
+/// glyphon has share the last slot, which never moves.
+fn draw_slot(index: usize) -> u32 {
+    index.min(MAX_DRAW_OFFSETS - 1) as u32
+}
+
+/// Whether renderer `index` has a draw offset of its own.
+fn can_move(index: usize) -> bool {
+    index < MAX_DRAW_OFFSETS - 1
 }
 
 impl Renderer {
@@ -171,6 +371,7 @@ impl Renderer {
         if runs.renderers.len() > total.max(1) * 2 {
             runs.renderers.truncate(total.max(1));
             runs.memos.truncate(total.max(1));
+            runs.offsets.truncate(total.max(1));
             runs.pending.truncate(total.max(1));
         }
         let count = runs.renderers.len();
@@ -180,6 +381,7 @@ impl Renderer {
         runs.prepared.resize(count, false);
         runs.slots.clear();
         runs.hashes.clear();
+        runs.moved_hashes.clear();
         // Only the positioned path draws exactly what the texts say; the
         // buffer path reads recolored buffers that change underneath.
         let reuse = reuse && self.text_path == TextPath::Positioned;
@@ -202,6 +404,34 @@ impl Renderer {
                 }
                 runs.slots.push(kept.unwrap_or(usize::MAX));
                 runs.hashes.push(hash);
+                runs.moved_hashes
+                    .push(moved_hash(target, texts, rich_texts));
+            }
+        }
+
+        // Runs that moved, once every unchanged run has its renderer.
+        if reuse {
+            let mut index = 0;
+            for (target, frame) in frames.iter().enumerate() {
+                let resolution = match target {
+                    0 => self.viewport.resolution(),
+                    i => self.layer_viewports[i - 1].resolution(),
+                };
+                for run in &frame.batches.text_runs {
+                    let runs = &mut self.text_runs;
+                    let candidate = (runs.slots[index] == usize::MAX)
+                        .then(|| runs.moved_lookup.get(&runs.moved_hashes[index]).copied())
+                        .flatten()
+                        .filter(|&slot| slot < count && !runs.claimed[slot] && can_move(slot));
+                    if let Some(slot) = candidate {
+                        let (texts, rich_texts) = run_items(frame, run);
+                        if runs.translate(slot, (target, resolution, epoch), texts, rich_texts) {
+                            runs.claimed[slot] = true;
+                            runs.slots[index] = slot;
+                        }
+                    }
+                    index += 1;
+                }
             }
         }
 
@@ -222,6 +452,7 @@ impl Renderer {
                             None,
                         ));
                         runs.memos.push(RunMemo::default());
+                        runs.offsets.push([0, 0]);
                         runs.claimed.push(false);
                         runs.prepared.push(false);
                         runs.pending.push(false);
@@ -251,9 +482,12 @@ impl Renderer {
         let runs = &mut self.text_runs;
         let epoch = self.atlas.epoch();
         runs.lookup.clear();
-        for (&slot, &hash) in runs.slots.iter().zip(&runs.hashes) {
+        runs.moved_lookup.clear();
+        for ((&slot, &hash), &moved) in runs.slots.iter().zip(&runs.hashes).zip(&runs.moved_hashes)
+        {
             runs.memos[slot].epoch = epoch;
             runs.lookup.insert(hash, slot);
+            runs.moved_lookup.insert(moved, slot);
         }
         // Unclaimed renderers keep no texts alive.
         for (memo, &claimed) in runs.memos.iter_mut().zip(&runs.claimed) {
@@ -282,15 +516,19 @@ impl Renderer {
         memo.forget();
         let renderer = &mut runs.renderers[slot];
         match self.text_path {
-            TextPath::Positioned => renderer.prepare_glyphs(
-                &self.device,
-                &self.queue,
-                text.raster_font_system(),
-                &mut self.atlas,
-                viewport,
-                positioned_glyphs(texts, rich_texts),
-                &mut self.swash_cache,
-            )?,
+            TextPath::Positioned => {
+                // Kept to check a later move of the run against.
+                push_positioned_glyphs(texts, rich_texts, &mut memo.glyphs);
+                renderer.prepare_glyphs(
+                    &self.device,
+                    &self.queue,
+                    text.raster_font_system(),
+                    &mut self.atlas,
+                    viewport,
+                    memo.glyphs.iter().copied(),
+                    &mut self.swash_cache,
+                )?
+            }
             TextPath::Buffer => renderer.prepare(
                 &self.device,
                 &self.queue,
@@ -303,8 +541,10 @@ impl Renderer {
         }
         runs.prepared[slot] = true;
         runs.pending[slot] = true;
+        runs.offsets[slot] = [0, 0];
         memo.valid = true;
         memo.target = target;
+        memo.resolution = Some(viewport.resolution());
         memo.texts.extend_from_slice(texts);
         memo.rich_texts.extend_from_slice(rich_texts);
         Ok(())

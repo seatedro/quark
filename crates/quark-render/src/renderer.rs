@@ -1528,7 +1528,9 @@ impl Renderer {
         // Prepare every text run before recording any pass.
         self.text_ready = self.prepare_frame_text(frames, text);
         if self.text_ready && self.text_path == TextPath::Positioned {
-            self.text_runs.upload(&self.device, &self.queue);
+            let viewports = std::iter::once(&mut self.viewport)
+                .chain(&mut self.layer_viewports[..frames.len() - 1]);
+            self.text_runs.upload(&self.device, &self.queue, viewports);
         }
 
         for frame in frames.iter_mut() {
@@ -1999,11 +2001,8 @@ impl Renderer {
                 }
                 pass.set_scissor_rect(0, 0, width, height);
                 for run in cmds {
-                    self.text_runs.renderer(t.frame.text_base + run).render(
-                        &self.atlas,
-                        t.glyph_viewport,
-                        pass,
-                    )?;
+                    let (renderer, slot) = self.text_runs.renderer(t.frame.text_base + run);
+                    renderer.render_at(&self.atlas, t.glyph_viewport, pass, slot)?;
                 }
                 return Ok(());
             }

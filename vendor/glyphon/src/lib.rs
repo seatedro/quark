@@ -22,7 +22,7 @@ pub use custom_glyph::{
 pub use error::{PrepareError, RenderError};
 pub use text_atlas::{AtlasStats, ColorMode, TextAtlas};
 pub use text_render::TextRenderer;
-pub use viewport::Viewport;
+pub use viewport::{Viewport, MAX_DRAW_OFFSETS};
 
 // Re-export all top-level types from `cosmic-text` for convenience.
 #[doc(no_inline)]
@@ -131,7 +131,7 @@ pub struct TextArea<'a> {
 /// A glyph already shaped, laid out, and placed, for
 /// [`TextRenderer::prepare_glyphs`]. Its color is its own, so text in many
 /// colors needs no buffer shaped with those colors.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PositionedGlyph {
     /// What to rasterize: font, glyph, size, subpixel bins, and flags.
     pub cache_key: CacheKey,
