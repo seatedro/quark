@@ -208,6 +208,7 @@ impl DockState {
         }
         self.confined.retain(|p| seen.contains(p));
         self.tab_drag = None;
+        self.drag_hover = None;
         self.divider_drag = None;
         for region in DockRegion::ALL {
             if self.panels(region).is_empty() {

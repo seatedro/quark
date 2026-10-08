@@ -44,8 +44,9 @@ use quark::{TabStop, view};
 use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
 use quark_ui::design::Shadow;
 use quark_ui::element::{
-    AnyElement, ClickEvent, CursorHint, DragHandler, DragPreview, DragReleaseResult,
-    ElementGeometry, ElementHandle, IntoAnyElement, LayoutSnapshot, div, svg_icon, text,
+    AnyElement, ClickEvent, CursorHint, DRAG_PREVIEW_THRESHOLD, DragHandler, DragHandoff,
+    DragPreview, DragReleaseResult, DropTarget, DropTargetHit, DropTargetId, ElementGeometry,
+    ElementHandle, IntoAnyElement, LayoutSnapshot, canvas, div, svg_icon, text,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -223,6 +224,21 @@ pub enum DockEvent {
     /// window for; the panels stay where they are until
     /// [`DockState::commit_host`].
     MoveToNewHost(MovePayload),
+    /// A dragged tab or group grip moved past the drag threshold, the
+    /// pointer at `at` in the window's coordinates. An app that follows
+    /// drags across windows hands the drag off to a drag session here
+    /// (`UiContext::hand_off_drag`); the drag then carries `payload`. Others
+    /// ignore it, and the drag stays inside the window.
+    DragOut {
+        payload: MovePayload,
+        at: (f32, f32),
+    },
+    /// A group dragged by its grip is over `target`, or over nowhere it
+    /// can land; see [`DockState::set_drag_hover`].
+    Hover {
+        payload: MovePayload,
+        target: Option<DockDestination>,
+    },
 }
 
 /// What [`DockState::apply_event`] did.
@@ -442,6 +458,9 @@ pub struct DockState {
     next_host: u64,
     revision: u64,
     tab_drag: Option<(PanelId, Option<PaneDrop>)>,
+    /// Where a drag the app routes (a group grip, a drag between windows)
+    /// would land: shown like a tab drag's target while it holds.
+    drag_hover: Option<(MovePayload, PaneDrop)>,
     divider_drag: Option<(PaneId, usize, Vec<f32>)>,
 }
 
@@ -487,6 +506,7 @@ impl DockState {
             next_host: 1,
             revision: 0,
             tab_drag: None,
+            drag_hover: None,
             divider_drag: None,
         };
         // Empty side regions take no space until a panel arrives.
@@ -932,6 +952,32 @@ impl DockState {
         self.can_drop(panel, target).then_some((panel, target))
     }
 
+    /// Show where a drag of `payload` the app routes itself would land, or
+    /// nothing: a group dragged by its grip, or a drag that left its window
+    /// for a drag session. Shown only while the move is allowed. Changes
+    /// no layout, so drop targets painted before stay current.
+    pub fn set_drag_hover(&mut self, hover: Option<(MovePayload, DockDestination)>) {
+        self.drag_hover = hover.map(|(payload, d)| {
+            (
+                payload,
+                PaneDrop {
+                    pane: d.pane,
+                    zone: d.zone,
+                },
+            )
+        });
+    }
+
+    /// Where the drag under way would land, shown as the drop preview: a
+    /// routed drag's hover, else a tab drag's target.
+    fn shown_target(&self) -> Option<PaneDrop> {
+        let routed = self.drag_hover.and_then(|(payload, target)| {
+            let d = self.drop_destination(target)?;
+            self.prepare(payload, d).is_ok().then_some(target)
+        });
+        routed.or_else(|| self.drop_preview().map(|(_, target)| target))
+    }
+
     fn split_weights(&self, split: PaneId) -> Option<Vec<f32>> {
         self.areas()
             .find_map(|(_, _, r)| r.split(split))
@@ -1037,6 +1083,11 @@ impl DockState {
                 self.tab_drag = Some((panel, target));
                 false
             }
+            DockEvent::Hover { payload, target } => {
+                self.set_drag_hover(target.map(|d| (payload, d)));
+                false
+            }
+            DockEvent::DragOut { .. } => false,
             DockEvent::TabDrop { panel, target } => {
                 self.tab_drag = None;
                 let moved = target
@@ -1323,6 +1374,7 @@ struct DragContext {
     hits: Vec<GroupHit>,
     policies: [TabPolicy; 4],
     root: DockRoot,
+    host: HostId,
 }
 
 impl DragContext {
@@ -1360,7 +1412,11 @@ pub struct Dock<'a> {
     move_keys: Option<(String, String)>,
     always_tabs: [bool; 4],
     tab_width: f32,
+    grips: bool,
 }
+
+/// Width of a group's grip at the end of its tab strip.
+const GRIP_WIDTH: f32 = 24.0;
 
 impl<'a> Dock<'a> {
     /// A dock filling `size` points. `on_event` wraps its events in the
@@ -1380,6 +1436,65 @@ impl<'a> Dock<'a> {
             move_keys: Some((MOVE_TAB_KEYS.0.into(), MOVE_TAB_KEYS.1.into())),
             always_tabs: [false; 4],
             tab_width: 120.0,
+            grips: false,
+        }
+    }
+
+    /// Give every tab strip a grip at its end that drags the whole group:
+    /// into another group, beside one, or (for an app that follows drags
+    /// across windows) out into a window of its own. Off by default.
+    pub fn group_grips(mut self, grips: bool) -> Self {
+        self.grips = grips;
+        self
+    }
+
+    /// The scope of the [`DropTargetId`]s a dock built with `handle` (or
+    /// none) publishes: one per tab group body and one per tab strip, so
+    /// drags that leave a window ([`quark_ui::element::DragSession`]) find
+    /// the dock's groups in every window. [`Self::drop_destination`] reads
+    /// a hit back.
+    pub fn drop_scope(handle: Option<ElementHandle>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        (DOCK_ID, handle).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The group a drop target of the dock names, whatever its scope.
+    pub fn drop_target_pane(id: DropTargetId) -> PaneId {
+        PaneId((id.key >> 1) as u32)
+    }
+
+    /// Where a drop on `hit`, one of the dock's targets, lands: its tab
+    /// strip's slot, or the zone of its group's body. `None` when the group
+    /// is gone.
+    pub fn drop_destination(state: &DockState, hit: &DropTargetHit) -> Option<DockDestination> {
+        let pane = Self::drop_target_pane(hit.id);
+        let group = state.group(pane)?;
+        let zone = if hit.id.key & 1 == 1 {
+            DropZone::Tabs(hit.slot.unwrap_or(group.panels.len()))
+        } else {
+            // Docks paint untransformed, so the bounds are the body's size.
+            DropZone::in_body(
+                hit.bounds.width,
+                hit.bounds.height,
+                hit.local.0,
+                hit.local.1,
+            )
+        };
+        Some(DockDestination {
+            host: state.host_of(pane)?,
+            pane,
+            zone,
+        })
+    }
+
+    /// The part of a strip `width` wide its tabs share.
+    fn tabs_width(&self, width: f32) -> f32 {
+        if self.grips {
+            (width - GRIP_WIDTH).max(0.0)
+        } else {
+            width
         }
     }
 
@@ -1533,7 +1648,7 @@ impl<'a> Dock<'a> {
                     region,
                     rect,
                     strip: if tabs { strip } else { 0.0 },
-                    tab_width: self.tab_width_for(rect.width, group.panels.len()),
+                    tab_width: self.tab_width_for(self.tabs_width(rect.width), group.panels.len()),
                 });
             }
         }
@@ -1541,6 +1656,7 @@ impl<'a> Dock<'a> {
             hits,
             policies: state.policies,
             root: self.handle.map_or(DockRoot::Id, DockRoot::Handle),
+            host: HostId::MAIN,
         });
 
         let mut region = |r: DockRegion| {
@@ -1610,7 +1726,7 @@ impl<'a> Dock<'a> {
                     region: DockRegion::Center,
                     rect,
                     strip,
-                    tab_width: self.tab_width_for(rect.width, group.panels.len()),
+                    tab_width: self.tab_width_for(self.tabs_width(rect.width), group.panels.len()),
                 })
             })
             .collect();
@@ -1618,6 +1734,7 @@ impl<'a> Dock<'a> {
             hits,
             policies: [self.state.area_policy(self.host, DockRegion::Center); 4],
             root: self.handle.map_or(DockRoot::Id, DockRoot::Handle),
+            host: self.host,
         });
         let body = root.map(|root| {
             self.node(
@@ -1836,14 +1953,15 @@ impl<'a> Dock<'a> {
             0.0
         };
         let body_height = (height - strip_height).max(0.0);
+        let tab_width = self.tab_width_for(self.tabs_width(width), group.panels.len());
         // Where a dragged tab would land in this group.
         let preview = self
             .state
-            .drop_preview()
-            .filter(|(_, target)| target.pane == group.id)
-            .map(|(_, target)| match target.zone {
+            .shown_target()
+            .filter(|target| target.pane == group.id)
+            .map(|target| match target.zone {
                 DropZone::Tabs(i) => {
-                    let tab = self.tab_width_for(width, group.panels.len());
+                    let tab = tab_width;
                     let x = (i.min(group.panels.len()) as f32 * tab - 1.0).max(0.0);
                     (x, 0.0, 2.0, strip_height)
                 }
@@ -1852,8 +1970,10 @@ impl<'a> Dock<'a> {
                     (x, y + strip_height, w, h)
                 }
             });
+        let targets = self.drop_targets(group, (width, height), strip_height, tab_width);
         view! {
             <div class="relative flex-col" w={width} h={height} bg={colors.surface}>
+                <div class="absolute" left={0.0} top={0.0} w={width} h={height}>{targets}</div>
                 if show_tabs && !group.panels.is_empty() {
                     {self.tab_strip(theme, region, group, (width, strip_height), drag, title)}
                 }
@@ -1874,6 +1994,54 @@ impl<'a> Dock<'a> {
         }
     }
 
+    /// Publish the group's drop targets: its tab strip, a slot per tab and
+    /// one for the rest of the strip, and its body.
+    fn drop_targets(
+        &self,
+        group: &TabGroup,
+        (width, height): (f32, f32),
+        strip: f32,
+        tab_width: f32,
+    ) -> AnyElement {
+        let scope = Self::drop_scope(self.handle);
+        let key = u64::from(group.id.0) << 1;
+        let revision = self.state.layout_revision();
+        let count = group.panels.len();
+        canvas(move |b, _scene, cx| {
+            let rect = |x, y, width, height| quark::Rect {
+                x,
+                y,
+                width,
+                height,
+            };
+            if strip > 0.0 {
+                let tabs = tab_width * count as f32;
+                let slots: Vec<quark::Rect> = (0..count)
+                    .map(|i| rect(b.x + tab_width * i as f32, b.y, tab_width, strip))
+                    .chain([rect(b.x + tabs, b.y, (b.width - tabs).max(0.0), strip)])
+                    .collect();
+                cx.add_drop_target(DropTarget {
+                    id: DropTargetId {
+                        scope,
+                        key: key | 1,
+                    },
+                    revision,
+                    layout: rect(b.x, b.y, b.width, strip),
+                    slots: &slots,
+                });
+            }
+            cx.add_drop_target(DropTarget {
+                id: DropTargetId { scope, key },
+                revision,
+                layout: rect(b.x, b.y + strip, b.width, (b.height - strip).max(0.0)),
+                slots: &[],
+            });
+        })
+        .w(width)
+        .h(height)
+        .into_any()
+    }
+
     fn tab_strip(
         &self,
         theme: &Theme,
@@ -1884,7 +2052,10 @@ impl<'a> Dock<'a> {
         title: &impl Fn(PanelId) -> String,
     ) -> AnyElement {
         let colors = &theme.colors;
-        let tab_width = self.tab_width_for(width, group.panels.len());
+        let tab_width = self.tab_width_for(self.tabs_width(width), group.panels.len());
+        let grip = self
+            .grips
+            .then(|| self.grip(theme, region, group, height, drag, title));
         view! {
             <div class="flex-row w-full" h={height} class="flex-none overflow-clip"
                  border_b={colors.border_variant}
@@ -1895,6 +2066,56 @@ impl<'a> Dock<'a> {
                     {self.tab(theme, region, group, index, panel, (tab_width, height), drag, title)}
                 }
                 <div class="flex-1 h-full" bg={Color::TRANSPARENT} />
+                if let Some(grip) = grip {
+                    {grip}
+                }
+            </div>
+        }
+    }
+
+    /// The grip that drags the whole group.
+    fn grip(
+        &self,
+        theme: &Theme,
+        region: DockRegion,
+        group: &TabGroup,
+        height: f32,
+        drag: &Rc<DragContext>,
+        title: &impl Fn(PanelId) -> String,
+    ) -> AnyElement {
+        let colors = &theme.colors;
+        let m = &theme.metrics;
+        let map = self.map.clone();
+        let ctx = drag.clone();
+        let pane = group.id;
+        let name = group.active_panel().map(title).unwrap_or_default();
+        // The picture under the pointer: the active tab, and how many more.
+        let label = match group.panels.len() {
+            0 | 1 => name.clone(),
+            n => format!("{name} +{}", n - 1),
+        };
+        view! {
+            <div class="flex-none items-center justify-center" w={GRIP_WIDTH} class="h-full"
+                 // Pointer only: the keyboard moves groups through the app's
+                 // menu ("Move group to new window").
+                 id={format!("dock:grip:{}", pane.0)}
+                 test_id="dock-group-grip" cursor={CursorHint::Grab}
+                 hover_bg={colors.ghost_element_hover}
+                 on:drag={move |press: ClickEvent| {
+                     Box::new(GroupDrag {
+                         map: map.clone(),
+                         ctx: ctx.clone(),
+                         pane,
+                         region,
+                         press: (press.x, press.y),
+                         dock: None,
+                         target: None,
+                         out: false,
+                         preview: tab_preview(PanelId(u64::MAX), &label, (120.0, height)),
+                     }) as Box<dyn DragHandler>
+                 }}>
+                <icon svg={lucide::GRIP_VERTICAL} size={m.ui_small_font_size}
+                      color={colors.text_muted} />
             </div>
         }
     }
@@ -1980,6 +2201,7 @@ impl<'a> Dock<'a> {
                          press: (press.x, press.y),
                          dock: None,
                          held: false,
+                         out: false,
                          preview: tab_preview(panel, &drag_title, (tab_width, tab_height)),
                      }) as Box<dyn DragHandler>
                  }}
@@ -2057,7 +2279,28 @@ struct TabDrag {
     dock: Option<ElementGeometry>,
     /// The preview has the tab's measured size and the press's place on it.
     held: bool,
+    /// [`DockEvent::DragOut`] went out.
+    out: bool,
     preview: DragPreview,
+}
+
+/// [`DockEvent::DragOut`] once the pointer at window point `(x, y)` is
+/// past the drag threshold from `press`.
+fn drag_out(
+    map: &EventMap,
+    out: &mut bool,
+    press: (f32, f32),
+    (x, y): (f32, f32),
+    payload: MovePayload,
+) -> Option<Action> {
+    if *out || (x - press.0).hypot(y - press.1) < DRAG_PREVIEW_THRESHOLD {
+        return None;
+    }
+    *out = true;
+    Some(map(DockEvent::DragOut {
+        payload,
+        at: (x, y),
+    }))
 }
 
 impl DragHandler for TabDrag {
@@ -2083,25 +2326,17 @@ impl DragHandler for TabDrag {
         })]
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
-        // Without the dock in the frame, as if it filled the window.
-        let (x, y) = self.dock.and_then(|g| g.to_local(x, y)).unwrap_or((x, y));
-        let mut allowed = true;
-        let target = self.ctx.target_at(x, y).and_then(|(region, target)| {
-            allowed = drop_allowed(&self.ctx.policies, self.confined, self.from, region, target);
-            // Over its own slot, or a split its group cannot give it, the
-            // tab is simply not moving: no preview and no refusal.
-            (allowed || target.pane != self.from.pane).then_some(target)
-        });
-        self.allowed = allowed || target.is_none();
-        if target == self.target {
-            return Vec::new();
-        }
-        self.target = target;
-        vec![(self.map)(DockEvent::TabHover {
-            panel: self.panel,
-            target,
-        })]
+    fn on_move(&mut self, wx: f32, wy: f32) -> Vec<Action> {
+        let out = drag_out(
+            &self.map,
+            &mut self.out,
+            self.press,
+            (wx, wy),
+            MovePayload::Panel(self.panel),
+        );
+        let mut actions = self.hover(wx, wy);
+        actions.extend(out);
+        actions
     }
 
     fn on_release(&mut self) -> DragReleaseResult {
@@ -2121,6 +2356,19 @@ impl DragHandler for TabDrag {
         })]
     }
 
+    /// The tab follows the pointer into other windows: the session carries
+    /// [`MovePayload::Panel`], and this window stops showing a target.
+    fn on_handoff(&mut self) -> Option<DragHandoff> {
+        self.target = None;
+        Some(DragHandoff {
+            payload: Box::new(MovePayload::Panel(self.panel)),
+            actions: vec![(self.map)(DockEvent::TabHover {
+                panel: self.panel,
+                target: None,
+            })],
+        })
+    }
+
     fn preview(&self) -> Option<&DragPreview> {
         Some(&self.preview)
     }
@@ -2131,6 +2379,121 @@ impl DragHandler for TabDrag {
             (Some(_), true) => CursorHint::Grabbing,
             (None, _) => CursorHint::Default,
         }
+    }
+}
+
+impl TabDrag {
+    /// Report the target under window point `(x, y)` when it changed.
+    fn hover(&mut self, x: f32, y: f32) -> Vec<Action> {
+        // Without the dock in the frame, as if it filled the window.
+        let (x, y) = self.dock.and_then(|g| g.to_local(x, y)).unwrap_or((x, y));
+        let mut allowed = true;
+        let target = self.ctx.target_at(x, y).and_then(|(region, target)| {
+            allowed = drop_allowed(&self.ctx.policies, self.confined, self.from, region, target);
+            // Over its own slot, or a split its group cannot give it, the
+            // tab is simply not moving: no preview and no refusal.
+            (allowed || target.pane != self.from.pane).then_some(target)
+        });
+        self.allowed = allowed || target.is_none();
+        if target == self.target {
+            return Vec::new();
+        }
+        self.target = target;
+        vec![(self.map)(DockEvent::TabHover {
+            panel: self.panel,
+            target,
+        })]
+    }
+}
+
+/// Drags a whole group by its grip: shows where it would land, moves it
+/// there on release ([`DockEvent::Transfer`]), and hands off to a drag
+/// session carrying [`MovePayload::Group`].
+struct GroupDrag {
+    map: EventMap,
+    ctx: Rc<DragContext>,
+    pane: PaneId,
+    region: DockRegion,
+    /// Window point of the press.
+    press: (f32, f32),
+    dock: Option<ElementGeometry>,
+    target: Option<DockDestination>,
+    out: bool,
+    preview: DragPreview,
+}
+
+impl GroupDrag {
+    fn payload(&self) -> MovePayload {
+        MovePayload::Group(self.pane)
+    }
+
+    fn hover(&self, target: Option<DockDestination>) -> Action {
+        (self.map)(DockEvent::Hover {
+            payload: self.payload(),
+            target,
+        })
+    }
+}
+
+impl DragHandler for GroupDrag {
+    fn set_geometry(&mut self, geometry: &LayoutSnapshot) {
+        self.dock = self.ctx.root.find(geometry);
+    }
+
+    fn on_move(&mut self, wx: f32, wy: f32) -> Vec<Action> {
+        let payload = self.payload();
+        let out = drag_out(&self.map, &mut self.out, self.press, (wx, wy), payload);
+        let (x, y) = self
+            .dock
+            .and_then(|g| g.to_local(wx, wy))
+            .unwrap_or((wx, wy));
+        let target = self
+            .ctx
+            .target_at(x, y)
+            .filter(|(region, t)| !(*region == self.region && t.pane == self.pane))
+            .map(|(_, t)| DockDestination {
+                host: self.ctx.host,
+                pane: t.pane,
+                zone: t.zone,
+            });
+        let mut actions = Vec::new();
+        if target != self.target {
+            self.target = target;
+            actions.push(self.hover(target));
+        }
+        actions.extend(out);
+        actions
+    }
+
+    fn on_release(&mut self) -> DragReleaseResult {
+        let mut actions = vec![self.hover(None)];
+        if let Some(destination) = self.target {
+            actions.push((self.map)(DockEvent::Transfer {
+                payload: self.payload(),
+                destination,
+            }));
+        }
+        DragReleaseResult { actions }
+    }
+
+    fn on_cancel(&mut self) -> Vec<Action> {
+        vec![self.hover(None)]
+    }
+
+    fn on_handoff(&mut self) -> Option<DragHandoff> {
+        self.target = None;
+        Some(DragHandoff {
+            payload: Box::new(self.payload()),
+            actions: vec![self.hover(None)],
+        })
+    }
+
+    fn preview(&self) -> Option<&DragPreview> {
+        Some(&self.preview)
+    }
+
+    fn cursor(&self) -> CursorHint {
+        CursorHint::Grabbing
     }
 }
 
