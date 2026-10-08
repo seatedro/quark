@@ -1683,6 +1683,7 @@ mod tests {
                     kind: 0,
                 },
                 blocks: vec![Block::plain(BlockKey(i), text)],
+                adornments: Vec::new(),
             }
         }
 

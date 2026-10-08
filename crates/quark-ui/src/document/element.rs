@@ -13,25 +13,27 @@ use accesskit::Role as AccessibilityRole;
 use quark::hit::{CursorHint, HitFlags, HitId};
 use quark::{SemanticActions, SemanticNode, SemanticRole, Transform2D};
 use quark_render::scene::Rect;
-use quark_render::{ImagePrimitive, RoundedRectPrimitive, Scene};
+use quark_render::{BorderPrimitive, ImagePrimitive, RoundedRectPrimitive, Scene};
 
 use quark::selection::BlockKey;
 
 use super::measure::{failed_image_spans, image_extent};
 use super::{
-    Block, BlockContent, BlockGeometry, Decorator, Document, DocumentSource, ImageState, LIST_STEP,
-    Palette, QUOTE_STEP, RowChrome, VisibleRow,
+    AdornmentAccessibility, AdornmentCx, Block, BlockContent, BlockGeometry, Decorator, Document,
+    DocumentSource, ImageState, LIST_STEP, Palette, QUOTE_STEP, RowAdornment, RowChrome,
+    TableCells, TableMetrics, VisibleRow,
 };
-use crate::accessibility::{AccessibilityAction, AccessibilityNode};
+use crate::accessibility::{AccessibilityAction, AccessibilityNode, CollectionInfo};
 use crate::action::Action;
 use crate::design::Alpha;
 use crate::element::{
-    AnyElement, Bounds, CacheKey, ClickEvent, DragHandler, DragReleaseResult, DragStart, Element,
-    ElementContext, IntoAnyElement, LayoutEngine, LayoutId, LinkClicked, LinkHandler,
-    ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink, ScrollTarget, ScrollbarInput,
-    ScrollbarVisibility, Scrollbars, SelectableText, StyledSpan, cached, code_block_joined, div,
-    inputs_hash, selectable_rich_text, text,
+    AnyElement, Bounds, CacheKey, ClickEvent, CodeBlock, CodeHeader, DragHandler,
+    DragReleaseResult, DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId,
+    LinkClicked, LinkHandler, ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink,
+    ScrollTarget, ScrollbarInput, ScrollbarVisibility, Scrollbars, SelectableText, StyledSpan,
+    cached, code_block_joined, div, inputs_hash, selectable_rich_text, svg_icon, text,
 };
+use crate::icons::lucide;
 use crate::style::Styled;
 use crate::theme::Theme;
 use crate::virtual_list::RowKey;
@@ -75,6 +77,27 @@ pub enum DocumentEvent {
     /// The scrollbar moved the view to this offset (`f32::MAX` for the
     /// end); landing at the bottom pins the view there.
     ScrollTo(f32),
+    /// A code block's wrap toggle was pressed.
+    SetCodeWrap {
+        block: BlockKey,
+        wrap: bool,
+    },
+}
+
+/// A code block's Copy button was pressed. `text` is the block's whole
+/// source, including lines and columns scrolled out of view; write it to
+/// the clipboard. Emitted as an action of this type unless
+/// [`DocumentElement::on_copy_code`] maps it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CopyCode {
+    pub block: BlockKey,
+    pub text: Arc<str>,
+}
+
+impl From<CopyCode> for Action {
+    fn from(copy: CopyCode) -> Self {
+        Action::new(copy)
+    }
 }
 
 /// Frame interval requested while a drag autoscrolls.
@@ -85,6 +108,16 @@ type EventMap = Rc<dyn Fn(DocumentEvent) -> Action>;
 /// The link action of a built element. Its blocks are built before
 /// [`DocumentElement::on_link`] can be called, so they share this slot.
 type LinkSlot = Rc<RefCell<Option<Rc<dyn Fn(&Arc<str>) -> Action>>>>;
+
+/// The copy-code action of a built element, shared like [`LinkSlot`].
+type CopySlot = Rc<RefCell<Option<Rc<dyn Fn(CopyCode) -> Action>>>>;
+
+/// What a code block's toolbar buttons emit through.
+#[derive(Clone)]
+struct CodeControls {
+    on_event: EventMap,
+    on_copy: CopySlot,
+}
 
 /// A block's spans with their tones resolved, kept while the block stays
 /// materialized and the theme stays the same.
@@ -155,6 +188,8 @@ struct RowBuild {
     font_size: f32,
     colors: RowColors,
     blocks: Vec<BlockBuild>,
+    /// Adornments with their bands relative to the row, in flow order.
+    adornments: Vec<(RowAdornment, Rect)>,
     /// Find highlights: rectangles relative to the row, and whether each is
     /// the current match.
     highlights: Vec<(Rect, bool)>,
@@ -168,6 +203,38 @@ struct BlockBuild {
     /// The horizontal scroll and unwrapped width of content wider than
     /// the column.
     scroll: Option<(ScrollHandle, f32)>,
+    table: Option<TableBuild>,
+}
+
+/// A table block's grid and its cells' spans with theme colors resolved.
+struct TableBuild {
+    metrics: TableMetrics,
+    cells: Vec<Arc<[StyledSpan]>>,
+}
+
+impl TableBuild {
+    fn new(block: &Block, metrics: Option<&TableMetrics>, palette: &Palette) -> Option<Self> {
+        let BlockContent::Table(table) = &block.content else {
+            return None;
+        };
+        let cells = table
+            .cells
+            .iter()
+            .map(|cell| match &cell.tones {
+                None => cell.spans.clone(),
+                Some(tones) => cell
+                    .spans
+                    .iter()
+                    .zip(tones.iter())
+                    .map(|(span, tone)| palette.paint(span, *tone))
+                    .collect(),
+            })
+            .collect();
+        Some(Self {
+            metrics: metrics?.clone(),
+            cells,
+        })
+    }
 }
 
 /// The theme colors a row paints with besides its spans' own.
@@ -219,6 +286,7 @@ pub struct DocumentElement {
     rows: Vec<Placed>,
     on_event: EventMap,
     on_link: LinkSlot,
+    on_copy: CopySlot,
     label: Cow<'static, str>,
     /// A drag is autoscrolling; ask for the next frame.
     animating: bool,
@@ -260,6 +328,11 @@ impl<G: BlockGeometry> Document<G> {
             colors.hash_into(&mut hasher);
             hasher.finish()
         };
+        let on_event: EventMap = Rc::new(on_event);
+        let controls = CodeControls {
+            on_event: on_event.clone(),
+            on_copy: Rc::default(),
+        };
         let on_link: LinkSlot = Rc::default();
         let link_slot = on_link.clone();
         let links = LinkHandler::new(move |url| match &*link_slot.borrow() {
@@ -276,14 +349,15 @@ impl<G: BlockGeometry> Document<G> {
         for row in &self.rows {
             let content = source.row(row.key);
             let blocks = content.map_or(&[][..], |r| &r.blocks[..]);
+            let adornments = content.map_or(&[][..], |r| &r.adornments[..]);
             let chrome = content.map(|r| &r.chrome);
-            let hash = self.row_hash(row, chrome, blocks, theme_hash, row_count);
+            let hash = self.row_hash(row, chrome, (blocks, adornments), theme_hash, row_count);
             let build = match builds.remove(&row.key) {
                 Some(entry) if entry.hash == hash => entry.build,
                 _ => Rc::new(self.row_build(
                     row,
                     chrome,
-                    blocks,
+                    (blocks, adornments),
                     (&palette, colors),
                     (&mut painted, &mut kept),
                     row_count,
@@ -297,6 +371,7 @@ impl<G: BlockGeometry> Document<G> {
                 }
             }
             let links = links.clone();
+            let controls = controls.clone();
             let subtree = build.clone();
             placed.push(Placed {
                 rect: Rect {
@@ -306,7 +381,7 @@ impl<G: BlockGeometry> Document<G> {
                     height: row.height,
                 },
                 element: cached(row_cache_key(row.key), hash, move || {
-                    RowElement::new(subtree, &links)
+                    RowElement::new(subtree, &links, &controls)
                 })
                 .into_any(),
             });
@@ -319,7 +394,6 @@ impl<G: BlockGeometry> Document<G> {
         self.row_builds = kept_builds;
         self.row_builds_spare = builds;
 
-        let on_event: EventMap = Rc::new(on_event);
         DocumentElement {
             size: self.size,
             scroll: self.list.scroll_offset(),
@@ -329,6 +403,7 @@ impl<G: BlockGeometry> Document<G> {
             rows: placed,
             on_event,
             on_link,
+            on_copy: controls.on_copy,
             label: Cow::Borrowed("Document"),
             animating: self.wants_frame(),
             scrollbar_auto_hide: false,
@@ -341,7 +416,7 @@ impl<G: BlockGeometry> Document<G> {
         &self,
         row: &VisibleRow,
         chrome: Option<&RowChrome>,
-        blocks: &[Block],
+        (blocks, adornments): (&[Block], &[RowAdornment]),
         theme_hash: u64,
         row_count: usize,
     ) -> u64 {
@@ -360,6 +435,9 @@ impl<G: BlockGeometry> Document<G> {
                 continue;
             };
             (block.revision(), visible.offset_in_row.to_bits()).hash(&mut hasher);
+            if let BlockContent::Code { .. } = block.content {
+                (self.code_toolbar, self.is_code_wrapped(block.key)).hash(&mut hasher);
+            }
             self.scroll_x(block.key).to_bits().hash(&mut hasher);
             if self.scroll_unsettled(block.key) {
                 // The offset resolves while the row paints; a replay would
@@ -373,7 +451,19 @@ impl<G: BlockGeometry> Document<G> {
                 find.hash_block(block.key, &mut hasher);
             }
         }
+        for visible in self.visible_row_adornments(row) {
+            if let Some(adornment) = adornments
+                .get(visible.index)
+                .filter(|a| a.key == visible.key)
+            {
+                (adornment, visible.offset_in_row.to_bits()).hash(&mut hasher);
+            }
+        }
         hasher.finish()
+    }
+
+    fn visible_row_adornments(&self, row: &VisibleRow) -> &[super::VisibleAdornment] {
+        &self.adornments[row.adornments.clone()]
     }
 
     /// The inputs of `row`'s subtree.
@@ -381,7 +471,7 @@ impl<G: BlockGeometry> Document<G> {
         &self,
         row: &VisibleRow,
         chrome: Option<&RowChrome>,
-        blocks: &[Block],
+        (blocks, adornments): (&[Block], &[RowAdornment]),
         (palette, colors): (&Palette, RowColors),
         (painted, kept): (
             &mut HashMap<BlockKey, PaintedSpans>,
@@ -428,11 +518,12 @@ impl<G: BlockGeometry> Document<G> {
                 }
             }
             built.push(BlockBuild {
-                block: block.clone(),
+                block: self.code_presentation().present(block).into_owned(),
                 spans: painted_spans(painted, kept, block, palette),
                 rect,
                 selection: self.block_selection(block.key, visible.text_len),
                 scroll,
+                table: TableBuild::new(block, visible.geometry.table_metrics(), palette),
             });
         }
         RowBuild {
@@ -451,25 +542,51 @@ impl<G: BlockGeometry> Document<G> {
             font_size: style.font_size,
             colors,
             blocks: built,
+            adornments: self
+                .visible_row_adornments(row)
+                .iter()
+                .filter_map(|visible| {
+                    let adornment = adornments.get(visible.index)?;
+                    let rect = Rect {
+                        y: visible.offset_in_row,
+                        ..visible.rect
+                    };
+                    (adornment.key == visible.key).then(|| (adornment.clone(), rect))
+                })
+                .collect(),
             highlights,
         }
     }
 }
 
-/// One row: its chrome background, find highlights, chrome header, and
-/// blocks, with the row's list item node. Built inside the row's cached
-/// boundary, so it paints relative to the row's top left.
+/// One row: its chrome background, find highlights, chrome header,
+/// blocks, and adornments, with the row's list item node. Built inside the
+/// row's cached boundary, so it paints relative to the row's top left.
 struct RowElement {
     build: Rc<RowBuild>,
     /// The decorator's header, built at layout, where the theme is known.
     header: Option<AnyElement>,
-    children: Vec<Placed>,
+    /// Block elements and adornment slots in flow order, so assistive tech
+    /// reads them as they appear.
+    children: Vec<RowChild>,
+}
+
+enum RowChild {
+    Placed(Placed),
+    /// The adornment at this index of the build, and its element once
+    /// built at layout.
+    Adornment(usize, Option<AnyElement>),
 }
 
 impl RowElement {
-    fn new(build: Rc<RowBuild>, links: &LinkHandler) -> Self {
-        let mut children = Vec::with_capacity(build.blocks.len() * 2);
+    fn new(build: Rc<RowBuild>, links: &LinkHandler, controls: &CodeControls) -> Self {
+        let mut children = Vec::with_capacity(build.blocks.len() * 2 + build.adornments.len());
+        let mut placed = Vec::new();
+        let mut adornments = build.adornments.iter().enumerate().peekable();
         for b in &build.blocks {
+            while let Some((i, _)) = adornments.next_if(|(_, (_, rect))| rect.y <= b.rect.y) {
+                children.push(RowChild::Adornment(i, None));
+            }
             block_elements(
                 &b.block,
                 b.spans.clone(),
@@ -478,12 +595,16 @@ impl RowElement {
                     base_font_size: build.font_size,
                     selection: b.selection,
                     links,
+                    controls,
                     colors: &build.colors,
                     scroll: b.scroll.as_ref(),
+                    table: b.table.as_ref(),
                 },
-                &mut children,
+                &mut placed,
             );
+            children.extend(placed.drain(..).map(RowChild::Placed));
         }
+        children.extend(adornments.map(|(i, _)| RowChild::Adornment(i, None)));
         Self {
             build,
             header: None,
@@ -511,13 +632,29 @@ impl Element for RowElement {
         }
         if let Some(header) = &mut self.header {
             let header = header.request_layout(engine, cx);
-            ids.push(engine.request_layout(absolute(self.build.header), &[header]));
+            ids.push(engine.request_layout(absolute(build.header), &[header]));
         }
-        for placed in &mut self.children {
-            let child = placed.element.request_layout(engine, cx);
-            ids.push(engine.request_layout(absolute(placed.rect), &[child]));
+        for child in &mut self.children {
+            let (rect, element) = match child {
+                RowChild::Placed(placed) => (placed.rect, &mut placed.element),
+                RowChild::Adornment(i, element) => {
+                    let (adornment, rect) = &build.adornments[*i];
+                    let element = element.get_or_insert_with(|| {
+                        adornment.build(&AdornmentCx {
+                            row: build.key,
+                            key: adornment.key,
+                            width: rect.width,
+                            height: rect.height,
+                            theme: cx.theme,
+                        })
+                    });
+                    (*rect, element)
+                }
+            };
+            let id = element.request_layout(engine, cx);
+            ids.push(engine.request_layout(absolute(rect), &[id]));
         }
-        let (width, height) = self.build.size;
+        let (width, height) = build.size;
         let id = engine.request_layout(
             taffy::Style {
                 size: taffy::Size {
@@ -542,8 +679,12 @@ impl Element for RowElement {
         if let Some(header) = &mut self.header {
             header.prepaint(engine, cx);
         }
-        for placed in &mut self.children {
-            placed.element.prepaint(engine, cx);
+        for child in &mut self.children {
+            match child {
+                RowChild::Placed(placed) => placed.element.prepaint(engine, cx),
+                RowChild::Adornment(_, Some(element)) => element.prepaint(engine, cx),
+                RowChild::Adornment(_, None) => {}
+            }
         }
     }
 
@@ -596,8 +737,9 @@ impl Element for RowElement {
         cx.push_semantic_parent(item);
 
         if let Some(header) = &mut self.header {
-            // A labelled row is named by its label; keep the header out of
-            // the tree so it is not read twice.
+            // A labelled row is named by its label; keep the header's text
+            // out of the tree so it is not read twice. Controls with their
+            // own labels stay.
             cx.push_accessibility_text_hidden(build.chrome.label.is_some());
             cx.push_text_color(build.colors.muted);
             header.paint(engine, scene, cx);
@@ -605,8 +747,19 @@ impl Element for RowElement {
             cx.pop_accessibility_text_hidden();
         }
 
-        for placed in &mut self.children {
-            placed.element.paint(engine, scene, cx);
+        for child in &mut self.children {
+            match child {
+                RowChild::Placed(placed) => placed.element.paint(engine, scene, cx),
+                RowChild::Adornment(i, Some(element)) => {
+                    let policy = build.adornments[*i].0.accessibility;
+                    cx.push_accessibility_text_hidden(
+                        policy == AdornmentAccessibility::ControlsOnly,
+                    );
+                    element.paint(engine, scene, cx);
+                    cx.pop_accessibility_text_hidden();
+                }
+                RowChild::Adornment(_, None) => {}
+            }
         }
         cx.pop_semantic_parent();
     }
@@ -624,8 +777,10 @@ struct BlockPaint<'a> {
     base_font_size: f32,
     selection: Option<(usize, usize)>,
     links: &'a LinkHandler,
+    controls: &'a CodeControls,
     colors: &'a RowColors,
     scroll: Option<&'a (ScrollHandle, f32)>,
+    table: Option<&'a TableBuild>,
 }
 
 /// The elements of one block at `rect`: quote bars and the list marker in
@@ -642,8 +797,10 @@ fn block_elements(
         base_font_size,
         selection,
         links,
+        controls,
         colors,
         scroll,
+        table,
     } = paint;
     let style = &block.style;
     let font_size = base_font_size * style.scale;
@@ -693,6 +850,7 @@ fn block_elements(
         ..rect
     };
     let spans = spans.unwrap_or_else(|| Arc::from([]));
+    let mut overlay = None;
     let element = match &block.content {
         BlockContent::Prose(_) => {
             let mut el = selectable_rich_text(spans)
@@ -708,11 +866,35 @@ fn block_elements(
             el.into_any()
         }
         BlockContent::Code {
-            line_count, label, ..
+            line_count,
+            label,
+            toolbar,
+            wrap,
+            ..
         } => {
+            if *toolbar {
+                // Over the panel the code paints, and outside its sideways
+                // scroll, so the buttons stay put.
+                let height = CodeHeader::Toolbar.height(font_size);
+                let rect = Rect { height, ..content };
+                let toolbar = CodeToolbar {
+                    block,
+                    label: label.as_deref(),
+                    wrap: *wrap,
+                    font_size,
+                    colors,
+                    controls,
+                };
+                overlay = Some(Placed {
+                    rect,
+                    element: toolbar.element(rect),
+                });
+            }
             let code = |width: f32| {
                 code_block_joined(spans.clone(), *line_count)
                     .label(label.clone())
+                    .toolbar(*toolbar)
+                    .wrap(*wrap)
                     .width(width)
                     .size(font_size)
                     .source(block.key.0)
@@ -721,7 +903,10 @@ fn block_elements(
             match scroll {
                 // Wider than the column: the block scrolls sideways under
                 // its own scrollbar.
+                // A tab stop, so arrow keys can bring hidden columns in.
                 Some((handle, natural)) => div()
+                    .id(super::scroll_area_id(block.key).as_str())
+                    .tab_stop(quark::focus::TabStop::new(0))
                     .w(content.width)
                     .h(content.height)
                     .track_scroll(handle)
@@ -735,6 +920,35 @@ fn block_elements(
                     )
                     .into_any(),
                 None => code(content.width).into_any(),
+            }
+        }
+        BlockContent::Table(cells) => {
+            let Some(table) = table else {
+                // A measurer without table grids: show the markdown.
+                return placed.push(Placed {
+                    rect: content,
+                    element: selectable_rich_text(vec![StyledSpan::plain(&*block.text)])
+                        .width(content.width)
+                        .size(font_size)
+                        .source(block.key.0)
+                        .selection(selection)
+                        .into_any(),
+                });
+            };
+            let grid = TableGrid::new(block.key, cells, table, font_size, selection, colors, links);
+            match scroll {
+                // Wider than the column: scrolls sideways like wide code.
+                Some((handle, _)) => div()
+                    .id(super::scroll_area_id(block.key).as_str())
+                    .tab_stop(quark::focus::TabStop::new(0))
+                    .w(content.width)
+                    .h(content.height)
+                    .track_scroll(handle)
+                    .overflow_x_scroll()
+                    .scrollbar_auto_hide()
+                    .child(grid)
+                    .into_any(),
+                None => grid.into_any(),
             }
         }
         BlockContent::Image {
@@ -781,6 +995,309 @@ fn block_elements(
         rect: content,
         element,
     });
+    placed.extend(overlay);
+}
+
+/// A table block's grid: a tinted header row, separators between rows, a
+/// rounded border, and each cell's text as selectable text in its cell.
+/// Assistive tech gets a table of rows of header and data cells.
+struct TableGrid {
+    key: BlockKey,
+    columns: usize,
+    rows: usize,
+    metrics: TableMetrics,
+    colors: RowColors,
+    /// One selectable text per cell, row-major, placed at the cell's text.
+    cells: Vec<Placed>,
+}
+
+impl TableGrid {
+    fn new(
+        key: BlockKey,
+        table: &TableCells,
+        build: &TableBuild,
+        font_size: f32,
+        selection: Option<(usize, usize)>,
+        colors: &RowColors,
+        links: &LinkHandler,
+    ) -> Self {
+        let metrics = build.metrics.clone();
+        let (pad_x, pad_y) = metrics.pad;
+        let cells = table
+            .cells
+            .iter()
+            .zip(&build.cells)
+            .map(|(cell, spans)| {
+                let rect = metrics.cell(cell.row, cell.column);
+                let text = Rect {
+                    x: rect.x + pad_x,
+                    y: rect.y + pad_y,
+                    width: (rect.width - pad_x * 2.0).max(1.0),
+                    height: TableMetrics::line_height(font_size).ceil(),
+                };
+                // The selection in the cell's own bytes.
+                let local = selection.and_then(|(lo, hi)| {
+                    let (lo, hi) = (lo.max(cell.range.start), hi.min(cell.range.end));
+                    (lo < hi).then(|| (lo - cell.range.start, hi - cell.range.start))
+                });
+                Placed {
+                    rect: text,
+                    element: selectable_rich_text(spans.clone())
+                        .width(text.width)
+                        .size(font_size)
+                        .source(key.0)
+                        .selection(local)
+                        .link_handler(links.clone())
+                        .into_any(),
+                }
+            })
+            .collect();
+        Self {
+            key,
+            columns: table.columns,
+            rows: table.rows,
+            metrics,
+            colors: *colors,
+            cells,
+        }
+    }
+
+    fn size(&self) -> (f32, f32) {
+        (self.metrics.width(), self.metrics.height(self.rows))
+    }
+
+    /// Pushes a semantic node of `role` with its accessibility node and
+    /// makes it the parent of what is painted next.
+    fn push_node(
+        cx: &mut ElementContext,
+        bounds: Rect,
+        (role, accessible): (SemanticRole, AccessibilityRole),
+        id: String,
+        info: CollectionInfo,
+    ) {
+        let mut node = SemanticNode::new(bounds);
+        node.parent = cx.current_semantic_parent();
+        node.role = Some(role);
+        let index = cx.semantic.push(node);
+        cx.push_accessibility_for_semantic(
+            AccessibilityNode::new(id, accessible, bounds).collection(info),
+            index,
+        );
+        cx.push_semantic_parent(index);
+    }
+}
+
+impl Element for TableGrid {
+    type LayoutState = ();
+    type PrepaintState = ();
+
+    fn request_layout(
+        &mut self,
+        engine: &mut LayoutEngine,
+        cx: &mut ElementContext,
+    ) -> (LayoutId, ()) {
+        let mut ids = Vec::with_capacity(self.cells.len());
+        for placed in &mut self.cells {
+            let child = placed.element.request_layout(engine, cx);
+            ids.push(engine.request_layout(absolute(placed.rect), &[child]));
+        }
+        let (width, height) = self.size();
+        let id = engine.request_layout(
+            taffy::Style {
+                size: taffy::Size {
+                    width: taffy::Dimension::length(width),
+                    height: taffy::Dimension::length(height),
+                },
+                flex_shrink: 0.0,
+                ..Default::default()
+            },
+            &ids,
+        );
+        (id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _bounds: Bounds,
+        _layout_state: &mut (),
+        engine: &LayoutEngine,
+        cx: &mut ElementContext,
+    ) {
+        for placed in &mut self.cells {
+            placed.element.prepaint(engine, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        bounds: Bounds,
+        _layout_state: &mut (),
+        _prepaint_state: &mut (),
+        engine: &LayoutEngine,
+        scene: &mut Scene,
+        cx: &mut ElementContext,
+    ) {
+        let radius = 6.0;
+        let row_height = self.metrics.row_height;
+        let header = Rect {
+            height: row_height,
+            ..bounds
+        };
+        scene.rounded_rect(RoundedRectPrimitive {
+            corner_radii: [radius, radius, 0.0, 0.0],
+            ..RoundedRectPrimitive::uniform(header, 0.0, self.colors.placeholder)
+        });
+        for row in 1..self.rows {
+            let line = Rect {
+                y: bounds.y + row_height * row as f32,
+                height: 1.0,
+                ..bounds
+            };
+            scene.rounded_rect(RoundedRectPrimitive::uniform(line, 0.0, self.colors.border));
+        }
+        scene.border(BorderPrimitive::uniform(
+            bounds,
+            1.0,
+            radius,
+            self.colors.border,
+        ));
+
+        let key = self.key.0;
+        let table_info = CollectionInfo {
+            row_count: Some(self.rows),
+            column_count: Some(self.columns),
+            ..CollectionInfo::default()
+        };
+        Self::push_node(
+            cx,
+            bounds,
+            (SemanticRole::Table, AccessibilityRole::Table),
+            format!("document.table:{key}"),
+            table_info,
+        );
+        let mut cells = self.cells.iter_mut();
+        for row in 0..self.rows {
+            let row_bounds = Rect {
+                y: bounds.y + row_height * row as f32,
+                height: row_height,
+                ..bounds
+            };
+            let row_info = CollectionInfo {
+                row_index: Some(row),
+                ..CollectionInfo::default()
+            };
+            Self::push_node(
+                cx,
+                row_bounds,
+                (SemanticRole::Row, AccessibilityRole::Row),
+                format!("document.table:{key}:{row}"),
+                row_info,
+            );
+            for column in 0..self.columns {
+                let Some(placed) = cells.next() else {
+                    break;
+                };
+                let cell = self.metrics.cell(row, column).offset(bounds.x, bounds.y);
+                let role = if row == 0 {
+                    AccessibilityRole::ColumnHeader
+                } else {
+                    AccessibilityRole::Cell
+                };
+                let info = CollectionInfo {
+                    row_index: Some(row),
+                    column_index: Some(column),
+                    ..CollectionInfo::default()
+                };
+                Self::push_node(
+                    cx,
+                    cell,
+                    (SemanticRole::Cell, role),
+                    format!("document.table:{key}:{row}:{column}"),
+                    info,
+                );
+                placed.element.paint(engine, scene, cx);
+                cx.pop_semantic_parent();
+            }
+            cx.pop_semantic_parent();
+        }
+        cx.pop_semantic_parent();
+    }
+}
+
+impl IntoAnyElement for TableGrid {
+    fn into_any(self) -> AnyElement {
+        AnyElement::new(self)
+    }
+}
+
+/// A code block's toolbar: its label, then Copy and the wrap toggle at
+/// the right end.
+struct CodeToolbar<'a> {
+    block: &'a Block,
+    label: Option<&'a str>,
+    wrap: bool,
+    font_size: f32,
+    colors: &'a RowColors,
+    controls: &'a CodeControls,
+}
+
+impl CodeToolbar<'_> {
+    fn element(&self, rect: Rect) -> AnyElement {
+        let key = self.block.key;
+        let pad = CodeBlock::header_metrics(self.font_size, 1, CodeHeader::Toolbar)
+            .text_origin
+            .0;
+        let icon = (self.font_size * 1.15).round();
+        let button = |id: &str, svg: &'static str, name: &'static str| {
+            div()
+                .id(format!("document.code:{}:{id}", key.0).as_str())
+                .w(rect.height)
+                .h(rect.height)
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .rounded(4.0)
+                .hover_bg(self.colors.placeholder)
+                .accessibility_role(AccessibilityRole::Button)
+                .accessibility_label(name)
+                .tooltip(name)
+                .child(svg_icon(svg, icon).color(self.colors.muted))
+        };
+        // Rows build at layout, after the element's `on_copy_code`, so the
+        // slot is final here. Plain click actions keep the buttons'
+        // accessibility actions.
+        let copy = CopyCode {
+            block: key,
+            text: self.block.text.clone(),
+        };
+        let copy = match &*self.controls.on_copy.borrow() {
+            Some(f) => f(copy),
+            None => copy.into(),
+        };
+        let copy = button("copy", lucide::COPY, "Copy code").on_click(copy);
+        let toggle = (self.controls.on_event)(DocumentEvent::SetCodeWrap {
+            block: key,
+            wrap: !self.wrap,
+        });
+        let wrap = button("wrap", lucide::WRAP_TEXT, "Wrap lines")
+            .accessibility_toggled(self.wrap)
+            .on_click(toggle);
+        let label = self.label.unwrap_or("");
+        div()
+            .w(rect.width)
+            .h(rect.height)
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .pl(pad)
+            .child(
+                text(label.to_owned())
+                    .size(CodeHeader::label_size(self.font_size))
+                    .color(self.colors.muted),
+            )
+            .child(div().flex_row().child(copy).child(wrap))
+            .into_any()
+    }
 }
 
 /// An image block's content: the pixels scaled to `size`, a placeholder
@@ -884,6 +1401,13 @@ impl DocumentElement {
     /// [`LinkClicked`].
     pub fn on_link(self, f: impl Fn(&Arc<str>) -> Action + 'static) -> Self {
         *self.on_link.borrow_mut() = Some(Rc::new(f));
+        self
+    }
+
+    /// Action a code block's Copy button emits. Defaults to the
+    /// [`CopyCode`] itself.
+    pub fn on_copy_code(self, f: impl Fn(CopyCode) -> Action + 'static) -> Self {
+        *self.on_copy.borrow_mut() = Some(Rc::new(f));
         self
     }
 

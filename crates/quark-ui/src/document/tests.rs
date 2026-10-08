@@ -113,6 +113,7 @@ fn message_with(i: u64, blocks: &[&str]) -> DocumentRow {
             .enumerate()
             .map(|(b, text)| Block::plain(BlockKey(i * 10 + b as u64), *text))
             .collect(),
+        adornments: Vec::new(),
     }
 }
 
@@ -892,6 +893,7 @@ fn markdown_message_with(
             &mut ImageStore::new(),
             keys,
         ),
+        adornments: Vec::new(),
     }
 }
 
@@ -908,6 +910,7 @@ fn dump_blocks(message: &DocumentRow) -> String {
                     format!("code({})", label.as_deref().unwrap_or(""))
                 }
                 BlockContent::Rule => "rule".to_owned(),
+                BlockContent::Table(t) => format!("table({}x{})", t.rows, t.columns),
                 BlockContent::Image { src, state } => format!("image({src}, {state:?})"),
             };
             let s = &block.style;
@@ -958,33 +961,11 @@ fn markdown_blocks_become_separate_keyed_blocks_with_markers_and_prefixes() {
             r###"2 prose l2 q0 [•] "  - " "nested""###,
             r###"3 prose l1 q0 [1.] "1. " "first""###,
             r###"4 prose l0 q1 [] "> " "quoted""###,
-            r###"5 code() l0 q0 [] "" "| a   | bb  |\n| --- | --- |\n| 1   | 2   |""###,
+            r###"5 table(2x2) l0 q0 [] "" "| a | bb |\n| --- | --- |\n| 1 | 2 |""###,
             r###"6 code(rust) l0 q0 [] "" "fn main() {}""###,
             r###"7 rule l0 q0 [] "" "---""###,
         ]
         .join("\n")
-    );
-}
-
-// Catches columns padded by char count, which misaligns wide (CJK) text in
-// the monospace grid.
-#[test]
-fn table_columns_align_by_display_width() {
-    let source = "| 名前 | n |\n|---|---|\n| 日本語テキスト | 1 |\n| abc | 22 |";
-
-    let message = markdown_message(
-        0,
-        &mut MarkdownBlocks::new(),
-        source,
-        &mut SyntaxHighlighter::new(),
-    );
-
-    assert_eq!(
-        message.blocks[0].text(),
-        "| 名前           | n   |\n\
-         | -------------- | --- |\n\
-         | 日本語テキスト | 1   |\n\
-         | abc            | 22  |"
     );
 }
 
@@ -1171,6 +1152,30 @@ fn dead_highlight_worker_is_replaced_and_does_not_hang() {
         highlighted_runs(&message.blocks[0]),
         vec!["fn".to_owned(), "main".to_owned()]
     );
+}
+
+// Catches a batch with a repeated row key being half adopted, or the
+// error naming another key: history loads must be all or nothing.
+#[test]
+fn a_batch_repeating_a_row_key_is_rejected_whole() {
+    let entry = |row: u64| MarkdownEntry {
+        row: RowKey(row),
+        chrome: RowChrome::default(),
+        markdown: format!("row {row}"),
+    };
+    // (batch, error) against a document already holding row 0.
+    let cases: [(&[u64], u64); 2] = [(&[1, 2, 3, 2, 4], 2), (&[5, 0, 6], 0)];
+    for (batch, repeated) in cases {
+        let mut md = markdown_document("row 0");
+
+        let result = md.extend(batch.iter().map(|&row| entry(row)));
+
+        assert_eq!(
+            (result, md.len()),
+            (Err(RowError::DuplicateKey(RowKey(repeated))), 1),
+            "{batch:?}"
+        );
+    }
 }
 
 #[test]
@@ -1990,4 +1995,652 @@ fn decorator_background_fills_exactly_the_rows_it_returns_a_color_for() {
         })
         .collect();
     assert_eq!(painted, expected);
+}
+
+// ---------------------------------------------------------------------------
+// Row adornments
+// ---------------------------------------------------------------------------
+
+/// An adornment whose band holds nothing.
+fn blank_adornment(key: u64, slot: AdornmentSlot, height: f32) -> RowAdornment {
+    RowAdornment::new(AdornmentKey(key), slot, height, 0, |_| div().into_any())
+}
+
+/// What an adornment's builder shows: "row {key}" text and a "Retry {key}"
+/// button that emits `Retry(row)`.
+#[derive(Debug, Clone, PartialEq)]
+struct Retry(u64);
+
+impl From<Retry> for Action {
+    fn from(retry: Retry) -> Self {
+        Action::new(retry)
+    }
+}
+
+fn retry_bar(revision: u64) -> RowAdornment {
+    RowAdornment::new(
+        AdornmentKey(1),
+        AdornmentSlot::Start,
+        30.0,
+        revision,
+        |cx| {
+            let row = cx.row.0;
+            div()
+                .w(cx.width)
+                .h(cx.height)
+                .flex_row()
+                .child(crate::element::text(format!("row {row}")))
+                .child(
+                    div()
+                        .w(80.0)
+                        .h(cx.height)
+                        .on_click(Retry(row))
+                        .accessibility_label(format!("Retry {row}")),
+                )
+                .into_any()
+        },
+    )
+}
+
+/// `Role name` of every published node, without author ids.
+fn accessible_names(painted: &Painted) -> Vec<String> {
+    let update = painted.accessibility.tree_update("Test", None);
+    crate::accessibility::dump_accessibility_states(&update)
+        .lines()
+        .map(|line| {
+            let mut parts = line.split(" | ").skip(1);
+            format!(
+                "{} {}",
+                parts.next().unwrap_or(""),
+                parts.next().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+// Catches adornments not taking their band in the row's flow: blocks
+// below them would overlap them, and the row would be too short.
+#[test]
+fn adornments_take_their_slot_in_the_rows_flow() {
+    use AdornmentSlot::{Before, End, Start};
+    // Row 0 holds blocks 0 and 1, one 20px line each, below a 20px header.
+    let cases: [(&[(AdornmentSlot, f32)], &str); 4] = [
+        (&[(Start, 30.0)], "a0@30 b0@70 b1@100 =130"),
+        (&[(Before(BlockKey(1)), 16.0)], "b0@30 a0@60 b1@86 =116"),
+        // Zero height takes no space; a missing block sends it to the end.
+        (&[(Start, 0.0), (End, 16.0)], "b0@30 b1@60 a1@90 =116"),
+        (&[(Before(BlockKey(99)), 16.0)], "b0@30 b1@60 a0@90 =116"),
+    ];
+    for (adornments, expected) in cases {
+        let row = message(0).with_adornments(
+            adornments
+                .iter()
+                .enumerate()
+                .map(|(i, &(slot, height))| blank_adornment(i as u64, slot, height))
+                .collect(),
+        );
+        let doc = Doc::new([row]);
+
+        let row = &doc.view.visible_rows()[0];
+        let mut items: Vec<(f32, String)> = doc.view.visible_blocks()[row.blocks.clone()]
+            .iter()
+            .map(|b| (b.offset_in_row, format!("b{}@{}", b.key.0, b.offset_in_row)))
+            .chain(
+                doc.view.visible_adornments()[row.adornments.clone()]
+                    .iter()
+                    .map(|a| (a.offset_in_row, format!("a{}@{}", a.key.0, a.offset_in_row))),
+            )
+            .collect();
+        items.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut dump: Vec<String> = items.into_iter().map(|(_, s)| s).collect();
+        dump.push(format!("={}", row.height));
+        assert_eq!(dump.join(" "), expected, "{adornments:?}");
+    }
+}
+
+// Catches a labelled row hiding its adornment's controls along with the
+// header text, and the policy not hiding the text it names.
+#[test]
+fn adornment_controls_stay_accessible_in_a_labelled_row() {
+    let cases = [
+        (AdornmentAccessibility::Exposed, true),
+        (AdornmentAccessibility::ControlsOnly, false),
+    ];
+    for (policy, text_published) in cases {
+        let mut rows = real_document(1);
+        let row = rows.get_mut(&RowKey(0)).unwrap();
+        row.adornments = vec![retry_bar(0).accessibility(policy)];
+        let mut view = real_view(&rows);
+
+        let names = accessible_names(&paint(&mut view, &rows, (400.0, 300.0), 0.0));
+
+        let has = |name: &str| names.iter().any(|n| n == name);
+        assert_eq!(
+            (
+                has("ListItem author 0"),
+                has("Label row 0"),
+                has("Button Retry 0")
+            ),
+            (true, text_published, true),
+            "{policy:?}: {names:#?}"
+        );
+    }
+}
+
+// Catches a press on an adornment's button starting a text selection
+// instead of reaching the button, which sits over the document's drag
+// surface.
+#[test]
+fn clicking_an_adornment_button_emits_its_action_and_selects_nothing() {
+    let mut rows = real_document(3);
+    rows.get_mut(&RowKey(1)).unwrap().adornments = vec![retry_bar(0)];
+    let mut view = real_view(&rows);
+    let mut painted = paint(&mut view, &rows, (400.0, 600.0), 0.0);
+    let update = painted.accessibility.tree_update("Test", None);
+    let button = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some("Retry 1"))
+        .and_then(|(_, n)| n.bounds())
+        .expect("the button is published");
+    let (x, y) = (
+        ((button.x0 + button.x1) * 0.5) as f32,
+        ((button.y0 + button.y1) * 0.5) as f32,
+    );
+
+    let mut actions = painted.router.pointer_down(x, y, &mut None).actions;
+    actions.extend(painted.router.pointer_up().actions);
+    for action in &actions {
+        if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
+            view.handle(*event);
+        }
+    }
+
+    let retries: Vec<&Retry> = actions.iter().filter_map(|a| a.downcast_ref()).collect();
+    assert_eq!(
+        (retries, view.selected_text(&rows)),
+        (vec![&Retry(1)], String::new())
+    );
+}
+
+// Catches a cached row replaying an adornment whose revision changed: a
+// tool card would keep showing "Running" after it finished.
+#[test]
+fn a_new_adornment_revision_rebuilds_the_cached_row() {
+    let label = Rc::new(std::cell::Cell::new("Running"));
+    let bar = |revision: u64| {
+        let label = label.clone();
+        RowAdornment::new(
+            AdornmentKey(1),
+            AdornmentSlot::Start,
+            30.0,
+            revision,
+            move |_| crate::element::text(label.get()).into_any(),
+        )
+    };
+    let mut rows = real_document(2);
+    rows.get_mut(&RowKey(0)).unwrap().adornments = vec![bar(1)];
+    let mut view = real_view(&rows);
+    let mut painter = CachedPainter::new();
+    let size = (400.0, 300.0);
+    painter.frame(&mut view, &rows, size, true);
+
+    label.set("Done");
+    let row = rows.get_mut(&RowKey(0)).unwrap();
+    row.adornments = vec![bar(2)];
+    view.update(&rows[&RowKey(0)]).unwrap();
+    let frame = painter.frame(&mut view, &rows, size, true);
+
+    assert!(
+        frame.contains("Label | Done") && !frame.contains("Running"),
+        "{frame}"
+    );
+}
+
+// Catches a focused adornment control leaving the tree when its row
+// scrolls out of the window, which would drop keyboard focus.
+#[test]
+fn a_kept_row_stays_in_the_tree_while_scrolled_away() {
+    for kept in [false, true] {
+        let mut rows = real_document(40);
+        rows.get_mut(&RowKey(0)).unwrap().adornments = vec![retry_bar(0)];
+        let mut view = real_view(&rows);
+        view.keep_materialized(kept.then_some(RowKey(0)));
+        view.scroll_to_bottom();
+        paint(&mut view, &rows, (400.0, 300.0), 0.0);
+
+        let names = accessible_names(&paint(&mut view, &rows, (400.0, 300.0), 0.0));
+
+        let row_0_visible = view
+            .visible_rows()
+            .iter()
+            .any(|r| r.key == RowKey(0) && r.top + r.height > 0.0);
+        assert_eq!(
+            (row_0_visible, names.iter().any(|n| n == "Button Retry 0")),
+            (false, kept),
+            "kept {kept}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Code toolbar
+// ---------------------------------------------------------------------------
+
+const WIDE_LINE: &str =
+    "let banner = render(\"a line long enough to run well past the column\", tail_identifier);";
+
+/// Row 0: a paragraph, then code block 5 with a short line and a line far
+/// wider than a 300px column.
+fn wide_code_rows() -> HashMap<RowKey, DocumentRow> {
+    let mut message = message_with(0, &["Above the code."]);
+    message.blocks.push(
+        Block::code(
+            BlockKey(5),
+            ["fn main() {", WIDE_LINE, "}"]
+                .iter()
+                .map(|line| vec![crate::element::StyledSpan::plain(*line)])
+                .collect(),
+        )
+        .with_label(Some("rust".into())),
+    );
+    [(message.key, message)].into()
+}
+
+/// The published node named `name`: its states after the role and name,
+/// and the center of its bounds.
+fn published(painted: &Painted, name: &str) -> (String, (f32, f32)) {
+    let update = painted.accessibility.tree_update("Test", None);
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some(name))
+        .unwrap_or_else(|| panic!("{name} is not published"));
+    let b = node.bounds().expect("bounds");
+    let dump = crate::accessibility::dump_accessibility_states(&update);
+    let states = dump
+        .lines()
+        .map(|line| line.splitn(4, " | ").collect::<Vec<_>>())
+        .find(|parts| parts.get(2) == Some(&name))
+        .and_then(|parts| parts.get(3).map(|s| (*s).to_owned()))
+        .unwrap_or_default();
+    (
+        states,
+        (((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32),
+    )
+}
+
+fn click(painted: &mut Painted, (x, y): (f32, f32)) -> Vec<Action> {
+    let mut actions = painted.router.pointer_down(x, y, &mut None).actions;
+    actions.extend(painted.router.pointer_up().actions);
+    actions
+}
+
+// Catches Copy reading the text on screen instead of the block's source:
+// columns scrolled out of view would be lost.
+#[test]
+fn copy_button_emits_the_whole_source_of_a_scrolled_code_block() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    view.set_code_toolbar(true);
+    paint(&mut view, &rows, (300.0, 400.0), 0.0);
+    view.scroll_handles[&BlockKey(5)].set_offset(120.0, 0.0);
+    let mut painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+    let (_, copy) = published(&painted, "Copy code");
+    let actions = click(&mut painted, copy);
+
+    let copied: Vec<&CopyCode> = actions.iter().filter_map(|a| a.downcast_ref()).collect();
+    let source = format!("fn main() {{\n{WIDE_LINE}\n}}");
+    assert_eq!(
+        copied,
+        vec![&CopyCode {
+            block: BlockKey(5),
+            text: source.into()
+        }]
+    );
+}
+
+// Catches the wrap toggle not reaching the document, or wrapped code
+// still running past the column: the end of the wide line must land
+// inside it, and the toggle must read as checked.
+#[test]
+fn wrap_toggle_brings_the_end_of_a_wide_line_into_the_column() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    view.set_code_toolbar(true);
+    let mut painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+    let (unwrapped, toggle) = published(&painted, "Wrap lines");
+
+    for action in click(&mut painted, toggle) {
+        if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
+            view.handle(*event);
+        }
+    }
+    let painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+    let code = view
+        .visible_blocks()
+        .iter()
+        .find(|b| b.key == BlockKey(5))
+        .unwrap();
+    let end = code.text_len;
+    let mut rects = Vec::new();
+    code.geometry.range_rects(end - 1..end, &mut rects);
+    let last_char_right = rects.iter().map(|r| r.x + r.width).fold(0.0, f32::max);
+    let (wrapped, _) = published(&painted, "Wrap lines");
+    assert_eq!(
+        (
+            unwrapped.as_str(),
+            wrapped.as_str(),
+            last_char_right <= code.rect.width
+        ),
+        ("unchecked", "checked", true),
+        "last char ends at {last_char_right} of {}",
+        code.rect.width
+    );
+}
+
+// Catches the measurer and the painted code block disagreeing about the
+// toolbar row or the wrap width: hits and highlights would land on the
+// wrong glyphs.
+#[test]
+fn code_text_is_painted_where_it_was_measured_with_toolbar_and_wrap() {
+    for (toolbar, wrap) in [(false, true), (true, false), (true, true)] {
+        let rows = wide_code_rows();
+        let mut view = real_view(&rows);
+        view.set_code_toolbar(toolbar);
+        view.set_code_wrap(BlockKey(5), wrap);
+
+        let painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+        let code = view
+            .visible_blocks()
+            .iter()
+            .find(|b| b.key == BlockKey(5))
+            .unwrap();
+        let region = painted
+            .regions
+            .iter()
+            .find(|r| r.source_key == 5)
+            .expect("code is painted");
+        let starts = |layout: &quark_text::TextLayout| -> Vec<usize> {
+            layout.lines().map(|line| line.byte_range.start).collect()
+        };
+        let (ox, oy) = code.geometry.text_origin;
+        let measured = format!(
+            "h{:.0} text@{:.0},{:.0} lines at {:?}",
+            code.rect.height,
+            code.rect.x + ox,
+            code.rect.y + oy,
+            starts(code.geometry.layout.as_ref().unwrap())
+        );
+        let shown = format!(
+            "h{:.0} text@{:.0},{:.0} lines at {:?}",
+            region.bounds.height,
+            region.text_origin.0,
+            region.text_origin.1,
+            starts(&region.layout)
+        );
+        assert_eq!(shown, measured, "toolbar {toolbar} wrap {wrap}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tables
+// ---------------------------------------------------------------------------
+
+const TABLE: &str = "| 名前 | n |\n|---|---|\n| 日本語テキスト | 1 |\n| a \\| b | 22 |";
+
+/// Cell texts of the first table block in `markdown`, row by row.
+fn parsed_cells(markdown: &str) -> Vec<Vec<String>> {
+    let doc = crate::markdown::MarkdownDoc::parse(markdown);
+    let block = (0..doc.len())
+        .find(|&b| doc.kind(b) == crate::markdown::BlockKind::Table)
+        .unwrap_or_else(|| panic!("no table in {markdown:?}"));
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for cell in doc.cells(block) {
+        let (row, _) = doc.cell_position(cell);
+        if rows.len() <= row {
+            rows.resize_with(row + 1, Vec::new);
+        }
+        rows[row].push(doc.cell_text(cell).to_owned());
+    }
+    rows
+}
+
+/// A real-text document holding row 0 with `TABLE` as its markdown.
+fn table_view() -> (HashMap<RowKey, DocumentRow>, Document, BlockKey) {
+    let message = markdown_message(
+        0,
+        &mut MarkdownBlocks::new(),
+        TABLE,
+        &mut SyntaxHighlighter::new(),
+    );
+    let key = message.blocks[0].key;
+    let rows: HashMap<RowKey, DocumentRow> = [(message.key, message)].into();
+    let mut view = real_view(&rows);
+    view.set_scroll_offset(0.0);
+    (rows, view, key)
+}
+
+// Catches a copied table that no longer parses as the same table: a pipe
+// inside a cell must stay escaped.
+#[test]
+fn a_copied_table_parses_back_to_the_same_cells() {
+    let mut md = markdown_document(TABLE);
+    md.document_mut().select_all();
+
+    let copied = md.selected_text();
+
+    assert_eq!(parsed_cells(&copied), parsed_cells(TABLE), "{copied}");
+}
+
+// Catches columns sized by char count or per row: a wide CJK cell must
+// push its whole column right, and every row's cells must line up.
+#[test]
+fn table_cells_line_up_in_columns_as_wide_as_their_widest_cell() {
+    let (rows, mut view, key) = table_view();
+
+    let painted = paint(&mut view, &rows, (500.0, 300.0), 0.0);
+
+    // Text regions of the table's cells, row-major.
+    let cells: Vec<&crate::element::SelectableTextRegion> = painted
+        .regions
+        .iter()
+        .filter(|r| r.source_key == key.0)
+        .collect();
+    let lefts: Vec<Vec<f32>> = cells
+        .chunks(2)
+        .map(|row| row.iter().map(|r| r.text_origin.0).collect())
+        .collect();
+    // A cell narrower than its text would wrap it onto more lines.
+    let wrapped: Vec<String> = cells
+        .iter()
+        .filter(|r| r.layout.line_count() > 1)
+        .map(|r| r.layout.source().to_string())
+        .collect();
+    assert_eq!(
+        (lefts[1].clone(), lefts[2].clone(), wrapped),
+        (lefts[0].clone(), lefts[0].clone(), Vec::<String>::new()),
+        "{lefts:?}"
+    );
+}
+
+// Catches a press in a cell landing in another cell, or on the pipes and
+// rule between them: dragging across one cell copies exactly its text.
+#[test]
+fn dragging_across_a_cell_copies_exactly_its_text() {
+    let (rows, mut view, key) = table_view();
+    paint(&mut view, &rows, (500.0, 300.0), 0.0);
+    let block = view.visible_blocks().iter().find(|b| b.key == key).unwrap();
+    let metrics = block.geometry.table_metrics().unwrap().clone();
+    let cell = metrics.cell(2, 1).offset(block.rect.x, block.rect.y);
+    let mid = cell.y + cell.height * 0.5;
+
+    view.handle(DocumentEvent::PointerDown {
+        x: cell.x + 1.0,
+        y: mid,
+    });
+    view.handle(DocumentEvent::PointerDrag {
+        x: cell.x + cell.width - 1.0,
+        y: mid,
+    });
+    view.handle(DocumentEvent::PointerUp);
+
+    assert_eq!(view.selected_text(&rows), "22");
+}
+
+// Catches tables published as loose text: assistive tech needs the
+// header cells, the data cells, and their row and column.
+#[test]
+fn a_table_publishes_header_and_data_cells_with_their_text() {
+    let (rows, mut view, _) = table_view();
+
+    let painted = paint(&mut view, &rows, (500.0, 300.0), 0.0);
+
+    let update = painted.accessibility.tree_update("Test", None);
+    let node = |id: &accesskit::NodeId| update.nodes.iter().find(|(n, _)| n == id).map(|(_, n)| n);
+    let cells: Vec<String> = update
+        .nodes
+        .iter()
+        .filter(|(_, n)| {
+            matches!(
+                n.role(),
+                accesskit::Role::ColumnHeader | accesskit::Role::Cell
+            )
+        })
+        .map(|(_, n)| {
+            let text: String = n
+                .children()
+                .iter()
+                .filter_map(|c| node(c).and_then(|c| c.value().or(c.label())))
+                .collect();
+            format!(
+                "{:?} {},{} {text}",
+                n.role(),
+                n.row_index().unwrap_or(99),
+                n.column_index().unwrap_or(99)
+            )
+        })
+        .collect();
+    let table = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::Table)
+        .map(|(_, n)| (n.row_count(), n.column_count()));
+    assert_eq!(
+        (table, cells),
+        (
+            Some((Some(3), Some(2))),
+            vec![
+                "ColumnHeader 0,0 名前".to_owned(),
+                "ColumnHeader 0,1 n".to_owned(),
+                "Cell 1,0 日本語テキスト".to_owned(),
+                "Cell 1,1 1".to_owned(),
+                "Cell 2,0 a \\| b".to_owned(),
+                "Cell 2,1 22".to_owned(),
+            ]
+        )
+    );
+}
+
+// Catches a card's disclosure jumping away under the pointer when the card
+// expands while the view follows the bottom: the growth would push the
+// card up by the height it gained.
+#[test]
+fn a_held_row_keeps_its_place_while_it_grows_at_the_bottom() {
+    let card = |height: f32| {
+        message(8).with_adornments(vec![blank_adornment(1, AdornmentSlot::Start, height)])
+    };
+    let mut doc = Doc::new((0..8).map(message).chain([card(20.0)]).chain([message(9)]));
+    doc.size.1 = 400.0;
+    doc.view.scroll_to_bottom();
+    doc.frame();
+    let before = doc.screen_top(8);
+
+    let expanded = card(200.0);
+    doc.view.update(&expanded).unwrap();
+    doc.messages.insert(expanded.key, expanded);
+    doc.view.hold_in_place(RowKey(8));
+    doc.frame();
+
+    assert_eq!(doc.screen_top(8), before);
+}
+
+// Catches the document disowning the focus a press on wide code gives its
+// scroll area: the app would then send Copy to the last text field.
+#[test]
+fn a_press_on_wide_code_focuses_a_target_the_document_owns() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    let mut painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+    let code = view
+        .visible_blocks()
+        .iter()
+        .find(|b| b.key == BlockKey(5))
+        .unwrap()
+        .rect;
+    let mut focus = Some(FocusId::from_key("composer"));
+
+    painted
+        .router
+        .pointer_down(code.x + 40.0, code.y + code.height - 10.0, &mut focus);
+
+    let focus = focus.expect("the press focuses something");
+    assert_eq!(
+        (
+            view.owns_focus(focus),
+            view.owns_focus(FocusId::from_key("composer"))
+        ),
+        (true, false)
+    );
+}
+
+// Catches toolbar buttons that only a pointer can press: assistive tech
+// activates them through their click action.
+#[test]
+fn code_toolbar_buttons_offer_assistive_tech_a_click() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    view.set_code_toolbar(true);
+
+    let painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+    let update = painted.accessibility.tree_update("Test", None);
+    let clickable = |name: &str| {
+        update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some(name))
+            .is_some_and(|(_, n)| n.supports_action(accesskit::Action::Click))
+    };
+    assert_eq!(
+        (clickable("Copy code"), clickable("Wrap lines")),
+        (true, true)
+    );
+}
+
+// Catches an image hinted before any row showed it never loading: the hint
+// made the store think the load had started.
+#[test]
+fn an_image_hinted_before_its_row_arrives_still_loads() {
+    let mut md = MarkdownDocument::new(DocumentStyle::for_font_size(14.0));
+    md.set_image_loader(sized_loader());
+    md.hint_image_size("200x100.png", 200, 100);
+    md.push(MarkdownEntry {
+        row: RowKey(0),
+        chrome: RowChrome::default(),
+        markdown: "![chart](200x100.png)".to_owned(),
+    })
+    .unwrap();
+    let (mut text, mut layouts) = (
+        TextSystem::vendored_only(&Default::default()),
+        LayoutCache::default(),
+    );
+
+    md.finish_images();
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+
+    assert_eq!(image_block(&md), (100.0, true));
 }

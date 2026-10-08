@@ -28,6 +28,7 @@
 //! survives its rows scrolling out of the window, history being prepended,
 //! and text streaming into the last row.
 
+mod adornment;
 mod background;
 mod element;
 mod facade;
@@ -36,18 +37,26 @@ mod images;
 mod markdown;
 mod measure;
 mod syntax;
+mod table;
 #[cfg(test)]
 mod tests;
 
+pub use adornment::{
+    AdornmentAccessibility, AdornmentCx, AdornmentKey, AdornmentSlot, RowAdornment,
+};
 pub use background::MeasureSpec;
-pub use element::{DocumentElement, DocumentEvent};
+
+use adornment::AdornmentShape;
+pub use element::{CopyCode, DocumentElement, DocumentEvent};
 pub use facade::{MarkdownDocument, MarkdownEntry};
 pub use find::{FindBarActions, FindIntegrityError, FindMatch, FindState, find_bar};
 pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage};
 pub use markdown::{BlockKeys, CODE_SCALE, MarkdownBlocks, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
+pub use table::{TableCell, TableCells, TableGeometry, TableMetrics};
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -68,6 +77,7 @@ use crate::element::{
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
 use quark::Color;
+use quark::focus::FocusId;
 
 /// What separates blocks in copied text.
 pub const BLOCK_SEPARATOR: &str = "\n\n";
@@ -106,7 +116,16 @@ pub enum BlockContent {
         spans: Arc<[StyledSpan]>,
         line_count: usize,
         label: Option<Arc<str>>,
+        /// A toolbar row above the lines holds the label, Copy, and the
+        /// wrap toggle; see [`Document::set_code_toolbar`].
+        toolbar: bool,
+        /// Lines wrap at the column instead of scrolling sideways; see
+        /// [`Document::set_code_wrap`].
+        wrap: bool,
     },
+    /// A grid of cells with a header row; see [`Block::table`]. Its text is
+    /// the table as markdown, which selection indexes and copy reads.
+    Table(TableCells),
     /// A horizontal rule. Its text is `---`, so copy keeps it.
     Rule,
     /// An image scaled to the block's width (never past its own width),
@@ -119,7 +138,7 @@ impl BlockContent {
     fn spans(&self) -> Option<&Arc<[StyledSpan]>> {
         match self {
             Self::Prose(spans) | Self::Code { spans, .. } => Some(spans),
-            Self::Rule | Self::Image { .. } => None,
+            Self::Rule | Self::Image { .. } | Self::Table(_) => None,
         }
     }
 }
@@ -236,10 +255,20 @@ impl Default for BlockStyle {
             marker: None,
             muted: false,
             tight: false,
-            copy_prefix: Arc::from(""),
-            copy_line_prefix: Arc::from(""),
+            copy_prefix: empty_str(),
+            copy_line_prefix: empty_str(),
         }
     }
+}
+
+thread_local! {
+    static EMPTY_STR: Arc<str> = Arc::from("");
+}
+
+/// A shared empty string, so plain blocks' styles allocate no prefixes:
+/// a streamed answer rebuilds its last block's style on every chunk.
+pub(crate) fn empty_str() -> Arc<str> {
+    EMPTY_STR.with(Arc::clone)
 }
 
 impl BlockStyle {
@@ -347,6 +376,8 @@ impl Block {
                 spans: spans.into(),
                 line_count,
                 label: None,
+                toolbar: false,
+                wrap: false,
             },
             style: BlockStyle::default(),
             text: text.into(),
@@ -416,14 +447,19 @@ impl Block {
                 BlockContent::Code {
                     spans: a,
                     label: la,
+                    toolbar: ta,
+                    wrap: wa,
                     ..
                 },
                 BlockContent::Code {
                     spans: b,
                     label: lb,
+                    toolbar: tb,
+                    wrap: wb,
                     ..
                 },
-            ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some(),
+            ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some() && (ta, wa) == (tb, wb),
+            (BlockContent::Table(a), BlockContent::Table(b)) => Arc::ptr_eq(&a.cells, &b.cells),
             (BlockContent::Rule, BlockContent::Rule) => true,
             (BlockContent::Image { state: a, .. }, BlockContent::Image { state: b, .. }) => {
                 image_height_class(a) == image_height_class(b)
@@ -453,12 +489,62 @@ fn image_height_class(state: &ImageState) -> (Option<(u32, u32)>, bool) {
     (state.size(), matches!(state, ImageState::Failed))
 }
 
+/// How the document shows code blocks, besides the blocks themselves.
+#[derive(Debug, Clone, Copy)]
+struct CodePresentation<'a> {
+    toolbar: bool,
+    wrapped: &'a HashSet<BlockKey>,
+}
+
+impl CodePresentation<'_> {
+    /// `block` as the document lays it out: a code block with the
+    /// document's toolbar and its wrap state. Its revision stays the
+    /// source block's; the row hash covers both settings.
+    fn present<'b>(&self, block: &'b Block) -> Cow<'b, Block> {
+        let BlockContent::Code { toolbar, wrap, .. } = &block.content else {
+            return Cow::Borrowed(block);
+        };
+        let want = (
+            *toolbar || self.toolbar,
+            *wrap || self.wrapped.contains(&block.key),
+        );
+        if (*toolbar, *wrap) == want {
+            return Cow::Borrowed(block);
+        }
+        let mut block = block.clone();
+        if let BlockContent::Code { toolbar, wrap, .. } = &mut block.content {
+            (*toolbar, *wrap) = want;
+        }
+        Cow::Owned(block)
+    }
+}
+
 /// One row of the document.
 #[derive(Debug, Clone)]
 pub struct DocumentRow {
     pub key: RowKey,
     pub chrome: RowChrome,
     pub blocks: Vec<Block>,
+    /// App elements between the blocks; see [`RowAdornment`]. Keys are
+    /// unique within the row.
+    pub adornments: Vec<RowAdornment>,
+}
+
+impl DocumentRow {
+    /// A row without adornments.
+    pub fn new(key: RowKey, chrome: RowChrome, blocks: Vec<Block>) -> Self {
+        Self {
+            key,
+            chrome,
+            blocks,
+            adornments: Vec::new(),
+        }
+    }
+
+    pub fn with_adornments(mut self, adornments: Vec<RowAdornment>) -> Self {
+        self.adornments = adornments;
+        self
+    }
 }
 
 /// App data for the chrome around one row's blocks. The document reserves
@@ -581,6 +667,13 @@ pub trait BlockGeometry: Clone {
     fn natural_width(&self) -> Option<f32> {
         None
     }
+
+    /// The grid of a table block, when the measurer lays tables out as
+    /// one; the element places the cells by it. Blocks without one show
+    /// a table's markdown text.
+    fn table_metrics(&self) -> Option<&TableMetrics> {
+        None
+    }
 }
 
 /// Measures blocks; [`TextMeasurer`] does it with the shared text layouts
@@ -666,6 +759,20 @@ pub struct VisibleRow {
     pub height: f32,
     /// This row's entries in [`Document::visible_blocks`].
     pub blocks: std::ops::Range<usize>,
+    /// This row's entries in [`Document::visible_adornments`].
+    pub adornments: std::ops::Range<usize>,
+}
+
+/// A materialized adornment, in viewport coordinates.
+#[derive(Debug, Clone)]
+pub struct VisibleAdornment {
+    pub key: AdornmentKey,
+    pub row: RowKey,
+    /// Position of the adornment in its row's `adornments`.
+    pub index: usize,
+    pub rect: Rect,
+    /// Top of the adornment below its row's top.
+    pub offset_in_row: f32,
 }
 
 /// A materialized block, in viewport coordinates.
@@ -742,6 +849,11 @@ pub struct Document<G = TextGeometry> {
     size: (f32, f32),
     rows: Vec<VisibleRow>,
     blocks: Vec<VisibleBlock<G>>,
+    adornments: Vec<VisibleAdornment>,
+    /// A row materialized even outside the window, while it holds focus.
+    kept_row: Option<RowKey>,
+    /// A row the next prepare keeps at its place in the viewport.
+    held_row: Option<RowKey>,
     /// Geometry of the blocks measured for the current window; materialize
     /// reuses it instead of measuring every visible block every frame.
     measured: HashMap<BlockKey, Measured<G>>,
@@ -766,6 +878,11 @@ pub struct Document<G = TextGeometry> {
     /// Horizontal scroll of each block wider than its column, kept while
     /// the block is in the document.
     scroll_handles: HashMap<BlockKey, ScrollHandle>,
+    /// Code blocks show a toolbar row with Copy and a wrap toggle.
+    code_toolbar: bool,
+    /// Code blocks whose lines wrap, kept while the block is in the
+    /// document.
+    wrapped: HashSet<BlockKey>,
     /// When the list's auto-hiding scrollbar shows; see
     /// [`DocumentElement::scrollbar_auto_hide`](element::DocumentElement::scrollbar_auto_hide).
     scrollbar: ScrollbarVisibility,
@@ -800,6 +917,9 @@ impl<G: BlockGeometry> Document<G> {
             size: (0.0, 0.0),
             rows: Vec::new(),
             blocks: Vec::new(),
+            adornments: Vec::new(),
+            kept_row: None,
+            held_row: None,
             measured: HashMap::new(),
             measured_spare: HashMap::new(),
             measure_key: None,
@@ -811,6 +931,8 @@ impl<G: BlockGeometry> Document<G> {
             find_stale: false,
             reveal: None,
             scroll_handles: HashMap::new(),
+            code_toolbar: false,
+            wrapped: HashSet::new(),
             scrollbar: ScrollbarVisibility::new(),
             elements_built: 0,
         }
@@ -835,6 +957,42 @@ impl<G: BlockGeometry> Document<G> {
     /// Draws every row's chrome from now on; see [`RowDecorator`].
     pub fn set_decorator(&mut self, decorator: impl RowDecorator + 'static) {
         self.decorator = Some(Decorator(Rc::new(decorator)));
+    }
+
+    /// Gives every code block a toolbar row with its label, a Copy button
+    /// (emitting [`CopyCode`] with the block's whole source), and a wrap
+    /// toggle. Off by default.
+    pub fn set_code_toolbar(&mut self, toolbar: bool) {
+        if self.code_toolbar != toolbar {
+            self.code_toolbar = toolbar;
+            self.list.invalidate_all();
+        }
+    }
+
+    /// Wraps the lines of code block `block` at the column, or lets them
+    /// scroll sideways again. Remembered while the block stays in the
+    /// document; its row is remeasured on the next prepare.
+    pub fn set_code_wrap(&mut self, block: BlockKey, wrap: bool) {
+        let changed = if wrap {
+            self.wrapped.insert(block)
+        } else {
+            self.wrapped.remove(&block)
+        };
+        if changed && let Some(row) = self.block_row.get(&block) {
+            let _ = self.list.invalidate(*row);
+        }
+    }
+
+    /// Whether the lines of code block `block` wrap.
+    pub fn is_code_wrapped(&self, block: BlockKey) -> bool {
+        self.wrapped.contains(&block)
+    }
+
+    fn code_presentation(&self) -> CodePresentation<'_> {
+        CodePresentation {
+            toolbar: self.code_toolbar,
+            wrapped: &self.wrapped,
+        }
     }
 
     // -- Document changes --
@@ -968,6 +1126,7 @@ impl<G: BlockGeometry> Document<G> {
     fn forget_block(&mut self, block: BlockKey) {
         self.find_stale = true;
         self.scroll_handles.remove(&block);
+        self.wrapped.remove(&block);
         self.block_row.remove(&block);
         let Some(pos) = self.order.remove(block) else {
             return;
@@ -1319,6 +1478,7 @@ impl<G: BlockGeometry> Document<G> {
             DocumentEvent::ScrollTo(offset) => {
                 self.set_scroll_offset(offset);
             }
+            DocumentEvent::SetCodeWrap { block, wrap } => self.set_code_wrap(block, wrap),
         }
     }
 
@@ -1385,8 +1545,20 @@ impl<G: BlockGeometry> Document<G> {
         Some(SelectionPoint::new(block.key, byte))
     }
 
-    /// How far block `key`'s content is scrolled left.
-    fn scroll_x(&self, key: BlockKey) -> f32 {
+    /// Whether `focus` is one of the document's own focus targets: the
+    /// sideways scroll of a wide code block or table, which a press or Tab
+    /// focuses so arrow keys reach it. Apps route copy and select-all to
+    /// the document while focus is on nothing or on one of these.
+    pub fn owns_focus(&self, focus: FocusId) -> bool {
+        self.scroll_handles
+            .keys()
+            .any(|key| FocusId::from_key(&scroll_area_id(*key)) == focus)
+    }
+
+    /// How far block `key`'s content is scrolled left: a wide code block
+    /// or table keeps its sideways scroll by key while it stays in the
+    /// document. Zero for blocks that fit their column.
+    pub fn scroll_x(&self, key: BlockKey) -> f32 {
         self.scroll_handles.get(&key).map_or(0.0, |h| h.offset().0)
     }
 
@@ -1418,7 +1590,26 @@ impl<G: BlockGeometry> Document<G> {
         self.size = (width, height);
         self.autoscroll(now_ms);
 
+        let held = self.held_row.take().and_then(|row| {
+            let top = self.list.rows().offset_of(row)? - self.list.scroll_offset();
+            Some((row, top))
+        });
         self.measure_window(source, measurer);
+        if let Some((row, top)) = held {
+            // Rows measured on the way can move it again; two passes
+            // settle it, as for a reveal.
+            for _ in 0..2 {
+                let Some(offset) = self.list.rows().offset_of(row) else {
+                    break;
+                };
+                let delta = offset - self.list.scroll_offset() - top;
+                if delta.abs() < 0.5 {
+                    break;
+                }
+                self.set_scroll_offset(self.list.scroll_offset() + delta);
+                self.measure_window(source, measurer);
+            }
+        }
         if self.list.is_stuck_to_bottom() {
             self.content_below = false;
         }
@@ -1451,15 +1642,25 @@ impl<G: BlockGeometry> Document<G> {
         let style = self.style;
         let width = self.size.0;
         let block_row = &self.block_row;
+        let code = CodePresentation {
+            toolbar: self.code_toolbar,
+            wrapped: &self.wrapped,
+        };
         let cache = &mut self.measured;
         self.list
             .measure_visible(width, style.overscan, |key, width| {
-                let blocks = owned_blocks(source, block_row, RowKey(key)).map(|(_, b)| b);
-                let header = source
-                    .row(RowKey(key))
-                    .map_or(0.0, |r| r.chrome.header_height);
-                row_height(&style, width, header, blocks, |block, block_width| {
-                    measure_cached(cache, measurer, block, block_width).height()
+                let key = RowKey(key);
+                let blocks = owned_blocks(source, block_row, key);
+                let (header, adornments) = source.row(key).map_or((0.0, &[][..]), |r| {
+                    (r.chrome.header_height, r.adornments.as_slice())
+                });
+                let block_width = block_width(&style, width);
+                lay_out_row(&style, header, blocks, adornments, |item, _| match item {
+                    RowItem::Block { block, .. } => {
+                        let block = code.present(block);
+                        measure_cached(cache, measurer, &block, block_width).height()
+                    }
+                    RowItem::Adornment { height, .. } => height,
                 })
             });
     }
@@ -1493,46 +1694,84 @@ impl<G: BlockGeometry> Document<G> {
         let rows = self.list.rows();
         self.rows.clear();
         self.blocks.clear();
+        self.adornments.clear();
         let mut kept = std::mem::take(&mut self.measured_spare);
-        for index in window.range {
+        // A kept row outside the window is materialized too, in order, so
+        // the focused control in it stays in the tree.
+        let extra = self
+            .kept_row
+            .and_then(|row| rows.index_of(row))
+            .filter(|index| !window.range.contains(index));
+        let above = extra.filter(|index| *index < window.range.start);
+        let below = extra.filter(|index| *index >= window.range.end);
+        for index in above.into_iter().chain(window.range).chain(below) {
             let key = rows.keys()[index];
             let top = rows.offset_of_index(index) - scroll;
             let height = rows.height_of(key).unwrap_or(0.0);
             let first = self.blocks.len();
-            let mut y = style.pad_y + source.row(key).map_or(0.0, |r| r.chrome.header_height);
-            for (n, (i, block)) in owned_blocks(source, &self.block_row, key).enumerate() {
-                y += gap_before(&style, n, block);
-                let geometry = measure_cached(&mut self.measured, measurer, block, block_width);
-                if let Some(entry) = self.measured.remove(&block.key) {
-                    kept.insert(block.key, entry);
+            let first_adornment = self.adornments.len();
+            let (header, adornments) = source.row(key).map_or((0.0, &[][..]), |r| {
+                (r.chrome.header_height, r.adornments.as_slice())
+            });
+            let (blocks, visible_adornments) = (&mut self.blocks, &mut self.adornments);
+            let (measured, handles) = (&mut self.measured, &mut self.scroll_handles);
+            let code = CodePresentation {
+                toolbar: self.code_toolbar,
+                wrapped: &self.wrapped,
+            };
+            let owned = owned_blocks(source, &self.block_row, key);
+            lay_out_row(&style, header, owned, adornments, |item, y| match item {
+                RowItem::Block { index: i, block } => {
+                    let block = code.present(block);
+                    let block = &*block;
+                    let geometry = measure_cached(measured, measurer, block, block_width);
+                    if let Some(entry) = measured.remove(&block.key) {
+                        kept.insert(block.key, entry);
+                    }
+                    let block_height = geometry.height();
+                    let column = block_width - block.style.inset(style.font_size);
+                    if geometry.natural_width().is_some_and(|w| w > column) {
+                        handles.entry(block.key).or_default();
+                    }
+                    blocks.push(VisibleBlock {
+                        key: block.key,
+                        row: key,
+                        index: i,
+                        rect: Rect {
+                            x: style.pad_x,
+                            y: top + y,
+                            width: block_width,
+                            height: block_height,
+                        },
+                        offset_in_row: y,
+                        text_len: block.text().len(),
+                        geometry,
+                    });
+                    block_height
                 }
-                let block_height = geometry.height();
-                let column = block_width - block.style.inset(style.font_size);
-                if geometry.natural_width().is_some_and(|w| w > column) {
-                    self.scroll_handles.entry(block.key).or_default();
+                RowItem::Adornment { index: i, height } => {
+                    visible_adornments.push(VisibleAdornment {
+                        key: adornments[i].key,
+                        row: key,
+                        index: i,
+                        rect: Rect {
+                            x: style.pad_x,
+                            y: top + y,
+                            width: block_width,
+                            height,
+                        },
+                        offset_in_row: y,
+                    });
+                    height
                 }
-                self.blocks.push(VisibleBlock {
-                    key: block.key,
-                    row: key,
-                    index: i,
-                    rect: Rect {
-                        x: style.pad_x,
-                        y: top + y,
-                        width: block_width,
-                        height: block_height,
-                    },
-                    offset_in_row: y,
-                    text_len: block.text().len(),
-                    geometry,
-                });
-                y += block_height;
-            }
+            });
             self.rows.push(VisibleRow {
                 key,
                 index,
                 top,
                 height,
                 blocks: first..self.blocks.len(),
+                adornments: first_adornment..self.adornments.len(),
             });
         }
         // Only the window's geometry is kept.
@@ -1548,6 +1787,30 @@ impl<G: BlockGeometry> Document<G> {
     /// Blocks of the materialized rows, in document order.
     pub fn visible_blocks(&self) -> &[VisibleBlock<G>] {
         &self.blocks
+    }
+
+    /// Adornments of the materialized rows, in document order.
+    pub fn visible_adornments(&self) -> &[VisibleAdornment] {
+        &self.adornments
+    }
+
+    /// Keeps `row` materialized, and so in the element and accessibility
+    /// tree, while it scrolls out of the window: set it while focus is on a
+    /// control in one of its adornments, so the control survives a scroll
+    /// until focus moves on, and clear it then.
+    pub fn keep_materialized(&mut self, row: Option<RowKey>) {
+        self.kept_row = row;
+    }
+
+    /// Keeps `row`'s top where it is in the viewport through the next
+    /// prepare, whatever happens to the rows around it and to its own
+    /// height: call it with the row whose disclosure was just toggled, so
+    /// the control stays under the pointer even while the view follows
+    /// the bottom. Scrolling away from the bottom this way stops following
+    /// it. The view never scrolls past the end, so a row that shrinks
+    /// near the end still moves down.
+    pub fn hold_in_place(&mut self, row: RowKey) {
+        self.held_row = Some(row);
     }
 
     pub fn viewport_size(&self) -> (f32, f32) {
@@ -1592,14 +1855,19 @@ impl<G: BlockGeometry> Document<G> {
         found
     }
 
-    /// The header height and blocks `row` lays out, as a snapshot another
-    /// thread can measure.
-    fn row_snapshot(&self, source: &impl DocumentSource, row: RowKey) -> (f32, Vec<Block>) {
-        let header = source.row(row).map_or(0.0, |r| r.chrome.header_height);
-        let blocks = owned_blocks(source, &self.block_row, row)
-            .map(|(_, block)| block.clone())
-            .collect();
-        (header, blocks)
+    /// What `row`'s height depends on, as a snapshot another thread can
+    /// measure: adornments go as their slots and heights only.
+    fn row_snapshot(&self, source: &impl DocumentSource, row: RowKey) -> RowSnapshot {
+        let content = source.row(row);
+        RowSnapshot {
+            header: content.map_or(0.0, |r| r.chrome.header_height),
+            adornments: content.map_or_else(Vec::new, |r| {
+                r.adornments.iter().map(|a| (a.slot, a.height)).collect()
+            }),
+            blocks: owned_blocks(source, &self.block_row, row)
+                .map(|(_, block)| self.code_presentation().present(block).into_owned())
+                .collect(),
+        }
     }
 
     /// Records a height measured off the UI thread for a row still holding
@@ -1733,7 +2001,7 @@ fn owned_blocks<'a>(
     source: &'a impl DocumentSource,
     block_row: &'a HashMap<BlockKey, RowKey>,
     row: RowKey,
-) -> impl Iterator<Item = (usize, &'a Block)> + 'a {
+) -> impl Iterator<Item = (usize, &'a Block)> + Clone + 'a {
     source
         .row(row)
         .map_or(&[][..], |m| m.blocks.as_slice())
@@ -1742,32 +2010,76 @@ fn owned_blocks<'a>(
         .filter(move |(_, block)| block_row.get(&block.key) == Some(&row))
 }
 
-/// Height of a row of `width` with a `header` band holding `blocks`, given
-/// each block's height at the blocks' width. The UI thread and the
-/// background measurer both use it, so their heights agree to the bit.
-fn row_height<'a>(
-    style: &DocumentStyle,
-    width: f32,
-    header: f32,
-    blocks: impl Iterator<Item = &'a Block>,
-    mut block_height: impl FnMut(&Block, f32) -> f32,
-) -> f32 {
-    let block_width = block_width(style, width);
-    let mut height = style.pad_y * 2.0 + header;
-    for (n, block) in blocks.enumerate() {
-        height += gap_before(style, n, block);
-        height += block_height(block, block_width);
-    }
-    height
+/// A row's height inputs, copied for a background thread.
+#[derive(Debug, Clone)]
+pub(super) struct RowSnapshot {
+    pub header: f32,
+    pub adornments: Vec<(AdornmentSlot, f32)>,
+    pub blocks: Vec<Block>,
 }
 
-/// Space above the `index`-th block of a row.
-fn gap_before(style: &DocumentStyle, index: usize, block: &Block) -> f32 {
-    match index {
-        0 => 0.0,
-        _ if block.style.tight => (style.block_gap * 0.5).round(),
-        _ => style.block_gap,
+/// One item of a row's flow, as [`lay_out_row`] meets it.
+#[derive(Clone, Copy)]
+enum RowItem<'a> {
+    /// The block at `index` in the row's `blocks`.
+    Block { index: usize, block: &'a Block },
+    /// The adornment at `index` in the row's adornments.
+    Adornment { index: usize, height: f32 },
+}
+
+/// Lays a row out top to bottom: `pad_y`, the `header` band, its blocks
+/// and adornments in flow order separated by the block gap (half of it
+/// before a [`BlockStyle::tight`] block), and `pad_y` again. `item` gets
+/// each item and its top below the row's top and returns its height.
+/// Returns the row's height. The UI thread and the background measurer
+/// both lay rows out through it, so their heights agree to the bit.
+///
+/// Adornments of zero height take no space and are skipped. One whose
+/// [`AdornmentSlot::Before`] block is not among `blocks` goes to the end.
+fn lay_out_row<'a, A: AdornmentShape>(
+    style: &DocumentStyle,
+    header: f32,
+    blocks: impl Iterator<Item = (usize, &'a Block)> + Clone,
+    adornments: &[A],
+    mut item: impl FnMut(RowItem<'a>, f32) -> f32,
+) -> f32 {
+    let mut y = style.pad_y + header;
+    let mut placed = false;
+    let mut next = |entry: RowItem<'a>, tight: bool| {
+        if placed {
+            y += if tight {
+                (style.block_gap * 0.5).round()
+            } else {
+                style.block_gap
+            };
+        }
+        placed = true;
+        y += item(entry, y);
+    };
+    let shaped = adornments
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.height() > 0.0)
+        .map(|(index, a)| (index, a.slot(), a.height()));
+    for (index, _, height) in shaped.clone().filter(|a| a.1 == AdornmentSlot::Start) {
+        next(RowItem::Adornment { index, height }, false);
     }
+    for (index, block) in blocks.clone() {
+        let before = AdornmentSlot::Before(block.key);
+        for (index, _, height) in shaped.clone().filter(|a| a.1 == before) {
+            next(RowItem::Adornment { index, height }, false);
+        }
+        next(RowItem::Block { index, block }, block.style.tight);
+    }
+    let at_end = |slot: AdornmentSlot| match slot {
+        AdornmentSlot::End => true,
+        AdornmentSlot::Before(key) => !blocks.clone().any(|(_, b)| b.key == key),
+        AdornmentSlot::Start => false,
+    };
+    for (index, _, height) in shaped.filter(|a| at_end(a.1)) {
+        next(RowItem::Adornment { index, height }, false);
+    }
+    y + style.pad_y
 }
 
 fn block_width(style: &DocumentStyle, width: f32) -> f32 {
@@ -1782,6 +2094,11 @@ fn vertical_distance(rect: &Rect, y: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// The stable id of the sideways scroll area of wide block `key`.
+fn scroll_area_id(key: BlockKey) -> String {
+    format!("document.block:{}:scroll", key.0)
 }
 
 /// Block text read from the app's model by way of the owning row.

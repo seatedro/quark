@@ -8,7 +8,7 @@
 //! also measures the rows outside the window on a background thread, so
 //! their heights become exact while the app idles.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use quark::selection::BlockKey;
@@ -19,7 +19,7 @@ use super::markdown::{BlockKeys, MarkdownBlocks};
 use super::syntax::SyntaxHighlighter;
 use super::{
     BlockMeasurer, Document, DocumentElement, DocumentEvent, DocumentRow, DocumentStyle, FindMatch,
-    RowChrome, RowDecorator, TextGeometry,
+    RowAdornment, RowChrome, RowDecorator, TextGeometry,
 };
 use crate::action::Action;
 use crate::markdown::{BlockKind, IncrementalMarkdown, MarkdownDoc};
@@ -37,6 +37,7 @@ pub struct MarkdownEntry {
 /// What is kept per row to convert it again cheaply.
 struct Entry {
     chrome: RowChrome,
+    adornments: Vec<RowAdornment>,
     source: String,
     parser: IncrementalMarkdown,
     doc: MarkdownDoc,
@@ -176,6 +177,26 @@ impl MarkdownDocument {
             return Ok(());
         }
         entry.chrome = chrome;
+        self.refresh(row)
+    }
+
+    /// Replaces the adornments of `row`: a tool card's header changing
+    /// state, an action bar appearing under a finished answer. The row is
+    /// rebuilt and remeasured on the next prepare; the row on screen keeps
+    /// its place, so collapsing a card above the view moves nothing.
+    pub fn set_adornments(
+        &mut self,
+        row: RowKey,
+        adornments: Vec<RowAdornment>,
+    ) -> Result<(), RowError> {
+        let entry = self
+            .entries
+            .get_mut(&row)
+            .ok_or(RowError::UnknownKey(row))?;
+        if entry.adornments == adornments {
+            return Ok(());
+        }
+        entry.adornments = adornments;
         self.refresh(row)
     }
 
@@ -364,9 +385,11 @@ impl MarkdownDocument {
         entries: impl IntoIterator<Item = MarkdownEntry>,
     ) -> Result<Vec<DocumentRow>, RowError> {
         let entries: Vec<MarkdownEntry> = entries.into_iter().collect();
-        for (i, entry) in entries.iter().enumerate() {
-            let repeated = entries[..i].iter().any(|e| e.row == entry.row);
-            if repeated || self.entries.contains_key(&entry.row) {
+        // A whole history arrives as one batch, so repeats are found with a
+        // set; the first repeated key is reported, and nothing is adopted.
+        let mut seen = HashSet::with_capacity(entries.len());
+        for entry in &entries {
+            if !seen.insert(entry.row) || self.entries.contains_key(&entry.row) {
                 return Err(RowError::DuplicateKey(entry.row));
             }
         }
@@ -376,6 +399,7 @@ impl MarkdownDocument {
             let doc = parser.parse(&new.markdown);
             let mut entry = Entry {
                 chrome: new.chrome,
+                adornments: Vec::new(),
                 source: new.markdown,
                 parser,
                 doc,
@@ -412,6 +436,7 @@ impl MarkdownDocument {
             key: row,
             chrome: entry.chrome.clone(),
             blocks,
+            adornments: entry.adornments.clone(),
         }
     }
 

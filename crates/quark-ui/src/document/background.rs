@@ -23,8 +23,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use quark_text::{LayoutCache, TextSystem, TextSystemRecipe};
 
 use super::{
-    Block, BlockGeometry, BlockMeasurer, Document, DocumentSource, DocumentStyle, TextMeasurer,
-    row_height,
+    BlockGeometry, BlockMeasurer, Document, DocumentSource, DocumentStyle, RowItem, RowSnapshot,
+    TextMeasurer, block_width, lay_out_row,
 };
 use crate::virtual_list::RowKey;
 
@@ -65,8 +65,7 @@ struct Job {
     generation: u64,
     epoch: u64,
     layout: Arc<RowLayout>,
-    header: f32,
-    blocks: Vec<Block>,
+    snapshot: RowSnapshot,
 }
 
 /// A finished row. `height` is `None` when measuring it panicked.
@@ -80,21 +79,20 @@ struct RowHeight {
 /// The worker thread is gone; no more results will arrive.
 struct WorkerGone;
 
-/// Measures one row's blocks. Swapped in tests to inject a panic.
-type MeasureRow = fn(&mut TextMeasurer<'_>, &RowLayout, f32, &[Block]) -> f32;
+/// Measures one row. Swapped in tests to inject a panic.
+type MeasureRow = fn(&mut TextMeasurer<'_>, &RowLayout, &RowSnapshot) -> f32;
 
-fn measure_row(
-    measurer: &mut TextMeasurer<'_>,
-    layout: &RowLayout,
-    header: f32,
-    blocks: &[Block],
-) -> f32 {
-    row_height(
+fn measure_row(measurer: &mut TextMeasurer<'_>, layout: &RowLayout, row: &RowSnapshot) -> f32 {
+    let width = block_width(&layout.style, layout.width);
+    lay_out_row(
         &layout.style,
-        layout.width,
-        header,
-        blocks.iter(),
-        |block, width| measurer.measure(block, width).height(),
+        row.header,
+        row.blocks.iter().enumerate(),
+        &row.adornments,
+        |item, _| match item {
+            RowItem::Block { block, .. } => measurer.measure(block, width).height(),
+            RowItem::Adornment { height, .. } => height,
+        },
     )
 }
 
@@ -206,7 +204,7 @@ fn run(jobs: Receiver<Job>, done: Sender<RowHeight>, epoch: &AtomicU64, measure:
                 let (_, system) = text.as_mut()?;
                 let mut measurer =
                     TextMeasurer::new(system, &mut layouts, spec.font_size, spec.scale_factor);
-                Some(measure(&mut measurer, &job.layout, job.header, &job.blocks))
+                Some(measure(&mut measurer, &job.layout, &job.snapshot))
             }))
             .ok()
             .flatten();
@@ -339,14 +337,12 @@ impl BackgroundMeasure {
         for row in rows {
             self.generation += 1;
             self.pending.insert(row, self.generation);
-            let (header, blocks) = document.row_snapshot(source, row);
             worker.send(Job {
                 row,
                 generation: self.generation,
                 epoch,
                 layout: layout.clone(),
-                header,
-                blocks,
+                snapshot: document.row_snapshot(source, row),
             });
         }
     }
@@ -597,17 +593,45 @@ mod tests {
         assert_eq!(ui.heights(), expected);
     }
 
+    // Catches the worker leaving adornments out of a row's height, which
+    // would make every tool card jump as it scrolls in.
+    #[test]
+    fn offscreen_rows_count_their_adornments() {
+        use crate::document::{AdornmentKey, AdornmentSlot, RowAdornment};
+        use crate::element::IntoAnyElement;
+        let mut ui = Ui::new(history(30), (420.0, 1.0));
+        let first_block = |ui: &Ui, row: u64| ui.md.rows()[&RowKey(row)].blocks[0].key;
+        for row in (0..30).step_by(3) {
+            let adornment = |key, slot, height| {
+                RowAdornment::new(AdornmentKey(key), slot, height, 0, |_| {
+                    crate::element::div().into_any()
+                })
+            };
+            let adornments = vec![
+                adornment(0, AdornmentSlot::Start, 36.0),
+                adornment(1, AdornmentSlot::Before(first_block(&ui, row)), 12.0),
+                adornment(2, AdornmentSlot::End, 28.0),
+            ];
+            ui.md.set_adornments(RowKey(row), adornments).unwrap();
+        }
+        ui.frame();
+
+        ui.md.finish_measures();
+
+        let expected = ui.synchronous_heights();
+        assert_eq!(ui.heights(), expected);
+    }
+
     fn panics_on_boom(
         measurer: &mut TextMeasurer<'_>,
         layout: &RowLayout,
-        header: f32,
-        blocks: &[Block],
+        row: &RowSnapshot,
     ) -> f32 {
         assert!(
-            blocks.iter().all(|b| !b.text().contains("boom")),
+            row.blocks.iter().all(|b| !b.text().contains("boom")),
             "shaping bug"
         );
-        measure_row(measurer, layout, header, blocks)
+        measure_row(measurer, layout, row)
     }
 
     // Catches a panicking measurement killing the worker (every later row
