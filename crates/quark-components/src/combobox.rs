@@ -23,17 +23,17 @@ use std::rc::Rc;
 
 use quark::view;
 
-use quark_ui::design::Sp;
 use quark_ui::element::{
     AnyElement, ElementContext, IntoAnyElement, RenderOnce, TextInput, div, text, text_input,
 };
 use quark_ui::style::Styled;
 use quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
-use quark_ui::theme::{Color, Theme};
+use quark_ui::theme::{Color, Theme, scaled_or};
 use quark_ui::{Action, FocusId};
 
 use crate::list_nav;
-use crate::popover::{PopoverSide, anchored, popover_panel};
+use crate::popover::{PopoverSide, anchored, list_padding, popover_panel};
+use crate::select::RowSizes;
 
 /// Score of `text` against the fuzzy `query`, appending the matched byte
 /// ranges of `text` to `ranges`. `None` (with `ranges` untouched) when the
@@ -440,7 +440,11 @@ impl RenderOnce for Combobox {
         let msg = &self.on_msg;
         let focused = cx.focus == Some(self.focus);
         let open = self.open && focused;
-        let field_h = (m.ui_row_height * 1.6).round();
+        let field_h = scaled_or(
+            theme.components.select.height,
+            scale,
+            (m.ui_row_height * 1.6).round(),
+        );
 
         view! {
             <div class="relative flex-col" w={width} accessibility_id={&*self.id}
@@ -456,7 +460,7 @@ impl RenderOnce for Combobox {
                 if open {
                     <anchored(
                         view! {
-                            <popover_panel(theme) w={width} py={m.spacing_xs}
+                            <popover_panel(theme) w={width} py={list_padding(theme)}
                                 accessibility_id={format!("{}-listbox", self.id)}
                                 test_id="combobox-listbox"
                                 accessibility_role={accesskit::Role::ListBox}
@@ -487,17 +491,16 @@ impl RenderOnce for Combobox {
 
 /// The list's only row while options load or when none match.
 fn status_row(loading: bool, theme: &Theme) -> AnyElement {
-    let m = &theme.metrics;
-    let scale = m.ui_scale();
+    let sz = RowSizes::resolve(theme.components.option, theme);
     let note = quark_ui::i18n::tr(if loading {
         "quark-loading"
     } else {
         "quark-find-no-matches"
     });
     view! {
-        <div px={m.spacing_md} py={m.spacing_xs + (Sp::XXS * scale).round()}
+        <div px={sz.px} py={sz.py}
              accessibility_role={accesskit::Role::Label} aria-label={note.clone()}>
-            <text class="text-sm" color={theme.colors.text_muted}>{note}</text>
+            <text size={sz.font} color={theme.colors.text_muted}>{note}</text>
         </div>
     }
 }
@@ -514,16 +517,15 @@ fn match_row(
     theme: &Theme,
 ) -> AnyElement {
     let tc = &theme.colors;
-    let m = &theme.metrics;
-    let scale = m.ui_scale();
+    let sz = RowSizes::resolve(theme.components.option, theme);
     // Each range with where the plain text before it starts.
     let runs = ranges.iter().scan(0, |at, &(start, end)| {
         Some((std::mem::replace(at, end), start, end))
     });
     let tail = ranges.last().map_or(0, |&(_, end)| end);
     view! {
-        <div class="flex-row items-center w-full" px={m.spacing_md}
-             py={m.spacing_xs + (Sp::XXS * scale).round()}
+        <div class="flex-row items-center w-full" px={sz.px} py={sz.py}
+             @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
              accessibility_role={accesskit::Role::ListBoxOption}
              aria-label={label.to_owned()} aria-selected={highlighted || selected}
              bg={if highlighted { tc.ghost_element_selected } else { Color::TRANSPARENT }}
@@ -531,14 +533,14 @@ fn match_row(
             <div class="flex-row flex-1 overflow-hidden">
                 for (at, start, end) in runs {
                     if start > at {
-                        <text class="text-sm" color={tc.text}>{label[at..start].to_owned()}</text>
+                        <text size={sz.font} color={tc.text}>{label[at..start].to_owned()}</text>
                     }
-                    <text class="text-sm font-semibold" color={tc.text_accent}>
+                    <text class="font-semibold" size={sz.font} color={tc.text_accent}>
                         {label[start..end].to_owned()}
                     </text>
                 }
                 if tail < label.len() {
-                    <text class="text-sm" color={tc.text}>{label[tail..].to_owned()}</text>
+                    <text size={sz.font} color={tc.text}>{label[tail..].to_owned()}</text>
                 }
             </div>
         </div>

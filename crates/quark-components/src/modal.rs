@@ -17,8 +17,9 @@ pub struct Modal {
     icon: &'static str,
     max_width: f32,
     height: Option<f32>,
-    gap: f32,
-    padding: f32,
+    /// Set by the caller; otherwise the theme's modal recipe or the default.
+    gap: Option<f32>,
+    padding: Option<f32>,
     align: ModalAlign,
     window_width: f32,
     window_height: f32,
@@ -44,8 +45,8 @@ impl Modal {
             icon,
             max_width,
             height: None,
-            gap: Sp::LG,
-            padding: Sp::XXL,
+            gap: None,
+            padding: None,
             align: ModalAlign::Center,
             window_width,
             window_height,
@@ -61,12 +62,12 @@ impl Modal {
     }
 
     pub fn gap(mut self, gap: f32) -> Self {
-        self.gap = gap;
+        self.gap = Some(gap);
         self
     }
 
     pub fn padding(mut self, padding: f32) -> Self {
-        self.padding = padding;
+        self.padding = Some(padding);
         self
     }
 
@@ -90,12 +91,20 @@ impl RenderOnce for Modal {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let scale = cx.theme.metrics.ui_scale();
+        let recipe = cx.theme.components.modal;
 
         let panel_width = self
             .max_width
             .min(self.window_width - (Sz::MODAL_MARGIN * scale).round());
-        let padding = (self.padding * scale).round();
-        let gap = (self.gap * scale).round();
+        // Unscaled: the panel's view scales its padding, gap, and radius
+        // once. Scaling them here as well grew them by the square.
+        let padding_x = self.padding.or(recipe.padding_x).unwrap_or(Sp::XXL);
+        let padding_y = self.padding.or(recipe.padding_y).unwrap_or(Sp::XXL);
+        let gap = self.gap.or(recipe.gap).unwrap_or(Sp::LG);
+        let radius = recipe.radius.unwrap_or(Rad::XXXL);
+        let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::MODAL, scale);
+        let title_size = recipe.title_font_size.map(|s| s * scale);
+        let subtitle_size = recipe.font_size.map(|s| s * scale);
         let max_h = self.window_height - (Sz::MODAL_MARGIN * scale).round() * 2.0;
         let accessibility_label = self.title.clone();
 
@@ -103,19 +112,25 @@ impl RenderOnce for Modal {
             <div class="flex-col" gap={Sp::SM}>
                 <div class="flex-row shrink-0 items-center" gap={Sp::SM}>
                     <icon svg={self.icon} size={Ico::LG} color={tc.accent} />
-                    <text class="text-lg font-semibold" color={tc.text_strong}>{&self.title}</text>
+                    <text class="text-lg font-semibold" color={tc.text_strong}
+                          @when {title_size.is_some()} { size={title_size.unwrap()} }>
+                        {&self.title}
+                    </text>
                 </div>
                 if !self.subtitle.is_empty() {
-                    <text class="text-sm" color={tc.text_muted}>{&self.subtitle}</text>
+                    <text class="text-sm" color={tc.text_muted}
+                          @when {subtitle_size.is_some()} { size={subtitle_size.unwrap()} }>
+                        {&self.subtitle}
+                    </text>
                 }
             </div>
         };
 
         let panel = view! { scale,
             <div class="flex-col overflow-hidden"
-                 w={panel_width} p={padding} gap={gap}
-                 bg={tc.elevated_surface} rounded={Rad::XXXL}
-                 border_b={tc.border} shadow_preset={Shadow::MODAL}
+                 w={panel_width} px={padding_x} py={padding_y} gap={gap}
+                 bg={tc.elevated_surface} rounded={radius}
+                 border_b={tc.border} shadow_preset={shadows.layers()}
                  on:click={quark_ui::element::NoopAction}
                  id={format!("modal:{accessibility_label}")}
                  test-id="modal"

@@ -6,7 +6,7 @@ use quark_ui::design::{Alpha, Ico, Rad, Sp};
 use quark_ui::element::CursorHint;
 use quark_ui::element::*;
 use quark_ui::style::Styled;
-use quark_ui::theme::Color;
+use quark_ui::theme::{Color, ControlMetrics};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonStyle {
@@ -45,6 +45,11 @@ pub struct Button {
     tooltip: Option<std::sync::Arc<str>>,
     #[prop(optional)]
     fixed_size: Option<f32>,
+    /// Sizes for this button over the theme's
+    /// [`ComponentMetrics::button`](quark_ui::theme::ComponentMetrics)
+    /// recipe, field by field.
+    #[prop(optional)]
+    metrics: Option<ControlMetrics>,
     /// Content after the icon and label. When it is all text and there is
     /// no label or tooltip, it is also the button's accessible name.
     #[prop(default)]
@@ -95,6 +100,11 @@ impl Button {
         self.fixed_size = Some(size);
         self
     }
+
+    pub fn metrics(mut self, metrics: ControlMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
 }
 
 impl RenderOnce for Button {
@@ -103,10 +113,24 @@ impl RenderOnce for Button {
         let tc = &theme.colors;
         let scale = theme.metrics.ui_scale();
 
-        let (icon_size, unscaled_px, unscaled_py) = match self.size {
-            ButtonSize::Default => (Ico::BUTTON_DEFAULT, Sp::MD, Sp::XS),
-            ButtonSize::Compact => (Ico::BUTTON_COMPACT, Sp::SM, Sp::XXS),
+        let (icon_size, unscaled_px, unscaled_py, recipe) = match self.size {
+            ButtonSize::Default => (Ico::BUTTON_DEFAULT, Sp::MD, Sp::XS, theme.components.button),
+            ButtonSize::Compact => (
+                Ico::BUTTON_COMPACT,
+                Sp::SM,
+                Sp::XXS,
+                theme.components.button_compact,
+            ),
         };
+        // Overrides are unscaled, like the defaults: this view scales its
+        // padding, gap, and radius attributes, and sizes are scaled here.
+        let m = self.metrics.unwrap_or_default().or(recipe);
+        let icon_size = m.icon_size.map_or(icon_size, |s| s * scale);
+        let unscaled_px = m.padding_x.unwrap_or(unscaled_px);
+        let unscaled_py = m.padding_y.unwrap_or(unscaled_py);
+        let gap = m.gap.unwrap_or(Sp::SM);
+        let height = m.height.map(|h| (h * scale).round());
+        let font_size = m.font_size.map(|s| s * scale);
 
         let (bg, hover_bg, icon_color, text_color) = match self.variant {
             ButtonStyle::Filled => (tc.accent, tc.accent_strong, tc.on_accent, tc.on_accent),
@@ -154,7 +178,12 @@ impl RenderOnce for Button {
 
         let icon_only = self.icon.is_some() && self.label.is_none();
         let actual_px = if icon_only { unscaled_py } else { unscaled_px };
-        let fixed = self.fixed_size.map(|s| (s * scale).round());
+        // A fixed size is the caller's own square: the theme's recipe
+        // height does not resize it, this button's own metrics do.
+        let own_height = self.metrics.and_then(|m| m.height);
+        let fixed = self
+            .fixed_size
+            .map(|s| (own_height.unwrap_or(s) * scale).round());
         let icon = self.icon;
         let action = if disabled {
             quark_ui::element::NoopAction.into()
@@ -193,12 +222,15 @@ impl RenderOnce for Button {
                  @when { fixed.is_some() } {
                      items_center justify_center
                      w={fixed.unwrap()} h={fixed.unwrap()}
-                     rounded={Rad::SM}
+                     rounded={m.radius.unwrap_or(Rad::SM)}
                  }
                  @when { fixed.is_none() } {
                      class="flex-row items-center"
-                     gap={Sp::SM} px={actual_px} py={unscaled_py}
-                     rounded={Rad::XL}
+                     gap={gap} px={actual_px} py={unscaled_py}
+                     rounded={m.radius.unwrap_or(Rad::XL)}
+                 }
+                 @when { fixed.is_none() && height.is_some() } {
+                     h={height.unwrap()} pt={0.0} pb={0.0}
                  }
                  @when { !disabled && icon_only } { hover_icon_color={tc.text} }
                  @when { !disabled && !icon_only } { hover_bg={hover_bg} }
@@ -211,7 +243,8 @@ impl RenderOnce for Button {
                 if let Some(label) = label_text {
                     <text class="font-medium" color={text_color}
                           @when {self.size == ButtonSize::Default} { class="text-sm" }
-                          @when {self.size == ButtonSize::Compact} { class="text-xs" }>
+                          @when {self.size == ButtonSize::Compact} { class="text-xs" }
+                          @when {font_size.is_some()} { size={font_size.unwrap()} }>
                         {label}
                     </text>
                 }
