@@ -485,57 +485,65 @@ fn terminal_scene(rows: &[Arc<SceneChunk>]) -> Scene {
 const LIST_ROWS: usize = 60;
 const ROW_H: f32 = 40.0;
 
-/// A scrolled list: each row is a chunk (a rounded card, its border, a
-/// title, a subtitle, a badge), clipped to an 800 pixel viewport.
-fn list_scene(text: &mut TextSystem, scroll: f32) -> Scene {
+/// The rows of a list, each a chunk at its origin: a rounded card, its
+/// border, a title, a subtitle, a badge.
+fn list_rows(text: &mut TextSystem) -> Vec<Arc<SceneChunk>> {
+    (0..LIST_ROWS)
+        .map(|i| {
+            let title = text
+                .layout(&TextParams::new(
+                    format!("Conversation {i}"),
+                    TextStyle::new(14.0),
+                ))
+                .expect("layout");
+            let subtitle = text
+                .layout(&TextParams::new(
+                    format!("Last message in thread {i}, a few words long"),
+                    TextStyle::new(12.0),
+                ))
+                .expect("layout");
+            chunk(vec![
+                Primitive::RoundedRect(RoundedRectPrimitive::uniform(
+                    rect(4.0, 2.0, 592.0, ROW_H - 4.0),
+                    6.0,
+                    color(44, 44, 52),
+                )),
+                Primitive::Border(BorderPrimitive::uniform(
+                    rect(4.0, 2.0, 592.0, ROW_H - 4.0),
+                    1.0,
+                    6.0,
+                    color(70, 70, 80),
+                )),
+                Primitive::TextRun(TextPrimitive {
+                    rect: rect(12.0, 4.0, 400.0, 18.0),
+                    layout: ShapedText::new(Arc::new(title)),
+                    color: color(240, 240, 240),
+                }),
+                Primitive::TextRun(TextPrimitive {
+                    rect: rect(12.0, 21.0, 400.0, 16.0),
+                    layout: ShapedText::new(Arc::new(subtitle)),
+                    color: color(170, 170, 180),
+                }),
+                Primitive::RoundedRect(RoundedRectPrimitive::uniform(
+                    rect(560.0, 12.0, 20.0, 14.0),
+                    7.0,
+                    color(80, 120, 220),
+                )),
+            ])
+        })
+        .collect()
+}
+
+/// `rows` scrolled by `scroll` pixels, clipped to an 800 pixel viewport.
+fn list_scene(rows: &[Arc<SceneChunk>], scroll: f32) -> Scene {
     let mut scene = Scene::default();
     scene.rect(RectPrimitive {
         rect: rect(0.0, 0.0, 800.0, 820.0),
         color: color(30, 30, 34),
     });
     scene.clip(rect(0.0, 10.0, 600.0, 800.0));
-    for i in 0..LIST_ROWS {
-        let title = text
-            .layout(&TextParams::new(
-                format!("Conversation {i}"),
-                TextStyle::new(14.0),
-            ))
-            .expect("layout");
-        let subtitle = text
-            .layout(&TextParams::new(
-                format!("Last message in thread {i}, a few words long"),
-                TextStyle::new(12.0),
-            ))
-            .expect("layout");
-        let row = chunk(vec![
-            Primitive::RoundedRect(RoundedRectPrimitive::uniform(
-                rect(4.0, 2.0, 592.0, ROW_H - 4.0),
-                6.0,
-                color(44, 44, 52),
-            )),
-            Primitive::Border(BorderPrimitive::uniform(
-                rect(4.0, 2.0, 592.0, ROW_H - 4.0),
-                1.0,
-                6.0,
-                color(70, 70, 80),
-            )),
-            Primitive::TextRun(TextPrimitive {
-                rect: rect(12.0, 4.0, 400.0, 18.0),
-                layout: ShapedText::new(Arc::new(title)),
-                color: color(240, 240, 240),
-            }),
-            Primitive::TextRun(TextPrimitive {
-                rect: rect(12.0, 21.0, 400.0, 16.0),
-                layout: ShapedText::new(Arc::new(subtitle)),
-                color: color(170, 170, 180),
-            }),
-            Primitive::RoundedRect(RoundedRectPrimitive::uniform(
-                rect(560.0, 12.0, 20.0, 14.0),
-                7.0,
-                color(80, 120, 220),
-            )),
-        ]);
-        scene.chunk(&row, [0.0, 10.0 + i as f32 * ROW_H - scroll]);
+    for (i, row) in rows.iter().enumerate() {
+        scene.chunk(row, [0.0, 10.0 + i as f32 * ROW_H - scroll]);
     }
     scene.pop_clip();
     physical(scene, 1.0)
@@ -546,6 +554,14 @@ fn list_scene(text: &mut TextSystem, scroll: f32) -> Scene {
 /// outside the timing.
 fn frame_cost(renderer: &mut Renderer, scene: &Scene, text: &mut TextSystem) -> (u64, u64, u64) {
     let (w, h) = (renderer.size.width, renderer.size.height);
+    // As `render` does; glyphs outside the viewport's resolution are culled.
+    renderer.viewport.update(
+        &renderer.queue,
+        Resolution {
+            width: w,
+            height: h,
+        },
+    );
     let target = renderer.texture_pool.acquire(&renderer.device, w, h);
     let view = renderer.texture_pool.view(&target).clone();
     let mut encoder = renderer
@@ -589,8 +605,8 @@ fn cycled_cost(scenes: &[Scene], text: &mut TextSystem) -> Option<(u64, u64, u64
 
 /// Prints the CPU cost of frames of a cached terminal and a cached list,
 /// drawn from chunks and from the same scenes expanded: repeated, with one
-/// terminal row changing every frame, and with the list scrolling by a
-/// pixel every frame. Run with `--ignored --nocapture` on a GPU (lavapipe
+/// terminal row changing every frame, and with the list's rows scrolling
+/// by a pixel every frame. Run with `--ignored --nocapture` on a GPU (lavapipe
 /// works).
 #[test]
 #[ignore = "measurement, prints a report"]
@@ -599,16 +615,17 @@ fn report_chunk_frame_cost() {
     let rows = terminal_rows(&mut text);
     let mut changed = rows.clone();
     changed[10] = terminal_row(&mut text, &format!("{:<80}", "0010 a changed row"));
+    let list = list_rows(&mut text);
     let cases = [
         ("terminal, repeated", vec![terminal_scene(&rows)]),
         (
             "terminal, a row changes",
             vec![terminal_scene(&rows), terminal_scene(&changed)],
         ),
-        ("list, repeated", vec![list_scene(&mut text, 0.0)]),
+        ("list, repeated", vec![list_scene(&list, 0.0)]),
         (
             "list, scrolling",
-            vec![list_scene(&mut text, 0.0), list_scene(&mut text, 1.0)],
+            (0..20).map(|y| list_scene(&list, y as f32)).collect(),
         ),
     ];
     for (name, scenes) in &cases {
