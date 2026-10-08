@@ -25,7 +25,8 @@
 //! On the desktop platforms a window of another app over one of ours
 //! hides it: the pointer over it is [`DragLocation::Outside`], never a drop
 //! into the window underneath. The stacking query sits behind
-//! [`WindowStack`], which tests replace with [`ScriptedStack`].
+//! [`WindowStack`], which tests replace with `ScriptedStack` (feature
+//! `test-support`).
 //!
 //! # Live tear-off
 //!
