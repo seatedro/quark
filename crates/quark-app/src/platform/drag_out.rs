@@ -5,8 +5,9 @@
 //! [`crate::UiContext::start_drag_out`]) while the primary button is held,
 //! from the action a pointer drag delivers once it leaves a threshold. The
 //! platform takes over the pointer from there: the app gets no release for
-//! the drag it was tracking, so the UI adapter ends its pointer capture
-//! (delivering the drag's release) when a drag out starts.
+//! the drag it was tracking, so the UI adapter cancels its pointer capture
+//! when a drag out starts, and that drag ends through its
+//! `DragHandler::on_cancel` instead of a release.
 //!
 //! [`crate::EventContext::start_drag_out_with_options`] takes a
 //! [`DragOutOptions`]: a [`DragImage`] to show under the pointer instead of
