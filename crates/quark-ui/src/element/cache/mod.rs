@@ -62,6 +62,9 @@ mod tests;
 /// rebuilt in the next pass, and the last pass replays nothing.
 pub(super) const LAYOUT_PASSES: usize = 3;
 
+/// Evicted rows whose buffers are kept for new rows.
+const SPARE_ROWS: usize = 64;
+
 /// Layout passes an entry survives unused before eviction.
 pub const EVICT_AFTER_PASSES: u64 = 60;
 
@@ -158,6 +161,7 @@ pub struct ElementCache {
     paint: Vec<PaintRecord>,
     /// Buffers of evicted rows, reused by new ones.
     spare_paint: Vec<PaintRecord>,
+    spare_memo: Vec<Vec<MeasureMemo>>,
     engine: Option<LayoutEngine>,
     /// The context's working buffers between frames.
     pub(super) buffers: super::context::FrameBuffers,
@@ -227,7 +231,7 @@ impl ElementCache {
             });
             self.inherited.push(Inherited::default());
             self.hit_extent.push(None);
-            self.memo.push(Vec::new());
+            self.memo.push(self.spare_memo.pop().unwrap_or_default());
             self.paint.push(self.spare_paint.pop().unwrap_or_default());
             debug_assert_eq!(self.verify_integrity(), Ok(()));
             return Claim::Build(row);
@@ -262,9 +266,13 @@ impl ElementCache {
         self.inputs.swap_remove(row);
         self.inherited.swap_remove(row);
         self.hit_extent.swap_remove(row);
-        self.memo.swap_remove(row);
+        let mut memo = self.memo.swap_remove(row);
+        if self.spare_memo.len() < SPARE_ROWS {
+            memo.clear();
+            self.spare_memo.push(memo);
+        }
         let mut paint = self.paint.swap_remove(row);
-        if self.spare_paint.len() < 64 {
+        if self.spare_paint.len() < SPARE_ROWS {
             paint.clear();
             self.spare_paint.push(paint);
         }
@@ -406,13 +414,17 @@ pub struct Cached<F> {
     state: State,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "inline so a rebuild does not allocate; the element's pooled box holds it"
+)]
 enum State {
     Idle,
     /// Replaying `row`.
     Replay {
         row: u32,
     },
-    Live(Box<Live>),
+    Live(Live),
 }
 
 /// A built subtree, laid out in a subtree of the parent's engine or, when
@@ -463,7 +475,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Cached<F> {
     }
 
     /// Build after layout, at the size layout already gave the boundary.
-    fn rebuild(&mut self, row: u32, bounds: Bounds, cx: &mut ElementContext) -> Box<Live> {
+    fn rebuild(&mut self, row: u32, bounds: Bounds, cx: &mut ElementContext) -> Live {
         let mut engine = match cx.cache.as_deref_mut() {
             Some(cache) => cache.take_engine(),
             None => Box::default(),
@@ -471,12 +483,12 @@ impl<F: FnOnce() -> AnyElement + 'static> Cached<F> {
         let mut child = self.build();
         let content = child.request_layout(&mut engine, cx);
         engine.layout_boundary(content, bounds.width, bounds.height);
-        Box::new(Live {
+        Live {
             child,
             layout: LiveLayout::Own(engine),
             entry: Some((row, self.frame_hash(cx))),
             recording: None,
-        })
+        }
     }
 }
 
@@ -582,12 +594,12 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
         let index = engine.begin_subtree();
         let content = child.request_layout(engine.subtree_mut(index), cx);
         let id = engine.finish_subtree(index, self.style.layout.clone(), content);
-        self.state = State::Live(Box::new(Live {
+        self.state = State::Live(Live {
             child,
             layout: LiveLayout::Subtree(index),
             entry,
             recording: None,
-        }));
+        });
         (id, ())
     }
 

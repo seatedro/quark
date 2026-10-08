@@ -287,7 +287,9 @@ impl LayoutEngine {
 
     /// Claim a cleared subtree for a cache boundary's content. Lay the
     /// content out in [`Self::subtree_mut`], then close it with
-    /// [`Self::finish_subtree`].
+    /// [`Self::finish_subtree`]. Subtrees go to boundaries in build order,
+    /// not by key: when the set of rebuilt boundaries shifts, a boundary
+    /// can get an engine whose nodes another shape left behind.
     pub(super) fn begin_subtree(&mut self) -> usize {
         if self.live_subtrees == self.subtrees.len() {
             self.subtrees.push(Subtree::new());

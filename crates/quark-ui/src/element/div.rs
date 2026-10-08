@@ -198,6 +198,14 @@ impl Div {
         self
     }
 
+    /// [`Self::on_drag`] with a start the caller keeps: a view that holds
+    /// one [`DragStart`] and clones it each frame registers its drag
+    /// without allocating.
+    pub fn on_drag_start(mut self, start: DragStart) -> Self {
+        self.on_drag = Some(start);
+        self
+    }
+
     /// Emit `action` when `binding` (keymap format, e.g. `"enter"`) is pressed
     /// while this element or a descendant has focus.
     pub fn on_key(mut self, binding: impl Into<String>, action: impl Into<Action>) -> Self {

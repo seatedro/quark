@@ -92,7 +92,7 @@ impl PaintRecord {
         self.hit_ids.clear();
         self.semantic.clear();
         self.semantic_parent.clear();
-        self.handlers = InputHandlers::default();
+        self.handlers.clear();
         self.a11y.clear();
         self.a11y_parent.clear();
         self.a11y_owner.clear();
