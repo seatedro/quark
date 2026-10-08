@@ -25,8 +25,8 @@
 //! The app owns a [`TerminalState`]. Its `view` calls
 //! [`TerminalState::set_viewport`] and [`TerminalState::prepare`], then
 //! builds [`terminal_view`]. PTY output arrives on another thread: spawn
-//! with a callback that sends each [`PtyEvent`] through the app's
-//! `UiSender`, and pass it to [`TerminalState::handle_pty`]. Keys and raw
+//! with a callback that wakes the app (its `Waker`), and call
+//! [`TerminalState::read_pty`] from `UiApp::wake`. Keys and raw
 //! pointer events come from the app's input hook (`UiApp::event`): key
 //! presses to [`TerminalState::key_press`], text to
 //! [`TerminalState::text_input`], and pointer input to
@@ -63,6 +63,11 @@ pub mod vt;
 #[cfg(all(test, ghostty_vt))]
 mod tests;
 // build.rs's manifest parsing, here so its unit tests run with the crate's.
+// Counts allocations for the budget tests.
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: quark_ui::test_alloc::Counting = quark_ui::test_alloc::Counting;
+
 #[cfg(test)]
 #[path = "../build/ghostty_deps.rs"]
 #[allow(dead_code)]

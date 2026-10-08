@@ -83,6 +83,14 @@ pub struct Scrollbar {
     pub len: u64,
 }
 
+/// What [`Terminal::snapshot`] changed in the grid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// Some row's cells or selection, or the grid's size or colors.
+    pub rows: bool,
+    pub cursor: bool,
+}
+
 /// Key modifiers, Ghostty's bit layout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Mods(pub u16);
@@ -494,9 +502,9 @@ impl Terminal {
 
     /// Refreshes `grid` from the terminal: rows the render state marks
     /// dirty (all of them when the size or colors changed), each row's
-    /// selection, the cursor, and the colors. Returns whether anything in
-    /// `grid` changed. Reuses `grid`'s buffers.
-    pub fn snapshot(&mut self, grid: &mut Grid) -> bool {
+    /// selection, the cursor, and the colors. Returns what in `grid`
+    /// changed. Reuses `grid`'s buffers.
+    pub fn snapshot(&mut self, grid: &mut Grid) -> Changes {
         let rs = self.render.as_ptr();
         // SAFETY: valid handles; every get passes its documented type.
         unsafe {
@@ -532,7 +540,9 @@ impl Terminal {
                 || grid.cols != cols
                 || grid.rows.len() != rows as usize
                 || grid.colors != new_colors;
-            let mut changed = full || dirty != sys::GHOSTTY_RENDER_STATE_DIRTY_FALSE;
+            // Dirty rows can reread to the same cells (the cursor's row
+            // when only the cursor moved), so compare hashes instead.
+            let mut rows_changed = full;
             grid.cols = cols;
             grid.colors = new_colors;
             grid.rows.resize_with(rows as usize, GridRow::default);
@@ -559,6 +569,7 @@ impl Terminal {
                 ))
                 .then_some((sel.start_x, sel.end_x));
                 let row = &mut grid.rows[y];
+                let before = row.hash;
                 if full || row_dirty {
                     self.read_row(iter, row, new_colors);
                     row.selection = selection;
@@ -566,8 +577,8 @@ impl Terminal {
                 } else if row.selection != selection {
                     row.selection = selection;
                     row.rehash();
-                    changed = true;
                 }
+                rows_changed |= row.hash != before;
                 y += 1;
             }
 
@@ -593,10 +604,13 @@ impl Terminal {
                 blinking: c.blinking,
                 color: colors.cursor_has_value.then(|| rgb(colors.cursor)),
             };
-            changed |= grid.cursor != cursor;
+            let cursor_changed = grid.cursor != cursor;
             grid.cursor = cursor;
             sys::ghostty_render_state_clean(rs);
-            changed
+            Changes {
+                rows: rows_changed,
+                cursor: cursor_changed,
+            }
         }
     }
 

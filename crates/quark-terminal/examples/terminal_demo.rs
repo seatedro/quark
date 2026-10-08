@@ -12,7 +12,7 @@
 use quark_app::quark_ui::element::AnyElement;
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::{UiApp, UiContext, ViewContext, WindowOptions};
-use quark_terminal::{PtyCommand, PtyEvent};
+use quark_terminal::PtyCommand;
 
 #[cfg(not(windows))]
 use quark_terminal::{TerminalEvent, TerminalState};
@@ -37,10 +37,13 @@ struct Demo {
     /// What to run once the window opens; `None` runs nothing (tests feed
     /// the terminal directly).
     command: Option<PtyCommand>,
-    /// Called on the PTY thread after each event is sent, so tests can
-    /// wait for output without polling.
+    /// Called on the PTY thread after each wake, so tests can wait for
+    /// output without polling.
     #[cfg(all(test, not(windows)))]
     on_pty: Option<std::sync::mpsc::Sender<()>>,
+    /// Allocations the last frame's `TerminalState::prepare` made.
+    #[cfg(all(test, not(windows)))]
+    prepare_allocations: u64,
 }
 
 impl Demo {
@@ -51,6 +54,8 @@ impl Demo {
             command,
             #[cfg(all(test, not(windows)))]
             on_pty: None,
+            #[cfg(all(test, not(windows)))]
+            prepare_allocations: 0,
         }
     }
 }
@@ -113,18 +118,18 @@ mod app {
 
     impl UiApp for Demo {
         type Action = Msg;
-        type Message = PtyEvent;
+        type Message = ();
 
         fn init(&mut self, cx: &mut UiContext) {
             cx.set_focus(Some(TERM_FOCUS));
             let Some(command) = self.command.clone() else {
                 return;
             };
-            let sender = cx.sender::<PtyEvent>();
+            let waker = cx.window.waker().clone();
             #[cfg(test)]
             let notify = self.on_pty.clone();
-            let spawned = self.term.spawn(&command, move |event| {
-                sender.send(event);
+            let spawned = self.term.spawn(&command, move || {
+                waker.wake();
                 #[cfg(test)]
                 if let Some(notify) = &notify {
                     let _ = notify.send(());
@@ -141,8 +146,18 @@ mod app {
             self.term.set_viewport(width, height);
             let scale = cx.frame.scale_factor();
             let text = cx.frame.text();
+            #[cfg(not(test))]
             self.term
                 .prepare(&mut text.system, &mut text.layouts, scale, cx.theme);
+            // Tests check what preparing alone allocates.
+            #[cfg(test)]
+            {
+                let term = &mut self.term;
+                self.prepare_allocations = quark_app::quark_ui::test_alloc::count(|| {
+                    term.prepare(&mut text.system, &mut text.layouts, scale, cx.theme);
+                })
+                .1;
+            }
             let env = TerminalEnv {
                 focused: cx.is_focused(TERM_FOCUS),
                 accessible: cx.frame.accessibility_active(),
@@ -157,10 +172,11 @@ mod app {
             self.apply(outcome, cx);
         }
 
-        fn message(&mut self, event: PtyEvent, cx: &mut UiContext) {
-            self.term.handle_pty(event);
-            self.signals(cx);
-            cx.window.request_redraw();
+        fn wake(&mut self, cx: &mut UiContext) {
+            if self.term.read_pty() {
+                self.signals(cx);
+                cx.window.request_redraw();
+            }
         }
 
         fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
@@ -226,7 +242,7 @@ mod app {
 #[cfg(windows)]
 impl UiApp for Demo {
     type Action = Msg;
-    type Message = PtyEvent;
+    type Message = ();
 
     fn init(&mut self, cx: &mut UiContext) {
         let _ = (&self.command, TERM_FOCUS);
@@ -340,6 +356,72 @@ mod tests {
         assert_eq!(runs.concat(), "$ make\nok");
     }
 
+    /// A screen reader that starts listening while the terminal is idle
+    /// gets the screen without new output.
+    #[test]
+    fn a_screen_reader_attached_later_gets_the_current_screen() {
+        let mut ui = harness(None);
+        ui.set_accessibility_active(false);
+        ui.app_mut().term.feed(b"$ make\r\nok");
+        ui.frame();
+        ui.set_accessibility_active(true);
+        ui.frame();
+        let runs: Vec<String> = ui
+            .find_all(By::role(Role::TextRun))
+            .into_iter()
+            .filter_map(|n| n.value)
+            .collect();
+        assert_eq!(runs.concat(), "$ make\nok");
+    }
+
+    /// `count` lines of 79 columns: a green line number, then text unique
+    /// to `seed`.
+    fn lines(seed: usize, count: usize) -> String {
+        (0..count)
+            .map(|n| {
+                let text = format!("output {seed}.{n} of a build step");
+                format!("\x1b[32m{n:04}\x1b[0m {text:<74}\r\n")
+            })
+            .collect()
+    }
+
+    /// With no screen reader, preparing a changed frame allocates nothing
+    /// once the rows have held lines as long: the grid updates in place and
+    /// no screen text is built.
+    #[test]
+    fn a_changed_frame_prepares_without_allocating() {
+        let cases: &[(&str, String, &str)] = &[
+            ("a typed character", "o".into(), "$ echo"),
+            (
+                "one new line",
+                "\r\nfresh output line".into(),
+                "fresh output line",
+            ),
+            (
+                "thirty new lines",
+                format!("\r\n{}", lines(9, 30)),
+                "output 9.29 of a build step",
+            ),
+        ];
+        for (name, input, shown) in cases {
+            let mut ui = harness(None);
+            ui.set_accessibility_active(false);
+            assert_eq!(ui.app().term.size(), (80, 22));
+            for seed in 0..3 {
+                ui.app_mut().term.feed(lines(seed, 30).as_bytes());
+                ui.frame();
+            }
+            ui.app_mut().term.feed(b"$ ech");
+            ui.frame();
+
+            ui.app_mut().term.feed(input.as_bytes());
+            ui.frame();
+            assert_eq!(ui.app().prepare_allocations, 0, "{name}");
+            let painted = ui.painted_text();
+            assert!(painted.contains(shown), "{name}: {painted}");
+        }
+    }
+
     /// A frame that repeats the last one replays the grid from the element
     /// cache and allocates nothing.
     #[test]
@@ -365,5 +447,23 @@ mod tests {
             ui.frame();
         });
         assert!(sites.is_empty(), "{sites:#?}");
+    }
+
+    /// Output that changes nothing on screen (here, resetting attributes
+    /// already reset) leaves the next frame allocation-free.
+    #[test]
+    fn output_that_changes_nothing_visible_allocates_nothing() {
+        let mut ui = harness(None);
+        ui.set_accessibility_active(false);
+        ui.app_mut().term.feed(b"$ make\r\nok");
+        ui.frame();
+        ui.advance(5_000);
+        ui.frame();
+        ui.app_mut().term.feed(b"\x1b[0m");
+        let ((), allocations) = test_alloc::count(|| {
+            ui.frame();
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(ui.painted_text(), "$ make\nok");
     }
 }
