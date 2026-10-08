@@ -1,0 +1,24 @@
+[package]
+name = "quark-codex"
+description = "A recreation of the OpenAI Codex desktop app's UI built from quark's primitives, with fake data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "codex-demo"
+path = "src/main.rs"
+
+[dependencies]
+quark.workspace = true
+quark-app = { workspace = true, features = ["components"] }
+quark-ui.workspace = true
+quark-components.workspace = true
+quark-text.workspace = true
+quark-terminal.workspace = true
+accesskit.workspace = true
+
+[dev-dependencies]
+quark-app = { workspace = true, features = ["components", "test-support"] }

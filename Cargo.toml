@@ -15,6 +15,7 @@ members = [
   "crates/quark-update",
   "tools/syntax-pack",
   "examples/workbench",
+  "examples/codex",
   # A member so CI's fmt, clippy, and tests cover the patch.
   "vendor/accesskit_unix",
   "vendor/glyphon",
