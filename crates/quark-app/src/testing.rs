@@ -355,7 +355,7 @@ impl<U: UiApp> UiTestHarness<U> {
     /// preedit clears, then the text is inserted.
     pub fn ime_commit(&mut self, text: &str) {
         self.dispatch(InputEvent::ImePreedit(String::new(), None));
-        self.send_event(InputEvent::TextInput(text.to_owned()));
+        self.send_event(InputEvent::ImeCommit(text.to_owned()));
     }
 
     // ---- Pointer ---------------------------------------------------------
@@ -448,6 +448,16 @@ impl<U: UiApp> UiTestHarness<U> {
     /// Deliver any input event, then run until idle.
     pub fn send_event(&mut self, event: InputEvent) {
         self.dispatch(event);
+        self.run_until_idle();
+    }
+
+    /// Deliver `events` back to back, with no frame between them, as the
+    /// platform queues input that arrives before the next redraw; then run
+    /// until idle.
+    pub fn send_events(&mut self, events: impl IntoIterator<Item = InputEvent>) {
+        for event in events {
+            self.dispatch(event);
+        }
         self.run_until_idle();
     }
 
