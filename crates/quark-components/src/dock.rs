@@ -44,13 +44,13 @@ use quark::{TabStop, view};
 use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
 use quark_ui::design::{Shadow, Sz};
 use quark_ui::element::{
-    AnyElement, ClickEvent, CursorHint, DRAG_PREVIEW_THRESHOLD, DragHandler, DragHandoff,
+    AnyElement, CacheKey, ClickEvent, CursorHint, DRAG_PREVIEW_THRESHOLD, DragHandler, DragHandoff,
     DragPreview, DragReleaseResult, DropTarget, DropTargetHit, DropTargetId, ElementGeometry,
-    ElementHandle, IntoAnyElement, LayoutSnapshot, canvas, div, svg_icon, text,
+    ElementHandle, IntoAnyElement, LayoutSnapshot, cached, canvas, div, svg_icon, text,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
-use quark_ui::theme::{Color, Theme};
+use quark_ui::theme::{Color, Theme, ThemeColors, ThemeMetrics};
 use quark_ui::{Action, FocusId};
 use serde::{Deserialize, Serialize};
 
@@ -462,6 +462,8 @@ pub struct DockState {
     /// would land: shown like a tab drag's target while it holds.
     drag_hover: Option<(MovePayload, PaneDrop)>,
     divider_drag: Option<(PaneId, usize, Vec<f32>)>,
+    /// What each group's tab strip last showed, for [`Dock`]'s cached strips.
+    strips: StripMemo,
 }
 
 impl DockState {
@@ -508,6 +510,7 @@ impl DockState {
             tab_drag: None,
             drag_hover: None,
             divider_drag: None,
+            strips: StripMemo::default(),
         };
         // Empty side regions take no space until a panel arrives.
         for region in [DockRegion::Left, DockRegion::Right, DockRegion::Bottom] {
@@ -1415,9 +1418,38 @@ struct DragContext {
     policies: [TabPolicy; 4],
     root: DockRoot,
     host: HostId,
+    /// Of all the above: a cached tab strip's drag handlers hold the
+    /// context they were built with, so the strip rebuilds when it changes.
+    hash: u64,
 }
 
 impl DragContext {
+    fn new(hits: Vec<GroupHit>, policies: [TabPolicy; 4], root: DockRoot, host: HostId) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for hit in &hits {
+            let r = hit.rect;
+            (hit.pane, hit.region).hash(&mut hasher);
+            for v in [r.x, r.y, r.width, r.height, hit.strip, hit.tab_width] {
+                v.to_bits().hash(&mut hasher);
+            }
+        }
+        policies.map(|p| (p.can_leave, p.accepts)).hash(&mut hasher);
+        match root {
+            DockRoot::Handle(handle) => Some(handle),
+            DockRoot::Id => None,
+        }
+        .hash(&mut hasher);
+        host.hash(&mut hasher);
+        Self {
+            hits,
+            policies,
+            root,
+            host,
+            hash: hasher.finish(),
+        }
+    }
+
     fn target_at(&self, x: f32, y: f32) -> Option<(DockRegion, PaneDrop)> {
         let hit = self.hits.iter().find(|h| h.rect.contains(x, y))?;
         let (lx, ly) = (x - hit.rect.x, y - hit.rect.y);
@@ -1692,12 +1724,12 @@ impl<'a> Dock<'a> {
                 });
             }
         }
-        let drag = Rc::new(DragContext {
+        let drag = Rc::new(DragContext::new(
             hits,
-            policies: state.policies,
-            root: self.handle.map_or(DockRoot::Id, DockRoot::Handle),
-            host: HostId::MAIN,
-        });
+            state.policies,
+            self.handle.map_or(DockRoot::Id, DockRoot::Handle),
+            HostId::MAIN,
+        ));
 
         let mut region = |r: DockRegion| {
             let rect = rects[r.index()];
@@ -1770,12 +1802,12 @@ impl<'a> Dock<'a> {
                 })
             })
             .collect();
-        let drag = Rc::new(DragContext {
+        let drag = Rc::new(DragContext::new(
             hits,
-            policies: [self.state.area_policy(self.host, DockRegion::Center); 4],
-            root: self.handle.map_or(DockRoot::Id, DockRoot::Handle),
-            host: self.host,
-        });
+            [self.state.area_policy(self.host, DockRegion::Center); 4],
+            self.handle.map_or(DockRoot::Id, DockRoot::Handle),
+            self.host,
+        ));
         let body = root.map(|root| {
             self.node(
                 theme,
@@ -2089,19 +2121,175 @@ impl<'a> Dock<'a> {
         drag: &Rc<DragContext>,
         title: &impl Fn(PanelId) -> String,
     ) -> AnyElement {
-        let colors = &theme.colors;
+        use std::hash::{Hash, Hasher};
         let tab_width = self.tab_width_for(self.tabs_width(width), group.panels.len());
-        let grip = self
-            .grips
-            .then(|| self.grip(theme, region, group, height, drag, title));
+        // Everything the strip reads besides the theme (which the element
+        // cache compares itself) and the event map (which must be pure).
+        let mut hasher = std::hash::DefaultHasher::new();
+        (
+            self.state.layout_revision(),
+            self.host,
+            region,
+            group.id,
+            group.active,
+        )
+            .hash(&mut hasher);
+        group.panels.hash(&mut hasher);
+        for panel in &group.panels {
+            self.state.confined.contains(panel).hash(&mut hasher);
+            title(*panel).hash(&mut hasher);
+        }
+        let policies = self.state.policies.map(|p| (p.can_leave, p.accepts));
+        (policies, &self.move_keys, self.grips, drag.hash).hash(&mut hasher);
+        (tab_width.to_bits(), height.to_bits(), width.to_bits()).hash(&mut hasher);
+        let hash = hasher.finish();
+        let data = self
+            .state
+            .strips
+            .get(self.host, group.id, hash, || StripData {
+                pane: group.id,
+                region,
+                panels: group.panels.clone(),
+                active: group.active,
+                titles: group.panels.iter().map(|&p| title(p)).collect(),
+                confined: group
+                    .panels
+                    .iter()
+                    .map(|p| self.state.confined.contains(p))
+                    .collect(),
+                moves: group
+                    .active_panel()
+                    .and_then(|panel| {
+                        let (previous, next) = self.move_keys.as_ref()?;
+                        let moves = [(previous, false), (next, true)]
+                            .into_iter()
+                            .filter_map(|(key, forward)| {
+                                let destination = self.state.move_target(panel, forward)?;
+                                let event = DockEvent::MoveTab {
+                                    panel,
+                                    destination,
+                                    index: None,
+                                };
+                                Some((key.clone(), (self.map)(event)))
+                            })
+                            .collect();
+                        Some(moves)
+                    })
+                    .unwrap_or_default(),
+                label: self.state.group_label(group.id),
+                tab_width,
+                height,
+                grips: self.grips,
+            });
+        let strip = StripView {
+            data,
+            map: self.map.clone(),
+            drag: drag.clone(),
+            colors: theme.colors,
+            metrics: theme.metrics,
+        };
+        let mut key = std::hash::DefaultHasher::new();
+        ("dock:strip", self.handle, self.host, group.id).hash(&mut key);
+        cached(CacheKey(key.finish()), hash, move || strip.build())
+            .w(width)
+            .h(height)
+            .flex_shrink_0()
+            .into_any()
+    }
+}
+
+/// Everything a tab strip shows and does, gathered when it changes and
+/// shared with its cached build closure, so a steady frame replays the
+/// strip from the element cache without building its tabs.
+#[derive(Debug)]
+struct StripData {
+    pane: PaneId,
+    region: DockRegion,
+    panels: Vec<PanelId>,
+    active: usize,
+    titles: Vec<String>,
+    confined: Vec<bool>,
+    /// The active tab's move keys, bound only toward a group that takes it,
+    /// so a refused move leaves the key to the app.
+    moves: Vec<(String, Action)>,
+    label: String,
+    tab_width: f32,
+    height: f32,
+    grips: bool,
+}
+
+/// The last [`StripData`] built per tab group, with the inputs hash it was
+/// built for. Lives in [`DockState`] (the one thing a [`Dock`] borrows from
+/// frame to frame); it is a cache, so it is neither compared nor cloned.
+#[derive(Default)]
+pub(crate) struct StripMemo(std::cell::RefCell<HashMap<(HostId, PaneId), (u64, Rc<StripData>)>>);
+
+impl StripMemo {
+    fn get(
+        &self,
+        host: HostId,
+        pane: PaneId,
+        hash: u64,
+        build: impl FnOnce() -> StripData,
+    ) -> Rc<StripData> {
+        let mut strips = self.0.borrow_mut();
+        if let Some((built, data)) = strips.get(&(host, pane))
+            && *built == hash
+        {
+            return data.clone();
+        }
+        // Groups come and go with the layout; drop the ones gone before
+        // the map outgrows any layout's group count by much.
+        if strips.len() > 64 {
+            strips.clear();
+        }
+        let data = Rc::new(build());
+        strips.insert((host, pane), (hash, data.clone()));
+        data
+    }
+}
+
+impl Clone for StripMemo {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for StripMemo {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for StripMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StripMemo")
+    }
+}
+
+/// A tab strip's build closure: its data plus what it needs from the
+/// frame that built it.
+struct StripView {
+    data: Rc<StripData>,
+    map: EventMap,
+    drag: Rc<DragContext>,
+    colors: ThemeColors,
+    metrics: ThemeMetrics,
+}
+
+impl StripView {
+    fn build(&self) -> AnyElement {
+        let data = &*self.data;
+        let colors = &self.colors;
+        let grip = data.grips.then(|| self.grip());
         view! {
-            <div class="flex-row w-full" h={height} class="flex-none overflow-clip"
+            <div class="flex-row w-full" h={data.height} class="flex-none overflow-clip"
                  border_b={colors.border_variant}
-                 accessibility_id={format!("dock:pane:{}:tabs", group.id.0)}
+                 accessibility_id={format!("dock:pane:{}:tabs", data.pane.0)}
                  accessibility_role={Role::TabList} role="tablist"
-                 aria-label={self.state.group_label(group.id)} test_id="dock-tabs">
-                for (index, &panel) in group.panels.iter().enumerate() {
-                    {self.tab(theme, region, group, index, panel, (tab_width, height), drag, title)}
+                 aria-label={data.label.clone()} test_id="dock-tabs">
+                for index in 0..data.panels.len() {
+                    {self.tab(index)}
                 }
                 <div class="flex-1 h-full" bg={Color::TRANSPARENT} />
                 if let Some(grip) = grip {
@@ -2112,23 +2300,16 @@ impl<'a> Dock<'a> {
     }
 
     /// The grip that drags the whole group.
-    fn grip(
-        &self,
-        theme: &Theme,
-        region: DockRegion,
-        group: &TabGroup,
-        height: f32,
-        drag: &Rc<DragContext>,
-        title: &impl Fn(PanelId) -> String,
-    ) -> AnyElement {
-        let colors = &theme.colors;
-        let m = &theme.metrics;
+    fn grip(&self) -> AnyElement {
+        let data = &*self.data;
+        let colors = &self.colors;
+        let m = &self.metrics;
         let map = self.map.clone();
-        let ctx = drag.clone();
-        let pane = group.id;
-        let name = group.active_panel().map(title).unwrap_or_default();
+        let ctx = self.drag.clone();
+        let (pane, region, height) = (data.pane, data.region, data.height);
+        let name = data.titles.get(data.active).cloned().unwrap_or_default();
         // The picture under the pointer: the active tab, and how many more.
-        let label = match group.panels.len() {
+        let label = match data.panels.len() {
             0 | 1 => name.clone(),
             n => format!("{name} +{}", n - 1),
         };
@@ -2158,51 +2339,27 @@ impl<'a> Dock<'a> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn tab(
-        &self,
-        theme: &Theme,
-        region: DockRegion,
-        group: &TabGroup,
-        index: usize,
-        panel: PanelId,
-        (tab_width, tab_height): (f32, f32),
-        drag: &Rc<DragContext>,
-        title: &impl Fn(PanelId) -> String,
-    ) -> AnyElement {
-        let colors = &theme.colors;
-        let m = &theme.metrics;
-        let pane = group.id;
-        let count = group.panels.len();
-        let selected = index == group.active;
-        let name = title(panel);
+    fn tab(&self, index: usize) -> AnyElement {
+        let data = &*self.data;
+        let colors = &self.colors;
+        let m = &self.metrics;
+        let (pane, region) = (data.pane, data.region);
+        let (tab_width, tab_height) = (data.tab_width, data.height);
+        let panel = data.panels[index];
+        let count = data.panels.len();
+        let selected = index == data.active;
+        let name = data.titles[index].clone();
         let map = self.map.clone();
-        let ctx = drag.clone();
-        let confined = self.state.confined.contains(&panel);
+        let ctx = self.drag.clone();
+        let confined = data.confined[index];
         let close = (self.map)(DockEvent::Close { pane, index });
         // Roving focus: only the active tab is a focus target, so selecting
         // a neighbor by arrow key moves focus with it.
         let prev = index.checked_sub(1).unwrap_or(count - 1);
         let next = (index + 1) % count;
         let select = |index| (self.map)(DockEvent::Select { pane, index });
-        // Only the focusable active tab takes the move keys, bound only
-        // toward a group that takes it, so a refused move leaves the key
-        // to the app.
-        let moves: Vec<(String, Action)> = match (&self.move_keys, selected) {
-            (Some((previous, next)), true) => [(previous, false), (next, true)]
-                .into_iter()
-                .filter_map(|(key, forward)| {
-                    let destination = self.state.move_target(panel, forward)?;
-                    let event = DockEvent::MoveTab {
-                        panel,
-                        destination,
-                        index: None,
-                    };
-                    Some((key.clone(), (self.map)(event)))
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+        // Only the focusable active tab takes the move keys.
+        let moves: &[(String, Action)] = if selected { &data.moves } else { &[] };
         let label_color = if selected {
             colors.text_strong
         } else {
@@ -2216,7 +2373,7 @@ impl<'a> Dock<'a> {
         view! {
             <div class="flex-row flex-none items-center" gap={m.spacing_xs} px={m.spacing_sm}
                  w={tab_width} class="h-full" border_r={colors.border_variant}
-                 accessibility_id={Self::tab_id(panel)} accessibility_role={Role::Tab}
+                 accessibility_id={Dock::tab_id(panel)} accessibility_role={Role::Tab}
                  role="tab" aria-label={name.clone()} aria-selected={selected} test_id="dock-tab"
                  // For assistive tech and Enter: a pointer press starts the
                  // drag below, which selects the tab itself.
@@ -2247,13 +2404,13 @@ impl<'a> Dock<'a> {
                  // edges, so the ring is drawn inside the tab.
                  focus_ring_offset={-Sz::FOCUS_RING_W}
                  @when {selected} {
-                     bg={colors.background} focus_ring={Self::tab_focus(pane)}
+                     bg={colors.background} focus_ring={Dock::tab_focus(pane)}
                      on_key={("left", select(prev))} on_key={("right", select(next))}
                      on_key={("home", select(0))} on_key={("end", select(count - 1))}
                      // Mac keyboards label Backspace "Delete".
                      on_key={("delete", close.clone())} on_key={("backspace", close.clone())}
                  }
-                 @for (key, action) in &moves {
+                 @for (key, action) in moves {
                      on_key={(key.clone(), action.clone())}
                  }
                  // A click makes an inactive tab focusable without making it
