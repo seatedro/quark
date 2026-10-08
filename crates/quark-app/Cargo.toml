@@ -47,7 +47,7 @@ global-hotkey = { version = "0.8", optional = true }
 muda = { version = "0.21", default-features = false }
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSMenu", "NSMenuItem", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSImage", "NSPasteboard", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSEvent", "NSMenu", "NSMenuItem", "NSWindow", "NSView", "NSButton", "NSControl", "NSResponder", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSBitmapImageRep", "NSGraphics", "NSImage", "NSImageRep", "NSPasteboard", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSBundle", "NSAppleEventDescriptor", "NSAppleEventManager", "NSSet", "NSDictionary", "NSError", "NSArray", "NSURL"] }
 # Click and action callbacks for notifications in bundled apps.
 # Login items through SMAppService (`platform::autostart`).
@@ -99,7 +99,7 @@ features = ["client_system"]
 
 [target.'cfg(target_os = "linux")'.dependencies.x11rb]
 version = "0.13"
-features = ["allow-unsafe-code", "xinput"]
+features = ["allow-unsafe-code", "shape", "xinput"]
 
 [target.'cfg(target_os = "linux")'.dependencies.x11-dl]
 version = "2.21"

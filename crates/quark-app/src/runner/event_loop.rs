@@ -240,6 +240,8 @@ impl<A: App> Runner<A> {
             self.text.layouts.remove_scope(handle.scope_id());
             if let Some(state) = entry.open() {
                 state.persist();
+                #[cfg(target_os = "linux")]
+                crate::platform::drag_out::window_destroyed(&state.window);
             }
             if self.focused == Some(handle) {
                 self.focused = None;

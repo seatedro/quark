@@ -9,24 +9,32 @@
 //! client, and X refuses a grab while another client holds one. So the drag
 //! first releases winit's grab through winit's own connection (the only
 //! client allowed to), then grabs the pointer for itself until the release.
+//!
+//! The drag image is an override-redirect window of ours that follows the
+//! pointer. Its input region is empty, so the pointer is never "in" it and
+//! XDND target lookup, which asks the server which child holds the pointer,
+//! looks straight through it. Without a compositor its alpha cannot blend,
+//! so it is flattened onto an opaque background.
 
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::Event;
+use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xinput::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode,
-    GrabStatus, PropMode, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent, SelectionRequestEvent,
-    Window, WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, ColormapAlloc,
+    ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, GrabMode,
+    GrabStatus, ImageFormat, ImageOrder, PropMode, SELECTION_NOTIFY_EVENT, Screen,
+    SelectionNotifyEvent, SelectionRequestEvent, StackMode, VisualClass, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 use x11rb::{CURRENT_TIME, NONE};
 
-use super::DragOutError;
+use super::{DragImage, DragOutError};
 
 x11rb::atom_manager! {
     Atoms: AtomsCookie {
@@ -42,6 +50,8 @@ x11rb::atom_manager! {
         XdndActionCopy,
         TARGETS,
         TEXT_URI_LIST: b"text/uri-list",
+        _NET_WM_WINDOW_TYPE,
+        _NET_WM_WINDOW_TYPE_DND,
     }
 }
 
@@ -55,10 +65,16 @@ const DROP_TIMEOUT: Duration = Duration::from_secs(10);
 /// `XK_Escape`.
 const ESCAPE: u32 = 0xff1b;
 
-pub(super) fn start(display: *mut std::ffi::c_void, uris: Vec<u8>) -> Result<(), DragOutError> {
-    let platform = |error: String| DragOutError::Platform(error);
-    release_winit_grab(display).map_err(platform)?;
-    let session = Session::open(uris).map_err(platform)?;
+/// What the drag image is flattened onto without a compositor: the light
+/// gray of a file manager's background.
+const BACKGROUND: [u8; 3] = [0xf0, 0xf0, 0xf0];
+
+pub(super) fn start(
+    display: *mut std::ffi::c_void,
+    uris: Vec<u8>,
+    image: &DragImage,
+) -> Result<(), DragOutError> {
+    let session = Session::open(display, uris, image).map_err(DragOutError::Platform)?;
     std::thread::Builder::new()
         .name("quark-drag-out".into())
         .spawn(move || {
@@ -108,10 +124,16 @@ struct Session {
     source: Window,
     escape: Option<u8>,
     uris: Vec<u8>,
+    image: Option<ImageWindow>,
 }
 
 impl Session {
-    fn open(uris: Vec<u8>) -> Result<Self, String> {
+    /// Connect and get everything ready, then take the pointer from winit.
+    fn open(
+        display: *mut std::ffi::c_void,
+        uris: Vec<u8>,
+        image: &DragImage,
+    ) -> Result<Self, String> {
         let error = |error: &dyn std::fmt::Display| error.to_string();
         let (conn, screen) = x11rb::connect(None).map_err(|e| error(&e))?;
         let root = conn.setup().roots[screen].root;
@@ -136,7 +158,16 @@ impl Session {
         .map_err(|e| error(&e))?;
         conn.set_selection_owner(source, atoms.XdndSelection, CURRENT_TIME)
             .map_err(|e| error(&e))?;
+        // Ready before the grab, so the drag only has to map it.
+        let image = match ImageWindow::create(&conn, screen, &atoms, image) {
+            Ok(image) => image,
+            Err(e) => {
+                tracing::warn!("drag out: no drag image: {e}");
+                None
+            }
+        };
         let cursor = hand_cursor(&conn).unwrap_or(NONE);
+        release_winit_grab(display)?;
         let grab = conn
             .grab_pointer(
                 false,
@@ -166,6 +197,7 @@ impl Session {
             source,
             escape,
             uris,
+            image,
         })
     }
 
@@ -179,7 +211,10 @@ impl Session {
             .map_err(|e| error(&e))?
             .reply()
             .map_err(|e| error(&e))?;
-        let target = find_target(&self, self.root);
+        if let Some(image) = &self.image {
+            image.show(&self.conn, at.root_x, at.root_y);
+        }
+        let target = find_target(&self.lookup(), self.root);
         self.send(drag.moved(target, at.root_x, at.root_y, CURRENT_TIME))?;
         while drag.phase() != Phase::Over {
             let Some(event) = self.next_event(deadline)? else {
@@ -189,7 +224,10 @@ impl Session {
             };
             let sends = match event {
                 Event::MotionNotify(event) => {
-                    let target = find_target(&self, self.root);
+                    if let Some(image) = &self.image {
+                        image.move_to(&self.conn, event.root_x, event.root_y);
+                    }
+                    let target = find_target(&self.lookup(), self.root);
                     drag.moved(target, event.root_x, event.root_y, event.time)
                 }
                 Event::ButtonRelease(event) => {
@@ -219,14 +257,28 @@ impl Session {
         }
         self.ungrab();
         let _ = self.conn.destroy_window(self.source);
+        if let Some(image) = &self.image {
+            image.destroy(&self.conn);
+        }
         let _ = self.conn.flush();
         Ok(())
     }
 
+    /// Let go of the pointer and keyboard, and take the drag image down.
     fn ungrab(&self) {
         let _ = self.conn.ungrab_pointer(CURRENT_TIME);
         let _ = self.conn.ungrab_keyboard(CURRENT_TIME);
+        if let Some(image) = &self.image {
+            let _ = self.conn.unmap_window(image.window);
+        }
         let _ = self.conn.flush();
+    }
+
+    fn lookup(&self) -> Lookup<'_> {
+        Lookup {
+            conn: &self.conn,
+            atoms: &self.atoms,
+        }
     }
 
     /// The next event, or `None` once `deadline` passes.
@@ -351,7 +403,13 @@ trait Tree {
     fn proxy(&self, window: Window) -> Option<Window>;
 }
 
-impl Tree for Session {
+/// The live window tree, on our connection.
+struct Lookup<'a> {
+    conn: &'a RustConnection,
+    atoms: &'a Atoms,
+}
+
+impl Tree for Lookup<'_> {
     fn child_at_pointer(&self, window: Window) -> Option<Window> {
         let reply = self.conn.query_pointer(window).ok()?.reply().ok()?;
         (reply.child != NONE).then_some(reply.child)
@@ -366,7 +424,7 @@ impl Tree for Session {
     }
 }
 
-impl Session {
+impl Lookup<'_> {
     fn property(&self, window: Window, name: u32, kind: AtomEnum) -> Option<u32> {
         let reply = self
             .conn
@@ -376,6 +434,201 @@ impl Session {
             .ok()?;
         reply.value32()?.next()
     }
+}
+
+/// The drag image's window, made but not yet shown.
+struct ImageWindow {
+    window: Window,
+    colormap: u32,
+    hotspot: (i16, i16),
+}
+
+impl ImageWindow {
+    /// A window showing `image`, or `None` where it would get in the way:
+    /// without SHAPE 1.1 its input region cannot be emptied, and it would
+    /// hide every target under it.
+    fn create(
+        conn: &RustConnection,
+        screen: usize,
+        atoms: &Atoms,
+        image: &DragImage,
+    ) -> Result<Option<Self>, String> {
+        let error = |error: &dyn std::fmt::Display| error.to_string();
+        if conn
+            .extension_information(shape::X11_EXTENSION_NAME)
+            .map_err(|e| error(&e))?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let version = conn
+            .shape_query_version()
+            .map_err(|e| error(&e))?
+            .reply()
+            .map_err(|e| error(&e))?;
+        if (version.major_version, version.minor_version) < (1, 1) {
+            return Ok(None);
+        }
+        let setup = conn.setup();
+        let info = &setup.roots[screen];
+        let Some((depth, visual, pixels)) = pixels_for(conn, screen, info, image)? else {
+            return Ok(None);
+        };
+        // ZPixmap rows of whole 32-bit pixels, low byte first, as converted.
+        let packs = setup
+            .pixmap_formats
+            .iter()
+            .any(|format| format.depth == depth && format.bits_per_pixel == 32);
+        if setup.image_byte_order != ImageOrder::LSB_FIRST || !packs {
+            return Ok(None);
+        }
+        let (width, height) = (image.width() as u16, image.height() as u16);
+        let colormap = conn.generate_id().map_err(|e| error(&e))?;
+        conn.create_colormap(ColormapAlloc::NONE, colormap, info.root, visual)
+            .map_err(|e| error(&e))?;
+        let window = conn.generate_id().map_err(|e| error(&e))?;
+        conn.create_window(
+            depth,
+            window,
+            info.root,
+            0,
+            0,
+            width,
+            height,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            &CreateWindowAux::new()
+                .background_pixel(0)
+                .border_pixel(0)
+                .override_redirect(1)
+                .save_under(1)
+                .colormap(colormap),
+        )
+        .map_err(|e| error(&e))?;
+        // The pixels as the window's background, which the server repaints
+        // on its own as the window moves.
+        let pixmap = conn.generate_id().map_err(|e| error(&e))?;
+        conn.create_pixmap(depth, pixmap, window, width, height)
+            .map_err(|e| error(&e))?;
+        let gc = conn.generate_id().map_err(|e| error(&e))?;
+        conn.create_gc(gc, pixmap, &CreateGCAux::new())
+            .map_err(|e| error(&e))?;
+        let row = usize::from(width) * 4;
+        // In strips that fit a request, past its 24 byte header.
+        let rows = ((conn.maximum_request_bytes() - 24) / row).max(1);
+        for (strip, chunk) in pixels.chunks(rows * row).enumerate() {
+            conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                pixmap,
+                gc,
+                width,
+                (chunk.len() / row) as u16,
+                0,
+                (strip * rows) as i16,
+                0,
+                depth,
+                chunk,
+            )
+            .map_err(|e| error(&e))?;
+        }
+        conn.change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
+        )
+        .map_err(|e| error(&e))?;
+        let _ = conn.free_gc(gc);
+        let _ = conn.free_pixmap(pixmap);
+        conn.shape_rectangles(
+            shape::SO::SET,
+            shape::SK::INPUT,
+            ClipOrdering::UNSORTED,
+            window,
+            0,
+            0,
+            &[],
+        )
+        .map_err(|e| error(&e))?;
+        conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            atoms._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            &[atoms._NET_WM_WINDOW_TYPE_DND],
+        )
+        .map_err(|e| error(&e))?;
+        let (hx, hy) = image.hotspot();
+        Ok(Some(Self {
+            window,
+            colormap,
+            hotspot: (hx as i16, hy as i16),
+        }))
+    }
+
+    /// Put the hotspot at (`x`, `y`) on the root, above everything.
+    fn move_to(&self, conn: &RustConnection, x: i16, y: i16) {
+        let _ = conn.configure_window(
+            self.window,
+            &ConfigureWindowAux::new()
+                .x(i32::from(x) - i32::from(self.hotspot.0))
+                .y(i32::from(y) - i32::from(self.hotspot.1))
+                .stack_mode(StackMode::ABOVE),
+        );
+    }
+
+    fn show(&self, conn: &RustConnection, x: i16, y: i16) {
+        self.move_to(conn, x, y);
+        let _ = conn.map_window(self.window);
+        let _ = conn.flush();
+    }
+
+    fn destroy(&self, conn: &RustConnection) {
+        let _ = conn.destroy_window(self.window);
+        let _ = conn.free_colormap(self.colormap);
+    }
+}
+
+/// The depth, visual, and pixels to show `image` with: premultiplied on a
+/// 32-bit visual when a compositor will blend it, else flattened onto
+/// `BACKGROUND` on the root's visual. `None` if neither visual is the
+/// 8-bit-a-channel TrueColor the pixels are converted for.
+fn pixels_for(
+    conn: &RustConnection,
+    screen: usize,
+    info: &Screen,
+    image: &DragImage,
+) -> Result<Option<(u8, u32, Vec<u8>)>, String> {
+    let error = |error: &dyn std::fmt::Display| error.to_string();
+    let true_color = |depth: u8, id: Option<u32>| {
+        info.allowed_depths
+            .iter()
+            .filter(|d| d.depth == depth)
+            .flat_map(|d| &d.visuals)
+            .find(|v| {
+                id.is_none_or(|id| v.visual_id == id)
+                    && v.class == VisualClass::TRUE_COLOR
+                    && (v.red_mask, v.green_mask, v.blue_mask) == (0xff_0000, 0xff00, 0xff)
+            })
+            .map(|v| v.visual_id)
+    };
+    let manager = conn
+        .intern_atom(false, format!("_NET_WM_CM_S{screen}").as_bytes())
+        .map_err(|e| error(&e))?
+        .reply()
+        .map_err(|e| error(&e))?
+        .atom;
+    let composited = conn
+        .get_selection_owner(manager)
+        .map_err(|e| error(&e))?
+        .reply()
+        .map_err(|e| error(&e))?
+        .owner
+        != NONE;
+    if composited && let Some(visual) = true_color(32, None) {
+        return Ok(Some((32, visual, image.premultiplied_bgra())));
+    }
+    Ok(true_color(info.root_depth, Some(info.root_visual))
+        .map(|visual| (info.root_depth, visual, image.opaque_bgrx(BACKGROUND))))
 }
 
 /// Where XDND messages for the window under the pointer go.
@@ -897,6 +1150,129 @@ mod tests {
         for (name, windows, expected) in cases {
             assert_eq!(find_target(&windows, ROOT), expected, "{name}");
         }
+    }
+
+    /// A private Xvfb server, killed on drop; `None` where Xvfb is not
+    /// installed, which skips the tests that need a real X server.
+    struct Xvfb {
+        child: std::process::Child,
+        display: String,
+    }
+
+    impl Xvfb {
+        fn start() -> Option<Self> {
+            use std::io::BufRead;
+            use std::os::fd::{FromRawFd, OwnedFd};
+            let mut fds = [0; 2];
+            // SAFETY: a plain pipe into a two-element array; only the write
+            // end is left inheritable, for Xvfb to report its display on.
+            let (read, write) = unsafe {
+                assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+                libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+                (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
+            };
+            let child = std::process::Command::new("Xvfb")
+                .args(["-displayfd", &fds[1].to_string(), "-nolisten", "tcp"])
+                .args(["-screen", "0", "320x240x24"])
+                .stdin(std::process::Stdio::null())
+                // A system Xvfb, not linked against a dev shell's libraries.
+                .env_remove("LD_LIBRARY_PATH")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            std::mem::drop(write);
+            let Ok(child) = child else {
+                eprintln!("skipped: no Xvfb");
+                return None;
+            };
+            let mut line = String::new();
+            std::io::BufReader::new(std::fs::File::from(read))
+                .read_line(&mut line)
+                .unwrap();
+            assert!(!line.trim().is_empty(), "Xvfb did not start");
+            Some(Self {
+                child,
+                display: format!(":{}", line.trim()),
+            })
+        }
+    }
+
+    impl Drop for Xvfb {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// On a fresh server, an XDND aware window at the top left and the
+    /// drag image of `rgba` (8 by 8 pixels, hotspot at its corner) shown
+    /// with the pointer at (50, 50).
+    fn drag_image_over_a_target(
+        server: &Xvfb,
+        rgba: [u8; 4],
+    ) -> (RustConnection, Atoms, Window, Window) {
+        let (conn, screen) = x11rb::connect(Some(&server.display)).unwrap();
+        let root = conn.setup().roots[screen].root;
+        let atoms = Atoms::new(&conn).unwrap().reply().unwrap();
+        let target = conn.generate_id().unwrap();
+        conn.create_window(
+            0,
+            target,
+            root,
+            0,
+            0,
+            200,
+            200,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().background_pixel(0),
+        )
+        .unwrap();
+        conn.change_property32(
+            PropMode::REPLACE,
+            target,
+            atoms.XdndAware,
+            AtomEnum::ATOM,
+            &[5],
+        )
+        .unwrap();
+        conn.map_window(target).unwrap();
+        conn.warp_pointer(NONE, root, 0, 0, 0, 0, 50, 50).unwrap();
+        let image = DragImage::from_rgba(8, 8, rgba.repeat(64))
+            .and_then(|image| image.with_hotspot(0, 0))
+            .unwrap();
+        let window = ImageWindow::create(&conn, screen, &atoms, &image)
+            .unwrap()
+            .expect("Xvfb has SHAPE and a TrueColor root");
+        window.show(&conn, 50, 50);
+        conn.get_input_focus().unwrap().reply().unwrap();
+        (conn, atoms, root, target)
+    }
+
+    #[test]
+    fn target_lookup_sees_through_the_drag_image_under_the_pointer() {
+        let Some(server) = Xvfb::start() else { return };
+        let (conn, atoms, root, target) = drag_image_over_a_target(&server, [0, 0, 255, 255]);
+        let lookup = Lookup {
+            conn: &conn,
+            atoms: &atoms,
+        };
+        assert_eq!(find_target(&lookup, root).map(|t| t.window), Some(target));
+    }
+
+    #[test]
+    fn without_a_compositor_the_drag_image_is_flattened_onto_light_gray() {
+        let Some(server) = Xvfb::start() else { return };
+        // Half transparent red.
+        let (conn, _, root, _) = drag_image_over_a_target(&server, [255, 0, 0, 128]);
+        let shown = conn
+            .get_image(ImageFormat::Z_PIXMAP, root, 52, 52, 1, 1, !0)
+            .unwrap()
+            .reply()
+            .unwrap();
+        // BGRX.
+        assert_eq!(shown.data[..3], [120, 120, 248]);
     }
 
     #[test]

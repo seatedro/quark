@@ -488,13 +488,22 @@ impl EventContext<'_> {
         &mut self,
         paths: impl IntoIterator<Item = P>,
     ) -> Result<(), crate::platform::drag_out::DragOutError> {
+        self.start_drag_out_with_options(paths, &Default::default())
+    }
+
+    /// [`Self::start_drag_out`] with a drag image or a Wayland seat.
+    pub fn start_drag_out_with_options<P: AsRef<std::path::Path>>(
+        &mut self,
+        paths: impl IntoIterator<Item = P>,
+        options: &crate::platform::drag_out::DragOutOptions,
+    ) -> Result<(), crate::platform::drag_out::DragOutError> {
         use crate::platform::drag_out::{self, DragOutError};
         let paths = drag_out::absolute_paths(paths)?;
         if !drag_out::supported() {
             return Err(DragOutError::Unsupported);
         }
         let window = self.native().ok_or(DragOutError::NoWindow)?;
-        drag_out::start(window, &paths)
+        drag_out::start(window, &paths, options)
     }
 
     /// Another open window, by handle.
