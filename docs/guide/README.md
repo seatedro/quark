@@ -15,6 +15,7 @@ and each names the file that compiles it.
 | [Syntax highlighting and grammar packs](syntax-packs.md) | `GrammarStore`, building packs with `syntax-pack`, signed indexes, the threat model |
 | [Accessibility and automation](accessibility-and-automation.md) | The AccessKit tree, AT-SPI coverage, ids, end-to-end specs with cua |
 | [Performance model](performance.md) | Cache boundaries, frame memory reuse, allocation budgets, profiling |
+| [Docking across windows](docking.md) | `DockWindows`: tabs and groups that drag between windows and tear off, closing and quitting, saved workspaces, platform differences |
 | [Platform services](platform-services.md) | Menus, notifications, badges, tray, dialogs, deep links, single instance, window state |
 | [Testing](testing.md) | The test bible, `UiTestHarness`, pixel probes, end-to-end specs, fuzzing, Miri, Kani |
 

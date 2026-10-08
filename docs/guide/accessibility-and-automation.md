@@ -72,9 +72,18 @@ the steps to drop the patch once AccessKit serves both.
 
 A clickable div needs a stable id or a `focus_ring` to be a Tab stop. The
 radio group, segmented control, select, and combobox are one Tab stop each
-and move with the arrow keys. Tab lists and menus have no arrow-key
-navigation, so each item is its own Tab stop. Drag-only interactions have
-no keyboard alternative.
+and move with the arrow keys, as do context menus and the menu bar. A
+`TabBar` has no arrow-key navigation, so each tab is its own Tab stop, and
+Delete closes it.
+
+A `Dock` tab group is one Tab stop, its active tab. Left and Right select
+the neighboring tab and move focus with it, Home and End the first and
+last, and Delete closes it. Mod+Shift+Page Up and Page Down move it into
+the previous or next group that takes it. Moving a tab or a whole group
+anywhere else, a new window included, is the app's menu:
+[panels_demo](../../crates/quark-app/examples/panels_demo.rs) opens one
+with Shift+F10 (see [Docking across windows](docking.md)). Other drag-only
+interactions have no keyboard alternative.
 
 ## End-to-end specs with cua
 
