@@ -9,6 +9,15 @@
 //! in; with `QUARK_WORKBENCH_THEME_DIR` set, edits to the copy there apply
 //! live (see [`super::reload`]).
 //!
+//! Translucent colors in the file (the scrim) are chosen for quark's
+//! renderer, which blends in linear light: `#15171c92` dims like a CSS
+//! 32% scrim, `#000000c8` like CSS 50% black (`1 - (1 - a)^2.2`, as for
+//! the shadow tokens). Tints are mixed opaque (`recipes::tint`) for the
+//! same reason: a light color at low alpha over the dark canvas brightens
+//! it far more than the alpha suggests. `border` is the raised surfaces'
+//! hairline (lighter than `border_variant` in dark, where shadows barely
+//! show); panels and cards use `border_variant`.
+//!
 //! On top of the file the adapter sets the compact component recipe, the
 //! zoom, high contrast (quark's high-contrast colors, workbench sizes), and
 //! reduced motion. `ui_font_size` stays at quark's 16-point zoom anchor;

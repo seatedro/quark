@@ -57,19 +57,25 @@ pub struct Shadow {
     pub alpha_dark: u8,
 }
 
-/// Menus, popovers, toasts: black 12% light, 28% dark.
+// The renderer composites in linear light (sRGB targets), where black at a
+// CSS alpha darkens far less than in a browser. Each alpha here is the
+// spec's `a` converted so the darkening matches: 1 - (1 - a)^2.2.
+// On the dark canvas no black shadow shows much; raised surfaces there also
+// get the lighter `raised_border` hairline from the theme file.
+
+/// Menus, popovers, toasts: the spec's black 12% light, 28% dark.
 pub const SHADOW_MENU: Shadow = Shadow {
     offset_y: 4.0,
     blur: 16.0,
-    alpha_light: 31,
-    alpha_dark: 71,
+    alpha_light: 62,
+    alpha_dark: 131,
 };
-/// Modals: black 18% light, 40% dark.
+/// Modals: the spec's black 18% light, 40% dark.
 pub const SHADOW_MODAL: Shadow = Shadow {
     offset_y: 12.0,
     blur: 40.0,
-    alpha_light: 46,
-    alpha_dark: 102,
+    alpha_light: 90,
+    alpha_dark: 172,
 };
 
 /// Motion durations, in milliseconds. Reduced motion drops movement and

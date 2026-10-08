@@ -207,7 +207,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     };
     let header = view! {
         <div w={source_w} h={HEADER_H} class="flex-row items-center shrink-0"
-             px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border}
+             px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border_variant}
              bg={colors.panel} role="status"
              aria-label={format!("{}{}", state.open, if modified { ", modified" } else { "" })}>
             <icon svg={lucide::FILE_CODE} size={tokens::ICON} color={colors.icon} />
@@ -224,8 +224,8 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     };
     let tree_box = view! {
         <div w={tree_w} h={tree_h} class="shrink-0 overflow-clip"
-             @when {side} { border_r={colors.border} }
-             @when {!side} { border_b={colors.border} }>
+             @when {side} { border_r={colors.border_variant} }
+             @when {!side} { border_b={colors.border_variant} }>
             {tree}
         </div>
     };
