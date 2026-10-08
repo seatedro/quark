@@ -178,6 +178,8 @@ pub struct TerminalState {
     pty: Option<Pty>,
     /// Bytes for the program while no PTY is attached (tests read them).
     outbox: Vec<u8>,
+    /// Input for the PTY that did not fit its queue yet, oldest first.
+    unsent: Vec<u8>,
     style: TerminalStyle,
     metrics: Option<(Metrics, u32)>,
     colors: Option<(Rgb, Rgb)>,
@@ -238,6 +240,7 @@ impl TerminalState {
             vt,
             pty: None,
             outbox: Vec::new(),
+            unsent: Vec::new(),
             style,
             metrics: None,
             colors: None,
@@ -353,6 +356,7 @@ impl TerminalState {
     ) -> std::io::Result<()> {
         let pty = Pty::spawn(command, self.geometry(), on_ready)?;
         self.pty = Some(pty);
+        self.unsent.clear();
         self.exited = false;
         self.flush();
         Ok(())
@@ -375,6 +379,7 @@ impl TerminalState {
         let Some(inbox) = self.pty.as_ref().map(Pty::inbox) else {
             return false;
         };
+        self.send_unsent();
         let mut any = false;
         inbox.drain(|event| {
             any = true;
@@ -389,6 +394,7 @@ impl TerminalState {
             PtyEvent::Exited(code) => {
                 self.exited = true;
                 self.pty = None;
+                self.unsent.clear();
                 self.signals.push(TerminalSignal::Exited(code));
             }
         }
@@ -419,13 +425,27 @@ impl TerminalState {
     }
 
     fn send(&mut self, bytes: &[u8]) {
-        match &mut self.pty {
-            Some(pty) => {
-                // A write fails once the program has exited; its exit event
-                // is on the way.
-                let _ = pty.write(bytes);
-            }
-            None => self.outbox.extend_from_slice(bytes),
+        if self.pty.is_none() {
+            self.outbox.extend_from_slice(bytes);
+            return;
+        }
+        self.unsent.extend_from_slice(bytes);
+        self.send_unsent();
+    }
+
+    /// Offers the PTY the input its queue turned away. The PTY wakes the
+    /// app ([`Self::read_pty`]) once there is room again.
+    fn send_unsent(&mut self) {
+        let Some(pty) = &mut self.pty else {
+            return;
+        };
+        if self.unsent.is_empty() {
+            return;
+        }
+        match pty.write(&self.unsent) {
+            Ok(n) => drop(self.unsent.drain(..n)),
+            // The program has exited; its exit event is on the way.
+            Err(_) => self.unsent.clear(),
         }
     }
 

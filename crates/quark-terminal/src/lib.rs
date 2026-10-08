@@ -70,7 +70,7 @@ mod ghostty_deps;
 
 pub use grid::{CellStyle, Colors, Cursor, CursorShape, Grid, GridRow, Rgb, Run, Underline};
 pub use input::KeyPress;
-pub use pty::{Pty, PtyCommand, PtyEvent, PtyGeometry};
+pub use pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 pub use state::{
     PointerInput, TerminalEvent, TerminalOutcome, TerminalSignal, TerminalState, TerminalStyle,
 };

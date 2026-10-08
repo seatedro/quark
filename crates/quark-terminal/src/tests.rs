@@ -392,3 +392,35 @@ fn query_replies_go_back_to_the_program() {
     t.feed(b"ab\x1b[6n");
     assert_eq!(t.take_input(), b"\x1b[1;3R");
 }
+
+/// A paste larger than the PTY's input queue reaches the program whole:
+/// the state keeps what the queue turned away and sends it as room frees.
+#[cfg(unix)]
+#[test]
+fn a_paste_larger_than_the_input_queue_arrives_whole() {
+    let len = 3 * crate::pty::INPUT_QUEUE;
+    let mut t = term(40, 4);
+    let ui = std::thread::current();
+    let command = crate::PtyCommand::new("sh")
+        .arg("-c")
+        .arg(format!("stty raw -echo; printf R; head -c {len} | wc -c"));
+    t.spawn(&command, move || ui.unpark()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut pasted = false;
+    while !t.has_exited() {
+        assert!(std::time::Instant::now() < deadline, "{}", screen(&mut t));
+        std::thread::park_timeout(std::time::Duration::from_millis(100));
+        t.read_pty();
+        // Once the terminal is raw.
+        if !pasted && screen(&mut t).starts_with('R') {
+            let text: String = (0..len)
+                .map(|i| char::from(b'a' + (i % 26) as u8))
+                .collect();
+            t.paste(&text, false).unwrap();
+            pasted = true;
+        }
+    }
+    // wc pads its count on some platforms.
+    let shown: String = screen(&mut t).split_whitespace().collect();
+    assert_eq!(shown, format!("R{len}"));
+}

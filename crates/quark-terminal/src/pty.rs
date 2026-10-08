@@ -1,8 +1,10 @@
 //! A child process on a pseudo terminal: a Unix PTY, or ConPTY on Windows
 //! (through `portable-pty`). A reader thread reads output into a few pooled
 //! buffers and calls back when there is some; the UI thread takes it with
-//! [`Pty::read`] and hands the buffers back. Input and resizes go through
-//! [`Pty`] on the UI thread.
+//! [`Pty::read`] and hands the buffers back. Input goes into a bounded
+//! queue that a writer thread feeds to the program, so the UI never waits
+//! on a program that is busy writing instead of reading. Resizes go
+//! through [`Pty`] on the UI thread.
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -109,6 +111,12 @@ pub enum PtyEvent<'a> {
 /// held back instead of queuing without bound. 256 KiB per terminal.
 const BUFFERS: usize = 4;
 const BUFFER_LEN: usize = 64 * 1024;
+
+/// Input bytes queued for the writer thread; [`Pty::write`] takes no more
+/// until it catches up.
+pub const INPUT_QUEUE: usize = 1024 * 1024;
+/// Bytes the writer thread takes from the queue per write.
+const WRITE_CHUNK: usize = 64 * 1024;
 
 /// Output passed from the reader thread to the UI thread in a fixed set of
 /// buffers, so reading allocates nothing after spawn.
@@ -233,9 +241,15 @@ impl Inbox {
                 return;
             };
             drop(state);
-            f(PtyEvent::Output(&buf[..len]));
-            self.lock().free.push(buf);
-            self.returned.notify_one();
+            // Returns the buffer to the pool even if `f` panics, so the
+            // reader is never left waiting for it.
+            let lease = Lease {
+                inbox: self,
+                buf: Some(buf),
+            };
+            f(PtyEvent::Output(
+                &lease.buf.as_ref().expect("leased")[..len],
+            ));
         }
         self.wake();
     }
@@ -246,11 +260,117 @@ impl Inbox {
     }
 }
 
+/// An output buffer lent to [`Inbox::drain`]'s callback.
+struct Lease<'a> {
+    inbox: &'a Inbox,
+    buf: Option<Box<[u8]>>,
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buf.take() {
+            self.inbox.lock().free.push(buf);
+            self.inbox.returned.notify_one();
+        }
+    }
+}
+
+/// Input waiting for the writer thread.
+struct Outbox {
+    state: Mutex<OutboxState>,
+    /// Signalled when input arrives or the PTY closes.
+    queued: Condvar,
+}
+
+struct OutboxState {
+    queue: VecDeque<u8>,
+    /// [`Pty::write`] turned bytes away since the writer last made room.
+    refused: bool,
+    /// The program stopped taking input.
+    failed: bool,
+    closed: bool,
+}
+
+impl Outbox {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(OutboxState {
+                queue: VecDeque::new(),
+                refused: false,
+                failed: false,
+                closed: false,
+            }),
+            queued: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, OutboxState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues what fits of `bytes` and returns how much did.
+    fn push(&self, bytes: &[u8]) -> io::Result<usize> {
+        let mut state = self.lock();
+        if state.failed {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let n = bytes.len().min(INPUT_QUEUE - state.queue.len());
+        state.queue.extend(&bytes[..n]);
+        state.refused |= n < bytes.len();
+        drop(state);
+        if n > 0 {
+            self.queued.notify_one();
+        }
+        Ok(n)
+    }
+
+    /// The writer thread: feeds queued input to `writer` until the PTY
+    /// closes or the program stops reading, and wakes the UI (`inbox`)
+    /// when it makes room for input [`Pty::write`] turned away.
+    fn run(&self, writer: &mut dyn Write, inbox: &Inbox) {
+        let mut chunk = vec![0; WRITE_CHUNK];
+        loop {
+            let (n, refused) = {
+                let mut state = self.lock();
+                while state.queue.is_empty() && !state.closed {
+                    state = self.queued.wait(state).unwrap_or_else(|e| e.into_inner());
+                }
+                if state.closed {
+                    return;
+                }
+                let n = state.queue.len().min(chunk.len());
+                for (to, from) in chunk.iter_mut().zip(state.queue.drain(..n)) {
+                    *to = from;
+                }
+                (n, std::mem::take(&mut state.refused))
+            };
+            if refused {
+                inbox.wake();
+            }
+            if writer
+                .write_all(&chunk[..n])
+                .and_then(|()| writer.flush())
+                .is_err()
+            {
+                let mut state = self.lock();
+                state.failed = true;
+                state.queue = VecDeque::new();
+                return;
+            }
+        }
+    }
+
+    fn close(&self) {
+        self.lock().closed = true;
+        self.queued.notify_all();
+    }
+}
+
 /// A running child on a PTY. Dropping it kills the child.
 pub struct Pty {
     /// `None` once the child exited on Windows (see [`Pty::spawn`]).
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-    writer: Box<dyn Write + Send>,
+    outbox: Arc<Outbox>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     geometry: PtyGeometry,
     inbox: Arc<Inbox>,
@@ -267,8 +387,10 @@ impl std::fmt::Debug for Pty {
 impl Pty {
     /// Starts `command` on a new PTY of `geometry`. `on_ready` runs, on
     /// the reader thread or in [`Self::read`], when output or the exit
-    /// waits to be read; once, until [`Self::read`] empties the queue.
-    /// Point it at the app's waker and call [`Self::read`] when it fires.
+    /// waits to be read; once, until [`Self::read`] empties the queue. It
+    /// also runs, on the writer thread, when input [`Self::write`] turned
+    /// away now fits. Point it at the app's waker and call [`Self::read`]
+    /// when it fires.
     pub fn spawn(
         command: &PtyCommand,
         geometry: PtyGeometry,
@@ -286,9 +408,18 @@ impl Pty {
         drop(pair.slave);
         let killer = child.clone_killer();
         let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-        let writer = pair.master.take_writer().map_err(io::Error::other)?;
+        let mut writer = pair.master.take_writer().map_err(io::Error::other)?;
         let inbox = Arc::new(Inbox::new(on_ready));
         let shared = Arc::clone(&inbox);
+        let outbox = Arc::new(Outbox::new());
+        {
+            let (outbox, inbox) = (Arc::clone(&outbox), Arc::clone(&inbox));
+            // Blocks in a write while the program is not reading; dropping
+            // the Pty kills the program, which fails the write and ends it.
+            std::thread::Builder::new()
+                .name("quark-terminal-write".into())
+                .spawn(move || outbox.run(&mut writer, &inbox))?;
+        }
         let master = Arc::new(Mutex::new(Some(pair.master)));
         #[cfg(windows)]
         let console = Arc::clone(&master);
@@ -312,7 +443,7 @@ impl Pty {
             })?;
         Ok(Self {
             master,
-            writer,
+            outbox,
             killer,
             geometry,
             inbox,
@@ -329,13 +460,17 @@ impl Pty {
         Arc::clone(&self.inbox)
     }
 
-    /// Writes input (keys, pastes, query replies) to the program.
-    pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+    /// Queues input (keys, pastes, query replies) for the program and
+    /// returns how many bytes fit; never waits for the program to read. At
+    /// most [`INPUT_QUEUE`] bytes wait. Keep the rest and offer it again
+    /// after the next `on_ready` wake (see [`Self::spawn`]), which comes
+    /// once the queue has room. Fails once the program stopped reading
+    /// input (it exited).
+    pub fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
-        self.writer.write_all(bytes)?;
-        self.writer.flush()
+        self.outbox.push(bytes)
     }
 
     /// Tells the program the grid changed size (SIGWINCH on Unix).
@@ -363,6 +498,7 @@ impl Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         self.inbox.close();
+        self.outbox.close();
         let _ = self.killer.kill();
     }
 }
@@ -523,6 +659,86 @@ mod tests {
         };
         assert!(words.contains(expected), "{words}");
         assert_eq!(exit, Some(Some(0)));
+    }
+
+    /// Spawns `script` under `sh` on a raw PTY (no echo, no line editing
+    /// or output translation), waking this thread.
+    #[cfg(unix)]
+    fn raw_sh(script: &str) -> Pty {
+        let ui = thread::current();
+        let command = PtyCommand::new("sh")
+            .arg("-c")
+            .arg(format!("stty raw -echo; {script}"));
+        let size = PtyGeometry {
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        Pty::spawn(&command, size, move || ui.unpark()).unwrap()
+    }
+
+    /// Input of `len` bytes no line discipline treats specially.
+    #[cfg(unix)]
+    fn input(len: usize) -> Vec<u8> {
+        (0..len).map(|i| b'a' + (i % 26) as u8).collect()
+    }
+
+    /// A program that writes a lot of output before it reads its input
+    /// gets a large paste while the UI keeps draining its output: queueing
+    /// the paste returns at once, and every byte arrives both ways.
+    #[cfg(unix)]
+    #[test]
+    fn a_large_paste_to_a_program_busy_writing_does_not_block() {
+        const LEN: usize = 1024 * 1024;
+        let mut pty = raw_sh(&format!(
+            "head -c {LEN} /dev/zero | tr '\\000' x; head -c {LEN}"
+        ));
+        let paste = input(LEN);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut out = Vec::new();
+        let mut exit = None;
+        let mut pasted = false;
+        while exit.is_none() {
+            // Paste once output shows the terminal is raw, while the
+            // program still has most of its output to write.
+            if !pasted && !out.is_empty() {
+                assert!(out.len() < LEN / 2, "the program wrote too fast");
+                let started = std::time::Instant::now();
+                assert_eq!(pty.write(&paste).unwrap(), LEN);
+                assert!(
+                    started.elapsed() < Duration::from_secs(1),
+                    "the write waited"
+                );
+                pasted = true;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stuck at {} bytes",
+                out.len()
+            );
+            thread::park_timeout(Duration::from_millis(100));
+            pty.read(|event| match event {
+                PtyEvent::Output(bytes) => out.extend_from_slice(bytes),
+                PtyEvent::Exited(code) => exit = Some(code),
+            });
+        }
+        assert_eq!(out.len(), 2 * LEN);
+        assert!(out[..LEN].iter().all(|&b| b == b'x'));
+        assert!(out[LEN..] == paste[..], "the paste arrived changed");
+    }
+
+    /// Input past the queue is turned away rather than waited on, and
+    /// closing the PTY while its writer is stuck mid-write returns at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_full_queue_turns_input_away_and_closing_does_not_wait() {
+        let mut pty = raw_sh("sleep 30");
+        let paste = input(3 * INPUT_QUEUE);
+        assert_eq!(pty.write(&paste).unwrap(), INPUT_QUEUE);
+        let started = std::time::Instant::now();
+        drop(pty);
+        assert!(started.elapsed() < Duration::from_secs(2), "closing waited");
     }
 
     /// A reader waiting for a buffer the UI never returns stops when the
