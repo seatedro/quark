@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use crate::store::Outcome;
@@ -56,7 +56,15 @@ pub struct Highlighted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerGone;
 
-type HighlightFn = Arc<dyn Fn(&LanguageId, &str) -> Outcome + Send + Sync>;
+/// Highlights a source, stopping early once the callback returns true.
+type Highlight = dyn Fn(&LanguageId, &str, &dyn Fn() -> bool) -> Outcome + Send + Sync;
+type HighlightFn = Arc<Highlight>;
+
+/// The newest generation requested per slot, written by
+/// [`HighlightWorker::request`] before the job is sent, so a highlight in
+/// progress can see that it was superseded without draining the channel.
+/// A slot's entry goes once its newest generation is done.
+type Latest = Arc<Mutex<HashMap<u64, u64>>>;
 
 /// Highlights requests on one background thread with a [`GrammarStore`]'s
 /// grammars. A slot is one code block; when several requests for a slot
@@ -71,22 +79,27 @@ type HighlightFn = Arc<dyn Fn(&LanguageId, &str) -> Outcome + Send + Sync>;
 /// result with a higher revision each time an arriving grammar changes it,
 /// unless a newer request for the slot superseded it.
 ///
+/// A highlight in progress stops at its next checkpoint (tree-sitter polls
+/// one every hundred or so parse or query steps) once a newer request for
+/// its slot arrives, and yields no result.
+///
 /// A highlight that panics yields a result with no spans (the block stays
 /// plain) and the thread keeps serving requests.
 pub struct HighlightWorker {
     jobs: Option<Sender<Message>>,
     done: Receiver<Highlighted>,
     thread: Option<JoinHandle<()>>,
-    /// Set on drop so the thread stops between highlights instead of
+    /// Set on drop so the thread stops at the next checkpoint instead of
     /// finishing its batch while the dropping thread waits.
     cancel: Arc<AtomicBool>,
+    latest: Latest,
 }
 
 impl HighlightWorker {
     pub fn new(store: GrammarStore) -> Self {
         let highlighter = store.clone();
-        let worker = Self::with_highlighter(Arc::new(move |language, source| {
-            highlighter.highlight(language, source)
+        let worker = Self::with_highlighter(Arc::new(move |language, source, cancelled| {
+            highlighter.highlight_until(language, source, cancelled)
         }));
         if let Some(jobs) = worker.jobs.clone() {
             store.subscribe(move || jobs.send(Message::Retry).is_ok());
@@ -98,16 +111,18 @@ impl HighlightWorker {
         let (jobs, job_rx) = channel::<Message>();
         let (done_tx, done) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let stop = cancel.clone();
+        let latest = Latest::default();
+        let (stop, newest) = (cancel.clone(), latest.clone());
         let thread = std::thread::Builder::new()
             .name("quark-syntax".to_owned())
-            .spawn(move || run(&job_rx, &done_tx, &stop, &*highlight))
+            .spawn(move || run(&job_rx, &done_tx, &stop, &newest, &*highlight))
             .ok();
         Self {
             jobs: Some(jobs),
             done,
             thread,
             cancel,
+            latest,
         }
     }
 
@@ -122,11 +137,16 @@ impl HighlightWorker {
             done,
             thread: None,
             cancel: Arc::new(AtomicBool::new(true)),
+            latest: Latest::default(),
         }
     }
 
     pub fn request(&self, slot: u64, generation: u64, language: LanguageId, source: Arc<str>) {
         if let Some(jobs) = &self.jobs {
+            let mut latest = lock(&self.latest);
+            let newest = latest.entry(slot).or_insert(generation);
+            *newest = (*newest).max(generation);
+            drop(latest);
             let _ = jobs.send(Message::Job(Job {
                 slot,
                 generation,
@@ -163,7 +183,7 @@ impl Drop for HighlightWorker {
     fn drop(&mut self) {
         // The flag stops a batch in progress; `Stop` ends the thread's loop
         // (the store's subscription keeps a sender, so the channel does not
-        // close). The wait is at most one highlight.
+        // close). The wait is at most one checkpoint.
         self.cancel.store(true, Ordering::Relaxed);
         if let Some(jobs) = self.jobs.take() {
             let _ = jobs.send(Message::Stop);
@@ -186,7 +206,8 @@ fn run(
     messages: &Receiver<Message>,
     done: &Sender<Highlighted>,
     cancel: &AtomicBool,
-    highlight: &(dyn Fn(&LanguageId, &str) -> Outcome + Send + Sync),
+    latest: &Mutex<HashMap<u64, u64>>,
+    highlight: &Highlight,
 ) {
     // Jobs whose grammars were pending, newest per slot, rerun on `Retry`.
     let mut parked: HashMap<u64, Parked> = HashMap::new();
@@ -234,10 +255,32 @@ fn run(
             let Some(job) = newest.remove(&slot) else {
                 continue;
             };
+            let superseded = || {
+                cancel.load(Ordering::Relaxed)
+                    || lock(latest)
+                        .get(&slot)
+                        .is_some_and(|&newest| newest > job.generation)
+            };
             // A grammar bug must not take the thread down: every later block
             // would silently stay plain.
-            let outcome = catch_unwind(AssertUnwindSafe(|| highlight(&job.language, &job.source)))
-                .unwrap_or_default();
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                highlight(&job.language, &job.source, &superseded)
+            }))
+            .unwrap_or_default();
+            if superseded() {
+                // The newer job is queued and replaces this one, parked
+                // state included.
+                continue;
+            }
+            {
+                let mut latest = lock(latest);
+                if latest
+                    .get(&slot)
+                    .is_some_and(|&newest| newest <= job.generation)
+                {
+                    latest.remove(&slot);
+                }
+            }
             let mut previous = retried.remove(&slot);
             if let Some(unchanged) = previous.take_if(|previous| {
                 previous.spans == outcome.spans && previous.unresolved == outcome.unresolved
@@ -275,11 +318,16 @@ fn run(
     }
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // The map stays valid if a panic interrupted an update.
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn panics_on_boom(_: &LanguageId, source: &str) -> Outcome {
+    fn panics_on_boom(_: &LanguageId, source: &str, _: &dyn Fn() -> bool) -> Outcome {
         assert_ne!(source, "boom", "highlighter bug");
         Outcome {
             spans: vec![HighlightSpan {
@@ -306,5 +354,35 @@ mod tests {
         let next = worker.recv().map(|r| (r.slot, r.spans.len()));
 
         assert_eq!((failed, next), (Ok((1, 0)), Ok((2, 1))));
+    }
+
+    // Catches a superseded highlight running to the end and publishing:
+    // once a newer generation of its slot is requested, the highlight in
+    // progress sees it at its next checkpoint and sends no result.
+    #[test]
+    fn superseded_highlight_stops_at_a_checkpoint_without_a_result() {
+        let (started_tx, started) = channel();
+        let (resume_tx, resume) = channel::<()>();
+        let (seen_tx, seen) = channel();
+        let resume = Mutex::new(resume);
+        let worker = HighlightWorker::with_highlighter(Arc::new(move |_, source, cancelled| {
+            if source == "first" {
+                started_tx.send(()).unwrap();
+                resume.lock().unwrap().recv().unwrap();
+                // The checkpoint a real highlight reaches while parsing.
+                seen_tx.send(cancelled()).unwrap();
+            }
+            panics_on_boom(&rust(), source, cancelled)
+        }));
+        worker.request(1, 1, rust(), Arc::from("first"));
+        started.recv().unwrap();
+        worker.request(1, 2, rust(), Arc::from("second"));
+        resume_tx.send(()).unwrap();
+        let first_result = worker.recv().map(|r| (r.generation, r.source));
+
+        assert_eq!(
+            (seen.recv(), first_result),
+            (Ok(true), Ok((2, Arc::from("second"))))
+        );
     }
 }

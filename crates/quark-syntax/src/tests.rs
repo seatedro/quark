@@ -333,7 +333,7 @@ fn injection_limits_table() {
     ];
     let mut results = Vec::new();
     for (name, limits) in cases {
-        let outcome = store.highlight_within(&rust, source, limits);
+        let outcome = store.highlight_within(&rust, source, limits, &|| false);
         let colored = outcome
             .spans
             .iter()
@@ -350,6 +350,91 @@ fn injection_limits_table() {
             ("bytes", false, true),
         ]
     );
+}
+
+// Catches injection discovery doing work no limit pays for: past the
+// layer and depth limits the search stops at the first region it cannot
+// use, and regions that never become layers (no grammar) stop at the
+// discovery limit instead of every match being visited.
+#[test]
+fn injection_discovery_stops_at_its_limits_table() {
+    const NOLANG: &str = "((macro_invocation (token_tree) @injection.content)
+ (#set! injection.language \"nolang\"))";
+    let Some((_root, store)) = fixture_store(&["rust"], &[("rust-nolang", "rust", NOLANG)]) else {
+        return;
+    };
+    let siblings = "m!(x);\n".repeat(1000);
+    let nested = format!("{}x{};\n", "m!(".repeat(200), ")".repeat(200));
+    let defaults = engine::Limits::for_source(siblings.len());
+    let cases = [
+        (
+            "layers",
+            "rust",
+            &siblings,
+            engine::Limits {
+                layers: 2,
+                ..defaults
+            },
+        ),
+        (
+            "depth",
+            "rust",
+            &nested,
+            engine::Limits {
+                depth: 2,
+                ..defaults
+            },
+        ),
+        (
+            "discovery",
+            "rust-nolang",
+            &siblings,
+            engine::Limits {
+                discovery: 50,
+                ..defaults
+            },
+        ),
+    ];
+    let mut results = Vec::new();
+    for (name, tag, source, limits) in cases {
+        let outcome = store.highlight_within(&language(tag), source, limits, &|| false);
+        results.push((
+            name,
+            outcome.truncated,
+            outcome.work.layers,
+            outcome.work.discovered,
+        ));
+    }
+
+    assert_eq!(
+        results,
+        [
+            ("layers", true, 2, 3),
+            ("depth", true, 2, 3),
+            ("discovery", true, 0, 50),
+        ]
+    );
+}
+
+// Catches a cancelled highlight parsing on: once cancellation is asked
+// for during the host parse, the parse stops there, nothing is
+// highlighted, and nothing polls again.
+#[test]
+fn highlight_cancelled_mid_parse_stops_at_that_checkpoint() {
+    let Some(store) = testing::store_with("rust") else {
+        return;
+    };
+    let source = "fn f() { m!(x); }\n".repeat(2000);
+    // Poll 1 is before the host parse; poll 2 is inside it.
+    let polls = std::cell::Cell::new(0);
+    let cancelled = || {
+        polls.set(polls.get() + 1);
+        polls.get() >= 2
+    };
+
+    let outcome = store.highlight_until(&language("rust"), &source, &cancelled);
+
+    assert_eq!((outcome.spans.len(), polls.get()), (0, 2));
 }
 
 #[cfg(feature = "download")]

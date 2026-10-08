@@ -103,28 +103,41 @@ impl GrammarStore {
     /// languages embedded in it, or returns no spans while the grammar is
     /// still on its way.
     pub(crate) fn highlight(&self, language: &LanguageId, source: &str) -> Outcome {
+        self.highlight_until(language, source, &|| false)
+    }
+
+    /// [`Self::highlight`], stopping with no spans once `cancelled`
+    /// returns true (it is polled while parsing and searching).
+    pub(crate) fn highlight_until(
+        &self,
+        language: &LanguageId,
+        source: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Outcome {
         #[cfg(feature = "engine")]
         {
             self.highlight_within(
                 language,
                 source,
                 crate::engine::Limits::for_source(source.len()),
+                cancelled,
             )
         }
         #[cfg(not(feature = "engine"))]
         {
-            let _ = (language, source);
+            let _ = (language, source, cancelled);
             Outcome::default()
         }
     }
 
-    /// [`Self::highlight`] with explicit bounds on embedded layers.
+    /// [`Self::highlight_until`] with explicit bounds on embedded layers.
     #[cfg(feature = "engine")]
     pub(crate) fn highlight_within(
         &self,
         language: &LanguageId,
         source: &str,
         limits: crate::engine::Limits,
+        cancelled: &dyn Fn() -> bool,
     ) -> Outcome {
         let Some(inner) = &self.inner else {
             return Outcome::default();
@@ -133,19 +146,24 @@ impl GrammarStore {
             Tag::Ready(grammar) => {
                 // Each lookup takes the state lock only to clone a handle;
                 // parsing runs without it.
-                let found = crate::engine::highlight(&grammar, source, limits, &mut |embedded| {
-                    inner.lookup(embedded.as_str())
-                });
+                let found = crate::engine::highlight(
+                    &grammar,
+                    source,
+                    limits,
+                    &mut |embedded| inner.lookup(embedded.as_str()),
+                    cancelled,
+                );
                 Outcome {
                     spans: found.spans,
                     unresolved: found.unresolved,
                     truncated: found.truncated,
+                    work: found.work,
                 }
             }
             Tag::Pending => Outcome {
                 spans: Vec::new(),
                 unresolved: vec![language.clone()],
-                truncated: false,
+                ..Outcome::default()
             },
             Tag::Unavailable => Outcome::default(),
         }
@@ -163,6 +181,9 @@ pub(crate) struct Outcome {
     /// Bounds on embedded layers left some regions unparsed.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) truncated: bool,
+    #[cfg(feature = "engine")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) work: crate::engine::Work,
 }
 
 impl Outcome {
