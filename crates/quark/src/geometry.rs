@@ -75,3 +75,45 @@ impl Rect {
         }
     }
 }
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Whole-point edges, possibly negative sizes, so every sum is exact.
+    fn any_rect() -> Rect {
+        let coord = || f32::from(kani::any::<i8>() % 16);
+        Rect {
+            x: coord(),
+            y: coord(),
+            width: coord(),
+            height: coord(),
+        }
+    }
+
+    fn inside(r: Rect, x: f32, y: f32) -> bool {
+        x > r.x && y > r.y && x < r.right() && y < r.bottom()
+    }
+
+    /// The intersection is symmetric, has positive area, and holds exactly
+    /// the points both rects hold; `None` means the rects share no
+    /// interior point.
+    #[kani::proof]
+    fn intersection_holds_exactly_the_points_of_both() {
+        let (a, b) = (any_rect(), any_rect());
+        // Half points too, so a point can sit strictly between two edges.
+        let x = f32::from(kani::any::<i8>() % 64) / 2.0;
+        let y = f32::from(kani::any::<i8>() % 64) / 2.0;
+
+        let overlap = a.intersection(b);
+
+        assert!(overlap == b.intersection(a));
+        match overlap {
+            Some(r) => {
+                assert!(r.width > 0.0 && r.height > 0.0);
+                assert!(r.contains(x, y) == (a.contains(x, y) && b.contains(x, y)));
+            }
+            None => assert!(!(inside(a, x, y) && inside(b, x, y))),
+        }
+    }
+}

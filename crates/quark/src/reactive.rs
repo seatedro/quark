@@ -669,6 +669,49 @@ impl Default for SignalStore {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const OPS: usize = 5;
+
+    /// Any five creates and disposes, where a dispose may name any handle
+    /// made so far (live or already disposed): every live handle reads
+    /// its own value, and a disposed one never resolves again, even once
+    /// a later signal reuses its slot. Generation wraparound after 2^32
+    /// reuses of one slot is beyond this bound.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn reused_slots_never_alias_a_handle() {
+        let store = SignalStore::new();
+        let mut made: [Option<Signal<u8>>; OPS] = [None; OPS];
+        let mut alive = [false; OPS];
+        for step in 0..OPS {
+            if kani::any() {
+                made[step] = Some(store.create(step as u8));
+                alive[step] = true;
+            } else {
+                let j: usize = kani::any();
+                kani::assume(j < step);
+                if let Some(signal) = made[j] {
+                    store.dispose(signal);
+                    alive[j] = false;
+                }
+            }
+        }
+        let mut live = 0;
+        for j in 0..OPS {
+            let Some(signal) = made[j] else { continue };
+            assert!(store.inner_ref().live(signal.id) == alive[j]);
+            if alive[j] {
+                assert!(store.read_untracked(signal) == j as u8);
+                live += 1;
+            }
+        }
+        assert!(store.len() == live);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

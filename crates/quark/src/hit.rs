@@ -412,6 +412,94 @@ impl HitTable {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const N: usize = 3;
+
+    /// Whole points, so every edge sum is exact in `f32`.
+    fn any_rect() -> Rect {
+        let side = || f32::from(kani::any::<u8>() % 8);
+        Rect {
+            x: side(),
+            y: side(),
+            width: side(),
+            height: side(),
+        }
+    }
+
+    /// Three entries with any bounds, clips, z, and blockers: the stack
+    /// under any point holds exactly the entries whose bounds and clip
+    /// contain it, topmost first (z, then later paint), down to and
+    /// including the topmost blocker. After a reset the old ids resolve
+    /// to nothing, though new entries reuse their indices.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn stack_at_is_topmost_first_down_to_a_blocker_and_old_ids_go_stale() {
+        let mut table = HitTable::default();
+        let mut ids = [HitId { frame: 0, index: 0 }; N];
+        let mut hit = [false; N];
+        let mut blocks = [false; N];
+        let mut z = [0i32; N];
+        let x = f32::from(kani::any::<u8>() % 8);
+        let y = f32::from(kani::any::<u8>() % 8);
+        for i in 0..N {
+            let bounds = any_rect();
+            let clip = if kani::any() { any_rect() } else { UNCLIPPED };
+            z[i] = i32::from(kani::any::<u8>() % 3);
+            blocks[i] = kani::any();
+            let flags = if blocks[i] {
+                HitFlags::BLOCKS_MOUSE | HitFlags::HOVER
+            } else {
+                HitFlags::HOVER
+            };
+            ids[i] = table.push(bounds, clip, z[i], flags, CursorHint::Default);
+            hit[i] = bounds.contains(x, y) && clip.contains(x, y);
+        }
+        let key = |i: usize| (z[i], i);
+        // The topmost blocker under the point; everything listed is at or
+        // above it.
+        let mut floor = None;
+        for i in 0..N {
+            if hit[i] && blocks[i] && floor.is_none_or(|f| key(i) > f) {
+                floor = Some(key(i));
+            }
+        }
+        let listed = |i: usize| hit[i] && floor.is_none_or(|f| key(i) >= f);
+
+        let stack = table.stack_at(x, y);
+
+        let mut expected = 0;
+        for i in 0..N {
+            assert!(table.row(ids[i]) == Some(i));
+            expected += usize::from(listed(i));
+        }
+        assert!(stack.len() == expected);
+        for (k, id) in stack.iter().enumerate() {
+            let i = table.row(*id).unwrap();
+            assert!(listed(i));
+            if k > 0 {
+                assert!(key(i) < key(table.row(stack[k - 1]).unwrap()));
+            }
+        }
+
+        table.reset();
+        for _ in 0..N {
+            table.push(
+                any_rect(),
+                UNCLIPPED,
+                0,
+                HitFlags::HOVER,
+                CursorHint::Default,
+            );
+        }
+        for id in ids {
+            assert!(table.row(id).is_none());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
