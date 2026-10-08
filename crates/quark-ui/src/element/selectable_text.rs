@@ -328,15 +328,15 @@ pub(super) fn register_selectable(cx: &mut ElementContext, mut region: Selectabl
     }
 }
 
-/// Static text that wraps to `width` and supports mouse drag-selection + copy.
-/// Selection state lives in app state (keyed by byte offsets into the source
+/// Static text that wraps to its box (or an explicit width) and supports
+/// mouse drag-selection + copy. Selection state lives in app state (keyed by byte offsets into the source
 /// string, which survive re-wrap); the element renders the highlight from a
 /// resolved `selection` range and registers a `SelectableTextRegion` for input.
 pub struct SelectableText {
     /// Shared so a caller that keeps its spans (a document block) builds
     /// the element every frame without copying their text.
     spans: Arc<[StyledSpan]>,
-    width: f32,
+    wrap: WrapMode,
     font_size: f32,
     /// Base font for text outside any span's overrides.
     font_kind: FontKind,
@@ -358,7 +358,7 @@ pub fn selectable_text(text: impl Into<String>) -> SelectableText {
 pub fn selectable_rich_text(spans: impl Into<Arc<[StyledSpan]>>) -> SelectableText {
     SelectableText {
         spans: spans.into(),
-        width: 0.0,
+        wrap: WrapMode::Auto,
         font_size: 0.0,
         font_kind: FontKind::Ui,
         font_weight: FontWeight::Normal,
@@ -371,8 +371,23 @@ pub fn selectable_rich_text(spans: impl Into<Arc<[StyledSpan]>>) -> SelectableTe
 }
 
 impl SelectableText {
+    /// Wraps lines at `w` points; the element is `w` wide whatever its
+    /// container offers. Without it, the text wraps to the width layout
+    /// gives it, like [`text`].
     pub fn width(mut self, w: f32) -> Self {
-        self.width = w;
+        self.wrap = WrapMode::Explicit(w);
+        self
+    }
+
+    /// Keep each line whole at its natural width instead of wrapping it to
+    /// its box.
+    pub fn no_wrap(mut self) -> Self {
+        self.wrap = WrapMode::NoWrap;
+        self
+    }
+
+    pub fn wrap(mut self, mode: WrapMode) -> Self {
+        self.wrap = mode;
         self
     }
     pub fn size(mut self, s: f32) -> Self {
@@ -434,11 +449,21 @@ impl SelectableText {
         weight: FontWeight,
         width: f32,
     ) -> TextParams {
+        Self::params(spans, font_size, kind, weight, Some(width))
+    }
+
+    fn params(
+        spans: &[StyledSpan],
+        font_size: f32,
+        kind: FontKind,
+        weight: FontWeight,
+        width: Option<f32>,
+    ) -> TextParams {
         let style = TextStyle::new(font_size)
             .kind(kind)
             .weight(weight)
             .line_height(Self::line_height_for(font_size));
-        styled_params(spans, style, Some(width.max(1.0)))
+        styled_params(spans, style, width.map(|w| w.max(1.0)))
     }
 
     /// Height the element lays out at for `layout` (from
@@ -449,14 +474,10 @@ impl SelectableText {
         max_lines: Option<usize>,
     ) -> f32 {
         let line_height = Self::line_height_for(font_size);
-        let height = match layout {
-            Some(layout) => match max_lines.and_then(|n| layout.line(n)) {
-                Some(first_hidden) => first_hidden.top,
-                None => layout.size().1,
-            },
-            None => line_height,
-        };
-        height.max(line_height).ceil()
+        match layout {
+            Some(layout) => text_height(layout, max_lines, line_height),
+            None => line_height.ceil(),
+        }
     }
 }
 
@@ -566,26 +587,44 @@ impl Element for SelectableText {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
-        let params = Self::layout_params(
+        let explicit = match self.wrap {
+            WrapMode::Explicit(width) => Some(width),
+            WrapMode::Auto | WrapMode::NoWrap => None,
+        };
+        let params = Self::params(
             &self.spans,
             self.font_size,
             self.font_kind,
             self.font_weight,
-            self.width,
+            explicit,
         );
+        // Unwrapped unless the width is explicit; automatic wrapping
+        // reshapes at the resolved width in prepaint.
         let layout = cx.layout_text(&params);
-        let height = Self::measured_height(layout.as_deref(), self.font_size, self.max_lines);
-        let id = engine.request_layout(
-            taffy::Style {
-                size: taffy::Size {
-                    width: taffy::Dimension::length(self.width),
-                    height: taffy::Dimension::length(height),
-                },
-                flex_shrink: 0.0,
-                ..Default::default()
-            },
-            &[],
-        );
+        let id = match (self.wrap, &layout) {
+            (WrapMode::Auto, Some(unwrapped)) => engine.request_text_layout(
+                &taffy::Style::default(),
+                TextMeasure::new(unwrapped.clone(), Self::line_height_for(self.font_size))
+                    .max_lines(self.max_lines),
+            ),
+            _ => {
+                let width =
+                    explicit.unwrap_or_else(|| layout.as_ref().map_or(0.0, |l| l.size().0.ceil()));
+                let height =
+                    Self::measured_height(layout.as_deref(), self.font_size, self.max_lines);
+                engine.request_layout(
+                    taffy::Style {
+                        size: taffy::Size {
+                            width: taffy::Dimension::length(width),
+                            height: taffy::Dimension::length(height),
+                        },
+                        flex_shrink: 0.0,
+                        ..Default::default()
+                    },
+                    &[],
+                )
+            }
+        };
         (id, layout)
     }
 
@@ -596,6 +635,20 @@ impl Element for SelectableText {
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> Vec<LinkHits> {
+        // Shaped at the width layout resolved, which the last measure query
+        // may not have been (it can be an intrinsic-size probe). Link hits,
+        // `max_lines` clipping, paint, and the selectable region all use
+        // this layout.
+        let wrapped = match layout_state {
+            Some(unwrapped) if self.wrap == WrapMode::Auto => {
+                auto_wrap_width(bounds.width, unwrapped.size().0.ceil())
+                    .and_then(|w| cx.layout_text_query(&unwrapped.query().wrap_width(Some(w))))
+            }
+            _ => None,
+        };
+        if wrapped.is_some() {
+            *layout_state = wrapped;
+        }
         match layout_state {
             Some(layout) => register_link_hits(&self.spans, layout, (bounds.x, bounds.y), cx),
             None => Vec::new(),
@@ -691,5 +744,275 @@ impl Element for SelectableText {
 impl IntoAnyElement for SelectableText {
     fn into_any(self) -> AnyElement {
         element_into_any(self)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::string_slice)]
+mod tests {
+    use super::*;
+
+    const SENTENCE: &str = "the quick brown fox jumps over the lazy dog";
+    /// 14pt selectable text.
+    const LINE: f32 = 14.0 * 1.35;
+    const SWATCH: Color = Color::rgba(10, 20, 30, 255);
+
+    /// A window's text state and element cache, kept across frames, and
+    /// what the last frame registered for input.
+    struct Window {
+        text: TextSystem,
+        layouts: LayoutCache,
+        signals: SignalStore,
+        theme: Theme,
+        cache: ElementCache,
+        regions: Vec<SelectableTextRegion>,
+        router: InputRouter,
+    }
+
+    /// What a frame painted: each selectable region's box and lines, the
+    /// text runs, selection highlights, clips, and where the `SWATCH` box
+    /// landed.
+    #[derive(Debug, PartialEq)]
+    struct Frame {
+        regions: Vec<(Rect, Vec<String>)>,
+        texts: Vec<Rect>,
+        highlights: Vec<Rect>,
+        clips: Vec<Rect>,
+        swatch: Option<Rect>,
+    }
+
+    impl Frame {
+        fn region(&self) -> &(Rect, Vec<String>) {
+            assert_eq!(self.regions.len(), 1, "{self:?}");
+            &self.regions[0]
+        }
+    }
+
+    fn lines(layout: &TextLayout) -> Vec<String> {
+        layout
+            .lines()
+            .map(|line| layout.text()[line.byte_range].to_owned())
+            .collect()
+    }
+
+    impl Window {
+        fn new() -> Self {
+            Self {
+                text: TextSystem::vendored_only(&Default::default()),
+                layouts: LayoutCache::default(),
+                signals: SignalStore::new(),
+                theme: Theme::default_dark(),
+                cache: ElementCache::new(),
+                regions: Vec::new(),
+                router: InputRouter::default(),
+            }
+        }
+
+        fn paint(&mut self, root: impl IntoAnyElement) -> Frame {
+            self.layouts.begin_frame();
+            let highlight = self.theme.colors.accent.with_alpha(Alpha::SOFT);
+            let mut cx = ElementContext::new(
+                &self.theme,
+                1.0,
+                &mut self.text,
+                &mut self.layouts,
+                None,
+                &self.signals,
+            )
+            .with_accessibility(false)
+            .with_element_cache(&mut self.cache);
+            cx.semantic = SemanticFrame::new(400.0, 300.0);
+            let mut scene = Scene::default();
+            render_element(&mut root.into_any(), &mut scene, &mut cx, 400.0, 300.0);
+            self.regions = std::mem::take(&mut cx.selectable_text_runs);
+            self.router.set_frame(cx.take_input_frame());
+
+            let mut frame = Frame {
+                regions: self
+                    .regions
+                    .iter()
+                    .map(|r| (r.bounds, lines(&r.layout)))
+                    .collect(),
+                texts: Vec::new(),
+                highlights: Vec::new(),
+                clips: Vec::new(),
+                swatch: None,
+            };
+            for primitive in &scene.primitives {
+                match primitive {
+                    quark_render::Primitive::RichTextRun(run) => frame.texts.push(run.rect),
+                    quark_render::Primitive::RoundedRect(r) if r.color == SWATCH => {
+                        frame.swatch = Some(r.rect);
+                    }
+                    quark_render::Primitive::RoundedRect(r) if r.color == highlight => {
+                        frame.highlights.push(r.rect);
+                    }
+                    quark_render::Primitive::ClipStart(clip) => frame.clips.push(clip.rect),
+                    _ => {}
+                }
+            }
+            frame
+        }
+
+        /// Width of `s` on one line.
+        fn width_of(&mut self, s: &str) -> f32 {
+            let params = TextParams::new(s, TextStyle::new(14.0).line_height(LINE));
+            self.layouts
+                .layout(&mut self.text, &params)
+                .expect("layout")
+                .size()
+                .0
+        }
+
+        /// The URLs a click at `(x, y)` opens.
+        fn click(&mut self, x: f32, y: f32) -> Vec<Arc<str>> {
+            self.router
+                .pointer_down(x, y, &mut None)
+                .actions
+                .iter()
+                .filter_map(|a| a.downcast_ref::<LinkClicked>())
+                .map(|link| link.url.clone())
+                .collect()
+        }
+    }
+
+    fn swatch() -> Div {
+        div().w(10.0).h(10.0).bg(SWATCH)
+    }
+
+    fn sentence() -> SelectableText {
+        selectable_text(SENTENCE).size(14.0)
+    }
+
+    /// `content` above the swatch in a column `width` wide.
+    fn column(width: f32, content: impl IntoAnyElement) -> Div {
+        div().w(width).flex_col().child(content).child(swatch())
+    }
+
+    /// Lines that are a whole number of words of `SENTENCE`, each no wider
+    /// than `width`.
+    fn assert_wrapped(window: &mut Window, lines: &[String], width: f32) {
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(lines.concat(), SENTENCE, "{lines:?}");
+        for line in lines {
+            assert!(!line.starts_with(' '), "{lines:?}");
+            assert!(window.width_of(line.trim_end()) <= width, "{line:?}");
+        }
+    }
+
+    // Catches selectable text that ignores the width a flex row leaves it,
+    // a measured height that disagrees with the painted lines (the swatch
+    // would overlap or float below them), and a selection highlight or hit
+    // mapped through a layout other than the painted one.
+    #[test]
+    fn selectable_text_wraps_to_a_constrained_flex_width() {
+        let mut window = Window::new();
+        let lazy = SENTENCE.find("lazy").expect("word");
+        let row = div()
+            .flex_row()
+            .child(div().w(50.0).h(5.0).flex_shrink_0())
+            .child(sentence().selection(Some((lazy, lazy + 4))));
+        let frame = window.paint(column(200.0, row));
+
+        let (bounds, lines) = frame.region().clone();
+        assert_eq!(bounds.width, 150.0);
+        assert_wrapped(&mut window, &lines, 150.0);
+        assert_eq!(
+            frame.swatch.expect("swatch").y,
+            bounds.y + (lines.len() as f32 * LINE).ceil()
+        );
+
+        let [highlight] = frame.highlights[..] else {
+            panic!("{frame:?}");
+        };
+        assert!(highlight.y > bounds.y, "not on a wrapped line: {frame:?}");
+        assert!(highlight.right() <= bounds.right(), "{frame:?}");
+        let region = &window.regions[0];
+        let mid = highlight.y + highlight.height / 2.0;
+        assert_eq!(region.hit(highlight.x + 0.5, mid), lazy);
+        assert_eq!(region.hit(highlight.right() - 0.5, mid), lazy + 4);
+    }
+
+    // Catches link hits registered on the unwrapped layout: a link that
+    // wraps onto a second line opens from every line it is painted on.
+    #[test]
+    fn a_wrapped_link_opens_from_each_painted_line() {
+        let mut window = Window::new();
+        let spans = vec![
+            StyledSpan::plain("see "),
+            StyledSpan::plain("the quick brown fox jumps").link("https://quark.dev"),
+            StyledSpan::plain(" over the lazy dog"),
+        ];
+        window.paint(column(120.0, selectable_rich_text(spans).size(14.0)));
+
+        let region = window.regions[0].clone();
+        let start = "see ".len();
+        let link = start..start + "the quick brown fox jumps".len();
+        let rects: Vec<Rect> = region.layout.selection_rects(link).collect();
+        assert!(rects.len() > 1, "link fits one line: {rects:?}");
+        for rect in rects {
+            let x = region.text_origin.0 + rect.x + rect.width / 2.0;
+            let y = region.text_origin.1 + rect.y + rect.height / 2.0;
+            assert!(x < region.bounds.right(), "{rect:?}");
+            assert_eq!(
+                window.click(x, y),
+                [Arc::from("https://quark.dev")],
+                "{rect:?}"
+            );
+        }
+    }
+
+    // Catches `max_lines` measured or clipped against the unwrapped
+    // layout: automatically wrapped text is as tall as its first lines and
+    // clips the rest at its box.
+    #[test]
+    fn max_lines_clips_automatically_wrapped_text() {
+        let mut window = Window::new();
+        let frame = window.paint(column(120.0, sentence().max_lines(2)));
+
+        let (bounds, lines) = frame.region().clone();
+        assert!(lines.len() > 2, "{lines:?}");
+        assert_eq!(bounds.height, (2.0 * LINE).ceil());
+        assert_eq!(frame.swatch.expect("swatch").y, bounds.bottom());
+        assert_eq!(frame.clips, [bounds]);
+    }
+
+    // Catches the opt-outs following automatic wrapping: an explicit
+    // width holds past a narrower container, and no-wrap keeps one line
+    // at the natural width.
+    #[test]
+    fn wrap_modes_override_the_container_width() {
+        let mut window = Window::new();
+        let frame = window.paint(column(100.0, sentence().width(150.0)));
+        let (bounds, lines) = frame.region().clone();
+        assert_eq!(bounds.width, 150.0);
+        assert_wrapped(&mut window, &lines, 150.0);
+        assert_eq!(
+            frame.swatch.expect("swatch").y,
+            (lines.len() as f32 * LINE).ceil()
+        );
+
+        let natural = window.width_of(SENTENCE).ceil();
+        let frame = window.paint(column(100.0, sentence().no_wrap()));
+        let (bounds, lines) = frame.region();
+        assert_eq!((bounds.width, lines.len()), (natural, 1));
+    }
+
+    // Catches a cache boundary replaying lines, link hits, or a selectable
+    // region recorded at another width: after the container narrows, the
+    // frame matches one a fresh window paints.
+    #[test]
+    fn cached_text_rewraps_like_a_fresh_build_after_a_width_change() {
+        let block = || {
+            cached("selectable", 1, || {
+                let lazy = SENTENCE.find("lazy").expect("word");
+                sentence().selection(Some((lazy, lazy + 4))).into_any()
+            })
+        };
+        let mut window = Window::new();
+        window.paint(column(300.0, block()));
+        let narrow = window.paint(column(120.0, block()));
+        assert_eq!(narrow, Window::new().paint(column(120.0, block())));
+        assert!(narrow.region().1.len() > 2, "{narrow:?}");
     }
 }

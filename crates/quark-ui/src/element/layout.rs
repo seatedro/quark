@@ -57,6 +57,8 @@ pub(super) struct TextMeasure {
     unwrapped: Arc<TextLayout>,
     /// Height of one line; the element is never shorter.
     line_height: f32,
+    /// Lines shown; the element is as tall as these and clips the rest.
+    max_lines: Option<usize>,
     /// Min-content width, once asked for.
     min_content: Option<f32>,
 }
@@ -66,8 +68,14 @@ impl TextMeasure {
         Self {
             unwrapped,
             line_height,
+            max_lines: None,
             min_content: None,
         }
+    }
+
+    pub(super) fn max_lines(mut self, max_lines: Option<usize>) -> Self {
+        self.max_lines = max_lines;
+        self
     }
 
     fn max_content(&self) -> f32 {
@@ -101,16 +109,23 @@ impl TextMeasure {
             AvailableSpace::Definite(offered) => offered.min(self.max_content()),
         });
         let height = known.height.unwrap_or_else(|| {
-            let height = match auto_wrap_width(width, self.max_content()) {
-                None => self.unwrapped.size().1,
-                Some(wrap) => cx
-                    .layout(&self.unwrapped.query().wrap_width(Some(wrap)))
-                    .map_or(self.unwrapped.size().1, |layout| layout.size().1),
-            };
-            height.max(self.line_height).ceil()
+            let wrapped = auto_wrap_width(width, self.max_content())
+                .and_then(|wrap| cx.layout(&self.unwrapped.query().wrap_width(Some(wrap))));
+            let layout = wrapped.as_deref().unwrap_or(&self.unwrapped);
+            text_height(layout, self.max_lines, self.line_height)
         });
         taffy::Size { width, height }
     }
+}
+
+/// Height of `layout` showing at most `max_lines`, never shorter than one
+/// line, in whole pixels.
+pub(super) fn text_height(layout: &TextLayout, max_lines: Option<usize>, line_height: f32) -> f32 {
+    let height = match max_lines.and_then(|n| layout.line(n)) {
+        Some(first_hidden) => first_hidden.top,
+        None => layout.size().1,
+    };
+    height.max(line_height).ceil()
 }
 
 /// The wrap width automatically wrapped text of max-content width
@@ -352,7 +367,8 @@ impl LayoutEngine {
             // context keeps taffy's cached sizes for it.
             (Context::Measure(NodeMeasure::Text(text)), Some(NodeMeasure::Text(old)))
                 if Arc::ptr_eq(&text.unwrapped, &old.unwrapped)
-                    && text.line_height == old.line_height => {}
+                    && text.line_height == old.line_height
+                    && text.max_lines == old.max_lines => {}
             (context, _) => {
                 tree.set_node_context(node, context.into_measure())
                     .expect("valid node");
