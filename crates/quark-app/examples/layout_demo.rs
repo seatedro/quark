@@ -42,6 +42,7 @@ enum Msg {
     Duplicate,
     ToggleDense,
     DragOut(&'static str),
+    DragOutCancelled(&'static str),
     MenuTitle(usize),
     Menu(MenuPick),
 }
@@ -277,7 +278,11 @@ impl DragHandler for DragOutRow {
     }
 
     fn on_cancel(&mut self) -> Vec<Action> {
-        Vec::new()
+        if self.sent {
+            vec![Msg::DragOutCancelled(self.file).into()]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -366,6 +371,9 @@ impl UiApp for Demo {
                     }
                     Err(error) => error.to_string(),
                 };
+            }
+            Msg::DragOutCancelled(file) => {
+                self.status = format!("Cancelled dragging {file}");
             }
             Msg::MenuTitle(index) => {
                 if let Some(menu) = &mut self.menu {
