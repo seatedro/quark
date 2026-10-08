@@ -226,13 +226,32 @@ impl UiApp for ControlsDemo {
                 let before = self.theme.selected();
                 let focus = self.theme.update(m, &self.themes, now_ms).focus;
                 if self.theme.selected() != before {
-                    match self.theme.selected() {
-                        Some(1) => cx.set_theme(Theme::default_light()),
-                        Some(2) => cx.set_theme(Theme::default_dark()),
-                        Some(3) => {
-                            cx.set_themes(Theme::high_contrast_light(), Theme::high_contrast_dark())
+                    use quark_app::winit::window::Theme as WindowTheme;
+                    let window_theme = match self.theme.selected() {
+                        Some(1) => {
+                            cx.set_theme(Theme::default_light());
+                            Some(WindowTheme::Light)
                         }
-                        _ => cx.set_themes(Theme::default_light(), Theme::default_dark()),
+                        Some(2) => {
+                            cx.set_theme(Theme::default_dark());
+                            Some(WindowTheme::Dark)
+                        }
+                        Some(3) => {
+                            cx.set_themes(
+                                Theme::high_contrast_light(),
+                                Theme::high_contrast_dark(),
+                            );
+                            None
+                        }
+                        _ => {
+                            cx.set_themes(Theme::default_light(), Theme::default_dark());
+                            None
+                        }
+                    };
+                    // The title bar follows a fixed choice; `None` hands it
+                    // back to the desktop's preference.
+                    if let Some(window) = cx.window.window() {
+                        window.set_theme(window_theme);
                     }
                 }
                 focus

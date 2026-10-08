@@ -38,6 +38,7 @@ pub struct Div {
     clips: bool,
     block_mouse: bool,
     focus_target: Option<FocusId>,
+    focus_ring_offset: f32,
     tooltip: Option<std::sync::Arc<str>>,
     hit_identity: Option<HitIdentity>,
     semantic_id: Option<UiNodeId>,
@@ -91,6 +92,7 @@ pub fn div() -> Div {
         clips: false,
         block_mouse: false,
         focus_target: None,
+        focus_ring_offset: 0.0,
         tooltip: None,
         hit_identity: None,
         semantic_id: None,
@@ -437,6 +439,17 @@ impl Div {
 
     pub fn focus_ring(mut self, target: FocusId) -> Self {
         self.focus_target = Some(target);
+        self
+    }
+
+    /// Draw the focus ring `gap` points outside the element instead of
+    /// against its edge. For controls without a visible boundary of their
+    /// own (a radio row, a switch with its label), whose content reaches
+    /// their bounds and would otherwise touch the ring. A negative gap of
+    /// the ring's width draws it just inside, for elements whose parent
+    /// clips them (a tab in a strip).
+    pub fn focus_ring_offset(mut self, gap: f32) -> Self {
+        self.focus_ring_offset = gap;
         self
     }
 
@@ -998,24 +1011,7 @@ impl Element for Div {
         if let Some(target) = ring_target
             && cx.is_focused(target)
         {
-            let ring_inset = -2.0;
-            let ring_bounds = Rect {
-                x: bounds.x + ring_inset,
-                y: bounds.y + ring_inset,
-                width: bounds.width - ring_inset * 2.0,
-                height: bounds.height - ring_inset * 2.0,
-            };
-            // The ring sits outside the bounds, where siblings painted later
-            // (a hovered neighbor's background) would cover it; one z above
-            // the element's own keeps it on top of them and under overlays.
-            scene.push_z_index(cx.current_z_index() + 1);
-            scene.border(BorderPrimitive {
-                rect: ring_bounds,
-                widths: [2.0; 4],
-                corner_radii: radii.map(|c| c + 2.0),
-                color: cx.theme.colors.focus_border,
-            });
-            scene.pop_z_index();
+            paint_focus_ring(scene, cx, bounds, radii, self.focus_ring_offset);
         }
 
         let click_action = self.on_click.clone();
@@ -1343,4 +1339,34 @@ impl IntoAnyElement for Div {
     fn into_any(self) -> AnyElement {
         element_into_any(self)
     }
+}
+
+/// Paint the keyboard focus ring `offset` points outside `bounds`, rounded
+/// to follow corners of `radii`. Every focusable element and text field
+/// rings through here, so the ring looks the same on all of them.
+pub(crate) fn paint_focus_ring(
+    scene: &mut Scene,
+    cx: &ElementContext,
+    bounds: Bounds,
+    radii: [f32; 4],
+    offset: f32,
+) {
+    let outset = offset + Sz::FOCUS_RING_W;
+    let ring_bounds = Rect {
+        x: bounds.x - outset,
+        y: bounds.y - outset,
+        width: bounds.width + outset * 2.0,
+        height: bounds.height + outset * 2.0,
+    };
+    // The ring sits outside the bounds, where siblings painted later (a
+    // hovered neighbor's background) would cover it; one z above the
+    // element's own keeps it on top of them and under overlays.
+    scene.push_z_index(cx.current_z_index() + 1);
+    scene.border(BorderPrimitive {
+        rect: ring_bounds,
+        widths: [Sz::FOCUS_RING_W; 4],
+        corner_radii: radii.map(|c| c + outset),
+        color: cx.theme.colors.focus_border,
+    });
+    scene.pop_z_index();
 }

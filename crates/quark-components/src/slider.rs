@@ -158,7 +158,7 @@ impl RenderOnce for Slider {
         let width = self.width.unwrap_or((220.0 * scale).round());
         let value_text = format!("{value:.*}", range.decimals());
         let (fill, rest, knob) = if self.disabled {
-            (tc.text_muted, tc.element_background, tc.text_muted)
+            (tc.text_disabled, tc.element_background, tc.text_disabled)
         } else {
             (tc.accent, tc.element_background, tc.text_strong)
         };
@@ -167,7 +167,7 @@ impl RenderOnce for Slider {
         let page = self.page.unwrap_or(range.step * 10.0);
         let change = &self.on_change;
         let track = view! {
-            <div class="flex-row items-center" w={width} h={thumb + 4.0 * scale}
+            <div class="flex-row items-center" w={width} min_w={thumb * 3.0} h={thumb + 4.0 * scale}
                  rounded={thumb / 2.0} accessibility_id={self.id.clone()} test_id="slider"
                  accessibility_role={accesskit::Role::Slider} aria-label={self.label.clone()}
                  aria-valuetext={value_text.clone()}
@@ -213,14 +213,16 @@ impl RenderOnce for Slider {
                      bg={rest} />
             </div>
         };
+        // `width` is the track's preferred width: in a narrower container the
+        // track gives way, down to a few thumbs, so the value stays in view.
         view! {
-            <div class="flex-row items-center" gap={m.spacing_sm}>
+            <div class="flex-row items-center min-w-0" gap={m.spacing_sm}>
                 {BoundsProbe {
                     child: track,
                     bounds: probe,
                 }}
                 if self.show_value {
-                    <text class="text-sm" color={if self.disabled { tc.text_muted } else { tc.text }}>
+                    <text class="text-sm" color={if self.disabled { tc.text_disabled } else { tc.text }}>
                         {value_text}
                     </text>
                 }

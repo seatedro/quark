@@ -1303,6 +1303,44 @@ fn focus_ring_draws_above_later_siblings() {
     assert!(ring_z > hover_z, "ring z {ring_z}, sibling z {hover_z}");
 }
 
+// Catches a focused text field showing focus fainter than other controls:
+// it recolored its 1pt border while every other control drew the 2pt
+// ring, which in high contrast left the field barely marked.
+#[test]
+fn focused_text_field_draws_the_same_ring_as_other_controls() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store).with_focus(Some(FOCUS_LIST));
+    let mut scene = Scene::default();
+    let ring = Theme::default_dark().colors.focus_border;
+
+    let mut root = div()
+        .w(300.0)
+        .h(200.0)
+        .p(20.0)
+        .gap(20.0)
+        .flex_col()
+        .child(div().w(100.0).h(20.0).focus_ring(FOCUS_LIST))
+        .child(text_input("City", "").focused(true).w(200.0).h(60.0))
+        .into_any();
+    render_element(&mut root, &mut scene, &mut cx, 300.0, 200.0);
+
+    let rings: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            quark_render::Primitive::Border(b) if b.color == ring => Some(b),
+            _ => None,
+        })
+        .collect();
+    let [control, field] = rings[..] else {
+        panic!("expected a ring per focused element, got {rings:?}");
+    };
+    assert_eq!(field.widths, control.widths);
+    // Outside the field's 60pt height, as the control's is outside its 20.
+    assert_eq!(field.rect.height - 60.0, control.rect.height - 20.0);
+}
+
 #[test]
 fn focus_tree_registers_focus_ring_and_text_input_targets() {
     let mut ts = TestText::new();

@@ -65,7 +65,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ghostty_deps::{Source, needed, parse_dependencies};
+use ghostty_deps::{Source, ZIG_SERIES, needed, parse_dependencies, zig_supported};
 
 /// The Ghostty commit libghostty-vt is built from. Moving it means
 /// updating the hash below (`zig fetch URL` prints it), checking
@@ -150,6 +150,11 @@ fn build_with_zig(os: &str, archive: &str) -> PathBuf {
     let optimize = env::var("QUARK_GHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
     let target = zig_target(os);
     let zig_version = zig_version(&zig);
+    assert!(
+        zig_supported(&zig_version),
+        "quark-terminal: libghostty-vt needs Zig {ZIG_SERIES}, but {zig:?} is {zig_version}. \
+         Point ZIG at a Zig {ZIG_SERIES} binary. {HELP}."
+    );
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     // OUT_DIR is <target>/<profile>/build/<pkg>-<hash>/out.
     let cache_root = out

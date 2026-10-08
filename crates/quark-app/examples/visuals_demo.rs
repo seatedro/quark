@@ -156,7 +156,7 @@ impl UiApp for Visuals {
                          class="w-[90] h-[90] items-center justify-center rounded-[10] bg-[colors.accent]"
                          rotate={self.turns as f32 * FRAC_PI_4}
                          transition={(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))}>
-                        <text color={colors.text_strong} class="font-semibold">"Turn"</text>
+                        <text color={colors.on_accent} class="font-semibold">"Turn"</text>
                     </div>
                     <div class="relative w-[180] h-[120] flex-row">
                         for i in 0..6 {

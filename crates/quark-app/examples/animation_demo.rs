@@ -30,13 +30,21 @@ struct AnimationDemo {
     panel_open: bool,
 }
 
-fn button(key: &str, label: &str, idle: Color, hover: Color, msg: Option<Msg>) -> AnyElement {
+/// A button whose fill animates from `idle` to `hover`, with a label color
+/// readable on each: `ink` and `hover_ink`.
+fn button(
+    key: &str,
+    label: &str,
+    (idle, ink): (Color, Color),
+    (hover, hover_ink): (Color, Color),
+    msg: Option<Msg>,
+) -> AnyElement {
     view! {
         <div key={key} test_id={key} class="px-4 h-9 items-center justify-center rounded-[8] bg-[idle]"
-             hover_bg={hover}
+             hover_bg={hover} hover_text_color={hover_ink}
              transition={(Prop::Background, Motion::tween(180, Curve::EaseOutCubic))}
              on:click={if let Some(msg) = msg { msg }}>
-            <text class="font-semibold">{label}</text>
+            <text class="font-semibold" color={ink}>{label}</text>
         </div>
     }
 }
@@ -48,24 +56,25 @@ impl UiApp for AnimationDemo {
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
         let colors = &cx.theme.colors;
+        let (white, black) = (Color::rgba(255, 255, 255, 255), Color::rgba(0, 0, 0, 255));
         let swatches = [
             (
                 "demo.blue",
                 "Blue",
-                Color::rgba(37, 99, 235, 255),
-                Color::rgba(250, 204, 21, 255),
+                (Color::rgba(37, 99, 235, 255), white),
+                (Color::rgba(250, 204, 21, 255), black),
             ),
             (
                 "demo.red",
                 "Red",
-                Color::rgba(220, 38, 38, 255),
-                Color::rgba(16, 185, 129, 255),
+                (Color::rgba(220, 38, 38, 255), white),
+                (Color::rgba(16, 185, 129, 255), black),
             ),
             (
                 "demo.ghost",
                 "Ghost",
-                Color::TRANSPARENT,
-                Color::rgba(168, 85, 247, 255),
+                (Color::TRANSPARENT, colors.text),
+                (Color::rgba(168, 85, 247, 255), black),
             ),
         ];
         let panel_x = if self.panel_open {
@@ -93,8 +102,8 @@ impl UiApp for AnimationDemo {
                     {button(
                         "demo.toggle",
                         "Toggle panel",
-                        colors.accent,
-                        colors.accent_strong,
+                        (colors.accent, colors.on_accent),
+                        (colors.accent_strong, colors.on_accent),
                         Some(Msg::TogglePanel),
                     )}
                 </div>

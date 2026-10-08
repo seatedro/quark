@@ -36,6 +36,10 @@ impl SegmentedItem {
     }
 }
 
+/// How much faster a segment's side padding gives way than its label, so
+/// labels truncate only once the padding is gone.
+const PAD_SHRINK: f32 = 1000.0;
+
 /// The id a [`SegmentedControl`] uses until [`SegmentedControl::id`] sets
 /// one.
 const DEFAULT_ID: &str = "segmented-control";
@@ -77,7 +81,7 @@ impl RenderOnce for SegmentedControl {
         let tab_stop = selected.or((len > 0).then_some(0));
 
         view! {
-            <div class="flex-row shrink-0 items-center overflow-hidden" id={self.id.clone()}
+            <div class="flex-row min-w-0 items-center overflow-hidden" id={self.id.clone()}
                  test_id="segmented-control" role="radiogroup"
                  accessibility_role={accesskit::Role::RadioGroup}
                  accessibility_id={self.id.clone()} bg={tc.element_background}
@@ -89,10 +93,13 @@ impl RenderOnce for SegmentedControl {
                      on_key={("arrowleft", self.items[to].action.clone())}
                  }>
                 for (i, item) in self.items.into_iter().enumerate() {
-                    <div class="flex-1 items-center justify-center"
+                    // Segments keep their natural widths and give way in a
+                    // narrow container: first their side padding, then their
+                    // labels, which truncate rather than spill past it.
+                    <div class="flex-auto min-w-0 flex-row items-center justify-center"
                          id={format!("segmented:{:?}:{}", item.action, item.label)}
                          key={item.label.clone()} test_id="segmented-item" role="radio"
-                         px={Sp::MD * scale} py={Sp::XXS * scale} rounded={Rad::LG * scale}
+                         py={Sp::XXS * scale} rounded={Rad::LG * scale}
                          focus_ring={list_nav::item_focus(base, i)}
                          accessibility_role={accesskit::Role::RadioButton}
                          accessibility_id={format!("segmented:{:?}:{}", item.action, item.label)}
@@ -104,10 +111,12 @@ impl RenderOnce for SegmentedControl {
                          }
                          @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
                          @when {let Some(tip) = item.tooltip_text} { tooltip={tip} }>
-                        <text class="text-sm font-medium"
+                        <div w={Sp::MD * scale} flex_shrink_val={PAD_SHRINK} />
+                        <text class="text-sm font-medium truncate"
                               color={if item.selected { tc.text } else { tc.text_muted }}>
                             {item.label}
                         </text>
+                        <div w={Sp::MD * scale} flex_shrink_val={PAD_SHRINK} />
                     </div>
                 }
             </div>

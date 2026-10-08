@@ -271,6 +271,8 @@ fn keys_encode_for_the_active_keyboard_mode() {
             ("", key(None, Some("a"), alt), "\x1ba")
         },
         ("", key(Some(NamedKey::Enter), None, none), "\r"),
+        // X11's Linefeed key types "\n" and sends LF, as in xterm.
+        ("", key(None, Some("\n"), none), "\n"),
         ("", key(Some(NamedKey::Backspace), None, none), "\x7f"),
         ("", key(Some(NamedKey::Tab), None, none), "\t"),
         ("", key(Some(NamedKey::Escape), None, none), "\x1b"),
@@ -845,4 +847,33 @@ fn report_frame_timing() {
             }
         }
     }
+}
+
+// Catches a light theme keeping Ghostty's dark-background ANSI colors:
+// green, yellow, and blue were 1.7, 1.4, and 2.3:1 on the light editor.
+#[test]
+fn light_theme_ansi_colors_are_readable_on_its_editor_surface() {
+    use quark_ui::theme::{Theme, contrast_ratio};
+    let theme = Theme::default_light();
+    let palette = crate::state::ansi_colors(theme.mode).expect("a light palette");
+    let bg = theme.colors.editor_surface;
+    // Bright white (15) stays light, as in every light terminal palette.
+    for (i, c) in palette.iter().enumerate().take(15) {
+        let ratio = contrast_ratio(quark_ui::theme::Color::rgba(c.r, c.g, c.b, 255), bg);
+        assert!(ratio >= 4.5, "color {i}: {ratio:.2}");
+    }
+}
+
+// Catches the palette not reaching the terminal: SGR 32 must paint the
+// configured green, not Ghostty's default.
+#[test]
+fn ansi_colors_color_the_cells_programs_pick_by_number() {
+    let mut t = term(20, 2);
+    t.vt_mut().set_ansi_colors(Some(&crate::state::LIGHT_ANSI));
+    t.feed(b"\x1b[32mgo");
+    let grid = t.refresh();
+    assert_eq!(
+        runs(&grid.rows[0]),
+        format!("0+2\"go\" fg={}", crate::state::LIGHT_ANSI[2])
+    );
 }

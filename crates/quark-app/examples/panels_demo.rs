@@ -128,22 +128,10 @@ impl PanelsDemo {
         }
     }
 
-    /// A group's name for the menu and announcements: its region's label,
-    /// numbered when the region is split.
+    /// A group's name for the menu and announcements, as its tab list
+    /// publishes it.
     fn group_name(&self, pane: PaneId) -> String {
-        DockRegion::ALL
-            .into_iter()
-            .find_map(|region| {
-                let groups = self.dock.root(region).groups();
-                let at = groups.iter().position(|g| g.id == pane)?;
-                let label = self.dock.label(region);
-                Some(if groups.len() == 1 {
-                    label.to_owned()
-                } else {
-                    format!("{label} {}", at + 1)
-                })
-            })
-            .unwrap_or_default()
+        self.dock.group_label(pane)
     }
 
     /// Open the "Move to group" menu for `panel` under its tab, listing
@@ -249,7 +237,7 @@ impl PanelsDemo {
             .map_or("No session", |(_, name)| name);
         view! {
             <div w={width} h={height} class="flex-col">
-                {tab_bar(tabs)}
+                {tab_bar(tabs).label("Sessions")}
                 <div class="p-3 gap-[6] flex-col">
                     <text class="font-semibold" color={colors.text_strong}>{current}</text>
                     <text class="text-sm" color={colors.text_muted}>"$ cargo test"</text>
@@ -486,7 +474,8 @@ mod tests {
             ("Sidebar", 1000.0, Some("480")),
             ("Sidebar", -60.0, Some("200")),
             ("Sidebar", -150.0, Some("180")),
-            ("Sidebar", -200.0, None),
+            // Collapsed by the drag, the divider stays to drag back out.
+            ("Sidebar", -200.0, Some("0")),
             ("Right panel", -100.0, Some("520")),
             ("Right panel", -1000.0, Some("698")),
             ("Right panel", 200.0, Some("280")),
@@ -522,15 +511,45 @@ mod tests {
         ui.advance(1_000);
         ui.click_node(divider("Sidebar"));
         ui.key("enter");
-        assert_eq!(announced(&ui, "Sidebar"), None);
         assert!(
             ui.try_find(By::role_name(Role::TabPanel, "Threads"))
                 .is_none()
         );
-
-        ui.key("mod+b");
+        // The divider stays, focused at the edge, so Enter undoes it.
+        assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("0"));
+        assert_eq!(focused_name(&ui).as_deref(), Some("Resize Sidebar"));
+        ui.key("enter");
         assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("400"));
         assert_eq!(divider_x(&ui, "Sidebar"), 400.0);
+
+        // Hidden by its toggle key, it restores the same way.
+        ui.key("mod+b");
+        assert_eq!(announced(&ui, "Sidebar"), None);
+        ui.key("mod+b");
+        assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("400"));
+    }
+
+    #[test]
+    fn home_and_end_move_a_divider_to_its_limits() {
+        // (divider, key, announced size): the sidebar is 180..=480, and
+        // the right panel, pushing the sidebar to its minimum, stops at
+        // 1200 - 2 dividers - 320 - 180 = 698.
+        let cases = [
+            ("Sidebar", "end", "480"),
+            ("Sidebar", "home", "180"),
+            ("Right panel", "end", "698"),
+            ("Right panel", "home", "280"),
+        ];
+        for (label, key, expected) in cases {
+            let mut ui = harness();
+            ui.click_node(divider(label));
+            ui.key(key);
+            assert_eq!(
+                announced(&ui, label).as_deref(),
+                Some(expected),
+                "{label} {key}"
+            );
+        }
     }
 
     #[test]
@@ -762,6 +781,59 @@ mod tests {
         assert_eq!(announcement(&ui).as_deref(), Some("Moved Threads to Chat"));
     }
 
+    // Catches tab lists a screen reader cannot tell apart: both halves of a
+    // split region were named after the region, and the drawer's session
+    // tabs had no name.
+    #[test]
+    fn every_tab_list_has_its_own_name() {
+        let mut ui = harness();
+        ui.key("mod+j");
+        split_right_panel(&mut ui);
+        let names: Vec<String> = ui
+            .find_all(By::role(Role::TabList))
+            .into_iter()
+            .map(|n| n.name.unwrap_or_default())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Sidebar",
+                "Chat",
+                "Drawer",
+                "Sessions",
+                "Right panel 1",
+                "Right panel 2"
+            ]
+        );
+    }
+
+    // Catches a region divider claiming it goes down to 0: the sidebar's
+    // smallest size is 180 (Enter, not resizing, collapses it).
+    #[test]
+    fn region_dividers_publish_their_real_range() {
+        let ui = harness();
+        let id = ui.find(divider("Sidebar")).id.expect("divider id");
+        let (_, node) = ax_node(&ui, &id);
+        assert_eq!(
+            (node.min_numeric_value(), node.max_numeric_value()),
+            (Some(180.0), Some(480.0))
+        );
+    }
+
+    #[test]
+    fn a_tab_moved_out_of_the_sidebar_moves_back() {
+        let mut ui = harness();
+        ui.key("tab");
+        ui.key("mod+shift+pagedown");
+        assert!(
+            ui.try_find(By::role_name(Role::TabList, "Sidebar"))
+                .is_none()
+        );
+        ui.key("mod+shift+pageup");
+        assert_eq!(strip(&ui, "Sidebar"), ["Threads"]);
+        assert_eq!(focused_name(&ui).as_deref(), Some("Threads"));
+    }
+
     #[test]
     fn a_refused_move_leaves_the_dock_and_focus() {
         // (active tab, key): the sidebar is first in tree order, and the
@@ -803,6 +875,14 @@ mod tests {
             announcement(&ui).as_deref(),
             Some("Moved Threads to Drawer")
         );
+    }
+
+    #[test]
+    fn backspace_closes_the_focused_dock_tab() {
+        let mut ui = harness();
+        ui.click_node(By::role_name(Role::Tab, "Diff"));
+        ui.key("backspace");
+        assert!(ui.try_find(By::role_name(Role::Tab, "Diff")).is_none());
     }
 
     #[test]
@@ -870,6 +950,52 @@ mod tests {
         assert_eq!(focused_name(&ui).as_deref(), Some("Files"));
     }
 
+    // Catches a tab's focus ring cut off: the strip clips to its height and
+    // the sidebar's tab sits against the window's left edge, which hid the
+    // ring's top and left sides.
+    #[test]
+    fn a_focused_tabs_ring_lies_inside_the_tab() {
+        for name in ["Threads", "Files"] {
+            let mut ui = harness();
+            ui.click_node(By::role_name(Role::Tab, name));
+            let tab = ui.find(By::role_name(Role::Tab, name)).bounds;
+            let ring_color = ui.theme().colors.focus_border;
+            let ring = ui
+                .scene()
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    quark::Primitive::Border(b) if b.color == ring_color => Some(b.rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name}: no ring"));
+            let inside = ring.x >= tab.x
+                && ring.y >= tab.y
+                && ring.x + ring.width <= tab.x + tab.width
+                && ring.y + ring.height <= tab.y + tab.height;
+            assert!(inside, "{name}: ring {ring:?} outside tab {tab:?}");
+        }
+    }
+
+    // Assistive tech can focus a tab without selecting it; Shift+F10 then
+    // acts on that tab, not the group's selected one.
+    #[test]
+    fn the_move_menu_acts_on_a_tab_focused_without_selecting_it() {
+        let mut ui = harness();
+        ax_action(
+            &mut ui,
+            &Dock::tab_id(FILES),
+            accesskit::Action::Focus,
+            None,
+        );
+        assert_eq!(focused_name(&ui).as_deref(), Some("Files"));
+        ui.key("shift+f10");
+        ui.click_node(By::role_name(Role::MenuItem, "Split right"));
+        // Files splits off into a group of its own; the selected tab stays.
+        ui.find(By::role_name(Role::TabPanel, "Files"));
+        ui.find(By::role_name(Role::TabPanel, "Preview"));
+    }
+
     #[test]
     fn the_move_menu_opens_under_the_focused_tab() {
         let mut ui = harness();
@@ -918,7 +1044,7 @@ mod tests {
         // line, each group at least 100.
         assert_eq!(
             divider_value(&ui),
-            ((210.0, 100.0, 319.0), Some("50%".into()))
+            ((210.0, 100.0, 319.0), Some("210".into()))
         );
         ui.click_node(By::test_id("dock-pane-divider"));
         // (key, divider position, Terminal's group width)

@@ -513,6 +513,25 @@ impl Terminal {
         );
     }
 
+    /// The 16 ANSI colors programs pick by number, over Ghostty's default
+    /// 256-color palette; `None` restores the default.
+    pub fn set_ansi_colors(&mut self, ansi: Option<&[Rgb; 16]>) {
+        let Some(ansi) = ansi else {
+            self.set(sys::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, std::ptr::null());
+            return;
+        };
+        let mut palette = [c_rgb(Rgb::new(0, 0, 0)); 256];
+        // SAFETY: `palette` holds the 256 entries the call writes.
+        unsafe { sys::ghostty_color_palette_default(palette.as_mut_ptr()) };
+        for (slot, color) in palette.iter_mut().zip(ansi) {
+            *slot = c_rgb(*color);
+        }
+        self.set(
+            sys::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+            palette.as_ptr().cast(),
+        );
+    }
+
     // ---- Snapshot -------------------------------------------------------
 
     /// Refreshes `grid` from the terminal: rows the render state marks

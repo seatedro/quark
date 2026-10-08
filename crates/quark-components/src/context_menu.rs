@@ -276,14 +276,14 @@ fn menu_row(
         }
     );
     let fg = if disabled {
-        tc.text_muted
+        tc.text_disabled
     } else if destructive {
         tc.status_error
     } else {
         tc.text
     };
     let icon_color = if disabled {
-        tc.text_muted
+        tc.text_disabled
     } else if destructive {
         tc.status_error
     } else {

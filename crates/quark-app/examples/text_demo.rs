@@ -42,6 +42,8 @@ const GAP: f32 = 8.0;
 /// Toolbar rows above the editor.
 const ROWS: f32 = 5.0;
 const EDITOR_Y: f32 = PAD + ROWS * (ROW_H + GAP);
+/// Space between the editor's rounded surface and its text.
+const EDITOR_INSET: f32 = 10.0;
 
 const LOCALES: [&str; 4] = ["en-US", "de", "ja", "ar"];
 
@@ -232,7 +234,10 @@ impl TextDemo {
             return false;
         };
         let at = layout
-            .hit(x - PAD, y - EDITOR_Y + self.editor.scroll_y)
+            .hit(
+                x - PAD - EDITOR_INSET,
+                y - EDITOR_Y - EDITOR_INSET + self.editor.scroll_y,
+            )
             .get();
         let Some(issue) = self.editor.spelling_at(at) else {
             return false;
@@ -266,7 +271,7 @@ impl TextDemo {
                  class="px-[10] h-[ROW_H] items-center justify-center rounded-[6]"
                  bg={if on { colors.accent } else { colors.element_background }}
                  hover_bg={colors.element_hover}>
-                <text class="text-sm" color={if on { colors.text_strong } else { colors.text }}>
+                <text class="text-sm" color={if on { colors.on_accent } else { colors.text }}>
                     {label}
                 </text>
             </div>
@@ -377,8 +382,8 @@ impl UiApp for TextDemo {
         let (width, height) = cx.frame.size();
         let theme = cx.theme;
         let colors = &theme.colors;
-        let editor_w = (width - 2.0 * PAD).max(100.0);
-        let editor_h = (height - EDITOR_Y - PAD).max(60.0);
+        let editor_w = (width - 2.0 * (PAD + EDITOR_INSET)).max(100.0);
+        let editor_h = (height - EDITOR_Y - PAD - 2.0 * EDITOR_INSET).max(60.0);
         self.editor.set_clock(cx.frame.elapsed().as_millis() as u64);
         self.editor.sync_size(editor_w, editor_h);
         self.editor.flush(&mut cx.frame.text().system);
@@ -386,7 +391,7 @@ impl UiApp for TextDemo {
         view! {
             <div w={width} h={height} class="flex-col p-[PAD] gap-[GAP] bg-[colors.background]">
                 {...self.toolbar(theme)}
-                <div class="bg-[colors.editor_surface] rounded-[8]">
+                <div class="bg-[colors.editor_surface] rounded-[8] p-[EDITOR_INSET]">
                     <text_editor_element(
                         INPUT,
                         ScrollActionBuilder::new(|lines| Msg::Scroll(lines).into()),

@@ -19,6 +19,12 @@ impl Sp {
 pub struct Sz;
 
 impl Sz {
+    /// Width of the keyboard focus ring drawn outside a focused control.
+    pub const FOCUS_RING_W: f32 = 2.0;
+    /// Space between the focus ring and a control without a boundary of
+    /// its own (radio rows, checkboxes, switches), so the ring never
+    /// touches the control's marks or label.
+    pub const FOCUS_RING_GAP: f32 = 2.0;
     pub const CHROME_BAR_H: f32 = 28.0;
     pub const CHROME_TRAFFIC_INSET: f32 = 64.0;
     pub const CHROME_CONTROL_W: f32 = 40.0;
@@ -111,7 +117,6 @@ impl Alpha {
     pub const HOVER: u8 = 230;
     pub const HOVER_ALT: u8 = 220;
     pub const STRONG: u8 = 180;
-    pub const PLACEHOLDER: u8 = 140;
     pub const MEDIUM: u8 = 120;
     pub const MUTED: u8 = 100;
     pub const SOFT: u8 = 80;

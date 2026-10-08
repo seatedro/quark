@@ -51,7 +51,7 @@
 //!                      on:click={Msg::Increment}
 //!                      class="px-4 h-9 items-center rounded-[8] bg-[colors.accent]
 //!                             hover:bg-[colors.accent_strong]">
-//!                     <text color={colors.text_strong}>"Increment"</text>
+//!                     <text color={colors.on_accent}>"Increment"</text>
 //!                 </div>
 //!             </div>
 //!         }

@@ -54,11 +54,11 @@ impl RenderOnce for Checkbox {
         let radius = (m.control_radius * 0.5).max(Sz::CHECKBOX_RAD_MIN * scale);
 
         let (box_bg, box_border, check_color) = if self.disabled {
-            (tc.element_background, tc.border_variant, tc.text_muted)
+            (tc.element_background, tc.border_variant, tc.text_disabled)
         } else if self.checked {
             (tc.accent, tc.accent, tc.on_accent)
         } else {
-            (Color::TRANSPARENT, tc.border, tc.icon)
+            (Color::TRANSPARENT, tc.control_border, tc.icon)
         };
 
         let can_hover = !self.disabled && !self.checked;
@@ -78,13 +78,14 @@ impl RenderOnce for Checkbox {
         let click_action = self.on_toggle.filter(|_| !self.disabled);
         let accessibility_id = format!("checkbox:{:?}:{accessibility_label}", click_action);
         let label_color = if self.disabled {
-            tc.text_muted
+            tc.text_disabled
         } else {
             tc.text
         };
 
         view! {
             <div class="flex-row items-center" gap={m.spacing_sm}
+                 focus_ring_offset={Sz::FOCUS_RING_GAP}
                  id={accessibility_id.clone()}
                  key={accessibility_label.clone()}
                  test-id="checkbox"
@@ -159,7 +160,7 @@ impl RenderOnce for Switch {
         let travel = track_w - thumb_size - 2.0 * thumb_inset;
 
         let (track_bg, thumb_bg) = if self.disabled {
-            (tc.element_background, tc.text_muted)
+            (tc.element_background, tc.text_disabled)
         } else if self.on {
             (tc.accent, tc.on_accent)
         } else {
@@ -177,14 +178,15 @@ impl RenderOnce for Switch {
         let accessibility_id = format!("switch:{:?}:{accessibility_label}", click_action);
 
         let label_color = if self.disabled {
-            tc.text_muted
+            tc.text_disabled
         } else {
             tc.text
         };
         // Keyed by the switch, so the slide animates across frames.
         let thumb_key = format!("{accessibility_id}:thumb");
         view! {
-            <div class="flex-row items-center" gap={m.spacing_sm} rounded={track_h / 2.0}
+            <div class="flex-row items-center" gap={m.spacing_sm}
+                 focus_ring_offset={Sz::FOCUS_RING_GAP}
                  id={accessibility_id.clone()} key={accessibility_label.clone()} test_id="switch"
                  role="switch" accessibility_role={accesskit::Role::Switch}
                  accessibility_id={accessibility_id} aria-label={accessibility_label}

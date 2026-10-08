@@ -11,7 +11,7 @@ use quark_render::scene::Rect;
 use quark_text::{FontEpoch, LayoutCache, TextParams, TextStyle, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{DragStart, ScrollHandle};
-use quark_ui::theme::Theme;
+use quark_ui::theme::{Theme, ThemeMode};
 use winit::keyboard::{ModifiersState, NamedKey};
 
 use crate::grid::{Grid, Rgb};
@@ -221,7 +221,7 @@ pub struct TerminalState {
     /// The cell metrics and what they were measured for: the scale
     /// factor's bits and the text system's font generation.
     metrics: Option<(Metrics, (u32, Option<FontEpoch>))>,
-    colors: Option<(Rgb, Rgb)>,
+    colors: Option<(Rgb, Rgb, ThemeMode)>,
     viewport: (f32, f32),
     /// Grid size in cells, and the scale it was sized at.
     size: (u16, u16, u32),
@@ -568,7 +568,7 @@ impl TerminalState {
         }
         let input = KeyInput {
             key,
-            mods: input::mods(m),
+            mods: press.mods(),
             text: press.typed(),
             unshifted,
             action: if press.repeat {
@@ -966,10 +966,12 @@ impl TerminalState {
         let colors = (
             Rgb::new(c.text.r, c.text.g, c.text.b),
             Rgb::new(c.editor_surface.r, c.editor_surface.g, c.editor_surface.b),
+            theme.mode,
         );
         if self.colors != Some(colors) {
             self.colors = Some(colors);
             self.vt.set_default_colors(colors.0, colors.1);
+            self.vt.set_ansi_colors(ansi_colors(theme.mode));
             self.dirty = true;
         }
         let m = self.metrics();
@@ -1144,6 +1146,32 @@ impl TerminalState {
     pub(crate) fn vt_mut(&mut self) -> &mut Terminal {
         &mut self.vt
     }
+}
+
+/// ANSI colors readable on a light theme's editor surface: at least 4.5:1
+/// for all but bright white, after GitHub's light terminal palette. Dark
+/// themes keep Ghostty's defaults.
+pub(crate) const LIGHT_ANSI: [Rgb; 16] = [
+    Rgb::new(0x24, 0x29, 0x2f),
+    Rgb::new(0xcf, 0x22, 0x2e),
+    Rgb::new(0x11, 0x63, 0x29),
+    Rgb::new(0x4d, 0x2d, 0x00),
+    Rgb::new(0x08, 0x60, 0xca),
+    Rgb::new(0x7a, 0x3f, 0xd8),
+    Rgb::new(0x1a, 0x6f, 0x75),
+    Rgb::new(0x65, 0x6d, 0x76),
+    Rgb::new(0x57, 0x60, 0x6a),
+    Rgb::new(0xa4, 0x0e, 0x26),
+    Rgb::new(0x17, 0x73, 0x34),
+    Rgb::new(0x63, 0x3c, 0x01),
+    Rgb::new(0x05, 0x50, 0xae),
+    Rgb::new(0x66, 0x39, 0xba),
+    Rgb::new(0x13, 0x60, 0x61),
+    Rgb::new(0x8c, 0x95, 0x9f),
+];
+
+pub(crate) fn ansi_colors(mode: ThemeMode) -> Option<&'static [Rgb; 16]> {
+    (mode == ThemeMode::Light).then_some(&LIGHT_ANSI)
 }
 
 /// The palette the view uses from the theme.

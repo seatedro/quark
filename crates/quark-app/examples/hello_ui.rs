@@ -50,7 +50,7 @@ impl HelloUi {
             <div accessibility_id={id} role="button" aria-label={label} on:click={msg}
                  class="px-4 h-9 items-center justify-center rounded-[8]
                         bg-[colors.accent] hover:bg-[colors.accent_strong]">
-                <text class="font-semibold" color={colors.text_strong}>{label}</text>
+                <text class="font-semibold" color={colors.on_accent}>{label}</text>
             </div>
         }
     }

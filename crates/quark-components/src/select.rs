@@ -467,7 +467,7 @@ fn option_row(
             <div class="flex-1">
                 <text class="text-sm truncate"
                       color={if option.disabled {
-                          tc.text_muted
+                          tc.text_disabled
                       } else if selected {
                           tc.text_strong
                       } else {

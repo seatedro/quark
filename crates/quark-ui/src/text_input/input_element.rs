@@ -363,7 +363,7 @@ impl Element for TextEditorElement {
             frame_scale.set(cx.scale_factor);
         }
         if self.is_empty {
-            let placeholder_color = theme.colors.text_muted.with_alpha(Alpha::PLACEHOLDER);
+            let placeholder_color = theme.colors.placeholder;
             let params = TextParams::new(std::mem::take(&mut self.placeholder), style);
             if let Some(layout) = cx.layout_text(&params) {
                 scene.text(TextPrimitive {

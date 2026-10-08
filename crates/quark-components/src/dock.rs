@@ -29,7 +29,7 @@ use std::rc::Rc;
 use accesskit::Role;
 use quark::{TabStop, view};
 use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
-use quark_ui::design::Shadow;
+use quark_ui::design::{Shadow, Sz};
 use quark_ui::element::{
     AnyElement, ClickEvent, CursorHint, DragHandler, DragPreview, DragReleaseResult,
     ElementGeometry, ElementHandle, IntoAnyElement, LayoutSnapshot, div, svg_icon, text,
@@ -414,6 +414,25 @@ impl DockState {
         self.labels[region.index()]
     }
 
+    /// A group's name, which its tab list publishes: its region's label,
+    /// numbered in reading order when the region is split, so no two
+    /// groups share a name.
+    pub fn group_label(&self, pane: PaneId) -> String {
+        DockRegion::ALL
+            .into_iter()
+            .find_map(|region| {
+                let groups = self.roots[region.index()].groups();
+                let at = groups.iter().position(|g| g.id == pane)?;
+                let label = self.label(region);
+                Some(if groups.len() == 1 {
+                    label.to_owned()
+                } else {
+                    format!("{label} {}", at + 1)
+                })
+            })
+            .unwrap_or_default()
+    }
+
     /// Constrain which tab moves cross `region`'s boundary.
     pub fn set_policy(&mut self, region: DockRegion, policy: TabPolicy) {
         self.policies[region.index()] = policy;
@@ -607,6 +626,9 @@ impl DockState {
         let (Some(from), Some(to)) = (self.origin(panel), self.region_of(target.pane)) else {
             return false;
         };
+        // An empty region was hidden for want of panels; one arriving
+        // shows it.
+        let reveal = self.panels(to).is_empty();
         if let Some(group) = self.group_mut(from.pane) {
             group.remove(from.index);
         }
@@ -634,24 +656,33 @@ impl DockState {
         if to != from.region {
             self.settle(to);
         }
+        if reveal {
+            self.set_hidden(to, false);
+        }
         true
     }
 
-    /// Every group of the shown regions, in tree order: left, center,
-    /// bottom, right, and within a region its groups in reading order.
+    /// Every group a tab can move to, in tree order: left, center, bottom,
+    /// right, and within a region its groups in reading order. A shown
+    /// region offers its groups; an empty one, hidden for want of panels,
+    /// offers its root, so a tab moved out of it can move back.
     fn shown_groups(&self) -> Vec<PaneId> {
         TREE_ORDER
             .into_iter()
-            .filter(|r| self.is_visible(*r))
+            .filter(|r| self.takes_moves(*r))
             .flat_map(|r| self.roots[r.index()].groups().into_iter().map(|g| g.id))
             .collect()
     }
 
+    fn takes_moves(&self, region: DockRegion) -> bool {
+        self.is_visible(region) || self.panels(region).is_empty()
+    }
+
     /// Whether [`Self::move_tab`] would move `panel`: `destination` is in
-    /// a shown region and [`Self::can_drop`] allows it.
+    /// a shown or empty region and [`Self::can_drop`] allows it.
     pub fn can_move(&self, panel: PanelId, destination: PaneId, index: Option<usize>) -> bool {
         self.region_of(destination)
-            .is_some_and(|r| self.is_visible(r))
+            .is_some_and(|r| self.takes_moves(r))
             && self.can_drop(panel, move_drop(destination, index))
     }
 
@@ -686,15 +717,21 @@ impl DockState {
             && self.drop_panel(panel, move_drop(destination, index))
     }
 
-    /// The panel whose tab has `focus`, a [`Dock::tab_focus`] target: the
-    /// active panel of that group.
+    /// The panel whose tab has `focus`: a group's [`Dock::tab_focus`]
+    /// target, meaning its active panel, or an inactive tab's own target,
+    /// which assistive technology can focus without selecting the tab.
     pub fn focused_panel(&self, focus: Option<FocusId>) -> Option<PanelId> {
         let focus = focus?;
-        self.roots
-            .iter()
-            .flat_map(PaneNode::groups)
-            .find(|g| Dock::tab_focus(g.id) == focus)?
-            .active_panel()
+        let mut groups = self.roots.iter().flat_map(PaneNode::groups);
+        groups.find_map(|g| {
+            if Dock::tab_focus(g.id) == focus {
+                return g.active_panel();
+            }
+            g.panels
+                .iter()
+                .copied()
+                .find(|&p| FocusId::from_key(&Dock::tab_id(p)) == focus)
+        })
     }
 
     /// The tab being dragged and where it would land, while a drag is over
@@ -1370,7 +1407,7 @@ impl<'a> Dock<'a> {
 
     /// The divider's value for assistive tech is its position in points
     /// from the split's start, with the range [`DockState`] lets it move
-    /// in; its text is that position as a percentage of the split.
+    /// in; its text is that position, in points like a region divider's.
     fn pane_divider(
         &self,
         theme: &Theme,
@@ -1402,6 +1439,7 @@ impl<'a> Dock<'a> {
             })
         };
         let nudge = |delta: f32| event(PaneDividerEvent::Nudge { delta, extent });
+        let to = |position: f32| event(PaneDividerEvent::SetPosition { position, extent });
         let set_position = event.clone();
         let numeric_actions = NumericActions::new(move |position| {
             set_position(PaneDividerEvent::SetPosition {
@@ -1412,11 +1450,6 @@ impl<'a> Dock<'a> {
         .steps(nudge(-NUDGE_STEP), nudge(NUDGE_STEP));
         let avail: f32 = sizes.iter().sum();
         let (at, lo, hi) = divider_span(sizes, divider_min(MIN_GROUP, avail, sizes.len()), divider);
-        let percent = if extent > 0.0 {
-            at / extent * 100.0
-        } else {
-            0.0
-        };
         let drag_map = self.map.clone();
         // The same wide invisible grip as a `Split` divider.
         let grip = 8.0;
@@ -1432,7 +1465,7 @@ impl<'a> Dock<'a> {
                          "quark-resize-named",
                          [("name", self.state.label(region).into())],
                      )}
-                     aria-valuetext={format!("{percent:.0}%")}
+                     aria-valuetext={format!("{at:.0}")}
                      accessibility_numeric={NumericValue {
                          value: f64::from(at),
                          min: f64::from(lo),
@@ -1451,6 +1484,8 @@ impl<'a> Dock<'a> {
                      on_key={(forward, nudge(NUDGE_STEP))}
                      on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
                      on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
+                     // Home and End: the ends of the range it may move in.
+                     on_key={("home", to(lo))} on_key={("end", to(hi))}
                      test_id="dock-pane-divider" cursor={cursor} hover_bg={colors.accent}
                      on:drag={move |press: ClickEvent| {
                          Box::new(PaneDividerDrag {
@@ -1542,7 +1577,7 @@ impl<'a> Dock<'a> {
                  border_b={colors.border_variant}
                  accessibility_id={format!("dock:pane:{}:tabs", group.id.0)}
                  accessibility_role={Role::TabList} role="tablist"
-                 aria-label={self.state.label(region)} test_id="dock-tabs">
+                 aria-label={self.state.group_label(group.id)} test_id="dock-tabs">
                 for (index, &panel) in group.panels.iter().enumerate() {
                     {self.tab(theme, region, group, index, panel, (tab_width, height), drag, title)}
                 }
@@ -1635,11 +1670,15 @@ impl<'a> Dock<'a> {
                          preview: tab_preview(panel, &drag_title, (tab_width, tab_height)),
                      }) as Box<dyn DragHandler>
                  }}
+                 // The strip clips to its height and regions to their
+                 // edges, so the ring is drawn inside the tab.
+                 focus_ring_offset={-Sz::FOCUS_RING_W}
                  @when {selected} {
                      bg={colors.background} focus_ring={Self::tab_focus(pane)}
                      on_key={("left", select(prev))} on_key={("right", select(next))}
                      on_key={("home", select(0))} on_key={("end", select(count - 1))}
-                     on_key={("delete", close.clone())}
+                     // Mac keyboards label Backspace "Delete".
+                     on_key={("delete", close.clone())} on_key={("backspace", close.clone())}
                  }
                  @for (key, action) in &moves {
                      on_key={(key.clone(), action.clone())}
@@ -2054,11 +2093,29 @@ mod tests {
         assert_eq!(dock.move_target(CHAT, true), Some(pane_of(&dock, A)));
     }
 
+    // Catches an emptied region dropping out of the move order: after its
+    // last tab moved out, the sidebar was hidden and no key moved it back.
+    #[test]
+    fn a_tab_moves_back_into_the_region_it_emptied() {
+        let mut dock = dock();
+        assert!(dock.move_tab(LEFT, pane_of(&dock, CHAT), None));
+        assert!(!dock.is_visible(DockRegion::Left));
+
+        let back = dock.move_target(LEFT, false).expect("the empty sidebar");
+        assert!(dock.move_tab(LEFT, back, None));
+        assert_eq!(
+            dock.dump(),
+            "left: [1*]\nright: [10 11 12*]\ncenter: [2*]\n"
+        );
+        assert!(dock.is_visible(DockRegion::Left));
+    }
+
     #[test]
     fn move_targets_skip_groups_policy_refuses() {
         let mut dock = dock();
         dock.set_policy(DockRegion::Center, TabPolicy::SEALED);
-        // Past the sealed center, to the right region.
+        dock.set_policy(DockRegion::Bottom, TabPolicy::SEALED);
+        // Past the sealed center and bottom, to the right region.
         assert_eq!(dock.move_target(LEFT, true), Some(pane_of(&dock, A)));
         dock.confine(LEFT, true);
         assert_eq!(dock.move_target(LEFT, true), None);

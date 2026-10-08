@@ -87,10 +87,23 @@ tokens! {
         modal_surface,
         overlay_scrim,
         border,
+        /// The outline that marks out a control with no fill of its own:
+        /// an unchecked radio or checkbox. At least 3:1 against what it sits
+        /// on (WCAG 1.4.11), unlike `border`, which separates surfaces.
+        control_border,
         border_variant,
         focus_border,
         text,
         text_muted,
+        /// Hint text in an empty field. Opaque, so its contrast does not
+        /// depend on how the renderer blends: at least 4.5:1 over the
+        /// field's fills (`element_background`, and `surface` while
+        /// focused).
+        placeholder,
+        /// Text and marks of a disabled control. In high contrast it stays
+        /// readable (4.5:1) but clearly lighter than `text` and
+        /// `text_muted`, which are too close there to tell states apart.
+        text_disabled,
         text_accent,
         icon,
         element_background,
@@ -380,6 +393,7 @@ fn dark_colors(
         // Borders — subtle but visible separation
         border_soft: n[ElementHover],
         border: n[ElementActive],
+        control_border: n[Solid],
         border_variant: n[ElementHover],
         focus_border: b[Solid],
         empty_state_border: n[ElementActive],
@@ -388,6 +402,8 @@ fn dark_colors(
         text_strong: Color::rgba(240, 240, 245, 255),
         text: n[Text],
         text_muted: n[Solid],
+        placeholder: n[TextSubtle],
+        text_disabled: n[Solid],
         text_accent: b[TextSubtle],
         icon: n[TextSubtle],
         gutter_text: n[BorderStrong],
@@ -483,6 +499,7 @@ fn light_colors(
         // Borders
         border_soft: n[Border],
         border: n[Border],
+        control_border: n[Solid],
         border_variant: n[BorderSubtle],
         focus_border: b[Solid],
         empty_state_border: n[Border],
@@ -491,6 +508,8 @@ fn light_colors(
         text_strong: n[TextStrong],
         text: n[TextStrong],
         text_muted: n[TextSubtle],
+        placeholder: n[TextSubtle],
+        text_disabled: n[TextSubtle],
         text_accent: b[TextSubtle],
         icon: n[TextSubtle],
         gutter_text: n[Solid],
@@ -602,10 +621,13 @@ fn high_contrast_dark_colors() -> ThemeColors {
         modal_surface: rgb(0x141414),
         overlay_scrim: rgba(0x000000, 0xcc),
         border: rgb(0xbdbdbd),
+        control_border: rgb(0xbdbdbd),
         border_variant: rgb(0xa3a3a3),
         focus_border: rgb(0xffd60a),
         text: rgb(0xffffff),
         text_muted: rgb(0xe0e0e0),
+        placeholder: rgb(0xacacac),
+        text_disabled: rgb(0x949494),
         text_accent: rgb(0xb0d9ff),
         icon: rgb(0xe6e6e6),
         element_background: rgb(0x0f0f0f),
@@ -670,10 +692,13 @@ fn high_contrast_light_colors() -> ThemeColors {
         modal_surface: rgb(0xffffff),
         overlay_scrim: rgba(0x000000, 0x99),
         border: rgb(0x4d4d4d),
+        control_border: rgb(0x4d4d4d),
         border_variant: rgb(0x6b6b6b),
         focus_border: rgb(0x7a00cc),
         text: rgb(0x000000),
         text_muted: rgb(0x2e2e2e),
+        placeholder: rgb(0x595959),
+        text_disabled: rgb(0x646464),
         text_accent: rgb(0x00317f),
         icon: rgb(0x1f1f1f),
         element_background: rgb(0xf0f0f0),
@@ -844,7 +869,8 @@ mod tests {
 
     // Catches a high-contrast token edited below its target for a pair a
     // control paints: text, code, and diff text at 7:1, marks over the
-    // accent at 7:1, and borders, focus rings, and accent marks at 3:1.
+    // accent at 7:1, placeholders at 4.5:1, and borders, focus rings, and
+    // accent marks at 3:1.
     #[test]
     fn high_contrast_pairs_meet_their_targets() {
         const SURFACES: &[&str] = &[
@@ -924,6 +950,7 @@ mod tests {
         const BOUNDARIES: &[&str] = &[
             "focus_border",
             "border",
+            "control_border",
             "border_variant",
             "border_soft",
             "empty_state_border",
@@ -948,6 +975,7 @@ mod tests {
             (CODE, CODE_BACKGROUNDS, 7.0),
             (GUTTER, GUTTER_BACKGROUNDS, 7.0),
             (&["on_accent"], &["accent", "accent_strong"], 7.0),
+            (&["placeholder", "text_disabled"], CONTROL_BACKGROUNDS, 4.5),
             (BOUNDARIES, CONTROL_BACKGROUNDS, 3.0),
         ];
         for theme in [Theme::high_contrast_dark(), Theme::high_contrast_light()] {
@@ -982,6 +1010,71 @@ mod tests {
                 }
             }
             assert!(failures.is_empty(), "{:?}: {failures:#?}", theme.mode);
+        }
+    }
+
+    // Catches disabled controls looking enabled in high contrast: the light
+    // theme's disabled radio (#2E2E2E, text_muted) was hard to tell from an
+    // enabled one (#000).
+    #[test]
+    fn high_contrast_disabled_text_stands_apart_from_enabled_text() {
+        for theme in [Theme::high_contrast_dark(), Theme::high_contrast_light()] {
+            let c = &theme.colors;
+            for (name, enabled) in [("text", c.text), ("text_muted", c.text_muted)] {
+                let ratio = contrast_ratio(c.text_disabled, enabled);
+                assert!(
+                    ratio >= 2.0,
+                    "{:?}: text_disabled vs {name}: {ratio:.2}",
+                    theme.mode
+                );
+            }
+        }
+    }
+
+    // Catches an unchecked radio or checkbox fading into what holds it: the
+    // dark theme drew their outlines in `border`, about 1.4:1.
+    #[test]
+    fn standard_control_outlines_stand_out_from_their_backgrounds() {
+        for theme in [Theme::default_dark(), Theme::default_light()] {
+            let c = &theme.colors;
+            for bg in [
+                "background",
+                "surface",
+                "panel",
+                "element_background",
+                "elevated_surface",
+                "modal_surface",
+                "editor_surface",
+                "sidebar_background",
+            ] {
+                let ratio = contrast_ratio(c.control_border, c.get(bg).expect(bg));
+                assert!(
+                    ratio >= 3.0,
+                    "{:?}: control_border on {bg}: {ratio:.2}",
+                    theme.mode
+                );
+            }
+        }
+    }
+
+    // Catches a standard theme's placeholder dropping below WCAG AA over
+    // the fills a text field paints behind it, as the old translucent
+    // text_muted did (about 2:1 once blended).
+    #[test]
+    fn standard_placeholders_are_readable_in_fields() {
+        for theme in [Theme::default_dark(), Theme::default_light()] {
+            let c = &theme.colors;
+            for (name, fill) in [
+                ("element_background", c.element_background),
+                ("surface", c.surface),
+            ] {
+                let ratio = contrast_ratio(c.placeholder, fill);
+                assert!(
+                    c.placeholder.a == 255 && ratio >= 4.5,
+                    "{:?}: placeholder on {name}: {ratio:.2}",
+                    theme.mode
+                );
+            }
         }
     }
 

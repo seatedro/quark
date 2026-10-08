@@ -206,7 +206,7 @@ fn jump_to_latest(theme: &Theme, width: f32, height: f32) -> AnyElement {
              hover_bg={theme.colors.accent_strong}
              accessibility_id="chat.jump-to-latest" accessibility_role={accesskit::Role::Button}
              aria-label={label.clone()} on:click={Msg::JumpToLatest}>
-            <text size={FONT_SIZE * 0.9} class="font-semibold" color={theme.colors.text_strong}>
+            <text size={FONT_SIZE * 0.9} class="font-semibold" color={theme.colors.on_accent}>
                 {label}
             </text>
         </div>
@@ -478,7 +478,15 @@ impl Demo {
         if let Err(e) = self.chat.set_markdown(stream.key, &stream.script[..end]) {
             eprintln!("{e:?}");
         }
-        end == stream.script.len()
+        let finished = end == stream.script.len();
+        if finished
+            && let Err(e) = self
+                .chat
+                .set_chrome(stream.key, chat_chrome(Role::Assistant, "Assistant"))
+        {
+            eprintln!("{e:?}");
+        }
+        finished
     }
 
     fn record(&mut self, elapsed: Duration) {

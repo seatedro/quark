@@ -21,6 +21,18 @@ pub enum Source {
     Path(String),
 }
 
+/// The Zig release series Ghostty's build needs.
+pub const ZIG_SERIES: &str = "0.16";
+
+/// Whether `zig version` output names a [`ZIG_SERIES`] release (a dev
+/// build of it included). Other releases fail deep in Ghostty's build with
+/// errors that do not mention the version.
+pub fn zig_supported(version: &str) -> bool {
+    version
+        .strip_prefix(ZIG_SERIES)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-']))
+}
+
 /// Lazy dependencies that Ghostty's build script requests while configuring
 /// `-Demit-lib-vt -Demit-themes=false`, found by building with Zig's
 /// `--system` package directory holding only these. Zig resolves lazy
@@ -228,6 +240,22 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches a Zig 0.17 build passing the check and failing later with a
+    // misleading "build.zig: FileNotFound".
+    #[test]
+    fn only_zig_0_16_releases_are_supported() {
+        let cases = [
+            ("0.16.0", true),
+            ("0.16.1-dev.42+abc123", true),
+            ("0.17.0", false),
+            ("0.15.2", false),
+            ("0.160.0", false),
+        ];
+        for (version, supported) in cases {
+            assert_eq!(zig_supported(version), supported, "{version}");
+        }
+    }
 
     /// Ghostty's manifest shapes: comments (with braces and quotes), field
     /// order varying, quoted names, and non-dependency fields around them.
