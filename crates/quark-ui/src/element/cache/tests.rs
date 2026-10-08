@@ -408,6 +408,55 @@ fn a_font_change_lays_out_a_cached_boundary_again() {
     assert_eq!(changed, expected);
 }
 
+impl Frame {
+    /// Lines of every painted text, in paint order.
+    fn text_lines(&self) -> Vec<Vec<String>> {
+        self.scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                quark_render::Primitive::TextRun(run) => {
+                    let layout = run.layout.downcast_ref::<TextLayout>()?;
+                    Some(
+                        layout
+                            .lines()
+                            .map(|line| layout.text()[line.byte_range].to_owned())
+                            .collect(),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Wrapping text in a boundary whose size its own style fixes, so its
+/// parent places it without a measure query.
+fn fixed_paragraph(width: f32) -> AnyElement {
+    cached("paragraph", 1, || {
+        div()
+            .flex_col()
+            .child(text("the quick brown fox jumps over the lazy dog").size(14.0))
+    })
+    .w(width)
+    .h(100.0)
+    .into_any()
+}
+
+// Catches replaying lines wrapped at the old width when a boundary's own
+// style resizes it: the parent then asks it no sizing query, so only the
+// final placement (a memo miss, or failing that the recorded size) tells
+// the resized boundary apart.
+#[test]
+fn a_resized_fixed_boundary_rewraps_its_text() {
+    let mut window = Window::new();
+    window.paint(fixed_paragraph(300.0));
+    let narrow = window.paint(fixed_paragraph(120.0)).text_lines();
+    let fresh = Window::new().paint_with(fixed_paragraph(120.0), false);
+    assert_eq!(narrow, fresh.text_lines());
+    assert!(narrow[0].len() > 1, "{narrow:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Frame budget: the regression guard for per-frame waste
 // ---------------------------------------------------------------------------
