@@ -211,7 +211,7 @@ impl HeadlessRunner {
             .last_frame_ms
             .map_or(Duration::ZERO, |last| Duration::from_millis(now - last));
         self.last_frame_ms = Some(now);
-        self.text.layouts.begin_frame_for(self.window.scope_id());
+        self.text.begin_frame(self.window.scope_id());
         let scale = self.input.scale_factor;
         let (width, height) = self.size;
         let elapsed = Duration::from_millis(now);
@@ -237,6 +237,7 @@ impl HeadlessRunner {
             last_render: Default::default(),
         };
         let scene = app.frame(&mut cx);
+        self.text.end_frame();
         self.frames_drawn += 1;
         self.queue_requested_frames(true);
         scene
