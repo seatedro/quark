@@ -233,7 +233,10 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> Option
     if tooltip.is_none() && toasts.is_none() && menu.is_none() && palette.is_none() {
         return None;
     }
-    let mut layer = div().absolute().left(0.0).top(0.0).w(0.0).h(0.0);
+    // Window-sized so children anchored to the bottom or right (the toast
+    // stack) resolve against the window. A div with no handlers takes no
+    // hits, so the layer does not block the surfaces under it.
+    let mut layer = div().absolute().left(0.0).top(0.0).w(window.0).h(window.1);
     for child in [toasts, menu, tooltip, palette].into_iter().flatten() {
         layer = layer.child(child);
     }

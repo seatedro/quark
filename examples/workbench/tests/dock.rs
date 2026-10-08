@@ -70,7 +70,9 @@ fn dock_apply_and_undo_change_the_fixture_source() {
     ui.click_node(tab("Files"));
     let applied = source(&ui);
     ui.click_node(tab("Diff"));
-    ui.click_node(By::role_name(Role::Button, "Undo"));
+    // The panel's Undo, not the one on the "Applied" toast.
+    let undo = surface_button(&ui, "Undo").center();
+    ui.click(undo);
     ui.click_node(tab("Files"));
     let undone = source(&ui);
 

@@ -246,8 +246,32 @@ fn overlays_toast_undo_runs_command() {
     ui.key("enter");
     assert!(!ui.app().model.files.changed().is_empty(), "applied");
 
-    ui.click_node(By::role_name(Role::Button, "Undo"));
+    // Past the toast's entrance, so it is on screen; the Diff panel shows
+    // an Undo of its own.
+    ui.advance(300);
+    let undo = toast_button(&ui, "Undo").center();
+    ui.click(undo);
     assert!(ui.app().model.files.changed().is_empty());
+}
+
+// Catches a toast stack laid out against something smaller than the
+// window (it once anchored to a zero-size overlay layer and drew above the
+// top edge): once in, the toast sits wholly inside the window's bottom
+// edge.
+#[test]
+fn overlays_toast_rests_at_the_window_bottom() {
+    let mut ui = harness(ScenarioKind::Review);
+    ui.key("mod+k");
+    ui.type_text("Apply proposed");
+    ui.key("enter");
+    ui.advance(300);
+
+    let undo = toast_button(&ui, "Undo").bounds;
+    let (_, height) = WIDE;
+    assert!(
+        undo.y > height / 2.0 && undo.y + undo.height <= height,
+        "{undo:?}"
+    );
 }
 
 // Catches a tooltip that shows at once, never, or takes focus: resting on

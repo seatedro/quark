@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use accesskit::Role;
-use quark_app::testing::{By, UiTestHarness};
+use quark_app::testing::{By, Node, UiTestHarness};
 use quark_workbench::contracts::{Options, ScenarioKind};
 use quark_workbench::{Workbench, adapter};
 
@@ -69,4 +69,36 @@ pub fn selected_rows(ui: &UiTestHarness<Workbench>) -> Vec<String> {
 pub fn type_in_composer(ui: &mut UiTestHarness<Workbench>, text: &str) {
     ui.click_node(By::name("Message"));
     ui.type_text(text);
+}
+
+/// Whether `node` is a button on a toast (`quark_components::Toast` gives
+/// its action buttons `toast-action:` ids).
+fn on_toast(node: &Node) -> bool {
+    node.id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("toast-action:"))
+}
+
+/// The one button named `name` on a toast. Apply and the like offer an
+/// Undo toast while their panel shows an Undo of its own.
+#[track_caller]
+pub fn toast_button(ui: &UiTestHarness<Workbench>, name: &str) -> Node {
+    one(ui, name, true)
+}
+
+/// The one button named `name` that is not on a toast.
+#[track_caller]
+pub fn surface_button(ui: &UiTestHarness<Workbench>, name: &str) -> Node {
+    one(ui, name, false)
+}
+
+#[track_caller]
+fn one(ui: &UiTestHarness<Workbench>, name: &str, toast: bool) -> Node {
+    let found: Vec<Node> = ui
+        .find_all(By::role_name(Role::Button, name))
+        .into_iter()
+        .filter(|n| on_toast(n) == toast)
+        .collect();
+    assert_eq!(found.len(), 1, "buttons named {name:?} (toast {toast}): {found:?}");
+    found.into_iter().next().expect("one")
 }
