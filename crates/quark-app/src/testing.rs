@@ -494,6 +494,12 @@ impl<U: UiApp> UiTestHarness<U> {
             .collect()
     }
 
+    /// Where the last frame's identified elements landed, as
+    /// `UiContext::geometry` sees it.
+    pub fn geometry(&self) -> &quark_ui::element::LayoutSnapshot {
+        self.adapter.geometry()
+    }
+
     /// The node holding keyboard focus, if focus is on one.
     pub fn focused(&self) -> Option<Node> {
         self.nodes().into_iter().find(|node| node.focused)

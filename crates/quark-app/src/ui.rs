@@ -31,8 +31,9 @@ use quark::scene::Scene;
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer, Politeness};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
-    AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, InputRouter, Mods,
-    ScrollbarTrack, TextInputHitArea, TooltipRegion, WheelEvent, render_element,
+    AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, ElementHandle,
+    ElementHandles, InputRouter, LayoutSnapshot, Mods, ScrollbarTrack, TextInputHitArea,
+    TooltipRegion, WheelEvent, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
@@ -174,9 +175,28 @@ pub struct ViewContext<'a, 'f> {
     pub theme: &'a Theme,
     focus: Option<FocusId>,
     animations: &'a mut AnimationTable,
+    geometry: &'a LayoutSnapshot,
+    handles: &'a mut ElementHandles,
 }
 
 impl ViewContext<'_, '_> {
+    /// Where the elements of the last completed frame landed: the frame
+    /// before the one this view builds. Empty before the first frame.
+    /// Reading it lays nothing out.
+    pub fn geometry(&self) -> &LayoutSnapshot {
+        self.geometry
+    }
+
+    /// A new handle to name an element with (`Div::element_handle`) and
+    /// find it in [`Self::geometry`]. Release it once the element is gone.
+    pub fn new_element_handle(&mut self) -> ElementHandle {
+        self.handles.allocate()
+    }
+
+    pub fn release_element_handle(&mut self, handle: ElementHandle) {
+        self.handles.release(handle);
+    }
+
     /// The window's animation table, ticked to this frame's clock. Rows
     /// still moving after paint schedule the next frame.
     pub fn animations(&mut self) -> &mut AnimationTable {
@@ -204,9 +224,28 @@ pub struct UiContext<'a, 'w> {
     theme_choice: &'a mut ThemeChoice,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
+    geometry: &'a LayoutSnapshot,
+    handles: &'a mut ElementHandles,
 }
 
 impl UiContext<'_, '_> {
+    /// Where the elements of the last completed frame landed, the frame
+    /// input is routed through. Empty before the first frame. Reading it
+    /// lays nothing out, so it does not see changes the app made since.
+    pub fn geometry(&self) -> &LayoutSnapshot {
+        self.geometry
+    }
+
+    /// A new handle to name an element with (`Div::element_handle`) and
+    /// find it in [`Self::geometry`]. Release it once the element is gone.
+    pub fn new_element_handle(&mut self) -> ElementHandle {
+        self.handles.allocate()
+    }
+
+    pub fn release_element_handle(&mut self, handle: ElementHandle) {
+        self.handles.release(handle);
+    }
+
     pub fn focus(&self) -> Option<FocusId> {
         *self.focus
     }
@@ -353,6 +392,8 @@ pub struct UiAdapter<U: UiApp> {
     hovered: Vec<HitId>,
     /// Routes input through the last painted frame until the next replaces it.
     router: InputRouter,
+    /// Handles the app names elements with.
+    element_handles: ElementHandles,
     key_bindings: KeyBindings,
     /// A drag out took the pointer during the last dispatch.
     pointer_taken: bool,
@@ -413,6 +454,7 @@ impl<U: UiApp> UiAdapter<U> {
             pointer: None,
             hovered: Vec::new(),
             router: InputRouter::default(),
+            element_handles: ElementHandles::default(),
             key_bindings: KeyBindings::new(),
             pointer_taken: false,
             accessibility: AccessibilityFrame::default(),
@@ -500,6 +542,8 @@ impl<U: UiApp> UiAdapter<U> {
             theme: &mut self.theme,
             theme_choice: &mut self.theme_choice,
             sender: &self.sender,
+            geometry: &self.router.frame().geometry,
+            handles: &mut self.element_handles,
         };
         f(&mut self.app, &mut ucx)
     }
@@ -967,6 +1011,8 @@ impl<U: UiApp> App for UiAdapter<U> {
             theme: &self.theme,
             focus: self.focus,
             animations: &mut self.animations,
+            geometry: &self.router.frame().geometry,
+            handles: &mut self.element_handles,
         });
         #[cfg(feature = "devtools")]
         let build_us = view_started.elapsed().as_micros() as u64;
@@ -1094,6 +1140,10 @@ impl<U: UiApp> UiAdapter<U> {
 
     pub(crate) fn semantic_frame(&self) -> &SemanticFrame {
         &self.router.frame().semantic
+    }
+
+    pub(crate) fn geometry(&self) -> &LayoutSnapshot {
+        &self.router.frame().geometry
     }
 
     /// The semantic node of the topmost hit region at a point that has one.
@@ -1811,6 +1861,77 @@ mod tests {
         fn update(&mut self, Msg::Save: Msg, _cx: &mut UiContext) {
             self.saved += 1;
         }
+    }
+
+    /// Names a box with a handle taken in `init`, and notes in each view
+    /// where the last completed frame put it.
+    struct GeometryApp {
+        handle: Option<ElementHandle>,
+        show: bool,
+        seen: Vec<Option<Rect>>,
+    }
+
+    impl GeometryApp {
+        fn harness() -> UiTestHarness<Self> {
+            let app = Self {
+                handle: None,
+                show: true,
+                seen: Vec::new(),
+            };
+            UiTestHarness::new(app, (200.0, 100.0), 1.0)
+        }
+    }
+
+    impl UiApp for GeometryApp {
+        type Action = Msg;
+        type Message = ();
+
+        fn init(&mut self, cx: &mut UiContext) {
+            self.handle = Some(cx.new_element_handle());
+        }
+
+        fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+            let handle = self.handle.expect("init ran");
+            let seen = cx.geometry().by_handle(handle).ok().map(|g| g.bounds);
+            self.seen.push(seen);
+            let column = div().flex_col().child(div().h(40.0));
+            let column = match self.show {
+                true => column.child(div().element_handle(handle).w(50.0).h(20.0)),
+                false => column,
+            };
+            column.into_any()
+        }
+
+        fn update(&mut self, _: Msg, _: &mut UiContext) {}
+    }
+
+    // Catches a view reading geometry from the frame it is still building,
+    // or from no frame: the first view finds nothing, the second finds
+    // where the first frame put the box.
+    #[test]
+    fn view_sees_where_the_last_completed_frame_put_an_element() {
+        let mut ui = GeometryApp::harness();
+        ui.frame();
+        let placed = Rect {
+            x: 0.0,
+            y: 40.0,
+            width: 50.0,
+            height: 20.0,
+        };
+        assert_eq!(ui.app().seen, [None, Some(placed)]);
+    }
+
+    // Catches geometry that outlives the element it names.
+    #[test]
+    fn a_removed_element_has_no_geometry() {
+        let mut ui = GeometryApp::harness();
+        ui.app_mut().show = false;
+        ui.frame();
+        let handle = ui.app().handle.expect("init ran");
+        assert_eq!(
+            ui.geometry().by_handle(handle),
+            Err(quark_ui::element::LookupError::Missing)
+        );
     }
 
     // A click from assistive tech moves focus with it, as a pointer click
