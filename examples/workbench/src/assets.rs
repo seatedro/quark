@@ -30,21 +30,23 @@ pub fn image_loader() -> ImageLoader {
 }
 
 /// Where grammar packs come from: `$QUARK_SYNTAX_PACKS`, else
-/// `assets/syntax-packs/<target>/` beside the executable, else the
-/// workspace's `target/syntax-packs` (what `cargo run -p syntax-pack --
-/// build` writes). `None` when none exists: code renders as plain text and
-/// the timeline names the fallback.
+/// `assets/syntax-packs` beside the executable, else the workspace's
+/// `target/syntax-packs` (what `cargo run -p syntax-pack -- build` writes).
+/// Each is a pack root as the store reads it, holding
+/// `<target triple>/<language>/`, and counts only when it has packs for
+/// this target. `None` when none does: code renders as plain text.
 pub fn grammar_pack_root() -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("QUARK_SYNTAX_PACKS") {
         return Some(PathBuf::from(root));
     }
-    let target = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    use quark_app::quark_ui::quark_syntax::pack::TARGET;
+    let has_packs = |root: &Path| root.join(TARGET).is_dir();
     let beside_exe = std::env::current_exe().ok().and_then(|exe| {
-        let dir = exe.parent()?.join("assets/syntax-packs").join(&target);
-        dir.is_dir().then_some(dir)
+        let root = exe.parent()?.join("assets/syntax-packs");
+        has_packs(&root).then_some(root)
     });
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/syntax-packs");
-    beside_exe.or_else(|| workspace.is_dir().then_some(workspace))
+    beside_exe.or_else(|| has_packs(&workspace).then_some(workspace))
 }
 
 /// A grammar store over the local packs, with downloads off.
