@@ -10,9 +10,12 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 quark-diff = { path = "../crates/quark-diff" }
+quark-terminal = { path = "../crates/quark-terminal" }
 quark-text = { path = "../crates/quark-text" }
 quark-ui = { path = "../crates/quark-ui" }
 unicode-segmentation = "1.12"
+# quark-terminal's key and modifier types.
+winit = "0.30"
 
 # Its own workspace so the root workspace never builds it.
 [workspace]
@@ -39,6 +42,20 @@ bench = false
 [[bin]]
 name = "unified_diff"
 path = "fuzz_targets/unified_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal_vt"
+path = "fuzz_targets/terminal_vt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal_input"
+path = "fuzz_targets/terminal_input.rs"
 test = false
 doc = false
 bench = false

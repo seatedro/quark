@@ -43,6 +43,9 @@
 //!   (`libghostty-vt.a`, or `ghostty-vt-static.lib` on Windows), used
 //!   instead of building (required when the `zig-build` feature is off).
 //! - `QUARK_GHOSTTY_VT_OPTIMIZE`: Zig optimize mode (default ReleaseFast).
+//!   The fuzz CI job uses ReleaseSafe, so Zig's own checks (bounds,
+//!   overflow, unreachable code) abort on a violation; Rust's sanitizers
+//!   and libFuzzer's coverage never instrument the Zig code.
 //!
 //! There is no build without the VT: a target this script cannot build for
 //! (Windows other than x86-64 MSVC) fails here unless

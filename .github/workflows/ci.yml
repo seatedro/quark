@@ -211,6 +211,11 @@ jobs:
 
   fuzz:
     runs-on: ubuntu-latest
+    env:
+      # ASan does not instrument libghostty-vt, so the terminal targets link
+      # a ReleaseSafe build (its own cache entry): Zig's safety checks abort
+      # on a violation. Job-wide so the replay steps reuse the build.
+      QUARK_GHOSTTY_VT_OPTIMIZE: ReleaseSafe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -226,6 +231,11 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.2
 
+      # The terminal targets link libghostty-vt, built with Zig.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz
@@ -240,7 +250,7 @@ jobs:
       # check over the corpus, not a fuzzing session.
       - name: Replay corpora
         run: |
-          for target in text_layout markdown; do
+          for target in text_layout markdown terminal_vt terminal_input; do
             cargo fuzz run --target x86_64-unknown-linux-gnu "$target" "$PWD/fuzz/corpus/$target" -- -runs=0
           done
 
