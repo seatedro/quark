@@ -607,6 +607,9 @@ impl DockState {
         let (Some(from), Some(to)) = (self.origin(panel), self.region_of(target.pane)) else {
             return false;
         };
+        // An empty region was hidden for want of panels; one arriving
+        // shows it.
+        let reveal = self.panels(to).is_empty();
         if let Some(group) = self.group_mut(from.pane) {
             group.remove(from.index);
         }
@@ -634,24 +637,33 @@ impl DockState {
         if to != from.region {
             self.settle(to);
         }
+        if reveal {
+            self.set_hidden(to, false);
+        }
         true
     }
 
-    /// Every group of the shown regions, in tree order: left, center,
-    /// bottom, right, and within a region its groups in reading order.
+    /// Every group a tab can move to, in tree order: left, center, bottom,
+    /// right, and within a region its groups in reading order. A shown
+    /// region offers its groups; an empty one, hidden for want of panels,
+    /// offers its root, so a tab moved out of it can move back.
     fn shown_groups(&self) -> Vec<PaneId> {
         TREE_ORDER
             .into_iter()
-            .filter(|r| self.is_visible(*r))
+            .filter(|r| self.takes_moves(*r))
             .flat_map(|r| self.roots[r.index()].groups().into_iter().map(|g| g.id))
             .collect()
     }
 
+    fn takes_moves(&self, region: DockRegion) -> bool {
+        self.is_visible(region) || self.panels(region).is_empty()
+    }
+
     /// Whether [`Self::move_tab`] would move `panel`: `destination` is in
-    /// a shown region and [`Self::can_drop`] allows it.
+    /// a shown or empty region and [`Self::can_drop`] allows it.
     pub fn can_move(&self, panel: PanelId, destination: PaneId, index: Option<usize>) -> bool {
         self.region_of(destination)
-            .is_some_and(|r| self.is_visible(r))
+            .is_some_and(|r| self.takes_moves(r))
             && self.can_drop(panel, move_drop(destination, index))
     }
 
@@ -2067,11 +2079,29 @@ mod tests {
         assert_eq!(dock.move_target(CHAT, true), Some(pane_of(&dock, A)));
     }
 
+    // Catches an emptied region dropping out of the move order: after its
+    // last tab moved out, the sidebar was hidden and no key moved it back.
+    #[test]
+    fn a_tab_moves_back_into_the_region_it_emptied() {
+        let mut dock = dock();
+        assert!(dock.move_tab(LEFT, pane_of(&dock, CHAT), None));
+        assert!(!dock.is_visible(DockRegion::Left));
+
+        let back = dock.move_target(LEFT, false).expect("the empty sidebar");
+        assert!(dock.move_tab(LEFT, back, None));
+        assert_eq!(
+            dock.dump(),
+            "left: [1*]\nright: [10 11 12*]\ncenter: [2*]\n"
+        );
+        assert!(dock.is_visible(DockRegion::Left));
+    }
+
     #[test]
     fn move_targets_skip_groups_policy_refuses() {
         let mut dock = dock();
         dock.set_policy(DockRegion::Center, TabPolicy::SEALED);
-        // Past the sealed center, to the right region.
+        dock.set_policy(DockRegion::Bottom, TabPolicy::SEALED);
+        // Past the sealed center and bottom, to the right region.
         assert_eq!(dock.move_target(LEFT, true), Some(pane_of(&dock, A)));
         dock.confine(LEFT, true);
         assert_eq!(dock.move_target(LEFT, true), None);

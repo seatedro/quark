@@ -794,6 +794,20 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_moved_out_of_the_sidebar_moves_back() {
+        let mut ui = harness();
+        ui.key("tab");
+        ui.key("mod+shift+pagedown");
+        assert!(
+            ui.try_find(By::role_name(Role::TabList, "Sidebar"))
+                .is_none()
+        );
+        ui.key("mod+shift+pageup");
+        assert_eq!(strip(&ui, "Sidebar"), ["Threads"]);
+        assert_eq!(focused_name(&ui).as_deref(), Some("Threads"));
+    }
+
+    #[test]
     fn a_refused_move_leaves_the_dock_and_focus() {
         // (active tab, key): the sidebar is first in tree order, and the
         // sealed right panel takes nothing and gives nothing.
