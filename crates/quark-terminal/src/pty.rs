@@ -134,7 +134,7 @@ struct InboxState {
 
 impl Inbox {
     fn new(on_ready: impl Fn() + Send + 'static) -> Self {
-        Self {
+        let inbox = Self {
             state: Mutex::new(InboxState {
                 ready: VecDeque::with_capacity(BUFFERS),
                 free: (0..BUFFERS)
@@ -146,7 +146,14 @@ impl Inbox {
             }),
             returned: Condvar::new(),
             on_ready: Mutex::new(Box::new(on_ready)),
-        }
+        };
+        // macOS builds std's mutexes and condvars on pthreads, which are
+        // boxed on first use; touch them here so that happens at spawn and
+        // not on the first read.
+        drop(inbox.lock());
+        drop(inbox.on_ready.lock());
+        inbox.returned.notify_one();
+        inbox
     }
 
     fn lock(&self) -> MutexGuard<'_, InboxState> {
