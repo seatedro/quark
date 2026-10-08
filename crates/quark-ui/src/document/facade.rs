@@ -234,8 +234,10 @@ impl MarkdownDocument {
         self.refresh_all_images();
     }
 
-    /// The intrinsic size of the image at `src`, when the app knows it
-    /// before the pixels: its block reserves that height while it loads.
+    /// The intrinsic size of the image at `src` in points, when the app
+    /// knows it before the pixels: its block reserves that height while it
+    /// loads. An image of exactly 2x (or 3x...) those pixels is high
+    /// density and keeps the hinted size; see [`ImageStore::hint_size`].
     pub fn hint_image_size(&mut self, src: &str, width: u32, height: u32) {
         self.images.hint_size(src, width, height);
         self.refresh_images(&[Arc::from(src)]);

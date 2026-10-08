@@ -1717,26 +1717,28 @@ impl Block {
     }
 }
 
-// Each case: the image's size, whether the app hinted it, and the block's
+// Each case: the image's size, the size the app hinted, and the block's
 // height before and after the pixels arrive (the column is 371 points
-// wide, so wider images scale down).
+// wide, so wider images scale down). Pixels twice the hint are a 2x image
+// shown at the hinted size; other mismatches show at their pixels.
 #[test]
 fn image_blocks_reserve_their_height_and_scale_to_the_column() {
     let placeholder = (14.0 * IMAGE_PLACEHOLDER_HEIGHT).ceil();
-    let cases: &[(&str, bool, f32, f32)] = &[
-        ("200x100.png", true, 100.0, 100.0),
-        ("742x100.png", true, 50.0, 50.0),
-        ("200x100.png", false, placeholder, 100.0),
+    let cases = [
+        ("200x100.png", Some((200u32, 100u32)), 100.0f32, 100.0f32),
+        ("742x100.png", Some((742, 100)), 50.0, 50.0),
+        ("200x100.png", None, placeholder, 100.0),
+        ("400x200.png", Some((200, 100)), 100.0, 100.0),
+        ("300x150.png", Some((200, 100)), 100.0, 150.0),
     ];
-    for &(src, hint, before, after) in cases {
+    for (src, hint, before, after) in cases {
         let mut md = markdown_document(&format!("![chart]({src})"));
         let (mut text, mut layouts) = (
             TextSystem::vendored_only(&Default::default()),
             LayoutCache::default(),
         );
-        if hint {
-            let (w, h) = src.strip_suffix(".png").unwrap().split_once('x').unwrap();
-            md.hint_image_size(src, w.parse().unwrap(), h.parse().unwrap());
+        if let Some((w, h)) = hint {
+            md.hint_image_size(src, w, h);
         }
         md.set_image_loader(sized_loader());
         prepare_markdown(&mut md, &mut text, &mut layouts);
@@ -1748,7 +1750,7 @@ fn image_blocks_reserve_their_height_and_scale_to_the_column() {
         assert_eq!(
             (loading, loaded),
             ((before, false), (after, true)),
-            "{src} hinted={hint}"
+            "{src} hinted {hint:?}"
         );
     }
 }

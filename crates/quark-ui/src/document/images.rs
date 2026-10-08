@@ -37,6 +37,9 @@ pub struct DecodedImage {
     pub rgba: Arc<[u8]>,
     /// Identifies the pixels to the renderer's texture cache.
     pub cache_key: u64,
+    /// Pixels per point: the whole factor between the pixels and the
+    /// image's size hint (2 for an `@2x` image hinted at half), else 1.
+    pub density: u32,
 }
 
 impl std::fmt::Debug for DecodedImage {
@@ -60,11 +63,15 @@ pub enum ImageState {
 }
 
 impl ImageState {
-    /// Intrinsic size in pixels, when known.
+    /// Intrinsic size in points, when known: a hinted size, or the pixels
+    /// over their density.
     pub fn size(&self) -> Option<(u32, u32)> {
         match self {
             Self::Pending { size } => *size,
-            Self::Ready(image) => Some((image.width, image.height)),
+            Self::Ready(image) => {
+                let density = image.density.max(1);
+                Some((image.width / density, image.height / density))
+            }
             Self::Failed => None,
         }
     }
@@ -122,17 +129,27 @@ impl ImageStore {
         }
     }
 
-    /// The intrinsic size of `src`, known before its pixels (from an API
-    /// response or an HTML attribute), so its block reserves the right
-    /// height and nothing moves when the pixels land.
+    /// The intrinsic size of `src` in points, known before its pixels (from
+    /// an API response or an HTML attribute), so its block reserves the
+    /// right height and nothing moves when the pixels land. Pixels that
+    /// are an exact whole multiple of the hint are a high density image:
+    /// it shows at the hinted size, sharp on a screen of that scale.
     pub fn hint_size(&mut self, src: &str, width: u32, height: u32) {
         let entry = self.entry(src);
         entry.hint = Some((width, height));
-        if let ImageState::Pending { size } = &mut entry.state
-            && *size != entry.hint
-        {
-            *size = entry.hint;
-            entry.version += 1;
+        match &mut entry.state {
+            ImageState::Pending { size } if *size != entry.hint => {
+                *size = entry.hint;
+                entry.version += 1;
+            }
+            ImageState::Ready(image) => {
+                let density = density(image, (width, height));
+                if image.density != density {
+                    image.density = density;
+                    entry.version += 1;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -190,6 +207,11 @@ impl ImageStore {
 
     fn resolve(&mut self, src: Arc<str>, image: Option<DecodedImage>) {
         let entry = self.entry(&src);
+        let hint = entry.hint;
+        let image = image.map(|mut image| {
+            image.density = hint.map_or(1, |hint| density(&image, hint));
+            image
+        });
         entry.state = image.map_or(ImageState::Failed, ImageState::Ready);
         entry.version += 1;
     }
@@ -271,7 +293,22 @@ fn decode(src: &str, loaded: LoadedImage) -> Option<DecodedImage> {
         height,
         cache_key: quark::stable_hash(&format!("quark.image:{src}:{width}x{height}")),
         rgba: pixels.into(),
+        density: 1,
     })
+}
+
+/// How many pixels per point `image` has if `hint` is its size in points:
+/// the whole factor both sides share, or 1 when they share none.
+fn density(image: &DecodedImage, (width, height): (u32, u32)) -> u32 {
+    if width == 0 || height == 0 || !image.width.is_multiple_of(width) {
+        return 1;
+    }
+    let k = image.width / width;
+    if k > 1 && image.height == height * k {
+        k
+    } else {
+        1
+    }
 }
 
 #[cfg(feature = "images")]
