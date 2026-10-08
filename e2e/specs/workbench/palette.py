@@ -39,6 +39,10 @@ def spec(cua: Cua):
 
     keys(cua, pid, "ctrl", "k")
     wait_for("the palette to open", lambda: app_tree().find("dialog", "Command palette"))
+    # A query, for a screenshot of the matched characters highlighted.
+    cua.call("type_text", pid=pid, text="tog", delivery_mode="foreground")
+    wait_for("the palette to filter", lambda: app_tree().find("dialog", "Command palette").find("list item", "Settings") is None)
+    save_screenshot(cua, "palette-query")
     cua.call("press_key", pid=pid, key="escape", delivery_mode="foreground")
     wait_for("the palette to close", lambda: app_tree().find("dialog", "Command palette") is None)
     wait_for("focus back in the composer", composer_focused)
