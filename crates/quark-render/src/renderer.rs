@@ -597,10 +597,12 @@ impl GpuContext {
                     },
                 ],
             });
+        // Trilinear: cached images carry mip levels; render targets have one.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("quark_blit_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -2058,6 +2060,11 @@ impl Renderer {
             );
             return;
         }
+        // Images drawn smaller than their pixels (a large picture in a
+        // narrow column, a 2x asset on a 1x screen) sample a mip level
+        // instead of skipping texels and aliasing. One drawn 1:1 samples
+        // level 0 exactly.
+        let (mip_level_count, data) = mip_chain(&image.rgba, image.width, image.height);
         let texture = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
@@ -2067,7 +2074,7 @@ impl Renderer {
                     height: image.height,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: 1,
+                mip_level_count,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -2075,7 +2082,7 @@ impl Renderer {
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            &image.rgba,
+            &data,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = create_texture_bind_group(
@@ -2098,6 +2105,75 @@ impl Renderer {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// sRGB-encoded byte to linear light, for averaging texels as the GPU's
+/// sRGB sampling would.
+fn srgb_to_linear_table() -> &'static [f32; 256] {
+    static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let c = i as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    })
+}
+
+fn linear_to_srgb_byte(l: f32) -> u8 {
+    let c = if l <= 0.003_130_8 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (c.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The number of mip levels of a `width` x `height` image and every
+/// level's sRGB RGBA8 pixels, level 0 (`rgba` itself) first. Each level
+/// halves the last (rounding down, at least 1) and averages 2x2 blocks in
+/// linear light; alpha averages linearly.
+fn mip_chain(rgba: &[u8], width: u32, height: u32) -> (u32, std::borrow::Cow<'_, [u8]>) {
+    let levels = 32 - width.max(height).max(1).leading_zeros();
+    if levels == 1 {
+        return (1, std::borrow::Cow::Borrowed(rgba));
+    }
+    let lut = srgb_to_linear_table();
+    let mut data = Vec::with_capacity(rgba.len() / 3 * 4 + 16);
+    data.extend_from_slice(rgba);
+    let (mut w, mut h) = (width as usize, height as usize);
+    let mut start = 0;
+    for _ in 1..levels {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let next = data.len();
+        data.reserve(nw * nh * 4);
+        for y in 0..nh {
+            let rows = [(2 * y).min(h - 1), (2 * y + 1).min(h - 1)];
+            for x in 0..nw {
+                let cols = [(2 * x).min(w - 1), (2 * x + 1).min(w - 1)];
+                let mut sum = [0.0f32; 4];
+                for row in rows {
+                    for col in cols {
+                        let at = start + (row * w + col) * 4;
+                        for (c, total) in sum.iter_mut().enumerate().take(3) {
+                            *total += lut[data[at + c] as usize];
+                        }
+                        sum[3] += f32::from(data[at + 3]);
+                    }
+                }
+                for total in &sum[..3] {
+                    data.push(linear_to_srgb_byte(total / 4.0));
+                }
+                data.push((sum[3] / 4.0).round() as u8);
+            }
+        }
+        start = next;
+        (w, h) = (nw, nh);
+    }
+    (levels, std::borrow::Cow::Owned(data))
+}
 
 /// Instance buffers for one frame, one per pipeline.
 #[derive(Default)]
@@ -4895,6 +4971,37 @@ mod tests {
             return;
         };
         assert!(image.get_pixel(16, 16).0[0] > 200, "image missing");
+    }
+
+    // Catches images sampled without mip levels: drawn at a third of its
+    // size, a one-pixel checkerboard must average to grey instead of
+    // landing on single black or white texels.
+    #[test]
+    fn render_downscaled_image_averages_its_texels() {
+        let side = 48u32;
+        let mut rgba = Vec::with_capacity((side * side * 4) as usize);
+        for y in 0..side {
+            for x in 0..side {
+                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut scene = Scene::default();
+        scene.push(Primitive::Image(crate::scene::ImagePrimitive {
+            rect: rect(0.0, 0.0, 16.0, 16.0),
+            width: side,
+            height: side,
+            rgba: Arc::from(rgba),
+            cache_key: 11,
+        }));
+        let Some(image) = render_pixels(&scene, 16, 16) else {
+            return;
+        };
+        // Half black and half white in linear light is sRGB 188.
+        for (x, y) in [(3, 3), (8, 8), (12, 5)] {
+            let v = image.get_pixel(x, y).0[0];
+            assert!(v.abs_diff(188) <= 16, "pixel ({x}, {y}) is {v}, not grey");
+        }
     }
 
     // Rounded blur regions: the corner the radius cuts off keeps the sharp
