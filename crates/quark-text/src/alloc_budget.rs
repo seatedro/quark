@@ -227,7 +227,7 @@ fn assert_budgets(system: &mut TextSystem, cases: Vec<(&str, Vec<Input>, Vec<Inp
         });
         assert!(allocations <= budget, "{name}: {allocations} > {budget}");
         for (layout, input) in layouts.iter().zip(&measured) {
-            assert_eq!(layout.text().as_ref(), input.text, "{name}");
+            assert_eq!(layout.text(), input.text, "{name}");
             assert_eq!(layout.verify_integrity(), Ok(()), "{name}");
         }
     }
@@ -251,6 +251,14 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             1,
         ),
         (
+            // Refills the pangram's layout, whose text is longer: the
+            // copy must go into that storage rather than a new string.
+            "line of another length",
+            vec![ui(PANGRAM.into()), ui("jumpy otter".into())],
+            vec![ui("one small brown cat naps".into())],
+            0,
+        ),
+        (
             "80-column styled row",
             vec![styled_row(1), styled_row(2)],
             vec![styled_row(3)],
@@ -261,7 +269,7 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             (0..30).map(plain_row).collect(),
             (30..60).map(plain_row).collect(),
             // Words longer than the word that last had their glyph vector.
-            30,
+            29,
         ),
         (
             "bidi and emoji paragraph",
@@ -271,7 +279,7 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             // those runs with every font: 69 shape plans, which must all
             // stay cached, and a glyph vector and missing-glyph list per
             // font tried, which must be reused.
-            22,
+            20,
         ),
     ];
     assert_budgets(&mut test_system(), cases);
@@ -304,7 +312,7 @@ fn fresh_text_with_ligatures_off_copies_features_per_span_only() {
             "bidi and emoji paragraph",
             vec![bidi_emoji(1)],
             vec![bidi_emoji(2)],
-            22 + 9,
+            20 + 10,
         ),
     ];
     assert_budgets(&mut system, cases);
@@ -331,9 +339,9 @@ fn stream_past_cache_capacity_refills_evicted_layouts() {
     // Left-to-right rows skip the bidi analysis, its 19 words' monospace
     // fallback candidates reuse one vector, its lines' reordering reuses
     // another, and the evictions themselves must add nothing.
-    assert!(allocations <= 2, "{allocations} allocations for 64 rows");
+    assert_eq!(allocations, 0, "{allocations} allocations for 64 rows");
     let last = last.expect("layout");
-    assert_eq!(last.text().as_ref(), rows[95].text);
+    assert_eq!(last.text(), rows[95].text);
     assert_eq!(last.verify_integrity(), Ok(()));
 }
 
@@ -354,6 +362,44 @@ fn layout_released_after_eviction_is_refilled() {
     drop(held);
     let fresh = ui("brisk eagle".into());
     let (layout, allocations) = count(|| cache.layout_query(&mut system, &fresh.query()));
-    assert!(allocations <= 1, "{allocations} allocations");
-    assert_eq!(layout.expect("layout").text().as_ref(), fresh.text);
+    assert_eq!(allocations, 0);
+    assert_eq!(layout.expect("layout").text(), fresh.text);
+}
+
+// A block being edited while its last layout stays on screen writes each
+// revision over the storage of the one before last, whatever its length.
+// Neither the text nor the layout may be copied into new storage; what is
+// left is shaping's own residual: a word's glyph vector growing when it
+// goes to a longer word than it last held.
+#[test]
+fn block_edits_within_warmed_capacity_copy_no_text() {
+    let mut system = test_system();
+    let style = TextStyle::new(14.0);
+    let mut block = crate::block::TextBlock::new();
+    let edits = [
+        "a line long enough to hold every later revision of the edit",
+        "a line long enough",
+        "short",
+        "na\u{ef}ve caf\u{e9} \u{65e5}\u{672c}",
+        "a line long enough to hold every later revision of it",
+        "a line",
+    ];
+    // Warms the storage: the first two revisions allocate the sources and
+    // layouts the rest reuse, and the font lookups for every char.
+    let mut shown = None;
+    for text in edits.iter().chain(&edits) {
+        block.set_text(text);
+        shown = Some(block.layout(&mut system, style, None, 1.0).expect("warm"));
+    }
+    for (i, text) in edits.iter().enumerate() {
+        let (layout, allocations) = count(|| {
+            block.set_text(text);
+            block.layout(&mut system, style, None, 1.0)
+        });
+        let layout = layout.expect("layout");
+        assert!(allocations <= 2, "edit {i}: {allocations} allocations");
+        assert_eq!(layout.text(), *text);
+        shown = Some(layout);
+    }
+    drop(shown);
 }

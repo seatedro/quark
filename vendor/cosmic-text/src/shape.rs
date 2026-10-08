@@ -885,8 +885,9 @@ impl ShapeSpan {
         let mut words = mem::take(&mut self.words);
 
         // Cache the shape words in reverse order so they can be popped for reuse in the same order.
+        // Words earlier spans had left over stay beneath them, so a span with more words than
+        // this one had reuses those before allocating.
         let mut cached_words = mem::take(&mut font_system.shape_buffer.words);
-        cached_words.clear();
         if line_rtl != level.is_rtl() {
             // Un-reverse previous words so the internal glyph counts match accurately when rewriting memory.
             cached_words.append(&mut words);
@@ -956,10 +957,14 @@ impl ShapeSpan {
         self.level = level;
         self.words = words;
 
-        // Cache buffer for future reuse.
+        // Cache buffer for future reuse, keeping the oldest spare words up to the cap.
+        cached_words.truncate(MAX_SPARE_WORDS);
         font_system.shape_buffer.words = cached_words;
     }
 }
+
+/// Most shape words, with their glyph storage, kept across lines for reuse.
+const MAX_SPARE_WORDS: usize = 256;
 
 /// A shaped line (or paragraph)
 #[derive(Clone, Debug)]
@@ -988,6 +993,43 @@ impl VisualLine {
 }
 
 impl ShapeLine {
+    /// How many glyphs `visual_line`'s ranges cover, counted as `layout_to_buffer` takes them.
+    fn visual_line_glyphs(&self, visual_line: &VisualLine) -> usize {
+        let mut count = 0;
+        for &(span_index, (starting_word, starting_glyph), (ending_word, ending_glyph)) in
+            &visual_line.ranges
+        {
+            let words = &self.spans[span_index].words;
+            for i in starting_word..ending_word + usize::from(ending_glyph != 0) {
+                let start = if i == starting_word {
+                    starting_glyph
+                } else {
+                    0
+                };
+                let end = if i == ending_word {
+                    ending_glyph
+                } else {
+                    words[i].glyphs.len()
+                };
+                count += end.saturating_sub(start);
+            }
+        }
+        count
+    }
+
+    /// Heap bytes the line keeps: its spans, their words, and the words'
+    /// glyphs, at capacity.
+    pub fn storage_bytes(&self) -> usize {
+        let mut bytes = self.spans.capacity() * mem::size_of::<ShapeSpan>();
+        for span in &self.spans {
+            bytes += span.words.capacity() * mem::size_of::<ShapeWord>();
+            for word in &span.words {
+                bytes += word.glyphs.capacity() * mem::size_of::<ShapeGlyph>();
+            }
+        }
+        bytes
+    }
+
     /// Creates an empty line.
     ///
     /// The returned line is in an invalid state until [`Self::build_in_buffer`] is called.
@@ -1649,9 +1691,11 @@ impl ShapeLine {
                 continue;
             }
             self.reorder(&visual_line.ranges, &mut reorder_levels, &mut new_order);
-            let mut glyphs = cached_glyph_sets
-                .pop()
-                .unwrap_or_else(|| Vec::with_capacity(1));
+            let mut glyphs = cached_glyph_sets.pop().unwrap_or_default();
+            // Room for the glyphs `process_range` below pushes, so a new line allocates once,
+            // rounded up as growing push by push would have, so a reused line keeps that slack.
+            let glyph_count = self.visual_line_glyphs(visual_line);
+            glyphs.reserve(glyph_count.next_power_of_two());
             let mut x = start_x;
             let mut y = 0.;
             let mut max_ascent: f32 = 0.;
@@ -1779,6 +1823,11 @@ impl ShapeLine {
                     process_range(range.clone());
                 }
             }
+            debug_assert_eq!(
+                glyphs.len(),
+                glyph_count,
+                "glyphs reserved for the visual line"
+            );
 
             let mut line_height_opt: Option<f32> = None;
             for glyph in &glyphs {

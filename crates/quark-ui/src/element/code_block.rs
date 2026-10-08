@@ -93,10 +93,13 @@ impl CodeBlock {
     /// [`Self::layout_params`] for lines already joined by
     /// [`join_code_lines`].
     pub fn joined_layout_params(spans: &[StyledSpan], font_size: f32) -> TextParams {
-        let style = TextStyle::new(font_size)
+        styled_params(spans, Self::style(font_size), None)
+    }
+
+    fn style(font_size: f32) -> TextStyle {
+        TextStyle::new(font_size)
             .kind(FontKind::Mono)
-            .line_height(font_size * CODE_LINE_HEIGHT);
-        styled_params(spans, style, None)
+            .line_height(font_size * CODE_LINE_HEIGHT)
     }
 
     /// Height and text origin of a block of `line_count` lines.
@@ -143,13 +146,13 @@ impl Element for CodeBlock {
         engine: &mut LayoutEngine,
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
-        let params = Self::joined_layout_params(&self.spans, self.font_size);
-        let layout = cx.layout_text(&params);
+        let style = Self::style(self.font_size);
+        let layout = with_styled_query(&self.spans, style, None, |q| cx.layout_text_query(q));
         let spans = self.spans.clone();
         let label = self.label.as_ref().and_then(|label| {
             let size = self.font_size * LABEL_SIZE;
-            cx.layout_text(&TextParams::new(
-                label.to_string(),
+            cx.layout_text_query(&TextQuery::new(
+                label,
                 TextStyle::new(size)
                     .kind(FontKind::Ui)
                     .line_height(size * 1.2),
@@ -255,7 +258,7 @@ impl Element for CodeBlock {
         });
         scene.pop_clip();
 
-        let text = layout.text().clone();
+        let text = layout.source().clone();
         if cx.accessibility_enabled()
             && !cx.accessibility_text_hidden()
             && bounds.width > 0.0

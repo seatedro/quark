@@ -1,8 +1,10 @@
 // Byte slicing of strings lives in `quark_text::offset`.
 #![deny(clippy::string_slice, clippy::indexing_slicing)]
 
+use std::cell::RefCell;
+
 use super::*;
-use quark_text::{TextOffset, ToTextOffset};
+use quark_text::{TextOffset, TextSource, ToTextOffset};
 
 // ---------------------------------------------------------------------------
 // SelectableText — multi-line, mouse-selectable static text
@@ -283,7 +285,8 @@ pub(super) fn register_link_input(
 /// Per-frame record of a painted selectable-text block, mirroring
 /// `TextInputHitArea`. Carries the layout that was painted, so pointer
 /// hit-testing maps a click onto exactly the glyphs on screen (bold, italic,
-/// and code runs included) and on to a byte offset into `text`. `source_key`
+/// and code runs included) and on to a byte offset into `text`, the
+/// layout's own source: what was painted, whatever the text is now. `source_key`
 /// identifies which logical text this is, so a selection survives re-wrap and
 /// only highlights its own block.
 #[derive(Debug, Clone)]
@@ -292,7 +295,7 @@ pub struct SelectableTextRegion {
     pub bounds: Rect,
     /// The layout's top left in layout coordinates.
     pub text_origin: (f32, f32),
-    pub text: Arc<str>,
+    pub text: TextSource,
     pub layout: Arc<TextLayout>,
     pub source_key: u64,
     /// Layout coordinates to window coordinates: the transforms of the
@@ -459,11 +462,18 @@ impl SelectableText {
         weight: FontWeight,
         width: Option<f32>,
     ) -> TextParams {
-        let style = TextStyle::new(font_size)
+        styled_params(
+            spans,
+            Self::style(font_size, kind, weight),
+            width.map(|w| w.max(1.0)),
+        )
+    }
+
+    fn style(font_size: f32, kind: FontKind, weight: FontWeight) -> TextStyle {
+        TextStyle::new(font_size)
             .kind(kind)
             .weight(weight)
-            .line_height(Self::line_height_for(font_size));
-        styled_params(spans, style, width.map(|w| w.max(1.0)))
+            .line_height(Self::line_height_for(font_size))
     }
 
     /// Height the element lays out at for `layout` (from
@@ -481,6 +491,46 @@ impl SelectableText {
     }
 }
 
+/// [`styled_params`] borrowed: the text and spans are joined into storage
+/// this thread keeps, and `f` gets the query over them, so laying out a
+/// block the layout cache already holds allocates nothing.
+pub(crate) fn with_styled_query<R>(
+    spans: &[StyledSpan],
+    style: TextStyle,
+    wrap_width: Option<f32>,
+    f: impl FnOnce(&TextQuery) -> R,
+) -> R {
+    thread_local! {
+        static JOINED: RefCell<(String, Vec<TextSpan>)> = const {
+            RefCell::new((String::new(), Vec::new()))
+        };
+    }
+    JOINED.with(|joined| {
+        let (text, text_spans) = &mut *joined.borrow_mut();
+        text.clear();
+        text_spans.clear();
+        for span in spans {
+            let start = text.len();
+            text.push_str(&span.text);
+            text_spans.push(styled_span(span, start..text.len()));
+        }
+        f(&TextQuery {
+            text,
+            spans: text_spans,
+            ..TextQuery::new("", style).wrap_width(wrap_width)
+        })
+    })
+}
+
+fn styled_span(span: &StyledSpan, range: std::ops::Range<usize>) -> TextSpan {
+    TextSpan {
+        range,
+        weight: Some(span.font_weight),
+        style: span.italic.then_some(FontStyle::Italic),
+        kind: Some(span.font_kind),
+    }
+}
+
 /// One layout for the concatenated span texts, each span's font applied to
 /// its byte range. Span `i` of the layout is `spans[i]`, which is how paint
 /// maps glyphs back to span colors.
@@ -494,12 +544,7 @@ pub(crate) fn styled_params(
     for span in spans {
         let start = text.len();
         text.push_str(&span.text);
-        text_spans.push(TextSpan {
-            range: start..text.len(),
-            weight: Some(span.font_weight),
-            style: span.italic.then_some(FontStyle::Italic),
-            kind: Some(span.font_kind),
-        });
+        text_spans.push(styled_span(span, start..text.len()));
     }
     TextParams::new(text, style)
         .spans(text_spans)
@@ -592,16 +637,12 @@ impl Element for SelectableText {
             WrapMode::Explicit(width) => Some(width),
             WrapMode::Auto | WrapMode::NoWrap => None,
         };
-        let params = Self::params(
-            &self.spans,
-            self.font_size,
-            self.font_kind,
-            self.font_weight,
-            explicit,
-        );
         // Unwrapped unless the width is explicit; automatic wrapping
         // reshapes at the resolved width in prepaint.
-        let layout = cx.layout_text(&params);
+        let style = Self::style(self.font_size, self.font_kind, self.font_weight);
+        let layout = with_styled_query(&self.spans, style, explicit.map(|w| w.max(1.0)), |q| {
+            cx.layout_text_query(q)
+        });
         let id = match (self.wrap, &layout) {
             (WrapMode::Auto, Some(unwrapped)) => engine.request_text_layout(
                 &taffy::Style::default(),
@@ -700,7 +741,7 @@ impl Element for SelectableText {
             scene.pop_clip();
         }
 
-        let text = layout.text().clone();
+        let text = layout.source().clone();
         if !text.is_empty()
             && cx.accessibility_enabled()
             && !cx.accessibility_text_hidden()
@@ -719,8 +760,8 @@ impl Element for SelectableText {
                 .label(text.to_string())
                 .read_only(true)
                 .text(match self.selection {
-                    Some((start, end)) => AccessibleText::new(text.clone()).selection(start, end),
-                    None => AccessibleText::new(text.clone()),
+                    Some((start, end)) => AccessibleText::new(text.as_str()).selection(start, end),
+                    None => AccessibleText::new(text.as_str()),
                 }),
             );
         }
