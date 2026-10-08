@@ -117,15 +117,18 @@ impl SliderRange {
         ((snapped * scale).round() / scale).clamp(self.min, self.max)
     }
 
-    /// Decimal places the step needs, for display: 0 for 1, 1 for 0.5, 2
-    /// for 0.25.
+    /// Decimal places the values need, for display: 0 for 1, 1 for 0.5, 2
+    /// for 0.25. Values are `min` plus whole steps, so `min` counts too.
     pub fn decimals(&self) -> usize {
-        (0..6)
-            .find(|&d| {
-                let scaled = self.step * POW10[d];
-                (scaled - scaled.round()).abs() < 1e-3
-            })
-            .unwrap_or(6)
+        let places = |x: f32| {
+            (0..6)
+                .find(|&d| {
+                    let scaled = x * POW10[d];
+                    (scaled - scaled.round()).abs() < 1e-3
+                })
+                .unwrap_or(6)
+        };
+        places(self.step).max(places(self.min))
     }
 
     /// The value at fraction `t` of the range.
@@ -365,6 +368,13 @@ mod tests {
             max: 10.0,
             step: 5.0,
         };
+        // Regression: halves from a quarter were rounded to the step's one
+        // decimal, so 0.75 came out as 0.8.
+        let halves_from_a_quarter = SliderRange {
+            min: 0.25,
+            max: 2.0,
+            step: 0.5,
+        };
         let cases = [
             (tenths, 0.1 + 0.2, 0.3),
             (tenths, 0.94, 0.9),
@@ -372,6 +382,7 @@ mod tests {
             (fives, 2.4, 0.0),
             (fives, 2.6, 5.0),
             (fives, -12.0, -10.0),
+            (halves_from_a_quarter, 0.7, 0.75),
         ];
         for (range, input, expected) in cases {
             assert_eq!(range.snap(input), expected, "{input} in {range:?}");
