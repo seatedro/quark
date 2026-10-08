@@ -146,6 +146,9 @@ impl State {
         let text = model.files.get(&self.open).unwrap_or_default();
         if self.source.text() != text {
             self.source.set_text(text);
+            // The caret lands at the end, and the editor would scroll it
+            // into view: a file opens at its first line.
+            self.source.apply(TextEditCommand::SetTextCursor(0));
         }
     }
 }
