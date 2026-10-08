@@ -553,22 +553,22 @@ mod tests {
     #[test]
     fn a_changed_frame_stays_within_its_allocation_budget() {
         // (case, input, text it shows, budget warm, budget after idling)
-        // Measured: 50/9, 55/11, 1283/234, 2/2.
+        // Measured: 31/1, 34/3, 882/6, 0/0.
         let cases: &[(&str, String, &str, u64, u64)] = &[
-            ("a typed character", "o".into(), "$ echo", 52, 11),
+            ("a typed character", "o".into(), "$ echo", 33, 2),
             (
                 "one new line",
                 "\r\nfresh output line".into(),
                 "fresh output line",
-                57,
-                13,
+                36,
+                4,
             ),
             (
                 "thirty new lines",
                 format!("\r\n{}", lines(9, 30)),
                 "output 9.29 of a build step",
-                1300,
-                240,
+                900,
+                8,
             ),
             // Onto a blank cell, so no glyph under the cursor needs shaping.
             ("a cursor move", "\x1b[22;2H".into(), "$ ech", 0, 0),

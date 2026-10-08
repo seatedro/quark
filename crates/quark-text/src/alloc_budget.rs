@@ -251,6 +251,14 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             1,
         ),
         (
+            // Refills the pangram's layout, whose text is longer: the
+            // copy must go into that storage rather than a new string.
+            "line of another length",
+            vec![ui(PANGRAM.into()), ui("jumpy otter".into())],
+            vec![ui("one small brown cat naps".into())],
+            0,
+        ),
+        (
             "80-column styled row",
             vec![styled_row(1), styled_row(2)],
             vec![styled_row(3)],
@@ -261,7 +269,7 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             (0..30).map(plain_row).collect(),
             (30..60).map(plain_row).collect(),
             // Words longer than the word that last had their glyph vector.
-            30,
+            29,
         ),
         (
             "bidi and emoji paragraph",
@@ -271,7 +279,7 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             // those runs with every font: 69 shape plans, which must all
             // stay cached, and a glyph vector and missing-glyph list per
             // font tried, which must be reused.
-            22,
+            20,
         ),
     ];
     assert_budgets(&mut test_system(), cases);
@@ -304,7 +312,7 @@ fn fresh_text_with_ligatures_off_copies_features_per_span_only() {
             "bidi and emoji paragraph",
             vec![bidi_emoji(1)],
             vec![bidi_emoji(2)],
-            22 + 9,
+            20 + 10,
         ),
     ];
     assert_budgets(&mut system, cases);
@@ -331,7 +339,7 @@ fn stream_past_cache_capacity_refills_evicted_layouts() {
     // Left-to-right rows skip the bidi analysis, its 19 words' monospace
     // fallback candidates reuse one vector, its lines' reordering reuses
     // another, and the evictions themselves must add nothing.
-    assert!(allocations <= 2, "{allocations} allocations for 64 rows");
+    assert_eq!(allocations, 0, "{allocations} allocations for 64 rows");
     let last = last.expect("layout");
     assert_eq!(last.text(), rows[95].text);
     assert_eq!(last.verify_integrity(), Ok(()));
@@ -354,7 +362,7 @@ fn layout_released_after_eviction_is_refilled() {
     drop(held);
     let fresh = ui("brisk eagle".into());
     let (layout, allocations) = count(|| cache.layout_query(&mut system, &fresh.query()));
-    assert!(allocations <= 1, "{allocations} allocations");
+    assert_eq!(allocations, 0);
     assert_eq!(layout.expect("layout").text(), fresh.text);
 }
 
