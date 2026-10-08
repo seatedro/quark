@@ -2,7 +2,8 @@
 //!
 //! A theme file names a family and gives a light variant, a dark variant,
 //! or both. Each variant starts from quark's own theme of its mode and
-//! overrides the tokens it lists:
+//! contrast (`"standard"` unless it says `"high"`) and overrides the tokens
+//! it lists:
 //!
 //! ```json
 //! {
@@ -11,7 +12,7 @@
 //!     "colors": { "background": "#0f1419", "accent": "#59c2ff" },
 //!     "metrics": { "ui_font_size": 15 }
 //!   },
-//!   "light": { "colors": { "background": "#fafafa" } }
+//!   "light": { "contrast": "high", "colors": { "background": "#fafafa" } }
 //! }
 //! ```
 //!
@@ -26,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-use super::{Color, Theme, ThemeColors, ThemeMetrics, ThemeMode};
+use super::{Color, Theme, ThemeColors, ThemeContrast, ThemeMetrics, ThemeMode};
 
 /// Metrics that are font sizes, which must stay readable.
 const FONT_SIZES: [&str; 4] = [
@@ -91,6 +92,15 @@ impl ThemeFamily {
         }
     }
 
+    /// Quark's own high-contrast light and dark themes.
+    pub fn high_contrast() -> Self {
+        Self {
+            name: "Quark High Contrast".to_owned(),
+            light: Some(Theme::high_contrast_light()),
+            dark: Some(Theme::high_contrast_dark()),
+        }
+    }
+
     /// The variant for `mode`, or the other one when the family has only
     /// that.
     pub fn theme(&self, mode: ThemeMode) -> Theme {
@@ -147,6 +157,10 @@ fn variant_json(theme: &Theme) -> Value {
         })
         .collect();
     let mut variant = Map::new();
+    variant.insert(
+        "contrast".to_owned(),
+        Value::String(contrast_name(theme.contrast).to_owned()),
+    );
     variant.insert("colors".to_owned(), Value::Object(colors));
     variant.insert("metrics".to_owned(), Value::Object(metrics));
     variant.insert(
@@ -154,6 +168,13 @@ fn variant_json(theme: &Theme) -> Value {
         Value::Bool(theme.reduced_motion),
     );
     Value::Object(variant)
+}
+
+fn contrast_name(contrast: ThemeContrast) -> &'static str {
+    match contrast {
+        ThemeContrast::Standard => "standard",
+        ThemeContrast::High => "high",
+    }
 }
 
 fn color_hex(c: Color) -> String {
@@ -252,18 +273,35 @@ fn parse_variant(
     path: &str,
     issues: &mut Vec<ThemeIssue>,
 ) -> Theme {
-    let mut theme = Theme::for_mode(mode);
     let Value::Object(variant) = value else {
         issue(
             issues,
             path,
             "expected an object with \"colors\" and \"metrics\"",
         );
-        return theme;
+        return Theme::for_mode(mode);
     };
+    // The contrast picks the theme the tokens override, so it is read
+    // before them.
+    let contrast = match variant.get("contrast") {
+        None => ThemeContrast::Standard,
+        Some(Value::String(name)) if name == "standard" => ThemeContrast::Standard,
+        Some(Value::String(name)) if name == "high" => ThemeContrast::High,
+        Some(value) => {
+            let at = format!("{path}.contrast");
+            issue(
+                issues,
+                at,
+                format!("expected \"standard\" or \"high\", found {value}"),
+            );
+            ThemeContrast::Standard
+        }
+    };
+    let mut theme = Theme::for_mode_and_contrast(mode, contrast);
     for (key, value) in variant {
         let at = format!("{path}.{key}");
         match (key.as_str(), value) {
+            ("contrast", _) => {}
             ("colors", Value::Object(colors)) => {
                 for (token, value) in colors {
                     let at = format!("{at}.{token}");
@@ -306,7 +344,12 @@ fn parse_variant(
             ("reduced_motion", Value::Bool(reduced)) => theme.reduced_motion = *reduced,
             ("colors" | "metrics", _) => issue(issues, at, "expected an object of tokens"),
             ("reduced_motion", _) => issue(issues, at, "expected true or false"),
-            _ => unknown(issues, &at, key, &["colors", "metrics", "reduced_motion"]),
+            _ => unknown(
+                issues,
+                &at,
+                key,
+                &["colors", "metrics", "reduced_motion", "contrast"],
+            ),
         }
     }
     theme
@@ -343,8 +386,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
-/// The theme families an app can pick from: quark's own, then those
-/// loaded from theme files (a later family replaces an earlier one of the
+/// The theme families an app can pick from: quark's own (standard, then
+/// high contrast), then those loaded from theme files (a later family replaces an earlier one of the
 /// same name).
 #[derive(Debug, Clone)]
 pub struct ThemeRegistry {
@@ -354,7 +397,7 @@ pub struct ThemeRegistry {
 impl Default for ThemeRegistry {
     fn default() -> Self {
         Self {
-            families: vec![ThemeFamily::builtin()],
+            families: vec![ThemeFamily::builtin(), ThemeFamily::high_contrast()],
         }
     }
 }
@@ -417,7 +460,7 @@ mod tests {
 
     #[test]
     fn a_family_survives_a_round_trip_through_json() {
-        let mut dark = Theme::default_dark();
+        let mut dark = Theme::high_contrast_dark();
         dark.colors.accent = Color::rgba(1, 2, 3, 4);
         dark.metrics.ui_font_size = 13.5;
         dark.reduced_motion = true;
@@ -439,6 +482,17 @@ mod tests {
         expected.colors.accent = Color::rgba(0x59, 0xc2, 0xff, 255);
         expected.colors.text = Color::rgba(255, 255, 255, 0x88);
         // A family without a light variant uses its dark one in light mode.
+        assert_eq!(family.theme(ThemeMode::Light), expected);
+    }
+
+    #[test]
+    fn a_high_contrast_variant_overrides_the_high_contrast_theme() {
+        let family = ThemeFamily::from_json(
+            r##"{"name": "Harbor HC", "light": {"colors": {"accent": "#002266"}, "contrast": "high"}}"##,
+        )
+        .expect("valid");
+        let mut expected = Theme::high_contrast_light();
+        expected.colors.accent = Color::rgba(0x00, 0x22, 0x66, 255);
         assert_eq!(family.theme(ThemeMode::Light), expected);
     }
 
@@ -467,6 +521,11 @@ mod tests {
                     "dark.colors.accent: expected a color like",
                     "dark.colors.backgound: unknown key \"backgound\"; did you mean \"background\"?",
                 ],
+            ),
+            (
+                "an unknown contrast",
+                r#"{"name": "x", "dark": {"contrast": "max"}}"#,
+                &["dark.contrast: expected \"standard\" or \"high\", found \"max\""],
             ),
             (
                 "an unreadable font size and a negative metric",
@@ -511,7 +570,11 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        assert_eq!(names, ["Quark"], "a.json replaced the builtin family");
+        assert_eq!(
+            names,
+            ["Quark", "Quark High Contrast"],
+            "a.json replaced the builtin family"
+        );
         let accent = registry
             .get("Quark")
             .map(|f| f.theme(ThemeMode::Dark).colors.accent);

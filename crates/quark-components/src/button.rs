@@ -109,7 +109,7 @@ impl RenderOnce for Button {
         };
 
         let (bg, hover_bg, icon_color, text_color) = match self.variant {
-            ButtonStyle::Filled => (tc.accent, tc.accent_strong, tc.text_strong, tc.text_strong),
+            ButtonStyle::Filled => (tc.accent, tc.accent_strong, tc.on_accent, tc.on_accent),
             ButtonStyle::Subtle => (
                 tc.element_background,
                 tc.element_hover,

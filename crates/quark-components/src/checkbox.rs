@@ -56,7 +56,7 @@ impl RenderOnce for Checkbox {
         let (box_bg, box_border, check_color) = if self.disabled {
             (tc.element_background, tc.border_variant, tc.text_muted)
         } else if self.checked {
-            (tc.accent, tc.accent, Color::rgba(255, 255, 255, 255))
+            (tc.accent, tc.accent, tc.on_accent)
         } else {
             (Color::TRANSPARENT, tc.border, tc.icon)
         };
@@ -161,7 +161,7 @@ impl RenderOnce for Switch {
         let (track_bg, thumb_bg) = if self.disabled {
             (tc.element_background, tc.text_muted)
         } else if self.on {
-            (tc.accent, Color::rgba(255, 255, 255, 255))
+            (tc.accent, tc.on_accent)
         } else {
             (tc.element_background, tc.icon)
         };
