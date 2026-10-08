@@ -2166,6 +2166,185 @@ mod tests {
         }
     }
 
+    /// Texts the shaping memo is checked over: ASCII words, digits and
+    /// punctuation, tabs, ligature candidates, wide CJK, emoji sequences,
+    /// combining marks, right-to-left runs, and words that repeat (so the
+    /// memo answers within a line too).
+    const MEMO_CORPUS: &[&str] = &[
+        "the quick brown fox jumps over the lazy dog",
+        "0123 4.5% = $6, (7) / 8:9 -- ... !? [] {} <> @#^&*_+|~`'\"",
+        "tab\tseparated\tcolumns\t\t42",
+        "fi fl ffi office -> => != === <= >= && || :: www 0xFF",
+        "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8} \u{6f22}\u{5b57} kanji",
+        "emoji \u{1f600} \u{1f469}\u{200d}\u{1f4bb} \u{1f1ef}\u{1f1f5} \u{2764}\u{fe0f} ok",
+        "e\u{301} a\u{308}o\u{303} n\u{303}a\u{30a} combining \u{3b1}\u{3b2} \u{2603}",
+        "\u{5e9}\u{5dc}\u{5d5}\u{5dd} world \u{645}\u{631}\u{62d}\u{628}\u{627} 123",
+        // `<>` between right-to-left words shapes right to left, mirrored,
+        // and between left-to-right ones it does not.
+        "\u{5e9}\u{5dc} <> \u{5d5}\u{5dd} and <> x",
+        "build build build build step step a a a",
+        "  blanks  around   ",
+    ];
+
+    /// The spans each memo corpus text is laid out with: none, bold and
+    /// italic words, another font kind, and a span that changes nothing
+    /// but its index (so a memo answer must still take the glyph's own).
+    fn memo_spans(text: &str) -> Vec<Vec<TextSpan>> {
+        let snap = |i: usize| {
+            (0..=i.min(text.len()))
+                .rev()
+                .find(|&i| text.is_char_boundary(i))
+        };
+        let span = |from: usize, to: usize, weight, style, kind| {
+            let (from, to) = (snap(from).unwrap_or(0), snap(to).unwrap_or(0));
+            TextSpan {
+                range: from..to.max(from),
+                weight,
+                style,
+                kind,
+            }
+        };
+        vec![
+            Vec::new(),
+            vec![
+                span(0, 6, Some(FontWeight::Bold), None, None),
+                span(6, 12, None, Some(FontStyle::Italic), None),
+                span(12, 18, None, None, None),
+                span(18, 24, None, None, Some(FontKind::Mono)),
+            ],
+            vec![span(
+                5,
+                40,
+                Some(FontWeight::Semibold),
+                Some(FontStyle::Italic),
+                None,
+            )],
+        ]
+    }
+
+    /// A system shaping every run again, and one answering from the memo.
+    fn memo_pair(settings: &FontSettings) -> (TextSystem, TextSystem) {
+        let mut full = TextSystem::vendored_only(settings);
+        full.raster_font_system().set_shape_run_memo(false);
+        (full, TextSystem::vendored_only(settings))
+    }
+
+    // cosmic-text answers short runs it has shaped from a memo. Its key must
+    // hold everything that picks the glyphs (text, direction, the start's
+    // fonts and features), and each answer must take what shaping copies
+    // from each glyph's own attributes; otherwise a layout differs from
+    // one shaped run by run. Each text is laid out twice, so the second
+    // reads every run it can from the memo.
+    #[test]
+    fn memoized_shaping_lays_out_like_shaping_every_run() {
+        let fira = crate::fonts::FIRA_CODE_FAMILY.to_owned();
+        let settings = [
+            FontSettings::default(),
+            FontSettings {
+                ligatures: false,
+                ..FontSettings::default()
+            },
+            FontSettings {
+                mono_family: fira.clone(),
+                ..FontSettings::default()
+            },
+            FontSettings {
+                mono_family: fira,
+                ligatures: false,
+                ..FontSettings::default()
+            },
+        ];
+        let styles = [
+            (TextStyle::new(14.0), 1.0),
+            (TextStyle::new(13.0).kind(FontKind::Mono), 1.0),
+            (TextStyle::new(13.0).kind(FontKind::Mono), 1.5),
+        ];
+        for settings in &settings {
+            let (mut full, mut memo) = memo_pair(settings);
+            for pass in 0..2 {
+                for text in MEMO_CORPUS {
+                    for spans in memo_spans(text) {
+                        for (style, scale) in styles {
+                            let params = TextParams::new(*text, style)
+                                .spans(spans.clone())
+                                .scale_factor(scale);
+                            let expected = dump(&full.layout(&params).expect("layout"));
+                            let actual = dump(&memo.layout(&params).expect("layout"));
+                            assert_eq!(actual, expected, "pass {pass} {text:?} {spans:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config(24))]
+
+        // The memo over arbitrary mixed-direction text with a bold italic
+        // prefix, wrapped or not.
+        #[test]
+        fn memoized_shaping_of_mixed_text_matches_shaping_every_run(
+            text in mixed_text(),
+            end in 0usize..48,
+            wrap in wrap(),
+        ) {
+            let (mut full, mut memo) = memo_pair(&FontSettings::default());
+            let params = TextParams::new(text.as_str(), TextStyle::new(14.0))
+                .spans(prefix_span(&text, end, FontStyle::Italic))
+                .wrap_width(wrap);
+            let expected = dump(&full.layout(&params).expect("layout"));
+            for _ in 0..2 {
+                prop_assert_eq!(dump(&memo.layout(&params).expect("layout")), expected.clone());
+            }
+        }
+    }
+
+    // Attributes quark-text never sets (letter spacing, color, metrics,
+    // stretch, font features per span) reach shaped glyphs too: a memo answer must add
+    // each glyph's own spacing to the bare advance and copy its own color,
+    // metadata, weight, flags, and metrics, including within one run, and
+    // a run with other features (Fira Code's `ffi` without ligatures) is
+    // another run.
+    #[test]
+    fn memoized_runs_take_each_glyphs_own_attributes() {
+        use cosmic_text::{
+            Attrs, AttrsList, BufferLine, CacheKeyFlags, Color, Family, FontFeatures, LineEnding,
+            Metrics, Shaping, Stretch, Weight,
+        };
+        let shaped = |memo: bool| {
+            let mut system = TextSystem::vendored_only(&FontSettings::default());
+            let fs = system.raster_font_system();
+            fs.set_shape_run_memo(memo);
+            let base = Attrs::new().family(Family::Name(crate::fonts::FIRA_CODE_FAMILY));
+            let mut no_ligatures = FontFeatures::new();
+            set_font_features(&mut no_ligatures, false);
+            let mut attrs = AttrsList::new(&base);
+            attrs.add_span(25..31, &base.clone().font_features(no_ligatures));
+            attrs.add_span(3..5, &base.clone().letter_spacing(0.25));
+            let marked = base
+                .clone()
+                .color(Color::rgb(1, 2, 3))
+                .metadata(7)
+                .cache_key_flags(CacheKeyFlags::FAKE_ITALIC);
+            attrs.add_span(6..8, &marked);
+            attrs.add_span(9..10, &base.clone().metrics(Metrics::new(20.0, 24.0)));
+            attrs.add_span(12..14, &base.clone().letter_spacing(-0.1));
+            attrs.add_span(15..17, &base.clone().weight(Weight::BOLD));
+            attrs.add_span(0..2, &base.clone().stretch(Stretch::Condensed));
+            let mut line = BufferLine::new(
+                "ab ab ab ab ab ab office office",
+                LineEnding::None,
+                attrs,
+                Shaping::Advanced,
+            );
+            line.shape(fs, 8);
+            line.reset();
+            format!("{:?}", line.shape(fs, 8))
+        };
+        assert_eq!(shaped(true), shaped(false));
+    }
+
     // Mono text falls back through monospace candidates ordered by weight
     // distance, then by how many of the word's chars they lack, with the
     // default mono font first. Geist Mono lacks Greek and the snowman;
