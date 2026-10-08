@@ -3056,6 +3056,7 @@ dependencies = [
  "pollster",
  "quark",
  "quark-text",
+ "quark-ui",
  "resvg",
  "thiserror 2.0.21",
  "tracing",

@@ -124,6 +124,22 @@ pub struct TextArea<'a> {
     pub custom_glyphs: &'a [CustomGlyph],
 }
 
+/// A glyph already shaped, laid out, and placed, for
+/// [`TextRenderer::prepare_glyphs`]. Its color is its own, so text in many
+/// colors needs no buffer shaped with those colors.
+#[derive(Clone, Copy, Debug)]
+pub struct PositionedGlyph {
+    /// What to rasterize: font, glyph, size, subpixel bins, and flags.
+    pub cache_key: CacheKey,
+    /// The pixel position [`LayoutGlyph::physical`] returns, with the
+    /// line's rounded baseline already added to `y`.
+    pub x: i32,
+    pub y: i32,
+    pub color: Color,
+    /// Clip rectangle, as [`TextArea::bounds`].
+    pub bounds: TextBounds,
+}
+
 pub(crate) struct State<'a> {
     pub(crate) device: &'a Device,
     pub(crate) queue: &'a Queue,

@@ -35,6 +35,9 @@ wgpu = { workspace = true, features = ["gles"] }
 image.workspace = true
 # The color glyph pixel probe draws an emoji.
 quark-text = { workspace = true, features = ["emoji-font"] }
+# The counting allocator for text preparation budgets. quark-ui depends on
+# this crate; Cargo allows the cycle for dev-dependencies.
+quark-ui = { workspace = true, features = ["test-alloc"] }
 
 [features]
 # Enables the no-surface offscreen render path used by fixture renders, and

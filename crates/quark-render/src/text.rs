@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, AttrsList, AttrsOwned, Buffer, Color as GlyphonColor, FontSystem, TextArea, TextBounds,
+    Attrs, AttrsList, AttrsOwned, Buffer, Color as GlyphonColor, FontSystem, LayoutGlyph,
+    LayoutRun, PositionedGlyph, TextArea, TextBounds,
 };
 use quark::scene::ShapedText;
 use quark::{Color, FontKind};
@@ -11,6 +12,97 @@ use quark_text::{TextLayout, TextParams, TextStyle, TextSystem};
 use crate::renderer::{ClippedRichText, ClippedText};
 use crate::scene::{Rect, RectPrimitive, Scene, TextDecoration, TextDecorationKind};
 
+/// How text primitives reach glyphon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TextPath {
+    /// Each layout's glyphs, already positioned, in the color of their
+    /// span. Changing colors copies and reshapes nothing.
+    #[default]
+    Positioned,
+    /// One glyphon text area per primitive over the layout's buffer, with
+    /// multi-colored layouts drawn from [`RecoloredBuffers`]. The fallback
+    /// the positioned path is checked against.
+    Buffer,
+}
+
+/// The glyphs of `texts` then `rich_texts`, in glyphon's order for the same
+/// primitives as text areas, so overlapping glyphs blend the same way.
+/// Nothing is shaped or copied; layouts must come from the `TextSystem`
+/// passed to glyphon's prepare, because glyph cache keys carry that font
+/// database's face ids.
+pub(super) fn positioned_glyphs<'a>(
+    texts: &'a [ClippedText],
+    rich_texts: &'a [ClippedRichText],
+) -> impl Iterator<Item = PositionedGlyph> + 'a {
+    let plain = texts.iter().flat_map(|text| {
+        let primitive = &text.primitive;
+        let color = glyphon_color(primitive.color);
+        let layout = primitive.layout.downcast_ref::<TextLayout>();
+        layout.into_iter().flat_map(move |layout| {
+            layout_glyphs(layout, primitive.rect, text.clip, move |glyph| {
+                glyph.color_opt.unwrap_or(color)
+            })
+        })
+    });
+    let rich = rich_texts.iter().flat_map(|text| {
+        let primitive = &text.primitive;
+        let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+        let layout = primitive.layout.downcast_ref::<TextLayout>();
+        layout.into_iter().flat_map(move |layout| {
+            layout_glyphs(layout, primitive.rect, text.clip, move |glyph| {
+                let color = span_color(glyph.metadata as u32, default_color, span_colors);
+                glyph.color_opt.unwrap_or(glyphon_color(color))
+            })
+        })
+    });
+    plain.chain(rich)
+}
+
+/// `layout`'s glyphs on lines that reach `clip`, placed as glyphon places a
+/// text area's: the same physical position, rounded baseline, and line
+/// culling, so both paths draw identical pixels.
+///
+/// Positions come from the layout's cosmic-text buffer. The glyph columns
+/// cannot replace it yet: their `phys_y` adds the baseline before
+/// truncating, where glyphon rounds the baseline separately, which moves
+/// glyphs on fractional baselines by a pixel. Drawing from the columns
+/// needs quark-text to keep each glyph's rounded baseline apart from its
+/// offset.
+fn layout_glyphs<'a>(
+    layout: &'a TextLayout,
+    origin: Rect,
+    clip: Rect,
+    color: impl Fn(&LayoutGlyph) -> GlyphonColor + Copy + 'a,
+) -> impl Iterator<Item = PositionedGlyph> + 'a {
+    // The layout's hit-testing and carets already include this shift.
+    let (left, top) = (origin.x + layout.buffer_x(), origin.y);
+    let bounds = text_bounds(clip);
+    let visible = move |run: &LayoutRun<'_>| {
+        let start = (top + run.line_top) as i32;
+        let end = start + run.line_height as i32;
+        start <= bounds.bottom && bounds.top <= end
+    };
+    layout
+        .buffer()
+        .layout_runs()
+        .skip_while(move |run| !visible(run))
+        .take_while(move |run| visible(run))
+        .flat_map(move |run| {
+            let line_y = run.line_y.round() as i32;
+            run.glyphs.iter().map(move |glyph| {
+                // The buffer is already shaped at physical size.
+                let physical = glyph.physical((left, top), 1.0);
+                PositionedGlyph {
+                    cache_key: physical.cache_key,
+                    x: physical.x,
+                    y: physical.y + line_y,
+                    color: color(glyph),
+                    bounds,
+                }
+            })
+        })
+}
+
 /// Builds glyphon areas straight from the shaped layouts; nothing is shaped
 /// here. Layouts must come from the `TextSystem` passed to glyphon's prepare,
 /// because glyph cache keys carry that font database's face ids.
@@ -18,35 +110,30 @@ pub(super) fn prepare_text_areas<'a>(
     texts: &'a [ClippedText],
     rich_texts: &'a [ClippedRichText],
     recolored: &'a RecoloredBuffers,
-) -> Vec<TextArea<'a>> {
-    let mut areas = Vec::with_capacity(texts.len() + rich_texts.len());
-    for text in texts {
+) -> impl Iterator<Item = TextArea<'a>> + 'a {
+    let plain = texts.iter().filter_map(|text| {
         let primitive = &text.primitive;
-        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
-            continue;
-        };
-        areas.push(text_area(
+        let layout = primitive.layout.downcast_ref::<TextLayout>()?;
+        Some(text_area(
             layout,
             primitive.rect,
             text.clip,
             primitive.color,
-        ));
-    }
-    for text in rich_texts {
+        ))
+    });
+    let rich = rich_texts.iter().filter_map(|text| {
         let primitive = &text.primitive;
-        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
-            continue;
-        };
-        areas.push(rich_text_area(
+        let layout = primitive.layout.downcast_ref::<TextLayout>()?;
+        Some(rich_text_area(
             layout,
             primitive.rect,
             text.clip,
             primitive.default_color,
             &primitive.span_colors,
             recolored,
-        ));
-    }
-    areas
+        ))
+    });
+    plain.chain(rich)
 }
 
 fn text_area(layout: &TextLayout, origin: Rect, clip: Rect, color: Color) -> TextArea<'_> {

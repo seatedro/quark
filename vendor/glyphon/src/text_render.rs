@@ -1,8 +1,8 @@
 use crate::{
     custom_glyph::CustomGlyphCacheKey, ColorMode, ContentType, FontSystem, GlyphDetails,
-    GlyphToRender, GpuCacheStatus, PrepareError, RasterizeCustomGlyphRequest,
+    GlyphToRender, GpuCacheStatus, PositionedGlyph, PrepareError, RasterizeCustomGlyphRequest,
     RasterizedCustomGlyph, RenderError, State, SwashCache, SwashContent, TextArea, TextAtlas,
-    Viewport,
+    TextBounds, Viewport,
 };
 use cosmic_text::{Color, SubpixelBin};
 use std::slice;
@@ -146,16 +146,7 @@ impl TextRenderer {
         let resolution = viewport.resolution();
 
         for text_area in text_areas {
-            let bounds = GlyphBounds {
-                x: Bounds {
-                    min: text_area.bounds.left.max(0),
-                    max: text_area.bounds.right.min(resolution.width as i32),
-                },
-                y: Bounds {
-                    min: text_area.bounds.top.max(0),
-                    max: text_area.bounds.bottom.min(resolution.height as i32),
-                },
-            };
+            let bounds = GlyphBounds::clipped(text_area.bounds, resolution);
 
             for glyph in text_area.custom_glyphs.iter() {
                 let x = text_area.left + (glyph.left * text_area.scale);
@@ -270,28 +261,8 @@ impl TextRenderer {
                             scale_factor: text_area.scale,
                         },
                         bounds,
-                        |system, _rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
-                            let image = system
-                                .cache
-                                .get_image_uncached(system.font_system, physical_glyph.cache_key)?;
-
-                            let content_type = match image.content {
-                                SwashContent::Color => ContentType::Color,
-                                SwashContent::Mask => ContentType::Mask,
-                                SwashContent::SubpixelMask => {
-                                    // Not implemented yet, but don't panic if this happens.
-                                    ContentType::Mask
-                                }
-                            };
-
-                            Some(GetGlyphImageResult {
-                                content_type,
-                                top: image.placement.top as i16,
-                                left: image.placement.left as i16,
-                                width: image.placement.width as u16,
-                                height: image.placement.height as u16,
-                                data: image.data,
-                            })
+                        |system, _rasterize_custom_glyph| {
+                            text_glyph_image(system, physical_glyph.cache_key)
                         },
                         &mut metadata_to_depth,
                         &mut rasterize_custom_glyph,
@@ -302,9 +273,66 @@ impl TextRenderer {
             }
         }
 
+        self.upload(device, queue);
+        Ok(())
+    }
+
+    /// Prepares glyphs that are already positioned, in the order given.
+    /// Unlike [`Self::prepare`], nothing is read from a [`cosmic_text::Buffer`]:
+    /// each glyph brings its own position, color, and clip. Call
+    /// [`Self::upload`] before rendering; keeping the GPU copy separate lets
+    /// a caller budget preparation apart from the driver's staging.
+    pub fn prepare_glyphs(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        font_system: &mut FontSystem,
+        atlas: &mut TextAtlas,
+        viewport: &Viewport,
+        glyphs: impl IntoIterator<Item = PositionedGlyph>,
+        cache: &mut SwashCache,
+    ) -> Result<(), PrepareError> {
+        self.glyph_vertices.clear();
+
+        let state = State { device, queue };
+        let mut system = GlyphSystem {
+            atlas,
+            cache,
+            font_system,
+        };
+        let resolution = viewport.resolution();
+
+        for glyph in glyphs {
+            if let Some(glyph_to_render) = prepare_glyph(
+                &state,
+                &mut system,
+                GlyphMetadata {
+                    x: glyph.x,
+                    y: glyph.y,
+                    line_y: 0.0,
+                    scale_factor: 1.0,
+                    color: glyph.color,
+                    metadata: 0,
+                    cache_key: GlyphonCacheKey::Text(glyph.cache_key),
+                },
+                GlyphBounds::clipped(glyph.bounds, resolution),
+                |system, _rasterize_custom_glyph| text_glyph_image(system, glyph.cache_key),
+                zero_depth,
+                |_| None,
+            )? {
+                self.glyph_vertices.push(glyph_to_render);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Copies the prepared vertices to the GPU, growing the buffer if needed.
+    /// [`Self::prepare`] and its variants call this themselves.
+    pub fn upload(&mut self, device: &Device, queue: &Queue) {
         let will_render = !self.glyph_vertices.is_empty();
         if !will_render {
-            return Ok(());
+            return;
         }
 
         let vertices = self.glyph_vertices.as_slice();
@@ -330,8 +358,6 @@ impl TextRenderer {
             self.vertex_buffer = buffer;
             self.vertex_buffer_size = buffer_size;
         }
-
-        Ok(())
     }
 
     /// Renders all layouts that were previously provided to `prepare`.
@@ -424,6 +450,50 @@ struct Bounds {
 struct GlyphBounds {
     x: Bounds,
     y: Bounds,
+}
+
+impl GlyphBounds {
+    /// `bounds` clipped to the viewport.
+    fn clipped(bounds: TextBounds, resolution: crate::Resolution) -> Self {
+        Self {
+            x: Bounds {
+                min: bounds.left.max(0),
+                max: bounds.right.min(resolution.width as i32),
+            },
+            y: Bounds {
+                min: bounds.top.max(0),
+                max: bounds.bottom.min(resolution.height as i32),
+            },
+        }
+    }
+}
+
+/// Rasterizes a font glyph for the atlas.
+fn text_glyph_image(
+    system: &mut GlyphSystem,
+    cache_key: cosmic_text::CacheKey,
+) -> Option<GetGlyphImageResult> {
+    let image = system
+        .cache
+        .get_image_uncached(system.font_system, cache_key)?;
+
+    let content_type = match image.content {
+        SwashContent::Color => ContentType::Color,
+        SwashContent::Mask => ContentType::Mask,
+        SwashContent::SubpixelMask => {
+            // Not implemented yet, but don't panic if this happens.
+            ContentType::Mask
+        }
+    };
+
+    Some(GetGlyphImageResult {
+        content_type,
+        top: image.placement.top as i16,
+        left: image.placement.left as i16,
+        width: image.placement.width as u16,
+        height: image.placement.height as u16,
+        data: image.data,
+    })
 }
 
 struct GlyphSystem<'a> {
