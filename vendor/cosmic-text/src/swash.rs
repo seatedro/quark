@@ -52,6 +52,14 @@ fn swash_image(
         Vector::new(cache_key.x_bin.as_float(), cache_key.y_bin.as_float())
     };
 
+    // Thickening widens outlines by a fiftieth of the em: half a pixel at
+    // 26 pixels per em (13 points on a 2x display).
+    let embolden = if cache_key.flags.contains(CacheKeyFlags::THICKEN) {
+        f32::from_bits(cache_key.font_size_bits) / 50.0
+    } else {
+        0.0
+    };
+
     // Select our source order
     Render::new(&[
         // Color outline with the first palette
@@ -63,6 +71,7 @@ fn swash_image(
     ])
     // Select a subpixel format
     .format(Format::Alpha)
+    .embolden(embolden)
     // Apply the fractional offset
     .offset(offset)
     .transform(if cache_key.flags.contains(CacheKeyFlags::FAKE_ITALIC) {

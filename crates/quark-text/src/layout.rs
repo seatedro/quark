@@ -98,6 +98,17 @@ pub struct TextStyle {
     pub font_weight: FontWeight,
     pub font_size: f32,
     pub line_height: f32,
+    /// A font family by name in place of `font_kind`'s generic one, for
+    /// text that keeps its own font whatever the app's settings (a
+    /// terminal's). Spans that set their own kind still use that kind's
+    /// family.
+    pub family: Option<&'static str>,
+    /// Extra advance after every glyph, in ems. A terminal sets it so
+    /// glyphs land on its whole-pixel cell grid.
+    pub letter_spacing: f32,
+    /// Rasterize glyph outlines slightly emboldened (color glyphs are
+    /// left alone), like Ghostty's `font-thicken`.
+    pub thicken: bool,
 }
 
 impl TextStyle {
@@ -107,6 +118,9 @@ impl TextStyle {
             font_weight: FontWeight::Normal,
             font_size,
             line_height: font_size * DEFAULT_LINE_HEIGHT_FACTOR,
+            family: None,
+            letter_spacing: 0.0,
+            thicken: false,
         }
     }
 
@@ -122,6 +136,21 @@ impl TextStyle {
 
     pub fn line_height(mut self, line_height: f32) -> Self {
         self.line_height = line_height;
+        self
+    }
+
+    pub fn family(mut self, family: Option<&'static str>) -> Self {
+        self.family = family;
+        self
+    }
+
+    pub fn letter_spacing(mut self, ems: f32) -> Self {
+        self.letter_spacing = ems;
+        self
+    }
+
+    pub fn thicken(mut self, thicken: bool) -> Self {
+        self.thicken = thicken;
         self
     }
 }
@@ -644,6 +673,7 @@ impl TextLayout {
         // One features vector moves between the base and each span's
         // attributes: an `Attrs` owns its features, so a clone per span
         // would allocate whenever ligatures are off.
+        let synth = synth.for_family(fs, style.family);
         let mut base = base_attrs(&style).font_features(mem::take(&mut scratch.features));
         while buffer.lines.len() > paragraphs.len() {
             spare_lines.extend(buffer.lines.pop());
@@ -1461,6 +1491,13 @@ fn split_paragraphs(text: &str, out: &mut Vec<(Range<usize>, LineEnding)>) {
     out.push((start..text.len(), LineEnding::None));
 }
 
+/// The family of text in `style` that no span re-kinds.
+fn style_family(style: &TextStyle) -> Family<'static> {
+    style
+        .family
+        .map_or_else(|| family(style.font_kind), Family::Name)
+}
+
 fn family(kind: FontKind) -> Family<'static> {
     match kind {
         FontKind::Ui => Family::SansSerif,
@@ -1515,12 +1552,27 @@ fn set_font_features(features: &mut cosmic_text::FontFeatures, ligatures: bool) 
 }
 
 fn base_attrs(style: &TextStyle) -> Attrs<'static> {
-    Attrs::new()
-        .family(family(style.font_kind))
+    let attrs = Attrs::new()
+        .family(style_family(style))
         .weight(cosmic_text::Weight(weight_value(
             style.font_kind,
             style.font_weight,
         )))
+        .cache_key_flags(style_flags(style));
+    if style.letter_spacing != 0.0 {
+        attrs.letter_spacing(style.letter_spacing)
+    } else {
+        attrs
+    }
+}
+
+/// Rasterization flags the whole block's style asks for.
+fn style_flags(style: &TextStyle) -> CacheKeyFlags {
+    if style.thicken {
+        CacheKeyFlags::THICKEN
+    } else {
+        CacheKeyFlags::empty()
+    }
 }
 
 /// Which generic families lack an italic face. Their italic spans are
@@ -1530,6 +1582,8 @@ fn base_attrs(style: &TextStyle) -> Attrs<'static> {
 pub(crate) struct SyntheticItalic {
     ui: bool,
     mono: bool,
+    /// For the style's named family, when it has one.
+    named: bool,
 }
 
 impl SyntheticItalic {
@@ -1545,7 +1599,20 @@ impl SyntheticItalic {
         Self {
             ui: lacks_italic(Family::SansSerif),
             mono: lacks_italic(Family::Monospace),
+            named: false,
         }
+    }
+
+    /// With `named` set for `family`, a style's family by name.
+    fn for_family(self, fs: &FontSystem, family: Option<&str>) -> Self {
+        let Some(name) = family else {
+            return self;
+        };
+        let named = !fs.db().faces().any(|face| {
+            face.style != fontdb::Style::Normal
+                && face.families.iter().any(|(family, _)| family == name)
+        });
+        Self { named, ..self }
     }
 
     fn needed(self, kind: FontKind) -> bool {
@@ -1565,18 +1632,29 @@ fn span_attrs(
     let kind = span.kind.unwrap_or(style.font_kind);
     let weight = span.weight.unwrap_or(style.font_weight);
     let italic = span.style == Some(FontStyle::Italic);
+    // The style's named family, unless the span picks a kind of its own.
+    let named = span.kind.is_none() && style.family.is_some();
     let font_style = if italic {
         cosmic_text::Style::Italic
     } else {
         cosmic_text::Style::Normal
     };
-    let flags = if italic && synth.needed(kind) {
+    let synthesize = if named {
+        synth.named
+    } else {
+        synth.needed(kind)
+    };
+    let flags = if italic && synthesize {
         CacheKeyFlags::FAKE_ITALIC
     } else {
         CacheKeyFlags::empty()
-    };
+    } | style_flags(style);
     base_attrs(style)
-        .family(family(kind))
+        .family(if named {
+            style_family(style)
+        } else {
+            family(kind)
+        })
         .weight(cosmic_text::Weight(weight_value(kind, weight)))
         .style(font_style)
         .cache_key_flags(flags)

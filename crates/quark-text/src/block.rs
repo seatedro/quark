@@ -280,6 +280,9 @@ mod tests {
         font_weight: quark::FontWeight::Normal,
         font_size: 14.0,
         line_height: 19.0,
+        family: None,
+        letter_spacing: 0.0,
+        thicken: false,
     };
 
     /// Everything a layout shows and hits against.

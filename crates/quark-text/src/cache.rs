@@ -31,6 +31,9 @@ impl LayoutKey {
         attrs.write_u8(kind_tag(style.font_kind));
         attrs.write_u8(weight_tag(Some(style.font_weight)));
         attrs.write_u32(style.line_height.to_bits());
+        style.family.hash(&mut attrs);
+        attrs.write_u32(style.letter_spacing.to_bits());
+        attrs.write_u8(u8::from(style.thicken));
         attrs.write_usize(params.spans.len());
         for span in params.spans.iter() {
             attrs.write_usize(span.range.start);

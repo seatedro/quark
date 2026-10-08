@@ -11,6 +11,8 @@ bitflags::bitflags! {
         const DISABLE_HINTING = 2;
         /// Render as a pixel font
         const PIXEL_FONT = 4;
+        /// Embolden outlines slightly, to thicken thin strokes
+        const THICKEN = 8;
     }
 }
 
