@@ -478,7 +478,15 @@ impl Demo {
         if let Err(e) = self.chat.set_markdown(stream.key, &stream.script[..end]) {
             eprintln!("{e:?}");
         }
-        end == stream.script.len()
+        let finished = end == stream.script.len();
+        if finished
+            && let Err(e) = self
+                .chat
+                .set_chrome(stream.key, chat_chrome(Role::Assistant, "Assistant"))
+        {
+            eprintln!("{e:?}");
+        }
+        finished
     }
 
     fn record(&mut self, elapsed: Duration) {

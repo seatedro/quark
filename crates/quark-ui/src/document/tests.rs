@@ -1930,6 +1930,32 @@ fn decorator_header_is_drawn_in_the_band_above_each_rows_blocks() {
     assert_eq!((headers, first_blocks_below_band), (expected, true));
 }
 
+// Catches a row keeping the chrome it was pushed with: chat_demo's answer
+// still read "Assistant (streaming)" after it finished.
+#[test]
+fn set_chrome_redraws_the_rows_chrome() {
+    let mut md = markdown_document("done");
+    md.document_mut().set_decorator(KindChrome);
+    let theme = Theme::default_dark();
+    let tinted = |scene: &Scene| {
+        scene.primitives.iter().any(|p| {
+            matches!(p, quark_render::Primitive::RoundedRect(rr) if rr.color == KIND_1_BACKGROUND)
+        })
+    };
+    let before = tinted(&paint_markdown(&mut md, &theme).1);
+
+    let chrome = RowChrome {
+        kind: 1,
+        ..RowChrome::default()
+    };
+    md.set_chrome(RowKey(0), chrome).unwrap();
+
+    assert_eq!(
+        (before, tinted(&paint_markdown(&mut md, &theme).1)),
+        (false, true)
+    );
+}
+
 // Catches the background hook painting the wrong rows, or not spanning the
 // whole row.
 #[test]

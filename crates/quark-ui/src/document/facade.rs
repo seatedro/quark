@@ -165,6 +165,20 @@ impl MarkdownDocument {
         self.refresh(row)
     }
 
+    /// Replaces the chrome of `row`: its author line once an answer has
+    /// finished streaming, say. The row is rebuilt on the next prepare.
+    pub fn set_chrome(&mut self, row: RowKey, chrome: RowChrome) -> Result<(), RowError> {
+        let entry = self
+            .entries
+            .get_mut(&row)
+            .ok_or(RowError::UnknownKey(row))?;
+        if entry.chrome == chrome {
+            return Ok(());
+        }
+        entry.chrome = chrome;
+        self.refresh(row)
+    }
+
     pub fn remove(&mut self, row: RowKey) -> Result<(), RowError> {
         self.document.remove(row)?;
         self.rows.remove(&row);
