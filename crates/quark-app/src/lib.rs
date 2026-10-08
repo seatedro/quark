@@ -205,6 +205,8 @@ macro_rules! profile_scope {
 
 #[cfg(feature = "devtools")]
 mod devtools;
+#[cfg(feature = "components")]
+pub mod dock_windows;
 #[cfg(all(test, feature = "test-support"))]
 mod drag_out_tests;
 

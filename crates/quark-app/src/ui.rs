@@ -499,6 +499,15 @@ impl UiContext<'_, '_> {
         redraw(Redraw::Announce, self.windows.handle, self.window);
     }
 
+    /// [`Self::set_window_name`] for `window`, which may be another window
+    /// than the context's, or one still opening.
+    pub fn set_window_name_in(&mut self, window: WindowHandle, name: impl Into<String>) {
+        if let Some(state) = self.state_in(window) {
+            state.name = Some(name.into());
+            redraw(Redraw::Announce, Some(window), self.window);
+        }
+    }
+
     /// The theme the next frame paints with.
     pub fn theme(&self) -> &Theme {
         &self.shared.theme
