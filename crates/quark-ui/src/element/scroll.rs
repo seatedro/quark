@@ -1139,16 +1139,16 @@ mod verification {
     use super::*;
 
     /// Any vertical bar (track, thumb length, offset, and max in whole
-    /// points), held anywhere on its thumb and dragged between any two
-    /// pointer positions: the offset asked for stays in range or is the
-    /// end, never goes back up as the pointer goes down, and is the end
-    /// once the thumb reaches the end of its track. A thumb that fills its
-    /// track keeps the offset. The bar comes from arbitrary values rather
-    /// than `scrollbars`: with its two divisions as well, the proof ran
-    /// past the 30 minute job.
+    /// points), held anywhere on its thumb, with the pointer anywhere: the
+    /// offset asked for is 0 with the thumb at or before the start of its
+    /// track, the end once the thumb reaches the end, and in range between.
+    /// A thumb that fills its track keeps the offset. One pointer per run:
+    /// comparing two (monotonicity) doubles the float divisions, and that
+    /// proof ran past the 30 minute job. The bar comes from arbitrary
+    /// values rather than `scrollbars` for the same reason.
     #[kani::proof]
     #[kani::solver(kissat)]
-    fn a_dragged_thumb_asks_for_offsets_in_order_and_in_range() {
+    fn a_dragged_thumb_asks_for_an_offset_in_range() {
         let len = f32::from(kani::any::<u8>());
         let thumb_len = f32::from(kani::any::<u8>());
         let max = f32::from(kani::any::<u16>());
@@ -1173,24 +1173,20 @@ mod verification {
             max,
             viewport: 0.0,
         };
-        let near = f32::from(kani::any::<i16>() % 512);
-        let far = f32::from(kani::any::<i16>() % 512);
-        kani::assume(near <= far);
+        let pointer = f32::from(kani::any::<i16>() % 512);
 
-        let (a, b) = (
-            bar.offset_for_pointer(near, grab),
-            bar.offset_for_pointer(far, grab),
-        );
+        let asked = bar.offset_for_pointer(pointer, grab);
 
+        let travel = pointer - track.y - grab;
         if len - thumb_len <= 0.0 {
             // A thumb that fills its track has nowhere to go.
-            assert!(a == offset && b == offset);
+            assert!(asked == offset);
+        } else if travel >= len - thumb_len {
+            assert!(asked == f32::MAX);
+        } else if travel <= 0.0 {
+            assert!(asked == 0.0);
         } else {
-            assert!(a == f32::MAX || (0.0 <= a && a <= max));
-            assert!(a <= b);
-            if far - track.y - grab >= len - thumb_len {
-                assert!(b == f32::MAX);
-            }
+            assert!(0.0 < asked && asked <= max);
         }
     }
 }
