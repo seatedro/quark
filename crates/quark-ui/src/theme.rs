@@ -563,25 +563,27 @@ fn light_colors(
 /// opaque `background` and that background. A translucent foreground is
 /// composited first, so the ratio is the one a reader sees.
 pub fn contrast_ratio(foreground: Color, background: Color) -> f32 {
-    let alpha = f32::from(foreground.a) / 255.0;
-    let channel = |fg: u8, bg: u8| {
-        let c = (f32::from(fg) * alpha + f32::from(bg) * (1.0 - alpha)) / 255.0;
+    let linear = |c: u8| {
+        let c = f32::from(c) / 255.0;
         if c <= 0.04045 {
             c / 12.92
         } else {
             ((c + 0.055) / 1.055).powf(2.4)
         }
     };
+    // Blended in linear light, as the renderer's sRGB surface blends.
+    let alpha = f32::from(foreground.a) / 255.0;
+    let over = |fg: u8, bg: u8| linear(fg) * alpha + linear(bg) * (1.0 - alpha);
     let luminance = |r, g, b| 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let fg = luminance(
-        channel(foreground.r, background.r),
-        channel(foreground.g, background.g),
-        channel(foreground.b, background.b),
+        over(foreground.r, background.r),
+        over(foreground.g, background.g),
+        over(foreground.b, background.b),
     );
     let bg = luminance(
-        channel(background.r, background.r),
-        channel(background.g, background.g),
-        channel(background.b, background.b),
+        linear(background.r),
+        linear(background.g),
+        linear(background.b),
     );
     (fg.max(bg) + 0.05) / (fg.min(bg) + 0.05)
 }
@@ -857,8 +859,10 @@ mod tests {
             (Color::rgba(0, 0, 0, 255), white, 21.0),
             (Color::rgba(0x77, 0x77, 0x77, 255), white, 4.48),
             (Color::rgba(0, 0, 255, 255), white, 8.59),
-            // Half-transparent black over white composites to #7f7f7f.
-            (Color::rgba(0, 0, 0, 128), white, 4.0),
+            // Half-transparent black over white leaves 127/255 of white's
+            // linear luminance: 1.05 / (127 / 255 + 0.05). Blending the
+            // gamma-encoded channels instead gives #7f7f7f and 4.0.
+            (Color::rgba(0, 0, 0, 128), white, 1.916),
             (white, white, 1.0),
         ];
         for (fg, bg, expected) in cases {
