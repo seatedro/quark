@@ -185,3 +185,49 @@ fn dock_terminal_command_keeps_the_dock_toggle_in_step() {
 
     assert_eq!((hidden, shown, hidden_again), (true, true, true));
 }
+
+/// Whether `primitives` (cached chunks included) paint an image with any
+/// visible pixel whose center lies in `area`.
+fn paints_icon_in(primitives: &[Primitive], offset: [f32; 2], area: quark::Rect) -> bool {
+    primitives.iter().any(|p| match p {
+        Primitive::Image(image) => {
+            let r = image.rect.offset(offset[0], offset[1]);
+            area.contains(r.x + r.width / 2.0, r.y + r.height / 2.0)
+                && image.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0)
+        }
+        Primitive::Chunk(chunk) => {
+            let at = [offset[0] + chunk.offset[0], offset[1] + chunk.offset[1]];
+            paints_icon_in(chunk.chunk.primitives(), at, area)
+        }
+        _ => false,
+    })
+}
+
+/// Whether the close button of the dock tab `name` shows its icon.
+fn close_shown(ui: &UiTestHarness<Workbench>, name: &str) -> bool {
+    let close = ui
+        .find_all(By::role(Role::Button))
+        .into_iter()
+        .find(|n| {
+            n.name
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Close") && label.contains(name))
+        })
+        .expect("close button");
+    paints_icon_in(&ui.scene().primitives, [0.0, 0.0], close.bounds)
+}
+
+// Catches the workbench's tab strip losing its hover-only close buttons:
+// an inactive tab hides its close icon until the pointer is over the tab
+// (the button stays in the accessibility tree), and the active tab always
+// shows its own.
+#[test]
+fn dock_inactive_tab_shows_close_only_on_hover() {
+    let mut ui = harness(ScenarioKind::Review);
+    ui.pointer_move((10.0, 10.0));
+    let resting = (close_shown(&ui, "Terminal"), close_shown(&ui, "Diff"));
+    ui.pointer_move(ui.find(tab("Terminal")).center());
+    let hovered = close_shown(&ui, "Terminal");
+
+    assert_eq!((resting, hovered), ((false, true), true));
+}
