@@ -83,7 +83,7 @@ pub use hit::{
     ClickEvent, CursorHint, EMPTY_CLIP, HitFlags, HitId, HitIdentity, HitSpace, HitTable,
     TooltipRegion, UNCLIPPED,
 };
-pub use identity::{TestId, UiKey, UiNodeId, stable_hash};
+pub use identity::{TestId, UiKey, UiNodeId, intern, stable_hash};
 pub use path::{FillRule, LineCap, LineJoin, Path, PathBuilder, PathVerb, StrokeStyle};
 pub use scene::{
     BlurRegionPrimitive, BorderPrimitive, ChunkPrimitive, ClipPrimitive, EffectQuadPrimitive,
