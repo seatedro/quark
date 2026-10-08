@@ -188,6 +188,7 @@ pub struct Terminal {
     host: Box<Host>,
     /// Grapheme bytes of the cell being read.
     cell_text: Vec<u8>,
+    decoder: CellDecoder,
 }
 
 impl std::fmt::Debug for Terminal {
@@ -298,6 +299,7 @@ impl Terminal {
             mouse_event,
             host: Box::default(),
             cell_text: vec![0; 64],
+            decoder: CellDecoder::new(),
         };
         term.install_callbacks();
         let name = b"xterm-256color";
@@ -631,6 +633,12 @@ impl Terminal {
 
     /// Reads the iterator's current row into `row`.
     ///
+    /// The row's raw cells come in one call, and each decodes through
+    /// [`CellDecoder`]. Only grapheme clusters and styled or colored cells
+    /// go through the cells iterator, and a styled cell like the one
+    /// before it reuses its style, so a row of plain text costs a few C
+    /// calls instead of several per cell.
+    ///
     /// # Safety
     ///
     /// `iter` must be this terminal's row iterator, positioned on a row.
@@ -642,7 +650,10 @@ impl Terminal {
     ) {
         row.clear();
         let mut raw_row: sys::GhosttyRow = 0;
-        let mut cells = self.cells.as_ptr();
+        let mut view = sys::GhosttyCellsView {
+            ptr: ptr::null(),
+            len: 0,
+        };
         // SAFETY: (all calls) valid handles and documented output types.
         unsafe {
             sys::ghostty_render_state_row_get(
@@ -659,56 +670,99 @@ impl Terminal {
             row.wrapped = wrapped;
             sys::ghostty_render_state_row_get(
                 iter,
-                sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                (&raw mut cells).cast(),
+                sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS_RAW,
+                (&raw mut view).cast(),
             );
         }
-        let mut col = 0u16;
+        let raws: &[sys::GhosttyCell] = if view.ptr.is_null() {
+            &[]
+        } else {
+            // SAFETY: the render state owns `len` cells at `ptr` until its
+            // next update, which cannot happen while `self` is borrowed.
+            unsafe { std::slice::from_raw_parts(view.ptr, view.len) }
+        };
+        // The cells iterator, filled for this row on first use.
+        let mut cells = None;
+        let plain = CellStyle::plain(colors);
+        // The last style read through the iterator and what identifies it
+        // within this row (one page, so one style table).
+        let mut last_read: Option<(StyleKey, CellStyle)> = None;
+        // The previous cell's style: a cell with the same key has the same
+        // style, so runs of it skip comparing styles.
+        let mut prev_key = None;
+        let mut style = plain;
+        let mut style_is_plain = true;
         // Length of `row.text` at the end of the last cell that is not a
         // default blank, for trimming.
         let mut keep_text = 0usize;
         let mut keep_runs = 0usize;
-        // SAFETY: as above.
-        while unsafe { sys::ghostty_render_state_row_cells_next(cells) } {
-            let here = col;
-            col += 1;
-            let mut raw: sys::GhosttyCell = 0;
-            let mut wide: sys::GhosttyCellWide = 0;
-            // SAFETY: as above.
-            unsafe {
-                sys::ghostty_render_state_row_cells_get(
-                    cells,
-                    sys::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
-                    (&raw mut raw).cast(),
-                );
-                sys::ghostty_cell_get(raw, sys::GHOSTTY_CELL_DATA_WIDE, (&raw mut wide).cast());
-            }
-            if wide == sys::GHOSTTY_CELL_WIDE_SPACER_TAIL {
+        for (x, &raw) in raws.iter().enumerate() {
+            let here = x as u16;
+            let bits = self.decoder.get(raw);
+            if bits.wide == sys::GHOSTTY_CELL_WIDE_SPACER_TAIL {
                 // Drawn by the wide character before it.
                 continue;
             }
-            let text = self.cell_text(cells);
-            let style = unsafe { cell_style(cells, raw, colors) };
-            let width = if wide == sys::GHOSTTY_CELL_WIDE_WIDE {
+            let start = row.text.len() as u32;
+            // The grapheme as GRAPHEMES_UTF8 reads it: nothing for an empty
+            // or color-only cell, or a codepoint that does not encode.
+            let blank = if bits.tag == sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME {
+                // SAFETY: `iter` is positioned on this row and `x` in it.
+                let cells = unsafe { self.row_cell(iter, &mut cells, x) };
+                let text = self.cell_text(cells);
+                let blank = text.is_empty() || text == b" ";
+                match std::str::from_utf8(text) {
+                    Ok(s) if !s.is_empty() => row.text.push_str(s),
+                    Ok(_) => row.text.push(' '),
+                    Err(_) => row.text.push('\u{fffd}'),
+                }
+                blank
+            } else {
+                row.text.push(bits.text.unwrap_or(' '));
+                matches!(bits.text, None | Some(' '))
+            };
+            let key = if !bits.textual {
+                // The color is in the cell itself.
+                StyleKey::Cell(raw)
+            } else if bits.styled {
+                StyleKey::Style(bits.style_id, bits.hyperlink)
+            } else {
+                StyleKey::Plain(bits.hyperlink)
+            };
+            let same_style = prev_key == Some(key);
+            if !same_style {
+                prev_key = Some(key);
+                style = match key {
+                    StyleKey::Plain(hyperlink) => CellStyle { hyperlink, ..plain },
+                    _ => match last_read {
+                        Some((k, style)) if k == key => style,
+                        _ => {
+                            // SAFETY: as above, and `raw` is cell `x`.
+                            let style = unsafe {
+                                let cells = self.row_cell(iter, &mut cells, x);
+                                cell_style(cells, raw, colors)
+                            };
+                            last_read = Some((key, style));
+                            style
+                        }
+                    },
+                };
+                style_is_plain = style == plain;
+            }
+            let width = if bits.wide == sys::GHOSTTY_CELL_WIDE_WIDE {
                 2
             } else {
                 1
             };
-            let blank = text.is_empty() || text == b" ";
-            let start = row.text.len() as u32;
-            match std::str::from_utf8(text) {
-                Ok(s) if !s.is_empty() => row.text.push_str(s),
-                Ok(_) => row.text.push(' '),
-                Err(_) => row.text.push('\u{fffd}'),
-            }
             let end = row.text.len() as u32;
             let narrow_ascii = width == 1 && end - start == 1;
             match row.runs.last_mut() {
                 Some(last)
                     if narrow_ascii
-                        && last.style == style
                         && last.col + last.cols == here
-                        && last.text.len() as u16 == last.cols =>
+                        && last.text.len() as u16 == last.cols
+                        // The previous cell's run is the last one.
+                        && (same_style || last.style == style) =>
                 {
                     last.cols += 1;
                     last.text.end = end;
@@ -720,11 +774,12 @@ impl Terminal {
                     style,
                 }),
             }
-            if !blank || style != CellStyle::plain(colors) {
+            if !blank || !style_is_plain {
                 keep_text = row.text.len();
                 keep_runs = row.runs.len();
             }
         }
+        let col = raws.len() as u16;
         row.text.truncate(keep_text);
         row.runs.truncate(keep_runs);
         if let Some(last) = row.runs.last_mut()
@@ -745,16 +800,46 @@ impl Terminal {
         debug_assert_eq!(row.verify_integrity(), Ok(()));
     }
 
+    /// The cells iterator positioned on cell `x` of the row iterator's
+    /// current row, filling `cells` for that row first if it is `None`.
+    ///
+    /// # Safety
+    ///
+    /// `iter` must be this terminal's row iterator, positioned on a row
+    /// with more than `x` cells, and `cells` `None` or filled for that row.
+    unsafe fn row_cell(
+        &self,
+        iter: sys::GhosttyRenderStateRowIterator,
+        cells: &mut Option<sys::GhosttyRenderStateRowCells>,
+        x: usize,
+    ) -> sys::GhosttyRenderStateRowCells {
+        let cells = *cells.get_or_insert_with(|| {
+            let mut cells = self.cells.as_ptr();
+            // SAFETY: a valid iterator and the documented output type.
+            unsafe {
+                sys::ghostty_render_state_row_get(
+                    iter,
+                    sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                    (&raw mut cells).cast(),
+                );
+            }
+            cells
+        });
+        // SAFETY: a filled cells handle and a column inside its row.
+        unsafe { sys::ghostty_render_state_row_cells_select(cells, x as u16) };
+        cells
+    }
+
     /// Time to walk every viewport row of the current render state `reps`
-    /// times, doing progressively more of what [`Self::read_row`] does per
-    /// cell: advancing the cell iterator, then reading the raw cell and its
-    /// width, its text, its style, the whole conversion into runs, and
-    /// hashing the row. Differences between steps are each part's cost.
+    /// times, doing progressively more of what [`Self::read_row`] does:
+    /// fetching each row's raw cells, decoding them, the whole conversion
+    /// into runs, and hashing the row. Differences between steps are each
+    /// part's cost.
     #[cfg(test)]
     pub(crate) fn cell_read_costs(
         &mut self,
         reps: u32,
-    ) -> [(&'static str, std::time::Duration); 6] {
+    ) -> [(&'static str, std::time::Duration); 4] {
         let colors = Colors::default();
         let mut scratch = GridRow::default();
         let mut step = |level: u8| {
@@ -769,56 +854,39 @@ impl Terminal {
                         (&raw mut iter).cast(),
                     );
                     while sys::ghostty_render_state_row_iterator_next(iter) {
-                        if level >= 4 {
+                        if level >= 2 {
                             self.read_row(iter, &mut scratch, colors);
-                            if level >= 5 {
+                            if level >= 3 {
                                 scratch.rehash();
                             }
                             std::hint::black_box(&scratch);
                             continue;
                         }
-                        let mut cells = self.cells.as_ptr();
+                        let mut view = sys::GhosttyCellsView {
+                            ptr: ptr::null(),
+                            len: 0,
+                        };
                         sys::ghostty_render_state_row_get(
                             iter,
-                            sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                            (&raw mut cells).cast(),
+                            sys::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS_RAW,
+                            (&raw mut view).cast(),
                         );
-                        while sys::ghostty_render_state_row_cells_next(cells) {
-                            if level == 0 {
-                                continue;
-                            }
-                            let mut raw: sys::GhosttyCell = 0;
-                            let mut wide: sys::GhosttyCellWide = 0;
-                            sys::ghostty_render_state_row_cells_get(
-                                cells,
-                                sys::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
-                                (&raw mut raw).cast(),
-                            );
-                            sys::ghostty_cell_get(
-                                raw,
-                                sys::GHOSTTY_CELL_DATA_WIDE,
-                                (&raw mut wide).cast(),
-                            );
-                            std::hint::black_box(wide);
-                            if level >= 2 {
-                                std::hint::black_box(self.cell_text(cells).len());
-                            }
-                            if level >= 3 {
-                                std::hint::black_box(cell_style(cells, raw, colors));
+                        if level >= 1 {
+                            for &raw in std::slice::from_raw_parts(view.ptr, view.len) {
+                                std::hint::black_box(self.decoder.get(raw));
                             }
                         }
+                        std::hint::black_box(view.len);
                     }
                 }
             }
             started.elapsed() / reps
         };
         [
-            ("iterate cells", step(0)),
-            ("+ raw cell, width", step(1)),
-            ("+ text", step(2)),
-            ("+ style", step(3)),
-            ("read_row (all conversion)", step(4)),
-            ("+ rehash", step(5)),
+            ("raw cell views", step(0)),
+            ("+ decode", step(1)),
+            ("read_row (all conversion)", step(2)),
+            ("+ rehash", step(3)),
         ]
     }
 
@@ -1183,6 +1251,115 @@ impl CellStyle {
             ..Self::default()
         }
     }
+}
+
+/// What [`Terminal::read_row`] needs of a raw cell, as `ghostty_cell_get`
+/// reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellBits {
+    tag: sys::GhosttyCellContentTag,
+    /// A codepoint cell, plain or part of a grapheme cluster, rather than
+    /// a color-only one.
+    textual: bool,
+    /// The codepoint of a codepoint cell, as GRAPHEMES_UTF8 encodes it:
+    /// `None` when empty or not encodable.
+    text: Option<char>,
+    /// 0 for an empty or color-only cell.
+    codepoint: u32,
+    wide: sys::GhosttyCellWide,
+    style_id: u16,
+    /// A style other than the default.
+    styled: bool,
+    hyperlink: bool,
+}
+
+impl CellBits {
+    fn of(raw: sys::GhosttyCell) -> Self {
+        let mut bits = Self {
+            tag: 0,
+            textual: false,
+            text: None,
+            codepoint: 0,
+            wide: 0,
+            style_id: 0,
+            styled: false,
+            hyperlink: false,
+        };
+        let keys = [
+            sys::GHOSTTY_CELL_DATA_CONTENT_TAG,
+            sys::GHOSTTY_CELL_DATA_CODEPOINT,
+            sys::GHOSTTY_CELL_DATA_WIDE,
+            sys::GHOSTTY_CELL_DATA_STYLE_ID,
+            sys::GHOSTTY_CELL_DATA_HAS_STYLING,
+            sys::GHOSTTY_CELL_DATA_HAS_HYPERLINK,
+        ];
+        let mut values: [*mut c_void; 6] = [
+            (&raw mut bits.tag).cast(),
+            (&raw mut bits.codepoint).cast(),
+            (&raw mut bits.wide).cast(),
+            (&raw mut bits.style_id).cast(),
+            (&raw mut bits.styled).cast(),
+            (&raw mut bits.hyperlink).cast(),
+        ];
+        // SAFETY: each value points at the key's documented output type;
+        // every key reads from any cell value.
+        unsafe {
+            sys::ghostty_cell_get_multi(
+                raw,
+                keys.len(),
+                keys.as_ptr(),
+                values.as_mut_ptr(),
+                ptr::null_mut(),
+            );
+        }
+        bits.textual = matches!(
+            bits.tag,
+            sys::GHOSTTY_CELL_CONTENT_CODEPOINT | sys::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME
+        );
+        bits.text = char::from_u32(bits.codepoint).filter(|&c| bits.textual && c != '\0');
+        bits
+    }
+}
+
+/// Decoded raw cells, direct-mapped by value. A screen holds few distinct
+/// cells (a character in a style), so most decodes are a lookup rather
+/// than a C call. A raw cell is a plain value, so entries stay valid
+/// across rows, pages, and updates.
+struct CellDecoder {
+    slots: Box<[(sys::GhosttyCell, CellBits); Self::SLOTS]>,
+}
+
+impl CellDecoder {
+    const SLOTS: usize = 256;
+
+    fn new() -> Self {
+        // Every slot starts as the empty cell, so none needs a validity flag.
+        Self {
+            slots: Box::new([(0, CellBits::of(0)); Self::SLOTS]),
+        }
+    }
+
+    fn get(&mut self, raw: sys::GhosttyCell) -> CellBits {
+        // Fibonacci hashing: the top bits of the product mix every bit of
+        // the cell.
+        let i = (raw.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - Self::SLOTS.ilog2())) as usize;
+        let slot = &mut self.slots[i];
+        if slot.0 != raw {
+            *slot = (raw, CellBits::of(raw));
+        }
+        slot.1
+    }
+}
+
+/// What a cell's resolved style depends on within one row: the row's
+/// style table entry and the hyperlink flag for a text cell, or the cell
+/// itself for a color-only cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StyleKey {
+    /// The default style, with or without a hyperlink.
+    Plain(bool),
+    Style(u16, bool),
+    Cell(sys::GhosttyCell),
 }
 
 /// The resolved style of the cells iterator's current cell.

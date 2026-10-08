@@ -83,6 +83,16 @@ fn sgr_sequences_style_runs() {
             r#"0+3"dim" faint 3+3"hid" fg=#111111 faint"#,
         ),
         ("\x1b[48;2;1;2;3m  \x1b[0m", r#"0+2"  " bg=#010203"#),
+        // Erasing with a background leaves cells that hold only a color.
+        (
+            "\x1b[48;2;1;2;3m\x1b[2X\x1b[2C\x1b[48;2;4;5;6m\x1b[2X",
+            r#"0+2"  " bg=#010203 2+2"  " bg=#040506"#,
+        ),
+        // A style reused after a plain cell, a combining mark, a link.
+        (
+            "\x1b[1mA\x1b[0mb\x1b[1mC\x1b[0me\u{301}\x1b]8;;http://a\x1b\\ln\x1b]8;;\x1b\\k",
+            r#"0+1"A" bold 1+1"b" 2+1"C" bold 3+1"e\u{301}" 4+2"ln" link 6+1"k""#,
+        ),
     ];
     for (input, expected) in cases {
         let mut t = term(20, 3);
