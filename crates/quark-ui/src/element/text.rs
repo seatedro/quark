@@ -331,20 +331,26 @@ impl Element for TextElement {
                 width: text_width.max(1.0).min(bounds.width.max(1.0)),
                 height: bounds.height,
             };
+            // The key is written into a reused buffer and the label shared
+            // straight from the content: two allocations per text node
+            // instead of a growing format string and a cloned label.
+            thread_local! {
+                static KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+            }
+            let key: std::sync::Arc<str> = KEY.with(|key| {
+                use std::fmt::Write;
+                let mut key = key.borrow_mut();
+                key.clear();
+                let _ = write!(
+                    key,
+                    "text:{:?}:{:.0}:{:.0}:{:.0}:{:.0}",
+                    content, text_bounds.x, text_bounds.y, text_bounds.width, text_bounds.height
+                );
+                std::sync::Arc::from(key.as_str())
+            });
             cx.push_accessibility(
-                AccessibilityNode::new(
-                    format!(
-                        "text:{:?}:{:.0}:{:.0}:{:.0}:{:.0}",
-                        content,
-                        text_bounds.x,
-                        text_bounds.y,
-                        text_bounds.width,
-                        text_bounds.height
-                    ),
-                    AccessibilityRole::Label,
-                    text_bounds,
-                )
-                .label(content.clone()),
+                AccessibilityNode::shared(key, AccessibilityRole::Label, text_bounds)
+                    .label(std::sync::Arc::<str>::from(content.as_str())),
             );
         }
 
