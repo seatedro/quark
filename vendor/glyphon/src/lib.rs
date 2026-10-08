@@ -4,6 +4,10 @@
 //! [cosmic-text]: https://github.com/pop-os/cosmic-text
 //! [etagere]: https://github.com/nical/etagere
 
+// quark patch: wgpu's Send chain (cache::Inner -> wgpu::RenderPipeline)
+// nests past the trait solver's default limit on newer nightlies.
+#![recursion_limit = "256"]
+
 mod cache;
 mod custom_glyph;
 mod error;

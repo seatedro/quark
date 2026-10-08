@@ -24,6 +24,8 @@ against that commit shows the whole patch.
 - `TextRenderer::upload` is public, and `prepare_glyphs` leaves the upload
   to the caller. The renderer's allocation budget covers preparation;
   wgpu's `write_buffer` staging allocates on every call.
+- `#![recursion_limit = "256"]` (`src/lib.rs`): newer nightlies need it
+  for wgpu's `Send` chain, as in quark-render.
 - `prepare` and `prepare_glyphs` share the bounds clipping and glyph
   rasterization helpers they used to inline.
 

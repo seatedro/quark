@@ -25,6 +25,8 @@ allocations.
 
 `vendor/accesskit_unix` is a patched copy of AccessKit's Linux adapter; see
 [vendor/accesskit_unix/VENDORED.md](vendor/accesskit_unix/VENDORED.md).
+`vendor/glyphon` is glyphon 0.10.0 with a positioned-glyph path; see
+[vendor/glyphon/VENDORED.md](vendor/glyphon/VENDORED.md).
 
 ## A minimal app
 
@@ -190,4 +192,5 @@ cargo test --workspace --features quark-ui/integrity-checks
 MIT; see [LICENSE](LICENSE). The fonts bundled in
 `crates/quark-text/assets/fonts` are under the SIL Open Font License 1.1;
 each has its license file beside it. `vendor/accesskit_unix` is AccessKit's
-code under MIT OR Apache-2.0.
+code under MIT OR Apache-2.0, and `vendor/glyphon` is glyphon's under MIT,
+Apache-2.0, or Zlib.

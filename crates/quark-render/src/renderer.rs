@@ -4348,13 +4348,17 @@ mod tests {
         };
         let buffer = render(TextPath::Buffer, &mut text).expect("renderer");
         let lit = positioned
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[..3] != [0, 0, 0])
             .count();
         assert!(lit > 500, "{lit} lit pixels: the fixture drew too little");
         let differing = positioned
-            .chunks_exact(4)
-            .zip(buffer.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(buffer.as_chunks::<4>().0)
             .filter(|(a, b)| a != b)
             .count();
         assert_eq!(differing, 0, "pixels differ between text paths");
