@@ -4,9 +4,11 @@
 //! thread with the grammars of the app's `quark_syntax::GrammarStore`
 //! ([`SyntaxHighlighter::set_grammar_store`]). A code block renders plain
 //! (or with its previous highlight, while its source only grew) until its
-//! result arrives, and stays plain while its grammar downloads; the app
-//! calls [`SyntaxHighlighter::poll`] each frame and rebuilds its markdown
-//! rows when it returns blocks. Without the feature, or without a store,
+//! result arrives, and stays plain while its grammar downloads (or keeps
+//! its own language's colors while grammars of languages embedded in it
+//! download, taking each newer result as they arrive); the app calls
+//! [`SyntaxHighlighter::poll`] each frame and rebuilds its markdown rows
+//! when it returns blocks. Without the feature, or without a store,
 //! every block is plain.
 
 use quark::selection::BlockKey;
@@ -156,13 +158,13 @@ mod imp {
 
     struct Done {
         generation: u64,
+        /// Counts results for `generation`: each grammar that arrives
+        /// while it is pending recolors it with a higher revision.
+        revision: u32,
         /// Distinct for every result taken, so rows rebuilt for a result
         /// that recolors the same generation (a grammar that arrived)
         /// see a new version.
         version: u64,
-        /// A plain stand-in while the grammar downloads; the real result
-        /// for this generation follows.
-        pending: bool,
         source: Arc<str>,
         spans: Arc<[HighlightSpan]>,
     }
@@ -331,11 +333,12 @@ mod imp {
         }
     }
 
-    /// Keeps a result unless the slot already holds a newer one. A result
-    /// older than the newest request is still kept: it applies while the
-    /// source only grew, and the newest one may be dropped by the worker's
-    /// coalescing in favor of an even newer one. A pending stand-in gives
-    /// way to the real result of its generation.
+    /// Keeps a result unless the slot already holds a newer one: a later
+    /// generation, or a later revision of the same one (results that
+    /// recolor a generation as its grammars arrive). A result older than
+    /// the newest request is still kept: it applies while the source only
+    /// grew, and the newest one may be dropped by the worker's coalescing
+    /// in favor of an even newer one.
     fn take(
         slots: &mut HashMap<BlockKey, Slot>,
         version: &mut u64,
@@ -344,16 +347,15 @@ mod imp {
         let key = BlockKey(result.slot);
         let slot = slots.get_mut(&key)?;
         if slot.done.as_ref().is_some_and(|done| {
-            done.generation > result.generation
-                || (done.generation == result.generation && !done.pending)
+            (done.generation, done.revision) >= (result.generation, result.revision)
         }) {
             return None;
         }
         *version += 1;
         slot.done = Some(Done {
             generation: result.generation,
+            revision: result.revision,
             version: *version,
-            pending: result.pending,
             source: result.source,
             spans: result.spans.into(),
         });
@@ -423,42 +425,52 @@ mod imp {
     mod tests {
         use super::*;
 
-        // Catches a grammar that arrives after a block was answered plain
-        // never coloring it: the colored result has the same generation as
-        // the stand-in, and must still replace it and change the version.
+        // Catches progressive results being dropped or stale ones winning:
+        // later revisions of the held generation (grammars that arrived)
+        // and later generations replace what a block holds, while repeats,
+        // earlier revisions, and earlier generations do not.
         #[test]
-        fn pending_stand_in_gives_way_to_the_colored_result() {
+        fn results_replace_a_block_only_when_newer() {
             let code: Arc<str> = Arc::from("fn");
             let key = BlockKey(1);
             let mut slots = HashMap::from([(
                 key,
                 Slot {
-                    generation: 1,
+                    generation: 2,
                     language: LanguageId::from_fence("rust").unwrap(),
                     requested: code.clone(),
                     done: None,
                 },
             )]);
             let mut version = 0;
-            let result = |pending, length| quark_syntax::Highlighted {
-                slot: key.0,
-                generation: 1,
-                source: code.clone(),
-                spans: vec![HighlightSpan {
-                    offset: 0,
-                    length,
-                    kind: HighlightKind::Keyword,
-                }],
-                pending,
-            };
-            let mut steps = Vec::new();
-            for (pending, length) in [(true, 0), (false, 2), (false, 0)] {
-                let taken = take(&mut slots, &mut version, result(pending, length));
+            let mut held = Vec::new();
+            for (generation, revision) in [(1, 0), (1, 1), (1, 1), (1, 0), (2, 0), (1, 2), (2, 1)] {
+                let result = quark_syntax::Highlighted {
+                    slot: key.0,
+                    generation,
+                    revision,
+                    source: code.clone(),
+                    spans: Vec::new(),
+                    pending: false,
+                    unresolved: Vec::new(),
+                };
+                take(&mut slots, &mut version, result);
                 let done = slots[&key].done.as_ref().unwrap();
-                steps.push((taken.is_some(), done.version, done.spans[0].length));
+                held.push((done.generation, done.revision, done.version));
             }
 
-            assert_eq!(steps, [(true, 1, 0), (true, 2, 2), (false, 2, 2)]);
+            assert_eq!(
+                held,
+                [
+                    (1, 0, 1),
+                    (1, 1, 2),
+                    (1, 1, 2),
+                    (1, 1, 2),
+                    (2, 0, 3),
+                    (2, 0, 3),
+                    (2, 1, 4)
+                ]
+            );
         }
     }
 }
