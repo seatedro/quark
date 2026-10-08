@@ -106,7 +106,7 @@ impl Workbench {
             composer: composer::new_state(),
             dock,
             overlays: overlays::new_state(),
-            settings: settings::new_state(),
+            settings: settings::new_state().with_theme(options.theme),
             marks: Marks::new(options.perf_out.is_some()),
             fx: Effects::default(),
             events: Vec::new(),
@@ -275,8 +275,10 @@ impl Workbench {
         let handled = {
             let scx = surface_cx!(self, cx.theme(), cx);
             let fx = &mut self.fx;
-            overlays::command(&mut self.overlays, id, &scx, fx)
-                || settings::command(&mut self.settings, id, &scx, fx)
+            // Modal owners first: open settings or an open palette take
+            // every command, so background commands wait until they close.
+            settings::command(&mut self.settings, id, &scx, fx)
+                || overlays::command(&mut self.overlays, id, &scx, fx)
                 || shell::command(&mut self.shell, id, &scx, fx)
                 || timeline::command(&mut self.timeline, id, &scx, fx)
                 || composer::command(&mut self.composer, id, &scx, fx)
@@ -549,17 +551,27 @@ impl UiApp for Workbench {
         if dock::input(&mut self.dock, event, cx) {
             return true;
         }
-        if !matches!(event, InputEvent::KeyPress(_)) {
-            return false;
+        // Escape ends a pointer drag before it closes any overlay.
+        if let InputEvent::KeyPress(chord) = event
+            && chord.binding().is_some_and(|b| b.key == "escape")
+            && cx.is_dragging()
+        {
+            cx.cancel_drag();
+            return true;
         }
+        let key = matches!(event, InputEvent::KeyPress(_));
         let handled = {
             let scx = surface_cx!(self, cx.theme(), cx);
             let fx = &mut self.fx;
-            overlays::event(&mut self.overlays, event, &scx, fx)
-                || settings::event(&mut self.settings, event, &scx, fx)
-                || shell::event(&mut self.shell, event, &scx, fx)
-                || composer::event(&mut self.composer, event, &scx, fx)
-                || timeline::event(&mut self.timeline, event, &scx, fx)
+            // Settings and overlays see every event, pointer and IME
+            // included (hover, right-click, composition), and see keys
+            // before the surfaces under them.
+            settings::event(&mut self.settings, event, &scx, fx)
+                || overlays::event(&mut self.overlays, event, &scx, fx)
+                || key
+                    && (shell::event(&mut self.shell, event, &scx, fx)
+                        || composer::event(&mut self.composer, event, &scx, fx)
+                        || timeline::event(&mut self.timeline, event, &scx, fx))
         };
         if handled {
             self.apply_effects(cx);
