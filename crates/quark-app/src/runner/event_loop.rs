@@ -57,6 +57,7 @@ struct Runner<A> {
     gpu: Option<GpuContext>,
     focused: Option<WindowHandle>,
     theme: Option<Theme>,
+    capabilities: PlatformCapabilities,
     started: bool,
     text: AppText,
     waker: Waker,
@@ -92,6 +93,7 @@ impl<A: App> Runner<A> {
             gpu: None,
             focused: None,
             theme: None,
+            capabilities: PlatformCapabilities::default(),
             started: false,
             text,
             waker,
@@ -166,6 +168,7 @@ impl<A: App> Runner<A> {
             last_render: Default::default(),
             traffic_lights: options.traffic_lights,
             persist_key: options.persist_key.clone(),
+            position: Default::default(),
         })
     }
 
@@ -189,9 +192,33 @@ impl<A: App> Runner<A> {
             })
     }
 
+    /// [`Self::default_window`], but never `closing`.
+    fn default_window_except(&self, closing: WindowHandle) -> Option<WindowHandle> {
+        self.focused
+            .filter(|&handle| handle != closing)
+            .filter(|&handle| self.windows.get(handle).is_some_and(|e| e.open().is_some()))
+            .or_else(|| {
+                self.windows
+                    .iter()
+                    .find(|&(handle, entry)| handle != closing && entry.open().is_some())
+                    .map(|(handle, _)| handle)
+            })
+    }
+
     fn with_event_cx(
         &mut self,
         event_loop: &ActiveEventLoop,
+        window: Option<WindowHandle>,
+        f: impl FnOnce(&mut A, &mut EventContext),
+    ) {
+        self.call_app(window, f);
+        self.apply_window_changes(event_loop);
+    }
+
+    /// Run an app callback without then applying the window changes it
+    /// queued: for callbacks made while applying them.
+    fn call_app(
+        &mut self,
         window: Option<WindowHandle>,
         f: impl FnOnce(&mut A, &mut EventContext),
     ) {
@@ -204,26 +231,27 @@ impl<A: App> Runner<A> {
             waker: &self.waker,
             events: &self.events,
             theme: self.theme,
+            capabilities: self.capabilities,
             #[cfg(feature = "test-support")]
-            headless: None,
+            headless: false,
             elapsed: self.launch_at.elapsed(),
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
             platform: &mut self.platform,
         };
         f(&mut self.app, &mut cx);
-        self.apply_window_changes(event_loop);
     }
 
     /// Open pending windows and close requested ones. Runs after every app
     /// callback, since contexts can only queue these. Takes one change at a
-    /// time because the callbacks it makes can queue more.
+    /// time, telling the app of each, because those callbacks can queue
+    /// more.
     fn apply_window_changes(&mut self, event_loop: &ActiveEventLoop) {
         loop {
-            let pending = self.windows.iter().find_map(|(handle, entry)| match entry {
-                WindowEntry::Pending(options) => Some((handle, (**options).clone())),
-                WindowEntry::Open(_) => None,
-            });
+            let pending = self
+                .windows
+                .iter()
+                .find_map(|(handle, entry)| Some((handle, entry.pending()?.clone())));
             if let Some((handle, options)) = pending {
                 self.open_pending(event_loop, handle, &options);
                 if self.startup_failure.is_some() {
@@ -231,30 +259,50 @@ impl<A: App> Runner<A> {
                 }
                 continue;
             }
-            let Some(handle) = self.flags.close.pop() else {
+            // In request order: a quit closes windows in table order.
+            if self.flags.close.is_empty() {
                 break;
-            };
-            let Some(entry) = self.windows.remove(handle) else {
-                continue;
-            };
-            self.text.layouts.remove_scope(handle.scope_id());
-            if let Some(state) = entry.open() {
-                state.persist();
-                #[cfg(target_os = "linux")]
-                crate::platform::drag_out::window_destroyed(&state.window);
             }
-            if self.focused == Some(handle) {
-                self.focused = None;
-            }
-            let window = self.default_window();
-            self.with_event_cx(event_loop, window, |app, cx| {
-                app.app_event(AppEvent::WindowClosed(handle), cx)
-            });
+            let (handle, reason) = self.flags.close.remove(0);
+            self.close(handle, reason);
         }
 
         if self.started && self.windows.is_empty() && !self.flags.keep_running_without_windows {
             event_loop.exit();
         }
+    }
+
+    /// Tell the app `handle` closes for `reason` while its placement is
+    /// still readable, then drop it. Stale handles are ignored.
+    fn close(&mut self, handle: WindowHandle, reason: CloseReason) {
+        let Some(entry) = self.windows.get(handle) else {
+            return;
+        };
+        if let Some(state) = entry.open() {
+            state.persist();
+        }
+        if self.focused == Some(handle) {
+            self.focused = None;
+        }
+        let window = self.default_window_except(handle);
+        self.call_app(window, |app, cx| {
+            app.app_event(
+                AppEvent::WindowClosed {
+                    window: handle,
+                    reason,
+                },
+                cx,
+            )
+        });
+        let Some(entry) = self.windows.remove(handle) else {
+            return;
+        };
+        self.text.layouts.remove_scope(handle.scope_id());
+        #[cfg(target_os = "linux")]
+        if let Some(state) = entry.open() {
+            crate::platform::drag_out::window_destroyed(&state.window);
+        }
+        drop(entry);
     }
 
     fn open_pending(
@@ -264,27 +312,31 @@ impl<A: App> Runner<A> {
         options: &WindowOptions,
     ) {
         let error = match self.create_window(event_loop, options) {
-            Ok(state) => {
+            Ok(mut state) => {
                 self.platform.window_opened(&state.window);
+                state.refresh_position();
                 if let Some(entry) = self.windows.get_mut(handle) {
                     *entry = WindowEntry::Open(Box::new(state));
                 }
                 self.flags.redraw.push(handle);
+                // The first window's comes after `init`.
+                if self.started {
+                    self.call_app(Some(handle), |app, cx| {
+                        app.app_event(AppEvent::WindowOpened(handle), cx)
+                    });
+                }
                 return;
             }
             Err(error) => error,
         };
         tracing::error!("could not open a window: {error}");
-        self.windows.remove(handle);
         if !self.started {
+            self.windows.remove(handle);
             self.startup_failure = Some(error);
             event_loop.exit();
             return;
         }
-        let window = self.default_window();
-        self.with_event_cx(event_loop, window, |app, cx| {
-            app.app_event(AppEvent::WindowOpenFailed(handle), cx)
-        });
+        self.close(handle, CloseReason::OpenFailed);
     }
 
     fn redraw(&mut self, handle: WindowHandle) {
@@ -341,7 +393,7 @@ impl<A: App> Runner<A> {
             profile_scope!("render");
             renderer.render(&scene, &mut self.text.system, time)
         };
-        self.app.recycle_scene(scene);
+        self.app.recycle_scene(handle, scene);
         #[cfg(debug_assertions)]
         if rendered.is_ok()
             && let Some(left) = &mut self.exit_after_frames
@@ -378,7 +430,10 @@ impl<A: App> Runner<A> {
         crate::profile::finish_frame();
 
         let app = &mut self.app;
-        if let Some(update) = state.accessibility_state.publish(|| app.accessibility()) {
+        if let Some(update) = state
+            .accessibility_state
+            .publish(|| app.accessibility(handle))
+        {
             state.accessibility.update_if_active(|| update);
         }
     }
@@ -413,15 +468,28 @@ impl<A: App> Runner<A> {
         });
     }
 
-    /// Ask the app whether `handle` may close, and queue the close if so.
-    fn ask_to_close(&mut self, event_loop: &ActiveEventLoop, handle: WindowHandle) -> bool {
-        let mut close = false;
-        self.with_event_cx(event_loop, Some(handle), |app, cx| {
-            close = app.close_requested(cx);
-        });
+    /// Ask the app whether `handle` may close for `reason`, and queue the
+    /// close if so.
+    fn ask_to_close(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        handle: WindowHandle,
+        reason: CloseReason,
+    ) -> bool {
+        let close = self.ask(handle, reason);
         if close {
-            self.flags.close.push(handle);
+            self.flags.close.push((handle, reason));
         }
+        self.apply_window_changes(event_loop);
+        close
+    }
+
+    /// [`App::close_requested`] for `handle`, without applying anything.
+    fn ask(&mut self, handle: WindowHandle, reason: CloseReason) -> bool {
+        let mut close = false;
+        self.call_app(Some(handle), |app, cx| {
+            close = app.close_requested(reason, cx);
+        });
         close
     }
 
@@ -441,11 +509,17 @@ impl<A: App> Runner<A> {
                 .filter(|(_, entry)| entry.open().is_some())
                 .map(|(handle, _)| handle)
                 .collect();
+            // Every window is asked before any closes, and one refusal
+            // cancels the quit for all, so a quit never leaves some windows
+            // closed and others open.
             let mut all = true;
-            for handle in open {
-                all &= self.ask_to_close(event_loop, handle);
+            for &handle in &open {
+                all &= self.ask(handle, CloseReason::Quit);
             }
             if all {
+                self.flags
+                    .close
+                    .extend(open.into_iter().map(|handle| (handle, CloseReason::Quit)));
                 self.flags.exit_requested = true;
             }
             self.apply_window_changes(event_loop);
@@ -463,9 +537,7 @@ impl<A: App> Runner<A> {
             return;
         }
         if role == MenuRole::CloseWindow {
-            if self.ask_to_close(event_loop, handle) {
-                self.apply_window_changes(event_loop);
-            }
+            self.ask_to_close(event_loop, handle, CloseReason::User);
             return;
         }
         let Some(state) = self.windows.get(handle).and_then(WindowEntry::open) else {
@@ -524,6 +596,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
         // Again now that AppKit has installed its own Apple Event handlers.
         #[cfg(target_os = "macos")]
         crate::platform::deep_link::listen(&self.events);
+        self.capabilities = PlatformCapabilities::detect(event_loop);
         let handle = self.windows.insert(WindowEntry::Pending(Box::new(options)));
         self.apply_window_changes(event_loop);
         if self.startup_failure.is_some() {
@@ -531,7 +604,10 @@ impl<A: App> ApplicationHandler for Runner<A> {
         }
         self.started = true;
         self.focused = Some(handle);
-        self.with_event_cx(event_loop, Some(handle), |app, cx| app.init(cx));
+        self.with_event_cx(event_loop, Some(handle), |app, cx| {
+            app.init(cx);
+            app.app_event(AppEvent::WindowOpened(handle), cx);
+        });
         // macOS and Windows report the theme through the window; on Linux it
         // comes from the settings portal.
         if let Some(theme) = self
@@ -561,19 +637,43 @@ impl<A: App> ApplicationHandler for Runner<A> {
 
         match event {
             WindowEvent::CloseRequested => {
-                if self.ask_to_close(event_loop, handle) {
-                    self.apply_window_changes(event_loop);
-                }
+                self.ask_to_close(event_loop, handle, CloseReason::User);
             }
             WindowEvent::Resized(size) => {
                 let scale_factor = state.window.scale_factor();
                 state.sync_metrics(size, scale_factor);
                 self.flags.redraw.push(handle);
+                let size = size.to_logical::<f32>(scale_factor);
+                let event = AppEvent::WindowResized {
+                    window: handle,
+                    size: (size.width, size.height),
+                };
+                self.with_event_cx(event_loop, Some(handle), |app, cx| app.app_event(event, cx));
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let size = state.window.inner_size();
                 state.sync_metrics(size, scale_factor);
                 self.flags.redraw.push(handle);
+                let event = AppEvent::WindowScaleChanged {
+                    window: handle,
+                    scale_factor,
+                };
+                self.with_event_cx(event_loop, Some(handle), |app, cx| app.app_event(event, cx));
+            }
+            WindowEvent::Moved(position) => {
+                state.refresh_position();
+                let event = AppEvent::WindowMoved {
+                    window: handle,
+                    position: state.desktop_position(position),
+                };
+                self.with_event_cx(event_loop, Some(handle), |app, cx| app.app_event(event, cx));
+            }
+            WindowEvent::ActivationTokenDone { token, .. } => {
+                let event = AppEvent::ActivationToken {
+                    window: handle,
+                    token: token.into_raw(),
+                };
+                self.with_event_cx(event_loop, Some(handle), |app, cx| app.app_event(event, cx));
             }
             WindowEvent::RedrawRequested => self.redraw(handle),
             WindowEvent::ThemeChanged(theme) => {
@@ -591,8 +691,19 @@ impl<A: App> ApplicationHandler for Runner<A> {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        for (_, entry) in self.windows.iter() {
-            if let Some(state) = entry.open() {
+        // Windows still open close for the quit, each told while its
+        // placement is readable. No window changes apply from here on, so
+        // windows these callbacks open are never created.
+        let open: Vec<WindowHandle> = self
+            .windows
+            .iter()
+            .filter(|(_, entry)| entry.open().is_some())
+            .map(|(handle, _)| handle)
+            .collect();
+        for handle in open {
+            if self.started {
+                self.close(handle, CloseReason::Quit);
+            } else if let Some(state) = self.windows.get(handle).and_then(WindowEntry::open) {
                 state.persist();
             }
         }

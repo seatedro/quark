@@ -140,7 +140,7 @@ impl EventContext<'_> {
     pub fn set_badge(&mut self, count: Option<u32>) {
         self.platform.badge = count;
         #[cfg(feature = "test-support")]
-        if self.headless.is_some() {
+        if self.headless {
             return;
         }
         #[cfg(target_os = "macos")]
@@ -187,7 +187,7 @@ impl EventContext<'_> {
 
         // muda menus are main thread only, and test threads are not it.
         #[cfg(feature = "test-support")]
-        if self.headless.is_some() {
+        if self.headless {
             return;
         }
         if !self.platform.menu_events_installed {

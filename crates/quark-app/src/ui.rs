@@ -45,7 +45,8 @@ use winit::window::{CursorIcon, Theme as SystemTheme};
 
 use crate::input::{PointerButton, UiInput};
 use crate::{
-    App, AppEvent, EventContext, FrameContext, InputEvent, RunError, Waker, WindowOptions, run,
+    App, AppEvent, CloseReason, EventContext, FrameContext, InputEvent, RunError, Waker,
+    WindowHandle, WindowOptions, run,
 };
 
 /// Lines scrolled per accessibility ScrollUp/ScrollDown request.
@@ -1235,15 +1236,15 @@ impl<U: UiApp> App for UiAdapter<U> {
         self.after_input(false, cx);
     }
 
-    fn close_requested(&mut self, cx: &mut EventContext) -> bool {
+    fn close_requested(&mut self, _reason: CloseReason, cx: &mut EventContext) -> bool {
         self.with_app(cx, |app, ucx| app.close_requested(ucx))
     }
 
-    fn recycle_scene(&mut self, scene: Scene) {
+    fn recycle_scene(&mut self, _window: WindowHandle, scene: Scene) {
         self.spare_scene = scene;
     }
 
-    fn accessibility(&mut self) -> Option<TreeUpdate> {
+    fn accessibility(&mut self, _window: WindowHandle) -> Option<TreeUpdate> {
         // A full tree; accesskit diffs it against the last one.
         let mut update = self.logical_accessibility_tree();
         scale_tree(&mut update, self.scale_factor);
@@ -1955,6 +1956,8 @@ mod tests {
     #[test]
     fn app_event_reaches_the_app_and_the_theme_follows() {
         let mut ui = composer("");
+        // Opening the window was one too.
+        ui.app_mut().events.clear();
 
         ui.app_event(AppEvent::ThemeChanged(SystemTheme::Light));
 

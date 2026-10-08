@@ -5,20 +5,30 @@ use super::*;
 pub(super) enum WindowEntry {
     Pending(Box<WindowOptions>),
     Open(Box<WindowState>),
+    /// An open window of the headless runner, with no native window.
+    #[cfg(feature = "test-support")]
+    Virtual(Box<VirtualWindow>),
 }
 
 impl WindowEntry {
     pub(super) fn open(&self) -> Option<&WindowState> {
         match self {
             Self::Open(state) => Some(state),
-            Self::Pending(_) => None,
+            _ => None,
         }
     }
 
     pub(super) fn open_mut(&mut self) -> Option<&mut WindowState> {
         match self {
             Self::Open(state) => Some(state),
-            Self::Pending(_) => None,
+            _ => None,
+        }
+    }
+
+    pub(super) fn pending(&self) -> Option<&WindowOptions> {
+        match self {
+            Self::Pending(options) => Some(options),
+            _ => None,
         }
     }
 }
@@ -42,6 +52,7 @@ pub(super) struct WindowState {
     pub(super) last_render: quark_render::FrameStats,
     pub(super) traffic_lights: Option<TrafficLights>,
     pub(super) persist_key: Option<String>,
+    pub(super) position: CachedPosition,
 }
 
 impl WindowState {
@@ -77,6 +88,7 @@ impl WindowState {
         self.input.set_scale_factor(scale_factor);
         self.renderer.resize(size.width, size.height, scale_factor);
         position_traffic_lights(&self.window, self.traffic_lights);
+        self.refresh_position();
     }
 }
 
@@ -142,6 +154,12 @@ pub(super) fn window_attributes(
         .with_window_icon(options.icon.clone())
         // Shown once the renderer exists, so the first paint isn't blank.
         .with_visible(false);
+    if let Some(position) = options.position {
+        attrs = attrs.with_position(to_winit(position));
+    }
+    if !options.active {
+        attrs = attrs.with_active(false);
+    }
     if let Some(path) = options.persist_key.as_deref().and_then(state_path) {
         let monitors: Vec<MonitorArea> = event_loop
             .available_monitors()
