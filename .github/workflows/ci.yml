@@ -288,8 +288,13 @@ jobs:
           python3 -I fuzz/commonmark_corpus.py "$dir/spec.txt" "$dir/corpus"
           cargo fuzz run --target x86_64-unknown-linux-gnu markdown "$dir/corpus" -- -runs=0
 
+  # The original Miri suite, one interpreter running every test: it alone can
+  # catch races between tests that share process state, so it stays the
+  # full verification check.
   miri:
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    # Full verification only (master pushes, merge groups, manual runs); other
+    # runs get the parallel miri-pr job instead.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -298,10 +303,23 @@ jobs:
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup component add miri rust-src
-          cargo miri setup
+          echo "MIRI_SYSROOT=$RUNNER_TEMP/miri-sysroot" >> "$GITHUB_ENV"
 
+      # The sysroot Miri builds for the dated nightly in rust-toolchain.toml.
+      # setup only rebuilds it when it does not match the toolchain.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        id: miri-sysroot
+        with:
+          path: ${{ env.MIRI_SYSROOT }}
+          key: miri-sysroot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-v1
+
+      - name: Miri setup
+        run: cargo miri setup
+
+      # Shared with miri-pr, which only reads it.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          shared-key: miri-v1
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # quark only: quark-text's one unsafe block copies text over an
@@ -316,6 +334,59 @@ jobs:
           # align_of_val_raw under cfg(miri) without enabling its feature.
           RUSTFLAGS: "-Zcrate-attr=feature(layout_for_ptr)"
         run: cargo miri test -p quark
+
+      - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        if: success() && github.ref == 'refs/heads/master' && steps.miri-sysroot.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.MIRI_SYSROOT }}
+          key: ${{ steps.miri-sysroot.outputs.cache-primary-key }}
+
+  # The same tests and flags as the miri job, run by nextest as one process
+  # per test so four interpreters work at once. Nextest skips doctests, which
+  # get their own step.
+  miri-pr:
+    if: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add miri rust-src
+          echo "MIRI_SYSROOT=$RUNNER_TEMP/miri-sysroot" >> "$GITHUB_ENV"
+
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ env.MIRI_SYSROOT }}
+          key: miri-sysroot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-v1
+
+      - name: Miri setup
+        run: cargo miri setup
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: miri-v1
+          save-if: "false"
+
+      # The action's pinned manifest fixes the nextest version.
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-nextest
+
+      # Uses the default-miri profile in .config/nextest.toml.
+      - name: Miri
+        env:
+          # As in the miri job; properties drop to 4 cases under cfg(miri).
+          RUSTFLAGS: "-Zcrate-attr=feature(layout_for_ptr)"
+        run: cargo miri nextest run -p quark --test-threads 4 --no-fail-fast
+
+      - name: Miri doctests
+        if: success() || failure()
+        env:
+          RUSTFLAGS: "-Zcrate-attr=feature(layout_for_ptr)"
+        run: cargo miri test -p quark --doc
 
   kani:
     name: kani (${{ matrix.name }})
@@ -430,7 +501,7 @@ jobs:
   # verification and the faster PR jobs.
   ci-result:
     if: ${{ always() && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [check, platform, fuzz, miri, kani, kani-pr]
+    needs: [check, platform, fuzz, miri, miri-pr, kani, kani-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results
@@ -451,7 +522,8 @@ jobs:
           expect check true
           expect platform true
           expect fuzz true
-          expect miri true
+          expect miri "$FULL"
+          expect miri-pr "$fast"
           expect kani "$FULL"
           expect kani-pr "$fast"
           exit "$fail"

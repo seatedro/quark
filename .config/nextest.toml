@@ -1,0 +1,5 @@
+# `cargo miri nextest` runs the default-miri profile (CI's miri-pr job).
+[profile.default-miri]
+fail-fast = false
+# Report slow tests without ending them: a terminated test is not a pass.
+slow-timeout = { period = "60s" }
