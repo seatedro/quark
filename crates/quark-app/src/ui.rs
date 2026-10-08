@@ -966,6 +966,16 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
             Some(ActionData::Value(value)) => Some(Routed::SetValue(*focus, value.to_string())),
             _ => None,
         },
+        (AxAction::SetValue, AccessibilityAction::Numeric(numeric)) => match &request.data {
+            Some(ActionData::NumericValue(value)) => Some(Routed::Dispatch(numeric.set(*value))),
+            _ => None,
+        },
+        (AxAction::Increment, AccessibilityAction::Numeric(numeric)) => {
+            numeric.increment().cloned().map(Routed::Dispatch)
+        }
+        (AxAction::Decrement, AccessibilityAction::Numeric(numeric)) => {
+            numeric.decrement().cloned().map(Routed::Dispatch)
+        }
         (
             AxAction::ReplaceSelectedText,
             AccessibilityAction::TextValue(focus)
