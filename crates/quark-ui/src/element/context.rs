@@ -43,6 +43,8 @@ pub struct ElementContext<'a> {
     /// Where this frame's identified elements landed, in paint order so
     /// far; becomes the frame's [`LayoutSnapshot`].
     pub geometry: LayoutSnapshot,
+    /// Drop targets added so far; becomes the frame's [`DropTargets`].
+    pub drop_targets: DropTargets,
     /// Inspector recording, style overrides, and phase timings.
     #[cfg(feature = "devtools")]
     pub devtools: crate::inspector::FrameProbe,
@@ -123,6 +125,7 @@ impl<'a> ElementContext<'a> {
                 geometry.reset();
                 geometry
             },
+            drop_targets: DropTargets::default(),
             #[cfg(feature = "devtools")]
             devtools: Default::default(),
             hovered: Vec::new(),
@@ -274,10 +277,12 @@ impl<'a> ElementContext<'a> {
         frame.handlers.clear();
         frame.semantic.clear();
         frame.geometry.reset();
+        frame.drop_targets.clear();
         self.hit_table = frame.hits;
         self.handlers = frame.handlers;
         self.semantic = frame.semantic;
         self.geometry = frame.geometry;
+        self.drop_targets = frame.drop_targets;
         self
     }
 
@@ -673,6 +678,22 @@ impl<'a> ElementContext<'a> {
         self.push_geometry(key, layout, quark::hit::UNCLIPPED);
     }
 
+    /// Publish `target` (layout coordinates, before the current transform)
+    /// as a drop target of this frame, under the current transform, clips,
+    /// and z-index; see [`DropTargets`]. Call it while painting.
+    pub fn add_drop_target(&mut self, target: DropTarget) {
+        let space = self.current_paint_space();
+        self.drop_targets.push(DropTargetRow {
+            target,
+            transform: space.transform,
+            window_clip: space.window_clip,
+            z: self.current_z_index(),
+        });
+        // Cache boundaries do not record drop targets, so one adding them
+        // is painted fresh each frame.
+        self.volatile_reads += 1;
+    }
+
     /// Push a geometry row clipped to `clip` (layout coordinates) within
     /// the current clips: how a replayed cache boundary republishes its
     /// rows under the current transform.
@@ -804,11 +825,13 @@ impl<'a> ElementContext<'a> {
     /// Move this frame's hit table, handlers, and semantic tree out for an
     /// [`InputRouter`].
     pub fn take_input_frame(&mut self) -> InputFrame {
+        self.drop_targets.set_frame(self.geometry.frame());
         InputFrame {
             hits: std::mem::take(&mut self.hit_table),
             handlers: std::mem::take(&mut self.handlers),
             semantic: std::mem::take(&mut self.semantic),
             geometry: std::mem::take(&mut self.geometry),
+            drop_targets: std::mem::take(&mut self.drop_targets),
         }
     }
 }
