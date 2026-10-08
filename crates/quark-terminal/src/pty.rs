@@ -391,6 +391,11 @@ impl Pty {
     /// also runs, on the writer thread, when input [`Self::write`] turned
     /// away now fits. Point it at the app's waker and call [`Self::read`]
     /// when it fires.
+    ///
+    /// On Windows, ConPTY asks for the cursor position (`ESC [ 6 n`) and
+    /// starts nothing until the reply comes back as input, so the output
+    /// must reach a terminal that answers queries (as
+    /// [`crate::TerminalState`] does) and its replies must be written back.
     pub fn spawn(
         command: &PtyCommand,
         geometry: PtyGeometry,
@@ -612,11 +617,13 @@ mod tests {
     #[test]
     fn a_program_sees_the_resize_and_its_exit_follows_its_output() {
         // Each waits for a line, then prints the size its terminal has.
+        // On Windows the line arrives before ConPTY has started cmd, and
+        // `set /p` reads input typed ahead like that.
         let command = if cfg!(windows) {
             PtyCommand::new("cmd")
                 .arg("/d")
                 .arg("/c")
-                .arg("pause >nul & mode con")
+                .arg("set /p x=& mode con")
         } else {
             PtyCommand::new("sh").arg("-c").arg("read x; stty size")
         };
@@ -645,6 +652,14 @@ mod tests {
                 PtyEvent::Output(bytes) => term.feed(bytes),
                 PtyEvent::Exited(code) => exit = Some(code),
             });
+            // Query replies go back to the program, as TerminalState sends
+            // them with a PTY attached: ConPTY asks for the cursor position
+            // and starts nothing until it is answered. Writing fails only
+            // once the program has exited.
+            let replies = term.take_input();
+            if !replies.is_empty() {
+                let _ = pty.write(&replies);
+            }
         }
         let words = term
             .refresh()
