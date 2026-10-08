@@ -16,6 +16,7 @@ members = [
   "tools/syntax-pack",
   # A member so CI's fmt, clippy, and tests cover the patch.
   "vendor/accesskit_unix",
+  "vendor/glyphon",
 ]
 # cargo-fuzz targets build on their own with nightly sanitizers.
 exclude = ["fuzz"]
@@ -86,3 +87,6 @@ panic = "unwind"
 # (GetRoleName, an `id` attribute). See vendor/accesskit_unix/VENDORED.md.
 [patch.crates-io]
 accesskit_unix = { path = "vendor/accesskit_unix" }
+# glyphon 0.10.0 plus a prepare path for already positioned glyphs, so text
+# draws in per-glyph colors without reshaping. See vendor/glyphon/VENDORED.md.
+glyphon = { path = "vendor/glyphon" }
