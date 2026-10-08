@@ -54,11 +54,6 @@ impl State {
         }
     }
 
-    /// The whole scrollback and screen as text, for tests.
-    pub fn text(&self) -> String {
-        self.term.grid().text()
-    }
-
     /// Run what the VT encoder queued for the (absent) program.
     fn pump(&mut self, files: &FileStore) {
         let input = self.term.take_input();

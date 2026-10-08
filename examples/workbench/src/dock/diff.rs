@@ -67,11 +67,6 @@ impl State {
         }
     }
 
-    /// The mode on screen.
-    pub fn mode(&self) -> Mode {
-        self.view.mode()
-    }
-
     /// Scroll to `path`'s file header.
     pub fn reveal(&mut self, path: &str) {
         let file = self.view.document().summaries().find(|s| &*s.path == path);

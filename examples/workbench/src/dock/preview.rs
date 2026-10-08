@@ -36,7 +36,7 @@ pub enum Action {
 
 pub struct State {
     image: Option<AnimatedImage>,
-    /// Bytes to decode; tests swap in broken ones to reach the error state.
+    /// The encoded snapshot, kept for Retry.
     bytes: &'static [u8],
     zoom: Zoom,
     scroll: ScrollHandle,
@@ -49,7 +49,7 @@ impl State {
 
     /// A preview of `bytes`, decoded now: the snapshot is small, and a
     /// panel that pops in later would shift its controls.
-    pub fn with_bytes(bytes: &'static [u8]) -> Self {
+    fn with_bytes(bytes: &'static [u8]) -> Self {
         let mut state = Self {
             image: None,
             bytes,
@@ -63,10 +63,6 @@ impl State {
     fn load(&mut self) {
         let limits = AnimationLimits::default();
         self.image = decode_animation(self.bytes, limits).map(AnimatedImage::from_frames);
-    }
-
-    pub fn zoom(&self) -> Zoom {
-        self.zoom
     }
 }
 
