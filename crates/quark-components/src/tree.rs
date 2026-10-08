@@ -26,7 +26,8 @@ use quark::selection::{FULL_INTEGRITY_CHECKS, count_integrity_steps};
 use quark::view;
 use quark_ui::element::{
     AnyElement, CacheKey, ClickEvent, DragHandler, DragReleaseResult, IntoAnyElement,
-    ScrollActionBuilder, WHEEL_LINE_PX, cached, div, inputs_hash, svg_icon, text,
+    ScrollActionBuilder, ScrollbarVisibility, WHEEL_LINE_PX, cached, div, inputs_hash, svg_icon,
+    text,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -225,6 +226,9 @@ struct TreeData {
     type_ahead_at: u64,
     /// Bumped by every change the view can show; the view's cache input.
     revision: u64,
+    /// The scrollbar shows only on demand, as `scrollbar` decides.
+    scrollbar_auto_hide: bool,
+    scrollbar: ScrollbarVisibility,
 }
 
 /// App-owned tree model and view state. See the [module docs](self).
@@ -273,6 +277,8 @@ impl TreeState {
                 type_ahead: String::new(),
                 type_ahead_at: 0,
                 revision: 0,
+                scrollbar_auto_hide: false,
+                scrollbar: ScrollbarVisibility::new(),
             }),
         }
     }
@@ -290,6 +296,14 @@ impl TreeState {
 
     pub fn with_row_height(mut self, row_height: f32) -> Self {
         self.m().row_height = row_height.max(1.0);
+        self
+    }
+
+    /// Show the scrollbar only while the pointer is over the view, its
+    /// thumb is held, or briefly after the view scrolls or gains focus (see
+    /// [`ScrollbarVisibility`]). Without it the scrollbar always shows.
+    pub fn with_scrollbar_auto_hide(mut self) -> Self {
+        self.m().scrollbar_auto_hide = true;
         self
     }
 
@@ -1399,6 +1413,9 @@ fn build_tree(
              scroll_y={d.scroll} scroll_total={window.total_extent}
              on:scroll={ScrollActionBuilder::new(move |lines| on_event(TreeEvent::Scroll(lines)))
                  .with_to_px(move |px| on_event(TreeEvent::ScrollTo(px as f32)))}
+             @when {d.scrollbar_auto_hide} {
+                 scrollbar_visibility={&d.scrollbar} class="scrollbar-auto-hide"
+             }
              @when {env.accessible} {
                  accessibility_id={d.id} accessibility_role={Role::Tree} aria-label={d.label}
                  aria-multiselectable={d.mode == SelectionMode::Multi}

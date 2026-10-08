@@ -45,7 +45,7 @@ use quark_syntax::{
 };
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
 use quark_ui::FocusId;
-use quark_ui::element::{ScrollHandle, WHEEL_LINE_PX};
+use quark_ui::element::{ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX};
 use quark_ui::virtual_list::{RowKey, VariableList};
 
 pub use view::diff_view;
@@ -280,6 +280,8 @@ pub(crate) struct ViewFrame {
     pub total: f32,
     pub row_count: u32,
     pub hscroll: [ScrollHandle; 2],
+    pub scrollbar_auto_hide: bool,
+    pub scrollbar: ScrollbarVisibility,
 }
 
 /// What the last prepare materialized from.
@@ -314,6 +316,10 @@ pub struct DiffViewState {
     style: DiffStyle,
     viewport: (f32, f32),
     hscroll: [ScrollHandle; 2],
+    /// The vertical scrollbar shows only on demand, as `scrollbar`
+    /// decides.
+    scrollbar_auto_hide: bool,
+    scrollbar: ScrollbarVisibility,
     selection: Option<Selection>,
     /// The side a side-by-side selection copies.
     selection_side: Side,
@@ -357,6 +363,8 @@ impl DiffViewState {
             style: DiffStyle::default(),
             viewport: (0.0, 0.0),
             hscroll: [ScrollHandle::new(), ScrollHandle::new()],
+            scrollbar_auto_hide: false,
+            scrollbar: ScrollbarVisibility::new(),
             selection: None,
             selection_side: Side::New,
             drag: None,
@@ -386,6 +394,16 @@ impl DiffViewState {
 
     pub fn with_style(mut self, style: DiffStyle) -> Self {
         self.set_style(style);
+        self
+    }
+
+    /// Show the vertical scrollbar only while the pointer is over the view,
+    /// its thumb is held, or briefly after the view scrolls or gains focus
+    /// (see [`ScrollbarVisibility`]). Without it that scrollbar always
+    /// shows.
+    /// The sideways scrollbars of unwrapped lines always auto-hide.
+    pub fn with_scrollbar_auto_hide(mut self) -> Self {
+        self.scrollbar_auto_hide = true;
         self
     }
 
@@ -1028,6 +1046,8 @@ impl DiffViewState {
             total: self.list.rows().total_extent(),
             row_count: self.projection.len(),
             hscroll: self.hscroll.clone(),
+            scrollbar_auto_hide: self.scrollbar_auto_hide,
+            scrollbar: self.scrollbar.clone(),
         }));
     }
 

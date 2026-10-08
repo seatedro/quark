@@ -61,7 +61,9 @@ use quark::selection::{
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
 
-use crate::element::{AnyElement, Binding, ScrollHandle, StyledSpan, join_code_lines};
+use crate::element::{
+    AnyElement, Binding, ScrollHandle, ScrollbarVisibility, StyledSpan, join_code_lines,
+};
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
 use quark::Color;
@@ -748,6 +750,9 @@ pub struct Document<G = TextGeometry> {
     /// Horizontal scroll of each block wider than its column, kept while
     /// the block is in the document.
     scroll_handles: HashMap<BlockKey, ScrollHandle>,
+    /// When the list's auto-hiding scrollbar shows; see
+    /// [`DocumentElement::scrollbar_auto_hide`](element::DocumentElement::scrollbar_auto_hide).
+    scrollbar: ScrollbarVisibility,
     /// Elements built so far; rows whose scroll is still moving hash it so
     /// they rebuild every frame until it settles.
     elements_built: u64,
@@ -789,6 +794,7 @@ impl<G: BlockGeometry> Document<G> {
             find_stale: false,
             reveal: None,
             scroll_handles: HashMap::new(),
+            scrollbar: ScrollbarVisibility::new(),
             elements_built: 0,
         }
     }
