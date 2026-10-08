@@ -11,12 +11,21 @@
 #   cargo build -p quark-app --examples --features ui,notifications
 #
 # Environment:
-#   QUARK_E2E_BIN_DIR  example binaries (default target/debug/examples)
+#   QUARK_E2E_BIN_DIR  example binaries (default target/debug/examples); a
+#                      package binary such as workbench lives in target/debug
 #   CUA_DRIVER         cua-driver binary (default: PATH, then e2e/install-cua.sh's)
 #   QUARK_E2E_OUT      artifacts root (default target/e2e/artifacts)
+#   QUARK_E2E_KEEP=1   keep the artifacts of passing specs too, with a final
+#                      screen.png and tree.txt, for visual review
+#
+# A spec can set its app's environment with header lines, applied before
+# the app launches (the runner starts binaries without arguments):
+#   # quark-e2e-env: QUARK_WORKBENCH_SCENARIO=empty
 #
 # A failed spec leaves screen.png, tree.txt, cua-tree.txt, and every log in
-# $QUARK_E2E_OUT/<example>-<behavior>/.
+# $QUARK_E2E_OUT/<example>-<behavior>/, plus meta.txt naming the spec, its
+# environment, and the screen. Specs save named screenshots there with
+# quark_e2e.save_screenshot.
 set -euo pipefail
 
 E2E_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -65,7 +74,26 @@ run_one() {
   export HOME=$out/home XDG_RUNTIME_DIR=$out/runtime TMPDIR=$out/tmp
   export XDG_CONFIG_HOME=$HOME/.config XDG_CACHE_HOME=$HOME/.cache XDG_DATA_HOME=$HOME/.local/share
   unset WAYLAND_DISPLAY
-  export QUARK_E2E_APP=$example QUARK_E2E_APP_LOG=$out/app.log
+  export QUARK_E2E_APP=$example QUARK_E2E_APP_LOG=$out/app.log QUARK_E2E_ARTIFACTS=$out
+
+  # The spec's own app environment (`# quark-e2e-env: KEY=VALUE`).
+  local line name
+  local env_line='^# quark-e2e-env: ([A-Za-z_][A-Za-z0-9_]*=.*)$'
+  while IFS= read -r line; do
+    if [[ $line =~ $env_line ]]; then
+      export "${BASH_REMATCH[1]}"
+    fi
+  done <"$spec"
+  {
+    echo "spec: $spec"
+    echo "screen: 1280x800x24, scale 1"
+    for name in $(compgen -e | sort); do
+      case $name in
+        QUARK_E2E_PID | QUARK_E2E_OUT | QUARK_E2E_ARTIFACTS | QUARK_E2E_APP_LOG) ;;
+        QUARK_*) echo "$name=${!name}" ;;
+      esac
+    done
+  } >"$out/meta.txt"
 
   exec 3>"$out/display"
   Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp >"$out/xvfb.log" 2>&1 &
@@ -99,8 +127,10 @@ run_one() {
   elif ! timeout 120 python3 "$spec" >>"$out/spec.log" 2>&1; then
     status=1
   fi
-  if ((status != 0)); then
+  if ((status != 0)) || [[ ${QUARK_E2E_KEEP:-0} != 0 ]]; then
     timeout 60 python3 "$E2E_DIR/quark_e2e.py" dump "$out" >>"$out/spec.log" 2>&1 || true
+  fi
+  if ((status != 0)); then
     sed 's/^/    /' "$out/spec.log" >&2
   fi
   return $status
@@ -131,8 +161,12 @@ for spec in "$@"; do
   setsid "${BASH_SOURCE[0]}" --one "$spec" &
   leader=$!
   if wait "$leader"; then
-    echo "PASS $name"
-    rm -rf "${QUARK_E2E_OUT:?}/${name/\//-}"
+    if [[ ${QUARK_E2E_KEEP:-0} != 0 ]]; then
+      echo "PASS $name (artifacts kept in $QUARK_E2E_OUT/${name/\//-})"
+    else
+      echo "PASS $name"
+      rm -rf "${QUARK_E2E_OUT:?}/${name/\//-}"
+    fi
   else
     echo "FAIL $name (artifacts in $QUARK_E2E_OUT/${name/\//-})"
     failed=$((failed + 1))

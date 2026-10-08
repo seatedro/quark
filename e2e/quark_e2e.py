@@ -49,6 +49,9 @@ ROLE = {
     "toggle button": 62,
     "status bar": 54,
     "notification": 101,
+    "page tab": 37,
+    "page tab list": 38,
+    "tool bar": 63,
 }
 ROLE_NAME = {v: k for k, v in ROLE.items()}
 STATE_CHECKED = 4
@@ -328,6 +331,21 @@ def xdotool(*args):
     return done.stdout.strip()
 
 
+def window_id(title):
+    """The X window id of the top-level window titled exactly `title`, so
+    a spec acts on the intended host when the app has several."""
+    return xdotool("search", "--sync", "--name", f"^{re.escape(title)}$").splitlines()[0]
+
+
+def resize_window(title, width, height):
+    """Move the window titled `title` to the desktop's corner and give it
+    `width` x `height` points of content (scale 1 under Xvfb)."""
+    wid = window_id(title)
+    xdotool("windowmove", "--sync", wid, 0, 0)
+    xdotool("windowsize", "--sync", wid, width, height)
+    return wid
+
+
 def pointer_drag(start, path, release=True):
     """Press the primary button at screen point `start` and move through
     `path` one step at a time, each waiting for the pointer to get there,
@@ -532,6 +550,43 @@ def app_pid():
 
 def example_binary(name):
     return os.path.join(os.environ["QUARK_E2E_BIN_DIR"], name)
+
+
+def artifacts_dir():
+    """This spec's artifacts directory (kept on failure or QUARK_E2E_KEEP=1)."""
+    return os.environ["QUARK_E2E_ARTIFACTS"]
+
+
+def save_screenshot(cua, name):
+    """Save the display as `<name>.png` among the spec's artifacts, for
+    visual review. Returns the path."""
+    path = os.path.join(artifacts_dir(), f"{name}.png")
+    if not cua.screenshot(path):
+        raise AssertionError(f"cua returned no image for {name}")
+    return path
+
+
+def save_tree(name, window=None):
+    """Save the app's AT-SPI tree (or one window's) as `<name>.txt`."""
+    tree = app_tree(window=window) if window else atspi_tree(os.environ["QUARK_E2E_APP"])
+    with open(os.path.join(artifacts_dir(), f"{name}.txt"), "w") as f:
+        f.write(tree.dump() if tree else "application not registered on the AT-SPI bus\n")
+
+
+def app_marks():
+    """Timing marks the app printed to its log as JSON lines,
+    `{"mark": name, "ms": n}`, as a dict of name to milliseconds."""
+    marks = {}
+    with open(os.environ["QUARK_E2E_APP_LOG"], errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('{"mark"'):
+                try:
+                    mark = json.loads(line)
+                except ValueError:
+                    continue
+                marks[mark["mark"]] = mark["ms"]
+    return marks
 
 
 def main(spec):

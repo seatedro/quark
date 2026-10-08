@@ -1,0 +1,1240 @@
+{
+ "projects": [
+  {
+   "id": 1,
+   "name": "Atlas",
+   "path": "~/src/atlas"
+  },
+  {
+   "id": 2,
+   "name": "Meridian",
+   "path": "~/src/meridian"
+  },
+  {
+   "id": 3,
+   "name": "Lumen",
+   "path": "~/src/lumen"
+  }
+ ],
+ "threads": [
+  {
+   "id": 1,
+   "project": 1,
+   "title": "Add keyboard shortcuts",
+   "pinned": true,
+   "unread": false,
+   "status": "idle",
+   "updated": "now",
+   "rows": [
+    {
+     "id": 1,
+     "role": "user",
+     "at": "10:41",
+     "markdown": "Add keyboard shortcuts for the common actions: new trip, pin place, and help. Keep them out of the way while someone is typing in a field."
+    },
+    {
+     "id": 2,
+     "role": "assistant",
+     "at": "10:41",
+     "markdown": "I'll wire a single `keydown` listener at the app root and resolve keys through the existing command list, so each shortcut has one source of truth.\n\nPlan:\n\n1. Find where commands are defined and whether anything already listens for keys.\n2. Add an optional `shortcut` to `Command`:\n   - `mod+n` creates a trip\n   - `mod+p` pins the selected place\n   - `?` opens help, with no modifier\n3. Ignore keys whose target is an `input`, `textarea`, or `contenteditable` element.\n4. Run the test suite."
+    },
+    {
+     "id": 3,
+     "role": "tool",
+     "at": "10:42",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "keydown|shortcut in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "src/App.tsx: no matches\nsrc/commands.ts: no matches\nsrc/trips.ts: no matches\n\n0 results in 4 files"
+     }
+    },
+    {
+     "id": 4,
+     "role": "tool",
+     "at": "10:42",
+     "tool": {
+      "kind": "read",
+      "verb": "Read",
+      "target": "src/commands.ts",
+      "status": "ok",
+      "duration": "0.1s",
+      "output": "export interface Command {\n  id: string;\n  title: string;\n  run: () => void;\n}"
+     }
+    },
+    {
+     "id": 5,
+     "role": "assistant",
+     "at": "10:42",
+     "markdown": "Nothing listens for keys yet, and `commands.ts` already lists every action, so the shortcut belongs there. These are the bindings I'm adding:\n\n| Command | Shortcut | Notes |\n|---|---|---|\n| New trip | `mod+n` | `⌘N` on macOS, `Ctrl+N` elsewhere |\n| Pin place | `mod+p` | Overrides the browser's print shortcut inside the app |\n| Show help | `?` | Works without a modifier, so it must skip text fields |\n\n`mod` resolves to `metaKey` on macOS and `ctrlKey` elsewhere."
+    },
+    {
+     "id": 6,
+     "role": "tool",
+     "at": "10:42",
+     "tool": {
+      "kind": "edit",
+      "verb": "Edited",
+      "target": "src/commands.ts",
+      "status": "ok",
+      "duration": "0.1s",
+      "output": "+12 −1"
+     }
+    },
+    {
+     "id": 7,
+     "role": "tool",
+     "at": "10:42",
+     "tool": {
+      "kind": "edit",
+      "verb": "Edited",
+      "target": "src/App.tsx",
+      "status": "ok",
+      "duration": "0.1s",
+      "output": "+13 −2"
+     }
+    },
+    {
+     "id": 8,
+     "role": "assistant",
+     "at": "10:43",
+     "markdown": "The resolver lives next to the command list. The wide line below is the default table, kept on one line so it diffs cleanly:\n\n```ts\n/** Resolves a keydown to a command, ignoring keys typed into fields. */\nexport function commandForKey(event: KeyboardEvent): Command | undefined {\n  const target = event.target as HTMLElement | null;\n  if (target?.closest(\"input, textarea, [contenteditable]\")) return undefined;\n  const mod = event.metaKey || event.ctrlKey ? \"mod+\" : \"\";\n  return commands.find((command) => command.shortcut === `${mod}${event.key.toLowerCase()}`);\n}\n\nexport const DEFAULT_SHORTCUTS: Record<CommandId, Shortcut> = { \"trip.new\": { key: \"n\", mod: true }, \"place.pin\": { key: \"p\", mod: true }, \"view.help\": { key: \"?\", mod: false }, \"trip.share\": { key: \"s\", mod: true, shift: true } }; // finalIdentifierOnWideLine\n```"
+    },
+    {
+     "id": 9,
+     "role": "tool",
+     "at": "10:42",
+     "tool": {
+      "kind": "run",
+      "verb": "Ran",
+      "target": "npm test",
+      "status": "failed",
+      "duration": "1.4s",
+      "output": " FAIL  src/commands.test.ts > commandForKey matches ? without a modifier\nAssertionError: expected undefined to deeply equal { id: 'view.help', … }\n  ❯ src/commands.test.ts:31:42\n\n Test Files  1 failed | 2 passed (3)\n      Tests  1 failed | 12 passed (13)"
+     }
+    },
+    {
+     "id": 10,
+     "role": "assistant",
+     "at": "10:43",
+     "markdown": "One failure: on most layouts `?` arrives with `shiftKey` set, and `event.key` is already `\"?\"`, so lowercasing is fine, but the test builds the event with `ctrlKey: true` by mistake. The resolver is correct; the test fixture is wrong.\n\n> Keys typed into the search field still reach the input, which is the behavior we want."
+    },
+    {
+     "id": 11,
+     "role": "tool",
+     "at": "10:42",
+     "tool": {
+      "kind": "edit",
+      "verb": "Edited",
+      "target": "src/commands.test.ts",
+      "status": "ok",
+      "duration": "0.1s",
+      "output": "+1 −1"
+     }
+    },
+    {
+     "id": 12,
+     "role": "tool",
+     "at": "10:42",
+     "tool": {
+      "kind": "run",
+      "verb": "Ran",
+      "target": "npm test",
+      "status": "ok",
+      "duration": "1.2s",
+      "output": " ✓ src/trips.test.ts (4 tests) 12ms\n ✓ src/commands.test.ts (6 tests) 9ms\n ✓ src/App.test.tsx (3 tests) 31ms\n\n Test Files  3 passed (3)\n      Tests  13 passed (13)"
+     }
+    },
+    {
+     "id": 13,
+     "role": "assistant",
+     "at": "10:44",
+     "markdown": "All 13 tests pass. Here is the help overlay with the new shortcut column:\n\n![Atlas help overlay listing New trip ⌘N, Pin place ⌘P, and Show help ?](preview.png)\n\nSummary of the change:\n\n- `src/commands.ts`\n  - adds `shortcut?: string` to `Command`\n  - adds `commandForKey`, which skips editable targets\n- `src/App.tsx` registers one `keydown` listener and removes it on unmount\n- `src/commands.test.ts` fixes the `?` case\n\nThe proposed diff is in the **Diff** panel. Apply it to update the files, or ask for changes first."
+    },
+    {
+     "id": 14,
+     "role": "user",
+     "at": "10:46",
+     "markdown": "Looks good. Does this work with non-Latin keyboard layouts, like ЙЦУКЕН or a Japanese IME?"
+    },
+    {
+     "id": 15,
+     "role": "assistant",
+     "at": "10:46",
+     "markdown": "Mostly. `event.key` reports the produced character, so on a Russian layout `mod+n` arrives as `mod+т`. Two adjustments make it layout-independent:\n\n1. Match modifier shortcuts on `event.code` (`KeyN`), which names the physical key.\n2. Keep `?` on `event.key`, because it names a character rather than a key position.\n\nDuring IME composition (`event.isComposing`, 日本語入力 for example) every key belongs to the composition, so the resolver should return early. I'll fold both into the next run."
+    },
+    {
+     "id": 16,
+     "role": "error",
+     "at": "10:47",
+     "markdown": "The demo backend closed the stream before the response finished. Nothing was lost: retrying continues from the last tool result.",
+     "retry": true
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "project": 1,
+   "title": "Share trips as read-only links",
+   "pinned": true,
+   "unread": true,
+   "status": "idle",
+   "updated": "12m",
+   "rows": [
+    {
+     "id": 17,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Share trips as read-only links. Start by finding where it lives."
+    },
+    {
+     "id": 18,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "links in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 19,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/links.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 20,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 21,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "project": 1,
+   "title": "Fix flaky geocoder test",
+   "pinned": false,
+   "unread": false,
+   "status": "failed",
+   "updated": "40m",
+   "rows": [
+    {
+     "id": 22,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Fix flaky geocoder test. Start by finding where it lives."
+    },
+    {
+     "id": 23,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "test in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 24,
+     "role": "tool",
+     "at": "09:13",
+     "tool": {
+      "kind": "run",
+      "verb": "Ran",
+      "target": "npm test",
+      "status": "failed",
+      "duration": "2.1s",
+      "output": " FAIL  src/geocode.test.ts > retries on 503\nError: Test timed out in 5000ms"
+     }
+    },
+    {
+     "id": 25,
+     "role": "error",
+     "at": "09:14",
+     "markdown": "The test run timed out. The geocoder mock never answered the third retry; rerun after the mock server restarts.",
+     "retry": true
+    },
+    {
+     "id": 26,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "project": 1,
+   "title": "Upgrade to Vite 7",
+   "pinned": false,
+   "unread": false,
+   "status": "running",
+   "updated": "1h",
+   "rows": [
+    {
+     "id": 27,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Upgrade to Vite 7. Start by finding where it lives."
+    },
+    {
+     "id": 28,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "7 in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 29,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/7.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 30,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 31,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "project": 1,
+   "title": "Cluster pins at low zoom",
+   "pinned": false,
+   "unread": true,
+   "status": "idle",
+   "updated": "2h",
+   "rows": [
+    {
+     "id": 32,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Cluster pins at low zoom. Start by finding where it lives."
+    },
+    {
+     "id": 33,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "zoom in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 34,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/zoom.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 35,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 36,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "project": 1,
+   "title": "Offline tile cache",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "3h",
+   "rows": [
+    {
+     "id": 37,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Offline tile cache. Start by finding where it lives."
+    },
+    {
+     "id": 38,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "cache in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 39,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/cache.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 40,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 41,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "project": 1,
+   "title": "Trip export to GPX",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "yesterday",
+   "rows": [
+    {
+     "id": 42,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Trip export to GPX. Start by finding where it lives."
+    },
+    {
+     "id": 43,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "gpx in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 44,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/gpx.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 45,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 46,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "project": 1,
+   "title": "Accessibility audit of the map controls",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "Mon",
+   "rows": [
+    {
+     "id": 47,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Accessibility audit of the map controls. Start by finding where it lives."
+    },
+    {
+     "id": 48,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "controls in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 49,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/controls.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 50,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 51,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "project": 2,
+   "title": "Calendar sync with CalDAV",
+   "pinned": true,
+   "unread": false,
+   "status": "idle",
+   "updated": "25m",
+   "rows": [
+    {
+     "id": 52,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Calendar sync with CalDAV. Start by finding where it lives."
+    },
+    {
+     "id": 53,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "caldav in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 54,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/caldav.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 55,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 56,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "project": 2,
+   "title": "Time zone picker search",
+   "pinned": false,
+   "unread": true,
+   "status": "idle",
+   "updated": "1h",
+   "rows": [
+    {
+     "id": 57,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Time zone picker search. Start by finding where it lives."
+    },
+    {
+     "id": 58,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "search in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 59,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/search.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 60,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 61,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "project": 2,
+   "title": "Recurring events across DST",
+   "pinned": false,
+   "unread": false,
+   "status": "failed",
+   "updated": "4h",
+   "rows": [
+    {
+     "id": 62,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Recurring events across DST. Start by finding where it lives."
+    },
+    {
+     "id": 63,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "dst in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 64,
+     "role": "tool",
+     "at": "09:13",
+     "tool": {
+      "kind": "run",
+      "verb": "Ran",
+      "target": "npm test",
+      "status": "failed",
+      "duration": "2.1s",
+      "output": " FAIL  src/geocode.test.ts > retries on 503\nError: Test timed out in 5000ms"
+     }
+    },
+    {
+     "id": 65,
+     "role": "error",
+     "at": "09:14",
+     "markdown": "The test run timed out. The geocoder mock never answered the third retry; rerun after the mock server restarts.",
+     "retry": true
+    },
+    {
+     "id": 66,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 12,
+   "project": 2,
+   "title": "Agenda view virtualization",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "yesterday",
+   "rows": [
+    {
+     "id": 67,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Agenda view virtualization. Start by finding where it lives."
+    },
+    {
+     "id": 68,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "virtualization in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 69,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/virtualization.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 70,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 71,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 13,
+   "project": 2,
+   "title": "Drag to reschedule",
+   "pinned": false,
+   "unread": false,
+   "status": "running",
+   "updated": "yesterday",
+   "rows": [
+    {
+     "id": 72,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Drag to reschedule. Start by finding where it lives."
+    },
+    {
+     "id": 73,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "reschedule in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 74,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/reschedule.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 75,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    },
+    {
+     "id": 76,
+     "role": "assistant",
+     "at": "09:16",
+     "markdown": "Follow-up noted; nothing else to change here."
+    }
+   ]
+  },
+  {
+   "id": 14,
+   "project": 2,
+   "title": "Invite emails in plain text",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "Tue",
+   "rows": [
+    {
+     "id": 77,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Invite emails in plain text. Start by finding where it lives."
+    },
+    {
+     "id": 78,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "text in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 79,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/text.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 80,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 15,
+   "project": 2,
+   "title": "Week numbers setting",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "Sep 30",
+   "rows": [
+    {
+     "id": 81,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Week numbers setting. Start by finding where it lives."
+    },
+    {
+     "id": 82,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "setting in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 83,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/setting.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 84,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 16,
+   "project": 2,
+   "title": "Migrate settings to SQLite",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "Sep 28",
+   "rows": [
+    {
+     "id": 85,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Migrate settings to SQLite. Start by finding where it lives."
+    },
+    {
+     "id": 86,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "sqlite in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 87,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/sqlite.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 88,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 17,
+   "project": 3,
+   "title": "Dark mode for the reader",
+   "pinned": true,
+   "unread": false,
+   "status": "idle",
+   "updated": "5m",
+   "rows": [
+    {
+     "id": 89,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Dark mode for the reader. Start by finding where it lives."
+    },
+    {
+     "id": 90,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "reader in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 91,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/reader.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 92,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 18,
+   "project": 3,
+   "title": "Footnote popovers",
+   "pinned": false,
+   "unread": true,
+   "status": "idle",
+   "updated": "50m",
+   "rows": [
+    {
+     "id": 93,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Footnote popovers. Start by finding where it lives."
+    },
+    {
+     "id": 94,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "popovers in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 95,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/popovers.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 96,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 19,
+   "project": 3,
+   "title": "EPUB import progress",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "2h",
+   "rows": [
+    {
+     "id": 97,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "EPUB import progress. Start by finding where it lives."
+    },
+    {
+     "id": 98,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "progress in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 99,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/progress.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 100,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 20,
+   "project": 3,
+   "title": "Hyphenation for German",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "yesterday",
+   "rows": [
+    {
+     "id": 101,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Hyphenation for German. Start by finding where it lives."
+    },
+    {
+     "id": 102,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "german in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 103,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/german.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 104,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 21,
+   "project": 3,
+   "title": "Highlight export to Markdown",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "Mon",
+   "rows": [
+    {
+     "id": 105,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Highlight export to Markdown. Start by finding where it lives."
+    },
+    {
+     "id": 106,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "markdown in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 107,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/markdown.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 108,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 22,
+   "project": 3,
+   "title": "Reading position sync",
+   "pinned": false,
+   "unread": false,
+   "status": "failed",
+   "updated": "Sep 29",
+   "rows": [
+    {
+     "id": 109,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Reading position sync. Start by finding where it lives."
+    },
+    {
+     "id": 110,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "sync in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 111,
+     "role": "tool",
+     "at": "09:13",
+     "tool": {
+      "kind": "run",
+      "verb": "Ran",
+      "target": "npm test",
+      "status": "failed",
+      "duration": "2.1s",
+      "output": " FAIL  src/geocode.test.ts > retries on 503\nError: Test timed out in 5000ms"
+     }
+    },
+    {
+     "id": 112,
+     "role": "error",
+     "at": "09:14",
+     "markdown": "The test run timed out. The geocoder mock never answered the third retry; rerun after the mock server restarts.",
+     "retry": true
+    }
+   ]
+  },
+  {
+   "id": 23,
+   "project": 3,
+   "title": "Font size slider",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "Sep 27",
+   "rows": [
+    {
+     "id": 113,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Font size slider. Start by finding where it lives."
+    },
+    {
+     "id": 114,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "slider in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 115,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/slider.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 116,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  },
+  {
+   "id": 24,
+   "project": 3,
+   "title": "Empty library onboarding",
+   "pinned": false,
+   "unread": false,
+   "status": "idle",
+   "updated": "Sep 21",
+   "rows": [
+    {
+     "id": 117,
+     "role": "user",
+     "at": "09:12",
+     "markdown": "Empty library onboarding. Start by finding where it lives."
+    },
+    {
+     "id": 118,
+     "role": "tool",
+     "at": "09:12",
+     "tool": {
+      "kind": "search",
+      "verb": "Searched",
+      "target": "onboarding in src/",
+      "status": "ok",
+      "duration": "0.2s",
+      "output": "3 results in 2 files"
+     }
+    },
+    {
+     "id": 119,
+     "role": "assistant",
+     "at": "09:13",
+     "markdown": "Found it. The change touches two files:\n\n- `src/onboarding.ts`\n- `src/App.tsx`\n\nI'll keep the public API unchanged."
+    },
+    {
+     "id": 120,
+     "role": "assistant",
+     "at": "09:15",
+     "markdown": "Done. `npm test` passes (13 tests) and the change is ready for review."
+    }
+   ]
+  }
+ ]
+}

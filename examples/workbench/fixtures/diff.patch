@@ -1,0 +1,62 @@
+diff --git a/src/App.tsx b/src/App.tsx
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,11 +1,23 @@
+-import { useState } from "react";
+-import { CommandList } from "./commands";
++import { useEffect, useState } from "react";
++import { CommandList, commandForKey } from "./commands";
+ import { TripList } from "./trips";
+ 
+ export function App() {
+   const [query, setQuery] = useState("");
+   const [showHelp, setShowHelp] = useState(false);
+ 
++  useEffect(() => {
++    const onKeyDown = (event: KeyboardEvent) => {
++      const command = commandForKey(event);
++      if (!command) return;
++      event.preventDefault();
++      if (command.id === "view.help") setShowHelp(true);
++      else command.run();
++    };
++    window.addEventListener("keydown", onKeyDown);
++    return () => window.removeEventListener("keydown", onKeyDown);
++  }, []);
++
+   return (
+     <main className="atlas">
+       <header className="toolbar">
+diff --git a/src/commands.ts b/src/commands.ts
+--- a/src/commands.ts
++++ b/src/commands.ts
+@@ -1,15 +1,26 @@
+ export interface Command {
+   id: string;
+   title: string;
++  /** Keyboard shortcut in `mod+key` form, shown in help. */
++  shortcut?: string;
+   run: () => void;
+ }
+ 
+ export const commands: Command[] = [
+-  { id: "trip.new", title: "New trip", run: () => {} },
+-  { id: "place.pin", title: "Pin place", run: () => {} },
+-  { id: "view.help", title: "Show help", run: () => {} },
++  { id: "trip.new", title: "New trip", shortcut: "mod+n", run: () => {} },
++  { id: "place.pin", title: "Pin place", shortcut: "mod+p", run: () => {} },
++  { id: "view.help", title: "Show help", shortcut: "?", run: () => {} },
+ ];
+ 
++/** Resolves a keydown to a command, ignoring keys typed into fields. */
++export function commandForKey(event: KeyboardEvent): Command | undefined {
++  const target = event.target as HTMLElement | null;
++  if (target?.closest("input, textarea, [contenteditable]")) return undefined;
++  const mod = event.metaKey || event.ctrlKey ? "mod+" : "";
++  const key = `${mod}${event.key.toLowerCase()}`;
++  return commands.find((command) => command.shortcut === key);
++}
++
+ export function CommandList(props: { onClose: () => void }) {
+   return null;
+ }
