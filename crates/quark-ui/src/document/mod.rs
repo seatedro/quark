@@ -60,6 +60,7 @@ use quark::selection::{
 };
 use quark_render::FontWeight;
 use quark_render::scene::Rect;
+use quark_text::FontEpoch;
 
 use crate::element::{
     AnyElement, Binding, ScrollHandle, ScrollbarVisibility, StyledSpan, join_code_lines,
@@ -589,10 +590,10 @@ pub trait BlockMeasurer {
     fn measure(&mut self, block: &Block, width: f32) -> Self::Geometry;
 
     /// Identifies the settings geometry depends on besides the block and
-    /// width (font size, scale factor). Geometry measured under another key
-    /// is measured again.
-    fn settings_key(&self) -> u64 {
-        0
+    /// width (fonts, font size, scale factor). When it changes, every block
+    /// and row is measured again.
+    fn settings_key(&self) -> MeasureKey {
+        MeasureKey::default()
     }
 
     /// How a background thread can measure exactly as this measurer does.
@@ -603,12 +604,25 @@ pub trait BlockMeasurer {
     }
 }
 
+/// What a [`BlockMeasurer`]'s geometry depends on besides the block and
+/// width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MeasureKey {
+    /// Measurer-defined settings; [`TextMeasurer`] packs the font size and
+    /// scale factor.
+    pub settings: u64,
+    /// The fonts text is shaped with, for measurers that shape text. It
+    /// changes with the font settings, a loaded font, or a replaced text
+    /// system.
+    pub fonts: Option<FontEpoch>,
+}
+
 /// Geometry of a block as measured, with what it was measured from.
 #[derive(Debug, Clone)]
 struct Measured<G> {
     block: Block,
     width: u32,
-    settings: u64,
+    settings: MeasureKey,
     geometry: G,
 }
 
@@ -733,6 +747,8 @@ pub struct Document<G = TextGeometry> {
     measured: HashMap<BlockKey, Measured<G>>,
     /// Last frame's `measured` map, empty, kept for its capacity.
     measured_spare: HashMap<BlockKey, Measured<G>>,
+    /// The measurer settings the row heights were measured under.
+    measure_key: Option<MeasureKey>,
     /// Theme-resolved spans of the blocks the last element painted, and
     /// last frame's map kept for its capacity.
     painted: HashMap<BlockKey, element::PaintedSpans>,
@@ -786,6 +802,7 @@ impl<G: BlockGeometry> Document<G> {
             blocks: Vec::new(),
             measured: HashMap::new(),
             measured_spare: HashMap::new(),
+            measure_key: None,
             painted: HashMap::new(),
             painted_spare: HashMap::new(),
             row_builds: HashMap::new(),
@@ -1385,7 +1402,8 @@ impl<G: BlockGeometry> Document<G> {
 
     /// Advances autoscroll to `now_ms`, measures the rows entering the
     /// window at `width`, and rebuilds the materialized rows. A width
-    /// change remeasures every row as it becomes visible.
+    /// change, or a change of the measurer's [`MeasureKey`] (such as new
+    /// fonts), remeasures every row as it becomes visible.
     pub fn prepare<M: BlockMeasurer<Geometry = G>>(
         &mut self,
         width: f32,
@@ -1423,6 +1441,13 @@ impl<G: BlockGeometry> Document<G> {
         source: &impl DocumentSource,
         measurer: &mut M,
     ) {
+        let key = measurer.settings_key();
+        if self.measure_key != Some(key) {
+            // Every height so far is from the old fonts or sizes; they stay
+            // as estimates until each row is measured again.
+            self.list.invalidate_all();
+            self.measure_key = Some(key);
+        }
         let style = self.style;
         let width = self.size.0;
         let block_row = &self.block_row;
