@@ -23,8 +23,47 @@ env:
 
 # Actions are pinned to commit SHAs; the comment names the release.
 jobs:
-  check:
+  # Whether a run that is not full verification changed only documentation
+  # no check reads (.github/scripts/docs-only.sh); then the build, test and
+  # proof jobs skip. Full verification always runs everything.
+  changes:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs-only: ${{ steps.classify.outputs.docs-only }}
+    steps:
+      # Full history without file contents: enough for the merge base and
+      # the changed path names.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github/scripts
+
+      - name: Classify changes
+        id: classify
+        env:
+          FULL: ${{ github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master') }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          docs_only=false
+          if [ "$FULL" != true ]; then
+            if [ "$EVENT" = pull_request ]; then base=$PR_BASE; else base=origin/master; fi
+            # From the merge base, so the whole branch counts and not only
+            # its last push. A git failure leaves docs_only=false.
+            if mb=$(git merge-base "$base" HEAD) && changed=$(git diff --no-renames --name-only "$mb" HEAD); then
+              echo "$changed"
+              docs_only=$(.github/scripts/docs-only.sh <<<"$changed" || echo false)
+            fi
+          fi
+          echo "docs-only: $docs_only"
+          echo "docs-only=$docs_only" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
     env:
       # CI builds drop debuginfo (dev keeps debug = 1 for local work) and
@@ -137,7 +176,8 @@ jobs:
   # a smoke launch of hello_ui. Formatting and feature combinations are
   # platform independent and stay on Linux.
   platform:
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -297,7 +337,8 @@ jobs:
           if-no-files-found: ignore
 
   fuzz:
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
     runs-on: ubuntu-latest
     env:
       # ASan does not instrument libghostty-vt, so the terminal targets link
@@ -415,7 +456,8 @@ jobs:
   # per test so four interpreters work at once. Nextest skips doctests, which
   # get their own step.
   miri-pr:
-    if: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: changes
+    if: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && needs.changes.outputs.docs-only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -582,7 +624,8 @@ jobs:
   # Arguments must match the full matrix entry of the same name.
   kani-pr:
     name: kani-pr (${{ matrix.name }})
-    if: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: changes
+    if: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && needs.changes.outputs.docs-only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     strategy:
@@ -651,18 +694,20 @@ jobs:
 
   # One check to require: fails on any failed, cancelled or unexpectedly
   # skipped job. The only expected skips are the event split between full
-  # verification and the faster PR jobs.
+  # verification and the faster PR jobs, and documentation-only changes.
   ci-result:
     if: ${{ always() && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [check, platform, fuzz, miri, miri-pr, kani, kani-pr]
+    needs: [changes, check, platform, fuzz, miri, miri-pr, kani, kani-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results
         env:
           FULL: ${{ github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master') }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs-only == 'true' }}
           NEEDS: ${{ toJSON(needs) }}
         run: |
-          fast=$([ "$FULL" = true ] && echo false || echo true)
+          native=$([ "$DOCS_ONLY" = true ] && echo false || echo true)
+          fast=$([ "$FULL" = false ] && [ "$native" = true ] && echo true || echo false)
           fail=0
           # expect JOB SHOULD_RUN: a job that should run must succeed; one that
           # should not must be skipped.
@@ -672,9 +717,10 @@ jobs:
             echo "$1: $result (want $want)"
             [ "$result" = "$want" ] || fail=1
           }
-          expect check true
-          expect platform true
-          expect fuzz true
+          expect changes true
+          expect check "$native"
+          expect platform "$native"
+          expect fuzz "$native"
           expect miri "$FULL"
           expect miri-pr "$fast"
           expect kani "$FULL"
