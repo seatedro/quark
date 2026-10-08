@@ -104,11 +104,11 @@ fn anchor(vcx: &mut ViewContext, id: &str) -> Option<Rect> {
     }
 }
 
-fn simple(
-    m: &mut M,
-    entries: &[(Option<&'static str>, &str, Option<&str>, bool, bool)],
-    msg: impl Fn(usize) -> Msg,
-) {
+/// A plain row: icon, title, shortcut, checked, submenu. An empty title
+/// is a separator.
+type Entry<'a> = (Option<&'static str>, &'a str, Option<&'a str>, bool, bool);
+
+fn simple(m: &mut M, entries: &[Entry], msg: impl Fn(usize) -> Msg) {
     for (i, (icon, title, keys, check, chevron)) in entries.iter().enumerate() {
         if title.is_empty() {
             m.sep();
@@ -188,16 +188,16 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
                 .px(2.0)
                 .justify_between()
                 .relative();
-            for i in 0..stops {
+            for (i, effort) in EFFORTS.iter().enumerate().take(stops) {
                 let knob = i == app.effort;
                 slider = slider.child(
                     div()
-                        .w(if knob { 24.0 } else { 24.0 })
+                        .w(24.0)
                         .h(24.0)
                         .items_center()
                         .justify_center()
                         .accessibility_role(accesskit::Role::RadioButton)
-                        .accessibility_label(EFFORTS[i])
+                        .accessibility_label(*effort)
                         .accessibility_selected(knob)
                         .on_click(Msg::Effort(i))
                         .child(if knob {

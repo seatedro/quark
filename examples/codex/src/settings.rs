@@ -279,6 +279,17 @@ fn setting_row(
     control: impl IntoAnyElement,
     w: f32,
 ) -> Div {
+    setting_row_wrap(p, title, desc, control, (w - 220.0).max(160.0))
+}
+
+/// [`setting_row`] with the description wrapped at `wrap`.
+fn setting_row_wrap(
+    p: &Pal,
+    title: &str,
+    desc: Option<&str>,
+    control: impl IntoAnyElement,
+    wrap: f32,
+) -> Div {
     let mut text_col = div()
         .flex_col()
         .flex_1()
@@ -291,7 +302,7 @@ fn setting_row(
                 .size(SMALL)
                 .color(p.muted)
                 .line_height(1.25)
-                .wrap_width((w - 230.0).max(160.0)),
+                .wrap_width(wrap),
         );
     }
     hrow()
@@ -400,12 +411,12 @@ fn general(app: &Codex, p: &Pal, w: f32) -> Div {
         .child(group(
             p,
             vec![
-                setting_row(
+                setting_row_wrap(
                     p,
                     "Projectless task folder",
                     Some("The location where tasks started outside of projects store their data by default."),
                     hrow().gap(12.0).child(text("/Users/rohit/…uments/Codex").size(12.5).mono().color(p.muted).no_wrap()).child(change),
-                    w,
+                    250.0,
                 ),
                 setting_row(p, "Default file open destination", Some("Where files and folders open by default"), dropdown(p, "Default app", Some(icons::APP_FINDER)), w),
                 setting_row(p, "Language", Some("Language for the app UI"), dropdown(p, "Auto detect", None), w),

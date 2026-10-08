@@ -141,12 +141,12 @@ pub const SCENES: &[(&str, &str, Setup)] = &[
         a.menu = Some(Menu::Profile);
     }),
     ("settings-general", "u51-settings-general-1-dark", |a| {
-        a.screen = Screen::Settings(Page::General)
+        settings(a, Page::General)
     }),
     (
         "settings-appearance",
         "u51-settings-appearance-1-dark",
-        |a| a.screen = Screen::Settings(Page::Appearance),
+        |a| settings(a, Page::Appearance),
     ),
     ("turn1-light", "u61-thread-finished-light", |a| {
         turn1(a, false, false, false)
@@ -187,7 +187,7 @@ pub const SCENES: &[(&str, &str, Setup)] = &[
     (
         "settings-shortcuts",
         "58-settings-keyboard-shortcuts-1-dark",
-        |a| a.screen = Screen::Settings(Page::KeyboardShortcuts),
+        |a| settings(a, Page::KeyboardShortcuts),
     ),
     ("narrow-640", "62-narrow-640-dark", |a| {
         a.screen = Screen::Thread(data::ERRORS_THREAD);
@@ -260,8 +260,17 @@ fn approval(a: &mut Codex) {
     a.pending = Some(data::turn3_approval());
 }
 
+/// Settings as captured: the theme choice reads System whatever the
+/// scene's forced mode.
+fn settings(a: &mut Codex, page: Page) {
+    a.screen = Screen::Settings(page);
+    a.theme_choice = crate::ThemeChoice::System;
+}
+
+/// The 26.623 error thread, scrolled to its end as that version kept it.
 fn set_errors(a: &mut Codex, n: usize) {
     a.project = Some(ProjectId(1));
+    a.scroll_px = Some(1.0e6);
     if let Some(t) = a.data.thread_mut(ThreadId(2)) {
         t.items = data::error_items()[..n].to_vec();
     }

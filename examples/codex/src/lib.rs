@@ -310,7 +310,12 @@ impl Codex {
             settings_handle: ScrollHandle::new(),
             terminal,
             theme_choice: options.theme,
-            toggles: vec!["default-permissions", "translucent", "smart-punctuation"],
+            toggles: vec![
+                "default-permissions",
+                "full-access",
+                "translucent",
+                "smart-punctuation",
+            ],
             size: (INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32),
             now_ms: 0,
             run_started: None,
@@ -950,6 +955,7 @@ fn rail(app: &Codex, p: &Pal, h: f32) -> Div {
         b
     };
     let home = matches!(app.screen, Screen::Home | Screen::Thread(_));
+    let _ = home;
     div()
         .absolute()
         .left(0.0)
@@ -1048,9 +1054,10 @@ fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> Div {
             p.icon_faint,
             "Forward",
             Msg::Noop,
-        ))
-        .child(div().w(8.0))
-        .child(icon_button(
+        ));
+    let settings = matches!(app.screen, Screen::Settings(_));
+    if !settings {
+        left = left.child(div().w(8.0)).child(icon_button(
             p,
             icons::SIDEBAR,
             28.0,
@@ -1059,6 +1066,7 @@ fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> Div {
             "Hide sidebar",
             Msg::ToggleSidebar,
         ));
+    }
     let collapsed = f.sidebar_w == 0.0;
     if collapsed && !matches!(app.screen, Screen::Settings(_)) {
         left = left
@@ -1144,7 +1152,8 @@ fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> Div {
                 .child(div().w(6.0)),
         );
     }
-    if f.panel_w > 0.0 || app.full_view {
+    if settings {
+    } else if f.panel_w > 0.0 || app.full_view {
         bar = bar.child(panel::tab_strip(app, p, f));
     } else {
         bar = bar.child(

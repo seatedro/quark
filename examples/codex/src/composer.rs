@@ -458,3 +458,38 @@ pub fn tray(app: &Codex, p: &Pal, w: f32) -> Div {
                 )),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{State, Suggest};
+
+    // Catches the slash and `@` lists opening on the wrong drafts: a slash
+    // only counts at the start and until a space, `@` only as the last word.
+    #[test]
+    fn draft_opens_the_matching_suggestion_list() {
+        let cases = [
+            ("/", Some(Suggest::Slash(String::new()))),
+            ("/Co", Some(Suggest::Slash("co".into()))),
+            ("/code review", None),
+            ("fix @car", Some(Suggest::At("car".into()))),
+            ("@cart.js then", None),
+            ("plain text", None),
+            ("a/b", None),
+        ];
+        for (draft, want) in cases {
+            let mut state = State::new();
+            state.editor.set_text(draft);
+            assert_eq!(state.suggest(), want, "{draft:?}");
+        }
+    }
+
+    // Catches picking from the filtered list: the index is into the
+    // matches, not the whole table.
+    #[test]
+    fn picking_a_filtered_command_fills_its_name() {
+        let mut state = State::new();
+        state.editor.set_text("/p");
+        state.pick(1);
+        assert_eq!(state.editor.text(), "/plan mode ");
+    }
+}

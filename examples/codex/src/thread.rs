@@ -927,3 +927,34 @@ fn approval_card(p: &Pal, a: &data::Approval, w: f32) -> (Div, f32) {
         );
     (card, h)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Span, parse_spans};
+
+    // Catches code and bold markers leaking into the prose or swallowing
+    // text when a marker is unmatched.
+    #[test]
+    fn markers_become_spans() {
+        assert_eq!(
+            parse_spans("Ran `npm test`: **both fail**."),
+            vec![
+                Span::Text("Ran "),
+                Span::Code("npm test"),
+                Span::Text(": "),
+                Span::Bold("both fail"),
+                Span::Text("."),
+            ]
+        );
+        assert_eq!(
+            parse_spans("2 * 3 `x"),
+            vec![
+                Span::Text("2 "),
+                Span::Text("*"),
+                Span::Text(" 3 "),
+                Span::Text("`"),
+                Span::Text("x")
+            ]
+        );
+    }
+}

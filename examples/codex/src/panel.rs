@@ -830,3 +830,26 @@ fn file_viewer(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
         )))
         .into_any()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::tokens;
+    use crate::theme::DARK as P;
+
+    // Catches the highlighter losing text or coloring a line differently
+    // from the app: keywords red, `function` and called names purple,
+    // members orange, comments grey.
+    #[test]
+    fn javascript_line_tokens_take_codex_colors() {
+        let line = "export function subtotal(items) { return items.reduce(x); } // done";
+        let toks = tokens(line, &P);
+        assert_eq!(toks.iter().map(|t| t.0).collect::<String>(), line);
+        let color = |word: &str| toks.iter().find(|t| t.0 == word).map(|t| t.1);
+        assert_eq!(color("export"), Some(P.syn_keyword));
+        assert_eq!(color("function"), Some(P.syn_function));
+        assert_eq!(color("subtotal"), Some(P.syn_function));
+        assert_eq!(color("reduce"), Some(P.syn_function));
+        assert_eq!(color("items"), Some(P.code));
+        assert_eq!(color("// done"), Some(P.syn_comment));
+    }
+}
