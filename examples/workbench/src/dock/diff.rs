@@ -8,6 +8,7 @@ use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::style::Styled;
+use quark_app::quark_ui::theme::ThemeColors;
 use quark_app::{UiContext, ViewContext};
 use quark_components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonStyle, CollectionEnv, DiffEvent, DiffOutcome,
@@ -107,30 +108,69 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
         super::Action::Diff(Action::View(e)).into()
     });
 
-    let applied = scx.model.files.can_undo();
-    let (badge, variant) = if applied {
-        ("Applied", BadgeVariant::Success)
-    } else {
-        ("Proposed", BadgeVariant::Info)
+    let header = Header {
+        applied: scx.model.files.can_undo(),
+        totals: state.totals,
+        wide,
+        unified: state.preferred == Mode::Unified,
+        width,
     };
-    let (files, adds, dels) = state.totals;
-    let summary = format!("{files} file{} changed", if files == 1 { "" } else { "s" });
-    let segmented = wide.then(|| {
-        let item = |label: &str, m: Mode| {
-            SegmentedItem::new(
-                label,
-                super::Action::Diff(Action::Mode(m)),
-                state.preferred == m,
-            )
-        };
-        SegmentedControl::new(vec![
-            item("Unified", Mode::Unified),
-            item("Split", Mode::Split),
-        ])
-        .id("workbench.diff.mode")
-    });
+    let hash = inputs_hash(&(
+        (header.applied, header.totals, header.wide, header.unified),
+        width.to_bits(),
+    ));
+    let header_colors = *colors;
+    let header = cached("dock.diff.header", hash, move || {
+        header.build(header_colors)
+    })
+    .w(width)
+    .h(TOOLBAR_H)
+    .flex_shrink_0();
     view! {
         <div w={width} h={height} class="flex-col" bg={colors.editor_surface} test_id="dock.diff">
+            {header}
+            {body}
+        </div>
+    }
+    .into_any()
+}
+
+/// The toolbar over the diff: status, mode, Apply and Undo. It replays
+/// from the element cache until one of these fields changes.
+struct Header {
+    applied: bool,
+    totals: (usize, u32, u32),
+    wide: bool,
+    unified: bool,
+    width: f32,
+}
+
+impl Header {
+    fn build(self, colors: ThemeColors) -> AnyElement {
+        let Self {
+            applied,
+            totals: (files, adds, dels),
+            wide,
+            unified,
+            width,
+        } = self;
+        let (badge, variant) = if applied {
+            ("Applied", BadgeVariant::Success)
+        } else {
+            ("Proposed", BadgeVariant::Info)
+        };
+        let summary = format!("{files} file{} changed", if files == 1 { "" } else { "s" });
+        let segmented = wide.then(|| {
+            let item = |label: &str, m: Mode, on: bool| {
+                SegmentedItem::new(label, super::Action::Diff(Action::Mode(m)), on)
+            };
+            SegmentedControl::new(vec![
+                item("Unified", Mode::Unified, unified),
+                item("Split", Mode::Split, !unified),
+            ])
+            .id("workbench.diff.mode")
+        });
+        view! {
             <div w={width} h={TOOLBAR_H} class="flex-row items-center shrink-0"
                  px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border}
                  bg={colors.panel} accessibility_role={accesskit::Role::Toolbar}
@@ -153,10 +193,9 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
                         icon={lucide::CORNER_UP_LEFT} size={ButtonSize::Compact} disabled={!applied}
                         tooltip="Restore the files from before Apply" />
             </div>
-            {body}
-        </div>
+        }
+        .into_any()
     }
-    .into_any()
 }
 
 pub fn update(

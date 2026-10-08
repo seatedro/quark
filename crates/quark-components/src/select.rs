@@ -115,7 +115,7 @@ pub struct SelectOutcome {
 
 /// The state of one select: the chosen option, whether the list is open,
 /// the highlighted option, and type-ahead.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SelectState {
     id: Rc<str>,
     focus: FocusId,

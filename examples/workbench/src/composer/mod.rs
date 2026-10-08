@@ -24,7 +24,8 @@ use accesskit::Role;
 use quark::view;
 use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::element::{
-    AnyElement, Binding, IntoAnyElement, ScrollActionBuilder, div, svg_icon, text,
+    AnyElement, Binding, IntoAnyElement, ScrollActionBuilder, cached, div, inputs_hash, svg_icon,
+    text,
 };
 use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::style::Styled;
@@ -32,6 +33,7 @@ use quark_app::quark_ui::text_input::{
     Completion, CompletionKey, Editor, Insertion, RichText, TextEditCommand, TextEditOutcome,
     text_editor_element,
 };
+use quark_app::quark_ui::theme::ThemeColors;
 use quark_app::{InputEvent, ViewContext};
 use quark_components::{SelectMsg, SelectOption, SelectState, select};
 
@@ -303,19 +305,18 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     .w(text_w)
     .h(state.text_height);
 
-    let model = select(&state.model, state.model_options.clone(), |m| {
-        Action::Model(m).into()
-    })
-    .label("Model")
-    .width(132.0 * z)
-    .viewport(window);
-    let reasoning = select(&state.reasoning, state.reasoning_options.clone(), |m| {
-        Action::Reasoning(m).into()
-    })
-    .label("Reasoning")
-    .width(156.0 * z)
-    .viewport(window);
-
+    let toolbar = Toolbar {
+        model: state.model.clone(),
+        model_options: state.model_options.clone(),
+        reasoning: state.reasoning.clone(),
+        reasoning_options: state.reasoning_options.clone(),
+        window,
+        z,
+        send_label,
+        send_action,
+        send_enabled,
+    }
+    .view(theme);
     let popup = completions::popup(
         &state.completion,
         state.editor.caret_anchor(),
@@ -344,19 +345,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
                         </div>
                     }
                     <div px={2.0 * z} py={TEXT_PAD * z}>{editor}</div>
-                    <div class="flex-row items-center" gap={GAP * z} h={TOOLBAR_HEIGHT * z}>
-                        {model}
-                        {reasoning}
-                        <div class="flex-1" />
-                        <div id={ATTACH_ID} accessibility_role={Role::Button}
-                             aria-label="Attach fixture image" tooltip="Attach fixture image"
-                             class="w-[28] h-[28] items-center justify-center rounded-[6]"
-                             hover_bg={colors.element_hover}
-                             on:click={Action::AttachFixture}>
-                            {svg_icon(lucide::PLUS, 16.0).color(colors.text_muted)}
-                        </div>
-                        {send_button(send_label, send_action, send_enabled, theme)}
-                    </div>
+                    {toolbar}
                 </div>
             </div>
             if let Some(popup) = popup {
@@ -367,16 +356,84 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     .into_any()
 }
 
+/// The row under the text area: model and reasoning pickers, attach, and
+/// Send/Stop. It holds no text input, so it replays from the element cache
+/// until a picker, the run state, or the draft's emptiness changes.
+struct Toolbar {
+    model: SelectState,
+    model_options: Rc<[SelectOption]>,
+    reasoning: SelectState,
+    reasoning_options: Rc<[SelectOption]>,
+    window: (f32, f32),
+    z: f32,
+    send_label: &'static str,
+    send_action: Action,
+    send_enabled: bool,
+}
+
+impl Toolbar {
+    fn view(self, theme: &quark_app::quark_ui::theme::Theme) -> AnyElement {
+        let picker = |s: &SelectState, options: &Rc<[SelectOption]>| {
+            (
+                s.selected(),
+                s.is_open(),
+                s.highlighted(),
+                Rc::as_ptr(options) as *const u8,
+            )
+        };
+        let hash = inputs_hash(&(
+            picker(&self.model, &self.model_options),
+            picker(&self.reasoning, &self.reasoning_options),
+            (
+                self.window.0.to_bits(),
+                self.window.1.to_bits(),
+                self.z.to_bits(),
+            ),
+            (self.send_label, self.send_enabled),
+        ));
+        let height = TOOLBAR_HEIGHT * self.z;
+        let colors = theme.colors;
+        cached("composer.toolbar", hash, move || self.build(colors))
+            .w_full()
+            .h(height)
+            .into_any()
+    }
+
+    fn build(self, colors: ThemeColors) -> AnyElement {
+        let z = self.z;
+        let model = select(&self.model, self.model_options, |m| Action::Model(m).into())
+            .label("Model")
+            .width(132.0 * z)
+            .viewport(self.window);
+        let reasoning = select(&self.reasoning, self.reasoning_options, |m| {
+            Action::Reasoning(m).into()
+        })
+        .label("Reasoning")
+        .width(156.0 * z)
+        .viewport(self.window);
+        view! {
+            <div class="flex-row items-center" gap={GAP * z} h={TOOLBAR_HEIGHT * z}>
+                {model}
+                {reasoning}
+                <div class="flex-1" />
+                <div id={ATTACH_ID} accessibility_role={Role::Button}
+                     aria-label="Attach fixture image" tooltip="Attach fixture image"
+                     class="w-[28] h-[28] items-center justify-center rounded-[6]"
+                     hover_bg={colors.element_hover}
+                     on:click={Action::AttachFixture}>
+                    {svg_icon(lucide::PLUS, 16.0).color(colors.text_muted)}
+                </div>
+                {send_button(self.send_label, self.send_action, self.send_enabled, &colors)}
+            </div>
+        }
+        .into_any()
+    }
+}
+
 /// Send or Stop under one id, so focus stays on it when it changes. It
 /// stays clickable while disabled (a click does nothing) so it never
 /// drops out of the focus order under the keyboard.
-fn send_button(
-    label: &str,
-    action: Action,
-    enabled: bool,
-    theme: &quark_app::quark_ui::theme::Theme,
-) -> AnyElement {
-    let colors = &theme.colors;
+fn send_button(label: &str, action: Action, enabled: bool, colors: &ThemeColors) -> AnyElement {
     let (bg, fg) = if enabled {
         (colors.accent, colors.on_accent)
     } else {
