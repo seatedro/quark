@@ -56,12 +56,13 @@ run_one() {
   behavior=$(basename "$spec" .py)
   local out=$QUARK_E2E_OUT/$example-$behavior
   rm -rf "$out"
-  mkdir -p "$out/home" "$out/runtime"
+  mkdir -p "$out/home" "$out/runtime" "$out/tmp"
   chmod 700 "$out/runtime"
 
   # Keep the apps, the driver, and the single instance socket away from the
-  # user's real session and from each other.
-  export HOME=$out/home XDG_RUNTIME_DIR=$out/runtime
+  # user's real session and from each other. A private TMPDIR keeps state an
+  # example saves there (panels_demo's layout) from leaking into later runs.
+  export HOME=$out/home XDG_RUNTIME_DIR=$out/runtime TMPDIR=$out/tmp
   export XDG_CONFIG_HOME=$HOME/.config XDG_CACHE_HOME=$HOME/.cache XDG_DATA_HOME=$HOME/.local/share
   unset WAYLAND_DISPLAY
   export QUARK_E2E_APP=$example QUARK_E2E_APP_LOG=$out/app.log
