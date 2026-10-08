@@ -161,6 +161,12 @@ pub fn reveal_diff(state: &mut State, _path: Option<&str>) {
     state.layout.open(DockRegion::Right, panels::DIFF);
 }
 
+/// Make `panel` the active tab of its group (the app has already asked
+/// the shell to show the dock).
+pub fn reveal_panel(state: &mut State, panel: PanelId) {
+    state.layout.open(DockRegion::Right, panel);
+}
+
 // Window hooks, forwarded from `UiApp`.
 
 pub fn init(state: &mut State, cx: &mut UiContext) {
