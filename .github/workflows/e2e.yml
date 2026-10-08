@@ -81,7 +81,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libx11-dev libxcursor-dev \
             libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev \
             mesa-vulkan-drivers libegl1 libgl1-mesa-dri \
-            xvfb openbox x11-utils xdotool at-spi2-core dbus dbus-x11 python3-dbus
+            xvfb openbox x11-utils xdotool at-spi2-core dbus dbus-x11 python3-dbus python3-pil
 
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
