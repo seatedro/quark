@@ -521,8 +521,9 @@ impl Element for TextEditorElement {
         scene.pop_clip();
 
         let target = self.focus_target;
+        let key = super::target_key("text-editor", target);
         let mut semantic_node = SemanticNode::new(bounds)
-            .id(format!("text-editor:{target:?}"))
+            .id(key.clone())
             .role(SemanticRole::TextInput);
         semantic_node.parent = cx.current_semantic_parent();
         semantic_node.actions = SemanticActions::default().text_value().scrollable();
@@ -540,23 +541,19 @@ impl Element for TextEditorElement {
         );
         if cx.accessibility_enabled() {
             cx.push_accessibility(
-                AccessibilityNode::new(
-                    format!("text-editor:{target:?}"),
-                    accesskit::Role::MultilineTextInput,
-                    bounds,
-                )
-                .label(accessibility_label)
-                .value(self.text.clone())
-                .text(match self.text_selection {
-                    Some((anchor, caret)) => {
-                        AccessibleText::new(self.text.clone()).selection(anchor, caret)
-                    }
-                    None => AccessibleText::new(self.text.clone()),
-                })
-                .action(AccessibilityAction::EditorViewport {
-                    focus: target,
-                    scroll: self.on_scroll.clone(),
-                }),
+                AccessibilityNode::shared(key, accesskit::Role::MultilineTextInput, bounds)
+                    .label(accessibility_label)
+                    .value(self.text.clone())
+                    .text(match self.text_selection {
+                        Some((anchor, caret)) => {
+                            AccessibleText::new(self.text.clone()).selection(anchor, caret)
+                        }
+                        None => AccessibleText::new(self.text.clone()),
+                    })
+                    .action(AccessibilityAction::EditorViewport {
+                        focus: target,
+                        scroll: self.on_scroll.clone(),
+                    }),
             );
         }
         register_text_input_area(
