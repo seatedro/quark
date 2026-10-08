@@ -86,10 +86,10 @@ pub use hit::{
 pub use identity::{TestId, UiKey, UiNodeId, stable_hash};
 pub use path::{FillRule, LineCap, LineJoin, Path, PathBuilder, PathVerb, StrokeStyle};
 pub use scene::{
-    BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive, EffectType, FontKind,
-    FontWeight, IconPrimitive, ImagePrimitive, LayerPrimitive, PathFill, PathPrimitive, PathStroke,
-    Primitive, RectPrimitive, RichTextPrimitive, RoundedRectPrimitive, Scene, ShadowPrimitive,
-    ShapedText, TextPrimitive,
+    BlurRegionPrimitive, BorderPrimitive, ChunkPrimitive, ClipPrimitive, EffectQuadPrimitive,
+    EffectType, FontKind, FontWeight, IconPrimitive, ImagePrimitive, LayerPrimitive, PathFill,
+    PathPrimitive, PathStroke, Primitive, RectPrimitive, RichTextPrimitive, RoundedRectPrimitive,
+    Scene, SceneChunk, ShadowPrimitive, ShapedText, TextPrimitive,
 };
 pub use selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText, copy_text};
 pub use semantic::{

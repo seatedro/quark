@@ -1,112 +1,29 @@
 //! The one conversion from an app's logical scene to the renderer's physical
 //! pixels.
 
-use quark::Rect;
-use quark::scene::{EffectType, Primitive, Scene};
+use quark::scene::Scene;
 
-/// Multiply every coordinate in `scene` by `scale`, turning logical points
-/// into physical pixels. Rect edges snap to whole pixels so quads stay sharp
-/// and neighbours tile without seams; a non-empty rect or border never
-/// snaps away to nothing. Radii, blur, and shadow offsets scale unsnapped.
-/// Path origins snap like rect edges, and their geometry scales through the
-/// primitive's `scale`. Layer transforms keep their rotation and scale and
-/// move by scaled pixels. Pixel-based effect parameters (noise frequency)
-/// scale so an effect looks the same at every scale factor.
+/// Convert every primitive of `scene` from logical points to physical
+/// pixels at `scale`; see [`to_physical`]. Rect edges snap to whole pixels,
+/// and chunks convert their primitives as they are drawn.
 ///
 /// Text origins snap too. Glyphs are not resized here: a text layout must
 /// already be shaped at `scale` (see `FrameContext::layout_text`), which puts
 /// its glyphs in physical pixels.
+///
+/// [`to_physical`]: quark::scene::Primitive::to_physical
 pub fn scene_to_physical(scene: &mut Scene, scale: f32) {
     for primitive in &mut scene.primitives {
-        scale_primitive(primitive, scale);
-    }
-}
-
-fn scale_primitive(primitive: &mut Primitive, s: f32) {
-    match primitive {
-        Primitive::Rect(p) => p.rect = snap(p.rect, s),
-        Primitive::RoundedRect(p) => {
-            p.rect = snap(p.rect, s);
-            p.corner_radii = p.corner_radii.map(|r| r * s);
-        }
-        Primitive::Border(p) => {
-            p.rect = snap(p.rect, s);
-            p.widths = p.widths.map(|w| snap_length(w, s));
-            p.corner_radii = p.corner_radii.map(|r| r * s);
-        }
-        Primitive::Shadow(p) => {
-            p.rect = snap(p.rect, s);
-            p.blur_radius *= s;
-            p.corner_radius *= s;
-            p.offset = p.offset.map(|o| o * s);
-        }
-        Primitive::TextRun(p) => p.rect = snap(p.rect, s),
-        Primitive::RichTextRun(p) => p.rect = snap(p.rect, s),
-        Primitive::Icon(p) => p.rect = snap(p.rect, s),
-        Primitive::Image(p) => p.rect = snap(p.rect, s),
-        Primitive::EffectQuad(p) => {
-            p.rect = snap(p.rect, s);
-            p.corner_radius *= s;
-            // Noise is sampled per physical pixel; its frequency is per point.
-            if p.effect_type == EffectType::NoiseGradient && s > 0.0 {
-                p.params[0] /= s;
-            }
-        }
-        Primitive::BlurRegion(p) => {
-            p.rect = snap(p.rect, s);
-            p.blur_radius *= s;
-            p.corner_radii = p.corner_radii.map(|r| r * s);
-        }
-        Primitive::Path(p) => {
-            p.origin = p.origin.map(|o| (o * s).round());
-            p.scale *= s;
-        }
-        Primitive::LayerStart(p) => p.transform = p.transform.in_scaled_space(s),
-        Primitive::ClipStart(p) => {
-            p.rect = snap(p.rect, s);
-            p.corner_radii = p.corner_radii.map(|r| r * s);
-        }
-        Primitive::ClipEnd
-        | Primitive::ZIndexPush(_)
-        | Primitive::ZIndexPop
-        | Primitive::LayerEnd
-        | Primitive::LayerBoundary => {}
-    }
-}
-
-/// Scale and round both edges, so adjacent rects share a pixel edge.
-fn snap(rect: Rect, s: f32) -> Rect {
-    let x0 = (rect.x * s).round();
-    let y0 = (rect.y * s).round();
-    let mut x1 = ((rect.x + rect.width) * s).round();
-    let mut y1 = ((rect.y + rect.height) * s).round();
-    if rect.width > 0.0 && x1 <= x0 {
-        x1 = x0 + 1.0;
-    }
-    if rect.height > 0.0 && y1 <= y0 {
-        y1 = y0 + 1.0;
-    }
-    Rect {
-        x: x0,
-        y: y0,
-        width: x1 - x0,
-        height: y1 - y0,
-    }
-}
-
-/// A stroke width in whole pixels, at least one when it is drawn at all.
-fn snap_length(length: f32, s: f32) -> f32 {
-    if length > 0.0 {
-        (length * s).round().max(1.0)
-    } else {
-        0.0
+        primitive.to_physical(scale);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use quark::scene::{BorderPrimitive, EffectQuadPrimitive, LayerPrimitive, RectPrimitive};
-    use quark::{Color, Transform2D};
+    use quark::scene::{
+        BorderPrimitive, EffectQuadPrimitive, EffectType, LayerPrimitive, Primitive, RectPrimitive,
+    };
+    use quark::{Color, Rect, Transform2D};
 
     use super::*;
 

@@ -1442,7 +1442,7 @@ impl CachedPainter {
         render_element(&mut element.into_any(), &mut scene, &mut cx, size.0, size.1);
         let mut out = String::new();
         // Filled rects: row backgrounds, selection, and find highlights.
-        for p in &scene.primitives {
+        for p in &scene.expanded() {
             let (r, c) = match p {
                 quark_render::Primitive::Rect(p) => (p.rect, p.color),
                 quark_render::Primitive::RoundedRect(p) => (p.rect, p.color),
