@@ -2204,6 +2204,67 @@ mod tests {
         }
     }
 
+    /// Each line's clusters as painted left to right.
+    fn painted_lines(layout: &TextLayout) -> Vec<String> {
+        let g = layout.glyphs();
+        let text = layout.text();
+        layout
+            .lines()
+            .map(|line| {
+                let mut glyphs: Vec<usize> = line.glyph_range.collect();
+                glyphs.sort_by(|&a, &b| g.x[a].total_cmp(&g.x[b]));
+                glyphs.dedup_by_key(|&mut i| g.byte_start[i]);
+                glyphs
+                    .iter()
+                    .map(|&i| text.get(g.byte_start[i] as usize..g.byte_end[i] as usize))
+                    .collect::<Option<String>>()
+                    .expect("clusters start and end on char boundaries")
+            })
+            .collect()
+    }
+
+    // Each visual line reorders its own level runs. Lines with fewer runs
+    // after lines with more catch runs or levels a line inherits from the
+    // one before; the digits sit at level 2 inside RTL text in both
+    // directions.
+    #[test]
+    fn wrapped_bidi_lines_paint_their_runs_in_visual_order() {
+        let cases: [(&str, f32, &[&str]); 3] = [
+            (
+                "ab \u{5e9}\u{5dc}\u{5d5}\u{5dd} cd \u{5d0}\u{5d1}\u{5d2} ef gh \u{5d3}\u{5d4} ij",
+                120.0,
+                &[
+                    "ab \u{5dd}\u{5d5}\u{5dc}\u{5e9} cd \u{5d2}\u{5d1}\u{5d0} ef",
+                    "gh \u{5d4}\u{5d3} ij",
+                ],
+            ),
+            (
+                "ab \u{5e9}\u{5dc} \u{5d5}\u{5dd} cd ef \u{5d0}\u{5d1} 34 gh",
+                80.0,
+                &[
+                    "ab \u{5dd}\u{5d5} \u{5dc}\u{5e9} cd",
+                    "ef 34 \u{5d1}\u{5d0} gh",
+                ],
+            ),
+            (
+                "\u{5e9}\u{5dc}\u{5d5}\u{5dd} ab cd \u{5d0}\u{5d1} 12 \u{5d2}\u{5d3} ef \u{5d4}\u{5d5}",
+                90.0,
+                &[
+                    "ab cd \u{5dd}\u{5d5}\u{5dc}\u{5e9}",
+                    "ef \u{5d3}\u{5d2} 12 \u{5d1}\u{5d0}",
+                    "\u{5d5}\u{5d4}",
+                ],
+            ),
+        ];
+        for (text, wrap, expected) in cases {
+            assert_eq!(
+                painted_lines(&layout(text, Some(wrap))),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
+
     #[test]
     fn layout_invalid_params_return_matching_error() {
         let style = TextStyle::new(12.0);

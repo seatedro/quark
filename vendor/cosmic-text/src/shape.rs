@@ -115,6 +115,10 @@ pub struct ShapeBuffer {
 
     /// Buffer for sets of layout glyphs.
     glyph_sets: Vec<Vec<LayoutGlyph>>,
+
+    /// Buffers for a visual line's bidi levels and reordered level runs.
+    reorder_levels: Vec<unicode_bidi::Level>,
+    reorder_runs: Vec<Range<usize>>,
 }
 
 impl Default for ShapeBuffer {
@@ -129,6 +133,8 @@ impl Default for ShapeBuffer {
             visual_lines: Vec::new(),
             cached_visual_lines: Vec::new(),
             glyph_sets: Vec::new(),
+            reorder_levels: Vec::new(),
+            reorder_runs: Vec::new(),
         }
     }
 }
@@ -1123,13 +1129,22 @@ impl ShapeLine {
     }
 
     // A modified version of second part of unicode_bidi::bidi_info::visual run
-    fn reorder(&self, line_range: &[VlRange]) -> Vec<Range<usize>> {
-        let line: Vec<unicode_bidi::Level> = line_range
-            .iter()
-            .map(|(span_index, _, _)| self.spans[*span_index].level)
-            .collect();
+    /// Fills `runs` with the visual order of `line_range`'s level runs, using
+    /// `line` for the levels.
+    fn reorder(
+        &self,
+        line_range: &[VlRange],
+        line: &mut Vec<unicode_bidi::Level>,
+        runs: &mut Vec<Range<usize>>,
+    ) {
+        line.clear();
+        line.extend(
+            line_range
+                .iter()
+                .map(|(span_index, _, _)| self.spans[*span_index].level),
+        );
         // Find consecutive level runs.
-        let mut runs = Vec::new();
+        runs.clear();
         let mut start = 0;
         let mut run_level = line[start];
         let mut min_level = run_level;
@@ -1182,8 +1197,6 @@ impl ShapeLine {
                 .lower(1)
                 .expect("Lowering embedding level below zero");
         }
-
-        runs
     }
 
     pub fn layout(
@@ -1258,6 +1271,8 @@ impl ShapeLine {
         // that fits on a line.
         // let mut current_visual_line: Vec<VlRange> = Vec::with_capacity(1);
         let mut current_visual_line = cached_visual_lines.pop().unwrap_or_default();
+        let mut reorder_levels = mem::take(&mut scratch.reorder_levels);
+        let mut new_order = mem::take(&mut scratch.reorder_runs);
 
         if wrap == Wrap::None {
             for (span_index, span) in self.spans.iter().enumerate() {
@@ -1567,7 +1582,7 @@ impl ShapeLine {
             if visual_line.ranges.is_empty() {
                 continue;
             }
-            let new_order = self.reorder(&visual_line.ranges);
+            self.reorder(&visual_line.ranges, &mut reorder_levels, &mut new_order);
             let mut glyphs = cached_glyph_sets
                 .pop()
                 .unwrap_or_else(|| Vec::with_capacity(1));
@@ -1689,13 +1704,13 @@ impl ShapeLine {
             };
 
             if self.rtl {
-                for range in new_order.into_iter().rev() {
-                    process_range(range);
+                for range in new_order.iter().rev() {
+                    process_range(range.clone());
                 }
             } else {
                 /* LTR */
-                for range in new_order {
-                    process_range(range);
+                for range in &new_order {
+                    process_range(range.clone());
                 }
             }
 
@@ -1740,5 +1755,7 @@ impl ShapeLine {
         scratch.visual_lines.append(&mut cached_visual_lines);
         scratch.cached_visual_lines = cached_visual_lines;
         scratch.glyph_sets = cached_glyph_sets;
+        scratch.reorder_levels = reorder_levels;
+        scratch.reorder_runs = new_order;
     }
 }

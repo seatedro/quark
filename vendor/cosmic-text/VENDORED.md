@@ -48,3 +48,8 @@ own pull request.
   the duplicate check are unchanged. Remove once upstream reuses the
   candidate storage; `mono_fallback_picks_nearest_weight_then_best_coverage`
   checks the order.
+- Visual reorder scratch (`src/shape.rs`): `ShapeLine::reorder` fills a
+  visual line's levels and reordered level runs into two vectors the
+  `ShapeBuffer` keeps, where it collected two new vectors per visual line.
+  Remove once upstream reuses reorder storage;
+  `wrapped_bidi_lines_paint_their_runs_in_visual_order` checks the order.

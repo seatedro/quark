@@ -214,11 +214,10 @@ fn warmed_cache(system: &mut TextSystem, warm: &[Input]) -> LayoutCache {
 }
 
 // What laying out unseen text still allocates is all inside cosmic-text and
-// its dependencies: unicode-bidi's paragraph analysis (seven vectors per
-// paragraph), cosmic-text's line reordering, its attribute span maps, its
-// per-word glyph vectors (which word gets which retained vector varies, so
-// one can grow), and a glyph vector and missing-glyph list for each font
-// fallback tries. The budgets sit just above that, so storage quark-text
+// its dependencies: unicode-bidi's paragraph analysis (six vectors per
+// paragraph), cosmic-text's attribute span maps, its per-word glyph vectors
+// (which word gets which retained vector varies, so one can grow), and a
+// glyph vector and missing-glyph list for each font fallback tries. The budgets sit just above that, so storage quark-text
 // allocates or grows per layout (each one costs at least 14 glyph columns)
 // breaks them.
 #[test]
@@ -229,19 +228,19 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             "short ascii line",
             vec![ui(PANGRAM.into()), ui("jumpy otter".into())],
             vec![ui("brisk eagle".into())],
-            9,
+            7,
         ),
         (
             "80-column styled row",
             vec![styled_row(1), styled_row(2)],
             vec![styled_row(3)],
-            9,
+            7,
         ),
         (
             "30 fresh rows",
             (0..30).map(plain_row).collect(),
             (30..60).map(plain_row).collect(),
-            30 * 9,
+            30 * 7,
         ),
         (
             "bidi and emoji paragraph",
@@ -250,7 +249,7 @@ fn fresh_text_within_warmed_capacity_allocates_only_inside_shaping() {
             // No vendored font has Hebrew or Arabic, so fallback shapes
             // those runs with every font: 69 shape plans, which must all
             // stay cached.
-            180,
+            175,
         ),
     ];
     for (name, warm, measured, budget) in cases {
@@ -291,11 +290,11 @@ fn stream_past_cache_capacity_refills_evicted_layouts() {
         }
         last
     });
-    // Each row's residual: unicode-bidi's seven vectors and cosmic-text's
-    // reordering. Its 19 words' monospace fallback candidates reuse one
-    // vector, and the evictions themselves must add nothing.
+    // Each row's residual is unicode-bidi's six vectors. Its 19 words'
+    // monospace fallback candidates reuse one vector, its lines' reordering
+    // reuses another, and the evictions themselves must add nothing.
     assert!(
-        allocations <= 64 * 8 + 2,
+        allocations <= 64 * 6 + 2,
         "{allocations} allocations for 64 rows"
     );
     let last = last.expect("layout");
@@ -320,6 +319,6 @@ fn layout_released_after_eviction_is_refilled() {
     drop(held);
     let fresh = ui("brisk eagle".into());
     let (layout, allocations) = count(|| cache.layout_query(&mut system, &fresh.query()));
-    assert!(allocations <= 9, "{allocations} allocations");
+    assert!(allocations <= 7, "{allocations} allocations");
     assert_eq!(layout.expect("layout").text().as_ref(), fresh.text);
 }
