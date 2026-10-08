@@ -21,9 +21,11 @@ winit = "0.30"
 [workspace]
 members = ["."]
 
-# The root workspace's patch does not reach this one; quark-render needs it.
+# The root workspace's patches do not reach this one; quark's crates need them.
 [patch.crates-io]
 glyphon = { path = "../vendor/glyphon" }
+cosmic-text = { path = "../vendor/cosmic-text" }
+taffy = { path = "../vendor/taffy" }
 
 [[bin]]
 name = "text_layout"
