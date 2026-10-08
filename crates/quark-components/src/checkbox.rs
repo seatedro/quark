@@ -85,6 +85,7 @@ impl RenderOnce for Checkbox {
 
         view! {
             <div class="flex-row items-center" gap={m.spacing_sm}
+                 focus_ring_offset={Sz::FOCUS_RING_GAP}
                  id={accessibility_id.clone()}
                  key={accessibility_label.clone()}
                  test-id="checkbox"
@@ -184,7 +185,8 @@ impl RenderOnce for Switch {
         // Keyed by the switch, so the slide animates across frames.
         let thumb_key = format!("{accessibility_id}:thumb");
         view! {
-            <div class="flex-row items-center" gap={m.spacing_sm} rounded={track_h / 2.0}
+            <div class="flex-row items-center" gap={m.spacing_sm}
+                 focus_ring_offset={Sz::FOCUS_RING_GAP}
                  id={accessibility_id.clone()} key={accessibility_label.clone()} test_id="switch"
                  role="switch" accessibility_role={accesskit::Role::Switch}
                  accessibility_id={accessibility_id} aria-label={accessibility_label}

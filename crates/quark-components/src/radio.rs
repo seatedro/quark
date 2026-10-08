@@ -7,6 +7,7 @@
 //! to [`radio_focus_id`], so screen readers follow.
 
 use quark::{TabStop, view};
+use quark_ui::design::Sz;
 use quark_ui::element::text;
 use quark_ui::element::{AnyElement, ElementContext, IntoAnyElement, RenderOnce, div};
 use quark_ui::style::Styled;
@@ -111,7 +112,8 @@ impl RenderOnce for RadioGroup {
                      on_key={("arrowup", action.clone())} on_key={("arrowleft", action)}
                  }>
                 for (i, option) in options.iter().enumerate() {
-                    <div class="flex-row items-center" gap={m.spacing_sm} rounded={m.control_radius}
+                    <div class="flex-row items-center" gap={m.spacing_sm}
+                         focus_ring_offset={Sz::FOCUS_RING_GAP}
                          accessibility_id={format!("{}-{i}", self.id)} test_id="radio"
                          accessibility_role={accesskit::Role::RadioButton}
                          aria-label={option.label.clone()} aria-checked={self.selected == Some(i)}

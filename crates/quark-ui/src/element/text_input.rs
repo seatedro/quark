@@ -361,14 +361,19 @@ impl Element for TextInput {
             } else {
                 theme.colors.element_background
             };
-            let border = if self.focused {
-                theme.colors.focus_border
-            } else {
-                theme.colors.border
-            };
-
             scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, radius, fill));
-            scene.border(BorderPrimitive::uniform(bounds, 1.0, radius, border));
+            scene.border(BorderPrimitive::uniform(
+                bounds,
+                1.0,
+                radius,
+                theme.colors.border,
+            ));
+            // Focus shows as the ring every other control draws, which the
+            // high-contrast themes rely on; a recolored 1pt border was much
+            // fainter than the rings around it.
+            if self.focused {
+                paint_focus_ring(scene, cx, bounds, [radius; 4], 0.0);
+            }
 
             let scale = theme.metrics.ui_scale();
             let label_size = theme.metrics.ui_small_font_size - 1.0;
