@@ -33,8 +33,16 @@ def keys(cua, pid, *names):
 def spec(cua: Cua):
     app_tree()
     pid = app_pid()
-    keys(cua, pid, "ctrl", "j")
-    wait_for("the drawer to show", lambda: strip_of(DRAWER_TAB) == "Drawer")
+    # The first key can arrive before the window takes keyboard focus under
+    # Xvfb; send it again rather than wait out the whole timeout.
+    for attempt in range(3):
+        keys(cua, pid, "ctrl", "j")
+        try:
+            wait_for("the drawer to show", lambda: strip_of(DRAWER_TAB) == "Drawer", timeout=5.0)
+            break
+        except AssertionError:
+            if attempt == 2:
+                raise
     # Nothing has focus yet: the first Tab stop is the sidebar's tab.
     cua.call("press_key", pid=pid, key="tab", delivery_mode="foreground")
     wait_for("Threads to take focus", lambda: threads_focused_in("Sidebar"))
