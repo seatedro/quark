@@ -22,8 +22,16 @@
 //! The round trip needs only the thread itself to read, and the UI thread
 //! is not inside a read while it waits, so neither queue blocks on the
 //! other.
+//!
+//! Nothing on the thread blocks but its poll, which the wake pipe ends, so
+//! a stop request always gets through: the round trip is a `wl_display.sync`
+//! whose `done` the loop dispatches like any other event, and the dropped
+//! files are written to each drop target as its pipe takes them. A drag
+//! request touches the window's surface only under a [`ticket`] claim,
+//! while the UI still holds the window.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
@@ -31,9 +39,11 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use raw_window_handle::{RawWindowHandle, WindowHandle};
 use wayland_client::backend::{Backend, ObjectId};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_buffer::WlBuffer;
+use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
 use wayland_client::protocol::wl_data_device_manager::{DndAction, WlDataDeviceManager};
@@ -50,12 +60,13 @@ use wayland_client::{
 };
 
 use super::seat::{Refusal, Seats, Selected, Surface};
+use super::ticket::{self, Ticket};
 use super::{DragImage, DragOutError};
 
 const URI_LIST: &str = "text/uri-list";
 
-/// How long a drag request waits on the thread: a round trip with a live
-/// compositor takes well under this.
+/// How long a drag request waits for the thread to take it on: a round
+/// trip with a live compositor takes well under this.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 
 thread_local! {
@@ -77,11 +88,22 @@ enum Request {
 }
 
 struct Start {
+    drag: Drag,
+    ticket: Ticket,
+}
+
+/// What a drag starts with.
+struct Drag {
+    /// The window's `wl_surface`, converted while the window was live. Only
+    /// used under a claim on the request's ticket, while the UI keeps the
+    /// window open.
+    origin: ObjectId,
+    /// The same surface as the seats know it, by address: compared, never
+    /// dereferenced.
     surface: Surface,
     uris: Vec<u8>,
     seat: Option<String>,
     icon: Option<IconPixels>,
-    answer: mpsc::SyncSender<Result<(), DragOutError>>,
 }
 
 /// The drag image in a shared memory file, ready for a buffer.
@@ -102,6 +124,12 @@ struct State {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     seats: Seats<SeatObjects>,
+    /// Drag requests waiting for their round trip's `done`, by the sync
+    /// callback's data.
+    starts: BTreeMap<u64, Start>,
+    next_start: u64,
+    /// Drop targets still reading the dropped files.
+    transfers: Vec<Transfer>,
 }
 
 /// One seat's objects on our queue.
@@ -168,6 +196,9 @@ fn connect(display: *mut std::ffi::c_void) -> Result<Wayland, String> {
         compositor: None,
         shm: None,
         seats: Seats::default(),
+        starts: BTreeMap::new(),
+        next_start: 0,
+        transfers: Vec::new(),
     };
     for global in globals.contents().clone_list() {
         state.global(&qh, global.name, &global.interface, global.version);
@@ -228,20 +259,23 @@ fn run(
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
-        let mut fds = [
-            libc::pollfd {
-                fd: guard.connection_fd().as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: woken.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
+        let pollfd = |fd: i32, events| libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let mut fds = vec![
+            pollfd(guard.connection_fd().as_raw_fd(), libc::POLLIN),
+            pollfd(woken.as_raw_fd(), libc::POLLIN),
         ];
-        // SAFETY: two valid pollfds over open descriptors.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+        fds.extend(
+            state
+                .transfers
+                .iter()
+                .map(|transfer| pollfd(transfer.file.as_raw_fd(), libc::POLLOUT)),
+        );
+        // SAFETY: valid pollfds over open descriptors, as many as given.
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
             continue;
         }
         if fds[0].revents != 0 {
@@ -255,6 +289,11 @@ fn run(
             // Dropping the guard cancels the read.
             drop(guard);
         }
+        // One pollfd per transfer, in order.
+        let mut ready = fds[2..].iter().map(|fd| fd.revents != 0);
+        state
+            .transfers
+            .retain_mut(|transfer| !ready.next().unwrap_or(false) || !transfer.write());
         if fds[1].revents == 0 {
             continue;
         }
@@ -274,12 +313,13 @@ fn run(
                     open: false,
                 } => state.seats.window_destroyed(surface),
                 Request::Start(start) => {
-                    let answer = start.answer.clone();
-                    let result = match queue.roundtrip(&mut state) {
-                        Ok(_) => state.start(&qh, start),
-                        Err(error) => Err(DragOutError::Platform(error.to_string())),
-                    };
-                    let _ = answer.send(result);
+                    // Starts the UI gave up on, whose syncs never came back.
+                    state.starts.retain(|_, start| !start.ticket.abandoned());
+                    let key = state.next_start;
+                    state.next_start += 1;
+                    state.starts.insert(key, start);
+                    // Served when this sync is done; see `Dispatch<WlCallback>`.
+                    state.conn.display().sync(&qh, key);
                 }
             }
         }
@@ -325,12 +365,22 @@ pub(super) fn shutdown() {
     });
 }
 
+/// Start a drag from `window`, which this keeps borrowed, and so open,
+/// until the thread is done with it.
 pub(super) fn start(
-    surface: *mut std::ffi::c_void,
+    window: WindowHandle<'_>,
     uris: Vec<u8>,
     seat: Option<String>,
     image: &DragImage,
 ) -> Result<(), DragOutError> {
+    let RawWindowHandle::Wayland(handle) = window.as_raw() else {
+        return Err(DragOutError::Unsupported);
+    };
+    let surface = handle.surface.as_ptr();
+    // SAFETY: winit's window handle is its window's wl_surface, live while
+    // `window` borrows the window.
+    let origin = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }
+        .map_err(|_| DragOutError::Platform("the window has no wl_surface".into()))?;
     // Before anything about the seat, so the drag starts at once after.
     let icon = match icon_pixels(image) {
         Ok(icon) => Some(icon),
@@ -344,17 +394,19 @@ pub(super) fn start(
         let wayland = slot
             .as_ref()
             .ok_or_else(|| DragOutError::Platform("no Wayland seat to drag with".into()))?;
-        let (answer, answered) = mpsc::sync_channel(1);
+        let (waiter, ticket) = ticket::ticket();
         wayland.send(Request::Start(Start {
-            surface: surface as Surface,
-            uris,
-            seat,
-            icon,
-            answer,
+            drag: Drag {
+                origin,
+                surface: surface as Surface,
+                uris,
+                seat,
+                icon,
+            },
+            ticket,
         }))?;
-        answered
-            .recv_timeout(ANSWER_TIMEOUT)
-            .map_err(|_| DragOutError::Platform("the Wayland drag thread did not answer".into()))?
+        // Holds `window` until the thread can no longer touch its surface.
+        waiter.wait(ANSWER_TIMEOUT)
     })
 }
 
@@ -449,7 +501,17 @@ impl State {
         }
     }
 
-    fn start(&mut self, qh: &QueueHandle<Self>, start: Start) -> Result<(), DragOutError> {
+    /// A drag request whose round trip is done: start it, unless the UI
+    /// stopped waiting, when its window may be gone.
+    fn serve(&mut self, qh: &QueueHandle<Self>, Start { drag, ticket }: Start) {
+        match ticket.claim() {
+            Some(claim) => claim.answer(self.start(qh, drag)),
+            None => tracing::debug!("drag out: the UI stopped waiting; not started"),
+        }
+    }
+
+    /// Under a claim on the request's ticket.
+    fn start(&mut self, qh: &QueueHandle<Self>, start: Drag) -> Result<(), DragOutError> {
         let Selected { seat, press } = self
             .seats
             .select(start.surface, start.seat.as_deref())
@@ -465,11 +527,9 @@ impl State {
             .get_mut(seat)
             .and_then(|state| state.objects.device.clone())
             .ok_or(platform("the seat has no data device"))?;
-        // SAFETY: winit's window handle is its window's live wl_surface: the
-        // UI thread holds the window open while it waits on this answer.
-        let id = unsafe { ObjectId::from_ptr(WlSurface::interface(), start.surface as *mut _) }
-            .map_err(|_| platform("the window has no wl_surface"))?;
-        let origin = WlSurface::from_id(&self.conn, id)
+        // The claim keeps the UI waiting, and so the window and its surface
+        // alive, until this answers.
+        let origin = WlSurface::from_id(&self.conn, start.origin)
             .map_err(|_| platform("the window has no wl_surface"))?;
         let icon = start
             .icon
@@ -551,6 +611,51 @@ fn show(icon: &Icon, pixels: &IconPixels) {
         surface.damage(0, 0, i32::MAX, i32::MAX);
     }
     surface.commit();
+}
+
+/// A drop target reading the `text/uri-list`, written as its pipe takes it
+/// so that a target that stops reading holds up nothing else. Dropped
+/// unfinished (on shutdown), it closes the pipe, cutting the list short.
+struct Transfer {
+    file: std::fs::File,
+    uris: Arc<[u8]>,
+    written: usize,
+}
+
+impl Transfer {
+    fn new(fd: OwnedFd, uris: Arc<[u8]>) -> std::io::Result<Self> {
+        // SAFETY: fcntl on a descriptor this owns.
+        unsafe {
+            let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
+            if flags < 0 || libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(Self {
+            file: fd.into(),
+            uris,
+            written: 0,
+        })
+    }
+
+    /// Write what the pipe takes now. True once done: all written, or the
+    /// target went away.
+    fn write(&mut self) -> bool {
+        while self.written < self.uris.len() {
+            match self.file.write(&self.uris[self.written..]) {
+                Ok(0) => return true,
+                Ok(n) => self.written += n,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
+                Err(error) => {
+                    tracing::warn!("drag out: writing the dropped files failed: {error}");
+                    return true;
+                }
+            }
+        }
+        true
+    }
 }
 
 /// A data source's `text/uri-list` and the icon it drags with.
@@ -686,9 +791,26 @@ fn replace(slot: &mut Option<WlDataOffer>, offer: Option<WlDataOffer>) {
     }
 }
 
+impl Dispatch<WlCallback, u64> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: wl_callback::Event,
+        key: &u64,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event
+            && let Some(start) = state.starts.remove(key)
+        {
+            state.serve(qh, start);
+        }
+    }
+}
+
 impl Dispatch<WlDataSource, Payload> for State {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         source: &WlDataSource,
         event: wl_data_source::Event,
         payload: &Payload,
@@ -697,9 +819,15 @@ impl Dispatch<WlDataSource, Payload> for State {
     ) {
         match event {
             wl_data_source::Event::Send { mime_type, fd } if mime_type == URI_LIST => {
-                // On our thread, so a slow reader stalls only it.
-                if let Err(error) = std::fs::File::from(fd).write_all(&payload.uris) {
-                    tracing::warn!("drag out: writing the dropped files failed: {error}");
+                match Transfer::new(fd, Arc::clone(&payload.uris)) {
+                    Ok(mut transfer) => {
+                        if !transfer.write() {
+                            state.transfers.push(transfer);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("drag out: writing the dropped files failed: {error}")
+                    }
                 }
             }
             wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
@@ -739,3 +867,68 @@ ignore_events!(
     WlBuffer,
     WlSurface
 );
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::sync::Arc;
+
+    use super::Transfer;
+
+    /// A blocking pipe, as a drop target hands over: its read end, and the
+    /// write end for the transfer.
+    fn pipe() -> (std::fs::File, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: a plain pipe2 into a two-element array.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: both ends are fresh descriptors owned from here on.
+        unsafe {
+            (
+                std::fs::File::from_raw_fd(fds[0]),
+                OwnedFd::from_raw_fd(fds[1]),
+            )
+        }
+    }
+
+    /// A list far larger than a pipe holds.
+    fn long_list() -> Arc<[u8]> {
+        (0..1 << 20).map(|i| b'a' + (i % 26) as u8).collect()
+    }
+
+    #[test]
+    fn a_drop_target_that_stops_reading_holds_up_nothing_and_is_cut_off_on_shutdown() {
+        let (mut reader, write_end) = pipe();
+        let uris = long_list();
+        let mut transfer = Transfer::new(write_end, Arc::clone(&uris)).unwrap();
+        assert!(!transfer.write(), "a full pipe leaves the rest for later");
+        drop(transfer);
+        let mut got = Vec::new();
+        reader.read_to_end(&mut got).unwrap();
+        assert!(got.len() < uris.len());
+        assert_eq!(got[..], uris[..got.len()]);
+    }
+
+    #[test]
+    fn a_drop_target_that_keeps_reading_gets_the_whole_list() {
+        let (mut reader, write_end) = pipe();
+        let uris = long_list();
+        let reading = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            reader.read_to_end(&mut got).unwrap();
+            got
+        });
+        let mut transfer = Transfer::new(write_end, Arc::clone(&uris)).unwrap();
+        while !transfer.write() {
+            let mut fd = libc::pollfd {
+                fd: std::os::fd::AsRawFd::as_raw_fd(&transfer.file),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd over an open descriptor.
+            unsafe { libc::poll(&mut fd, 1, -1) };
+        }
+        drop(transfer);
+        assert!(reading.join().unwrap()[..] == uris[..]);
+    }
+}

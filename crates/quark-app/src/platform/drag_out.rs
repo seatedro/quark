@@ -136,6 +136,8 @@ pub(crate) fn start(
 #[cfg(target_os = "linux")]
 mod seat;
 #[cfg(target_os = "linux")]
+mod ticket;
+#[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(target_os = "linux")]
 mod x11;
@@ -160,15 +162,17 @@ mod linux {
         let platform =
             |error: raw_window_handle::HandleError| DragOutError::Platform(error.to_string());
         let display = window.display_handle().map_err(platform)?.as_raw();
-        let handle = window.window_handle().map_err(platform)?.as_raw();
+        let window_handle = window.window_handle().map_err(platform)?;
         let uris = super::uri_list(paths);
         let image = options
             .image
             .clone()
             .unwrap_or_else(|| image::file_icon(paths.len(), window.scale_factor()));
-        match (display, handle) {
-            (RawDisplayHandle::Wayland(_), RawWindowHandle::Wayland(handle)) => {
-                wayland::start(handle.surface.as_ptr(), uris, options.seat.clone(), &image)
+        match (display, window_handle.as_raw()) {
+            // The borrowed handle, which keeps the window (and so its
+            // wl_surface) alive for as long as the drag thread may use it.
+            (RawDisplayHandle::Wayland(_), RawWindowHandle::Wayland(_)) => {
+                wayland::start(window_handle, uris, options.seat.clone(), &image)
             }
             (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(_)) => {
                 let display = display
