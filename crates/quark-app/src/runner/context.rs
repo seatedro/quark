@@ -433,9 +433,23 @@ impl EventContext<'_> {
     }
 
     pub fn set_title(&mut self, title: &str) {
-        if let Some(state) = self.state() {
-            state.window.set_title(title);
-            position_traffic_lights(&state.window, state.traffic_lights);
+        if let Some(window) = self.window {
+            self.set_window_title(window, title);
+        }
+    }
+
+    /// Retitle `window`, which may be another window than the context's,
+    /// or one still opening. Stale handles are ignored.
+    pub fn set_window_title(&mut self, window: WindowHandle, title: &str) {
+        match self.windows.get_mut(window) {
+            Some(WindowEntry::Open(state)) => {
+                state.window.set_title(title);
+                position_traffic_lights(&state.window, state.traffic_lights);
+            }
+            Some(WindowEntry::Pending(options)) => options.title = title.to_owned(),
+            #[cfg(feature = "test-support")]
+            Some(WindowEntry::Virtual(virtual_window)) => virtual_window.title = title.to_owned(),
+            None => {}
         }
     }
 

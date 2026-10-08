@@ -590,12 +590,15 @@ impl HeadlessRunner {
                 }
                 let (width, height) = options.size;
                 let position = options.position.unwrap_or((0.0, 0.0));
-                let opened = VirtualWindow::new(
+                let mut opened = VirtualWindow::new(
                     options.title,
                     (width as f32, height as f32),
                     self.open_scale,
                     position,
                 );
+                // On the main window's display, as a window placed by the
+                // window manager would be.
+                opened.monitor = self.window(self.main).and_then(|w| w.monitor.clone());
                 if let Some(entry) = self.windows.get_mut(window) {
                     *entry = WindowEntry::Virtual(Box::new(opened));
                 }

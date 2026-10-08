@@ -99,6 +99,27 @@ impl<U: UiApp> UiTestHarness<U> {
     /// [`Self::new`] for an adapter already configured, such as with
     /// [`UiAdapter::with_theme`].
     pub fn with_adapter(adapter: UiAdapter<U>, size: (f32, f32), scale_factor: f32) -> Self {
+        Self::start(adapter, size, scale_factor, None)
+    }
+
+    /// [`Self::new`] with the main window on `monitor` from the start, so
+    /// [`UiApp::init`] sees it ([`crate::EventContext::monitors`]). Windows
+    /// the app opens go on the main window's monitor.
+    pub fn with_monitor(app: U, size: (f32, f32), scale_factor: f32, monitor: MonitorInfo) -> Self {
+        Self::start(
+            UiAdapter::new(app, "Test"),
+            size,
+            scale_factor,
+            Some(monitor),
+        )
+    }
+
+    fn start(
+        adapter: UiAdapter<U>,
+        size: (f32, f32),
+        scale_factor: f32,
+        monitor: Option<MonitorInfo>,
+    ) -> Self {
         let mut harness = Self {
             sender: adapter.sender(),
             adapter,
@@ -107,6 +128,7 @@ impl<U: UiApp> UiTestHarness<U> {
             renderer: None,
         };
         let main = harness.runner.main_window();
+        harness.runner.set_monitor(main, monitor);
         harness
             .runner
             .callback(&mut harness.adapter, |adapter, cx| {

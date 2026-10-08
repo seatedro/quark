@@ -94,6 +94,9 @@ pub struct WindowOptions {
     /// the window the drag started in; platforms that cannot open windows
     /// unfocused ignore it.
     pub active: bool,
+    /// Open maximized. A `persist_key` window restores its saved state
+    /// instead.
+    pub maximized: bool,
 }
 
 impl Default for WindowOptions {
@@ -110,6 +113,7 @@ impl Default for WindowOptions {
             persist_key: None,
             position: None,
             active: true,
+            maximized: false,
         }
     }
 }

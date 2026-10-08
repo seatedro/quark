@@ -30,7 +30,11 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Icon, Theme, Window, WindowAttributes, WindowId};
 
 use crate::input::{InputEvent, InputNormalizer};
-use crate::platform::window_state::{MonitorArea, WindowGeometry, state_path};
+pub use crate::platform::placement::MonitorInfo;
+use crate::platform::placement::{
+    PhysicalRect, PlacementRecord, RestoreOptions, RestoredPlacement, WindowObservation, restore,
+};
+use crate::platform::window_state::{load_placement, save_placement, state_path};
 
 mod accessibility;
 mod app;
@@ -54,7 +58,7 @@ pub use events::*;
 #[cfg(target_os = "linux")]
 pub use placement::WaylandSurface;
 use placement::*;
-pub use placement::{DesktopPoint, MonitorInfo, PlatformCapabilities, WindowPlacement};
+pub use placement::{DesktopPoint, PlatformCapabilities, WindowPlacement, restored_position};
 use platform::PlatformState;
 pub use scale::scene_to_physical;
 pub use table::WindowHandle;

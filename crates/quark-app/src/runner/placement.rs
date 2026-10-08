@@ -61,37 +61,65 @@ impl WindowPlacement {
     }
 }
 
-/// A display, as [`WindowPlacement::monitor`] reports it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MonitorInfo {
-    /// A human-readable name; not guaranteed unique or stable across
-    /// reconnects, so treat it as a hint.
-    pub name: Option<String>,
-    /// Top-left corner in desktop units.
-    pub position: DesktopPoint,
-    /// In desktop units.
-    pub size: (f64, f64),
-    pub scale_factor: f64,
+/// A display as winit reports it: bounds in winit's physical pixels (on
+/// macOS, Cocoa points times the display's own scale), and no work area,
+/// which winit 0.30 does not report.
+pub(super) fn monitor_info(monitor: &MonitorHandle) -> MonitorInfo {
+    let position = monitor.position();
+    let size = monitor.size();
+    MonitorInfo {
+        name: monitor.name(),
+        bounds: PhysicalRect {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        },
+        scale_factor: monitor.scale_factor(),
+        work_area: None,
+    }
 }
 
-impl MonitorInfo {
-    pub(super) fn from_handle(monitor: &MonitorHandle) -> Self {
-        let scale = monitor.scale_factor();
-        let position = monitor.position();
-        let size = monitor.size();
-        let per_pixel = 1.0 / pixels_per_desktop_unit(scale);
-        Self {
-            name: monitor.name(),
-            position: (
-                f64::from(position.x) * per_pixel,
-                f64::from(position.y) * per_pixel,
-            ),
-            size: (
-                f64::from(size.width) * per_pixel,
-                f64::from(size.height) * per_pixel,
-            ),
-            scale_factor: scale,
-        }
+/// The placement record of a window placed as `placement`: its normal size
+/// and position, carried over from `previous` while it is maximized or
+/// minimized ([`PlacementRecord::capture`]).
+pub(super) fn capture(
+    placement: &WindowPlacement,
+    previous: Option<&PlacementRecord>,
+) -> PlacementRecord {
+    // Records hold winit's physical pixels, which on macOS are Cocoa
+    // points times the display's scale, as monitor bounds are.
+    let pixels = placement
+        .monitor
+        .as_ref()
+        .map_or(1.0, |m| pixels_per_desktop_unit(m.scale_factor));
+    let outer = placement
+        .outer_position
+        .map(|(x, y)| ((x * pixels).round() as i32, (y * pixels).round() as i32));
+    let observation = WindowObservation {
+        outer_position: outer,
+        inner_size: (
+            (f64::from(placement.size.0) * placement.scale_factor).round() as u32,
+            (f64::from(placement.size.1) * placement.scale_factor).round() as u32,
+        ),
+        scale_factor: placement.scale_factor,
+        maximized: placement.maximized,
+        minimized: placement.minimized.unwrap_or(false),
+        monitor: placement.monitor.as_ref(),
+    };
+    PlacementRecord::capture(previous, &observation)
+}
+
+/// Where a restored placement puts a window's outer corner, in desktop
+/// units, for [`WindowOptions::position`]; `None` leaves it to the platform.
+pub fn restored_position(
+    restored: &RestoredPlacement,
+    monitors: &[MonitorInfo],
+) -> Option<DesktopPoint> {
+    if cfg!(target_os = "macos") {
+        restored.desktop_points(monitors)
+    } else {
+        restored.position.map(|(x, y)| (f64::from(x), f64::from(y)))
     }
 }
 
@@ -234,7 +262,7 @@ impl WindowState {
             desktop_scale: desktop_scale(scale),
             monitor: window
                 .current_monitor()
-                .map(|monitor| MonitorInfo::from_handle(&monitor)),
+                .map(|monitor| monitor_info(&monitor)),
             maximized: window.is_maximized(),
             minimized: window.is_minimized(),
             focused: window.has_focus(),
@@ -321,6 +349,51 @@ impl EventContext<'_> {
             }
             WindowEntry::Pending(_) => None,
         }
+    }
+
+    /// The connected displays, the primary one first, as
+    /// [`crate::platform::placement::restore`] takes them. Empty before any
+    /// window is open. The headless runner reports the displays its windows
+    /// were put on.
+    pub fn monitors(&self) -> Vec<MonitorInfo> {
+        let mut monitors: Vec<MonitorInfo> = Vec::new();
+        for (_, entry) in self.windows.iter() {
+            match entry {
+                WindowEntry::Open(state) => {
+                    let window = &state.window;
+                    let primary = window.primary_monitor();
+                    monitors.extend(primary.iter().map(monitor_info));
+                    monitors.extend(
+                        window
+                            .available_monitors()
+                            .filter(|m| Some(m) != primary.as_ref())
+                            .map(|m| monitor_info(&m)),
+                    );
+                    return monitors;
+                }
+                #[cfg(feature = "test-support")]
+                WindowEntry::Virtual(virtual_window) => {
+                    if let Some(monitor) = &virtual_window.monitor
+                        && !monitors.contains(monitor)
+                    {
+                        monitors.push(monitor.clone());
+                    }
+                }
+                WindowEntry::Pending(_) => {}
+            }
+        }
+        monitors
+    }
+
+    /// `window`'s placement as a record to save and restore it by, with
+    /// its normal size and position kept from `previous` while it is
+    /// maximized or minimized. `None` for a window not open.
+    pub fn capture_placement(
+        &self,
+        window: WindowHandle,
+        previous: Option<&PlacementRecord>,
+    ) -> Option<PlacementRecord> {
+        Some(capture(&self.placement(window)?, previous))
     }
 
     /// What the windowing system lets the app do with window positions.

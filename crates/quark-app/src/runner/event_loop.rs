@@ -168,6 +168,7 @@ impl<A: App> Runner<A> {
             last_render: Default::default(),
             traffic_lights: options.traffic_lights,
             persist_key: options.persist_key.clone(),
+            saved_placement: saved_placement(options, event_loop),
             position: Default::default(),
         })
     }
@@ -645,6 +646,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
             WindowEvent::Resized(size) => {
                 let scale_factor = state.window.scale_factor();
                 state.sync_metrics(size, scale_factor);
+                state.note_placement();
                 self.flags.redraw.push(handle);
                 let size = size.to_logical::<f32>(scale_factor);
                 let event = AppEvent::WindowResized {
@@ -656,6 +658,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let size = state.window.inner_size();
                 state.sync_metrics(size, scale_factor);
+                state.note_placement();
                 self.flags.redraw.push(handle);
                 let event = AppEvent::WindowScaleChanged {
                     window: handle,
@@ -665,6 +668,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
             }
             WindowEvent::Moved(position) => {
                 state.refresh_position();
+                state.note_placement();
                 let event = AppEvent::WindowMoved {
                     window: handle,
                     position: state.desktop_position(position),
