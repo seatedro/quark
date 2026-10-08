@@ -6,6 +6,12 @@
 //! `app.rs` renders the dock for every host and forwards the window hooks
 //! below. The shell fills `SIDEBAR` and the thread fills `THREAD`; this
 //! module builds every other panel's content through [`panel_view`].
+//!
+//! Tabs move between groups and windows by dragging (DockWindows tears a
+//! tab off into a window that follows the pointer), and from the keyboard:
+//! Shift+F10 (or the menu key) on a focused tab opens a menu of the groups
+//! it can join and "Move to new window". Closing a floating window docks
+//! its panels back where they came from.
 
 pub mod diff;
 pub mod files;
@@ -18,15 +24,22 @@ use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome};
+use quark_app::winit::event::ElementState;
 use quark_app::{AppEvent, CloseReason, InputEvent, UiContext, ViewContext, WindowHandle};
-use quark_components::{DockEvent, DockLayout, DockRegion, DockState, Pane, PanelId, TabPolicy};
+use quark_components::{
+    ContextMenuEntry, ContextMenuOutcome, ContextMenuState, DockDestination, DockEvent, DockLayout,
+    DockRegion, DockState, DropZone, MovePayload, MoveTarget, Pane, PanelId, TabPolicy,
+};
 
 use crate::contracts::{
-    CommandId, EditCx, Effects, Options, PANELS, PanelSpec, SurfaceCx, panel_spec, panel_title,
-    panels,
+    CommandId, EditCx, Effect, Effects, Msg, Options, PANELS, PanelSpec, SurfaceCx, panel_spec,
+    panel_title, panels,
 };
 use crate::design::tokens;
 use crate::model::Model;
+
+/// Where the tab move menu opens inside its panel, below the tab strip.
+const MENU_INSET: (f32, f32) = (8.0, 4.0);
 
 /// Panel placement plus each panel's content state. The fields are
 /// separate so the app can borrow `layout` for the dock element while
@@ -37,13 +50,35 @@ pub struct State {
     pub panels: Panels,
 }
 
-/// Content state of the dock panels, keyed by panel, not by host window.
+/// Content state of the dock panels, keyed by panel, not by host window:
+/// one state per [`PanelId`], wherever the dock shows it.
 #[derive(Default)]
-pub struct Panels {}
+pub struct Panels {
+    pub diff: diff::State,
+    pub terminal: terminal::State,
+    pub files: files::State,
+    pub preview: preview::State,
+    /// The tab move menu, drawn in its panel's body.
+    menu: ContextMenuState,
+    menu_panel: Option<PanelId>,
+    /// The pointer's last position in the window it is over.
+    pointer: Option<(WindowHandle, f32, f32)>,
+}
+
+impl Panels {
+    fn close_menu(&mut self) {
+        self.menu.close();
+        self.menu_panel = None;
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Dock(DockEvent),
+    Diff(diff::Action),
+    Terminal(terminal::Action),
+    Files(files::Action),
+    Preview(preview::Action),
 }
 
 /// Dock layout per the design: sidebar 232 left, right dock 400.
@@ -95,24 +130,29 @@ pub fn known_panel(id: PanelId) -> bool {
 
 /// Content of a dock-owned panel (`DIFF`, `TERMINAL`, `FILES`, `PREVIEW`).
 pub fn panel_view(
-    _panels: &mut Panels,
+    panels: &mut Panels,
     id: PanelId,
     scx: &SurfaceCx,
-    _vcx: &mut ViewContext,
+    vcx: &mut ViewContext,
 ) -> AnyElement {
-    let colors = &scx.theme.colors;
-    let (width, height) = scx.size;
-    let note = match id {
-        panels::DIFF => "2 files changed",
-        panels::TERMINAL => "$ npm test",
-        panels::FILES => "src/App.tsx",
-        panels::PREVIEW => "Snapshot preview",
-        _ => "",
+    let content = match id {
+        panels::DIFF => diff::view(&mut panels.diff, scx, vcx),
+        panels::TERMINAL => terminal::view(&mut panels.terminal, scx, vcx),
+        panels::FILES => files::view(&mut panels.files, scx, vcx),
+        panels::PREVIEW => preview::view(&mut panels.preview, scx, vcx),
+        _ => div().into_any(),
     };
+    // The move menu sits in its tab's panel: panels clip their content,
+    // and this is the part of the window under the tab the dock lets a
+    // panel draw in.
+    let menu = (panels.menu_panel == Some(id))
+        .then(|| panels.menu.render(scx.size, scx.theme))
+        .flatten();
+    let (width, height) = scx.size;
     view! {
-        <div w={width} h={height} class="flex-col p-4 gap-[6]" bg={colors.panel}>
-            <text class="font-semibold" color={colors.text_strong}>{panel_title(id)}</text>
-            <text size={12.0} color={colors.text_muted}>{note}</text>
+        <div class="relative" w={width} h={height}>
+            {content}
+            {?menu}
         </div>
     }
     .into_any()
@@ -123,42 +163,213 @@ pub fn panel_view(
 pub fn update(
     state: &mut State,
     action: Action,
-    _model: &Model,
-    _fx: &mut Effects,
+    model: &Model,
+    fx: &mut Effects,
     cx: &mut UiContext,
 ) {
+    let panels = &mut state.panels;
     match action {
         Action::Dock(event) => {
+            // A choice from the move menu, or anything else done in the
+            // dock, closes it; pointer motion over a drag target does not.
+            if !matches!(event, DockEvent::TabHover { .. } | DockEvent::Hover { .. }) {
+                panels.close_menu();
+            }
             state.windows.apply(&mut state.layout, event, cx);
         }
+        Action::Diff(a) => diff::update(&mut panels.diff, a, model, fx, cx),
+        Action::Terminal(a) => terminal::update(&mut panels.terminal, a, cx),
+        Action::Files(a) => files::update(&mut panels.files, a, cx),
+        Action::Preview(a) => preview::update(&mut panels.preview, a),
     }
+    cx.window.request_redraw_all();
 }
 
 pub fn set_region_visible(state: &mut State, region: DockRegion, visible: bool) {
     state.layout.set_visible(region, visible);
 }
 
+/// Make `panel` active wherever it is, focus its content, and make sure
+/// the main window shows the right dock when the panel lives there.
+fn show(state: &mut State, panel: PanelId, focus: FocusId, fx: &mut Effects) {
+    state.layout.open(DockRegion::Right, panel);
+    if let Some((at, _)) = state.layout.location(panel)
+        && at.host == quark_components::HostId::MAIN
+    {
+        fx.push(Effect::SetRegionVisible(at.region, true));
+    }
+    fx.push(Effect::Focus(Some(focus)));
+}
+
 /// Commands the dock owns (`ShowDiff`, `ShowFiles`, `ShowPreview`,
-/// `ToggleTerminal`, `ApplyDiff`, `UndoDiff`). True when handled.
-pub fn command(_state: &mut State, _id: CommandId, _scx: &SurfaceCx, _fx: &mut Effects) -> bool {
-    false
+/// `ToggleTerminal`). True when handled. Apply and Undo stay with the app,
+/// which owns the file store.
+pub fn command(state: &mut State, id: CommandId, scx: &SurfaceCx, fx: &mut Effects) -> bool {
+    match id {
+        CommandId::ShowDiff => fx.push(Effect::RevealDiff(None)),
+        CommandId::ShowFiles => {
+            let path = state.panels.files.open_path().to_owned();
+            fx.push(Effect::OpenFile(path));
+        }
+        CommandId::ShowPreview => show(
+            state,
+            panels::PREVIEW,
+            FocusId::from_key("workbench.preview.zoom"),
+            fx,
+        ),
+        CommandId::ToggleTerminal => {
+            let shown = state
+                .layout
+                .location(panels::TERMINAL)
+                .is_some_and(|(at, _)| {
+                    state
+                        .layout
+                        .group(at.pane)
+                        .and_then(|g| g.panels.get(g.active))
+                        == Some(&panels::TERMINAL)
+                        && (at.host != quark_components::HostId::MAIN
+                            || state.layout.is_visible(at.region))
+                });
+            if shown && scx.is_focused(terminal::FOCUS) {
+                // Second press: back to the composer, as editors do with
+                // their terminal toggle.
+                fx.push(Effect::Command(CommandId::FocusComposer));
+            } else {
+                show(state, panels::TERMINAL, terminal::FOCUS, fx);
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 pub fn edit_text(
-    _state: &mut State,
-    _target: FocusId,
-    _command: TextEditCommand,
-    _ecx: &EditCx,
+    state: &mut State,
+    target: FocusId,
+    command: TextEditCommand,
+    ecx: &EditCx,
 ) -> Option<TextEditOutcome> {
-    None
+    files::edit_text(&mut state.panels.files, target, command, ecx.now_ms)
 }
 
 /// Show `path` in the Files panel.
-pub fn open_file(_state: &mut State, _path: &str) {}
+pub fn open_file(state: &mut State, path: &str) {
+    state.panels.files.open(path);
+    state.layout.open(DockRegion::Right, panels::FILES);
+}
 
 /// Show the Diff panel, at `path` when given.
-pub fn reveal_diff(state: &mut State, _path: Option<&str>) {
+pub fn reveal_diff(state: &mut State, path: Option<&str>) {
     state.layout.open(DockRegion::Right, panels::DIFF);
+    if let Some(path) = path {
+        state.panels.diff.reveal(path);
+    }
+}
+
+/// Open the move menu for `panel`'s tab: every group that takes it, and a
+/// new window. The panel becomes its group's active tab so the menu shows
+/// over it.
+fn open_move_menu(state: &mut State, panel: PanelId, cx: &mut UiContext) {
+    let Some((at, index)) = state.layout.location(panel) else {
+        return;
+    };
+    let payload = MovePayload::Panel(panel);
+    let mut entries: Vec<ContextMenuEntry> = state
+        .layout
+        .move_options(payload)
+        .into_iter()
+        .map(|target| match target {
+            MoveTarget::Group { host, pane } => {
+                let event = DockEvent::Transfer {
+                    payload,
+                    destination: DockDestination {
+                        host,
+                        pane,
+                        zone: DropZone::Center,
+                    },
+                };
+                let name = state.windows.group_name(&state.layout, pane);
+                ContextMenuEntry::item(format!("Move to {name}"), Msg::Dock(Action::Dock(event)))
+            }
+            MoveTarget::NewHost => ContextMenuEntry::item(
+                "Move to new window",
+                Msg::Dock(Action::Dock(DockEvent::MoveToNewHost(payload))),
+            ),
+        })
+        .collect();
+    if entries.is_empty() {
+        entries
+            .push(ContextMenuEntry::item("No other place takes this tab", NoopAction).disabled());
+    }
+    state.layout.select(at.pane, index);
+    state.panels.menu.open(entries, MENU_INSET.0, MENU_INSET.1);
+    state.panels.menu_panel = Some(panel);
+    cx.window.request_redraw_all();
+}
+
+/// The move menu's share of raw input: Shift+F10 or the menu key on a
+/// focused dock tab opens it, keys drive it while open, and a press
+/// outside it closes it.
+fn menu_input(state: &mut State, event: &InputEvent, cx: &mut UiContext) -> bool {
+    let panels = &mut state.panels;
+    match event {
+        InputEvent::PointerMoved { x, y } => {
+            panels.pointer = cx.window_handle().map(|w| (w, *x, *y));
+            false
+        }
+        InputEvent::PointerButton {
+            state: ElementState::Pressed,
+            ..
+        } if panels.menu.visible => {
+            let inside = panels
+                .pointer
+                .zip(cx.window_handle())
+                .is_some_and(|((w, x, y), here)| {
+                    w == here
+                        && cx
+                            .geometry()
+                            .by_id("context-menu")
+                            .is_ok_and(|m| m.bounds.contains(x, y))
+                });
+            if !inside {
+                panels.close_menu();
+                cx.window.request_redraw_all();
+            }
+            false
+        }
+        InputEvent::KeyPress(chord) => {
+            let Some(pressed) = chord.binding() else {
+                return false;
+            };
+            if panels.menu.visible {
+                let Some(outcome) = panels.menu.handle_key(&pressed) else {
+                    return false;
+                };
+                if let ContextMenuOutcome::Activate(action) = outcome {
+                    panels.close_menu();
+                    if let Some(Msg::Dock(Action::Dock(event))) = action.downcast_ref::<Msg>() {
+                        state.windows.apply(&mut state.layout, *event, cx);
+                    }
+                } else if !panels.menu.visible {
+                    panels.close_menu();
+                }
+                cx.window.request_redraw_all();
+                return true;
+            }
+            let opens = ["shift+f10", "contextmenu"]
+                .iter()
+                .any(|k| k.parse::<Binding>().is_ok_and(|b| b.matches(&pressed)));
+            let panel = state.layout.focused_panel(cx.focus());
+            match panel {
+                Some(panel) if opens && panel_spec(panel).is_some_and(|p| p.detachable) => {
+                    open_move_menu(state, panel, cx);
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 // Window hooks, forwarded from `UiApp`.
@@ -167,8 +378,16 @@ pub fn init(state: &mut State, cx: &mut UiContext) {
     state.windows.init(&mut state.layout, cx);
 }
 
+/// Raw input for every window, before the surfaces see it: a drag between
+/// windows, the move menu, then the terminal when it has focus.
 pub fn input(state: &mut State, event: &InputEvent, cx: &mut UiContext) -> bool {
-    state.windows.input(&mut state.layout, event, cx)
+    if state.windows.input(&mut state.layout, event, cx) {
+        return true;
+    }
+    if menu_input(state, event, cx) {
+        return true;
+    }
+    terminal::input(&mut state.panels.terminal, event, cx)
 }
 
 pub fn wake(state: &mut State, cx: &mut UiContext) {
@@ -189,6 +408,7 @@ pub fn window_closed(
     reason: CloseReason,
     cx: &mut UiContext,
 ) {
+    state.panels.close_menu();
     state
         .windows
         .window_closed(&mut state.layout, window, reason, cx);
