@@ -102,3 +102,19 @@ fn shell_960_layout_leaves_composer_reachable() {
     );
     assert_eq!(ui.find(By::name("Message")).value.as_deref(), Some("fits"));
 }
+
+// Catches the sidebar costing a Tab stop per thread or ignoring arrow
+// keys: the list is one stop, Down and End move the selection through the
+// listed threads, and the title bar follows.
+#[test]
+fn shell_arrow_keys_move_the_selection_from_the_focused_list() {
+    let mut ui = harness(ScenarioKind::Review);
+    ui.click_node(By::role_name(Role::List, "Threads"));
+    ui.key("down");
+    let after_down = selected_rows(&ui);
+    ui.key("end");
+
+    assert_eq!(after_down, ["Share trips as read-only links"]);
+    assert_eq!(selected_rows(&ui), ["Empty library onboarding"]);
+    assert!(ui.find(By::role(Role::List)).focused);
+}
