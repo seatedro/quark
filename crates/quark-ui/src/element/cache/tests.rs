@@ -133,7 +133,7 @@ impl Frame {
     /// Fill colors of the scene's rounded rects, in paint order.
     fn fills(&self) -> Vec<Color> {
         self.scene
-            .primitives
+            .expanded()
             .iter()
             .filter_map(|p| match p {
                 quark_render::Primitive::RoundedRect(r) => Some(r.color),
@@ -196,7 +196,7 @@ fn unchanged_inputs_replay_without_building() {
     let first = window.paint(screen(0.0, 1, &builds));
     let second = window.paint(screen(0.0, 1, &builds));
     assert_eq!(builds.get(), 1);
-    assert_eq!(second.scene, first.scene);
+    assert_eq!(second.scene.expanded(), first.scene.expanded());
 }
 
 #[test]
@@ -383,7 +383,7 @@ fn a_new_width_rebuilds_at_that_width() {
     let wide = window.paint(row(200.0, &builds));
     let rects: Vec<f32> = wide
         .scene
-        .primitives
+        .expanded()
         .iter()
         .filter_map(|p| match p {
             quark_render::Primitive::RoundedRect(r) => Some(r.rect.width),
@@ -420,7 +420,7 @@ fn scroller(handle: &ScrollHandle) -> AnyElement {
 impl Frame {
     /// The rect filled with `color`.
     fn rect_of(&self, color: Color) -> Option<Rect> {
-        self.scene.primitives.iter().find_map(|p| match p {
+        self.scene.expanded().iter().find_map(|p| match p {
             quark_render::Primitive::RoundedRect(r) if r.color == color => Some(r.rect),
             _ => None,
         })
@@ -500,7 +500,7 @@ impl Frame {
     /// Lines of every painted text, in paint order.
     fn text_lines(&self) -> Vec<Vec<String>> {
         self.scene
-            .primitives
+            .expanded()
             .iter()
             .filter_map(|p| match p {
                 quark_render::Primitive::TextRun(run) => {
@@ -570,6 +570,22 @@ fn swatch(key: u64, color: Color, action: &Action) -> AnyElement {
     .w(100.0)
     .h(30.0)
     .into_any()
+}
+
+// A replayed frame draws the recording by reference; rebuilding the
+// boundary while that frame is still held (a host keeps the last scene
+// until the next one is drawn) must not change what it drew.
+#[test]
+fn rebuilding_leaves_a_replayed_frame_as_it_was() {
+    let mut window = Window::new();
+    let action = Action::from(Pressed(1));
+    window.paint(swatch(0, BUTTON, &action));
+    let replayed = window.paint(swatch(0, BUTTON, &action));
+
+    let rebuilt = window.paint(swatch(0, HOVER, &action));
+
+    assert_eq!(replayed.fills(), [BUTTON]);
+    assert_eq!(rebuilt.fills(), [HOVER]);
 }
 
 // Catches per-rebuild bookkeeping allocations: the recorded handler
