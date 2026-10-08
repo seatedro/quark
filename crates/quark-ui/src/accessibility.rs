@@ -371,7 +371,11 @@ pub enum AccessibilityAction {
 pub struct AccessibilityNode {
     id: NodeId,
     role: Role,
+    /// In layout coordinates; published through `transform`.
     bounds: Rect,
+    /// Layout coordinates to window coordinates, set when the node is
+    /// pushed under a transformed element.
+    transform: quark::Transform2D,
     label: Option<Arc<str>>,
     value: Option<Arc<str>>,
     description: Option<Arc<str>>,
@@ -416,6 +420,7 @@ impl AccessibilityNode {
             id: stable_node_id(&key),
             role,
             bounds,
+            transform: quark::Transform2D::IDENTITY,
             label: None,
             value: None,
             description: None,
@@ -578,9 +583,22 @@ impl AccessibilityNode {
         self.bounds = self.bounds.offset(dx, dy);
     }
 
+    /// Publish the node through `transform` (layout coordinates to window
+    /// coordinates); element caches replay nodes under the transform of
+    /// their ancestors now.
+    pub(crate) fn set_transform(&mut self, transform: quark::Transform2D) {
+        self.transform = transform;
+    }
+
+    /// Window bounds: the four transformed corners' bounds. Absolute, so
+    /// no ancestor's transform applies on top of them.
+    pub fn window_bounds(&self) -> Rect {
+        crate::element::window_rect(self.transform, self.bounds)
+    }
+
     fn to_accesskit_node(&self) -> Node {
         let mut node = Node::new(self.role);
-        node.set_bounds(ax_rect(self.bounds));
+        node.set_bounds(ax_rect(self.window_bounds()));
         node.set_author_id(&*self.author_id);
         if let Some(label) = &self.label {
             node.set_label(&**label);
@@ -706,7 +724,7 @@ impl AccessibilityNode {
                 focus: text_position(owner, &runs, focus),
             });
         }
-        let bounds = ax_rect(self.bounds);
+        let bounds = ax_rect(self.window_bounds());
         runs.iter()
             .enumerate()
             .map(|(index, run)| {
@@ -1129,7 +1147,7 @@ pub fn dump_accessibility(frame: &AccessibilityFrame) -> String {
     for node in &frame.nodes {
         let label = node.label.as_deref().unwrap_or("-");
         let value = node.value.as_deref().unwrap_or("-");
-        let b = node.bounds;
+        let b = node.window_bounds();
         out.push_str(&format!(
             "{} | {:?} | {} | {} | {},{},{},{}\n",
             node.author_id,

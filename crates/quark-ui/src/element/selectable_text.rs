@@ -288,18 +288,43 @@ pub(super) fn register_link_input(
 /// only highlights its own block.
 #[derive(Debug, Clone)]
 pub struct SelectableTextRegion {
+    /// The block's box in layout coordinates (before `transform`).
     pub bounds: Rect,
+    /// The layout's top left in layout coordinates.
     pub text_origin: (f32, f32),
     pub text: Arc<str>,
     pub layout: Arc<TextLayout>,
     pub source_key: u64,
+    /// Layout coordinates to window coordinates: the transforms of the
+    /// block's ancestors. Always invertible; a block under a flattening
+    /// transform registers no region.
+    pub transform: Transform2D,
 }
 
 impl SelectableTextRegion {
-    /// Grapheme boundary nearest to a scene-space point.
+    /// A window point in layout coordinates.
+    pub fn to_layout(&self, x: f32, y: f32) -> (f32, f32) {
+        match self.transform.invert() {
+            Some(inverse) => inverse.apply(x, y),
+            None => (x, y),
+        }
+    }
+
+    /// Grapheme boundary nearest to a window point.
     pub fn hit(&self, x: f32, y: f32) -> TextOffset {
+        let (x, y) = self.to_layout(x, y);
         self.layout
             .hit(x - self.text_origin.0, y - self.text_origin.1)
+    }
+}
+
+/// Register `region` for pointer selection under the current transform. A
+/// transform that flattens the block (a zero scale) leaves it unselectable,
+/// as it is unclickable.
+pub(super) fn register_selectable(cx: &mut ElementContext, mut region: SelectableTextRegion) {
+    region.transform = cx.current_transform();
+    if region.transform.invert().is_some() {
+        cx.selectable_text_runs.push(region);
     }
 }
 
@@ -649,13 +674,17 @@ impl Element for SelectableText {
 
         register_link_input(links, &text, &self.on_link, self.source_key, cx);
 
-        cx.selectable_text_runs.push(SelectableTextRegion {
-            bounds,
-            text_origin: origin,
-            text,
-            layout,
-            source_key: self.source_key,
-        });
+        register_selectable(
+            cx,
+            SelectableTextRegion {
+                bounds,
+                text_origin: origin,
+                text,
+                layout,
+                source_key: self.source_key,
+                transform: Transform2D::IDENTITY,
+            },
+        );
     }
 }
 

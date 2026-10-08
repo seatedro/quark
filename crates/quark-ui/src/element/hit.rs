@@ -71,6 +71,12 @@ pub trait DragHandler {
     }
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action>;
     fn on_release(&mut self) -> DragReleaseResult;
+    /// The geometry of the frame the drag routes through: before
+    /// [`Self::on_press`], and again each time a newly painted frame
+    /// replaces it mid-drag. A handler that maps the pointer onto other
+    /// elements (a dock's tab groups) looks them up here rather than
+    /// trusting positions known when the view was built.
+    fn set_geometry(&mut self, _geometry: &LayoutSnapshot) {}
     fn cursor(&self) -> CursorHint {
         CursorHint::Default
     }

@@ -171,10 +171,12 @@ mod tests {
     use quark_render::Scene;
     use quark_text::{TextOffset, offset};
 
+    use std::f32::consts::FRAC_PI_2;
+
     use super::*;
     use crate::element::{
-        Delivery, ElementContext, InputRouter, IntoAnyElement, ScrollActionBuilder, render_element,
-        text_input,
+        Delivery, ElementContext, InputRouter, IntoAnyElement, ScrollActionBuilder, div,
+        render_element, text_input,
     };
     use crate::style::Styled;
     use crate::text_input::{Editor, EditorMode, TextField, text_editor_element};
@@ -218,6 +220,8 @@ mod tests {
     /// routes it.
     struct Harness {
         model: Model,
+        /// Scale and rotation of a div around the field, about its center.
+        wrap: Option<(f32, f32)>,
         text: quark_text::TextSystem,
         layouts: quark_text::LayoutCache,
         router: InputRouter,
@@ -228,8 +232,13 @@ mod tests {
 
     impl Harness {
         fn new(model: Model) -> Self {
+            Self::wrapped(model, None)
+        }
+
+        fn wrapped(model: Model, wrap: Option<(f32, f32)>) -> Self {
             let mut harness = Self {
                 model,
+                wrap,
                 text: quark_text::TextSystem::vendored_only(&Default::default()),
                 layouts: quark_text::LayoutCache::default(),
                 router: InputRouter::default(),
@@ -245,6 +254,13 @@ mod tests {
             let mut field = TextField::new(text);
             field.apply(TextEditCommand::SetTextCursor(0));
             Self::new(Model::Field(Box::new(field)))
+        }
+
+        /// A field in a div scaled by `scale` and turned by `rotate`.
+        fn transformed_field(text: &str, scale: f32, rotate: f32) -> Self {
+            let mut field = TextField::new(text);
+            field.apply(TextEditCommand::SetTextCursor(0));
+            Self::wrapped(Model::Field(Box::new(field)), Some((scale, rotate)))
         }
 
         fn editor(text: &str) -> Self {
@@ -277,6 +293,15 @@ mod tests {
                         .into_any()
                 }
             };
+            if let Some((scale, rotate)) = self.wrap {
+                root = div()
+                    .w(w)
+                    .h(h)
+                    .scale(scale)
+                    .rotate(rotate)
+                    .child(root)
+                    .into_any();
+            }
             let mut cx = ElementContext::new(
                 &theme,
                 1.0,
@@ -301,6 +326,19 @@ mod tests {
             let area = self.area();
             let layout = area.layout().expect("value layout");
             area.origin().0 + layout.caret(offset).x
+        }
+
+        /// Window point at byte `offset` of the painted single-line text,
+        /// halfway down its text area, through the wrapping div's scale and
+        /// rotation (about its center, 80,30).
+        fn point_at(&self, offset: usize) -> (f32, f32) {
+            let area = self.area();
+            let y = area.text_rect.y + area.text_rect.height / 2.0;
+            let (scale, rotate) = self.wrap.unwrap_or((1.0, 0.0));
+            quark::Transform2D::rotate(rotate)
+                .then(quark::Transform2D::scale(scale, scale))
+                .around(80.0, 30.0)
+                .apply(self.x_of(offset), y)
         }
 
         fn deliver(&mut self, delivery: Delivery) {
@@ -404,6 +442,49 @@ mod tests {
             );
             assert_eq!(after_release, *scrolls.last().unwrap(), "{name}");
         }
+    }
+
+    // Catches pointer selection mapped through untransformed coordinates:
+    // a drag across "brave" on a scaled or turned field selects "brave".
+    #[test]
+    fn drag_selection_follows_a_transformed_field() {
+        let text = "hello brave world";
+        for (name, scale, rotate) in [("scaled", 2.0, 0.0), ("turned", 1.0, FRAC_PI_2)] {
+            let mut harness = Harness::transformed_field(text, scale, rotate);
+            let (from, to) = (harness.point_at(6), harness.point_at(11));
+            harness.press(from.0, from.1);
+            harness.move_to(to.0, to.1);
+            harness.release();
+            assert_eq!(harness.selected(text), "brave", "{name}");
+        }
+    }
+
+    // Catches an IME candidate rect left in layout coordinates: after a
+    // press on a scaled field, the caret is where the press was.
+    #[test]
+    fn ime_caret_of_a_scaled_field_is_where_the_press_put_it() {
+        let mut harness = Harness::transformed_field("hello brave world", 2.0, 0.0);
+        let (x, y) = harness.point_at(6);
+        harness.press(x, y);
+        harness.release();
+        harness.paint();
+
+        let caret = harness.area().caret.expect("focused field reports a caret");
+        assert!(
+            caret.contains(x, y),
+            "caret {caret:?} not at the press {x},{y}"
+        );
+    }
+
+    // Catches a field under a zero scale that still reports a caret for
+    // the IME or maps pointers onto its text.
+    #[test]
+    fn flattened_field_shows_no_caret_and_takes_no_points() {
+        let harness = Harness::transformed_field("hello", 0.0, 0.0);
+        let area = harness.area();
+        assert_eq!(area.caret, None);
+        let r = area.text_rect;
+        assert_eq!(area.offset_at_point(r.x + 2.0, r.y + 2.0), None);
     }
 
     // Catches presses mapped through unscrolled or unwrapped coordinates:

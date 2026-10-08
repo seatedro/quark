@@ -74,6 +74,10 @@ pub(super) struct PaintRecord {
     tooltips: Vec<TooltipRegion>,
     selectable: Vec<SelectableTextRegion>,
     scrollbars: Vec<ScrollbarTrack>,
+    /// Geometry rows: names, layout boxes, and boundary-relative clips.
+    geometry: Vec<GeometryKey>,
+    geometry_layout: Vec<Rect>,
+    geometry_clip: Vec<Rect>,
     transitions: Vec<AnimKey>,
     /// Scroll handles the subtree painted, viewports relative.
     scroll: Vec<ScrollWatch>,
@@ -100,6 +104,9 @@ impl PaintRecord {
         self.tooltips.clear();
         self.selectable.clear();
         self.scrollbars.clear();
+        self.geometry.clear();
+        self.geometry_layout.clear();
+        self.geometry_clip.clear();
         self.transitions.clear();
         self.scroll.clear();
     }
@@ -130,6 +137,7 @@ struct PaintMarks {
     selectable: usize,
     scrollbars: usize,
     text_inputs: usize,
+    geometry: usize,
     semantic_parent: Option<usize>,
     a11y_parent: Option<NodeId>,
     state: PaintState,
@@ -230,8 +238,9 @@ impl Recording {
         cx.end_hit_recording(self.hit_start);
     }
 
-    pub(super) fn begin_paint(&mut self, scene: &Scene, cx: &ElementContext) {
+    pub(super) fn begin_paint(&mut self, scene: &Scene, cx: &mut ElementContext) {
         self.phase = PhaseStart::of(cx);
+        let geometry = cx.begin_geometry_recording();
         self.paint = Some(PaintMarks {
             scene: scene.len(),
             semantic: cx.semantic.nodes().len(),
@@ -241,6 +250,7 @@ impl Recording {
             selectable: cx.selectable_text_runs.len(),
             scrollbars: cx.scrollbar_tracks.len(),
             text_inputs: cx.text_input_hit_areas.len(),
+            geometry,
             semantic_parent: cx.current_semantic_parent(),
             a11y_parent: cx.accessible_semantic_ancestor(),
             state: PaintState::of(cx),
@@ -348,6 +358,13 @@ impl Recording {
                 .iter()
                 .map(|t| offset_scrollbar(t, -ox, -oy)),
         );
+        for row in marks.geometry..cx.geometry.len() {
+            let (key, layout, clip) = cx.geometry.recorded(row);
+            record.geometry.push(key);
+            record.geometry_layout.push(layout.offset(-ox, -oy));
+            record.geometry_clip.push(clip.offset(-ox, -oy));
+        }
+        cx.end_geometry_recording(marks.geometry);
 
         let pointer_inside = match (self.extent, cx.mouse_position) {
             (Some(extent), Some((x, y))) => extent.offset(ox, oy).contains(x, y),
@@ -385,6 +402,19 @@ fn offset_selectable(region: &SelectableTextRegion, dx: f32, dy: f32) -> Selecta
         bounds: region.bounds.offset(dx, dy),
         text_origin: (region.text_origin.0 + dx, region.text_origin.1 + dy),
         ..region.clone()
+    }
+}
+
+/// A recorded region at the boundary's new origin, under the transform it
+/// is replayed through.
+fn replay_selectable(
+    region: &SelectableTextRegion,
+    (dx, dy): (f32, f32),
+    transform: quark::Transform2D,
+) -> SelectableTextRegion {
+    SelectableTextRegion {
+        transform,
+        ..offset_selectable(region, dx, dy)
     }
 }
 
@@ -474,6 +504,18 @@ pub(super) fn replay_paint(
         cx.hit_table.set_identity(id, record.hit_identity[i]);
     }
     cx.handlers.extend_shifted(&record.handlers, base);
+    // A recorded subtree held no transform of its own (one would have kept
+    // it from replaying), so everything in it lands through the transform
+    // of its ancestors now.
+    for ((key, layout), clip) in record
+        .geometry
+        .iter()
+        .zip(&record.geometry_layout)
+        .zip(&record.geometry_clip)
+    {
+        cx.push_geometry(key.clone(), layout.offset(ox, oy), clip.offset(ox, oy));
+    }
+    let transform = cx.current_transform();
 
     let ancestor = cx.accessible_semantic_ancestor();
     record.a11y_ids.clear();
@@ -485,6 +527,7 @@ pub(super) fn replay_paint(
         };
         let mut node = node.clone();
         node.offset(ox, oy);
+        node.set_transform(transform);
         let id = cx.accessibility.push_child(node, parent);
         record.a11y_ids.push(id);
     }
@@ -502,7 +545,7 @@ pub(super) fn replay_paint(
         record
             .selectable
             .iter()
-            .map(|r| offset_selectable(r, ox, oy)),
+            .map(|r| replay_selectable(r, (ox, oy), transform)),
     );
     cx.scrollbar_tracks.extend(
         record

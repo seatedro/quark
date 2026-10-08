@@ -275,13 +275,17 @@ impl Element for CodeBlock {
             );
         }
 
-        cx.selectable_text_runs.push(SelectableTextRegion {
-            bounds,
-            text_origin: origin,
-            text,
-            layout,
-            source_key: self.source_key,
-        });
+        register_selectable(
+            cx,
+            SelectableTextRegion {
+                bounds,
+                text_origin: origin,
+                text,
+                layout,
+                source_key: self.source_key,
+                transform: Transform2D::IDENTITY,
+            },
+        );
     }
 }
 
