@@ -30,6 +30,9 @@ pub(crate) struct Grammar {
     language: ts::Language,
     query: ts::Query,
     capture_kinds: Vec<HighlightKind>,
+    /// `@none`, which clears the colors of the captures around it (Markdown
+    /// uses it so a fenced block's content is not all `@text.literal`).
+    none: Option<u32>,
     injections: Option<Injections>,
 }
 
@@ -87,6 +90,7 @@ impl Grammar {
             .iter()
             .map(|name| capture_name_to_highlight_kind(name))
             .collect();
+        let none = query.capture_index_for_name("none");
         let injections = injections
             .map(|text| Injections::compile(&language, &text))
             .transpose()?;
@@ -94,6 +98,7 @@ impl Grammar {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             language,
             query,
+            none,
             capture_kinds,
             injections,
         })
@@ -117,17 +122,18 @@ impl Grammar {
         })
     }
 
-    /// `(start, end, kind, pattern)` for every capture with a highlight kind.
-    fn collect_spans(
-        &self,
-        tree: &ts::Tree,
-        source: &str,
-    ) -> Vec<(usize, usize, HighlightKind, usize)> {
+    /// `(start, end, kind, pattern)` for every capture with a highlight
+    /// kind, and the ranges of `@none` captures.
+    fn collect_spans(&self, tree: &ts::Tree, source: &str) -> (Vec<Captured>, Vec<(usize, usize)>) {
         let mut cursor = ts::QueryCursor::new();
         let mut captures = cursor.captures(&self.query, tree.root_node(), source.as_bytes());
-        let mut raw = Vec::new();
+        let (mut raw, mut clears) = (Vec::new(), Vec::new());
         while let Some((query_match, capture_index)) = captures.next() {
             let capture = query_match.captures[*capture_index];
+            if Some(capture.index) == self.none {
+                clears.push((capture.node.start_byte(), capture.node.end_byte()));
+                continue;
+            }
             let kind = self
                 .capture_kinds
                 .get(capture.index as usize)
@@ -138,7 +144,8 @@ impl Grammar {
                 raw.push((start, end, kind, query_match.pattern_index));
             }
         }
-        raw
+        clears.sort_unstable();
+        (raw, clears)
     }
 }
 
@@ -402,6 +409,9 @@ struct Layer {
 /// `(start, end, kind)`: a span before conversion to [`HighlightSpan`].
 type Raw = (usize, usize, HighlightKind);
 
+/// `(start, end, kind, pattern)`: a capture before compaction.
+type Captured = (usize, usize, HighlightKind, usize);
+
 /// Highlights `source` with `root` and every language embedded in it,
 /// looking embedded languages up with `resolve` (which returns shared
 /// handles, so no store lock is held while parsing). Deeper layers take
@@ -441,10 +451,8 @@ pub(crate) fn highlight(
         };
         // A node spanning several ranges (an embedded document's root) also
         // covers the host text between them, which stays the host's.
-        let spans = clip(
-            compact_spans(layer.grammar.collect_spans(&tree, source)),
-            &layer.ranges,
-        );
+        let (captured, clears) = layer.grammar.collect_spans(&tree, source);
+        let spans = clip(subtract(compact_spans(captured), &clears), &layer.ranges);
         // Breadth first, so layers arrive shallowest first and each deeper
         // one overrides what it covers.
         merged = overlay(merged, &spans);
@@ -507,20 +515,48 @@ fn end_point(source: &str) -> ts::Point {
     ts::Point { row, column }
 }
 
-/// Resolves overlapping captures into sorted, disjoint spans: at the same
-/// start the later query pattern wins (generic `(identifier) @variable`
-/// rules come first in the queries), and a span starting inside an earlier
-/// one is dropped.
-fn compact_spans(mut raw: Vec<(usize, usize, HighlightKind, usize)>) -> Vec<Raw> {
-    raw.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.3.cmp(&a.3)));
-    let mut covered = 0usize;
+/// Resolves overlapping captures into sorted, disjoint spans, nesting
+/// them as tree-sitter's highlighter does: a capture inside another wins
+/// over it for its own bytes (a code span's delimiters inside the code
+/// span), and of captures over the same bytes the later query pattern wins
+/// (generic `(identifier) @variable` rules come first in the queries).
+fn compact_spans(mut raw: Vec<Captured>) -> Vec<Raw> {
+    raw.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.3.cmp(&b.3))
+    });
     let mut spans = Vec::with_capacity(raw.len());
-    for (start, end, kind, _) in raw {
-        if start < covered {
-            continue;
+    // Open captures, innermost last, with their (clamped) ends; `at` is
+    // where the spans emitted so far end.
+    let mut open: Vec<(usize, HighlightKind)> = Vec::new();
+    let mut at = 0usize;
+    fn emit(spans: &mut Vec<Raw>, at: &mut usize, end: usize, kind: HighlightKind) {
+        if *at < end {
+            spans.push((*at, end, kind));
+            *at = end;
         }
-        spans.push((start, end, kind));
-        covered = end;
+    }
+    for (start, end, kind, _) in raw {
+        while let Some(&(open_end, open_kind)) = open.last() {
+            if open_end > start {
+                break;
+            }
+            emit(&mut spans, &mut at, open_end, open_kind);
+            open.pop();
+        }
+        if let Some(&(_, open_kind)) = open.last() {
+            emit(&mut spans, &mut at, start, open_kind);
+        }
+        at = at.max(start);
+        // A capture crossing the end of the one around it stops there.
+        let end = open.last().map_or(end, |&(open_end, _)| end.min(open_end));
+        if end > start {
+            open.push((end, kind));
+        }
+    }
+    while let Some((open_end, open_kind)) = open.pop() {
+        emit(&mut spans, &mut at, open_end, open_kind);
     }
     spans
 }
@@ -549,25 +585,36 @@ fn overlay(base: Vec<Raw>, top: &[Raw]) -> Vec<Raw> {
     if top.is_empty() {
         return base;
     }
-    let mut out = Vec::with_capacity(base.len() + top.len() * 2);
+    let holes: Vec<(usize, usize)> = top.iter().map(|t| (t.0, t.1)).collect();
+    let mut out = subtract(base, &holes);
+    out.extend_from_slice(top);
+    out.sort_unstable_by_key(|span| span.0);
+    out
+}
+
+/// Sorted, disjoint `spans` without the bytes of `holes` (sorted by start,
+/// possibly overlapping).
+fn subtract(spans: Vec<Raw>, holes: &[(usize, usize)]) -> Vec<Raw> {
+    if holes.is_empty() {
+        return spans;
+    }
+    let mut out = Vec::with_capacity(spans.len() + holes.len());
     let mut first = 0;
-    for (start, end, kind) in base {
-        while top.get(first).is_some_and(|t| t.1 <= start) {
+    for (start, end, kind) in spans {
+        while holes.get(first).is_some_and(|h| h.1 <= start) {
             first += 1;
         }
         let mut at = start;
-        for t in top[first..].iter().take_while(|t| t.0 < end) {
-            if t.0 > at {
-                out.push((at, t.0, kind));
+        for hole in holes[first..].iter().take_while(|h| h.0 < end) {
+            if hole.0 > at {
+                out.push((at, hole.0, kind));
             }
-            at = at.max(t.1);
+            at = at.max(hole.1);
         }
         if at < end {
             out.push((at, end, kind));
         }
     }
-    out.extend_from_slice(top);
-    out.sort_unstable_by_key(|span| span.0);
     out
 }
 
@@ -637,6 +684,32 @@ fn capture_name_to_highlight_kind(name: &str) -> HighlightKind {
         HighlightKind::Label
     } else if name.starts_with("preproc") {
         HighlightKind::Preprocessor
+    } else if let Some(markup) = name
+        .strip_prefix("text.")
+        .or_else(|| name.strip_prefix("markup."))
+    {
+        // Prose markup (Markdown's queries use nvim's older `text.*` names)
+        // borrows the nearest code kinds, so themes need no new tones.
+        markup_kind(markup)
+    } else {
+        HighlightKind::Normal
+    }
+}
+
+/// Kinds for `text.*` and `markup.*` captures, named without the prefix.
+fn markup_kind(name: &str) -> HighlightKind {
+    if name.starts_with("title") || name.starts_with("heading") {
+        HighlightKind::Keyword
+    } else if name.starts_with("strong") {
+        HighlightKind::Type
+    } else if name.starts_with("emphasis") || name.starts_with("italic") {
+        HighlightKind::Attribute
+    } else if name.starts_with("literal") || name.starts_with("raw") {
+        HighlightKind::String
+    } else if name.starts_with("uri") || name.starts_with("reference") || name.starts_with("link") {
+        HighlightKind::Label
+    } else if name.starts_with("quote") {
+        HighlightKind::Comment
     } else {
         HighlightKind::Normal
     }

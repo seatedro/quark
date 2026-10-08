@@ -4,9 +4,8 @@
 //! (`<workspace>/target/syntax-packs`), or from `$QUARK_SYNTAX_TEST_PACKS`.
 //! Build the packs a test names once with `cargo run -p syntax-pack --
 //! build <language>...`. Without them these tests skip, unless
-//! `QUARK_REQUIRE_SYNTAX_PACKS` (set in CI after building the fixtures)
-//! turns a missing pack into a failure: `1` requires every pack, and a
-//! comma-separated list (`rust,javascript`) requires only those.
+//! `QUARK_REQUIRE_SYNTAX_PACKS=1` (set in CI after building the fixtures)
+//! turns a missing pack into a failure.
 
 use std::path::PathBuf;
 
@@ -30,15 +29,14 @@ pub fn store_with(language: &str) -> Option<GrammarStore> {
 /// `languages`.
 pub fn store_with_all(languages: &[&str]) -> Option<GrammarStore> {
     let root = pack_root();
-    let required = std::env::var("QUARK_REQUIRE_SYNTAX_PACKS").unwrap_or_default();
     for language in languages {
         let dir = root.join(pack::TARGET).join(language);
         if dir.join(pack::MANIFEST).is_file() {
             continue;
         }
         assert!(
-            required != "1" && !required.split(',').any(|r| r.trim() == *language),
-            "QUARK_REQUIRE_SYNTAX_PACKS={required} but there is no {language} pack in {}; \
+            std::env::var_os("QUARK_REQUIRE_SYNTAX_PACKS").is_none_or(|v| v != "1"),
+            "QUARK_REQUIRE_SYNTAX_PACKS=1 but there is no {language} pack in {}; \
              build it with `cargo run -p syntax-pack -- build {language}`",
             dir.display()
         );

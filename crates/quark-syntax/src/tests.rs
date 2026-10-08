@@ -117,7 +117,10 @@ fn markdown_fence_tag_resolves_through_aliases() {
         &[HighlightKind::Keyword, HighlightKind::Function],
     );
 
-    assert_eq!(dumped, "keyword:fn function:main function:run");
+    assert_eq!(
+        dumped,
+        "keyword:Notes keyword:fn function:main function:run"
+    );
 }
 
 // Catches the text of a content node's children leaking into the embedded
@@ -136,7 +139,11 @@ fn quoted_fence_parses_without_its_continuation_markers() {
         &[HighlightKind::Keyword, HighlightKind::String],
     );
 
-    assert_eq!(dumped, "keyword:let string:\"a\n string:b\"");
+    // The info string and the fence's line end are the block's literal.
+    assert_eq!(
+        dumped,
+        "string:rust\n keyword:let string:\"a\n string:b\" string:\n"
+    );
 }
 
 // Catches injections not recursing: a macro's token tree is Rust again,
@@ -164,20 +171,47 @@ fn macro_inside_a_macro_is_parsed_at_each_depth() {
 // must land on the original source's bytes.
 #[test]
 fn embedded_spans_keep_byte_offsets_after_multibyte_text() {
-    let Some(store) = testing::store_with_all(&["javascript", "json"]) else {
+    let Some(store) = testing::store_with_all(&["html", "javascript"]) else {
         return;
     };
-    let source = "const \u{e9} = \"\u{65e5}\u{672c}\";\nconst a = json`{\"\u{43a}\u{43b}\u{44e}\u{447}\": 1}`;\n";
+    let source = "<p>\u{65e5}\u{672c}\u{8a9e}</p>\n<script>let \u{e9} = \"\u{43a}\u{43b}\u{44e}\u{447}\"; f(1);</script>\n";
 
     let dumped = dump(
-        &highlight(&store, &language("js"), source),
+        &highlight(&store, &language("html"), source),
         source,
-        &[HighlightKind::String, HighlightKind::Number],
+        &[HighlightKind::String, HighlightKind::Function],
     );
 
+    assert_eq!(dumped, "string:\"\u{43a}\u{43b}\u{44e}\u{447}\" function:f");
+}
+
+// Catches Markdown prose staying plain: its `text.*` captures map to
+// kinds, and `@none` keeps a fenced block's code from all taking the
+// block's literal color.
+#[test]
+fn markdown_markup_takes_colors() {
+    let Some(store) = testing::store_with_all(&["markdown", "markdown_inline"]) else {
+        return;
+    };
+    let source = "# Title\n\nSome **bold**, *em*, `code`, <https://x.io>.\n\n```text\nplain\n```\n";
+
+    let spans = highlight(&store, &language("md"), source);
+    let dumped = dump(
+        &spans,
+        source,
+        &[
+            HighlightKind::Keyword,
+            HighlightKind::Type,
+            HighlightKind::Attribute,
+            HighlightKind::String,
+            HighlightKind::Label,
+        ],
+    );
+
+    // `plain` is the fenced block's content, which `@none` clears.
     assert_eq!(
         dumped,
-        "string:\"\u{65e5}\u{672c}\" string:`{ string:\"\u{43a}\u{43b}\u{44e}\u{447}\" string::  number:1 string:}`"
+        "keyword:Title type:bold attribute:em string:code label:<https://x.io> string:text\n string:\n"
     );
 }
 
@@ -463,10 +497,13 @@ mod download {
 
     /// Serves `files` by path over HTTP/1.1 on localhost, one request per
     /// connection, and logs each request's path. Responses wait while a
-    /// test holds `hold`, or the [`Server::gate`] of their path.
+    /// test holds `hold`, or the [`Server::gate`] of their path. Range
+    /// requests get the rest of the file from their offset, and a path in
+    /// `cut` sends only that many bytes before closing the connection.
     struct Server {
         url: String,
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        cut: Arc<Mutex<HashMap<String, usize>>>,
         hold: Arc<Mutex<()>>,
         gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
         log: Arc<Mutex<Vec<String>>>,
@@ -486,6 +523,8 @@ mod download {
             let (thread_files, thread_log, thread_hold, thread_stop) =
                 (files.clone(), log.clone(), hold.clone(), stop.clone());
             let thread_gates = gates.clone();
+            let cut: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+            let thread_cut = cut.clone();
             let thread = std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     if thread_stop.load(Ordering::Relaxed) {
@@ -495,11 +534,19 @@ mod download {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut request = String::new();
                     reader.read_line(&mut request).unwrap();
+                    let mut range = None;
                     loop {
                         let mut line = String::new();
                         reader.read_line(&mut line).unwrap();
                         if line == "\r\n" || line.is_empty() {
                             break;
+                        }
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(offset) = lower
+                            .strip_prefix("range: bytes=")
+                            .and_then(|rest| rest.trim().strip_suffix('-'))
+                        {
+                            range = offset.parse::<usize>().ok();
                         }
                     }
                     let path = request.split(' ').nth(1).unwrap_or("").to_owned();
@@ -510,21 +557,36 @@ mod download {
                         drop(gate.lock().unwrap());
                     }
                     let body = thread_files.lock().unwrap().get(&path).cloned();
-                    let (status, body) = match body {
-                        Some(body) => ("200 OK", body),
-                        None => ("404 Not Found", Vec::new()),
+                    let (status, body, extra) = match (body, range) {
+                        (Some(body), Some(offset)) if offset < body.len() => (
+                            "206 Partial Content",
+                            body[offset..].to_vec(),
+                            format!(
+                                "Content-Range: bytes {offset}-{}/{}\r\n",
+                                body.len() - 1,
+                                body.len()
+                            ),
+                        ),
+                        (Some(body), _) => ("200 OK", body, String::new()),
+                        (None, _) => ("404 Not Found", Vec::new(), String::new()),
                     };
                     let head = format!(
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
                         body.len()
                     );
+                    let sent = thread_cut
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .map_or(body.len(), |&cut| cut.min(body.len()));
                     let _ = stream.write_all(head.as_bytes());
-                    let _ = stream.write_all(&body);
+                    let _ = stream.write_all(&body[..sent]);
                 }
             });
             Self {
                 url,
                 files,
+                cut,
                 hold,
                 gates,
                 log,
@@ -645,12 +707,11 @@ mod download {
 
         store.status(&language("rust"));
         wait(&resolved);
-        let installed = cache
-            .path()
-            .join(pack::TARGET)
-            .join("rust/1.0.0")
-            .join(&library)
-            .exists();
+        // In whichever version directory the pack would have gone.
+        let installed = std::fs::read_dir(cache.path().join(pack::TARGET).join("rust"))
+            .into_iter()
+            .flatten()
+            .any(|dir| dir.unwrap().path().join(&library).exists());
 
         assert_eq!(
             (store.status(&language("rust")), installed),
@@ -741,43 +802,39 @@ mod download {
     // grammars did not change hears nothing new.
     #[test]
     fn embedded_grammars_recolor_a_request_as_they_arrive() {
-        if testing::store_with_all(&["javascript", "json", "bash"]).is_none() {
+        if testing::store_with_all(&["html", "javascript", "css"]).is_none() {
             return;
         }
         let server = Server::start();
         let root = testing::pack_root();
-        serve_packs(&server, &root, &["json", "bash"]);
-        let bash: PackManifest = serde_json::from_slice(
-            &std::fs::read(root.join(pack::TARGET).join("bash").join(pack::MANIFEST)).unwrap(),
+        serve_packs(&server, &root, &["javascript", "css"]);
+        let css: PackManifest = serde_json::from_slice(
+            &std::fs::read(root.join(pack::TARGET).join("css").join(pack::MANIFEST)).unwrap(),
         )
         .unwrap();
-        let bash_gate = server.gate(&format!(
-            "/packs/{}/bash/{}",
-            pack::TARGET,
-            bash.library.path
-        ));
-        let held = bash_gate.lock().unwrap();
-        // JavaScript is local; JSON and Bash download.
+        let css_gate = server.gate(&format!("/packs/{}/css/{}", pack::TARGET, css.library.path));
+        let held = css_gate.lock().unwrap();
+        // HTML is local; JavaScript and CSS download.
         let local = tempfile::tempdir().unwrap();
-        let javascript = local.path().join(pack::TARGET).join("javascript");
-        std::fs::create_dir_all(&javascript).unwrap();
-        for entry in std::fs::read_dir(root.join(pack::TARGET).join("javascript")).unwrap() {
+        let html = local.path().join(pack::TARGET).join("html");
+        std::fs::create_dir_all(&html).unwrap();
+        for entry in std::fs::read_dir(root.join(pack::TARGET).join("html")).unwrap() {
             let entry = entry.unwrap();
-            std::fs::copy(entry.path(), javascript.join(entry.file_name())).unwrap();
+            std::fs::copy(entry.path(), html.join(entry.file_name())).unwrap();
         }
         let cache = tempfile::tempdir().unwrap();
         let config = StoreConfig::new().local_packs(local.path());
         let (store, _) = downloading_store_over(&server, cache.path(), config);
         let worker = HighlightWorker::new(store);
-        const BOTH: &str = "json`[1]`;\nsh`echo`;\n";
-        const SHELL: &str = "sh`echo`;\n";
+        const BOTH: &str = "<script>f(1)</script>\n<style>p { color: red; }</style>\n";
+        const STYLE: &str = "<style>p { color: red; }</style>\n";
 
-        worker.request(1, 1, language("js"), Arc::from(BOTH));
-        worker.request(2, 1, language("js"), Arc::from(SHELL));
+        worker.request(1, 1, language("html"), Arc::from(BOTH));
+        worker.request(2, 1, language("html"), Arc::from(STYLE));
         let mut results: HashMap<u64, Vec<String>> = HashMap::new();
         let mut take = |result: Highlighted| {
-            let source = if result.slot == 1 { BOTH } else { SHELL };
-            let kinds = [HighlightKind::Function, HighlightKind::Number];
+            let source = if result.slot == 1 { BOTH } else { STYLE };
+            let kinds = [HighlightKind::Function, HighlightKind::Property];
             let unresolved: Vec<&str> = result.unresolved.iter().map(LanguageId::as_str).collect();
             results.entry(result.slot).or_default().push(format!(
                 "{} {} [{}]",
@@ -786,7 +843,7 @@ mod download {
                 unresolved.join(",")
             ));
         };
-        // Both first answers, then the first request's once JSON lands.
+        // Both first answers, then the first request's once JavaScript lands.
         for _ in 0..3 {
             take(worker.recv().unwrap());
         }
@@ -799,15 +856,60 @@ mod download {
             (&results[&1], &results[&2]),
             (
                 &vec![
-                    "0 function:json function:sh [json,sh]".to_owned(),
-                    "1 function:json number:1 function:sh [sh]".to_owned(),
-                    "2 function:json number:1 function:sh function:echo []".to_owned(),
+                    "0  [javascript,css]".to_owned(),
+                    "1 function:f [css]".to_owned(),
+                    "2 function:f property:color []".to_owned(),
                 ],
-                &vec![
-                    "0 function:sh [sh]".to_owned(),
-                    "1 function:sh function:echo []".to_owned(),
-                ]
+                &vec!["0  [css]".to_owned(), "1 property:color []".to_owned()]
             )
         );
+    }
+
+    // Catches a partial file of an older pack being resumed into a newer
+    // one: published files change with their content while a pack keeps
+    // its version, and appending the new file's tail to the old file's
+    // head would fail its SHA-256 and leave the language plain.
+    #[test]
+    fn changed_pack_downloads_afresh_over_an_old_partial_file() {
+        if testing::store_with("css").is_none() {
+            return;
+        }
+        let server = Server::start();
+        let root = testing::pack_root();
+        serve_packs(&server, &root, &["css"]);
+        let new_index = server.files.lock().unwrap()[&index_path()].clone();
+        // The old pack: the same version and size, other library bytes.
+        let mut manifest: PackManifest = serde_json::from_slice(
+            &std::fs::read(root.join(pack::TARGET).join("css").join(pack::MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        let library_path = format!("/packs/{}/css/{}", pack::TARGET, manifest.library.path);
+        let new_library = server.files.lock().unwrap()[&library_path].clone();
+        let old_library: Vec<u8> = new_library.iter().rev().copied().collect();
+        manifest.library.sha256 = sha(&old_library);
+        let old_index = index(vec![serde_json::to_value(&manifest).unwrap()]);
+        server.serve(&index_path(), sign(&old_index).into_bytes());
+        server.serve(&library_path, old_library);
+        server
+            .cut
+            .lock()
+            .unwrap()
+            .insert(library_path.clone(), new_library.len() / 2);
+        let cache = tempfile::tempdir().unwrap();
+        // The first session's download of the old library breaks off.
+        {
+            let (store, resolved) = downloading_store(&server, cache.path());
+            store.status(&language("css"));
+            wait(&resolved);
+        }
+        server.cut.lock().unwrap().clear();
+        server.serve(&index_path(), new_index);
+        server.serve(&library_path, new_library);
+
+        let (store, resolved) = downloading_store(&server, cache.path());
+        store.status(&language("css"));
+        wait(&resolved);
+
+        assert_eq!(store.status(&language("css")), LanguageStatus::Ready);
     }
 }

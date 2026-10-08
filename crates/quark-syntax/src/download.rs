@@ -9,7 +9,8 @@
 //! index's signature and each file's SHA-256 check again.
 //!
 //! Cache layout: `<cache>/<target>/index.json` (as signed) and
-//! `<cache>/<target>/<language>/<version>/<file>`.
+//! `<cache>/<target>/<language>/<version>-<digest>/<file>`, where the
+//! digest covers the SHA-256 of every file of the pack.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
@@ -54,10 +55,19 @@ impl Downloads {
         self.target_dir().join("index.json")
     }
 
+    /// Keyed by content as well as version: a pack rebuilt under the same
+    /// version gets its own directory, so a partial file of the old one is
+    /// never resumed into the new one.
     fn pack_dir(&self, manifest: &PackManifest) -> PathBuf {
+        let mut files = ring::digest::Context::new(&ring::digest::SHA256);
+        for file in manifest.files() {
+            files.update(file.sha256.to_ascii_lowercase().as_bytes());
+            files.update(b"\n");
+        }
+        let digest = pack::hex(&files.finish().as_ref()[..8]);
         self.target_dir()
             .join(&manifest.language)
-            .join(&manifest.version)
+            .join(format!("{}-{digest}", manifest.version))
     }
 
     /// A file's URL: its own, or `<language>/<path>` next to the index.
