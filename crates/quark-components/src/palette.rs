@@ -262,15 +262,16 @@ impl FuzzyMatcher {
 /// How a binding reads in a hint: `Ctrl+Shift+P`, or `Cmd+Shift+P` on
 /// macOS for `mod+shift+p`.
 pub fn binding_label(binding: &Binding) -> String {
+    binding_keys(binding).join("+")
+}
+
+/// The keys of a binding as [`binding_label`] names them, one per keycap:
+/// `["Ctrl", "Shift", "P"]`.
+pub fn binding_keys(binding: &Binding) -> Vec<String> {
     let m = binding.mods;
     let mac = cfg!(target_os = "macos");
-    let mut out = String::new();
-    let mut push = |part: &str| {
-        if !out.is_empty() {
-            out.push('+');
-        }
-        out.push_str(part);
-    };
+    let mut out = Vec::new();
+    let mut push = |part: &str| out.push(part.to_owned());
     if m.ctrl || (m.primary && !mac) {
         push("Ctrl");
     }
@@ -428,8 +429,14 @@ pub struct CommandPalette<S: ?Sized + 'static> {
     placeholder: String,
     matcher: FuzzyMatcher,
     items: Vec<PaletteItem>,
-    /// Parallel to `items`: their bindings as hint text.
+    /// Parallel to `items`: their bindings as hint text, and as keys for
+    /// keycaps.
     hints: Vec<Option<String>>,
+    hint_keys: Vec<Vec<String>>,
+    /// Panel width in points, before the theme's zoom.
+    width: f32,
+    /// Shortcuts as keycaps rather than one line of text.
+    keycaps: bool,
     sections: Vec<Section>,
     matches: Vec<Match>,
     positions: Vec<u32>,
@@ -458,6 +465,9 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
             matcher: FuzzyMatcher::default(),
             items: Vec::new(),
             hints: Vec::new(),
+            hint_keys: Vec::new(),
+            width: Sz::MODAL_LG,
+            keycaps: false,
             sections: Vec::new(),
             matches: Vec::new(),
             positions: Vec::new(),
@@ -475,6 +485,20 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
 
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
         self.placeholder = text.into();
+        self
+    }
+
+    /// The panel's width in points (at 100% zoom), narrowed to fit the
+    /// window. Defaults to 640.
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// Show each item's shortcut as keycaps (one [`kbd`](crate::kbd) per
+    /// key) instead of a line of text like `Ctrl+Shift+P`. Off by default.
+    pub fn keycaps(mut self, keycaps: bool) -> Self {
+        self.keycaps = keycaps;
         self
     }
 
@@ -530,6 +554,14 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                 .iter()
                 .map(|item| item.binding.as_ref().map(binding_label)),
         );
+        self.hint_keys.clear();
+        if self.keycaps {
+            self.hint_keys.extend(
+                self.items
+                    .iter()
+                    .map(|item| item.binding.as_ref().map(binding_keys).unwrap_or_default()),
+            );
+        }
         self.refilter();
     }
 
@@ -827,7 +859,9 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let scale = m.ui_scale();
         let (width, height) = window;
         let margin = (Sz::MODAL_MARGIN * scale).round();
-        let panel_w = (Sz::MODAL_LG * scale).min(width - margin).max(1.0);
+        let panel_w = (self.width * scale).min(width - margin).max(1.0);
+        let shadows =
+            crate::popover::Shadows::new(theme.components.modal.shadow, Shadow::MODAL, scale);
         let row_h = m.ui_row_height.round();
         let shown = self.rows.len().clamp(1, PALETTE_VISIBLE_ROWS);
         let list_h = shown as f32 * row_h;
@@ -839,7 +873,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                  bg={tc.overlay_scrim} id="palette.backdrop" test_id="palette-backdrop"
                  on:click={on_event(PaletteEvent::Dismiss)} block_mouse>
                 <div class="flex-col" w={panel_w} bg={tc.elevated_surface} border={tc.border}
-                     rounded={Rad::XL} shadow_preset={Shadow::MODAL} class="overflow-hidden"
+                     rounded={Rad::XL} shadow_preset={shadows.layers()} class="overflow-hidden"
                      on:click={NoopAction} id="palette" test_id="palette" role="dialog"
                      focus_scope="quark.palette" trap_focus={true}
                      accessibility_role={accesskit::Role::Dialog} accessibility_id="palette"
@@ -922,6 +956,10 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         // real bindings read as more bindings (New thread showed Ctrl+N and
         // the row under it Ctrl+2). Quick select still works unpainted.
         let hint = self.hints[found.item as usize].as_deref();
+        let keys = self
+            .hint_keys
+            .get(found.item as usize)
+            .filter(|keys| !keys.is_empty());
         let base = if selected { tc.text_strong } else { tc.text };
 
         view! {
@@ -940,7 +978,13 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                 if let Some(subtitle) = &item.subtitle {
                     <text class="text-xs truncate" color={tc.text_muted}>{subtitle.as_str()}</text>
                 }
-                if let Some(hint) = hint {
+                if let Some(keys) = keys {
+                    <div class="flex-row items-center shrink-0" gap={(Sp::XXS * scale).round()}>
+                        for key in keys {
+                            {crate::kbd(key.as_str(), theme)}
+                        }
+                    </div>
+                } else if let Some(hint) = hint {
                     <text class="text-xs font-mono" color={tc.text_muted}>{hint}</text>
                 }
             </div>

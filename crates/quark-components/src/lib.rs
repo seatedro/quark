@@ -70,7 +70,7 @@ pub use menu_bar::{MenuBar, MenuBarMenu};
 pub use modal::{Modal, ModalAlign};
 pub use palette::{
     CommandPalette, FuzzyMatcher, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome,
-    PaletteProvider, binding_label,
+    PaletteProvider, binding_keys, binding_label,
 };
 pub use pane_tree::{DropZone, PaneDrop, PaneId, PaneNode, PaneSplit, TabGroup};
 pub use picker::{PickerItem, PickerLabelStyle, picker_list};
