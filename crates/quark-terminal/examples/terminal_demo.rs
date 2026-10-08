@@ -93,7 +93,7 @@ mod app {
                     TerminalSignal::Title(title) => cx.window.set_title(&title),
                     TerminalSignal::Clipboard(text) => cx.window.set_clipboard_text(&text),
                     TerminalSignal::Exited(_) => cx.window.exit(),
-                    TerminalSignal::Bell => {}
+                    TerminalSignal::Bell | TerminalSignal::InputRefused(_) => {}
                 }
             }
         }

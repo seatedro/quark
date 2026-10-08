@@ -1,6 +1,7 @@
 //! [`TerminalState`]: the app-owned terminal behind [`crate::terminal_view`].
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use winit::keyboard::{ModifiersState, NamedKey};
 
 use crate::grid::{Grid, Rgb};
 use crate::input::{self, KeyPress};
-use crate::pty::{Pty, PtyCommand, PtyEvent, PtyGeometry};
+use crate::pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 use crate::vt::{
     KeyAction, KeyInput, Mode, Mods, MouseAction, MouseButton, MouseGeometry, Scroll, Terminal,
     UnsafePaste,
@@ -79,7 +80,17 @@ pub enum TerminalSignal {
     Clipboard(String),
     /// The program exited, with its code when the platform reports one.
     Exited(Option<u32>),
+    /// This many bytes of input (one key, commit, paste, or query reply)
+    /// were not sent, none of them: the program has not read so much
+    /// input sent before that holding them would pass [`INPUT_BACKLOG`].
+    InputRefused(usize),
 }
+
+/// The most input a [`TerminalState`] holds for a program that is not
+/// reading it, beyond the PTY's own [`INPUT_QUEUE`]. Input that would pass
+/// it is refused whole, never cut short, and reported as
+/// [`TerminalSignal::InputRefused`].
+pub const INPUT_BACKLOG: usize = 16 * 1024 * 1024;
 
 /// Pointer input for mouse reporting, from the app's raw input events.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -192,8 +203,9 @@ pub struct TerminalState {
     pty: Option<Pty>,
     /// Bytes for the program while no PTY is attached (tests read them).
     outbox: Vec<u8>,
-    /// Input for the PTY that did not fit its queue yet, oldest first.
-    unsent: Vec<u8>,
+    /// Input for the PTY that did not fit its queue yet, oldest first; at
+    /// most [`INPUT_BACKLOG`] bytes.
+    unsent: VecDeque<u8>,
     style: TerminalStyle,
     /// The cell metrics and what they were measured for: the scale
     /// factor's bits and the text system's font generation.
@@ -262,7 +274,7 @@ impl TerminalState {
             vt,
             pty: None,
             outbox: Vec::new(),
-            unsent: Vec::new(),
+            unsent: VecDeque::new(),
             style,
             metrics: None,
             colors: None,
@@ -454,7 +466,11 @@ impl TerminalState {
             self.outbox.extend_from_slice(bytes);
             return;
         }
-        self.unsent.extend_from_slice(bytes);
+        if self.unsent.len() + bytes.len() > INPUT_BACKLOG {
+            self.signals.push(TerminalSignal::InputRefused(bytes.len()));
+            return;
+        }
+        self.unsent.extend(bytes);
         self.send_unsent();
     }
 
@@ -464,13 +480,23 @@ impl TerminalState {
         let Some(pty) = &mut self.pty else {
             return;
         };
-        if self.unsent.is_empty() {
-            return;
+        while !self.unsent.is_empty() {
+            let (front, _) = self.unsent.as_slices();
+            let len = front.len();
+            match pty.write(front) {
+                Ok(n) => {
+                    self.unsent.drain(..n);
+                    if n < len {
+                        break;
+                    }
+                }
+                // The program has exited; its exit event is on the way.
+                Err(_) => self.unsent.clear(),
+            }
         }
-        match pty.write(&self.unsent) {
-            Ok(n) => drop(self.unsent.drain(..n)),
-            // The program has exited; its exit event is on the way.
-            Err(_) => self.unsent.clear(),
+        // Lets go of a large paste's memory once it is sent.
+        if self.unsent.capacity() > INPUT_QUEUE && self.unsent.is_empty() {
+            self.unsent = VecDeque::new();
         }
     }
 

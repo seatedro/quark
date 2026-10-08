@@ -425,6 +425,43 @@ fn a_paste_larger_than_the_input_queue_arrives_whole() {
     assert_eq!(shown, format!("R{len}"));
 }
 
+/// Input that would pass the backlog a program that stopped reading leaves
+/// behind is refused whole and reported; input that still fits is taken.
+#[cfg(unix)]
+#[test]
+fn input_past_the_backlog_is_refused_whole_and_reported() {
+    use crate::pty::INPUT_QUEUE;
+    use crate::state::INPUT_BACKLOG;
+
+    let mut t = term(40, 4);
+    let ui = std::thread::current();
+    let command = crate::PtyCommand::new("sh")
+        .arg("-c")
+        .arg("stty raw -echo; printf R; exec sleep 30");
+    t.spawn(&command, move || ui.unpark()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !screen(&mut t).starts_with('R') {
+        assert!(std::time::Instant::now() < deadline, "{}", screen(&mut t));
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+        t.read_pty();
+    }
+    let text = |len: usize| -> String {
+        (0..len)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect()
+    };
+    // The PTY's queue takes the first INPUT_QUEUE bytes; the rest waits.
+    t.paste(&text(INPUT_BACKLOG), false).unwrap();
+    assert_eq!(t.take_signals(), vec![]);
+    t.paste(&text(2 * INPUT_QUEUE), false).unwrap();
+    assert_eq!(
+        t.take_signals(),
+        vec![TerminalSignal::InputRefused(2 * INPUT_QUEUE)]
+    );
+    t.text_input("x");
+    assert_eq!(t.take_signals(), vec![]);
+}
+
 /// A terminal that was sized before the monospace family changed matches
 /// one made after it: columns, the cell under a point, and the pixel size
 /// it reports to the program.
