@@ -492,7 +492,9 @@ jobs:
         env:
           # As in the miri job; properties drop to 4 cases under cfg(miri).
           RUSTFLAGS: "-Zcrate-attr=feature(layout_for_ptr)"
-        run: cargo miri nextest run -p quark --test-threads 4 --no-fail-fast
+        # The 30k-block linearity test alone takes ~15 minutes under Miri
+        # (915 of 947 s); the master miri job still runs it.
+        run: cargo miri nextest run -p quark --test-threads 4 --no-fail-fast -E 'not test(=selection::tests::appending_30k_blocks_one_at_a_time_checks_linearly)'
 
       - name: Miri doctests
         if: success() || failure()
