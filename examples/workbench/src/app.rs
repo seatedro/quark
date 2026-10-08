@@ -577,7 +577,12 @@ impl UiApp for Workbench {
         self.runner_ms = cx.window.elapsed().as_millis() as u64;
         match message {
             Message::Flush => {
-                for text in self.announcements.drain(..) {
+                // One announcement for the batch: each replaces the last
+                // before assistive tech hears it, so completions a single
+                // frame played would otherwise speak only the final one.
+                if !self.announcements.is_empty() {
+                    let text = self.announcements.join(". ");
+                    self.announcements.clear();
                     cx.announce(text, Politeness::Polite);
                 }
             }
