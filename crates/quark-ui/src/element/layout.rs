@@ -160,6 +160,11 @@ struct Subtree {
     memo: Vec<MeasureMemo>,
     /// The size the content was last laid out at.
     laid_out_at: Option<taffy::Size<Option<f32>>>,
+    /// Whether a query at a definite width is answered by measuring the
+    /// root instead of laying the content out; see [`Self::size`]. Set
+    /// for content taffy can measure without laying any of it out, until
+    /// a query lays it out.
+    measures: bool,
 }
 
 impl Subtree {
@@ -170,6 +175,7 @@ impl Subtree {
             host: None,
             memo: Vec::new(),
             laid_out_at: None,
+            measures: false,
         }
     }
 
@@ -179,6 +185,7 @@ impl Subtree {
         self.host = None;
         self.memo.clear();
         self.laid_out_at = None;
+        self.measures = false;
     }
 
     /// Lay the content out for one parent query. Known dimensions become
@@ -212,6 +219,52 @@ impl Subtree {
         }
     }
 
+    /// The size the content takes for one parent query, as
+    /// [`Self::layout`] would lay it out.
+    ///
+    /// At a definite width the root is only measured: the content is laid
+    /// out once, at the boundary's final size, after the parent's pass.
+    /// The block root takes that width whatever height is offered, so the
+    /// content is measured with the inputs it is laid out with, and taffy
+    /// keeps the result among the content's sizes, not as its layout.
+    ///
+    /// A query at a min- or max-content width lays the content out, and so
+    /// does every later query this frame. Taffy answers a query from a
+    /// layout it kept when the layout's size is the one asked for, and the
+    /// root sizes the content at the width its intrinsic layout found:
+    /// the answer is that layout, where measuring at that width computes
+    /// afresh and can differ, as for a row whose percentage-wide items
+    /// take no space when it is sized by its content.
+    fn size(
+        &mut self,
+        known: taffy::Size<Option<f32>>,
+        available: taffy::Size<AvailableSpace>,
+        cx: &mut MeasureContext,
+    ) -> taffy::Size<f32> {
+        let width = known
+            .width
+            .map_or(available.width, AvailableSpace::Definite);
+        match self.root {
+            Some(root) if self.measures && width.is_definite() => {
+                let available = taffy::Size {
+                    width,
+                    height: known
+                        .height
+                        .map_or(available.height, AvailableSpace::Definite),
+                };
+                let size = self.engine.compute_size(root, available, cx);
+                taffy::Size {
+                    width: known.width.unwrap_or(size.width),
+                    height: known.height.unwrap_or(size.height),
+                }
+            }
+            _ => {
+                self.measures = false;
+                self.layout(known, available, cx)
+            }
+        }
+    }
+
     fn measure(
         &mut self,
         known: taffy::Size<Option<f32>>,
@@ -221,7 +274,7 @@ impl Subtree {
         if let Some(hit) = find_memo(&self.memo, known, available) {
             return hit;
         }
-        let size = self.layout(known, available, cx);
+        let size = self.size(known, available, cx);
         // Both dimensions known is the final placement, answered without a
         // memo on replay; only sizing queries need recording.
         if known.width.is_none() || known.height.is_none() {
@@ -291,6 +344,9 @@ pub struct LayoutEngine {
     replay_memo: Vec<MeasureMemo>,
     /// Cache slots whose replayed memo missed a query this frame.
     stale: Vec<u32>,
+    /// Whether a node requested this frame makes taffy lay out its
+    /// children while only measuring it; see [`lays_out_when_measured`].
+    lays_out_when_measured: bool,
 }
 
 impl Default for LayoutEngine {
@@ -313,6 +369,7 @@ impl LayoutEngine {
             live_subtrees: 0,
             replay_memo: Vec::new(),
             stale: Vec::new(),
+            lays_out_when_measured: false,
         }
     }
 
@@ -329,6 +386,7 @@ impl LayoutEngine {
             Children::Slice(ids) => ids,
             Children::Stack(mark) => &self.child_ids[mark..],
         };
+        self.lays_out_when_measured |= lays_out_when_measured(style, children);
         let Some(&node) = self.nodes.get(self.cursor) else {
             let node = self
                 .tree
@@ -456,6 +514,18 @@ impl LayoutEngine {
         content: LayoutId,
     ) -> LayoutId {
         let sub = &mut self.subtrees[index];
+        let tree = &sub.engine.tree;
+        // Measuring stands in for layout only where taffy measures the
+        // content without laying any of it out: the block root measures a
+        // flex or grid container, and nothing inside lays its children out
+        // to measure itself. A node laid out while measuring keeps that
+        // layout when the final pass is answered from the cache.
+        sub.measures = matches!(
+            tree.style(content).map(|style| style.display),
+            Ok(taffy::Display::Flex | taffy::Display::Grid)
+        ) && tree.child_count(content) > 0
+            && !sub.engine.lays_out_when_measured
+            && !layout_by_layout();
         sub.root = Some(sub.engine.request_layout(boundary_root_style(), &[content]));
         // Always set, so the host is dirtied: its content may have changed.
         let host = self.node(&style, Children::Slice(&[]), Context::Subtree(index));
@@ -536,23 +606,31 @@ impl LayoutEngine {
             stale,
             ..
         } = self;
-        tree.compute_layout_with_measure(
-            root,
-            available,
-            |known, available, _node_id, context, _style| match context {
-                Some(NodeMeasure::Measure(f)) => f(known, available),
-                Some(NodeMeasure::Text(text)) => text.measure(known, available, cx),
-                Some(NodeMeasure::Subtree(index)) => subtrees[*index].measure(known, available, cx),
-                Some(NodeMeasure::Replay { memo, slot }) => {
-                    find_memo(&replay_memo[memo.clone()], known, available).unwrap_or_else(|| {
-                        stale.push(*slot);
-                        taffy::Size::ZERO
-                    })
-                }
-                None => taffy::Size::ZERO,
-            },
-        )
+        tree.compute_layout_with_measure(root, available, |known, available, _, context, _| {
+            measure_node(context, known, available, subtrees, replay_memo, stale, cx)
+        })
         .expect("taffy compute_layout failed");
+    }
+
+    /// The size [`Self::compute`] would give `root`, without laying out
+    /// anything; unrounded.
+    fn compute_size(
+        &mut self,
+        root: LayoutId,
+        available: taffy::Size<AvailableSpace>,
+        cx: &mut MeasureContext,
+    ) -> taffy::Size<f32> {
+        let Self {
+            tree,
+            subtrees,
+            replay_memo,
+            stale,
+            ..
+        } = self;
+        tree.compute_size_with_measure(root, available, |known, available, _, context, _| {
+            measure_node(context, known, available, subtrees, replay_memo, stale, cx)
+        })
+        .expect("taffy compute_size failed")
     }
 
     /// After the pass: lay every subtree out at its host's final size, and
@@ -673,6 +751,7 @@ impl LayoutEngine {
         self.child_ids.clear();
         self.replay_memo.clear();
         self.stale.clear();
+        self.lays_out_when_measured = false;
     }
 
     /// Nodes created this frame, across subtrees: the layout work a frame
@@ -685,6 +764,57 @@ impl LayoutEngine {
                 .map(|sub| sub.engine.node_count())
                 .sum::<usize>()
     }
+}
+
+/// Size of a node with `context` for a taffy query.
+fn measure_node(
+    context: Option<&mut NodeMeasure>,
+    known: taffy::Size<Option<f32>>,
+    available: taffy::Size<AvailableSpace>,
+    subtrees: &mut [Subtree],
+    replay_memo: &[MeasureMemo],
+    stale: &mut Vec<u32>,
+    cx: &mut MeasureContext,
+) -> taffy::Size<f32> {
+    match context {
+        Some(NodeMeasure::Measure(f)) => f(known, available),
+        Some(NodeMeasure::Text(text)) => text.measure(known, available, cx),
+        Some(NodeMeasure::Subtree(index)) => subtrees[*index].measure(known, available, cx),
+        Some(NodeMeasure::Replay { memo, slot }) => {
+            find_memo(&replay_memo[memo.clone()], known, available).unwrap_or_else(|| {
+                stale.push(*slot);
+                taffy::Size::ZERO
+            })
+        }
+        None => taffy::Size::ZERO,
+    }
+}
+
+/// Whether taffy lays out the children of a node with `style` while it
+/// only measures the node: a block container lays out the blocks and
+/// leaves in it, and a flex or grid item aligned on its baseline is laid
+/// out to find the baseline.
+fn lays_out_when_measured(style: &taffy::Style, children: &[LayoutId]) -> bool {
+    (style.display == taffy::Display::Block && !children.is_empty())
+        || style.align_items == Some(taffy::AlignItems::Baseline)
+        || style.align_self == Some(taffy::AlignSelf::Baseline)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Whether subtrees answer every query by laying their content out,
+    /// as before they could measure it: the differential tests' reference.
+    static LAYOUT_BY_LAYOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn layout_by_layout() -> bool {
+    LAYOUT_BY_LAYOUT.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn layout_by_layout() -> bool {
+    false
 }
 
 /// Children of a requested node: a slice, or the engine's child stack
@@ -726,6 +856,7 @@ fn boundary_root_style() -> taffy::Style {
 mod tests {
     use super::*;
     use crate::test_alloc;
+    use quark_text::TextQuery;
     use taffy::{Dimension, LengthPercentage, LengthPercentageAuto};
 
     fn sized(width: f32, height: f32) -> taffy::Style {
@@ -869,5 +1000,363 @@ mod tests {
     fn warmed_frame_that_adds_nodes_allocates_nothing() {
         let frames = [(10.0, false), (10.0, true), (10.0, false), (10.0, true)];
         assert_eq!(last_frame_allocations(&frames), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Differential: subtrees that measure against subtrees that lay out
+    // -----------------------------------------------------------------------
+
+    fn pct(value: f32) -> Dimension {
+        Dimension::percent(value)
+    }
+
+    fn column() -> taffy::Style {
+        flex(taffy::FlexDirection::Column)
+    }
+
+    fn row() -> taffy::Style {
+        flex(taffy::FlexDirection::Row)
+    }
+
+    fn margins(left: f32, right: f32, top: f32, bottom: f32) -> taffy::Rect<LengthPercentageAuto> {
+        taffy::Rect {
+            left: LengthPercentageAuto::length(left),
+            right: LengthPercentageAuto::length(right),
+            top: LengthPercentageAuto::length(top),
+            bottom: LengthPercentageAuto::length(bottom),
+        }
+    }
+
+    /// Text that wraps to the width layout gives it, as `text()` lays out.
+    fn text(engine: &mut LayoutEngine, cx: &mut MeasureContext, content: &str) -> LayoutId {
+        let style = quark_text::TextStyle::new(14.0).line_height(18.0);
+        let query = TextQuery::new(content, style);
+        let unwrapped = cx.layout(&query).expect("vendored fonts shape");
+        engine.request_text_layout(&taffy::Style::default(), TextMeasure::new(unwrapped, 18.0))
+    }
+
+    /// A cache boundary with `style` around the content `build` makes.
+    fn boundary(
+        engine: &mut LayoutEngine,
+        cx: &mut MeasureContext,
+        style: taffy::Style,
+        build: impl FnOnce(&mut LayoutEngine, &mut MeasureContext) -> LayoutId,
+    ) -> LayoutId {
+        let index = engine.begin_subtree();
+        let content = build(engine.subtree_mut(index), cx);
+        engine.finish_subtree(index, style, content)
+    }
+
+    /// A message row as a transcript caches it: a column the boundary's
+    /// width, an author line, and wrapped body text.
+    fn message(engine: &mut LayoutEngine, cx: &mut MeasureContext, body: &str) -> LayoutId {
+        boundary(engine, cx, taffy::Style::default(), |engine, cx| {
+            let author = text(engine, cx, "Author");
+            let body = text(engine, cx, body);
+            let style = taffy::Style {
+                size: taffy::Size {
+                    width: pct(1.0),
+                    height: Dimension::auto(),
+                },
+                padding: taffy::Rect::length(4.0_f32),
+                ..column()
+            };
+            engine.request_layout(style, &[author, body])
+        })
+    }
+
+    const BODY: &str = "The quick brown fox jumps over the lazy dog while the band plays on";
+
+    /// Messages in a scrolling column, one of them edited every frame.
+    fn transcript(engine: &mut LayoutEngine, cx: &mut MeasureContext, frame: usize) -> LayoutId {
+        let mark = engine.begin_children();
+        for i in 0..6 {
+            let body = if i == 3 {
+                &BODY[..20 + 7 * (frame % 6)]
+            } else {
+                &BODY[..10 * (i + 1)]
+            };
+            let id = message(engine, cx, body);
+            engine.push_child(id);
+        }
+        let style = taffy::Style {
+            size: taffy::Size {
+                width: pct(1.0),
+                height: pct(1.0),
+            },
+            overflow: taffy::Point {
+                x: taffy::Overflow::Visible,
+                y: taffy::Overflow::Scroll,
+            },
+            ..column()
+        };
+        engine.finish_children(&style, mark)
+    }
+
+    /// Boundaries growing and shrinking in a row: the row asks each for its
+    /// min-content and max-content width as well as definite ones.
+    fn grow_and_shrink(
+        engine: &mut LayoutEngine,
+        cx: &mut MeasureContext,
+        frame: usize,
+    ) -> LayoutId {
+        let items = [
+            (1.0, 1.0, &BODY[..30]),
+            (2.0, 3.0, BODY),
+            (0.0, 1.0, &BODY[..12 + frame % 3]),
+        ];
+        let mark = engine.begin_children();
+        for (grow, shrink, body) in items {
+            let style = taffy::Style {
+                flex_grow: grow,
+                flex_shrink: shrink,
+                min_size: taffy::Size {
+                    width: Dimension::length(40.0),
+                    height: Dimension::auto(),
+                },
+                ..Default::default()
+            };
+            let id = boundary(engine, cx, style, |engine, cx| {
+                let words = text(engine, cx, body);
+                let icon = engine.request_layout(sized(16.0, 16.0), &[]);
+                let style = taffy::Style {
+                    gap: taffy::Size::length(4.0_f32),
+                    margin: margins(2.0, 3.0, 1.0, 0.0),
+                    ..row()
+                };
+                engine.request_layout(style, &[icon, words])
+            });
+            engine.push_child(id);
+        }
+        engine.finish_children(
+            &taffy::Style {
+                gap: taffy::Size::length(6.0_f32),
+                ..row()
+            },
+            mark,
+        )
+    }
+
+    /// Columns that wrap under a max height, in boundaries that grow in a
+    /// column whose height is the window's.
+    fn wrapping_columns(
+        engine: &mut LayoutEngine,
+        cx: &mut MeasureContext,
+        frame: usize,
+    ) -> LayoutId {
+        let mark = engine.begin_children();
+        for i in 0..3 {
+            let style = taffy::Style {
+                flex_grow: i as f32,
+                ..Default::default()
+            };
+            let id = boundary(engine, cx, style, |engine, cx| {
+                let mark = engine.begin_children();
+                for j in 0..4 + (frame + i) % 3 {
+                    let id = text(engine, cx, &BODY[..8 + 6 * j]);
+                    engine.push_child(id);
+                }
+                let style = taffy::Style {
+                    flex_wrap: taffy::FlexWrap::Wrap,
+                    max_size: taffy::Size {
+                        width: Dimension::auto(),
+                        height: Dimension::length(60.0),
+                    },
+                    gap: taffy::Size::length(2.0_f32),
+                    ..column()
+                };
+                engine.finish_children(&style, mark)
+            });
+            engine.push_child(id);
+        }
+        let style = taffy::Style {
+            size: taffy::Size {
+                width: pct(1.0),
+                height: pct(1.0),
+            },
+            ..column()
+        };
+        engine.finish_children(&style, mark)
+    }
+
+    /// A boundary inside a boundary, an absolute overlay, and sizes,
+    /// padding, and margins in percentages.
+    fn nested_and_percentages(
+        engine: &mut LayoutEngine,
+        cx: &mut MeasureContext,
+        frame: usize,
+    ) -> LayoutId {
+        let half = taffy::Style {
+            size: taffy::Size {
+                width: pct(0.5),
+                height: Dimension::auto(),
+            },
+            ..Default::default()
+        };
+        let outer = boundary(engine, cx, half, |engine, cx| {
+            let inner = boundary(engine, cx, taffy::Style::default(), |engine, cx| {
+                let words = text(engine, cx, &BODY[..25 + 5 * (frame % 4)]);
+                let bar = engine.request_layout(
+                    taffy::Style {
+                        size: taffy::Size {
+                            width: pct(0.3),
+                            height: Dimension::length(6.0),
+                        },
+                        flex_shrink: 0.0,
+                        ..Default::default()
+                    },
+                    &[],
+                );
+                engine.request_layout(row(), &[words, bar])
+            });
+            let beside = boundary(engine, cx, taffy::Style::default(), |engine, cx| {
+                let words = text(engine, cx, &BODY[..14 + 3 * (frame % 3)]);
+                engine.request_layout(column(), &[words])
+            });
+            let note = text(engine, cx, &BODY[30..]);
+            let line = engine.request_layout(row(), &[beside, note]);
+            let label = text(engine, cx, &BODY[..18]);
+            let badge = engine.request_layout(
+                taffy::Style {
+                    position: taffy::Position::Absolute,
+                    inset: taffy::Rect {
+                        left: LengthPercentageAuto::auto(),
+                        right: LengthPercentageAuto::length(0.0),
+                        top: LengthPercentageAuto::percent(0.1),
+                        bottom: LengthPercentageAuto::auto(),
+                    },
+                    ..sized(10.0, 10.0)
+                },
+                &[],
+            );
+            let style = taffy::Style {
+                padding: taffy::Rect {
+                    left: LengthPercentage::percent(0.05),
+                    right: LengthPercentage::length(3.0),
+                    top: LengthPercentage::length(2.0),
+                    bottom: LengthPercentage::percent(0.02),
+                },
+                margin: taffy::Rect {
+                    left: LengthPercentageAuto::percent(0.1),
+                    right: LengthPercentageAuto::length(0.0),
+                    top: LengthPercentageAuto::length(4.0),
+                    bottom: LengthPercentageAuto::length(4.0),
+                },
+                ..column()
+            };
+            engine.request_layout(style, &[label, inner, line, badge])
+        });
+        let fit = boundary(engine, cx, taffy::Style::default(), |engine, cx| {
+            let words = text(engine, cx, &BODY[..40]);
+            let style = taffy::Style {
+                max_size: taffy::Size {
+                    width: pct(0.8),
+                    height: Dimension::auto(),
+                },
+                ..column()
+            };
+            engine.request_layout(style, &[words])
+        });
+        let fitted = engine.request_layout(
+            taffy::Style {
+                align_items: Some(taffy::AlignItems::FlexStart),
+                ..column()
+            },
+            &[fit],
+        );
+        let side = text(engine, cx, BODY);
+        engine.request_layout(column(), &[outer, fitted, side])
+    }
+
+    /// Content that measuring cannot stand in for: text as the boundary's
+    /// whole content, and a row aligned on baselines.
+    fn laid_out_while_measured(
+        engine: &mut LayoutEngine,
+        cx: &mut MeasureContext,
+        frame: usize,
+    ) -> LayoutId {
+        let leaf = boundary(engine, cx, taffy::Style::default(), |engine, cx| {
+            text(engine, cx, &BODY[..30 + frame % 5])
+        });
+        let baselines = boundary(engine, cx, taffy::Style::default(), |engine, cx| {
+            let a = text(engine, cx, &BODY[..20]);
+            let b = text(engine, cx, &BODY[20..]);
+            let style = taffy::Style {
+                align_items: Some(taffy::AlignItems::Baseline),
+                ..row()
+            };
+            engine.request_layout(style, &[a, b])
+        });
+        engine.request_layout(column(), &[leaf, baselines])
+    }
+
+    /// Every node's rounded bounds and unrounded box, then each subtree's
+    /// with the measures it answered, depth first.
+    fn geometry(engine: &LayoutEngine, out: &mut Vec<String>) {
+        for &node in &engine.nodes[..engine.cursor] {
+            let exact = engine.tree.unrounded_layout(node);
+            out.push(format!(
+                "{:?} {:?} {:?}",
+                engine.layout_bounds(node),
+                exact.location,
+                exact.size
+            ));
+        }
+        for (i, sub) in engine.subtrees[..engine.live_subtrees].iter().enumerate() {
+            out.push(format!("subtree {i}: {:?}", sub.memo));
+            geometry(&sub.engine, out);
+        }
+    }
+
+    type Scene = fn(&mut LayoutEngine, &mut MeasureContext, usize) -> LayoutId;
+
+    /// Lays each scene out over frames of changing window sizes and
+    /// content, once with subtrees that measure and once with subtrees that
+    /// lay out for every query, and compares the geometry of every frame.
+    #[test]
+    fn measured_subtrees_lay_out_as_laid_out_ones() {
+        let scenes: [(&str, Scene); 5] = [
+            ("transcript", transcript),
+            ("grow and shrink", grow_and_shrink),
+            ("wrapping columns", wrapping_columns),
+            ("nested and percentages", nested_and_percentages),
+            ("laid out while measured", laid_out_while_measured),
+        ];
+        let windows = [
+            (480.0, 400.0),
+            (300.0, 400.0),
+            (300.0, 250.0),
+            (300.0, 250.0),
+            (480.0, 400.0),
+            (137.5, 400.0),
+            (90.0, 120.0),
+            (800.0, 600.0),
+        ];
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        let mut cx = MeasureContext {
+            text: &mut text,
+            layouts: &mut layouts,
+        };
+        for (name, scene) in scenes {
+            let mut engines = [LayoutEngine::new(), LayoutEngine::new()];
+            for (frame, &(width, height)) in windows.iter().enumerate() {
+                let [expected, actual] = [true, false].map(|by_layout| {
+                    LAYOUT_BY_LAYOUT.with(|flag| flag.set(by_layout));
+                    let engine = &mut engines[usize::from(!by_layout)];
+                    engine.clear();
+                    let root = scene(engine, &mut cx, frame);
+                    engine.compute_layout(root, width, height, &mut cx);
+                    let mut out = Vec::new();
+                    geometry(engine, &mut out);
+                    out
+                });
+                LAYOUT_BY_LAYOUT.with(|flag| flag.set(false));
+                assert_eq!(actual.len(), expected.len(), "{name}, frame {frame}");
+                for (i, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(actual, expected, "{name}, frame {frame}, entry {i}");
+                }
+            }
+        }
     }
 }
