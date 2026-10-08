@@ -18,6 +18,7 @@ use quark_app::quark_ui::theme::Theme;
 use quark_components::{Toast as ToastView, ToastKind as ToastViewKind, ToastQueue};
 
 use crate::contracts::{Toast, ToastKind};
+use crate::design::recipes::{self, TextRole};
 use crate::design::tokens;
 use crate::overlays::{Action, Pick};
 
@@ -25,7 +26,7 @@ use crate::overlays::{Action, Pick};
 pub const MAX_TOASTS: usize = 3;
 /// How long a toast's Undo stays available.
 pub const UNDO_MS: u64 = 8_000;
-pub const TOOLTIP_DELAY_MS: u64 = 500;
+pub use tokens::TOOLTIP_DELAY_MS;
 /// Gap between a tooltip and the element it describes.
 const TOOLTIP_GAP: f32 = 6.0;
 const TOOLTIP_MAX_WIDTH: f32 = 320.0;
@@ -177,24 +178,27 @@ impl Tooltip {
 /// Nothing in it takes clicks or focus.
 fn tooltip(label: &str, bounds: Rect, window: (f32, f32), theme: &Theme) -> AnyElement {
     let colors = &theme.colors;
-    let (size, line) = tokens::TYPE_META;
-    let height = line + 2.0 * tokens::SPACE_4;
+    let pt = |points: f32| recipes::pt(theme, points);
+    let (size, line) = TextRole::Meta.scaled(theme);
+    let (pad_x, pad_y, gap, max_w) = (
+        pt(tokens::SPACE_8),
+        pt(tokens::SPACE_4),
+        pt(TOOLTIP_GAP),
+        pt(TOOLTIP_MAX_WIDTH),
+    );
+    let height = line + 2.0 * pad_y;
     // An estimate for keeping it on screen; the text sets the real width.
-    let width =
-        (label.chars().count() as f32 * size * 0.6 + 2.0 * tokens::SPACE_8).min(TOOLTIP_MAX_WIDTH);
-    let left = bounds
-        .x
-        .min(window.0 - width - tokens::SPACE_8)
-        .max(tokens::SPACE_8);
-    let below = bounds.y + bounds.height + TOOLTIP_GAP;
+    let width = (label.chars().count() as f32 * size * 0.6 + 2.0 * pad_x).min(max_w);
+    let left = bounds.x.min(window.0 - width - pad_x).max(pad_x);
+    let below = bounds.y + bounds.height + gap;
     let top = if below + height > window.1 {
-        bounds.y - TOOLTIP_GAP - height
+        bounds.y - gap - height
     } else {
         below
     };
     view! {
-        <div class="absolute" left={left} top={top} max_w={TOOLTIP_MAX_WIDTH} z_index={500}
-             px={tokens::SPACE_8} py={tokens::SPACE_4} rounded={tokens::RADIUS_ROW}
+        <div class="absolute" left={left} top={top} max_w={max_w} z_index={500}
+             px={pad_x} py={pad_y} rounded={pt(tokens::RADIUS_ROW)}
              bg={colors.elevated_surface} border={colors.border}
              accessibility_role={accesskit::Role::Tooltip} aria-label={label.to_owned()}
              test_id="tooltip">
