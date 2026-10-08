@@ -1,0 +1,12 @@
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90m~/src/atlas[39m
+
+ [32m✓[39m src/trips.test.ts [2m(4 tests)[22m [90m12ms[39m
+ [32m✓[39m src/commands.test.ts [2m(6 tests)[22m [90m9ms[39m
+   [32m✓[39m commandForKey resolves mod+n to trip.new
+   [32m✓[39m commandForKey ignores keys typed into inputs
+   [32m✓[39m commandForKey matches ? without a modifier
+ [32m✓[39m src/App.test.tsx [2m(3 tests)[22m [90m31ms[39m
+
+[2m Test Files [22m [1m[32m3 passed[39m[22m[90m (3)[39m
+[2m      Tests [22m [1m[32m13 passed[39m[22m[90m (13)[39m
+[2m   Duration [22m 412ms

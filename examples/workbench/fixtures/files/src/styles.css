@@ -1,0 +1,12 @@
+.atlas {
+  display: grid;
+  grid-template-rows: 44px 1fr;
+  height: 100vh;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px;
+  align-items: center;
+}

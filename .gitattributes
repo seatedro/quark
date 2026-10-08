@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Raw terminal bytes: CR LF line ends are part of the fixture.
+*.ansi binary

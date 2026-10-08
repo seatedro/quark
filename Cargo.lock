@@ -3158,6 +3158,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "quark-workbench"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "quark",
+ "quark-app",
+ "quark-components",
+ "quark-diff",
+ "quark-syntax",
+ "quark-terminal",
+ "quark-text",
+ "quark-ui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
