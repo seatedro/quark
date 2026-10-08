@@ -170,6 +170,7 @@ pub(crate) const KEYWORDS: &[Keyword] = &[
     kw("font-bold", "bold", "", On::Text),
     kw("font-mono", "mono", "", On::Text),
     kw("truncate", "truncate", "", On::Text),
+    kw("whitespace-nowrap", "no_wrap", "", On::Text),
     kw("leading-none", "line_height", "1.0", On::Text),
     kw("leading-tight", "line_height", "1.25", On::Text),
     kw("leading-snug", "line_height", "1.375", On::Text),

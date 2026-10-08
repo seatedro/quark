@@ -50,6 +50,8 @@ enum A11yParent {
 /// growing them.
 #[derive(Default)]
 pub(super) struct PaintRecord {
+    /// The boundary's size when recorded: its content was laid out to it.
+    size: (f32, f32),
     scene: Vec<Primitive>,
     hit_bounds: Vec<Rect>,
     hit_clip: Vec<Rect>,
@@ -158,6 +160,7 @@ pub(super) struct Recording {
     row: u32,
     hash: u64,
     origin: (f32, f32),
+    size: (f32, f32),
     hit_start: usize,
     /// Scroll watches before the subtree's.
     scroll_start: usize,
@@ -180,6 +183,7 @@ impl Recording {
             row,
             hash,
             origin: (bounds.x, bounds.y),
+            size: (bounds.width, bounds.height),
             hit_start: cx.begin_hit_recording(),
             scroll_start: cx.scroll_watches().len(),
             z: cx.current_z_index(),
@@ -204,6 +208,7 @@ impl Recording {
     pub(super) fn end_prepaint(&mut self, cx: &mut ElementContext) {
         let mut record = take_record(cx, self.row);
         record.clear();
+        record.size = self.size;
         self.end_phase(&mut record, cx);
         let (ox, oy) = self.origin;
         let (ids, clips) = cx.recorded_hits(self.hit_start);
@@ -397,7 +402,8 @@ fn offset_scrollbar(track: &ScrollbarTrack, dx: f32, dy: f32) -> ScrollbarTrack 
 }
 
 /// Re-insert `row`'s hits at the boundary's new origin. False when the
-/// row cannot replay here: another z layer, or the pointer over its hits.
+/// row cannot replay here: another size, another z layer, or the pointer
+/// over its hits.
 pub(super) fn replay_prepaint(row: u32, bounds: Bounds, cx: &mut ElementContext) -> bool {
     let (ox, oy) = (bounds.x, bounds.y);
     let Some(cache) = cx.cache.as_deref() else {
@@ -408,7 +414,12 @@ pub(super) fn replay_prepaint(row: u32, bounds: Bounds, cx: &mut ElementContext)
         (Some(extent), Some((x, y))) => extent.offset(ox, oy).contains(x, y),
         _ => false,
     };
-    if pointer_over || cache.inherited[r].z != cx.current_z_index() {
+    // A parent that fixes both of the boundary's dimensions places it
+    // without a measure query the memo could miss, so a new size shows
+    // up only here; content laid out (and text wrapped) at the old size
+    // must not replay.
+    let resized = cache.paint[r].size != (bounds.width, bounds.height);
+    if resized || pointer_over || cache.inherited[r].z != cx.current_z_index() {
         return false;
     }
     let mut record = take_record(cx, row);

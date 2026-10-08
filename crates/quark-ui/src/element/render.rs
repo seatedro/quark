@@ -65,7 +65,7 @@ fn layout_root(
     for pass in 0..cache::LAYOUT_PASSES {
         cache::begin_layout_pass(cx, pass);
         let root_id = root.request_layout(engine, cx);
-        engine.compute_layout(root_id, width, height);
+        engine.compute_layout(root_id, width, height, &mut cx.measure_context());
         engine.drain_stale(&mut stale);
         if stale.is_empty() {
             return;

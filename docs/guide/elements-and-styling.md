@@ -29,6 +29,23 @@ tree, table, and diff view. Components
 emit the app's actions through mappings the caller supplies and know
 nothing of the app's types.
 
+## Text wrapping
+
+`text(s)` wraps to the width layout gives it. It is as wide as its
+text, up to the width its container offers, and as tall as the lines it
+wraps into, so in a column it wraps at the column's width, and in a row it
+shrinks beside its siblings down to its widest word. Lines break between
+words; a word wider than a box forced narrower than it breaks between
+characters. Give a fixed-width sibling such as an icon `flex_shrink_0()`
+so the text shrinks instead of it.
+
+To opt out, `.no_wrap()` (class `whitespace-nowrap`) keeps one line at the
+text's natural width, `.truncate()` keeps one line and ends it with an
+ellipsis where its box is narrower, and `.wrap_width(w)` wraps at `w`
+points whatever the container's width, and can overflow it. Before
+automatic wrapping, text kept its natural width unless given a wrap
+width; code that relied on that needs `.no_wrap()`.
+
 ## Styling
 
 `quark_ui::style::Styled` gives every element the same builder methods:

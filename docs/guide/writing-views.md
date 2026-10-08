@@ -220,6 +220,7 @@ tables (`QUARK_BLESS=1 cargo test -p quark-macros --lib` rewrites it).
 | `font-bold` | `.bold()` | `<text>` |
 | `font-mono` | `.mono()` | `<text>` |
 | `truncate` | `.truncate()` | `<text>` |
+| `whitespace-nowrap` | `.no_wrap()` | `<text>` |
 | `leading-none` | `.line_height(1.0)` | `<text>` |
 | `leading-tight` | `.line_height(1.25)` | `<text>` |
 | `leading-snug` | `.line_height(1.375)` | `<text>` |
