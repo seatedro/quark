@@ -1001,7 +1001,11 @@ impl ShapeLine {
         {
             let words = &self.spans[span_index].words;
             for i in starting_word..ending_word + usize::from(ending_glyph != 0) {
-                let start = if i == starting_word { starting_glyph } else { 0 };
+                let start = if i == starting_word {
+                    starting_glyph
+                } else {
+                    0
+                };
                 let end = if i == ending_word {
                     ending_glyph
                 } else {
@@ -1819,7 +1823,11 @@ impl ShapeLine {
                     process_range(range.clone());
                 }
             }
-            debug_assert_eq!(glyphs.len(), glyph_count, "glyphs reserved for the visual line");
+            debug_assert_eq!(
+                glyphs.len(),
+                glyph_count,
+                "glyphs reserved for the visual line"
+            );
 
             let mut line_height_opt: Option<f32> = None;
             for glyph in &glyphs {

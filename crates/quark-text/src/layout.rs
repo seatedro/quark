@@ -935,9 +935,9 @@ impl TextLayout {
         }
 
         let mut next_glyph = 0;
-        for run in 0..run_count {
-            let (gs, ge) = (r[run].glyph_start as usize, r[run].glyph_end as usize);
-            let line = r[run].line as usize;
+        for (run, record) in r.iter().enumerate() {
+            let (gs, ge) = (record.glyph_start as usize, record.glyph_end as usize);
+            let line = record.line as usize;
             let same_line = gs < ge
                 && ge <= glyph_count
                 && line < line_count
