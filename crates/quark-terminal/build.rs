@@ -14,7 +14,10 @@
 //!
 //! Ghostty's build runs with `-Demit-lib-vt`, which installs one static
 //! archive with its SIMD dependencies (simdutf, highway) and compiler-rt
-//! folded in; it needs only libc at link time.
+//! folded in; it needs only libc at link time. On Linux and Windows
+//! build.rs then renames compiler-rt's copies of C library functions in
+//! the archive so programs use the C library's (see build/compiler_rt.rs);
+//! Ghostty's build does the same for macOS.
 //!
 //! The archive is cached in the target directory per commit, Zig target,
 //! optimize mode, Zig version, and (for MSVC) C runtime, so feature changes
@@ -52,6 +55,8 @@
 //! `QUARK_GHOSTTY_VT_LIB_DIR` supplies the archive. On Windows, Zig finds
 //! the MSVC headers and Windows SDK through the Visual Studio installation.
 
+#[path = "build/compiler_rt.rs"]
+mod compiler_rt;
 #[path = "build/ghostty_deps.rs"]
 mod ghostty_deps;
 
@@ -69,6 +74,10 @@ use ghostty_deps::{Source, needed, parse_dependencies};
 const GHOSTTY_COMMIT: &str = "81681158b1f04b9900c3e58ba6db790384f5b6f5";
 const GHOSTTY_HASH: &str = "ghostty-1.3.2-dev-5UdBC4gaYwVruUDKYxdTyGQF6L_6LjdKdJCbx7L4iR5V";
 
+/// Part of the cache key; bump it when build.rs changes the archive it
+/// installs without changing anything else in the key.
+const ARCHIVE_REVISION: u32 = 2;
+
 /// What to tell a user whose build failed.
 const HELP: &str = "To build without network access, set QUARK_GHOSTTY_VT_SOURCE_DIR to a \
 directory of pre-fetched packages, or QUARK_GHOSTTY_VT_LIB_DIR to a directory holding a \
@@ -76,6 +85,7 @@ prebuilt archive (see crates/quark-terminal/build.rs)";
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build/compiler_rt.rs");
     println!("cargo:rerun-if-changed=build/ghostty_deps.rs");
     for var in [
         "ZIG",
@@ -131,7 +141,7 @@ fn build_with_zig(os: &str, archive: &str) -> PathBuf {
         .map_or_else(|| out.clone(), Path::to_path_buf)
         .join("ghostty-vt");
     let short = &GHOSTTY_COMMIT[..12];
-    let mut key = format!("{short}-{target}-{optimize}-zig{zig_version}");
+    let mut key = format!("{short}-{target}-{optimize}-zig{zig_version}-r{ARCHIVE_REVISION}");
     if target.ends_with("-msvc") {
         // Rust picks the C runtime per build (`+crt-static`). The archive
         // does not depend on it today (see the top of this file), but an
@@ -193,6 +203,9 @@ fn build_with_zig(os: &str, archive: &str) -> PathBuf {
         "quark-terminal: zig build installed no lib/{archive} in {}",
         staging.display()
     );
+    if !matches!(os, "macos" | "ios") {
+        compiler_rt::prefer_libc(&staging.join("lib").join(archive), &zig, os == "windows");
+    }
     // A leftover entry without the archive (from before installs were
     // atomic) would block the rename.
     if !lib_dir.join(archive).is_file() {

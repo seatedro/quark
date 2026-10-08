@@ -750,14 +750,7 @@ impl Terminal {
         wrapped: bool,
         colors: Colors,
     ) -> bool {
-        // Compared cell by cell rather than as slices: slice equality calls
-        // `bcmp`, and the one libghostty-vt's bundled compiler-rt exports
-        // (which the link picks over libc's) compares a byte at a time,
-        // about nine times slower on a row.
-        if row.wrapped != wrapped
-            || row.cells.len() != cells.len()
-            || !row.cells.iter().zip(cells).all(|(a, b)| a == b)
-        {
+        if row.wrapped != wrapped || row.cells != cells {
             return false;
         }
         if !row.looked_up {
