@@ -727,7 +727,7 @@ impl DockState {
 
     /// Shown with its content: has panels, and is not hidden.
     pub fn is_visible(&self, region: DockRegion) -> bool {
-        if self.panels(region).is_empty() {
+        if !self.roots[region.index()].has_panels() {
             return false;
         }
         let (split, pane) = region.place();
@@ -1685,12 +1685,12 @@ impl<'a> Dock<'a> {
         ]
     }
 
-    /// `title` names each panel's tab; `content` builds an active panel's
-    /// content for the size it gets.
-    pub fn build(
+    /// `title` names each panel's tab (a `&'static str` or a `String`);
+    /// `content` builds an active panel's content for the size it gets.
+    pub fn build<T: Title>(
         self,
         theme: &Theme,
-        title: impl Fn(PanelId) -> String,
+        title: impl Fn(PanelId) -> T,
         mut content: impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
         if self.host != HostId::MAIN {
@@ -1702,15 +1702,16 @@ impl<'a> Dock<'a> {
 
         let strip = Self::strip_height(theme);
         let mut hits = Vec::new();
+        let mut groups = Vec::new();
         for region in DockRegion::ALL {
             if region != DockRegion::Center && !state.is_visible(region) {
                 continue;
             }
-            let mut groups = Vec::new();
+            groups.clear();
             state
                 .root(region)
                 .layout(rects[region.index()], &mut groups);
-            for (pane, rect) in groups {
+            for &(pane, rect) in &groups {
                 let Some(group) = state.group(pane) else {
                     continue;
                 };
@@ -1776,10 +1777,10 @@ impl<'a> Dock<'a> {
     }
 
     /// A floating host: its one tree filling the dock.
-    fn build_floating(
+    fn build_floating<T: Title>(
         self,
         theme: &Theme,
-        title: impl Fn(PanelId) -> String,
+        title: impl Fn(PanelId) -> T,
         mut content: impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
         let (width, height) = self.size;
@@ -1830,13 +1831,13 @@ impl<'a> Dock<'a> {
         }
     }
 
-    fn region(
+    fn region<T: Title>(
         &self,
         theme: &Theme,
         region: DockRegion,
         size: (f32, f32),
         drag: &Rc<DragContext>,
-        title: &impl Fn(PanelId) -> String,
+        title: &impl Fn(PanelId) -> T,
         content: &mut impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
         if region != DockRegion::Center && !self.state.is_visible(region) {
@@ -1854,14 +1855,14 @@ impl<'a> Dock<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn node(
+    fn node<T: Title>(
         &self,
         theme: &Theme,
         region: DockRegion,
         node: &PaneNode,
         (width, height): (f32, f32),
         drag: &Rc<DragContext>,
-        title: &impl Fn(PanelId) -> String,
+        title: &impl Fn(PanelId) -> T,
         content: &mut impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
         let split = match node {
@@ -2005,14 +2006,14 @@ impl<'a> Dock<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn group(
+    fn group<T: Title>(
         &self,
         theme: &Theme,
         region: DockRegion,
         group: &TabGroup,
         (width, height): (f32, f32),
         drag: &Rc<DragContext>,
-        title: &impl Fn(PanelId) -> String,
+        title: &impl Fn(PanelId) -> T,
         content: &mut impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
         let colors = &theme.colors;
@@ -2051,7 +2052,7 @@ impl<'a> Dock<'a> {
                     <div w={width} h={body_height} class="overflow-clip"
                          accessibility_id={format!("dock:pane:{}:panel", group.id.0)}
                          accessibility_role={Role::TabPanel} role="tabpanel"
-                         aria-label={title(active)}>
+                         aria-label={title(active).into()}>
                         {content(active, (width, body_height))}
                     </div>
                 }
@@ -2112,14 +2113,14 @@ impl<'a> Dock<'a> {
         .into_any()
     }
 
-    fn tab_strip(
+    fn tab_strip<T: Title>(
         &self,
         theme: &Theme,
         region: DockRegion,
         group: &TabGroup,
         (width, height): (f32, f32),
         drag: &Rc<DragContext>,
-        title: &impl Fn(PanelId) -> String,
+        title: &impl Fn(PanelId) -> T,
     ) -> AnyElement {
         use std::hash::{Hash, Hasher};
         let tab_width = self.tab_width_for(self.tabs_width(width), group.panels.len());
@@ -2137,7 +2138,7 @@ impl<'a> Dock<'a> {
         group.panels.hash(&mut hasher);
         for panel in &group.panels {
             self.state.confined.contains(panel).hash(&mut hasher);
-            title(*panel).hash(&mut hasher);
+            title(*panel).as_ref().hash(&mut hasher);
         }
         let policies = self.state.policies.map(|p| (p.can_leave, p.accepts));
         (policies, &self.move_keys, self.grips, drag.hash).hash(&mut hasher);
@@ -2151,7 +2152,7 @@ impl<'a> Dock<'a> {
                 region,
                 panels: group.panels.clone(),
                 active: group.active,
-                titles: group.panels.iter().map(|&p| title(p)).collect(),
+                titles: group.panels.iter().map(|&p| title(p).into()).collect(),
                 confined: group
                     .panels
                     .iter()
@@ -2197,6 +2198,13 @@ impl<'a> Dock<'a> {
             .into_any()
     }
 }
+
+/// A panel title [`Dock::build`] takes: read for hashing every frame, and
+/// owned only when a tab strip is rebuilt, so `&'static str` titles cost
+/// no allocation in a steady frame.
+pub trait Title: AsRef<str> + Into<String> {}
+
+impl<T: AsRef<str> + Into<String>> Title for T {}
 
 /// Everything a tab strip shows and does, gathered when it changes and
 /// shared with its cached build closure, so a steady frame replays the

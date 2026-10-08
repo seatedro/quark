@@ -511,7 +511,7 @@ impl UiApp for Workbench {
         if !main {
             dock_el = dock_el.host(host);
         }
-        let dock_el = dock_el.build(theme, |id| panel_title(id).to_owned(), &mut content);
+        let dock_el = dock_el.build(theme, panel_title, &mut content);
         // Narrow layouts: the sidebar as a dismissible overlay.
         let sidebar_overlay = overlay_open.then(|| {
             let w = tokens::SIDEBAR_WIDTH.min(size.0);
