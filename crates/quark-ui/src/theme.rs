@@ -966,12 +966,18 @@ mod tests {
                     }
                 }
             }
-            // Text inputs and the diff view select with the accent at
-            // `Alpha::SOFT` over the field or editor.
-            for bg in ["surface", "editor_surface"] {
-                let selection = c("accent").with_alpha(crate::design::Alpha::SOFT);
+            // Text inputs, documents, and the diff view select with the
+            // accent at `Alpha::SOFT`: plain text in fields, code in
+            // editors and documents.
+            let selection = c("accent").with_alpha(crate::design::Alpha::SOFT);
+            for (fgs, bg) in [
+                (&["text"][..], "surface"),
+                (&["text"][..], "element_background"),
+                (CODE, "editor_surface"),
+                (CODE, "background"),
+            ] {
                 let composited = composite(selection, c(bg));
-                for fg in CODE {
+                for fg in fgs {
                     check(fg, &format!("selection over {bg}"), composited, 7.0);
                 }
             }
