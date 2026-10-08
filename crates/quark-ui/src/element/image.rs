@@ -81,24 +81,44 @@ impl Element for SvgIcon {
         let color = cx
             .icon_color_override()
             .unwrap_or_else(|| self.color.unwrap_or(cx.theme.colors.icon));
-        let scale = cx.theme.metrics.ui_scale();
-        let px_size = (self.size * scale).ceil() as u32;
+        // Rasterize at the window's device pixels, not at points: a bitmap
+        // the size of the logical rect is stretched (and blurred) by the
+        // scale factor when the scene turns physical.
+        let (rect, px_w, px_h) = device_pixel_rect(bounds, cx.scale_factor);
+        let px_size = px_w.max(px_h);
         let key = quark_render::icons::cache_key(self.svg, px_size, color);
         let (rgba, w, h) = quark_render::icons::rasterize_svg(self.svg, px_size, color);
-        let snapped = Bounds {
-            x: bounds.x.round(),
-            y: bounds.y.round(),
-            width: bounds.width.round(),
-            height: bounds.height.round(),
-        };
         scene.image(quark_render::ImagePrimitive {
-            rect: snapped,
+            rect,
             width: w,
             height: h,
             rgba,
             cache_key: key,
         });
     }
+}
+
+/// `bounds` snapped to whole device pixels at `scale`, as the logical rect
+/// that [`quark_render::scene::Primitive::to_physical`] turns back into
+/// exactly those pixels, and its size in pixels (at least 1 x 1). A bitmap
+/// of that size then draws 1:1, at any scale factor.
+fn device_pixel_rect(bounds: Bounds, scale: f32) -> (Bounds, u32, u32) {
+    let s = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let (x0, y0) = ((bounds.x * s).round(), (bounds.y * s).round());
+    let w = ((bounds.x + bounds.width) * s).round() - x0;
+    let h = ((bounds.y + bounds.height) * s).round() - y0;
+    let (w, h) = (w.max(1.0), h.max(1.0));
+    let rect = Bounds {
+        x: x0 / s,
+        y: y0 / s,
+        width: w / s,
+        height: h / s,
+    };
+    (rect, w as u32, h as u32)
 }
 
 impl IntoAnyElement for SvgIcon {
@@ -176,16 +196,11 @@ impl Element for RasterImage {
         _prepaint_state: &mut (),
         _engine: &LayoutEngine,
         scene: &mut Scene,
-        _cx: &mut ElementContext,
+        cx: &mut ElementContext,
     ) {
-        let snapped = Bounds {
-            x: bounds.x.round(),
-            y: bounds.y.round(),
-            width: bounds.width.round(),
-            height: bounds.height.round(),
-        };
+        let (rect, _, _) = device_pixel_rect(bounds, cx.scale_factor);
         scene.image(quark_render::ImagePrimitive {
-            rect: snapped,
+            rect,
             width: self.src_width,
             height: self.src_height,
             rgba: self.rgba.clone(),
@@ -725,5 +740,78 @@ mod animated_tests {
         };
         let frames = decode_animation(&two_frame_gif(), limits).expect("decodes");
         assert_eq!((frames.len(), frames.truncated()), (1, true));
+    }
+}
+
+#[cfg(test)]
+mod svg_icon_tests {
+    use super::*;
+    use crate::theme::Theme;
+    use quark::reactive::SignalStore;
+
+    const SQUARE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" fill="currentColor"/></svg>"#;
+
+    /// Paint a 16 pt icon `inset` points from the window's top left at
+    /// `scale`, and return its bitmap size and where it lands, in pixels.
+    fn painted_icon(scale: f32, inset: f32) -> ((u32, u32), quark_render::Rect) {
+        let mut text = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut layouts = quark_text::LayoutCache::default();
+        let store = SignalStore::new();
+        let theme = Theme::default_dark();
+        let mut cx = ElementContext::new(&theme, scale, &mut text, &mut layouts, None, &store);
+        let mut scene = Scene::default();
+        let mut root = div()
+            .w(100.0)
+            .h(100.0)
+            .pl(inset)
+            .pt(inset)
+            .child(svg_icon(SQUARE, 16.0))
+            .into_any();
+        render_element(&mut root, &mut scene, &mut cx, 100.0, 100.0);
+        scene
+            .primitives
+            .into_iter()
+            .find_map(|mut p| {
+                p.to_physical(scale);
+                match p {
+                    quark_render::Primitive::Image(image) => {
+                        Some(((image.width, image.height), image.rect))
+                    }
+                    _ => None,
+                }
+            })
+            .expect("the icon paints an image")
+    }
+
+    // Catches icons rasterized at their size in points, which the scale
+    // factor then stretches into a blurry bitmap: the bitmap must cover the
+    // pixels it lands on one to one.
+    #[test]
+    fn icon_bitmap_matches_its_device_pixels() {
+        for (scale, inset, pixels) in [
+            (1.0, 0.0, 16),
+            (1.25, 0.0, 20),
+            (1.5, 0.0, 24),
+            (1.5, 3.3, 24),
+            (2.0, 0.0, 32),
+            (2.0, 0.25, 32),
+        ] {
+            let ((w, h), rect) = painted_icon(scale, inset);
+            assert_eq!(
+                (w, h),
+                (pixels, pixels),
+                "bitmap at {scale}x, inset {inset}"
+            );
+            assert_eq!(
+                (rect.width, rect.height),
+                (pixels as f32, pixels as f32),
+                "drawn size at {scale}x, inset {inset}"
+            );
+            assert_eq!(
+                (rect.x.fract(), rect.y.fract()),
+                (0.0, 0.0),
+                "on the pixel grid at {scale}x, inset {inset}"
+            );
+        }
     }
 }
