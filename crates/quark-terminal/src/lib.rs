@@ -65,6 +65,8 @@ mod view;
 pub mod vt;
 
 #[cfg(test)]
+mod libc_tests;
+#[cfg(test)]
 mod tests;
 // build.rs's manifest parsing, here so its unit tests run with the crate's.
 // Counts allocations for the budget tests.
