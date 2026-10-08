@@ -237,7 +237,17 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         chunk_primitive(&card, [0.0, 0.0]),
         Primitive::LayerEnd,
     ]);
-    let cases: [(&str, Scene, Scene); 6] = [
+    let cases: [(&str, Scene, Scene); 8] = [
+        (
+            "unchanged",
+            framed(&card, [10.0, 10.0], just),
+            framed(&card, [10.0, 10.0], just),
+        ),
+        (
+            "clipped where it was",
+            framed(&card, [10.0, 10.0], just),
+            framed(&card, [10.0, 10.0], clipped),
+        ),
         (
             "moved",
             framed(&card, [10.0, 10.0], just),
@@ -274,6 +284,60 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
     }
 }
 
+/// White text at `rect`, 40 px.
+fn big_text(text: &mut TextSystem, rect: Rect, s: &str) -> Primitive {
+    let layout = text
+        .layout(&TextParams::new(s.to_owned(), TextStyle::new(40.0)))
+        .expect("layout");
+    Primitive::TextRun(TextPrimitive {
+        rect,
+        layout: ShapedText::new(Arc::new(layout)),
+        color: color(255, 255, 255),
+    })
+}
+
+// Text that draws its kept vertices again must not outlive its glyphs: once
+// the atlas forgets them (a font reset clears it; a full atlas evicts), the
+// next glyphs prepared take their place, and the kept text would show them.
+#[test]
+fn kept_text_draws_again_after_the_atlas_forgets_its_glyphs() {
+    let (w, h) = SIZE;
+    let mut text = test_text();
+    let kept = chunk(vec![big_text(
+        &mut text,
+        rect(0.0, 0.0, 190.0, 50.0),
+        "Kept",
+    )]);
+    let mut first = Scene::default();
+    first.chunk(&kept, [4.0, 4.0]);
+    let mut second = first.clone();
+    second.push(big_text(&mut text, rect(4.0, 90.0, 190.0, 50.0), "Zing"));
+    let Some(mut renderer) = gpu_renderer(w, h) else {
+        return;
+    };
+    renderer
+        .render_to_rgba(&first, &mut text, w, h)
+        .expect("render");
+    // What a text system replacement does before the next frame.
+    renderer.atlas.clear();
+    let drawn = renderer
+        .render_to_rgba(&second, &mut text, w, h)
+        .expect("render");
+    let expected = gpu_renderer(w, h)
+        .expect("renderer")
+        .render_to_rgba(&second, &mut text, w, h)
+        .expect("render");
+    let rows = |rgba: &[u8]| rgba[..(w * 60 * 4) as usize].to_vec();
+    assert!(
+        rows(&expected).iter().any(|&b| b > 200),
+        "nothing kept drew"
+    );
+    assert!(
+        rows(&drawn) == rows(&expected),
+        "kept text drew other glyphs"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Measurement scenes
 // ---------------------------------------------------------------------------
@@ -281,53 +345,65 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
 const TERMINAL_ROWS: usize = 50;
 const CELL_H: f32 = 16.0;
 
-/// A terminal as quark-terminal paints it: the grid chunk holds one chunk
-/// per row (a row background, two cell backgrounds, an 80-column line in
-/// four colors), and the cursor is a chunk of its own.
-fn terminal_scene(text: &mut TextSystem) -> Scene {
+/// One terminal row at its origin: a row background, two cell
+/// backgrounds, and an 80-column line in four colors.
+fn terminal_row(text: &mut TextSystem, line: &str) -> Arc<SceneChunk> {
     let palette: Arc<[quark::Color]> = Arc::from([
         color(120, 220, 120),
         color(230, 230, 230),
         color(240, 200, 90),
     ]);
-    let rows = (0..TERMINAL_ROWS)
+    let spans = [0..4, 5..11, 12..line.len()]
+        .into_iter()
+        .map(|range| TextSpan {
+            range,
+            weight: None,
+            style: None,
+            kind: None,
+        })
+        .collect::<Vec<_>>();
+    let params = TextParams::new(line.to_owned(), TextStyle::new(13.0)).spans(spans);
+    let layout = ShapedText::new(Arc::new(text.layout(&params).expect("layout")));
+    chunk(vec![
+        Primitive::Rect(RectPrimitive {
+            rect: rect(0.0, 0.0, 640.0, CELL_H),
+            color: color(20, 20, 24),
+        }),
+        Primitive::Rect(RectPrimitive {
+            rect: rect(40.0, 0.0, 8.0, CELL_H),
+            color: color(60, 60, 90),
+        }),
+        Primitive::Rect(RectPrimitive {
+            rect: rect(96.0, 0.0, 24.0, CELL_H),
+            color: color(90, 40, 40),
+        }),
+        Primitive::RichTextRun(RichTextPrimitive {
+            rect: rect(0.0, 0.0, 640.0, CELL_H),
+            layout,
+            default_color: color(200, 200, 200),
+            span_colors: palette,
+        }),
+    ])
+}
+
+fn terminal_rows(text: &mut TextSystem) -> Vec<Arc<SceneChunk>> {
+    (0..TERMINAL_ROWS)
         .map(|i| {
             let line = format!("{i:04} output {i} of a build step, compiling crate number {i:<30}");
-            let spans = [0..4, 5..11, 12..line.len()]
-                .into_iter()
-                .map(|range| TextSpan {
-                    range,
-                    weight: None,
-                    style: None,
-                    kind: None,
-                })
-                .collect::<Vec<_>>();
-            let params = TextParams::new(line.as_str(), TextStyle::new(13.0)).spans(spans);
-            let layout = ShapedText::new(Arc::new(text.layout(&params).expect("layout")));
-            let row = chunk(vec![
-                Primitive::Rect(RectPrimitive {
-                    rect: rect(0.0, 0.0, 640.0, CELL_H),
-                    color: color(20, 20, 24),
-                }),
-                Primitive::Rect(RectPrimitive {
-                    rect: rect(40.0, 0.0, 8.0, CELL_H),
-                    color: color(60, 60, 90),
-                }),
-                Primitive::Rect(RectPrimitive {
-                    rect: rect(96.0, 0.0, 24.0, CELL_H),
-                    color: color(90, 40, 40),
-                }),
-                Primitive::RichTextRun(RichTextPrimitive {
-                    rect: rect(0.0, 0.0, 640.0, CELL_H),
-                    layout,
-                    default_color: color(200, 200, 200),
-                    span_colors: palette.clone(),
-                }),
-            ]);
-            chunk_primitive(&row, [0.0, i as f32 * CELL_H])
+            terminal_row(text, &line)
         })
-        .collect();
-    let grid = chunk(rows);
+        .collect()
+}
+
+/// A terminal as quark-terminal paints it: the grid chunk holds one chunk
+/// per row, and the cursor is a chunk of its own.
+fn terminal_scene(rows: &[Arc<SceneChunk>]) -> Scene {
+    let grid = chunk(
+        rows.iter()
+            .enumerate()
+            .map(|(i, row)| chunk_primitive(row, [0.0, i as f32 * CELL_H]))
+            .collect(),
+    );
     let cursor = chunk(vec![Primitive::Rect(RectPrimitive {
         rect: rect(0.0, 0.0, 8.0, CELL_H),
         color: color(230, 230, 230),
@@ -430,65 +506,55 @@ fn frame_cost(renderer: &mut Renderer, scene: &Scene, text: &mut TextSystem) -> 
     (micros, flattened, allocations)
 }
 
-/// Median CPU time (all, flattening) and allocations of a repeated frame
-/// of `scene`.
-fn repeated_cost(scene: &Scene, text: &mut TextSystem) -> Option<(u64, u64, u64)> {
+/// Median CPU time (all, flattening) and allocations of a frame, drawing
+/// `scenes` in turn.
+fn cycled_cost(scenes: &[Scene], text: &mut TextSystem) -> Option<(u64, u64, u64)> {
     let mut renderer = Renderer::new_headless(800, 820, 1.0).ok()?;
-    for _ in 0..3 {
+    for scene in scenes.iter().cycle().take(4) {
         frame_cost(&mut renderer, scene, text);
     }
-    let mut samples: Vec<(u64, u64, u64)> = (0..40)
-        .map(|_| frame_cost(&mut renderer, scene, text))
+    let mut samples: Vec<(u64, u64, u64)> = scenes
+        .iter()
+        .cycle()
+        .take(40)
+        .map(|scene| frame_cost(&mut renderer, scene, text))
         .collect();
     samples.sort_unstable();
-    let mut text_us: Vec<u64> = (0..40)
-        .map(|_| {
-            renderer.flatten(scene, 800, 820);
-            let frames = std::mem::take(&mut renderer.frames);
-            let active = renderer.active_frames;
-            let mut steps = 0;
-            for frame in &mut renderer.frames.iter_mut().chain([]) {
-                let _ = frame;
-            }
-            let mut frames = frames;
-            for frame in frames[..active].iter_mut() {
-                build_batches(&frame.flat, &mut frame.batches);
-                frame.text_base = steps;
-                steps += frame.batches.text_steps;
-            }
-            renderer.fit_text_renderers(steps);
-            let started = Instant::now();
-            renderer.prepare_frame_text(&frames[..active], text);
-            let us = started.elapsed().as_micros() as u64;
-            renderer.frames = frames;
-            renderer.atlas.trim();
-            us
-        })
-        .collect();
-    text_us.sort_unstable();
-    println!("  text preparation {} us", text_us[20]);
     Some(samples[samples.len() / 2])
 }
 
-/// Prints the CPU cost of a repeated frame of a cached terminal and a
-/// cached list, drawn from chunks and from the same scenes expanded. Run
-/// with `--ignored --nocapture` on a GPU (lavapipe works).
+/// Prints the CPU cost of frames of a cached terminal and a cached list,
+/// drawn from chunks and from the same scenes expanded: repeated, with one
+/// terminal row changing every frame, and with the list scrolling by a
+/// pixel every frame. Run with `--ignored --nocapture` on a GPU (lavapipe
+/// works).
 #[test]
 #[ignore = "measurement, prints a report"]
 fn report_chunk_frame_cost() {
     let mut text = test_text();
-    let scenes = [
-        ("terminal", terminal_scene(&mut text)),
-        ("list", list_scene(&mut text, 0.0)),
+    let rows = terminal_rows(&mut text);
+    let mut changed = rows.clone();
+    changed[10] = terminal_row(&mut text, &format!("{:<80}", "0010 a changed row"));
+    let cases = [
+        ("terminal, repeated", vec![terminal_scene(&rows)]),
+        (
+            "terminal, a row changes",
+            vec![terminal_scene(&rows), terminal_scene(&changed)],
+        ),
+        ("list, repeated", vec![list_scene(&mut text, 0.0)]),
+        (
+            "list, scrolling",
+            vec![list_scene(&mut text, 0.0), list_scene(&mut text, 1.0)],
+        ),
     ];
-    for (name, scene) in &scenes {
-        for (mode, scene) in [("expanded", expanded(scene)), ("chunked", scene.clone())] {
-            let Some((micros, flattened, allocations)) = repeated_cost(&scene, &mut text) else {
+    for (name, scenes) in &cases {
+        let flat: Vec<Scene> = scenes.iter().map(expanded).collect();
+        for (mode, scenes) in [("expanded", &flat), ("chunked", scenes)] {
+            let Some((micros, flattened, allocations)) = cycled_cost(scenes, &mut text) else {
                 return;
             };
             println!(
-                "{name:<9} {mode:<9} {:>4} primitives {micros:>5} us ({flattened:>4} us flattening) {allocations:>3} allocations",
-                scene.len()
+                "{name:<24} {mode:<9} {micros:>5} us ({flattened:>3} us flattening) {allocations:>3} allocations"
             );
         }
     }

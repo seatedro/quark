@@ -5,7 +5,7 @@ use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
 /// Glyph atlas work counters, from [`Renderer::text_atlas_stats`].
 pub use glyphon::AtlasStats as TextAtlasStats;
-use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
+use glyphon::{Cache, Resolution, SwashCache, TextAtlas, Viewport};
 use quark_text::TextSystem;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -21,10 +21,11 @@ use crate::shaders::{
 };
 #[path = "chunks.rs"]
 mod chunks;
+#[path = "text_runs.rs"]
+mod text_runs;
 
 use crate::text::{
     GlyphOwner, RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width,
-    positioned_glyphs, prepare_text_areas,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -850,8 +851,9 @@ pub struct Renderer {
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
-    /// One text renderer per text segment of the frame.
-    text_renderers: Vec<TextRenderer>,
+    /// One text renderer per text run of the frame, kept with what it
+    /// prepared.
+    text_runs: text_runs::TextRuns,
     /// False when this frame's glyphs did not fit the atlas; its text
     /// segments are skipped.
     text_ready: bool,
@@ -1012,9 +1014,7 @@ impl Renderer {
         let texture_pool = TexturePool::new(shared.format);
         let swash_cache = SwashCache::new();
         let viewport = Viewport::new(&device, &shared.glyph_cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let atlas = TextAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
 
         Self {
             device,
@@ -1040,7 +1040,7 @@ impl Renderer {
             swash_cache,
             viewport,
             atlas,
-            text_renderers: vec![text_renderer],
+            text_runs: text_runs::TextRuns::default(),
             text_ready: true,
             text_path: TextPath::default(),
             recolored: RecoloredBuffers::default(),
@@ -1458,6 +1458,12 @@ impl Renderer {
         // it draws.
         expanded.clear();
         self.expanded = expanded;
+        let mut runs = 0;
+        for frame in &mut self.frames[..self.active_frames] {
+            build_batches(&frame.flat, &mut frame.batches);
+            frame.text_base = runs;
+            runs += frame.batches.text_runs.len();
+        }
     }
 
     /// Upload, prepare, and encode the flattened frame into `encoder`,
@@ -1498,11 +1504,7 @@ impl Renderer {
         }
         let segments = self.upload_segments();
 
-        let mut text_steps = 0;
         for frame in frames.iter_mut() {
-            build_batches(&frame.flat, &mut frame.batches);
-            frame.text_base = text_steps;
-            text_steps += frame.batches.text_steps;
             let (device, queue) = (&self.device, &self.queue);
             let pool = &mut self.instance_buffer_pool;
             let batches = &frame.batches;
@@ -1523,13 +1525,10 @@ impl Renderer {
         }
         self.prepare_layer_viewports(frames);
 
-        // Prepare every text segment before recording any pass.
-        self.fit_text_renderers(text_steps);
+        // Prepare every text run before recording any pass.
         self.text_ready = self.prepare_frame_text(frames, text);
         if self.text_ready && self.text_path == TextPath::Positioned {
-            for renderer in &mut self.text_renderers[..text_steps] {
-                renderer.upload(&self.device, &self.queue);
-            }
+            self.text_runs.upload(&self.device, &self.queue);
         }
 
         for frame in frames.iter_mut() {
@@ -1703,24 +1702,6 @@ impl Renderer {
         Some(texture.bind_group.clone())
     }
 
-    /// Keep one text renderer per text segment of this frame. Renderers left
-    /// over from a frame with many more segments are dropped, so one busy
-    /// frame does not hold their vertex buffers forever.
-    fn fit_text_renderers(&mut self, segments: usize) {
-        let wanted = segments.max(1);
-        if self.text_renderers.len() > wanted * 2 {
-            self.text_renderers.truncate(wanted);
-        }
-        while self.text_renderers.len() < wanted {
-            self.text_renderers.push(TextRenderer::new(
-                &mut self.atlas,
-                &self.device,
-                wgpu::MultisampleState::default(),
-                None,
-            ));
-        }
-    }
-
     /// Prepare every text segment of `frames`, retrying once with the atlas
     /// unpinned. False when this frame's glyphs do not fit and its text is
     /// skipped. On the positioned path the vertices still need uploading.
@@ -1731,14 +1712,14 @@ impl Renderer {
             self.recolored
                 .prepare(frames.iter().map(|frame| &frame.flat.rich_texts[..]), text);
         }
-        match self.prepare_text(frames, text) {
+        match self.prepare_text_runs(frames, text, true) {
             Ok(()) => true,
             Err(_) => {
                 // The atlas is full of glyphs pinned by this frame. Unpin
-                // them and prepare every segment again, since the retry may
-                // evict glyphs that earlier segments' vertices point at.
+                // them and prepare every run again, since the retry may
+                // evict glyphs that earlier runs' vertices point at.
                 self.atlas.trim();
-                match self.prepare_text(frames, text) {
+                match self.prepare_text_runs(frames, text, false) {
                     Ok(()) => true,
                     Err(error) => {
                         // This frame's glyphs do not fit even alone. Draw
@@ -1746,62 +1727,12 @@ impl Renderer {
                         // unpin so the next frame starts from a clean atlas.
                         tracing::warn!("skipping text for one frame: {error}");
                         self.atlas.trim();
+                        self.text_runs.forget();
                         false
                     }
                 }
             }
         }
-    }
-
-    /// Prepare each text segment of every target into its own renderer.
-    fn prepare_text(
-        &mut self,
-        frames: &[TargetFrame],
-        text: &mut TextSystem,
-    ) -> Result<(), glyphon::PrepareError> {
-        for (index, frame) in frames.iter().enumerate() {
-            let flat = &frame.flat;
-            let viewport = match index {
-                0 => &self.viewport,
-                i => &self.layer_viewports[i - 1],
-            };
-            let mut text_index = frame.text_base;
-            for step in &flat.steps {
-                let DrawStep::Batch {
-                    kind: PrimKind::Text,
-                    items,
-                    rich,
-                } = step
-                else {
-                    continue;
-                };
-                let texts = &flat.texts[items.start as usize..items.end as usize];
-                let rich_texts = &flat.rich_texts[rich.start as usize..rich.end as usize];
-                let renderer = &mut self.text_renderers[text_index];
-                match self.text_path {
-                    TextPath::Positioned => renderer.prepare_glyphs(
-                        &self.device,
-                        &self.queue,
-                        text.raster_font_system(),
-                        &mut self.atlas,
-                        viewport,
-                        positioned_glyphs(texts, rich_texts),
-                        &mut self.swash_cache,
-                    )?,
-                    TextPath::Buffer => renderer.prepare(
-                        &self.device,
-                        &self.queue,
-                        text.raster_font_system(),
-                        &mut self.atlas,
-                        viewport,
-                        prepare_text_areas(texts, rich_texts, &self.recolored),
-                        &mut self.swash_cache,
-                    )?,
-                }
-                text_index += 1;
-            }
-        }
-        Ok(())
     }
 
     /// Acquire offscreen targets and upload blur instances when the frame has
@@ -2067,11 +1998,13 @@ impl Renderer {
                     return Ok(());
                 }
                 pass.set_scissor_rect(0, 0, width, height);
-                self.text_renderers[t.frame.text_base + cmds.start].render(
-                    &self.atlas,
-                    t.glyph_viewport,
-                    pass,
-                )?;
+                for run in cmds {
+                    self.text_runs.renderer(t.frame.text_base + run).render(
+                        &self.atlas,
+                        t.glyph_viewport,
+                        pass,
+                    )?;
+                }
                 return Ok(());
             }
         };
@@ -2204,7 +2137,7 @@ struct TargetFrame {
     height: u32,
     /// The pooled texture an offscreen layer renders into this frame.
     layer: Option<OffscreenTarget>,
-    /// Text renderer of this target's first text step.
+    /// Index of this target's first text run among the frame's.
     text_base: usize,
     // Held only while the frame is recorded:
     buffers: FrameBuffers,
@@ -2775,6 +2708,8 @@ pub(super) struct ClippedText {
     pub(super) key: DrawKey,
     pub(super) primitive: TextPrimitive,
     pub(super) clip: Rect,
+    /// Id of the innermost chunk it was drawn from, zero outside chunks.
+    pub(super) run: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2785,6 +2720,8 @@ pub(super) struct ClippedRichText {
     /// Inline layer opacity, applied to each glyph's color as it is
     /// prepared so a fade allocates no faded copy of the span colors.
     pub(super) alpha: f32,
+    /// Id of the innermost chunk it was drawn from, zero outside chunks.
+    pub(super) run: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -3149,6 +3086,7 @@ fn flatten_scene_into(
                     alpha: fl.alpha,
                     bands: &bands,
                     segment_base: 0,
+                    run: 0,
                 };
                 for part in parts.into_iter().flatten() {
                     emit(part, &draw, fl, out);
@@ -3173,6 +3111,7 @@ fn flatten_scene_into(
                     alpha: fl.alpha,
                     bands: &[],
                     segment_base: 0,
+                    run: 0,
                 };
                 // Icons already on the GPU skip rasterizing.
                 let rasterize = |key| !image_cache.contains_key(&key);
@@ -3310,6 +3249,9 @@ struct Draw<'a> {
     /// segment starts are relative to in the frame's segments.
     bands: &'a [PathInstance],
     segment_base: u32,
+    /// Id of the chunk it is drawn from, zero outside chunks: texts of one
+    /// chunk prepare their glyphs together.
+    run: u64,
 }
 
 /// The draw of a primitive other than a path, a chunk, or a state change,
@@ -3581,6 +3523,7 @@ fn emit(drawn: Drawn, draw: &Draw<'_>, fl: &mut Flattener, out: &mut FlattenedSc
                     ..text
                 },
                 clip: intersection,
+                run: draw.run,
             });
         }
         Drawn::RichText(text) => {
@@ -3594,6 +3537,7 @@ fn emit(drawn: Drawn, draw: &Draw<'_>, fl: &mut Flattener, out: &mut FlattenedSc
                 primitive: RichTextPrimitive { rect, ..text },
                 clip: intersection,
                 alpha,
+                run: draw.run,
             });
         }
         Drawn::Blur(blur) => {
@@ -4028,10 +3972,18 @@ struct FrameBatches {
     quad_cmds: Vec<QuadDrawCommand>,
     image_cmds: Vec<ImageDrawCommand>,
     layer_cmds: Vec<LayerDrawCommand>,
-    /// Per step: a range into `quad_cmds` or `image_cmds`, or for text the
-    /// index of its text renderer (`start`).
+    /// Per step: a range into `quad_cmds`, `image_cmds`, `layer_cmds`, or
+    /// `text_runs`.
     step_cmds: Vec<std::ops::Range<u32>>,
-    text_steps: usize,
+    text_runs: Vec<TextRunItems>,
+}
+
+/// Texts of a step that prepare and draw together: plain runs, then rich
+/// ones, as the step orders them. A run holds texts of one chunk only.
+#[derive(Debug, Clone)]
+struct TextRunItems {
+    plain: std::ops::Range<u32>,
+    rich: std::ops::Range<u32>,
 }
 
 fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
@@ -4064,12 +4016,12 @@ fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
     out.image_cmds.clear();
     out.layer_cmds.clear();
     out.step_cmds.clear();
-    out.text_steps = 0;
+    out.text_runs.clear();
 
     for step in &flat.steps {
         let range = match step {
             DrawStep::Blur(_) => 0..0,
-            DrawStep::Batch { kind, items, .. } => {
+            DrawStep::Batch { kind, items, rich } => {
                 let (start, end) = (items.start as usize, items.end as usize);
                 match kind {
                     PrimKind::Shadow => push_clip_batches(
@@ -4127,15 +4079,47 @@ fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
                         }
                         first as u32..out.image_cmds.len() as u32
                     }
-                    PrimKind::Text => {
-                        out.text_steps += 1;
-                        (out.text_steps - 1) as u32..out.text_steps as u32
-                    }
+                    PrimKind::Text => push_text_runs(flat, items, rich, &mut out.text_runs),
                 }
             }
         };
         out.step_cmds.push(range);
     }
+}
+
+/// Append the runs of a text step, split where the chunk its texts come
+/// from changes, and return the range of runs added.
+fn push_text_runs(
+    flat: &FlattenedScene,
+    items: &std::ops::Range<u32>,
+    rich: &std::ops::Range<u32>,
+    out: &mut Vec<TextRunItems>,
+) -> std::ops::Range<u32> {
+    let first = out.len();
+    let mut current = None;
+    let plain = flat.texts[items.start as usize..items.end as usize].iter();
+    for (index, text) in (items.start..).zip(plain) {
+        match out.last_mut() {
+            Some(run) if current == Some(text.run) => run.plain.end = index + 1,
+            _ => out.push(TextRunItems {
+                plain: index..index + 1,
+                rich: rich.start..rich.start,
+            }),
+        }
+        current = Some(text.run);
+    }
+    let rich_texts = flat.rich_texts[rich.start as usize..rich.end as usize].iter();
+    for (index, text) in (rich.start..).zip(rich_texts) {
+        match out.last_mut() {
+            Some(run) if current == Some(text.run) => run.rich.end = index + 1,
+            _ => out.push(TextRunItems {
+                plain: items.end..items.end,
+                rich: index..index + 1,
+            }),
+        }
+        current = Some(text.run);
+    }
+    first as u32..out.len() as u32
 }
 
 /// Append scissor batches for consecutive instances that share a clip and
@@ -4715,7 +4699,7 @@ mod tests {
         let flat = flatten_scene(&scene, rect(0.0, 0.0, 200.0, 100.0), &ImageCache::new());
         let mut recolored = RecoloredBuffers::default();
         recolored.prepare([&flat.rich_texts[..]], &mut text);
-        let areas = prepare_text_areas(&flat.texts, &flat.rich_texts, &recolored);
+        let areas = crate::text::prepare_text_areas(&flat.texts, &flat.rich_texts, &recolored);
         assert_eq!(areas.count(), 1);
     }
 

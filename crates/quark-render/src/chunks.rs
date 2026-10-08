@@ -299,6 +299,7 @@ fn draw(
                     alpha,
                     bands: &entry.bands,
                     segment_base,
+                    run: id,
                 };
                 emit(drawn.clone(), &draw, fl, out);
             }
