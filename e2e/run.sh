@@ -76,6 +76,11 @@ run_one() {
   unset WAYLAND_DISPLAY
   export QUARK_E2E_APP=$example QUARK_E2E_APP_LOG=$out/app.log QUARK_E2E_ARTIFACTS=$out
 
+  # A private live theme directory the workbench watches; specs write
+  # theme files there to test reloading. Harmless for other apps.
+  mkdir -p "$out/themes"
+  export QUARK_WORKBENCH_THEME_DIR=$out/themes
+
   # The spec's own app environment (`# quark-e2e-env: KEY=VALUE`).
   local line name
   local env_line='^# quark-e2e-env: ([A-Za-z_][A-Za-z0-9_]*=.*)$'
