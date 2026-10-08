@@ -5,6 +5,7 @@ use std::sync::Arc;
 use quark::scene::FontStyle;
 use quark::{FontKind, FontWeight};
 
+use crate::epoch::FontEpoch;
 use crate::layout::{TextError, TextLayout, TextParams, TextQuery};
 use crate::system::TextSystem;
 
@@ -99,7 +100,9 @@ pub struct LayoutCache {
     lookups: u64,
     max_idle_frames: u64,
     max_entries: usize,
-    font_generation: u64,
+    /// The fonts the entries were shaped with. A lookup with another
+    /// system, or after its fonts changed, clears the cache first.
+    fonts: Option<FontEpoch>,
     stats: LayoutCacheStats,
     /// Evicted layouts, refilled by later misses.
     pool: LayoutPool,
@@ -127,7 +130,7 @@ impl LayoutCache {
             lookups: 0,
             max_idle_frames,
             max_entries: DEFAULT_MAX_ENTRIES,
-            font_generation: 0,
+            fonts: None,
             stats: LayoutCacheStats::default(),
             pool: LayoutPool::default(),
             stamps: Vec::new(),
@@ -228,9 +231,10 @@ impl LayoutCache {
         params: &TextQuery,
         shared: Option<&TextParams>,
     ) -> Result<Arc<TextLayout>, TextError> {
-        if system.generation() != self.font_generation {
+        let fonts = system.font_epoch();
+        if self.fonts != Some(fonts) {
             self.clear();
-            self.font_generation = system.generation();
+            self.fonts = Some(fonts);
         }
         let content = match self.content_hashes.get(&text_id(params.text)) {
             Some(&content) => content,
@@ -559,18 +563,46 @@ mod tests {
         assert_eq!(format!("{:?}", held.glyphs()), glyphs);
     }
 
+    // Every way the fonts change must reach the cache, or it hands out
+    // layouts shaped with the old fonts. A system put in another's place
+    // starts at the same generation, and a loaded font can be the family
+    // the settings already name.
     #[test]
-    fn layout_cache_font_settings_change_relayouts() {
-        // Its own system: changing fonts on the shared one would race other
-        // tests.
-        let mut sys = TextSystem::vendored_only(&FontSettings::default());
-        let mut cache = LayoutCache::new(2);
-        let before = cache.layout(&mut sys, &params(150.0)).expect("layout");
-        sys.set_font_settings(&FontSettings {
-            ui_family: "Inter".into(),
-            ..FontSettings::default()
-        });
-        let after = cache.layout(&mut sys, &params(150.0)).expect("layout");
-        assert!(!Arc::ptr_eq(&before, &after));
+    fn layout_cache_lays_out_again_after_any_font_change() {
+        type Change = fn(&mut TextSystem);
+        let changes: [(&str, Change); 3] = [
+            ("new settings", |sys| {
+                sys.set_font_settings(&FontSettings {
+                    ui_family: "Inter".into(),
+                    ..FontSettings::default()
+                });
+            }),
+            ("another system", |sys| {
+                *sys = TextSystem::vendored_only(&FontSettings {
+                    ui_family: "Inter".into(),
+                    ..FontSettings::default()
+                });
+            }),
+            ("a loaded font", |sys| {
+                sys.load_font_data(Arc::new(crate::system::renamed_inter()));
+            }),
+        ];
+        let probe = TextParams::new("iiiiMMMM", TextStyle::new(14.0));
+        for (name, change) in changes {
+            // Names a family that only the loaded font has, so until then
+            // the default one stands in. Its own system: changing fonts on
+            // the shared one would race other tests.
+            let mut sys = TextSystem::vendored_only(&FontSettings {
+                ui_family: crate::system::RENAMED_INTER.into(),
+                ..FontSettings::default()
+            });
+            let mut cache = LayoutCache::new(2);
+            let before = cache.layout(&mut sys, &probe).expect("layout").size();
+            change(&mut sys);
+            let cached = cache.layout(&mut sys, &probe).expect("layout").size();
+            let fresh = sys.layout(&probe).expect("layout").size();
+            assert_ne!(before, fresh, "{name} changes the font");
+            assert_eq!(cached, fresh, "{name}");
+        }
     }
 }

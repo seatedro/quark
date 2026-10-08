@@ -337,9 +337,9 @@ impl UiContext<'_, '_> {
     /// on their next flush.
     pub fn set_fonts(&mut self, fonts: &quark_text::FontSettings) {
         let system = &mut self.window.text().system;
-        let before = system.generation();
+        let before = system.font_epoch();
         system.set_font_settings(fonts);
-        if system.generation() != before {
+        if system.font_epoch() != before {
             // Every window shares the text system.
             self.window.request_redraw_all();
         }

@@ -376,7 +376,7 @@ impl Recording {
             _ => false,
         };
         let focus = (self.focus_reads > 0).then_some(cx.focus);
-        let (scale, font) = (cx.scale_factor, cx.text.generation());
+        let (scale, font) = (cx.scale_factor, cx.text.font_epoch());
         let accessibility = cx.accessibility_enabled();
         let row = self.row as usize;
         put_record(cx, self.row, record);

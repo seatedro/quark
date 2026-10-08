@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use quark_render::scene::{FontKind, FontStyle, FontWeight};
 use quark_text::offset;
-use quark_text::{TextLayout, TextOffset, TextParams, TextSpan, TextStyle, TextSystem};
+use quark_text::{FontEpoch, TextLayout, TextOffset, TextParams, TextSpan, TextStyle, TextSystem};
 
 use super::atoms::{InlineAtom, RichClipboard, RichText};
 use super::buffer::{TextBuffer, WordForward};
@@ -143,9 +143,9 @@ pub struct Editor {
     pub(crate) frame_scale: FrameScale,
     last_width: f32,
     last_height: f32,
-    /// The text system's font generation the layout was shaped with; the
-    /// next flush reshapes when the fonts change.
-    font_generation: Option<u64>,
+    /// The fonts the layout was shaped with; the next flush reshapes when
+    /// they change.
+    font_epoch: Option<FontEpoch>,
     spelling: Spelling,
 }
 
@@ -348,7 +348,7 @@ impl Editor {
             frame_scale: FrameScale::default(),
             last_width: 0.0,
             last_height: 0.0,
-            font_generation: None,
+            font_epoch: None,
             spelling: Spelling::default(),
         }
     }
@@ -591,8 +591,8 @@ impl Editor {
             self.set_scale_factor(scale);
         }
         self.refresh_syntax();
-        if self.font_generation != Some(text_system.generation()) {
-            self.font_generation = Some(text_system.generation());
+        if self.font_epoch != Some(text_system.font_epoch()) {
+            self.font_epoch = Some(text_system.font_epoch());
             self.dirty = true;
         }
         self.refresh_spelling();

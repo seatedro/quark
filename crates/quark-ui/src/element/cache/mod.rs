@@ -13,8 +13,9 @@
 //!   width rebuilds it; the frame runs layout once more);
 //! - the scale factor, the theme (the cache compares the theme each
 //!   frame and bumps a generation when it changes), and the text system's
-//!   font generation: a replay looks up no text, so without it a font
-//!   change would replay geometry shaped with the old fonts;
+//!   font epoch (which system, and its font generation): a replay looks up
+//!   no text, so without it a font change, or another text system, would
+//!   replay geometry shaped with the old fonts;
 //! - the focused element, if the subtree read focus;
 //! - inherited paint state: the z layer, the text and icon color pushed by
 //!   an ancestor's hover, and whether an ancestor hides text from
@@ -133,8 +134,8 @@ struct EntryInputs {
     hash: u64,
     scale: f32,
     theme: u32,
-    /// [`TextSystem::generation`] the subtree was shaped under.
-    font: u64,
+    /// The fonts the subtree was shaped with.
+    font: quark_text::FontEpoch,
     /// Whether accessibility nodes were built.
     accessibility: bool,
     /// The focus the output read, when it read any.
@@ -179,7 +180,7 @@ pub struct ElementCache {
 #[derive(Clone, Copy)]
 struct FrameInputs {
     scale: f32,
-    font: u64,
+    font: quark_text::FontEpoch,
     accessibility: bool,
     focus: Option<FocusId>,
 }
@@ -576,7 +577,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
     ) -> (LayoutId, ()) {
         let frame = FrameInputs {
             scale: cx.scale_factor,
-            font: cx.text.generation(),
+            font: cx.text.font_epoch(),
             accessibility: cx.accessibility_enabled(),
             focus: cx.focus,
         };

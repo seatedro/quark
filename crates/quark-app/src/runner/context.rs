@@ -218,8 +218,8 @@ impl FrameContext<'_> {
         self.text.layouts.layout(&mut self.text.system, &params)
     }
 
-    pub fn font_system(&mut self) -> &mut FontSystem {
-        self.text.system.font_system_mut()
+    pub fn font_system(&self) -> &FontSystem {
+        self.text.system.font_system()
     }
 
     /// The text system and layout cache this frame's scene must be shaped
@@ -364,8 +364,16 @@ impl EventContext<'_> {
         self.state().map_or(1.0, |state| state.scale_factor as f32)
     }
 
-    pub fn font_system(&mut self) -> &mut FontSystem {
-        self.text.system.font_system_mut()
+    pub fn font_system(&self) -> &FontSystem {
+        self.text.system.font_system()
+    }
+
+    /// Adds the faces in a font file (TrueType, OpenType, or a collection)
+    /// to the text system every window shares, and redraws them all with
+    /// it. See [`TextSystem::load_font_data`].
+    pub fn load_font_data(&mut self, data: Arc<dyn AsRef<[u8]> + Send + Sync>) {
+        self.text.system.load_font_data(data);
+        self.request_redraw_all();
     }
 
     pub fn text(&mut self) -> &mut AppText {

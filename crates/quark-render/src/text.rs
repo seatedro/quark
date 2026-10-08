@@ -245,7 +245,12 @@ impl RecoloredBuffers {
                 entry.last_used = self.frame;
                 continue;
             }
-            let buffer = recolor(layout, text.font_system_mut(), default_color, span_colors);
+            let buffer = recolor(
+                layout,
+                text.raster_font_system(),
+                default_color,
+                span_colors,
+            );
             self.entries.insert(
                 key,
                 Recolored {

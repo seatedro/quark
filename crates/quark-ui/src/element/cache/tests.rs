@@ -462,25 +462,38 @@ fn label_then_swatch() -> AnyElement {
 
 // Catches replaying geometry shaped with the old fonts: a replay looks up
 // no text, so nothing but the cache's font dependency notices the change.
+// Another text system in the old one's place starts at the same font
+// generation, so the dependency has to tell systems apart too.
 #[test]
 fn a_font_change_lays_out_a_cached_boundary_again() {
-    let inter = quark_text::FontSettings {
-        ui_family: "Inter".into(),
-        ..Default::default()
-    };
-    let mut window = Window::new();
-    let geist = window.paint(label_then_swatch()).rect_of(BUTTON);
-    window.text.set_font_settings(&inter);
-    let changed = window.paint(label_then_swatch()).rect_of(BUTTON);
+    fn inter() -> quark_text::FontSettings {
+        quark_text::FontSettings {
+            ui_family: "Inter".into(),
+            ..Default::default()
+        }
+    }
+    type Change = fn(&mut TextSystem);
+    let changes: [(&str, Change); 2] = [
+        ("new settings", |text| text.set_font_settings(&inter())),
+        ("another system", |text| {
+            *text = TextSystem::vendored_only(&inter());
+        }),
+    ];
+    for (name, change) in changes {
+        let mut window = Window::new();
+        let geist = window.paint(label_then_swatch()).rect_of(BUTTON);
+        change(&mut window.text);
+        let changed = window.paint(label_then_swatch()).rect_of(BUTTON);
 
-    let mut fresh = Window::new();
-    fresh.text.set_font_settings(&inter);
-    let expected = fresh.paint(label_then_swatch()).rect_of(BUTTON);
-    assert_ne!(
-        expected, geist,
-        "the two fonts set the label at different widths"
-    );
-    assert_eq!(changed, expected);
+        let mut fresh = Window::new();
+        fresh.text.set_font_settings(&inter());
+        let expected = fresh.paint(label_then_swatch()).rect_of(BUTTON);
+        assert_ne!(
+            expected, geist,
+            "the two fonts set the label at different widths"
+        );
+        assert_eq!(changed, expected, "{name}");
+    }
 }
 
 impl Frame {

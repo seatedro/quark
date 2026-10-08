@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use cosmic_text::{FontSystem, fontdb};
 
+use crate::epoch::{FontEpoch, TextSystemId};
 use crate::fonts::{
     FontSettings, QuarkFallback, configure_generic_families, emoji_family, vendored_font_sources,
 };
@@ -10,6 +13,7 @@ use crate::layout::{LayoutScratch, SyntheticItalic, TextError, TextLayout, TextP
 pub struct TextSystem {
     font_system: FontSystem,
     settings: FontSettings,
+    id: TextSystemId,
     generation: u64,
     /// Which generic families need slanted glyphs for italic spans. Finding
     /// out scans every face, so it runs when the fonts change rather than on
@@ -20,26 +24,55 @@ pub struct TextSystem {
     /// Built by [`Self::vendored_only`]; another thread builds its twin the
     /// same way.
     vendored_only: bool,
+    /// Fonts added by [`Self::load_font_data`], in order.
+    loaded: Vec<FontData>,
     scratch: LayoutScratch,
+}
+
+/// A font file's bytes, loaded into a [`TextSystem`]. Recipes compare them
+/// by identity: the same bytes loaded twice are two loads.
+#[derive(Clone)]
+struct FontData(Arc<dyn AsRef<[u8]> + Send + Sync>);
+
+impl PartialEq for FontData {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for FontData {}
+
+impl std::fmt::Debug for FontData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FontData({} bytes)", (*self.0).as_ref().len())
+    }
 }
 
 /// How a [`TextSystem`] was built: enough for another thread to build one
 /// that shapes identically, since a `TextSystem` cannot be shared across
-/// threads. The vendored fonts are static bytes, so the copy costs only the
-/// database scan (plus the system fonts when the original loaded them).
+/// threads. The vendored fonts are static bytes, and loaded fonts are
+/// shared, so the copy costs only the database scan (plus the system fonts
+/// when the original loaded them).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextSystemRecipe {
     settings: FontSettings,
     vendored_only: bool,
+    loaded: Vec<FontData>,
 }
 
 impl TextSystemRecipe {
     pub fn build(&self) -> TextSystem {
-        if self.vendored_only {
+        let mut system = if self.vendored_only {
             TextSystem::vendored_only(&self.settings)
         } else {
             TextSystem::with_settings(&self.settings)
+        };
+        // Loaded one at a time as the original did, so families resolve
+        // and fill in weights the same way.
+        for font in &self.loaded {
+            system.load_font_data(font.0.clone());
         }
+        system
     }
 }
 
@@ -79,18 +112,20 @@ impl TextSystem {
             emoji_family: emoji_family(font_system.db(), settings.bundled_fallback),
             font_system,
             settings: settings.normalized(),
+            id: TextSystemId::next(),
             generation: 0,
             vendored_only,
+            loaded: Vec::new(),
             scratch: LayoutScratch::default(),
         }
     }
 
     /// How to build a system that shapes like this one, on another thread.
-    /// Changes made through [`Self::font_system_mut`] are not part of it.
     pub fn recipe(&self) -> TextSystemRecipe {
         TextSystemRecipe {
             settings: self.settings.clone(),
             vendored_only: self.vendored_only,
+            loaded: self.loaded.clone(),
         }
     }
 
@@ -98,7 +133,7 @@ impl TextSystem {
         &self.settings
     }
 
-    /// Changes the generic families. Bumps [`Self::generation`] so layout
+    /// Changes the generic families. Advances [`Self::font_epoch`] so layout
     /// caches drop layouts shaped with the old fonts.
     pub fn set_font_settings(&mut self, settings: &FontSettings) {
         let settings = settings.normalized();
@@ -114,25 +149,51 @@ impl TextSystem {
         } else {
             configure_generic_families(self.font_system.db_mut(), &settings);
         }
-        self.synthetic_italic = SyntheticItalic::new(&self.font_system);
-        self.emoji_family = emoji_family(self.font_system.db(), settings.bundled_fallback);
         self.settings = settings;
+        self.fonts_changed();
+    }
+
+    /// Adds the faces in a font file (TrueType, OpenType, or a collection),
+    /// such as a font an app ships, for [`FontSettings`] to name or for
+    /// fallback. Advances [`Self::font_epoch`], and [`Self::recipe`] carries
+    /// the font, so systems built from it on other threads shape with it
+    /// too.
+    pub fn load_font_data(&mut self, data: Arc<dyn AsRef<[u8]> + Send + Sync>) {
+        let db = self.font_system.db_mut();
+        db.load_font_source(fontdb::Source::Binary(data.clone()));
+        // The settings may name a family only this font has.
+        configure_generic_families(db, &self.settings);
+        self.loaded.push(FontData(data));
+        self.fonts_changed();
+    }
+
+    /// Rederives what depends on the font database, and advances the
+    /// generation so everything shaped before is shaped again.
+    fn fonts_changed(&mut self) {
+        self.synthetic_italic = SyntheticItalic::new(&self.font_system);
+        self.emoji_family = emoji_family(self.font_system.db(), self.settings.bundled_fallback);
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Incremented whenever font configuration changes.
-    pub fn generation(&self) -> u64 {
-        self.generation
+    /// The fonts layouts from this system are shaped with now. It changes
+    /// with every font change, and no two systems share one.
+    pub fn font_epoch(&self) -> FontEpoch {
+        FontEpoch {
+            system: self.id,
+            generation: self.generation,
+        }
     }
 
     pub fn font_system(&self) -> &FontSystem {
         &self.font_system
     }
 
-    /// Needed by rasterizers (glyphon prepare, SwashCache). Changing the font
-    /// database through this does not bump [`Self::generation`] or recheck
-    /// which families lack an italic face.
-    pub fn font_system_mut(&mut self) -> &mut FontSystem {
+    /// For rasterizers (glyphon's prepare, `SwashCache`), which take the
+    /// font system mutably for their own caches. Not for changing fonts:
+    /// nothing here notices a change made through it, so caches would keep
+    /// layouts shaped with the old fonts. Use [`Self::set_font_settings`]
+    /// and [`Self::load_font_data`].
+    pub fn raster_font_system(&mut self) -> &mut FontSystem {
         &mut self.font_system
     }
 
@@ -186,4 +247,55 @@ pub(crate) fn test_system() -> std::sync::MutexGuard<'static, TextSystem> {
         .get_or_init(|| Mutex::new(TextSystem::vendored_only(&FontSettings::default())))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The family [`renamed_inter`] registers.
+#[cfg(test)]
+pub(crate) const RENAMED_INTER: &str = "Quark";
+
+/// Inter's font file with its family renamed to [`RENAMED_INTER`]: a font
+/// no vendored-only system has, for tests that load one. Same length, so
+/// only the name strings change.
+#[cfg(test)]
+pub(crate) fn renamed_inter() -> Vec<u8> {
+    let mut bytes = include_bytes!("../assets/fonts/Inter-Variable.ttf").to_vec();
+    let utf16 =
+        |name: &str| -> Vec<u8> { name.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+    for (from, to) in [
+        (b"Inter".to_vec(), RENAMED_INTER.as_bytes().to_vec()),
+        (utf16("Inter"), utf16(RENAMED_INTER)),
+    ] {
+        let mut at = 0;
+        while let Some(i) = bytes[at..].windows(from.len()).position(|w| w == from) {
+            bytes[at + i..at + i + from.len()].copy_from_slice(&to);
+            at += i + from.len();
+        }
+    }
+    bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::TextStyle;
+
+    // Catches a recipe that leaves out loaded fonts: a worker's twin would
+    // shape the family they add with the default font instead.
+    #[test]
+    fn recipe_builds_a_system_with_the_loaded_fonts() {
+        let mut system = TextSystem::vendored_only(&FontSettings {
+            ui_family: RENAMED_INTER.into(),
+            ..FontSettings::default()
+        });
+        system.load_font_data(Arc::new(renamed_inter()));
+        let mut inter = TextSystem::vendored_only(&FontSettings {
+            ui_family: "Inter".into(),
+            ..FontSettings::default()
+        });
+        let probe = TextParams::new("iiiiMMMM", TextStyle::new(14.0));
+        let width = |system: &mut TextSystem| system.layout(&probe).expect("layout").size().0;
+
+        let widths = [width(&mut system), width(&mut system.recipe().build())];
+        assert_eq!(widths, [width(&mut inter); 2]);
+    }
 }
