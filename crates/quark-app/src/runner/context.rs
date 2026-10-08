@@ -304,6 +304,12 @@ impl EventContext<'_> {
         self.flags.redraw_all = true;
     }
 
+    /// Redraw `window`, whichever window the context is for. Stale handles
+    /// are ignored.
+    pub fn request_redraw_window(&mut self, window: WindowHandle) {
+        self.flags.redraw.push(window);
+    }
+
     /// Redraw the context's window (or every window when the context has
     /// none) at `at`.
     pub fn request_frame_at(&mut self, at: Instant) {
