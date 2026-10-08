@@ -121,8 +121,12 @@ fn perf_idle_window_schedules_no_frame() {
 fn perf_repeated_frame_does_not_scale_with_history() {
     let (mut small, mut large) = (stress(5_000), stress(50_000));
     // Both exist before either is measured: the first harness built in a
-    // thread pays one more steady allocation while it is the only one.
-    assert_eq!(repeated_frame(&mut small), repeated_frame(&mut large));
+    // thread pays one more steady allocation while it is the only one. The
+    // two also share the thread's element pool, so which pooled child list
+    // a div gets (and whether it grows once) can differ by an allocation or
+    // two between them; work per history row would cost far more.
+    let (small, large) = (repeated_frame(&mut small), repeated_frame(&mut large));
+    assert!(small.abs_diff(large) <= 2, "{small} vs {large}");
 }
 
 // Catches a streamed chunk costing more than its ceiling, or playback
