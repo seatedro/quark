@@ -206,12 +206,15 @@ impl State {
             return TerminalStyle::ghostty();
         }
         USER.get_or_init(|| {
-            TerminalStyle::load_ghostty_config().map_or_else(TerminalStyle::ghostty, |(style, warnings)| {
-                for warning in warnings {
-                    eprintln!("ghostty config: {warning}");
-                }
-                style
-            })
+            TerminalStyle::load_ghostty_config().map_or_else(
+                TerminalStyle::ghostty,
+                |(style, warnings)| {
+                    for warning in warnings {
+                        eprintln!("ghostty config: {warning}");
+                    }
+                    style
+                },
+            )
         })
         .clone()
     }
