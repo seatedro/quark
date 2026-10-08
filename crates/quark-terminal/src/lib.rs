@@ -18,7 +18,8 @@
 //! OSC 8 hyperlinks. OSC 52 clipboard writes are off until
 //! [`TerminalState::allow_clipboard_write`]. Titles, bells, and exits come
 //! out as [`TerminalSignal`]s. Screen readers get one `Terminal` node with
-//! the visible text and the cursor as its caret.
+//! the visible text and the cursor as its caret, and an IME composition as
+//! a `Mark` inside it.
 //!
 //! # Wiring
 //!
@@ -28,9 +29,17 @@
 //! with a callback that wakes the app (its `Waker`), and call
 //! [`TerminalState::read_pty`] from `UiApp::wake`. Keys and raw
 //! pointer events come from the app's input hook (`UiApp::event`): key
-//! presses to [`TerminalState::key_press`], text to
-//! [`TerminalState::text_input`], and pointer input to
+//! presses to [`TerminalState::key_press`], text (IME commits included) to
+//! [`TerminalState::text_input`], IME compositions to
+//! [`TerminalState::set_preedit`], and pointer input to
 //! [`TerminalState::pointer`] for mouse reporting.
+//!
+//! The view registers the terminal as an IME target, so quark-app turns IME
+//! on while it has focus and keeps the candidate window at the cursor. A
+//! composition is painted at the cursor and sends nothing until the IME
+//! commits it; keys pressed meanwhile are the IME's. Losing focus (the
+//! window's, through [`TerminalState::focus_changed`], or to another
+//! element, seen by the next [`terminal_view`]) drops it unsent.
 //!
 //! # Platforms
 //!
@@ -72,7 +81,8 @@ pub use grid::{CellStyle, Colors, Cursor, CursorShape, Grid, GridRow, Rgb, Run, 
 pub use input::KeyPress;
 pub use pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 pub use state::{
-    PointerInput, TerminalEvent, TerminalOutcome, TerminalSignal, TerminalState, TerminalStyle,
+    PointerInput, Preedit, TerminalEvent, TerminalOutcome, TerminalSignal, TerminalState,
+    TerminalStyle,
 };
 pub use view::{TerminalEnv, terminal_view};
 pub use vt::UnsafePaste;

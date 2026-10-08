@@ -3,7 +3,8 @@
 //! so an unchanged frame replays without building and a scrolled or
 //! updated frame rebuilds only rows whose cells changed. The cursor is a
 //! boundary of its own beside them, so a blinking cursor never rebuilds
-//! the grid.
+//! the grid. An IME composition is painted over them every frame, outside
+//! any cache, where the cursor is.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -14,7 +15,6 @@ use quark::Color;
 use quark_render::scene::{BorderPrimitive, Rect, RectPrimitive, RichTextPrimitive, ShapedText};
 use quark_render::{FontStyle, FontWeight, Scene};
 use quark_text::{TextQuery, TextSpan};
-use quark_ui::Action;
 use quark_ui::accessibility::{AccessibilityNode, AccessibleText};
 use quark_ui::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult,
@@ -23,9 +23,10 @@ use quark_ui::element::{
 };
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
+use quark_ui::{Action, FocusId};
 
 use crate::grid::{CellStyle, CursorShape, Grid, GridRow, Rgb, Underline};
-use crate::state::{Frame, Metrics, Palette, TerminalEvent, TerminalState, palette};
+use crate::state::{Frame, Metrics, Palette, Preedit, TerminalEvent, TerminalState, palette};
 
 /// Cursor blink half-period.
 const BLINK_MS: u64 = 600;
@@ -33,7 +34,8 @@ const BLINK_MS: u64 = 600;
 /// What the view needs from the app besides the state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TerminalEnv {
-    /// The terminal has keyboard focus: a solid, blinking cursor.
+    /// The terminal has keyboard focus: a solid, blinking cursor, and an
+    /// IME composition kept (one built without focus drops it).
     pub focused: bool,
     /// A screen reader is listening: publish the screen's text.
     pub accessible: bool,
@@ -46,25 +48,45 @@ fn color(c: Rgb) -> Color {
 /// The terminal in `state` at its viewport size, as of the last
 /// [`TerminalState::prepare`]. `on_event` wraps selection input into the
 /// app's action type.
+///
+/// The terminal registers itself as an IME target, so the host turns IME
+/// on while it has focus and puts the candidate window at the cursor, or
+/// at the composition's caret while one shows. A terminal built without
+/// focus drops its composition unsent, so the composition cannot commit
+/// later or show beside another element's.
 pub fn terminal_view(
     state: &mut TerminalState,
     theme: &Theme,
     env: TerminalEnv,
     on_event: fn(TerminalEvent) -> Action,
 ) -> AnyElement {
+    if !env.focused {
+        state.cancel_preedit();
+    }
     let Some(frame) = state.frame() else {
         return div().into_any();
     };
     let grid = state.shared_grid();
+    let preedit = state.preedit().cloned();
     // Built only for a screen reader. Turning one on changes the hash, so
     // the current screen is published without new output.
-    let screen = env.accessible.then(|| state.screen_text());
+    let screen = env.accessible.then(|| Screen {
+        text: state.screen_text(),
+        composition: preedit
+            .as_ref()
+            .zip(grid.cursor.cell)
+            .map(|(p, at)| (p.clone(), at)),
+    });
     let (width, height) = frame.viewport;
     let palette = palette(theme);
     let top = state.scroll_top();
     let hash = inputs_hash(&(
         frame.revision,
-        screen.as_ref().map(|s| s.1),
+        screen.as_ref().map(|s| s.text.1),
+        screen
+            .as_ref()
+            .and_then(|s| s.composition.as_ref())
+            .map(|c| (c.0.revision, c.1)),
         top.to_bits(),
         state.nonce(),
         palette,
@@ -83,7 +105,8 @@ pub fn terminal_view(
     .h(height);
     let m = frame.metrics;
     let mut layer = div().w(width).h(height).relative().child(content);
-    if let Some(at) = grid.cursor.at {
+    // A composition covers the cursor.
+    if let Some(at) = grid.cursor.at.filter(|_| preedit.is_none()) {
         let blink = env.focused && grid.cursor.blinking;
         // Everything the cursor paints: its cell's row (the glyph under a
         // block), its style, and the cell size.
@@ -120,14 +143,33 @@ pub fn terminal_view(
             f32::from(grid.cols) * m.cell_w,
             grid.rows.len() as f32 * m.cell_h,
         ),
+        ime: Ime {
+            focus: frame.focus,
+            cell: grid.cursor.cell,
+            wide: grid.cursor.wide,
+            metrics: m,
+            cols: grid.cols,
+            viewport: frame.viewport,
+            preedit,
+            fg: color(grid.colors.foreground),
+            bg: color(grid.colors.background),
+            caret: grid.cursor.cursor_color(palette),
+        },
     }
     .into_any()
+}
+
+/// What a screen reader gets: the visible text with the cursor's byte in
+/// it, and the composition with the cell it shows at.
+struct Screen {
+    text: (Arc<str>, usize),
+    composition: Option<(Preedit, (u16, u16))>,
 }
 
 fn build(
     frame: &Frame,
     grid: &Rc<Grid>,
-    screen: Option<(Arc<str>, usize)>,
+    screen: Option<Screen>,
     top: f32,
     palette: Palette,
     drag: DragStart,
@@ -176,7 +218,11 @@ fn build(
             .h(m.cell_h),
         );
     }
-    if let Some((text, caret)) = screen {
+    if let Some(Screen {
+        text: (text, caret),
+        composition,
+    }) = screen
+    {
         let frame = frame.clone();
         let screen = canvas(move |bounds, _scene, cx| {
             let title: &str = if frame.title.is_empty() {
@@ -184,13 +230,31 @@ fn build(
             } else {
                 &frame.title
             };
-            cx.push_accessibility(
+            let terminal = cx.push_accessibility(
                 AccessibilityNode::new(format!("{}.screen", frame.id), Role::Terminal, bounds)
                     .label(title.to_owned())
                     .read_only(true)
                     .focus(frame.focus)
                     .text(AccessibleText::new(text).caret(caret)),
             );
+            // The composition is part of the focused terminal, as marked
+            // text on the cursor's row, and no live region: it is read
+            // where the user is, not announced as screen output.
+            if let Some((preedit, (col, row))) = composition {
+                let rect = Rect {
+                    x: bounds.x + f32::from(col) * m.cell_w,
+                    y: bounds.y + f32::from(row) * m.cell_h,
+                    width: (bounds.width - f32::from(col) * m.cell_w).max(m.cell_w),
+                    height: m.cell_h,
+                };
+                cx.push_accessibility_child(
+                    AccessibilityNode::new(format!("{}.preedit", frame.id), Role::Mark, rect)
+                        .label("Composition")
+                        .value(preedit.text)
+                        .read_only(true),
+                    terminal,
+                );
+            }
         })
         .w(grid_w)
         .h(grid_h);
@@ -543,6 +607,121 @@ struct BoundsProbe {
     bounds: Rc<Cell<Rect>>,
     /// Padding, grid width, grid height.
     inset: (f32, f32, f32),
+    ime: Ime,
+}
+
+/// The terminal as an IME target: where its cursor is and the composition
+/// to paint there.
+struct Ime {
+    focus: FocusId,
+    /// The cursor's cell, shown or not.
+    cell: Option<(u16, u16)>,
+    wide: bool,
+    metrics: Metrics,
+    cols: u16,
+    viewport: (f32, f32),
+    preedit: Option<Preedit>,
+    fg: Color,
+    bg: Color,
+    caret: Color,
+}
+
+impl Ime {
+    /// Paints the composition over the cursor's cell, clipped to the
+    /// viewport, and returns the caret the candidate window should follow
+    /// (the cursor's cell when nothing is composing). `bounds` is the
+    /// terminal's, padding included.
+    fn paint(&self, bounds: Bounds, scene: &mut Scene, cx: &mut ElementContext) -> Option<Rect> {
+        let m = &self.metrics;
+        let (col, row) = self.cell?;
+        let grid_left = bounds.x + m.pad;
+        let at_x = grid_left + f32::from(col) * m.cell_w;
+        let y = bounds.y + m.pad + f32::from(row) * m.cell_h;
+        let cursor = Rect {
+            x: at_x,
+            y,
+            width: m.cell_w * if self.wide { 2.0 } else { 1.0 },
+            height: m.cell_h,
+        };
+        let Some(preedit) = &self.preedit else {
+            return Some(cursor);
+        };
+        let Some(layout) = cx.layout_text_query(&TextQuery::new(&preedit.text, m.text_style()))
+        else {
+            return Some(cursor);
+        };
+        let width = layout.size().0;
+        // A composition too long for the rest of the row shifts left to
+        // stay on the grid.
+        let grid_right = grid_left + f32::from(self.cols) * m.cell_w;
+        let x = at_x.min(grid_right - width).max(grid_left);
+        let viewport = Rect {
+            x: bounds.x,
+            y: bounds.y,
+            width: self.viewport.0,
+            height: self.viewport.1,
+        };
+        scene.clip(viewport);
+        cx.push_paint_clip(viewport);
+        scene.rect(RectPrimitive {
+            rect: Rect {
+                x,
+                y,
+                width,
+                height: m.cell_h,
+            },
+            color: self.bg,
+        });
+        scene.rich_text(RichTextPrimitive {
+            rect: Rect {
+                x,
+                y,
+                width,
+                height: m.cell_h,
+            },
+            layout: ShapedText::new(layout.clone()),
+            default_color: self.fg,
+            span_colors: NO_SPAN_COLORS.clone(),
+        });
+        // A thin underline under the composition and a thick one under
+        // the clause the IME is converting, as text fields draw them.
+        let thin = (m.font_size / 13.0).round().max(1.0);
+        let mut line = |x: f32, width: f32, height: f32| {
+            scene.rect(RectPrimitive {
+                rect: Rect {
+                    x,
+                    y: y + m.cell_h - height,
+                    width,
+                    height,
+                },
+                color: self.fg,
+            });
+        };
+        line(x, width, thin);
+        let clause = preedit.selection.clone().filter(|s| !s.is_empty());
+        for r in clause.into_iter().flat_map(|s| layout.selection_rects(s)) {
+            line(x + r.x, r.width, thin * 2.0);
+        }
+        let bar = (m.font_size / 7.0).round().max(1.0);
+        let caret = Rect {
+            x: x + preedit
+                .selection
+                .as_ref()
+                .map_or(0.0, |s| layout.caret(s.end).x),
+            y,
+            width: bar,
+            height: m.cell_h,
+        };
+        if preedit.selection.is_some() {
+            scene.rect(RectPrimitive {
+                rect: caret,
+                color: self.caret,
+            });
+        }
+        cx.pop_paint_clip();
+        scene.pop_clip();
+        Some(caret)
+    }
 }
 
 impl Element for BoundsProbe {
@@ -576,7 +755,7 @@ impl Element for BoundsProbe {
 
     fn paint(
         &mut self,
-        _bounds: Bounds,
+        bounds: Bounds,
         _layout: &mut (),
         _prepaint: &mut (),
         engine: &LayoutEngine,
@@ -584,6 +763,8 @@ impl Element for BoundsProbe {
         cx: &mut ElementContext,
     ) {
         self.child.paint(engine, scene, cx);
+        let caret = self.ime.paint(bounds, scene, cx);
+        cx.register_ime_target(self.ime.focus, caret);
     }
 }
 

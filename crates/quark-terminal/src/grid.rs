@@ -159,6 +159,9 @@ pub struct Cursor {
     /// Column and row in the viewport, when the cursor is on screen and
     /// visible (DECTCEM).
     pub at: Option<(u16, u16)>,
+    /// Column and row in the viewport when on screen, shown or hidden:
+    /// where IME composition goes.
+    pub cell: Option<(u16, u16)>,
     /// The cell under the cursor is a wide character.
     pub wide: bool,
     pub shape: CursorShape,

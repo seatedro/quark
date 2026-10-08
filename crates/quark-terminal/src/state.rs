@@ -1,6 +1,7 @@
 //! [`TerminalState`]: the app-owned terminal behind [`crate::terminal_view`].
 
 use std::cell::Cell;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -95,6 +96,19 @@ pub enum PointerInput {
     Wheel {
         lines: f32,
     },
+}
+
+/// An IME composition in progress, painted at the cursor until the IME
+/// commits or cancels it. None of it reaches the program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preedit {
+    pub text: String,
+    /// The IME's cursor as a byte range of `text`, on grapheme boundaries:
+    /// the caret when empty, the clause being converted otherwise. `None`
+    /// hides the caret.
+    pub selection: Option<Range<usize>>,
+    /// Changes with every update to the composition.
+    pub revision: u64,
 }
 
 /// Cell and text sizes in logical points.
@@ -218,6 +232,9 @@ pub struct TerminalState {
     wheel: f32,
     /// The key press just encoded typed text: skip the text event after it.
     swallow_text: bool,
+    preedit: Option<Preedit>,
+    /// Revision of the last composition change.
+    preedit_revision: u64,
     title: Rc<str>,
     signals: Vec<TerminalSignal>,
     exited: bool,
@@ -270,6 +287,8 @@ impl TerminalState {
             buttons_down: 0,
             wheel: 0.0,
             swallow_text: false,
+            preedit: None,
+            preedit_revision: 0,
             title: Rc::from(""),
             signals: Vec::new(),
             exited: false,
@@ -477,6 +496,11 @@ impl TerminalState {
     pub fn key_press(&mut self, press: &KeyPress) -> TerminalOutcome {
         self.modifiers = press.modifiers;
         self.swallow_text = false;
+        // Keys pressed while composing are the IME's to interpret; only
+        // its commit reaches the program.
+        if self.preedit.is_some() {
+            return TerminalOutcome::Handled;
+        }
         let Some((key, unshifted)) = press.key() else {
             return TerminalOutcome::Ignored;
         };
@@ -522,13 +546,68 @@ impl TerminalState {
 
     /// Text from the platform (an IME commit, or the character a key press
     /// typed). Skipped right after [`Self::key_press`] already sent it.
+    /// Ends a composition still showing, as its commit.
     pub fn text_input(&mut self, text: &str) {
+        self.cancel_preedit();
         if std::mem::take(&mut self.swallow_text) || text.is_empty() {
             return;
         }
         // Committed text is inserted as typed, not as a paste.
         self.vt.pty_output().extend_from_slice(text.as_bytes());
         self.after_input();
+    }
+
+    // ---- IME -------------------------------------------------------------
+
+    /// The IME's composition changed (`InputEvent::ImePreedit`): `text`
+    /// with its cursor at the byte range `cursor`, snapped onto grapheme
+    /// boundaries. Empty text ends the composition, as IMEs cancel. Nothing
+    /// is sent to the program; its commit arrives as [`Self::text_input`]
+    /// (or [`Self::commit_preedit`]).
+    pub fn set_preedit(&mut self, text: &str, cursor: Option<(usize, usize)>) {
+        // An IME event between a key press and the text after it makes
+        // that text the IME's commit, which must not be swallowed as the
+        // key's own.
+        self.swallow_text = false;
+        if text.is_empty() {
+            self.cancel_preedit();
+            return;
+        }
+        self.preedit_revision += 1;
+        let selection = cursor.map(|(start, end)| {
+            let range = quark_text::offset::ordered(text, start..end);
+            range.start.get()..range.end.get()
+        });
+        self.preedit = Some(Preedit {
+            text: text.to_owned(),
+            selection,
+            revision: self.preedit_revision,
+        });
+    }
+
+    /// Drops the composition without sending any of it: the IME cancelled,
+    /// the terminal lost focus, or another element took it. Returns whether
+    /// there was one.
+    pub fn cancel_preedit(&mut self) -> bool {
+        if self.preedit.take().is_none() {
+            return false;
+        }
+        self.swallow_text = false;
+        self.preedit_revision += 1;
+        true
+    }
+
+    /// Ends the composition with the IME's commit, `text`, sent to the
+    /// program once, as typed.
+    pub fn commit_preedit(&mut self, text: &str) {
+        self.cancel_preedit();
+        self.swallow_text = false;
+        self.text_input(text);
+    }
+
+    /// The composition showing at the cursor.
+    pub fn preedit(&self) -> Option<&Preedit> {
+        self.preedit.as_ref()
     }
 
     /// Pastes `text` framed for the program's modes (bracketed paste when
@@ -540,8 +619,12 @@ impl TerminalState {
         Ok(())
     }
 
-    /// Reports focus to programs that asked (mode 1004).
+    /// Reports focus to programs that asked (mode 1004). Losing it drops
+    /// any composition unsent.
     pub fn focus_changed(&mut self, focused: bool) {
+        if !focused {
+            self.cancel_preedit();
+        }
         self.vt.focus(focused);
         self.flush();
         self.dirty = true;

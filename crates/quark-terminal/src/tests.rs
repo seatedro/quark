@@ -455,3 +455,133 @@ fn a_font_change_resizes_an_existing_terminal_like_a_fresh_one() {
     assert_ne!(before.0, fresh.0, "the fonts have the same advance");
     assert_eq!(after, fresh);
 }
+
+// ---- IME -----------------------------------------------------------------
+
+/// Composition updates, and keys pressed while composing (an IME that
+/// lets them through), send the program nothing.
+#[test]
+fn composing_sends_nothing_to_the_program() {
+    let mut t = term(20, 2);
+    let none = ModifiersState::empty();
+    t.set_preedit("n", Some((1, 1)));
+    t.key_press(&key(None, Some("i"), none));
+    t.set_preedit("\u{306b}", Some((3, 3)));
+    t.key_press(&key(Some(NamedKey::Space), None, none));
+    t.set_preedit("\u{65e5}\u{672c}", Some((0, 6)));
+    assert_eq!(t.take_input(), b"");
+    assert_eq!(
+        t.preedit().map(|p| p.text.as_str()),
+        Some("\u{65e5}\u{672c}")
+    );
+}
+
+/// A commit reaches the program exactly once whichever way it ends the
+/// composition, including right after a shortcut key whose own text the
+/// terminal was waiting to skip.
+#[test]
+fn a_commit_is_sent_exactly_once() {
+    let ctrl_c = key(None, Some("c"), ModifiersState::CONTROL);
+    type Step = fn(&mut TerminalState);
+    let cases: [(&str, &[Step], &[u8]); 3] = [
+        (
+            "winit order: the preedit clears, then the text",
+            &[
+                |t| t.set_preedit("\u{65e5}\u{672c}", Some((6, 6))),
+                |t| t.set_preedit("", None),
+                |t| t.text_input("\u{65e5}\u{672c}"),
+            ],
+            "\u{65e5}\u{672c}".as_bytes(),
+        ),
+        (
+            "text while the preedit still shows",
+            &[
+                |t| t.set_preedit("\u{65e5}\u{672c}", Some((6, 6))),
+                |t| t.text_input("\u{65e5}\u{672c}"),
+            ],
+            "\u{65e5}\u{672c}".as_bytes(),
+        ),
+        (
+            "an explicit commit",
+            &[
+                |t| t.set_preedit("\u{e9}", None),
+                |t| t.commit_preedit("\u{e9}"),
+            ],
+            "\u{e9}".as_bytes(),
+        ),
+    ];
+    for (name, steps, expected) in cases {
+        let mut t = term(20, 2);
+        t.key_press(&ctrl_c);
+        assert_eq!(t.take_input(), b"\x03", "{name}");
+        for step in steps {
+            step(&mut t);
+        }
+        assert_eq!(t.take_input(), expected, "{name}");
+        assert_eq!(t.preedit(), None, "{name}");
+    }
+}
+
+/// An IME that cancels, a window that loses focus, and a terminal built
+/// without focus all drop the composition and send nothing.
+#[test]
+fn cancelling_a_composition_sends_nothing() {
+    use crate::view::{TerminalEnv, terminal_view};
+    use quark_ui::theme::Theme;
+
+    let theme = Theme::default_dark();
+    type Cancel = fn(&mut TerminalState, &Theme);
+    let cases: [(&str, Cancel); 3] = [
+        ("the IME cancels", |t, _| t.set_preedit("", None)),
+        ("the window loses focus", |t, _| t.focus_changed(false)),
+        ("another element has focus", |t, theme| {
+            let env = TerminalEnv {
+                focused: false,
+                accessible: false,
+            };
+            terminal_view(t, theme, env, |_| quark_ui::Action::new(()));
+        }),
+    ];
+    for (name, cancel) in cases {
+        let mut t = term(20, 2);
+        t.set_preedit("\u{306b}\u{307b}", Some((6, 6)));
+        cancel(&mut t, &theme);
+        assert_eq!(t.preedit(), None, "{name}");
+        assert_eq!(t.take_input(), b"", "{name}");
+    }
+}
+
+/// The IME's cursor bytes land on grapheme boundaries of the composition,
+/// in order, whatever the IME sends.
+#[test]
+fn composition_cursors_snap_onto_graphemes() {
+    let cases = [
+        // 日本語: three 3-byte characters.
+        (Some((4, 7)), Some(3..6)),
+        (Some((9, 0)), Some(0..9)),
+        (Some((40, 40)), Some(9..9)),
+        (None, None),
+    ];
+    for (cursor, expected) in cases {
+        let mut t = term(20, 2);
+        t.set_preedit("\u{65e5}\u{672c}\u{8a9e}", cursor);
+        let selection = t.preedit().and_then(|p| p.selection.clone());
+        assert_eq!(selection, expected, "{cursor:?}");
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn composition_cursors_are_ordered_char_boundaries(
+        text in "\\PC{1,12}",
+        start in 0usize..64,
+        end in 0usize..64,
+    ) {
+        let mut t = term(20, 2);
+        t.set_preedit(&text, Some((start, end)));
+        let range = t.preedit().and_then(|p| p.selection.clone()).expect("selection");
+        proptest::prop_assert!(range.start <= range.end && range.end <= text.len());
+        proptest::prop_assert!(text.is_char_boundary(range.start));
+        proptest::prop_assert!(text.is_char_boundary(range.end));
+    }
+}
