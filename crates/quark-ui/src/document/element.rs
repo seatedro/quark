@@ -27,12 +27,13 @@ use crate::accessibility::{AccessibilityAction, AccessibilityNode};
 use crate::action::Action;
 use crate::design::Alpha;
 use crate::element::{
-    AnyElement, Bounds, CacheKey, ClickEvent, DragHandler, DragReleaseResult, DragStart, Element,
-    ElementContext, IntoAnyElement, LayoutEngine, LayoutId, LinkClicked, LinkHandler,
-    ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink, ScrollTarget, ScrollbarInput,
-    ScrollbarVisibility, Scrollbars, SelectableText, StyledSpan, cached, code_block_joined, div,
-    inputs_hash, selectable_rich_text, text,
+    AnyElement, Bounds, CacheKey, ClickEvent, ClickHandler, CodeBlock, CodeHeader, DragHandler,
+    DragReleaseResult, DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId,
+    LinkClicked, LinkHandler, ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink,
+    ScrollTarget, ScrollbarInput, ScrollbarVisibility, Scrollbars, SelectableText, StyledSpan,
+    cached, code_block_joined, div, inputs_hash, selectable_rich_text, svg_icon, text,
 };
+use crate::icons::lucide;
 use crate::style::Styled;
 use crate::theme::Theme;
 use crate::virtual_list::RowKey;
@@ -76,6 +77,27 @@ pub enum DocumentEvent {
     /// The scrollbar moved the view to this offset (`f32::MAX` for the
     /// end); landing at the bottom pins the view there.
     ScrollTo(f32),
+    /// A code block's wrap toggle was pressed.
+    SetCodeWrap {
+        block: BlockKey,
+        wrap: bool,
+    },
+}
+
+/// A code block's Copy button was pressed. `text` is the block's whole
+/// source, including lines and columns scrolled out of view; write it to
+/// the clipboard. Emitted as an action of this type unless
+/// [`DocumentElement::on_copy_code`] maps it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CopyCode {
+    pub block: BlockKey,
+    pub text: Arc<str>,
+}
+
+impl From<CopyCode> for Action {
+    fn from(copy: CopyCode) -> Self {
+        Action::new(copy)
+    }
 }
 
 /// Frame interval requested while a drag autoscrolls.
@@ -86,6 +108,16 @@ type EventMap = Rc<dyn Fn(DocumentEvent) -> Action>;
 /// The link action of a built element. Its blocks are built before
 /// [`DocumentElement::on_link`] can be called, so they share this slot.
 type LinkSlot = Rc<RefCell<Option<Rc<dyn Fn(&Arc<str>) -> Action>>>>;
+
+/// The copy-code action of a built element, shared like [`LinkSlot`].
+type CopySlot = Rc<RefCell<Option<Rc<dyn Fn(CopyCode) -> Action>>>>;
+
+/// What a code block's toolbar buttons emit through.
+#[derive(Clone)]
+struct CodeControls {
+    on_event: EventMap,
+    on_copy: CopySlot,
+}
 
 /// A block's spans with their tones resolved, kept while the block stays
 /// materialized and the theme stays the same.
@@ -222,6 +254,7 @@ pub struct DocumentElement {
     rows: Vec<Placed>,
     on_event: EventMap,
     on_link: LinkSlot,
+    on_copy: CopySlot,
     label: Cow<'static, str>,
     /// A drag is autoscrolling; ask for the next frame.
     animating: bool,
@@ -263,6 +296,11 @@ impl<G: BlockGeometry> Document<G> {
             colors.hash_into(&mut hasher);
             hasher.finish()
         };
+        let on_event: EventMap = Rc::new(on_event);
+        let controls = CodeControls {
+            on_event: on_event.clone(),
+            on_copy: Rc::default(),
+        };
         let on_link: LinkSlot = Rc::default();
         let link_slot = on_link.clone();
         let links = LinkHandler::new(move |url| match &*link_slot.borrow() {
@@ -301,6 +339,7 @@ impl<G: BlockGeometry> Document<G> {
                 }
             }
             let links = links.clone();
+            let controls = controls.clone();
             let subtree = build.clone();
             placed.push(Placed {
                 rect: Rect {
@@ -310,7 +349,7 @@ impl<G: BlockGeometry> Document<G> {
                     height: row.height,
                 },
                 element: cached(row_cache_key(row.key), hash, move || {
-                    RowElement::new(subtree, &links)
+                    RowElement::new(subtree, &links, &controls)
                 })
                 .into_any(),
             });
@@ -323,7 +362,6 @@ impl<G: BlockGeometry> Document<G> {
         self.row_builds = kept_builds;
         self.row_builds_spare = builds;
 
-        let on_event: EventMap = Rc::new(on_event);
         DocumentElement {
             size: self.size,
             scroll: self.list.scroll_offset(),
@@ -333,6 +371,7 @@ impl<G: BlockGeometry> Document<G> {
             rows: placed,
             on_event,
             on_link,
+            on_copy: controls.on_copy,
             label: Cow::Borrowed("Document"),
             animating: self.wants_frame(),
             scrollbar_auto_hide: false,
@@ -364,6 +403,9 @@ impl<G: BlockGeometry> Document<G> {
                 continue;
             };
             (block.revision(), visible.offset_in_row.to_bits()).hash(&mut hasher);
+            if let BlockContent::Code { .. } = block.content {
+                (self.code_toolbar, self.is_code_wrapped(block.key)).hash(&mut hasher);
+            }
             self.scroll_x(block.key).to_bits().hash(&mut hasher);
             if self.scroll_unsettled(block.key) {
                 // The offset resolves while the row paints; a replay would
@@ -444,7 +486,7 @@ impl<G: BlockGeometry> Document<G> {
                 }
             }
             built.push(BlockBuild {
-                block: block.clone(),
+                block: self.code_presentation().present(block).into_owned(),
                 spans: painted_spans(painted, kept, block, palette),
                 rect,
                 selection: self.block_selection(block.key, visible.text_len),
@@ -504,7 +546,7 @@ enum RowChild {
 }
 
 impl RowElement {
-    fn new(build: Rc<RowBuild>, links: &LinkHandler) -> Self {
+    fn new(build: Rc<RowBuild>, links: &LinkHandler, controls: &CodeControls) -> Self {
         let mut children = Vec::with_capacity(build.blocks.len() * 2 + build.adornments.len());
         let mut placed = Vec::new();
         let mut adornments = build.adornments.iter().enumerate().peekable();
@@ -520,6 +562,7 @@ impl RowElement {
                     base_font_size: build.font_size,
                     selection: b.selection,
                     links,
+                    controls,
                     colors: &build.colors,
                     scroll: b.scroll.as_ref(),
                 },
@@ -700,6 +743,7 @@ struct BlockPaint<'a> {
     base_font_size: f32,
     selection: Option<(usize, usize)>,
     links: &'a LinkHandler,
+    controls: &'a CodeControls,
     colors: &'a RowColors,
     scroll: Option<&'a (ScrollHandle, f32)>,
 }
@@ -718,6 +762,7 @@ fn block_elements(
         base_font_size,
         selection,
         links,
+        controls,
         colors,
         scroll,
     } = paint;
@@ -769,6 +814,7 @@ fn block_elements(
         ..rect
     };
     let spans = spans.unwrap_or_else(|| Arc::from([]));
+    let mut overlay = None;
     let element = match &block.content {
         BlockContent::Prose(_) => {
             let mut el = selectable_rich_text(spans)
@@ -784,11 +830,35 @@ fn block_elements(
             el.into_any()
         }
         BlockContent::Code {
-            line_count, label, ..
+            line_count,
+            label,
+            toolbar,
+            wrap,
+            ..
         } => {
+            if *toolbar {
+                // Over the panel the code paints, and outside its sideways
+                // scroll, so the buttons stay put.
+                let height = CodeHeader::Toolbar.height(font_size);
+                let rect = Rect { height, ..content };
+                let toolbar = CodeToolbar {
+                    block,
+                    label: label.as_deref(),
+                    wrap: *wrap,
+                    font_size,
+                    colors,
+                    controls,
+                };
+                overlay = Some(Placed {
+                    rect,
+                    element: toolbar.element(rect),
+                });
+            }
             let code = |width: f32| {
                 code_block_joined(spans.clone(), *line_count)
                     .label(label.clone())
+                    .toolbar(*toolbar)
+                    .wrap(*wrap)
                     .width(width)
                     .size(font_size)
                     .source(block.key.0)
@@ -797,7 +867,10 @@ fn block_elements(
             match scroll {
                 // Wider than the column: the block scrolls sideways under
                 // its own scrollbar.
+                // A tab stop, so arrow keys can bring hidden columns in.
                 Some((handle, natural)) => div()
+                    .id(format!("document.code:{}:lines", block.key.0).as_str())
+                    .tab_stop(quark::focus::TabStop::new(0))
                     .w(content.width)
                     .h(content.height)
                     .track_scroll(handle)
@@ -857,6 +930,82 @@ fn block_elements(
         rect: content,
         element,
     });
+    placed.extend(overlay);
+}
+
+/// A code block's toolbar: its label, then Copy and the wrap toggle at
+/// the right end.
+struct CodeToolbar<'a> {
+    block: &'a Block,
+    label: Option<&'a str>,
+    wrap: bool,
+    font_size: f32,
+    colors: &'a RowColors,
+    controls: &'a CodeControls,
+}
+
+impl CodeToolbar<'_> {
+    fn element(&self, rect: Rect) -> AnyElement {
+        let key = self.block.key;
+        let pad = CodeBlock::header_metrics(self.font_size, 1, CodeHeader::Toolbar)
+            .text_origin
+            .0;
+        let icon = (self.font_size * 1.15).round();
+        let button = |id: &str, svg: &'static str, name: &'static str| {
+            div()
+                .id(format!("document.code:{}:{id}", key.0).as_str())
+                .w(rect.height)
+                .h(rect.height)
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .rounded(4.0)
+                .hover_bg(self.colors.placeholder)
+                .accessibility_role(AccessibilityRole::Button)
+                .accessibility_label(name)
+                .tooltip(name)
+                .child(svg_icon(svg, icon).color(self.colors.muted))
+        };
+        let copy = {
+            let text = self.block.text.clone();
+            let slot = self.controls.on_copy.clone();
+            button("copy", lucide::COPY, "Copy code").on_click_handler(ClickHandler::new(
+                move |_| {
+                    let copy = CopyCode {
+                        block: key,
+                        text: text.clone(),
+                    };
+                    vec![match &*slot.borrow() {
+                        Some(f) => f(copy),
+                        None => copy.into(),
+                    }]
+                },
+            ))
+        };
+        let wrap = {
+            let (on_event, wrap) = (self.controls.on_event.clone(), !self.wrap);
+            button("wrap", lucide::WRAP_TEXT, "Wrap lines")
+                .accessibility_toggled(self.wrap)
+                .on_click_handler(ClickHandler::new(move |_| {
+                    vec![on_event(DocumentEvent::SetCodeWrap { block: key, wrap })]
+                }))
+        };
+        let label = self.label.unwrap_or("");
+        div()
+            .w(rect.width)
+            .h(rect.height)
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .pl(pad)
+            .child(
+                text(label.to_owned())
+                    .size(CodeHeader::label_size(self.font_size))
+                    .color(self.colors.muted),
+            )
+            .child(div().flex_row().child(copy).child(wrap))
+            .into_any()
+    }
 }
 
 /// An image block's content: the pixels scaled to `size`, a placeholder
@@ -960,6 +1109,13 @@ impl DocumentElement {
     /// [`LinkClicked`].
     pub fn on_link(self, f: impl Fn(&Arc<str>) -> Action + 'static) -> Self {
         *self.on_link.borrow_mut() = Some(Rc::new(f));
+        self
+    }
+
+    /// Action a code block's Copy button emits. Defaults to the
+    /// [`CopyCode`] itself.
+    pub fn on_copy_code(self, f: impl Fn(CopyCode) -> Action + 'static) -> Self {
+        *self.on_copy.borrow_mut() = Some(Rc::new(f));
         self
     }
 

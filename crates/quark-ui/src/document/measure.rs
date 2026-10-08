@@ -16,7 +16,7 @@ use super::{
     Block, BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState,
     MeasureKey, MeasureSpec, RULE_HEIGHT,
 };
-use crate::element::{CodeBlock, SelectableText, StyledSpan};
+use crate::element::{CodeBlock, CodeHeader, SelectableText, StyledSpan};
 
 /// Measures blocks with the frame's text system and layout cache.
 /// `font_size` is in logical points; `scale_factor` must be the one the
@@ -147,11 +147,29 @@ impl BlockMeasurer for TextMeasurer<'_> {
                 spans,
                 line_count,
                 label,
+                toolbar,
+                wrap,
             } => {
-                let layout = self.layout(CodeBlock::joined_layout_params(spans, font_size));
-                let metrics = CodeBlock::metrics(font_size, *line_count, label.is_some());
+                let params = if *wrap {
+                    CodeBlock::wrapped_layout_params(spans, font_size, width)
+                } else {
+                    CodeBlock::joined_layout_params(spans, font_size)
+                };
+                let layout = self.layout(params);
+                let header = match (toolbar, label.is_some()) {
+                    (true, _) => CodeHeader::Toolbar,
+                    (false, true) => CodeHeader::Label,
+                    (false, false) => CodeHeader::None,
+                };
+                let rows = match (&layout, wrap) {
+                    (Some(layout), true) => layout.line_count(),
+                    _ => *line_count,
+                };
+                let metrics = CodeBlock::header_metrics(font_size, rows, header);
+                // Wrapped lines fit the column, so nothing scrolls sideways.
                 let natural_width = layout
                     .as_ref()
+                    .filter(|_| !wrap)
                     .map(|l| (l.size().0 + metrics.text_origin.0 * 2.0).ceil());
                 TextGeometry {
                     natural_width,

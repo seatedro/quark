@@ -2243,3 +2243,166 @@ fn a_kept_row_stays_in_the_tree_while_scrolled_away() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Code toolbar
+// ---------------------------------------------------------------------------
+
+const WIDE_LINE: &str =
+    "let banner = render(\"a line long enough to run well past the column\", tail_identifier);";
+
+/// Row 0: a paragraph, then code block 5 with a short line and a line far
+/// wider than a 300px column.
+fn wide_code_rows() -> HashMap<RowKey, DocumentRow> {
+    let mut message = message_with(0, &["Above the code."]);
+    message.blocks.push(
+        Block::code(
+            BlockKey(5),
+            ["fn main() {", WIDE_LINE, "}"]
+                .iter()
+                .map(|line| vec![crate::element::StyledSpan::plain(*line)])
+                .collect(),
+        )
+        .with_label(Some("rust".into())),
+    );
+    [(message.key, message)].into()
+}
+
+/// The published node named `name`: its states after the role and name,
+/// and the center of its bounds.
+fn published(painted: &Painted, name: &str) -> (String, (f32, f32)) {
+    let update = painted.accessibility.tree_update("Test", None);
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some(name))
+        .unwrap_or_else(|| panic!("{name} is not published"));
+    let b = node.bounds().expect("bounds");
+    let dump = crate::accessibility::dump_accessibility_states(&update);
+    let states = dump
+        .lines()
+        .map(|line| line.splitn(4, " | ").collect::<Vec<_>>())
+        .find(|parts| parts.get(2) == Some(&name))
+        .and_then(|parts| parts.get(3).map(|s| (*s).to_owned()))
+        .unwrap_or_default();
+    (
+        states,
+        (((b.x0 + b.x1) * 0.5) as f32, ((b.y0 + b.y1) * 0.5) as f32),
+    )
+}
+
+fn click(painted: &mut Painted, (x, y): (f32, f32)) -> Vec<Action> {
+    let mut actions = painted.router.pointer_down(x, y, &mut None).actions;
+    actions.extend(painted.router.pointer_up().actions);
+    actions
+}
+
+// Catches Copy reading the text on screen instead of the block's source:
+// columns scrolled out of view would be lost.
+#[test]
+fn copy_button_emits_the_whole_source_of_a_scrolled_code_block() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    view.set_code_toolbar(true);
+    paint(&mut view, &rows, (300.0, 400.0), 0.0);
+    view.scroll_handles[&BlockKey(5)].set_offset(120.0, 0.0);
+    let mut painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+    let (_, copy) = published(&painted, "Copy code");
+    let actions = click(&mut painted, copy);
+
+    let copied: Vec<&CopyCode> = actions.iter().filter_map(|a| a.downcast_ref()).collect();
+    let source = format!("fn main() {{\n{WIDE_LINE}\n}}");
+    assert_eq!(
+        copied,
+        vec![&CopyCode {
+            block: BlockKey(5),
+            text: source.into()
+        }]
+    );
+}
+
+// Catches the wrap toggle not reaching the document, or wrapped code
+// still running past the column: the end of the wide line must land
+// inside it, and the toggle must read as checked.
+#[test]
+fn wrap_toggle_brings_the_end_of_a_wide_line_into_the_column() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    view.set_code_toolbar(true);
+    let mut painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+    let (unwrapped, toggle) = published(&painted, "Wrap lines");
+
+    for action in click(&mut painted, toggle) {
+        if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
+            view.handle(*event);
+        }
+    }
+    let painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+    let code = view
+        .visible_blocks()
+        .iter()
+        .find(|b| b.key == BlockKey(5))
+        .unwrap();
+    let end = code.text_len;
+    let mut rects = Vec::new();
+    code.geometry.range_rects(end - 1..end, &mut rects);
+    let last_char_right = rects.iter().map(|r| r.x + r.width).fold(0.0, f32::max);
+    let (wrapped, _) = published(&painted, "Wrap lines");
+    assert_eq!(
+        (
+            unwrapped.as_str(),
+            wrapped.as_str(),
+            last_char_right <= code.rect.width
+        ),
+        ("unchecked", "checked", true),
+        "last char ends at {last_char_right} of {}",
+        code.rect.width
+    );
+}
+
+// Catches the measurer and the painted code block disagreeing about the
+// toolbar row or the wrap width: hits and highlights would land on the
+// wrong glyphs.
+#[test]
+fn code_text_is_painted_where_it_was_measured_with_toolbar_and_wrap() {
+    for (toolbar, wrap) in [(false, true), (true, false), (true, true)] {
+        let rows = wide_code_rows();
+        let mut view = real_view(&rows);
+        view.set_code_toolbar(toolbar);
+        view.set_code_wrap(BlockKey(5), wrap);
+
+        let painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+        let code = view
+            .visible_blocks()
+            .iter()
+            .find(|b| b.key == BlockKey(5))
+            .unwrap();
+        let region = painted
+            .regions
+            .iter()
+            .find(|r| r.source_key == 5)
+            .expect("code is painted");
+        let starts = |layout: &quark_text::TextLayout| -> Vec<usize> {
+            layout.lines().map(|line| line.byte_range.start).collect()
+        };
+        let (ox, oy) = code.geometry.text_origin;
+        let measured = format!(
+            "h{:.0} text@{:.0},{:.0} lines at {:?}",
+            code.rect.height,
+            code.rect.x + ox,
+            code.rect.y + oy,
+            starts(code.geometry.layout.as_ref().unwrap())
+        );
+        let shown = format!(
+            "h{:.0} text@{:.0},{:.0} lines at {:?}",
+            region.bounds.height,
+            region.text_origin.0,
+            region.text_origin.1,
+            starts(&region.layout)
+        );
+        assert_eq!(shown, measured, "toolbar {toolbar} wrap {wrap}");
+    }
+}

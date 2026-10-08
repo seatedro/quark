@@ -46,7 +46,7 @@ pub use adornment::{
 pub use background::MeasureSpec;
 
 use adornment::AdornmentShape;
-pub use element::{DocumentElement, DocumentEvent};
+pub use element::{CopyCode, DocumentElement, DocumentEvent};
 pub use facade::{MarkdownDocument, MarkdownEntry};
 pub use find::{FindBarActions, FindIntegrityError, FindMatch, FindState, find_bar};
 pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage};
@@ -54,6 +54,7 @@ pub use markdown::{BlockKeys, CODE_SCALE, MarkdownBlocks, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -112,6 +113,12 @@ pub enum BlockContent {
         spans: Arc<[StyledSpan]>,
         line_count: usize,
         label: Option<Arc<str>>,
+        /// A toolbar row above the lines holds the label, Copy, and the
+        /// wrap toggle; see [`Document::set_code_toolbar`].
+        toolbar: bool,
+        /// Lines wrap at the column instead of scrolling sideways; see
+        /// [`Document::set_code_wrap`].
+        wrap: bool,
     },
     /// A horizontal rule. Its text is `---`, so copy keeps it.
     Rule,
@@ -353,6 +360,8 @@ impl Block {
                 spans: spans.into(),
                 line_count,
                 label: None,
+                toolbar: false,
+                wrap: false,
             },
             style: BlockStyle::default(),
             text: text.into(),
@@ -422,14 +431,18 @@ impl Block {
                 BlockContent::Code {
                     spans: a,
                     label: la,
+                    toolbar: ta,
+                    wrap: wa,
                     ..
                 },
                 BlockContent::Code {
                     spans: b,
                     label: lb,
+                    toolbar: tb,
+                    wrap: wb,
                     ..
                 },
-            ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some(),
+            ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some() && (ta, wa) == (tb, wb),
             (BlockContent::Rule, BlockContent::Rule) => true,
             (BlockContent::Image { state: a, .. }, BlockContent::Image { state: b, .. }) => {
                 image_height_class(a) == image_height_class(b)
@@ -457,6 +470,36 @@ impl Block {
 /// whether it shows a placeholder or its alt text.
 fn image_height_class(state: &ImageState) -> (Option<(u32, u32)>, bool) {
     (state.size(), matches!(state, ImageState::Failed))
+}
+
+/// How the document shows code blocks, besides the blocks themselves.
+#[derive(Debug, Clone, Copy)]
+struct CodePresentation<'a> {
+    toolbar: bool,
+    wrapped: &'a HashSet<BlockKey>,
+}
+
+impl CodePresentation<'_> {
+    /// `block` as the document lays it out: a code block with the
+    /// document's toolbar and its wrap state. Its revision stays the
+    /// source block's; the row hash covers both settings.
+    fn present<'b>(&self, block: &'b Block) -> Cow<'b, Block> {
+        let BlockContent::Code { toolbar, wrap, .. } = &block.content else {
+            return Cow::Borrowed(block);
+        };
+        let want = (
+            *toolbar || self.toolbar,
+            *wrap || self.wrapped.contains(&block.key),
+        );
+        if (*toolbar, *wrap) == want {
+            return Cow::Borrowed(block);
+        }
+        let mut block = block.clone();
+        if let BlockContent::Code { toolbar, wrap, .. } = &mut block.content {
+            (*toolbar, *wrap) = want;
+        }
+        Cow::Owned(block)
+    }
 }
 
 /// One row of the document.
@@ -809,6 +852,11 @@ pub struct Document<G = TextGeometry> {
     /// Horizontal scroll of each block wider than its column, kept while
     /// the block is in the document.
     scroll_handles: HashMap<BlockKey, ScrollHandle>,
+    /// Code blocks show a toolbar row with Copy and a wrap toggle.
+    code_toolbar: bool,
+    /// Code blocks whose lines wrap, kept while the block is in the
+    /// document.
+    wrapped: HashSet<BlockKey>,
     /// When the list's auto-hiding scrollbar shows; see
     /// [`DocumentElement::scrollbar_auto_hide`](element::DocumentElement::scrollbar_auto_hide).
     scrollbar: ScrollbarVisibility,
@@ -856,6 +904,8 @@ impl<G: BlockGeometry> Document<G> {
             find_stale: false,
             reveal: None,
             scroll_handles: HashMap::new(),
+            code_toolbar: false,
+            wrapped: HashSet::new(),
             scrollbar: ScrollbarVisibility::new(),
             elements_built: 0,
         }
@@ -880,6 +930,42 @@ impl<G: BlockGeometry> Document<G> {
     /// Draws every row's chrome from now on; see [`RowDecorator`].
     pub fn set_decorator(&mut self, decorator: impl RowDecorator + 'static) {
         self.decorator = Some(Decorator(Rc::new(decorator)));
+    }
+
+    /// Gives every code block a toolbar row with its label, a Copy button
+    /// (emitting [`CopyCode`] with the block's whole source), and a wrap
+    /// toggle. Off by default.
+    pub fn set_code_toolbar(&mut self, toolbar: bool) {
+        if self.code_toolbar != toolbar {
+            self.code_toolbar = toolbar;
+            self.list.invalidate_all();
+        }
+    }
+
+    /// Wraps the lines of code block `block` at the column, or lets them
+    /// scroll sideways again. Remembered while the block stays in the
+    /// document; its row is remeasured on the next prepare.
+    pub fn set_code_wrap(&mut self, block: BlockKey, wrap: bool) {
+        let changed = if wrap {
+            self.wrapped.insert(block)
+        } else {
+            self.wrapped.remove(&block)
+        };
+        if changed && let Some(row) = self.block_row.get(&block) {
+            let _ = self.list.invalidate(*row);
+        }
+    }
+
+    /// Whether the lines of code block `block` wrap.
+    pub fn is_code_wrapped(&self, block: BlockKey) -> bool {
+        self.wrapped.contains(&block)
+    }
+
+    fn code_presentation(&self) -> CodePresentation<'_> {
+        CodePresentation {
+            toolbar: self.code_toolbar,
+            wrapped: &self.wrapped,
+        }
     }
 
     // -- Document changes --
@@ -1013,6 +1099,7 @@ impl<G: BlockGeometry> Document<G> {
     fn forget_block(&mut self, block: BlockKey) {
         self.find_stale = true;
         self.scroll_handles.remove(&block);
+        self.wrapped.remove(&block);
         self.block_row.remove(&block);
         let Some(pos) = self.order.remove(block) else {
             return;
@@ -1364,6 +1451,7 @@ impl<G: BlockGeometry> Document<G> {
             DocumentEvent::ScrollTo(offset) => {
                 self.set_scroll_offset(offset);
             }
+            DocumentEvent::SetCodeWrap { block, wrap } => self.set_code_wrap(block, wrap),
         }
     }
 
@@ -1496,6 +1584,10 @@ impl<G: BlockGeometry> Document<G> {
         let style = self.style;
         let width = self.size.0;
         let block_row = &self.block_row;
+        let code = CodePresentation {
+            toolbar: self.code_toolbar,
+            wrapped: &self.wrapped,
+        };
         let cache = &mut self.measured;
         self.list
             .measure_visible(width, style.overscan, |key, width| {
@@ -1507,7 +1599,8 @@ impl<G: BlockGeometry> Document<G> {
                 let block_width = block_width(&style, width);
                 lay_out_row(&style, header, blocks, adornments, |item, _| match item {
                     RowItem::Block { block, .. } => {
-                        measure_cached(cache, measurer, block, block_width).height()
+                        let block = code.present(block);
+                        measure_cached(cache, measurer, &block, block_width).height()
                     }
                     RowItem::Adornment { height, .. } => height,
                 })
@@ -1564,9 +1657,15 @@ impl<G: BlockGeometry> Document<G> {
             });
             let (blocks, visible_adornments) = (&mut self.blocks, &mut self.adornments);
             let (measured, handles) = (&mut self.measured, &mut self.scroll_handles);
+            let code = CodePresentation {
+                toolbar: self.code_toolbar,
+                wrapped: &self.wrapped,
+            };
             let owned = owned_blocks(source, &self.block_row, key);
             lay_out_row(&style, header, owned, adornments, |item, y| match item {
                 RowItem::Block { index: i, block } => {
+                    let block = code.present(block);
+                    let block = &*block;
                     let geometry = measure_cached(measured, measurer, block, block_width);
                     if let Some(entry) = measured.remove(&block.key) {
                         kept.insert(block.key, entry);
@@ -1697,7 +1796,7 @@ impl<G: BlockGeometry> Document<G> {
                 r.adornments.iter().map(|a| (a.slot, a.height)).collect()
             }),
             blocks: owned_blocks(source, &self.block_row, row)
-                .map(|(_, block)| block.clone())
+                .map(|(_, block)| self.code_presentation().present(block).into_owned())
                 .collect(),
         }
     }

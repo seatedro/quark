@@ -13,6 +13,39 @@ const CODE_PAD_Y: f32 = 0.5;
 /// Label text size and the height of the label row above the code.
 const LABEL_SIZE: f32 = 0.8;
 const LABEL_ROW: f32 = 1.4;
+/// Height of a toolbar row, tall enough for icon buttons at a code font
+/// of 12 points to meet a 28-point target.
+const TOOLBAR_ROW: f32 = 2.4;
+
+/// The row above a code block's lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum CodeHeader {
+    /// No row.
+    #[default]
+    None,
+    /// A short row the block paints its label in.
+    Label,
+    /// A taller row for a label and actions that the caller places over
+    /// it (see [`CodeBlock::toolbar`]); the block paints neither, so they
+    /// stay put while the lines scroll sideways.
+    Toolbar,
+}
+
+impl CodeHeader {
+    /// Height of the row at `font_size`.
+    pub fn height(self, font_size: f32) -> f32 {
+        match self {
+            Self::None => 0.0,
+            Self::Label => font_size * LABEL_ROW,
+            Self::Toolbar => font_size * TOOLBAR_ROW,
+        }
+    }
+
+    /// Label size of the row at `font_size`.
+    pub fn label_size(font_size: f32) -> f32 {
+        font_size * LABEL_SIZE
+    }
+}
 
 /// A rounded panel of monospace code. Each inner `Vec<StyledSpan>` is one source
 /// line; lines are never wrapped, so height is exact (`n*line_height + padding`).
@@ -29,6 +62,8 @@ pub struct CodeBlock {
     font_size: f32,
     source_key: u64,
     selection: Option<(usize, usize)>,
+    toolbar: bool,
+    wrap: bool,
 }
 
 /// Where a code block's text sits and how tall the block is, for a font
@@ -55,6 +90,8 @@ pub fn code_block_joined(spans: impl Into<Arc<[StyledSpan]>>, line_count: usize)
         font_size: 0.0,
         source_key: 0,
         selection: None,
+        toolbar: false,
+        wrap: false,
     }
 }
 
@@ -84,6 +121,33 @@ impl CodeBlock {
         self
     }
 
+    /// Reserves a [`CodeHeader::Toolbar`] row above the code for the
+    /// caller's label and actions, painting no label itself.
+    pub fn toolbar(mut self, toolbar: bool) -> Self {
+        self.toolbar = toolbar;
+        self
+    }
+
+    /// Wraps lines at the block's width instead of letting them run past
+    /// it. Selection offsets and copy are unchanged.
+    pub fn wrap(mut self, wrap: bool) -> Self {
+        self.wrap = wrap;
+        self
+    }
+
+    fn header(&self) -> CodeHeader {
+        match (self.toolbar, self.label.is_some()) {
+            (true, _) => CodeHeader::Toolbar,
+            (false, true) => CodeHeader::Label,
+            (false, false) => CodeHeader::None,
+        }
+    }
+
+    /// Width lines wrap at in a block `width` wide, when wrapping.
+    pub fn wrap_width(width: f32, font_size: f32) -> f32 {
+        (width - font_size * CODE_PAD_X * 2.0).max(1.0)
+    }
+
     /// The text params `request_layout` shapes for `lines`: one unwrapped
     /// monospace text with the lines joined by `\n`.
     pub fn layout_params(lines: &[Vec<StyledSpan>], font_size: f32) -> TextParams {
@@ -96,6 +160,13 @@ impl CodeBlock {
         styled_params(spans, Self::style(font_size), None)
     }
 
+    /// [`Self::joined_layout_params`] for a block `width` wide that wraps
+    /// its lines.
+    pub fn wrapped_layout_params(spans: &[StyledSpan], font_size: f32, width: f32) -> TextParams {
+        let wrap = Self::wrap_width(width, font_size);
+        styled_params(spans, Self::style(font_size), Some(wrap))
+    }
+
     fn style(font_size: f32) -> TextStyle {
         TextStyle::new(font_size)
             .kind(FontKind::Mono)
@@ -104,12 +175,23 @@ impl CodeBlock {
 
     /// Height and text origin of a block of `line_count` lines.
     pub fn metrics(font_size: f32, line_count: usize, labeled: bool) -> CodeBlockMetrics {
+        let header = if labeled {
+            CodeHeader::Label
+        } else {
+            CodeHeader::None
+        };
+        Self::header_metrics(font_size, line_count, header)
+    }
+
+    /// Height and text origin of a block of `rows` visual lines under
+    /// `header`.
+    pub fn header_metrics(font_size: f32, rows: usize, header: CodeHeader) -> CodeBlockMetrics {
         let pad_y = font_size * CODE_PAD_Y;
-        let label = if labeled { font_size * LABEL_ROW } else { 0.0 };
-        let rows = line_count.max(1) as f32;
+        let header = header.height(font_size);
+        let rows = rows.max(1) as f32;
         CodeBlockMetrics {
-            height: (rows * font_size * CODE_LINE_HEIGHT + pad_y * 2.0 + label).ceil(),
-            text_origin: (font_size * CODE_PAD_X, pad_y + label),
+            height: (rows * font_size * CODE_LINE_HEIGHT + pad_y * 2.0 + header).ceil(),
+            text_origin: (font_size * CODE_PAD_X, pad_y + header),
         }
     }
 }
@@ -135,6 +217,7 @@ pub struct CodeBlockState {
     layout: Option<Arc<TextLayout>>,
     label: Option<Arc<TextLayout>>,
     spans: Arc<[StyledSpan]>,
+    metrics: CodeBlockMetrics,
 }
 
 impl Element for CodeBlock {
@@ -147,9 +230,14 @@ impl Element for CodeBlock {
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
         let style = Self::style(self.font_size);
-        let layout = with_styled_query(&self.spans, style, None, |q| cx.layout_text_query(q));
+        let wrap = self
+            .wrap
+            .then(|| Self::wrap_width(self.width, self.font_size));
+        let layout = with_styled_query(&self.spans, style, wrap, |q| cx.layout_text_query(q));
         let spans = self.spans.clone();
-        let label = self.label.as_ref().and_then(|label| {
+        let header = self.header();
+        let label = self.label.as_ref().filter(|_| header == CodeHeader::Label);
+        let label = label.and_then(|label| {
             let size = self.font_size * LABEL_SIZE;
             cx.layout_text_query(&TextQuery::new(
                 label,
@@ -158,12 +246,16 @@ impl Element for CodeBlock {
                     .line_height(size * 1.2),
             ))
         });
-        let height = Self::metrics(self.font_size, self.line_count, self.label.is_some()).height;
+        let rows = match (&layout, self.wrap) {
+            (Some(layout), true) => layout.line_count(),
+            _ => self.line_count,
+        };
+        let metrics = Self::header_metrics(self.font_size, rows, header);
         let id = engine.request_layout(
             taffy::Style {
                 size: taffy::Size {
                     width: taffy::Dimension::length(self.width),
-                    height: taffy::Dimension::length(height),
+                    height: taffy::Dimension::length(metrics.height),
                 },
                 flex_shrink: 1.0,
                 ..Default::default()
@@ -176,6 +268,7 @@ impl Element for CodeBlock {
                 layout,
                 label,
                 spans,
+                metrics,
             },
         )
     }
@@ -200,7 +293,7 @@ impl Element for CodeBlock {
     ) {
         let default_color = cx.text_color_override().unwrap_or(cx.theme.colors.text);
         let radius = (self.font_size * 0.35).min(8.0);
-        let metrics = Self::metrics(self.font_size, self.line_count, self.label.is_some());
+        let metrics = state.metrics;
         let origin = (
             bounds.x + metrics.text_origin.0,
             bounds.y + metrics.text_origin.1,
