@@ -106,7 +106,9 @@ fn main() {
 
     let lib_dir = match env::var_os("QUARK_GHOSTTY_VT_LIB_DIR") {
         Some(dir) => PathBuf::from(dir),
-        None if cfg!(feature = "zig-build") => build_with_zig(&os, archive),
+        None if cfg!(feature = "zig-build") => {
+            stage_in_out_dir(&build_with_zig(&os, archive), archive)
+        }
         None => panic!(
             "quark-terminal: the zig-build feature is off; set QUARK_GHOSTTY_VT_LIB_DIR \
              to a directory holding {archive}"
@@ -125,6 +127,21 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib={lib}");
         }
     }
+}
+
+/// Links (or copies) the cached archive into `OUT_DIR` and returns that
+/// directory. Build-script caches such as kache restore `OUT_DIR` and this
+/// script's output without running it, so the archive must live there:
+/// a path into the shared cache above would not exist in a fresh target.
+fn stage_in_out_dir(cached: &Path, archive: &str) -> PathBuf {
+    let dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("lib");
+    std::fs::create_dir_all(&dir).expect("create OUT_DIR/lib");
+    let staged = dir.join(archive);
+    let _ = std::fs::remove_file(&staged);
+    if std::fs::hard_link(cached.join(archive), &staged).is_err() {
+        std::fs::copy(cached.join(archive), &staged).expect("copy the archive into OUT_DIR");
+    }
+    dir
 }
 
 /// Builds (or reuses) the archive and returns the directory holding it.
