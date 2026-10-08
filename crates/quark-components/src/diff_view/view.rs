@@ -192,6 +192,9 @@ fn build(
              scroll_y={frame.scroll} scroll_total={frame.total}
              on:scroll={ScrollActionBuilder::new(move |lines| on_event(DiffEvent::Scroll(lines)))
                  .with_to_px(move |px| on_event(DiffEvent::ScrollTo(px as f32)))}
+             @when {frame.scrollbar_auto_hide} {
+                 scrollbar_visibility={&frame.scrollbar} class="scrollbar-auto-hide"
+             }
              @for &(binding, key) in KEYS { on_key={(binding, on_event(DiffEvent::Key(key)))} }
              @when {env.accessible} {
                  accessibility_id={frame.id} accessibility_role={Role::List}

@@ -32,7 +32,8 @@ use quark::view;
 use quark_ui::accessibility::SortDirection;
 use quark_ui::element::{
     AnyElement, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement,
-    ScrollActionBuilder, WHEEL_LINE_PX, cached, div, inputs_hash, svg_icon, text,
+    ScrollActionBuilder, ScrollbarVisibility, WHEEL_LINE_PX, cached, div, inputs_hash, svg_icon,
+    text,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -187,6 +188,9 @@ struct TableInner {
     /// Bumped when column widths, order, or the horizontal offset change:
     /// every row's cache input.
     layout_revision: u64,
+    /// The body's scrollbars show only on demand, as `scrollbar` decides.
+    scrollbar_auto_hide: bool,
+    scrollbar: ScrollbarVisibility,
 }
 
 /// App-owned column table and row view. See the [module docs](self).
@@ -226,6 +230,8 @@ impl TableState {
                 header: None,
                 revision: 0,
                 layout_revision: 0,
+                scrollbar_auto_hide: false,
+                scrollbar: ScrollbarVisibility::new(),
             }),
         }
     }
@@ -237,6 +243,14 @@ impl TableState {
 
     pub fn with_row_height(mut self, row_height: f32) -> Self {
         self.m().row_height = row_height.max(1.0);
+        self
+    }
+
+    /// Show the body's scrollbars only while the pointer is over the body,
+    /// a thumb is held, or briefly after the body scrolls (see
+    /// [`ScrollbarVisibility`]). Without it they always show.
+    pub fn with_scrollbar_auto_hide(mut self) -> Self {
+        self.m().scrollbar_auto_hide = true;
         self
     }
 
@@ -964,7 +978,10 @@ fn build_table<D: TableData>(
                      .with_to_px(move |px| on_event(TableEvent::ScrollTo(px as f32)))}
                  scroll_x={t.scroll_x} scroll_total_x={t.total_width()}
                  on:scroll_x={ScrollActionBuilder::new(move |lines| on_event(TableEvent::ScrollX(lines)))
-                     .with_to_px(move |px| on_event(TableEvent::ScrollXTo(px as f32)))}>
+                     .with_to_px(move |px| on_event(TableEvent::ScrollXTo(px as f32)))}
+                 @when {t.scrollbar_auto_hide} {
+                     scrollbar_visibility={&t.scrollbar} class="scrollbar-auto-hide"
+                 }>
                 <div class="w-full shrink-0" h={window.top_spacer} />
                 for display in window.range {
                     {table_row(t, data, display, columns.clone(), colors, env, on_event)}

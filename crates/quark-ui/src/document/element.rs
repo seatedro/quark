@@ -29,8 +29,8 @@ use crate::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, DragHandler, DragReleaseResult, DragStart, Element,
     ElementContext, IntoAnyElement, LayoutEngine, LayoutId, LinkClicked, LinkHandler,
     ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink, ScrollTarget, ScrollbarInput,
-    Scrollbars, SelectableText, StyledSpan, cached, code_block_joined, div, inputs_hash,
-    selectable_rich_text, text,
+    ScrollbarVisibility, Scrollbars, SelectableText, StyledSpan, cached, code_block_joined, div,
+    inputs_hash, selectable_rich_text, text,
 };
 use crate::style::Styled;
 use crate::theme::Theme;
@@ -222,6 +222,9 @@ pub struct DocumentElement {
     label: Cow<'static, str>,
     /// A drag is autoscrolling; ask for the next frame.
     animating: bool,
+    scrollbar_auto_hide: bool,
+    /// The document's, so the linger survives rebuilding the element.
+    scrollbar_visibility: ScrollbarVisibility,
 }
 
 /// Cache keys of document rows, apart from other cached boundaries.
@@ -328,6 +331,8 @@ impl<G: BlockGeometry> Document<G> {
             on_link,
             label: Cow::Borrowed("Document"),
             animating: self.wants_frame(),
+            scrollbar_auto_hide: false,
+            scrollbar_visibility: self.scrollbar.clone(),
         }
     }
 
@@ -888,6 +893,15 @@ impl DocumentElement {
         self
     }
 
+    /// Show the list's scrollbar only while the pointer is over the list,
+    /// its thumb is held, or for
+    /// [`SCROLLBAR_LINGER_MS`](crate::element::SCROLLBAR_LINGER_MS) after
+    /// the list scrolls.
+    pub fn scrollbar_auto_hide(mut self) -> Self {
+        self.scrollbar_auto_hide = true;
+        self
+    }
+
     /// Input from the wheel and the scrollbar.
     fn scroll_builder(&self) -> ScrollActionBuilder {
         let lines = self.on_event.clone();
@@ -971,7 +985,9 @@ impl Element for DocumentElement {
                 offset: (0.0, self.scroll),
                 axes: ScrollAxes { x: false, y: true },
                 sinks: [None, Some(ScrollSink::Builder(builder.clone()))],
-                auto_hide: false,
+                auto_hide: self.scrollbar_auto_hide,
+                visibility: Some(self.scrollbar_visibility.clone()),
+                focused: false,
             },
             cx,
         );

@@ -142,6 +142,15 @@ round trip through the app; the app can call `set_offset`, `animate_to`, or
 [element/scroll.rs](../../crates/quark-ui/src/element/scroll.rs) cover
 the app-owned alternative.
 
+Scrollbars always show unless the container asks for
+`scrollbar_auto_hide()`. Then they show while the pointer is over it or a
+thumb is held, and for a second after the offset moves or the container
+gains focus. A handle keeps that state itself. A container whose offset
+the app owns keeps a `ScrollbarVisibility` next to the offset and attaches
+it with `.scrollbar_visibility(&state)`; the tree, table, diff view, and
+document turn this on with `with_scrollbar_auto_hide()` (on the document
+element, `scrollbar_auto_hide()`).
+
 ## The `view!` macro
 
 `quark::view!` writes the same builder calls as HTML-like markup, with

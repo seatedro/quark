@@ -77,7 +77,7 @@ the rows that entered the window. The block document caches each row.
   The builder API stays plain values with no arena lifetimes.
 - **Frame buffers.** The adapter keeps the buffers of the frame before
   last (the scene the renderer hands back, the input routing frame, the
-  text input areas, the accessibility frame, the scrollbar tracks) and
+  text input areas, the accessibility frame, the tooltip regions) and
   refills them.
 - **Text layouts.** The `LayoutCache` keeps shaped layouts across frames
   and evicts the ones unused for a number of frames, so unchanged text is

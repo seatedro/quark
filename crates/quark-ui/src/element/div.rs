@@ -34,6 +34,7 @@ pub struct Div {
     scroll_axes: ScrollAxes,
     hide_scrollbar: bool,
     scrollbar_auto_hide: bool,
+    scrollbar_visibility: Option<ScrollbarVisibility>,
     clips: bool,
     block_mouse: bool,
     focus_target: Option<FocusId>,
@@ -86,6 +87,7 @@ pub fn div() -> Div {
         scroll_axes: ScrollAxes::default(),
         hide_scrollbar: false,
         scrollbar_auto_hide: false,
+        scrollbar_visibility: None,
         clips: false,
         block_mouse: false,
         focus_target: None,
@@ -417,10 +419,19 @@ impl Div {
     }
 
     /// Show scrollbars only while the pointer is over the container, a
-    /// thumb is held, or for [`SCROLLBAR_LINGER_MS`] after a tracked
-    /// container scrolls.
+    /// thumb is held, or for [`SCROLLBAR_LINGER_MS`] after the container
+    /// scrolls or gains focus (see [`ScrollbarVisibility`]). A container
+    /// whose offset the app owns lingers only with
+    /// [`Self::scrollbar_visibility`].
     pub fn scrollbar_auto_hide(mut self) -> Self {
         self.scrollbar_auto_hide = true;
+        self
+    }
+
+    /// Keep the linger of auto-hiding scrollbars in `state`, which the app
+    /// holds across frames. Overrides a [`Self::track_scroll`] handle's own.
+    pub fn scrollbar_visibility(mut self, state: &ScrollbarVisibility) -> Self {
+        self.scrollbar_visibility = Some(state.clone());
         self
     }
 
@@ -663,6 +674,17 @@ impl Div {
                 axes,
                 sinks: Axis::BOTH.map(|axis| self.scrollbar_sink(axis)),
                 auto_hide: self.scrollbar_auto_hide,
+                visibility: self.scrollbar_visibility.clone().or_else(|| {
+                    self.scroll_handle
+                        .as_ref()
+                        .map(|handle| handle.scrollbar_visibility().clone())
+                }),
+                // Read only for auto-hide: the read ties an enclosing cache
+                // boundary to focus.
+                focused: self.scrollbar_auto_hide
+                    && self
+                        .focus_target
+                        .is_some_and(|target| cx.is_focused(target)),
             },
             cx,
         )
