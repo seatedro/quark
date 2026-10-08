@@ -103,25 +103,32 @@ pub struct SliderRange {
     pub step: f32,
 }
 
+/// `10^d` for the decimal places a step can need. A table rather than
+/// `powi`, which Kani cannot model; the values are the same, all exact.
+const POW10: [f32; 7] = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6];
+
 impl SliderRange {
     /// `value` moved to the nearest step and into range.
     pub fn snap(&self, value: f32) -> f32 {
         let steps = ((value - self.min) / self.step).round();
         let snapped = self.min + steps * self.step;
         // Round off float noise below the step's precision (0.1 + 0.2).
-        let scale = 10f32.powi(self.decimals() as i32);
+        let scale = POW10[self.decimals()];
         ((snapped * scale).round() / scale).clamp(self.min, self.max)
     }
 
-    /// Decimal places the step needs, for display: 0 for 1, 1 for 0.5, 2
-    /// for 0.25.
+    /// Decimal places the values need, for display: 0 for 1, 1 for 0.5, 2
+    /// for 0.25. Values are `min` plus whole steps, so `min` counts too.
     pub fn decimals(&self) -> usize {
-        (0..6)
-            .find(|&d| {
-                let scaled = self.step * 10f32.powi(d);
-                (scaled - scaled.round()).abs() < 1e-3
-            })
-            .unwrap_or(6) as usize
+        let places = |x: f32| {
+            (0..6)
+                .find(|&d| {
+                    let scaled = x * POW10[d];
+                    (scaled - scaled.round()).abs() < 1e-3
+                })
+                .unwrap_or(6)
+        };
+        places(self.step).max(places(self.min))
     }
 
     /// The value at fraction `t` of the range.
@@ -319,6 +326,32 @@ impl IntoAnyElement for BoundsProbe {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// For any range and step in quarter points (exact in `f32`, as are
+    /// the snapped values), a snapped value is in range, on a step from
+    /// `min` unless it is `max`, and the nearest such value to the input.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn snap_lands_on_the_nearest_step_in_range() {
+        let quarters = |q: i16| f32::from(q) / 4.0;
+        let min = quarters(kani::any::<i8>().into());
+        let max = min + quarters((kani::any::<u8>() % 128).into());
+        let step = quarters((kani::any::<u8>() % 32 + 1).into());
+        let range = SliderRange { min, max, step };
+        let value = quarters(kani::any::<i16>() % 1024);
+
+        let snapped = range.snap(value);
+
+        assert!(min <= snapped && snapped <= max);
+        let steps = (snapped - min) / step;
+        assert!(snapped == max || steps == steps.round());
+        assert!((snapped - value.clamp(min, max)).abs() <= step / 2.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +368,13 @@ mod tests {
             max: 10.0,
             step: 5.0,
         };
+        // Regression: halves from a quarter were rounded to the step's one
+        // decimal, so 0.75 came out as 0.8.
+        let halves_from_a_quarter = SliderRange {
+            min: 0.25,
+            max: 2.0,
+            step: 0.5,
+        };
         let cases = [
             (tenths, 0.1 + 0.2, 0.3),
             (tenths, 0.94, 0.9),
@@ -342,6 +382,7 @@ mod tests {
             (fives, 2.4, 0.0),
             (fives, 2.6, 5.0),
             (fives, -12.0, -10.0),
+            (halves_from_a_quarter, 0.7, 0.75),
         ];
         for (range, input, expected) in cases {
             assert_eq!(range.snap(input), expected, "{input} in {range:?}");

@@ -145,6 +145,7 @@ mod linux {
 #[cfg(target_os = "linux")]
 fn uri_list(paths: &[PathBuf]) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = Vec::new();
     for path in paths {
         out.extend_from_slice(b"file://");
@@ -152,7 +153,11 @@ fn uri_list(paths: &[PathBuf]) -> Vec<u8> {
             if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
                 out.push(byte);
             } else {
-                out.extend_from_slice(format!("%{byte:02X}").as_bytes());
+                out.extend_from_slice(&[
+                    b'%',
+                    HEX[usize::from(byte >> 4)],
+                    HEX[usize::from(byte & 0xF)],
+                ]);
             }
         }
         out.extend_from_slice(b"\r\n");
@@ -315,6 +320,52 @@ mod windows_shell {
             unsafe { ILFree(Some(pidl)) };
         }
         result.map_err(|error| DragOutError::Platform(error.message()))
+    }
+}
+
+#[cfg(all(kani, target_os = "linux"))]
+mod verification {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    const LEN: usize = 3;
+
+    fn hex(digit: u8) -> u8 {
+        match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'A'..=b'F' => digit - b'A' + 10,
+            _ => panic!("not an uppercase hex digit"),
+        }
+    }
+
+    /// Any path bytes encode to one `file://` line that holds only URI
+    /// characters and decodes back to the same bytes.
+    #[kani::proof]
+    #[kani::unwind(13)]
+    fn uri_list_lines_decode_back_to_the_path_bytes() {
+        let bytes: [u8; LEN] = kani::any();
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(&bytes));
+        let out = super::uri_list(&[path]);
+
+        assert!(out.starts_with(b"file://") && out.ends_with(b"\r\n"));
+        let body = &out[7..out.len() - 2];
+        let mut decoded = [0u8; LEN];
+        let (mut i, mut n) = (0, 0);
+        while i < body.len() {
+            let byte = body[i];
+            let raw = if byte == b'%' {
+                i += 2;
+                hex(body[i - 1]) << 4 | hex(body[i])
+            } else {
+                assert!(byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte));
+                byte
+            };
+            assert!(n < LEN);
+            decoded[n] = raw;
+            n += 1;
+            i += 1;
+        }
+        assert!(n == LEN && decoded == bytes);
     }
 }
 

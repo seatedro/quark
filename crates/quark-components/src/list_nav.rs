@@ -124,6 +124,67 @@ pub(crate) const TYPE_AHEAD_KEYS: [&str; 36] = [
     "t", "u", "v", "w", "x", "y", "z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
 ];
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const MAX_LEN: usize = 5;
+
+    /// One enabled step from a valid `at`, written as a scan over offsets
+    /// rather than the probe loop `step` uses.
+    fn one_step(len: usize, at: usize, forward: bool, wrap: bool, mask: u8) -> usize {
+        let enabled = |i: usize| mask & (1 << i) == 0;
+        for k in 1..len {
+            let i = if forward { at + k } else { at + len - k };
+            if !wrap && (if forward { i >= len } else { i < len }) {
+                break;
+            }
+            if enabled(i % len) {
+                return i % len;
+            }
+        }
+        at
+    }
+
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn step_moves_to_the_nearest_enabled_item_and_composes() {
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_LEN);
+        let mask: u8 = kani::any();
+        let disabled = |i: usize| mask & (1 << i) != 0;
+        let current: Option<usize> = kani::any();
+        kani::assume(current.is_none_or(|c| c <= MAX_LEN));
+        let wrap: bool = kani::any();
+        let forward: bool = kani::any();
+        let unit = if forward { 1 } else { -1 };
+
+        let got = step(len, current, unit, wrap, disabled);
+
+        let any_enabled = (0..len).any(|i| !disabled(i));
+        match current.filter(|&c| c < len) {
+            _ if !any_enabled => assert!(got.is_none()),
+            Some(at) => {
+                assert!(got == Some(one_step(len, at, forward, wrap, mask)));
+                // Two steps are one step twice.
+                let twice = step(len, current, 2 * unit, wrap, disabled);
+                let again = step(len, got, unit, wrap, disabled);
+                assert!(twice == again);
+            }
+            None => {
+                let at = got.unwrap();
+                assert!(at < len && !disabled(at));
+                // The first enabled item going forward, the last going back.
+                if forward {
+                    assert!((0..at).all(disabled));
+                } else {
+                    assert!((at + 1..len).all(disabled));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

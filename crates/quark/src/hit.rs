@@ -412,6 +412,101 @@ impl HitTable {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const N: usize = 3;
+    const OVER: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 8.0,
+        height: 8.0,
+    };
+    const BESIDE: Rect = Rect {
+        x: 6.0,
+        y: 0.0,
+        width: 2.0,
+        height: 8.0,
+    };
+
+    /// Entries in `covers` hold the point (4, 4); the others miss it by
+    /// their bounds or by their clip. Membership is concrete so `stack_at`
+    /// hands `sort_unstable` a concrete length: a symbolic one made CBMC
+    /// unroll every branch of std's sort and never finish.
+    fn check(covers: u8) {
+        let (x, y) = (4.0, 4.0);
+        let mut table = HitTable::default();
+        let mut ids = [HitId { frame: 0, index: 0 }; N];
+        let mut blocks = [false; N];
+        let mut z = [0i32; N];
+        for i in 0..N {
+            let hit = covers & (1 << i) != 0;
+            let (bounds, clip) = match (hit, i % 2) {
+                (true, _) => (OVER, if i == 0 { UNCLIPPED } else { OVER }),
+                (false, 0) => (BESIDE, UNCLIPPED),
+                (false, _) => (OVER, BESIDE),
+            };
+            z[i] = i32::from(kani::any::<u8>() % 3);
+            blocks[i] = kani::any();
+            let flags = if blocks[i] {
+                HitFlags::BLOCKS_MOUSE | HitFlags::HOVER
+            } else {
+                HitFlags::HOVER
+            };
+            ids[i] = table.push(bounds, clip, z[i], flags, CursorHint::Default);
+        }
+        let key = |i: usize| (z[i], i);
+        let hit = |i: usize| covers & (1 << i) != 0;
+        // The topmost blocker under the point; everything listed is at or
+        // above it.
+        let mut floor = None;
+        for i in 0..N {
+            if hit(i) && blocks[i] && floor.is_none_or(|f| key(i) > f) {
+                floor = Some(key(i));
+            }
+        }
+        let listed = |i: usize| hit(i) && floor.is_none_or(|f| key(i) >= f);
+
+        let stack = table.stack_at(x, y);
+
+        let mut expected = 0;
+        for i in 0..N {
+            assert!(table.row(ids[i]) == Some(i));
+            expected += usize::from(listed(i));
+        }
+        assert!(stack.len() == expected);
+        for (k, id) in stack.iter().enumerate() {
+            let i = table.row(*id).unwrap();
+            assert!(listed(i));
+            if k > 0 {
+                assert!(key(i) < key(table.row(stack[k - 1]).unwrap()));
+            }
+        }
+
+        table.reset();
+        for _ in 0..N {
+            table.push(OVER, UNCLIPPED, 0, HitFlags::HOVER, CursorHint::Default);
+        }
+        for id in ids {
+            assert!(table.row(id).is_none());
+        }
+    }
+
+    /// For every set of entries under the point and any z and blockers,
+    /// the stack holds exactly those entries, topmost first (z, then later
+    /// paint), down to and including the topmost blocker. After a reset
+    /// the old ids resolve to nothing, though new entries reuse their
+    /// indices.
+    #[kani::proof]
+    #[kani::unwind(9)]
+    fn stack_at_is_topmost_first_down_to_a_blocker_and_old_ids_go_stale() {
+        for covers in 0..1u8 << N {
+            check(covers);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

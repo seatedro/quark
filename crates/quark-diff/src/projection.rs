@@ -111,15 +111,25 @@ impl Expansion {
     /// Lines of `gap` still hidden. A remainder of [`MIN_HIDDEN`] lines or
     /// fewer is shown, so it counts as none.
     pub fn hidden(&self, doc: &DiffDocument, gap: GapId) -> u32 {
+        self.hidden_of(gap, Self::gap_len(doc, gap))
+    }
+
+    /// [`Self::hidden`] for a gap of `len` lines.
+    fn hidden_of(&self, gap: GapId, len: u32) -> u32 {
         let (top, bottom) = self.revealed(gap);
-        let hidden = Self::gap_len(doc, gap).saturating_sub(top + bottom);
+        let hidden = len.saturating_sub(top + bottom);
         if hidden <= MIN_HIDDEN { 0 } else { hidden }
     }
 
     /// Reveals up to `amount` more lines of `gap`. A trailing gap only
     /// reveals downward. Returns whether anything changed.
     pub fn reveal(&mut self, doc: &DiffDocument, gap: GapId, reveal: Reveal, amount: u32) -> bool {
-        let hidden = self.hidden(doc, gap);
+        self.reveal_of(gap, Self::gap_len(doc, gap), reveal, amount)
+    }
+
+    /// [`Self::reveal`] for a gap of `len` lines.
+    fn reveal_of(&mut self, gap: GapId, len: u32, reveal: Reveal, amount: u32) -> bool {
+        let hidden = self.hidden_of(gap, len);
         if hidden == 0 {
             return false;
         }
@@ -351,13 +361,7 @@ impl Projection {
     /// store indices: revealed lines at the top, a gap row for the hidden
     /// middle (unless it is short enough to show), revealed lines below.
     fn push_gap(&mut self, id: GapId, (old, new): (u32, u32), len: u32, expansion: &Expansion) {
-        let (top, bottom) = expansion.revealed(id);
-        let (mut top, bottom) = (top.min(len), bottom.min(len - top.min(len)));
-        let mut hidden = len - top - bottom;
-        if hidden <= MIN_HIDDEN {
-            top += hidden;
-            hidden = 0;
-        }
+        let (top, hidden, bottom) = gap_split(len, expansion.revealed(id));
         for k in 0..top {
             self.push(RowKind::Context, id.file, NONE, old + k, new + k, NONE);
         }
@@ -445,9 +449,78 @@ impl Projection {
     }
 }
 
+/// Lines of a gap of `len` shown above its gap row, hidden under it, and
+/// shown below it, for `(top, bottom)` lines revealed from each end. A
+/// hidden remainder of [`MIN_HIDDEN`] lines or fewer is shown instead.
+fn gap_split(len: u32, (top, bottom): (u32, u32)) -> (u32, u32, u32) {
+    let (mut top, bottom) = (top.min(len), bottom.min(len - top.min(len)));
+    let mut hidden = len - top - bottom;
+    if hidden <= MIN_HIDDEN {
+        top += hidden;
+        hidden = 0;
+    }
+    (top, hidden, bottom)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionError {
     ColumnLength,
     Line { row: u32 },
     RowList { row: u32 },
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    fn any_reveal() -> Reveal {
+        match kani::any::<u8>() % 3 {
+            0 => Reveal::Down,
+            1 => Reveal::Up,
+            _ => Reveal::All,
+        }
+    }
+
+    /// Any gap, above a hunk or trailing a file, after any two reveals of
+    /// any amount from either end: its rows (lines shown on top, one gap
+    /// row, lines shown below) cover every line once, the gap row agrees
+    /// with `Expansion::hidden`, a gap of `MIN_HIDDEN` lines or fewer is
+    /// shown instead, and lines revealed from an end show at that end.
+    /// The row emission is left to the proptest: with rows pushed into
+    /// the projection's columns, even six lines got the CI runner shut
+    /// down while CBMC built the formula.
+    #[kani::proof]
+    fn gap_rows_show_every_line_once_after_any_reveals() {
+        let len: u32 = kani::any();
+        let id = GapId {
+            file: 0,
+            hunk: kani::any::<bool>().then_some(0),
+        };
+        let mut expansion = Expansion {
+            above: vec![(0, 0)],
+            after: vec![0],
+        };
+        expansion.reveal_of(id, len, any_reveal(), kani::any());
+        expansion.reveal_of(id, len, any_reveal(), kani::any());
+        let revealed = expansion.revealed(id);
+
+        let (top, hidden, bottom) = gap_split(len, revealed);
+
+        assert!(u64::from(top) + u64::from(hidden) + u64::from(bottom) == u64::from(len));
+        assert!(hidden == expansion.hidden_of(id, len));
+        assert!(hidden == 0 || hidden > MIN_HIDDEN);
+        if hidden > 0 {
+            assert!((top, bottom) == revealed);
+        }
+    }
+
+    /// Lines revealed by any stale expansion (more than the gap holds, from
+    /// either end) still split the gap without losing or repeating one.
+    #[kani::proof]
+    fn any_revealed_lines_split_a_gap_exactly() {
+        let len: u32 = kani::any();
+        let (top, hidden, bottom) = gap_split(len, kani::any());
+        assert!(u64::from(top) + u64::from(hidden) + u64::from(bottom) == u64::from(len));
+        assert!(hidden == 0 || hidden > MIN_HIDDEN);
+    }
 }

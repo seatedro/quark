@@ -265,3 +265,7 @@ required-features = ["components"]
 [[example]]
 name = "platform_demo"
 required-features = ["notifications"]
+
+[lints.rust]
+# `cfg(kani)` gates the bounded model checking harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

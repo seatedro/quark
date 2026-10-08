@@ -989,11 +989,12 @@ impl Scrollbar {
     /// end of its track asks for `f32::MAX`, which sinks clamp to their
     /// current end: content that grew since the press (a streaming
     /// transcript) is still reached, so a drag to the bottom stays there.
+    /// A thumb that fills its track has no travel and keeps the offset.
     pub fn offset_for_pointer(&self, pointer: f32, grab: f32) -> f32 {
         let (start, len) = self.axis.span(self.track);
         let range = len - self.axis.span(self.thumb).1;
         if range <= 0.0 {
-            return 0.0;
+            return self.offset;
         }
         let travel = (pointer - start - grab).clamp(0.0, range);
         if travel >= range {
@@ -1129,6 +1130,63 @@ impl DragHandler for ScrollbarDrag {
                     actions: builder.on_drag_end.iter().cloned().collect(),
                 }
             }
+        }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Any vertical bar (track, thumb length, offset, and max in whole
+    /// points), held anywhere on its thumb, with the pointer anywhere: the
+    /// offset asked for is 0 with the thumb at or before the start of its
+    /// track, the end once the thumb reaches the end, and in range between.
+    /// A thumb that fills its track keeps the offset. One pointer per run:
+    /// comparing two (monotonicity) doubles the float divisions, and that
+    /// proof ran past the 30 minute job. The bar comes from arbitrary
+    /// values rather than `scrollbars` for the same reason.
+    #[kani::proof]
+    #[kani::solver(kissat)]
+    fn a_dragged_thumb_asks_for_an_offset_in_range() {
+        let len = f32::from(kani::any::<u8>());
+        let thumb_len = f32::from(kani::any::<u8>());
+        let max = f32::from(kani::any::<u16>());
+        let offset = f32::from(kani::any::<u16>());
+        let grab = f32::from(kani::any::<u8>());
+        kani::assume(thumb_len <= len && 0.0 < max && offset <= max && grab <= thumb_len);
+        let track = Rect {
+            x: 0.0,
+            y: 6.0,
+            width: ScrollbarSz::WIDTH,
+            height: len,
+        };
+        let bar = Scrollbar {
+            axis: Axis::Y,
+            track,
+            thumb: Rect {
+                height: thumb_len,
+                ..track
+            },
+            hit: track,
+            offset,
+            max,
+            viewport: 0.0,
+        };
+        let pointer = f32::from(kani::any::<i16>() % 512);
+
+        let asked = bar.offset_for_pointer(pointer, grab);
+
+        let travel = pointer - track.y - grab;
+        if len - thumb_len <= 0.0 {
+            // A thumb that fills its track has nowhere to go.
+            assert!(asked == offset);
+        } else if travel >= len - thumb_len {
+            assert!(asked == f32::MAX);
+        } else if travel <= 0.0 {
+            assert!(asked == 0.0);
+        } else {
+            assert!(0.0 < asked && asked <= max);
         }
     }
 }

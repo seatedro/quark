@@ -128,10 +128,12 @@ pub fn virtual_list_window(
 
     let first = (scroll_offset.max(0.0) / stride).floor().max(0.0) as usize;
     let first = first.min(item_count);
-    let visible = (viewport_extent.max(0.0) / stride).ceil().max(1.0) as usize;
+    // One past the last row whose top is above the viewport's bottom edge,
+    // so a row an unaligned scroll cuts off at the bottom is still drawn.
+    let bottom = scroll_offset.max(0.0) + viewport_extent.max(0.0);
+    let last = ((bottom / stride).ceil() as usize).max(first.saturating_add(1));
     let start = first.saturating_sub(overscan_items).min(item_count);
-    let end = first
-        .saturating_add(visible)
+    let end = last
         .saturating_add(overscan_items)
         .min(item_count)
         .max(start);
@@ -152,6 +154,53 @@ pub fn virtual_list_window(
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const MAX_ITEMS: usize = 6;
+
+    /// For any scroll position the list can reach, every row that shows in
+    /// the viewport is in the window, and the spacers plus the windowed
+    /// rows add up to the list's full extent.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn window_covers_every_visible_row_and_preserves_extent() {
+        // Whole points, so every product and sum below is exact in `f32`.
+        let count = usize::from(kani::any::<u8>()) % (MAX_ITEMS + 1);
+        let extent = f32::from(kani::any::<u8>() % 32);
+        let gap = f32::from(kani::any::<u8>() % 8);
+        let viewport = f32::from(kani::any::<u8>());
+        let scroll = f32::from(kani::any::<u8>());
+        let overscan = usize::from(kani::any::<u8>() % 3);
+        let total = virtual_list_total_extent(count, extent, gap);
+        // Scrolling stops once the last row reaches the viewport's bottom.
+        kani::assume(scroll <= (total - viewport).max(0.0));
+
+        let window = virtual_list_window(count, scroll, viewport, extent, gap, overscan);
+
+        let range = window.range.clone();
+        assert!(range.start <= range.end && range.end <= count);
+        assert!(window.total_extent == total);
+        let stride = extent + gap;
+        if count == 0 || stride == 0.0 {
+            assert!(range.is_empty());
+            return;
+        }
+        for i in 0..count {
+            let top = i as f32 * stride;
+            if top < scroll + viewport && scroll < top + extent {
+                assert!(range.contains(&i));
+            }
+        }
+        let rows: f32 = range
+            .clone()
+            .map(|i| virtual_row_wrapper_extent(i, count, extent, stride))
+            .sum();
+        assert!(window.top_spacer + rows + window.bottom_spacer == total);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -166,6 +215,15 @@ mod tests {
 
         let near_end = virtual_list_window(100, 3_760.0, 80.0, 40.0, 0.0, 8);
         assert_eq!(near_end.range, 86..100);
+    }
+
+    // Regression: with no overscan, a row cut off at the viewport's bottom
+    // by an unaligned scroll was left out of the window.
+    #[test]
+    fn virtual_list_window_includes_a_row_cut_off_at_the_bottom() {
+        // Rows of 40; scrolled by 20, an 80 point viewport shows 20..100.
+        let window = virtual_list_window(10, 20.0, 80.0, 40.0, 0.0, 0);
+        assert_eq!(window.range, 0..3);
     }
 
     #[test]

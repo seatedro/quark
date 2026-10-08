@@ -358,12 +358,23 @@ impl SplitState {
     /// Fixed panes `pane` pushes once the flex pane is at its minimum: the
     /// expanded ones beyond its divider, nearest first.
     fn push_order(&self, pane: usize) -> impl Iterator<Item = usize> + '_ {
-        let beyond: Box<dyn Iterator<Item = usize>> = if pane < self.flex {
-            Box::new(pane + 1..self.panes.len())
+        // Index arithmetic rather than a boxed `Range` or `Rev<Range>`:
+        // dynamic dispatch made the Kani proof of `resize_to` intractable.
+        let forward = pane < self.flex;
+        let beyond = if forward {
+            pane + 1..self.panes.len()
         } else {
-            Box::new((0..pane).rev())
+            0..pane
         };
-        beyond.filter(|&i| i != self.flex && !self.collapsed[i])
+        (0..beyond.len())
+            .map(move |k| {
+                if forward {
+                    beyond.start + k
+                } else {
+                    beyond.end - 1 - k
+                }
+            })
+            .filter(|&i| i != self.flex && !self.collapsed[i])
     }
 
     /// Give `pane` the size `target` (already in pane terms): collapse below
@@ -752,6 +763,144 @@ impl DragHandler for DividerDrag {
 
     fn cursor(&self) -> CursorHint {
         self.cursor
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const N: usize = 3;
+
+    /// Small whole numbers, so every sum the algorithm forms is exact in
+    /// `f32` and the assertions can compare with `==`.
+    fn any_points() -> f32 {
+        f32::from(kani::any::<u8>() % 64)
+    }
+
+    /// Three panes with the flex pane at `flex`, arbitrary constraints and
+    /// stored sizes, and any panes other than `pane` collapsed.
+    fn any_state(pane: usize, flex: usize) -> SplitState {
+        let mut panes = [Pane::fixed("", 0.0); N];
+        let mut sizes = [0.0; N];
+        let mut collapsed = [false; N];
+        for i in 0..N {
+            let min = any_points();
+            let max = any_points();
+            kani::assume(min <= max);
+            panes[i] = Pane::fixed("", min).min(min).max(max);
+            if i == flex {
+                panes[i].flex = true;
+                panes[i].max = f32::INFINITY;
+            } else {
+                sizes[i] = any_points();
+                kani::assume(min <= sizes[i] && sizes[i] <= max);
+                collapsed[i] = i != pane && kani::any();
+            }
+        }
+        let mut state =
+            SplitState::new(Axis::Horizontal, panes.to_vec()).hide_collapsed_dividers(kani::any());
+        state.sizes = sizes.to_vec();
+        state.collapsed = collapsed.to_vec();
+        state
+    }
+
+    /// Resizing `pane` with the flex pane at `flex`.
+    fn check(pane: usize, flex: usize) {
+        let mut state = any_state(pane, flex);
+        let extent = f32::from(kani::any::<u8>());
+        let mins: f32 = state.panes.iter().map(|p| p.min).sum();
+        // Room for every minimum and divider; below that no layout can
+        // keep the minimums and resolve squeezes by design.
+        kani::assume(extent >= mins + (N - 1) as f32 * DIVIDER_THICKNESS);
+        let target = f32::from(kani::any::<u8>());
+        let before = state.sizes.clone();
+        // The panes `pane` may push, from the spec rather than from
+        // `push_order`: the expanded fixed panes on the flex pane's side.
+        let beyond = |i: usize| if pane < flex { i > pane } else { i < pane };
+        let mut far = [false; N];
+        for (i, far) in far.iter_mut().enumerate() {
+            *far = i != pane && i != flex && !state.collapsed[i] && beyond(i);
+        }
+
+        state.resize_to(pane, target, extent, false);
+
+        assert!(state.verify_integrity().is_ok());
+        let resolved = state.resolve(extent);
+        let r = resolved.as_slice();
+        // Sums are left out: proving float sums equal under a different
+        // association runs CBMC out of memory. The proptest checks them.
+        assert!(r[flex] >= state.panes[flex].min);
+        // The pane is laid out at the size it was given.
+        assert!(r[pane] == state.sizes[pane]);
+        for i in 0..N {
+            if i == pane || i == flex {
+                continue;
+            }
+            if far[i] {
+                // A pushed pane only shrinks, and never below its minimum.
+                assert!(state.sizes[i] <= before[i]);
+            } else {
+                // Panes on the near side are not touched.
+                assert!(state.sizes[i] == before[i]);
+            }
+        }
+        // Falling short of the target means nothing is left to push: the
+        // flex pane and every far pane sit at their minimums.
+        let p = state.panes[pane];
+        if state.sizes[pane] < target.clamp(p.min, p.max) {
+            assert!(r[flex] == state.panes[flex].min);
+            for i in 0..N {
+                if far[i] {
+                    assert!(r[i] == state.panes[i].min);
+                }
+            }
+        }
+    }
+
+    // One harness per placement of the resized and flex panes: with both
+    // indices symbolic the proof ran past the 30 minute job under CaDiCaL
+    // and under kissat.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane0_flex1() {
+        check(0, 1);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane0_flex2() {
+        check(0, 2);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane1_flex0() {
+        check(1, 0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane1_flex2() {
+        check(1, 2);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane2_flex0() {
+        check(2, 0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane2_flex1() {
+        check(2, 1);
     }
 }
 

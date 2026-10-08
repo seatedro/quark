@@ -669,6 +669,74 @@ impl Default for SignalStore {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const OPS: usize = 3;
+
+    /// Every handle made so far, and whether it is still live.
+    struct Model {
+        made: [Option<Signal<u8>>; OPS],
+        alive: [bool; OPS],
+    }
+
+    /// Step `step`: create a signal, or dispose any handle made so far,
+    /// live or already disposed.
+    fn any_op(store: &SignalStore, model: &mut Model, step: usize) {
+        if kani::any() {
+            model.made[step] = Some(store.create(step as u8));
+            model.alive[step] = true;
+        } else {
+            let j: usize = kani::any();
+            kani::assume(j < step);
+            if let Some(signal) = model.made[j] {
+                store.dispose(signal);
+                model.alive[j] = false;
+            }
+        }
+    }
+
+    /// Handle `j` resolves exactly while it is live. Values are not read:
+    /// with the downcasts as well the proof ran the runner out of memory,
+    /// and a slot handed to two handles already shows up as a stale
+    /// handle resolving or as a wrong count.
+    fn check(store: &SignalStore, model: &Model, j: usize) -> usize {
+        let Some(signal) = model.made[j] else {
+            return 0;
+        };
+        assert!(store.inner_ref().live(signal.id) == model.alive[j]);
+        usize::from(model.alive[j])
+    }
+
+    /// Any three creates and disposes: a live handle resolves, a disposed
+    /// one never resolves again, even once a later signal reuses its slot,
+    /// and the store counts exactly the live handles. Three steps reach a
+    /// double dispose and a create into a disposed slot; at four the CI
+    /// runner ran out of memory. Generation wraparound after 2^32 reuses
+    /// of one slot is beyond this bound. The steps are unrolled by hand so
+    /// the unwind bound stays at 2: at 7 the symbolic execution alone took
+    /// 25 minutes.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    #[kani::solver(kissat)]
+    fn reused_slots_never_alias_a_handle() {
+        let store = SignalStore::new();
+        let mut model = Model {
+            made: [None; OPS],
+            alive: [false; OPS],
+        };
+        any_op(&store, &mut model, 0);
+        any_op(&store, &mut model, 1);
+        any_op(&store, &mut model, 2);
+        let live = check(&store, &model, 0) + check(&store, &model, 1) + check(&store, &model, 2);
+        assert!(store.len() == live);
+        // Skip the drop glue of the boxed values; it only adds to the
+        // formula.
+        std::mem::forget(store);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

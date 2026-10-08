@@ -70,3 +70,7 @@ image = { workspace = true, features = ["gif", "webp"] }
 # accesskit_winit, so it adds nothing to the dependency tree.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 accesskit_atspi_common = "0.19"
+
+[lints.rust]
+# `cfg(kani)` gates the bounded model checking harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
