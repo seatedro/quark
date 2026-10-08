@@ -63,14 +63,18 @@ does not wait for downloads.
 
 [tools/syntax-pack](../../tools/syntax-pack/src/main.rs) builds packs from
 the pinned sources in
-[grammars.toml](../../tools/syntax-pack/grammars.toml): Bash, Go,
-JavaScript, JSON, Python, Rust, and TypeScript.
+[grammars.toml](../../tools/syntax-pack/grammars.toml): Bash, C, C++, CSS,
+Go, HTML, JavaScript, JSON, Markdown (the `markdown` block grammar and the
+`markdown_inline` grammar its injection query names), Python, Rust, TOML,
+TSX, TypeScript, and YAML. Every grammar is MIT licensed; `syntax-pack list`
+prints each with its license, repository, and commit.
 
 ```sh
 cargo run -p syntax-pack -- build                 # every language, for this host
 cargo run -p syntax-pack -- build rust            # one language
 cargo run -p syntax-pack -- build --target x86_64-apple-darwin
 cargo run -p syntax-pack -- build --sources DIR   # read DIR/<language>/ instead of git
+cargo run -p syntax-pack -- check                 # re-check built packs for this host
 ```
 
 Packs land in `target/syntax-packs/<target>/<language>/`, the root the
@@ -79,13 +83,36 @@ examples, quark-syntax's tests, and quark-ui's tests read
 `QUARK_SYNTAX_TEST_PACKS` the tests). For each language the tool fetches
 the pinned commit with git, hashes every C source, header, and query file
 it reads and compares the result with the pinned `sha256`, compiles
-`parser.c` and `scanner.c` with the target's C compiler (MSVC on Windows)
-into a shared library that exports only the language function, writes the
-manifest, and, for the host target, loads the pack and compiles its query.
-`--sources` serves offline and Nix builds; the hash check still applies.
+`parser.c` and, when the entry says `scanner = "c"`, `scanner.c` with the
+target's C compiler (MSVC on Windows) into a shared library that exports
+only the language function, and writes the manifest. Grammars with C++
+scanners are rejected; every pinned grammar uses a C scanner or none.
+`--sources` serves offline and Nix builds; the hash still applies. Files
+are hashed with LF line endings, so a Windows checkout that converted them
+hashes the same, and query files ship with LF endings on every target.
+
+For the host target the build then checks each pack: it loads the pack as
+the store does, loads the library again on its own, parses the language's
+sample from [samples](../../tools/syntax-pack/samples), and fails when the
+sample has a parse error, when an expected capture from `captures` is
+missing, or when the injection query does not name every language in
+`injects`. The TypeScript and TSX samples hold a type assertion and a
+generic arrow function beside an element, which each parse only under
+their own grammar. Packs for another target are checked by a syntax-pack
+built for that target, natively or, for Intel macOS on Apple silicon,
+under Rosetta:
+
+```sh
+cargo run -p syntax-pack --target x86_64-apple-darwin -- check
+```
+
+Loading grammars.toml checks that every name, alias, and extension belongs
+to one language and is lowercase, and that each expected injection is a
+tag of a pinned language.
 
 After bumping a `rev` in grammars.toml, run the build once: it fails and
-prints the new source hash to pin.
+prints the new source hash to pin. A changed grammar or query changes the
+files' SHA-256 and so their published URLs (below).
 
 ### Pack format
 
@@ -99,32 +126,64 @@ field and the checks.
 The index is `{"payload": {"schema": 1, "target": ..., "packs": [manifest,
 ...]}, "signature": "<hex>"}`, signed with Ed25519 over the payload's
 canonical JSON exactly like quark-update's manifests. A file's URL is its
-`url` field or `<language>/<path>` next to the index.
+`url` field or `<language>/<path>` next to the index. Published indexes
+always set `url` to an immutable, content addressed location,
+`<base>/<target>/<language>/<sha256>/<path>`, so a cached copy of an
+older file can never be mistaken for its replacement.
 
-## Publishing an index
+## Publishing packs
 
-The [Syntax packs](../../.github/workflows/syntax-packs.yml) workflow runs
-on manual dispatch only. It builds packs for `x86_64-unknown-linux-gnu`,
-`aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`,
-`x86_64-apple-darwin`, and `x86_64-pc-windows-msvc`, signs one
-`index.json` per target, and uploads `syntax-packs-<target>` artifacts. It
-publishes nothing.
+Packs are served from `https://quark.seated.ro/v1`, an nginx directory
+behind Cloudflare: `<base>/<target>/index.json` is each target's signed
+index, and the chat and diff demos fetch it, trusting the public key the
+workflow's `PACK_INDEX_KEY` also names. The [Syntax packs](../../.github/workflows/syntax-packs.yml)
+workflow runs on manual dispatch only and has four jobs:
 
-A host needs:
+| Job | Runs | Holds |
+|---|---|---|
+| `build` | Always, on a native runner per target: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` (`macos-15`), `x86_64-apple-darwin` (`macos-15-intel`), `x86_64-pc-windows-msvc`. Builds every pack, loads it, checks its sample, and uploads `syntax-packs-unsigned-<target>`. It fails when the runner's host triple is not the target, so no pack goes unloaded. | No secrets |
+| `sign` | Only when `languages` is empty. Signs each target's index with `--base-url`, then checks it with `syntax-pack verify` against the key the demos ship. Reads the build artifacts as data and restores no cache. Uploads `syntax-packs-signed`. | `QUARK_SYNTAX_SIGNING_KEY` |
+| `publish` | Only with `publish` checked, `languages` empty, on `master`. Runs [publish.sh](../../tools/syntax-pack/publish.sh). One run at a time across refs. | `QUARK_PACKS_*` SSH secrets |
+| `smoke` | After `publish`, on every target's runner. `syntax-pack remote-check` downloads each pack through the public index with quark-syntax's downloader and highlights its sample. | No secrets |
 
-- **A signing key.** Generate a seed with
-  `cargo run -p quark-update --example manifest_tool keygen`, store the
-  private half as the `QUARK_SYNTAX_SIGNING_KEY` repository secret, and
-  compile the public half (`syntax-pack public-key` prints it) into the
-  app. Use a key separate from the update key. To rotate, ship the new
-  public key beside the old one before signing with it.
-- **A static file host.** Copy each artifact's contents to
-  `<base>/<target>/` so the index sits at `<base>/<target>/index.json`
-  with the packs beside it, and configure the app with
-  `<base>/{target}/index.json`. Serve over HTTPS. Pack URLs do not carry a
-  version, so publish each run under a fresh `<base>` (or keep cache
-  lifetimes short): a stale cached file fails its SHA-256 check and its
-  language stays plain until the cache expires.
+publish.sh verifies every target's index first (signature, every pinned
+language, local files, URLs) and uploads nothing unless all pass. It then
+copies each file to the path its URL names with `rsync --ignore-existing`,
+so a published file is never replaced, downloads every file through the
+public URL to check its SHA-256, and only then replaces each
+`index.json` with an atomic rename on the host. A subset dispatch cannot
+reach the public index: `sign` and `publish` skip it, and `syntax-pack
+index` refuses any language set other than the complete pinned one.
+
+### One-time setup
+
+- Create the `syntax-packs-signing` and `syntax-packs-publish`
+  environments (Settings > Environments) with required reviewers and a
+  deployment branch rule for `master`.
+- Move `QUARK_SYNTAX_SIGNING_KEY` from the repository secrets into
+  `syntax-packs-signing`, so only the sign job can read it. To make a new
+  key, run `cargo run -p quark-update --example manifest_tool keygen`,
+  compile the public half (`syntax-pack public-key` prints it) into apps,
+  and update `PACK_INDEX_KEY` in the workflow. Use a key separate from the
+  update key. To rotate, ship the new public key beside the old one before
+  signing with it.
+- In `syntax-packs-publish`, set `QUARK_PACKS_SSH_DEST` (`user@host` of the
+  origin), `QUARK_PACKS_REMOTE_DIR` (the directory nginx serves as `/v1`),
+  `QUARK_PACKS_SSH_KEY` (a private key allowed to write only there), and
+  `QUARK_PACKS_SSH_KNOWN_HOSTS` (the host's `ssh-keyscan` line).
+- Let non-browser clients through Cloudflare for `/v1/*`: apps download
+  with ureq, and the publish job checks every URL with curl.
+
+### Running it
+
+1. Dispatch **Syntax packs** on `master` with `languages` empty and
+   `publish` unchecked. Every target builds and checks, and the signed
+   artifact is ready to inspect.
+2. Dispatch again with `publish` checked, approve the two environments, and
+   wait for `smoke` on all five targets.
+
+`languages` set to, say, `yaml toml` builds and tests just those, on
+every target, for trying a grammar bump.
 
 ## Threat model
 
