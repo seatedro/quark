@@ -343,10 +343,10 @@ fn scroller(handle: &ScrollHandle) -> AnyElement {
 }
 
 impl Frame {
-    /// Top edge of the rect filled with `color`.
-    fn top_of(&self, color: Color) -> Option<f32> {
+    /// The rect filled with `color`.
+    fn rect_of(&self, color: Color) -> Option<Rect> {
         self.scene.primitives.iter().find_map(|p| match p {
-            quark_render::Primitive::RoundedRect(r) if r.color == color => Some(r.rect.y),
+            quark_render::Primitive::RoundedRect(r) if r.color == color => Some(r.rect),
             _ => None,
         })
     }
@@ -368,11 +368,44 @@ fn a_moved_scroll_handle_repaints_its_cached_subtree() {
         scroll(&handle);
         let frame = window.paint(scroller(&handle));
         assert_eq!(
-            frame.top_of(Color::rgba(3, 0, 0, 255)),
+            frame.rect_of(Color::rgba(3, 0, 0, 255)).map(|r| r.y),
             Some(0.0),
             "{name}: row 3 at the top"
         );
     }
+}
+
+/// A label in a cached boundary, followed by a `BUTTON` swatch: the
+/// swatch sits where the boundary's measured width ends.
+fn label_then_swatch() -> AnyElement {
+    div()
+        .flex_row()
+        .child(cached("label", 1, || text("Hello, wide world").size(14.0)))
+        .child(div().w(10.0).h(10.0).bg(BUTTON))
+        .into_any()
+}
+
+// Catches replaying geometry shaped with the old fonts: a replay looks up
+// no text, so nothing but the cache's font dependency notices the change.
+#[test]
+fn a_font_change_lays_out_a_cached_boundary_again() {
+    let inter = quark_text::FontSettings {
+        ui_family: "Inter".into(),
+        ..Default::default()
+    };
+    let mut window = Window::new();
+    let geist = window.paint(label_then_swatch()).rect_of(BUTTON);
+    window.text.set_font_settings(&inter);
+    let changed = window.paint(label_then_swatch()).rect_of(BUTTON);
+
+    let mut fresh = Window::new();
+    fresh.text.set_font_settings(&inter);
+    let expected = fresh.paint(label_then_swatch()).rect_of(BUTTON);
+    assert_ne!(
+        expected, geist,
+        "the two fonts set the label at different widths"
+    );
+    assert_eq!(changed, expected);
 }
 
 // ---------------------------------------------------------------------------

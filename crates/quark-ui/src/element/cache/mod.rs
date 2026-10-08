@@ -11,8 +11,10 @@
 //!   reads, including app state like selection);
 //! - every measure query its parent makes (the size it is offered: a new
 //!   width rebuilds it; the frame runs layout once more);
-//! - the scale factor and the theme (the cache compares the theme each
-//!   frame and bumps a generation when it changes);
+//! - the scale factor, the theme (the cache compares the theme each
+//!   frame and bumps a generation when it changes), and the text system's
+//!   font generation: a replay looks up no text, so without it a font
+//!   change would replay geometry shaped with the old fonts;
 //! - the focused element, if the subtree read focus;
 //! - inherited paint state: the z layer, the text and icon color pushed by
 //!   an ancestor's hover, and whether an ancestor hides text from
@@ -131,6 +133,8 @@ struct EntryInputs {
     hash: u64,
     scale: f32,
     theme: u32,
+    /// [`TextSystem::generation`] the subtree was shaped under.
+    font: u64,
     /// Whether accessibility nodes were built.
     accessibility: bool,
     /// The focus the output read, when it read any.
@@ -175,6 +179,7 @@ pub struct ElementCache {
 #[derive(Clone, Copy)]
 struct FrameInputs {
     scale: f32,
+    font: u64,
     accessibility: bool,
     focus: Option<FocusId>,
 }
@@ -213,6 +218,7 @@ impl ElementCache {
     fn claim(&mut self, key: CacheKey, hash: u64, frame: FrameInputs) -> Claim {
         let FrameInputs {
             scale,
+            font,
             accessibility,
             focus,
         } = frame;
@@ -225,6 +231,7 @@ impl ElementCache {
                 hash,
                 scale,
                 theme: self.theme_generation,
+                font,
                 accessibility,
                 focus: None,
                 reusable: false,
@@ -249,6 +256,7 @@ impl ElementCache {
             && inputs.hash == hash
             && inputs.scale == scale
             && inputs.theme == self.theme_generation
+            && inputs.font == font
             && inputs.accessibility == accessibility
             && inputs.focus.is_none_or(|read| read == focus);
         if replay {
@@ -563,6 +571,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
     ) -> (LayoutId, ()) {
         let frame = FrameInputs {
             scale: cx.scale_factor,
+            font: cx.text.generation(),
             accessibility: cx.accessibility_enabled(),
             focus: cx.focus,
         };
