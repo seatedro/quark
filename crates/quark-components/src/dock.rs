@@ -3,16 +3,20 @@
 //! A [`DockState`] has four regions: left, right, and bottom docks that can
 //! be resized and hidden, and a center that fills the rest. Each region
 //! holds a [`PaneNode`] tree of tab groups, each an ordered list of
-//! app-defined [`PanelId`]s with one active. Click a tab to select it, close
-//! it with its close button or a middle click, or move between tabs with the
-//! arrow keys.
+//! app-defined [`PanelId`]s with one active. Click a tab to select and
+//! focus it, close it with its close button or a middle click, or move
+//! between tabs with the arrow keys. The dividers between split groups
+//! move with the pointer, the arrow keys (Shift for larger steps), or
+//! assistive tech setting their value.
 //!
 //! Tabs drag anywhere: into a group's tab strip to reorder or move them,
 //! onto a group's body to join it, or onto one of its edges to split the
-//! group and open the tab beside it. While a tab is dragged the dock shows
-//! where it would land. Apps constrain this per region with a
-//! [`TabPolicy`] (a region whose tabs stay in it, or that takes no tabs
-//! from elsewhere) and per panel with [`DockState::confine`].
+//! group and open the tab beside it. While a tab is dragged it follows the
+//! pointer and the dock shows where it would land; a cancelled drag
+//! (Escape through the app, or the window losing focus) leaves it where it
+//! was. Apps constrain this per region with a [`TabPolicy`] (a region
+//! whose tabs stay in it, or that takes no tabs from elsewhere) and per
+//! panel with [`DockState::confine`].
 //!
 //! The dock knows nothing about what panels are: the app gives each one a
 //! title and builds the active ones' content. Like [`Split`], it emits
@@ -23,10 +27,12 @@
 use std::rc::Rc;
 
 use accesskit::Role;
-use quark::view;
+use quark::{TabStop, view};
+use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
+use quark_ui::design::Shadow;
 use quark_ui::element::{
-    AnyElement, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement, div,
-    svg_icon, text,
+    AnyElement, ClickEvent, CursorHint, DragHandler, DragPreview, DragReleaseResult,
+    ElementGeometry, ElementHandle, IntoAnyElement, LayoutSnapshot, div, svg_icon, text,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -35,9 +41,13 @@ use quark_ui::{Action, FocusId};
 use serde::{Deserialize, Serialize};
 
 use crate::pane_tree::{
-    DropZone, PaneDrop, PaneId, PaneNode, PaneSplit, Rect, TabGroup, child_sizes, push_divider,
+    DropZone, PaneDrop, PaneId, PaneNode, PaneSplit, Rect, TabGroup, child_sizes, divider_min,
+    divider_span, push_divider,
 };
-use crate::split::{Axis, DIVIDER_THICKNESS, Pane, Split, SplitEvent, SplitSnapshot, SplitState};
+use crate::split::{
+    Axis, DIVIDER_THICKNESS, NUDGE_STEP, NUDGE_STEP_LARGE, Pane, Split, SplitEvent, SplitSnapshot,
+    SplitState,
+};
 
 /// An app-chosen panel identity. Persisted, so keep values stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -105,7 +115,10 @@ impl Default for TabPolicy {
     }
 }
 
-/// A divider between two children of a split inside a region.
+/// A divider between two children of a split inside a region. Every move
+/// shrinks the groups ahead of the divider, nearest first, down to a
+/// minimum of 100 points (less when the split cannot give each group that
+/// much), and grows the one behind it by as much.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PaneDividerEvent {
     Press,
@@ -116,6 +129,19 @@ pub enum PaneDividerEvent {
         extent: f32,
     },
     Release,
+    /// Keyboard resize by `delta` points along the axis, right or down
+    /// positive.
+    Nudge {
+        delta: f32,
+        extent: f32,
+    },
+    /// Move the divider to `position` points from the split's start, as
+    /// near as the groups' minimums allow: assistive tech setting the
+    /// divider's value.
+    SetPosition {
+        position: f32,
+        extent: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -164,13 +190,20 @@ pub struct DockOutcome {
     /// Where a [`DockEvent::MoveTab`] put its tab; `None` when it was
     /// refused or the event was another kind.
     pub moved: Option<TabMove>,
+    /// The group a [`DockEvent::Select`] (a tab clicked, pressed to drag,
+    /// or activated by assistive tech) made a tab active in.
+    pub selected: Option<PaneId>,
 }
 
 impl DockOutcome {
     /// Where keyboard focus belongs after the event: on a moved tab, in its
-    /// new group. Pass it to the app's focus.
+    /// new group, or on a selected one. Pass it to the app's focus when it
+    /// is `Some`.
     pub fn focus(&self) -> Option<FocusId> {
-        self.moved.map(|m| Dock::tab_focus(m.pane))
+        self.moved
+            .map(|m| m.pane)
+            .or(self.selected)
+            .map(Dock::tab_focus)
     }
 }
 
@@ -672,31 +705,60 @@ impl DockState {
         self.can_drop(panel, target).then_some((panel, target))
     }
 
+    fn split_weights(&self, split: PaneId) -> Option<Vec<f32>> {
+        self.roots
+            .iter()
+            .find_map(|r| r.split(split))
+            .map(|s| s.weights.clone())
+    }
+
     fn drag_divider(&mut self, split: PaneId, divider: usize, event: PaneDividerEvent) {
         match event {
             PaneDividerEvent::Press => {
-                let weights = self.roots.iter().find_map(|r| r.split(split));
-                self.divider_drag = weights.map(|s| (split, divider, s.weights.clone()));
+                self.divider_drag = self.split_weights(split).map(|w| (split, divider, w));
             }
             PaneDividerEvent::Drag { delta, extent } => {
                 let Some((id, d, origin)) = self.divider_drag.clone() else {
                     return;
                 };
-                if id != split || d != divider {
-                    return;
-                }
-                let mut sizes = child_sizes(&origin, extent);
-                let avail: f32 = sizes.iter().sum();
-                if avail <= 0.0 {
-                    return;
-                }
-                let min = MIN_GROUP.min(avail / sizes.len() as f32);
-                push_divider(&mut sizes, min, divider, delta);
-                if let Some(s) = self.roots.iter_mut().find_map(|r| r.split_mut(split)) {
-                    s.weights = sizes.iter().map(|size| size / avail).collect();
+                if id == split && d == divider {
+                    self.move_divider(split, divider, &origin, extent, |_| delta);
                 }
             }
             PaneDividerEvent::Release => self.divider_drag = None,
+            PaneDividerEvent::Nudge { delta, extent } => {
+                if let Some(weights) = self.split_weights(split) {
+                    self.move_divider(split, divider, &weights, extent, |_| delta);
+                }
+            }
+            PaneDividerEvent::SetPosition { position, extent } => {
+                if let Some(weights) = self.split_weights(split) {
+                    self.move_divider(split, divider, &weights, extent, |at| position - at);
+                }
+            }
+        }
+    }
+
+    /// Lay `split` out from `weights` in `extent` and move `divider` by
+    /// `delta` of where it is there.
+    fn move_divider(
+        &mut self,
+        split: PaneId,
+        divider: usize,
+        weights: &[f32],
+        extent: f32,
+        delta: impl FnOnce(f32) -> f32,
+    ) {
+        let mut sizes = child_sizes(weights, extent);
+        let avail: f32 = sizes.iter().sum();
+        if avail <= 0.0 {
+            return;
+        }
+        let min = divider_min(MIN_GROUP, avail, sizes.len());
+        let (at, _, _) = divider_span(&sizes, min, divider);
+        push_divider(&mut sizes, min, divider, delta(at));
+        if let Some(s) = self.roots.iter_mut().find_map(|r| r.split_mut(split)) {
+            s.weights = sizes.iter().map(|size| size / avail).collect();
         }
     }
 
@@ -713,6 +775,7 @@ impl DockState {
     /// the destination.
     pub fn apply_event(&mut self, event: DockEvent, now_ms: u64) -> DockOutcome {
         let mut moved = None;
+        let mut selected = None;
         let settled = match event {
             DockEvent::Split(which, event) => self.split_mut(which).apply(event, now_ms),
             DockEvent::PaneDivider {
@@ -721,10 +784,16 @@ impl DockState {
                 event,
             } => {
                 self.drag_divider(split, divider, event);
-                event == PaneDividerEvent::Release
+                matches!(
+                    event,
+                    PaneDividerEvent::Release
+                        | PaneDividerEvent::Nudge { .. }
+                        | PaneDividerEvent::SetPosition { .. }
+                )
             }
             DockEvent::Select { pane, index } => {
                 self.select(pane, index);
+                selected = self.group(pane).map(|g| g.id);
                 true
             }
             DockEvent::Close { pane, index } => self.close(pane, index).is_some(),
@@ -757,7 +826,11 @@ impl DockState {
             }
         };
         self.debug_verify();
-        DockOutcome { settled, moved }
+        DockOutcome {
+            settled,
+            moved,
+            selected,
+        }
     }
 
     pub fn snapshot(&self) -> DockSnapshot {
@@ -954,10 +1027,32 @@ struct GroupHit {
     tab_width: f32,
 }
 
-/// What a tab drag needs from the frame it started in.
+/// Stable id of the root of a dock given no [`Dock::handle`].
+const DOCK_ID: &str = "dock";
+
+/// How a tab drag finds its dock's root in a frame's geometry.
+#[derive(Debug, Clone, Copy)]
+enum DockRoot {
+    Handle(ElementHandle),
+    Id,
+}
+
+impl DockRoot {
+    fn find(self, geometry: &LayoutSnapshot) -> Option<ElementGeometry> {
+        match self {
+            Self::Handle(handle) => geometry.by_handle(handle),
+            Self::Id => geometry.by_id(DOCK_ID),
+        }
+        .ok()
+    }
+}
+
+/// What a tab drag needs from the frame it started in. Its rects are in
+/// the dock's own coordinates.
 struct DragContext {
     hits: Vec<GroupHit>,
     policies: [TabPolicy; 4],
+    root: DockRoot,
 }
 
 impl DragContext {
@@ -987,7 +1082,7 @@ impl DragContext {
 /// Builds the element for a [`DockState`].
 pub struct Dock<'a> {
     state: &'a DockState,
-    origin: (f32, f32),
+    handle: Option<ElementHandle>,
     size: (f32, f32),
     map: EventMap,
     toggle_keys: Vec<(DockRegion, String)>,
@@ -1006,7 +1101,7 @@ impl<'a> Dock<'a> {
     ) -> Self {
         Self {
             state,
-            origin: (0.0, 0.0),
+            handle: None,
             size,
             map: Rc::new(on_event),
             toggle_keys: Vec::new(),
@@ -1016,11 +1111,20 @@ impl<'a> Dock<'a> {
         }
     }
 
-    /// Where the dock's top left corner is in the window, so tab drags map
-    /// the pointer onto groups. Defaults to the window's origin.
-    pub fn origin(mut self, x: f32, y: f32) -> Self {
-        self.origin = (x, y);
+    /// Name the dock's root element by `handle`. A tab drag finds the dock
+    /// in the frame's geometry to map the pointer onto its groups, by the
+    /// handle or else by the stable id `"dock"`, so a window with more than
+    /// one dock gives each a handle.
+    pub fn handle(mut self, handle: ElementHandle) -> Self {
+        self.handle = Some(handle);
         self
+    }
+
+    /// Stable id of `panel`'s tab, wherever it is docked: for finding it
+    /// in the frame's geometry (anchoring a menu to it) or in the
+    /// accessibility tree.
+    pub fn tab_id(panel: PanelId) -> String {
+        format!("dock:tab:{}", panel.0)
     }
 
     /// Toggle a side region with `binding` (keymap format, `"mod+b"`) from
@@ -1121,10 +1225,10 @@ impl<'a> Dock<'a> {
             if region != DockRegion::Center && !state.is_visible(region) {
                 continue;
             }
-            let r = rects[region.index()];
-            let at = Rect::new(r.x + self.origin.0, r.y + self.origin.1, r.width, r.height);
             let mut groups = Vec::new();
-            state.root(region).layout(at, &mut groups);
+            state
+                .root(region)
+                .layout(rects[region.index()], &mut groups);
             for (pane, rect) in groups {
                 let Some(group) = state.group(pane) else {
                     continue;
@@ -1142,6 +1246,7 @@ impl<'a> Dock<'a> {
         let drag = Rc::new(DragContext {
             hits,
             policies: state.policies,
+            root: self.handle.map_or(DockRoot::Id, DockRoot::Handle),
         });
 
         let mut region = |r: DockRegion| {
@@ -1178,6 +1283,8 @@ impl<'a> Dock<'a> {
 
         view! {
             <div w={width} h={height} bg={theme.colors.background}
+                 @when {let Some(handle) = self.handle} { element_handle={handle} }
+                 @when {self.handle.is_none()} { id={DOCK_ID} }
                  @for (r, binding) in &self.toggle_keys {
                      on_key={(binding.clone(), (self.map)(DockEvent::Toggle(*r)))}
                  }>
@@ -1232,9 +1339,9 @@ impl<'a> Dock<'a> {
         view! {
             <div @when {horizontal} { class="flex-row" } @when {!horizontal} { class="flex-col" }
                  w={width} h={height}>
-                for (i, (child, size)) in split.children.iter().zip(sizes).enumerate() {
+                for (i, (child, &size)) in split.children.iter().zip(&sizes).enumerate() {
                     if i > 0 {
-                        {self.pane_divider(theme, region, split, i - 1, extent)}
+                        {self.pane_divider(theme, region, split, i - 1, &sizes, extent)}
                     }
                     <div class="flex-none overflow-clip" w={if horizontal { size } else { width }}
                          h={if horizontal { height } else { size }}>
@@ -1253,12 +1360,24 @@ impl<'a> Dock<'a> {
         }
     }
 
+    /// Focus target of divider `divider` of the split `split` inside a
+    /// region; arrow keys move it. Stays with the divider while it is
+    /// resized; a split that gains or loses groups renumbers its dividers.
+    pub fn divider_focus(split: PaneId, divider: usize) -> FocusId {
+        let key = (u64::from(split.0) << 16) | (divider as u64 & 0xffff);
+        FocusId::new(FocusId::from_key("dock:divider").0.wrapping_add(key + 1))
+    }
+
+    /// The divider's value for assistive tech is its position in points
+    /// from the split's start, with the range [`DockState`] lets it move
+    /// in; its text is that position as a percentage of the split.
     fn pane_divider(
         &self,
         theme: &Theme,
         region: DockRegion,
         split: &PaneSplit,
         divider: usize,
+        sizes: &[f32],
         extent: f32,
     ) -> AnyElement {
         let colors = &theme.colors;
@@ -1268,8 +1387,37 @@ impl<'a> Dock<'a> {
         } else {
             CursorHint::ResizeRow
         };
+        let (back, forward) = if horizontal {
+            ("left", "right")
+        } else {
+            ("up", "down")
+        };
         let map = self.map.clone();
         let id = split.id;
+        let event = move |event| {
+            (map)(DockEvent::PaneDivider {
+                split: id,
+                divider,
+                event,
+            })
+        };
+        let nudge = |delta: f32| event(PaneDividerEvent::Nudge { delta, extent });
+        let set_position = event.clone();
+        let numeric_actions = NumericActions::new(move |position| {
+            set_position(PaneDividerEvent::SetPosition {
+                position: position as f32,
+                extent,
+            })
+        })
+        .steps(nudge(-NUDGE_STEP), nudge(NUDGE_STEP));
+        let avail: f32 = sizes.iter().sum();
+        let (at, lo, hi) = divider_span(sizes, divider_min(MIN_GROUP, avail, sizes.len()), divider);
+        let percent = if extent > 0.0 {
+            at / extent * 100.0
+        } else {
+            0.0
+        };
+        let drag_map = self.map.clone();
         // The same wide invisible grip as a `Split` divider.
         let grip = 8.0;
         let offset = -(grip - DIVIDER_THICKNESS) / 2.0;
@@ -1284,10 +1432,29 @@ impl<'a> Dock<'a> {
                          "quark-resize-named",
                          [("name", self.state.label(region).into())],
                      )}
+                     aria-valuetext={format!("{percent:.0}%")}
+                     accessibility_numeric={NumericValue {
+                         value: f64::from(at),
+                         min: f64::from(lo),
+                         max: f64::from(hi),
+                         step: Some(f64::from(NUDGE_STEP)),
+                     }}
+                     accessibility_numeric_actions={numeric_actions}
+                     // A line between side by side groups stands upright.
+                     accessibility_orientation={if horizontal {
+                         Orientation::Vertical
+                     } else {
+                         Orientation::Horizontal
+                     }}
+                     focus_ring={Self::divider_focus(id, divider)}
+                     on_key={(back, nudge(-NUDGE_STEP))}
+                     on_key={(forward, nudge(NUDGE_STEP))}
+                     on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
+                     on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
                      test_id="dock-pane-divider" cursor={cursor} hover_bg={colors.accent}
                      on:drag={move |press: ClickEvent| {
                          Box::new(PaneDividerDrag {
-                             map: map.clone(),
+                             map: drag_map.clone(),
                              split: id,
                              divider,
                              horizontal,
@@ -1377,7 +1544,7 @@ impl<'a> Dock<'a> {
                  accessibility_role={Role::TabList} role="tablist"
                  aria-label={self.state.label(region)} test_id="dock-tabs">
                 for (index, &panel) in group.panels.iter().enumerate() {
-                    {self.tab(theme, region, group, index, panel, tab_width, drag, title)}
+                    {self.tab(theme, region, group, index, panel, (tab_width, height), drag, title)}
                 }
                 <div class="flex-1 h-full" bg={Color::TRANSPARENT} />
             </div>
@@ -1392,7 +1559,7 @@ impl<'a> Dock<'a> {
         group: &TabGroup,
         index: usize,
         panel: PanelId,
-        tab_width: f32,
+        (tab_width, tab_height): (f32, f32),
         drag: &Rc<DragContext>,
         title: &impl Fn(PanelId) -> String,
     ) -> AnyElement {
@@ -1438,13 +1605,17 @@ impl<'a> Dock<'a> {
             "quark-close-named",
             [("name", quark_ui::i18n::Arg::Text(&name))],
         );
+        let drag_title = name.clone();
         view! {
             <div class="flex-row flex-none items-center" gap={m.spacing_xs} px={m.spacing_sm}
                  w={tab_width} class="h-full" border_r={colors.border_variant}
-                 accessibility_id={format!("dock:tab:{}", panel.0)} accessibility_role={Role::Tab}
+                 accessibility_id={Self::tab_id(panel)} accessibility_role={Role::Tab}
                  role="tab" aria-label={name.clone()} aria-selected={selected} test_id="dock-tab"
+                 // For assistive tech and Enter: a pointer press starts the
+                 // drag below, which selects the tab itself.
+                 on:click={select(index)} cursor={CursorHint::Default}
                  on:middle_click={close.clone()}
-                 on:drag={move |_: ClickEvent| {
+                 on:drag={move |press: ClickEvent| {
                      Box::new(TabDrag {
                          map: map.clone(),
                          ctx: ctx.clone(),
@@ -1458,6 +1629,10 @@ impl<'a> Dock<'a> {
                          },
                          target: None,
                          allowed: true,
+                         press: (press.x, press.y),
+                         dock: None,
+                         held: false,
+                         preview: tab_preview(panel, &drag_title, (tab_width, tab_height)),
                      }) as Box<dyn DragHandler>
                  }}
                  @when {selected} {
@@ -1469,7 +1644,12 @@ impl<'a> Dock<'a> {
                  @for (key, action) in &moves {
                      on_key={(key.clone(), action.clone())}
                  }
-                 @when {!selected} { hover_bg={colors.ghost_element_hover} }>
+                 // A click makes an inactive tab focusable without making it
+                 // a Tab stop: a press focuses it, and the selection then
+                 // hands focus to the group (`DockOutcome::focus`).
+                 @when {!selected} {
+                     hover_bg={colors.ghost_element_hover} tab_stop={TabStop::disabled(0)}
+                 }>
                 // Let a long title shrink and truncate instead of pushing the
                 // close button out of the tab.
                 <div class="flex-1 min-w-0 overflow-clip">
@@ -1486,8 +1666,34 @@ impl<'a> Dock<'a> {
     }
 }
 
+/// The picture of a dragged tab: its title on a raised tab of its size,
+/// which the drag replaces with the tab's measured size.
+fn tab_preview(panel: PanelId, title: &str, size: (f32, f32)) -> DragPreview {
+    use std::hash::{Hash, Hasher};
+    let mut key = std::hash::DefaultHasher::new();
+    (panel, title).hash(&mut key);
+    let title = title.to_owned();
+    DragPreview::new(key.finish(), size, move |theme, (width, height)| {
+        let colors = &theme.colors;
+        let m = &theme.metrics;
+        view! {
+            <div class="flex-row items-center" w={width} h={height} px={m.spacing_sm}
+                 bg={colors.elevated_surface} rounded={m.control_radius}
+                 shadow_preset={Shadow::POPOVER}>
+                <div class="flex-1 min-w-0 overflow-clip">
+                    <text class="text-sm truncate" color={colors.text_strong}>
+                        {title.clone()}
+                    </text>
+                </div>
+            </div>
+        }
+    })
+    .hotspot(size.0 / 2.0, size.1 / 2.0)
+}
+
 /// Selects a tab on press, reports the drop target under the pointer as it
-/// moves, and drops the tab there on release.
+/// moves, and drops the tab there on release. Shows the tab under the
+/// pointer, held where it was pressed.
 struct TabDrag {
     map: EventMap,
     ctx: Rc<DragContext>,
@@ -1496,9 +1702,32 @@ struct TabDrag {
     from: Origin,
     target: Option<PaneDrop>,
     allowed: bool,
+    /// Window point of the press.
+    press: (f32, f32),
+    /// The dock's root in the frame the drag routes through, to map the
+    /// pointer into the dock's coordinates.
+    dock: Option<ElementGeometry>,
+    /// The preview has the tab's measured size and the press's place on it.
+    held: bool,
+    preview: DragPreview,
 }
 
 impl DragHandler for TabDrag {
+    fn set_geometry(&mut self, geometry: &LayoutSnapshot) {
+        self.dock = self.ctx.root.find(geometry);
+        // Once, from the frame pressed in: later frames may have moved the
+        // tab (selected, or dropped somewhere) while it stays held.
+        if !self.held
+            && let Ok(tab) = geometry.by_id(&Dock::tab_id(self.panel))
+        {
+            let b = tab.bounds;
+            self.preview.set_size(b.width, b.height);
+            self.preview
+                .set_hotspot(self.press.0 - b.x, self.press.1 - b.y);
+            self.held = true;
+        }
+    }
+
     fn on_press(&mut self) -> Vec<Action> {
         vec![(self.map)(DockEvent::Select {
             pane: self.from.pane,
@@ -1507,6 +1736,8 @@ impl DragHandler for TabDrag {
     }
 
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+        // Without the dock in the frame, as if it filled the window.
+        let (x, y) = self.dock.and_then(|g| g.to_local(x, y)).unwrap_or((x, y));
         let mut allowed = true;
         let target = self.ctx.target_at(x, y).and_then(|(region, target)| {
             allowed = drop_allowed(&self.ctx.policies, self.confined, self.from, region, target);
@@ -1532,6 +1763,18 @@ impl DragHandler for TabDrag {
                 target: self.target.filter(|_| self.allowed),
             })],
         }
+    }
+
+    /// Drop nowhere: the tab stays where it was.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        vec![(self.map)(DockEvent::TabDrop {
+            panel: self.panel,
+            target: None,
+        })]
+    }
+
+    fn preview(&self) -> Option<&DragPreview> {
+        Some(&self.preview)
     }
 
     fn cursor(&self) -> CursorHint {
