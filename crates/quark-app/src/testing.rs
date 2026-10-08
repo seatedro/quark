@@ -569,7 +569,7 @@ impl<U: UiApp> UiTestHarness<U> {
     /// Every text run the last frame painted, in paint order.
     pub fn painted_texts(&self) -> Vec<PaintedText> {
         self.scene
-            .primitives
+            .expanded()
             .iter()
             .filter_map(|primitive| {
                 let (bounds, layout) = match primitive {

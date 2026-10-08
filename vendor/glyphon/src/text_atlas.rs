@@ -370,6 +370,8 @@ pub struct TextAtlas {
     pub(crate) mask_atlas: InnerAtlas,
     pub(crate) format: TextureFormat,
     pub(crate) color_mode: ColorMode,
+    // quark patch: see `TextAtlas::epoch`.
+    clears: u64,
 }
 
 impl TextAtlas {
@@ -411,6 +413,7 @@ impl TextAtlas {
             mask_atlas,
             format,
             color_mode,
+            clears: 0,
         }
     }
 
@@ -427,6 +430,16 @@ impl TextAtlas {
     pub fn clear(&mut self) {
         self.mask_atlas.clear();
         self.color_atlas.clear();
+        self.clears += 1;
+    }
+
+    // quark patch: when prepared vertices go stale.
+    /// Changes whenever a cached glyph may have left its place: an eviction
+    /// or a [`Self::clear`]. Growth keeps every glyph where it was. Vertices
+    /// a renderer prepared at one epoch draw the same glyphs while the
+    /// epoch is unchanged, so they may be drawn again without preparing.
+    pub fn epoch(&self) -> u64 {
+        self.mask_atlas.stats.evictions + self.color_atlas.stats.evictions + self.clears
     }
 
     // quark patch: atlas work counters.

@@ -39,6 +39,9 @@ against that commit shows the whole patch.
 - `TextAtlas::clear` (`src/text_atlas.rs`): drops every cached glyph
   and frees its space, keeping the textures. quark-render calls it when
   the text system changes, since a new font database reuses face ids.
+- `TextAtlas::epoch` (`src/text_atlas.rs`): counts evictions and
+  clears, the events that can move a cached glyph. quark-render draws a
+  text run's vertices again without preparing them while it is unchanged.
 - `AtlasStats` and `TextAtlas::stats` (`src/text_atlas.rs`, counted in
   `src/text_render.rs`): glyph misses, evictions, growths, glyphs
   re-rasterized by a growth, and glyph bytes uploaded, for tests and

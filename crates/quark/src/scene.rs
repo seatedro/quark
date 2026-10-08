@@ -7,6 +7,7 @@ use std::any::Any;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::color::Color;
 use crate::geometry::Rect;
@@ -122,6 +123,25 @@ impl Scene {
         self.push(Primitive::ZIndexPop);
     }
 
+    /// Draw `chunk` with its origin at `offset`; see [`ChunkPrimitive`].
+    pub fn chunk(&mut self, chunk: &Arc<SceneChunk>, offset: [f32; 2]) {
+        self.push(Primitive::Chunk(ChunkPrimitive {
+            chunk: Arc::clone(chunk),
+            offset,
+            scale: None,
+        }));
+    }
+
+    /// The scene with every chunk replaced by the primitives it draws, as
+    /// they land. Allocates; for tests and tools that read primitives.
+    pub fn expanded(&self) -> Vec<Primitive> {
+        let mut out = Vec::with_capacity(self.primitives.len());
+        for primitive in &self.primitives {
+            primitive.expand_into(&mut out);
+        }
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.primitives.len()
     }
@@ -160,6 +180,9 @@ pub enum Primitive {
     /// Pop the current z-index context.
     ZIndexPop,
     LayerBoundary,
+    /// Primitives recorded once and drawn in place of this one; see
+    /// [`ChunkPrimitive`].
+    Chunk(ChunkPrimitive),
 }
 
 impl Primitive {
@@ -181,12 +204,251 @@ impl Primitive {
                 p.origin[1] += dy;
             }
             Self::LayerStart(p) => p.transform = p.transform.offset(dx, dy),
+            Self::Chunk(p) => {
+                // The offset applies before the scale.
+                let s = p.scale.unwrap_or(1.0);
+                p.offset[0] += dx / s;
+                p.offset[1] += dy / s;
+            }
             Self::ClipEnd
             | Self::ZIndexPush(_)
             | Self::ZIndexPop
             | Self::LayerBoundary
             | Self::LayerEnd => {}
         }
+    }
+
+    /// Multiply every coordinate by `s`, turning logical points into
+    /// physical pixels. Rect edges snap to whole pixels so quads stay sharp
+    /// and neighbours tile without seams; a non-empty rect or border never
+    /// snaps away to nothing. Radii, blur, and shadow offsets scale
+    /// unsnapped. Path origins snap like rect edges, and their geometry
+    /// scales through the primitive's `scale`. Layer transforms keep their
+    /// rotation and scale and move by scaled pixels. Pixel-based effect
+    /// parameters (noise frequency) scale so an effect looks the same at
+    /// every scale factor. A chunk keeps its recording and converts each
+    /// primitive as it is drawn, after moving it by the chunk's offset.
+    ///
+    /// Text origins snap too. Glyphs are not resized here: a text layout
+    /// must already be shaped at `s`, which puts its glyphs in physical
+    /// pixels.
+    pub fn to_physical(&mut self, s: f32) {
+        match self {
+            Self::Rect(p) => p.rect = snap(p.rect, s),
+            Self::RoundedRect(p) => {
+                p.rect = snap(p.rect, s);
+                p.corner_radii = p.corner_radii.map(|r| r * s);
+            }
+            Self::Border(p) => {
+                p.rect = snap(p.rect, s);
+                p.widths = p.widths.map(|w| snap_length(w, s));
+                p.corner_radii = p.corner_radii.map(|r| r * s);
+            }
+            Self::Shadow(p) => {
+                p.rect = snap(p.rect, s);
+                p.blur_radius *= s;
+                p.corner_radius *= s;
+                p.offset = p.offset.map(|o| o * s);
+            }
+            Self::TextRun(p) => p.rect = snap(p.rect, s),
+            Self::RichTextRun(p) => p.rect = snap(p.rect, s),
+            Self::Icon(p) => p.rect = snap(p.rect, s),
+            Self::Image(p) => p.rect = snap(p.rect, s),
+            Self::EffectQuad(p) => {
+                p.rect = snap(p.rect, s);
+                p.corner_radius *= s;
+                // Noise is sampled per physical pixel; its frequency is per point.
+                if p.effect_type == EffectType::NoiseGradient && s > 0.0 {
+                    p.params[0] /= s;
+                }
+            }
+            Self::BlurRegion(p) => {
+                p.rect = snap(p.rect, s);
+                p.blur_radius *= s;
+                p.corner_radii = p.corner_radii.map(|r| r * s);
+            }
+            Self::Path(p) => {
+                p.origin = p.origin.map(|o| (o * s).round());
+                p.scale *= s;
+            }
+            Self::LayerStart(p) => p.transform = p.transform.in_scaled_space(s),
+            Self::ClipStart(p) => {
+                p.rect = snap(p.rect, s);
+                p.corner_radii = p.corner_radii.map(|r| r * s);
+            }
+            Self::Chunk(p) => p.scale = Some(p.scale.unwrap_or(1.0) * s),
+            Self::ClipEnd
+            | Self::ZIndexPush(_)
+            | Self::ZIndexPop
+            | Self::LayerEnd
+            | Self::LayerBoundary => {}
+        }
+    }
+
+    /// Push this primitive onto `out`, or a chunk's primitives as they
+    /// land, recursively.
+    fn expand_into(&self, out: &mut Vec<Primitive>) {
+        match self {
+            Self::Chunk(chunk) => chunk.for_each_placed(|placed| placed.expand_into(out)),
+            other => out.push(other.clone()),
+        }
+    }
+}
+
+/// Scale and round both edges, so adjacent rects share a pixel edge.
+fn snap(rect: Rect, s: f32) -> Rect {
+    let x0 = (rect.x * s).round();
+    let y0 = (rect.y * s).round();
+    let mut x1 = ((rect.x + rect.width) * s).round();
+    let mut y1 = ((rect.y + rect.height) * s).round();
+    if rect.width > 0.0 && x1 <= x0 {
+        x1 = x0 + 1.0;
+    }
+    if rect.height > 0.0 && y1 <= y0 {
+        y1 = y0 + 1.0;
+    }
+    Rect {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    }
+}
+
+/// A stroke width in whole pixels, at least one when it is drawn at all.
+fn snap_length(length: f32, s: f32) -> f32 {
+    if length > 0.0 {
+        (length * s).round().max(1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Source of chunk ids; zero is never handed out.
+static NEXT_CHUNK_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Primitives recorded once (a cached subtree's paint output, relative to
+/// its origin) and drawn by reference from any number of scenes through
+/// [`ChunkPrimitive`]s. Scenes share it through an `Arc` and never change
+/// it; the recorder refills it only while no scene holds it, which bumps
+/// its generation. A renderer may therefore keep work derived from a chunk
+/// under its `(id, generation)` and reuse it while both match.
+#[derive(Debug)]
+pub struct SceneChunk {
+    id: u64,
+    generation: u64,
+    primitives: Vec<Primitive>,
+    /// Whether any primitive, nested chunks included, starts a layer.
+    has_layers: bool,
+}
+
+impl Default for SceneChunk {
+    fn default() -> Self {
+        Self {
+            id: NEXT_CHUNK_ID.fetch_add(1, Ordering::Relaxed),
+            generation: 0,
+            primitives: Vec::new(),
+            has_layers: false,
+        }
+    }
+}
+
+impl SceneChunk {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Unique for the life of the process.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Bumped every time the content changes.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn primitives(&self) -> &[Primitive] {
+        &self.primitives
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primitives.is_empty()
+    }
+
+    /// Whether drawing the chunk starts a layer (here or in a nested
+    /// chunk).
+    pub fn has_layers(&self) -> bool {
+        self.has_layers
+    }
+
+    /// Replace the content with `primitives`, keeping the buffer.
+    pub fn replace(&mut self, primitives: impl IntoIterator<Item = Primitive>) {
+        self.primitives.clear();
+        self.primitives.extend(primitives);
+        self.has_layers = self.primitives.iter().any(|p| match p {
+            Primitive::LayerStart(_) => true,
+            Primitive::Chunk(chunk) => chunk.chunk.has_layers,
+            _ => false,
+        });
+        self.generation += 1;
+    }
+
+    /// Drop the content, keeping the buffer.
+    pub fn clear(&mut self) {
+        if !self.primitives.is_empty() {
+            self.replace(std::iter::empty());
+        }
+    }
+}
+
+/// Draws a [`SceneChunk`]'s primitives in its place, each moved by
+/// `offset` and then, once the scene is in physical pixels, converted by
+/// [`Primitive::to_physical`] at `scale`. Drawing the chunk paints exactly
+/// what pushing those primitives here would; a nested chunk's offset adds
+/// to this one's.
+#[derive(Debug, Clone)]
+pub struct ChunkPrimitive {
+    pub chunk: Arc<SceneChunk>,
+    /// Where the chunk's origin lands, before `scale`.
+    pub offset: [f32; 2],
+    /// The scale [`Primitive::to_physical`] converted the scene at; `None`
+    /// while the scene is in logical points.
+    pub scale: Option<f32>,
+}
+
+impl ChunkPrimitive {
+    /// Call `f` with each of the chunk's primitives as it lands here.
+    pub fn for_each_placed(&self, mut f: impl FnMut(Primitive)) {
+        for primitive in &self.chunk.primitives {
+            f(self.place(primitive));
+        }
+    }
+
+    /// `primitive`, one of the chunk's, as it lands here.
+    pub fn place(&self, primitive: &Primitive) -> Primitive {
+        let mut placed = primitive.clone();
+        if let Primitive::Chunk(inner) = &mut placed {
+            // Offsets add in the outer chunk's units; the scale carries over.
+            inner.offset[0] += self.offset[0];
+            inner.offset[1] += self.offset[1];
+            inner.scale = self.scale;
+            return placed;
+        }
+        placed.offset(self.offset[0], self.offset[1]);
+        if let Some(scale) = self.scale {
+            placed.to_physical(scale);
+        }
+        placed
+    }
+}
+
+impl PartialEq for ChunkPrimitive {
+    /// The same recording at the same place.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.chunk, &other.chunk)
+            && self.offset == other.offset
+            && self.scale == other.scale
     }
 }
 

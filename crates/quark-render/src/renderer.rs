@@ -5,7 +5,7 @@ use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
 /// Glyph atlas work counters, from [`Renderer::text_atlas_stats`].
 pub use glyphon::AtlasStats as TextAtlasStats;
-use glyphon::{Cache, Resolution, SwashCache, TextAtlas, TextRenderer, Viewport};
+use glyphon::{Cache, Resolution, SwashCache, TextAtlas, Viewport};
 use quark_text::TextSystem;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -19,9 +19,13 @@ use crate::scene::{
 use crate::shaders::{
     BLIT_SHADER, BLUR_SHADER, EFFECT_SHADER, LAYER_SHADER, PATH_SHADER, QUAD_SHADER, SHADOW_SHADER,
 };
+#[path = "chunks.rs"]
+mod chunks;
+#[path = "text_runs.rs"]
+mod text_runs;
+
 use crate::text::{
     GlyphOwner, RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width,
-    positioned_glyphs, prepare_text_areas,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -847,8 +851,9 @@ pub struct Renderer {
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
-    /// One text renderer per text segment of the frame.
-    text_renderers: Vec<TextRenderer>,
+    /// One text renderer per text run of the frame, kept with what it
+    /// prepared.
+    text_runs: text_runs::TextRuns,
     /// False when this frame's glyphs did not fit the atlas; its text
     /// segments are skipped.
     text_ready: bool,
@@ -860,6 +865,8 @@ pub struct Renderer {
     /// `(font size, TextSystem generation, width)` of the last measurement.
     cached_mono_char_width: Option<(f32, quark_text::FontEpoch, f32)>,
     flattener: Flattener,
+    /// The frame's primitives with chunks expanded, when layers need them.
+    expanded: Vec<Primitive>,
     /// The window's target, then each offscreen layer's by target number.
     frames: Vec<TargetFrame>,
     /// Targets in use this frame.
@@ -1007,9 +1014,7 @@ impl Renderer {
         let texture_pool = TexturePool::new(shared.format);
         let swash_cache = SwashCache::new();
         let viewport = Viewport::new(&device, &shared.glyph_cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let atlas = TextAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
 
         Self {
             device,
@@ -1035,13 +1040,14 @@ impl Renderer {
             swash_cache,
             viewport,
             atlas,
-            text_renderers: vec![text_renderer],
+            text_runs: text_runs::TextRuns::default(),
             text_ready: true,
             text_path: TextPath::default(),
             recolored: RecoloredBuffers::default(),
             glyph_owner: GlyphOwner::default(),
             cached_mono_char_width: None,
             flattener: Flattener::default(),
+            expanded: Vec::new(),
             frames: Vec::new(),
             active_frames: 0,
             plans: Vec::new(),
@@ -1378,7 +1384,20 @@ impl Renderer {
             width: width as f32,
             height: height as f32,
         };
-        let offscreen = plan_layers(scene, viewport, &mut self.plans, &mut self.layer_scratch);
+        // Layer planning reads every primitive a layer groups, so chunks a
+        // layer groups, or that start one, draw from their primitives.
+        let mut expanded = std::mem::take(&mut self.expanded);
+        let prims = if needs_expansion(&scene.primitives) {
+            expanded.clear();
+            let mut depth = 0;
+            for primitive in &scene.primitives {
+                expand(primitive.clone(), &mut depth, &mut expanded);
+            }
+            &expanded[..]
+        } else {
+            &scene.primitives[..]
+        };
+        let offscreen = plan_layers(prims, viewport, &mut self.plans, &mut self.layer_scratch);
         self.active_frames = 1 + offscreen;
         if self.frames.len() < self.active_frames {
             self.frames
@@ -1402,7 +1421,7 @@ impl Renderer {
 
         let images = lock_images(&self.images);
         self.flattener.segments.clear();
-        let prims = &scene.primitives;
+        self.flattener.chunks.begin_frame();
         flatten_scene_into(
             prims,
             0..prims.len(),
@@ -1434,12 +1453,23 @@ impl Renderer {
                 &mut frame.flat,
             );
         }
+        drop(images);
+        // Let go of the chunks and layouts; the flattened frame holds what
+        // it draws.
+        expanded.clear();
+        self.expanded = expanded;
+        let mut runs = 0;
+        for frame in &mut self.frames[..self.active_frames] {
+            build_batches(&frame.flat, &mut frame.batches);
+            frame.text_base = runs;
+            runs += frame.batches.text_runs.len();
+        }
     }
 
     /// Upload, prepare, and encode the flattened frame into `encoder`,
-    /// targeting `target`. Everything goes into one encoder: each text segment
+    /// targeting `target`. Everything goes into one encoder: each text run
     /// has its own `TextRenderer`, so preparing one cannot overwrite the
-    /// vertices another segment's pass reads.
+    /// vertices another run's pass reads.
     fn record_frame(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1474,11 +1504,7 @@ impl Renderer {
         }
         let segments = self.upload_segments();
 
-        let mut text_steps = 0;
         for frame in frames.iter_mut() {
-            build_batches(&frame.flat, &mut frame.batches);
-            frame.text_base = text_steps;
-            text_steps += frame.batches.text_steps;
             let (device, queue) = (&self.device, &self.queue);
             let pool = &mut self.instance_buffer_pool;
             let batches = &frame.batches;
@@ -1499,13 +1525,10 @@ impl Renderer {
         }
         self.prepare_layer_viewports(frames);
 
-        // Prepare every text segment before recording any pass.
-        self.fit_text_renderers(text_steps);
+        // Prepare every text run before recording any pass.
         self.text_ready = self.prepare_frame_text(frames, text);
         if self.text_ready && self.text_path == TextPath::Positioned {
-            for renderer in &mut self.text_renderers[..text_steps] {
-                renderer.upload(&self.device, &self.queue);
-            }
+            self.text_runs.upload(&self.device, &self.queue);
         }
 
         for frame in frames.iter_mut() {
@@ -1679,25 +1702,7 @@ impl Renderer {
         Some(texture.bind_group.clone())
     }
 
-    /// Keep one text renderer per text segment of this frame. Renderers left
-    /// over from a frame with many more segments are dropped, so one busy
-    /// frame does not hold their vertex buffers forever.
-    fn fit_text_renderers(&mut self, segments: usize) {
-        let wanted = segments.max(1);
-        if self.text_renderers.len() > wanted * 2 {
-            self.text_renderers.truncate(wanted);
-        }
-        while self.text_renderers.len() < wanted {
-            self.text_renderers.push(TextRenderer::new(
-                &mut self.atlas,
-                &self.device,
-                wgpu::MultisampleState::default(),
-                None,
-            ));
-        }
-    }
-
-    /// Prepare every text segment of `frames`, retrying once with the atlas
+    /// Prepare every text run of `frames`, retrying once with the atlas
     /// unpinned. False when this frame's glyphs do not fit and its text is
     /// skipped. On the positioned path the vertices still need uploading.
     fn prepare_frame_text(&mut self, frames: &[TargetFrame], text: &mut TextSystem) -> bool {
@@ -1707,14 +1712,14 @@ impl Renderer {
             self.recolored
                 .prepare(frames.iter().map(|frame| &frame.flat.rich_texts[..]), text);
         }
-        match self.prepare_text(frames, text) {
+        match self.prepare_text_runs(frames, text, true) {
             Ok(()) => true,
             Err(_) => {
                 // The atlas is full of glyphs pinned by this frame. Unpin
-                // them and prepare every segment again, since the retry may
-                // evict glyphs that earlier segments' vertices point at.
+                // them and prepare every run again, since the retry may
+                // evict glyphs that earlier runs' vertices point at.
                 self.atlas.trim();
-                match self.prepare_text(frames, text) {
+                match self.prepare_text_runs(frames, text, false) {
                     Ok(()) => true,
                     Err(error) => {
                         // This frame's glyphs do not fit even alone. Draw
@@ -1722,62 +1727,12 @@ impl Renderer {
                         // unpin so the next frame starts from a clean atlas.
                         tracing::warn!("skipping text for one frame: {error}");
                         self.atlas.trim();
+                        self.text_runs.forget();
                         false
                     }
                 }
             }
         }
-    }
-
-    /// Prepare each text segment of every target into its own renderer.
-    fn prepare_text(
-        &mut self,
-        frames: &[TargetFrame],
-        text: &mut TextSystem,
-    ) -> Result<(), glyphon::PrepareError> {
-        for (index, frame) in frames.iter().enumerate() {
-            let flat = &frame.flat;
-            let viewport = match index {
-                0 => &self.viewport,
-                i => &self.layer_viewports[i - 1],
-            };
-            let mut text_index = frame.text_base;
-            for step in &flat.steps {
-                let DrawStep::Batch {
-                    kind: PrimKind::Text,
-                    items,
-                    rich,
-                } = step
-                else {
-                    continue;
-                };
-                let texts = &flat.texts[items.start as usize..items.end as usize];
-                let rich_texts = &flat.rich_texts[rich.start as usize..rich.end as usize];
-                let renderer = &mut self.text_renderers[text_index];
-                match self.text_path {
-                    TextPath::Positioned => renderer.prepare_glyphs(
-                        &self.device,
-                        &self.queue,
-                        text.raster_font_system(),
-                        &mut self.atlas,
-                        viewport,
-                        positioned_glyphs(texts, rich_texts),
-                        &mut self.swash_cache,
-                    )?,
-                    TextPath::Buffer => renderer.prepare(
-                        &self.device,
-                        &self.queue,
-                        text.raster_font_system(),
-                        &mut self.atlas,
-                        viewport,
-                        prepare_text_areas(texts, rich_texts, &self.recolored),
-                        &mut self.swash_cache,
-                    )?,
-                }
-                text_index += 1;
-            }
-        }
-        Ok(())
     }
 
     /// Acquire offscreen targets and upload blur instances when the frame has
@@ -2043,11 +1998,13 @@ impl Renderer {
                     return Ok(());
                 }
                 pass.set_scissor_rect(0, 0, width, height);
-                self.text_renderers[t.frame.text_base + cmds.start].render(
-                    &self.atlas,
-                    t.glyph_viewport,
-                    pass,
-                )?;
+                for run in cmds {
+                    self.text_runs.renderer(t.frame.text_base + run).render(
+                        &self.atlas,
+                        t.glyph_viewport,
+                        pass,
+                    )?;
+                }
                 return Ok(());
             }
         };
@@ -2180,7 +2137,7 @@ struct TargetFrame {
     height: u32,
     /// The pooled texture an offscreen layer renders into this frame.
     layer: Option<OffscreenTarget>,
-    /// Text renderer of this target's first text step.
+    /// Index of this target's first text run among the frame's.
     text_base: usize,
     // Held only while the frame is recorded:
     buffers: FrameBuffers,
@@ -2751,6 +2708,8 @@ pub(super) struct ClippedText {
     pub(super) key: DrawKey,
     pub(super) primitive: TextPrimitive,
     pub(super) clip: Rect,
+    /// Id of the innermost chunk it was drawn from, zero outside chunks.
+    pub(super) run: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2761,6 +2720,8 @@ pub(super) struct ClippedRichText {
     /// Inline layer opacity, applied to each glyph's color as it is
     /// prepared so a fade allocates no faded copy of the span colors.
     pub(super) alpha: f32,
+    /// Id of the innermost chunk it was drawn from, zero outside chunks.
+    pub(super) run: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -2910,21 +2871,23 @@ struct Flattener {
     inline: Vec<((f32, f32), f32)>,
     /// Path segments of every target this frame, in segment texture order.
     segments: Vec<[f32; 4]>,
-    bands: Vec<Band>,
-    scratch: Vec<[f32; 4]>,
+    band_scratch: BandScratch,
+    /// Band instances of the path being drawn outside any chunk.
+    path_bands: Vec<PathInstance>,
+    /// Flattened chunks kept across frames.
+    chunks: chunks::ChunkCache,
 }
 
 impl Flattener {
-    fn shift(&self, rect: Rect) -> Rect {
-        rect.offset(-self.origin.0, -self.origin.1)
-    }
-
     fn clip(&self) -> ActiveClip {
         *self.clips.last().expect("root clip")
     }
 
-    fn builder(&mut self) -> &mut ZBuilder {
-        let z = self.z_stack.last().copied().unwrap_or(0);
+    fn z(&self) -> i32 {
+        self.z_stack.last().copied().unwrap_or(0)
+    }
+
+    fn builder(&mut self, z: i32) -> &mut ZBuilder {
         let index = match self.builders[..self.active].iter().position(|b| b.z == z) {
             Some(index) => index,
             None => {
@@ -2939,19 +2902,19 @@ impl Flattener {
         &mut self.builders[index]
     }
 
-    fn place(&mut self, kind: PrimKind, bounds: Rect) -> DrawKey {
+    fn place(&mut self, z: i32, kind: PrimKind, bounds: Rect) -> DrawKey {
         self.seq += 1;
         let seq = self.seq;
-        let builder = self.builder();
+        let builder = self.builder(z);
         DrawKey {
-            z: builder.z,
+            z,
             segment: builder.place(kind, bounds),
             seq,
         }
     }
 
-    fn barrier(&mut self, blur: FlattenedBlurRegion) {
-        self.builder().barrier(blur);
+    fn barrier(&mut self, z: i32, blur: FlattenedBlurRegion) {
+        self.builder(z).barrier(blur);
     }
 }
 
@@ -3028,7 +2991,12 @@ impl ActiveClip {
 fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> FlattenedScene {
     let mut out = FlattenedScene::default();
     let mut plans = Vec::new();
-    plan_layers(scene, viewport, &mut plans, &mut LayerScratch::default());
+    plan_layers(
+        &scene.primitives,
+        viewport,
+        &mut plans,
+        &mut LayerScratch::default(),
+    );
     flatten_scene_into(
         &scene.primitives,
         0..scene.primitives.len(),
@@ -3089,187 +3057,70 @@ fn flatten_scene_into(
         let primitive = &prims[index];
         index += 1;
         match primitive {
-            Primitive::Rect(rect) => push_quad(
-                fl.shift(rect.rect),
-                fade(color_to_linear(rect.color), fl.alpha),
-                [0.0; 4],
-                [0.0; 4],
-                [0.0; 4],
-                fl,
-                &mut out.quads,
-            ),
-            Primitive::RoundedRect(rect) => push_quad(
-                fl.shift(rect.rect),
-                fade(color_to_linear(rect.color), fl.alpha),
-                [0.0; 4],
-                rect.corner_radii,
-                [0.0; 4],
-                fl,
-                &mut out.quads,
-            ),
-            Primitive::Border(border) => push_quad(
-                fl.shift(border.rect),
-                [0.0; 4],
-                fade(color_to_linear(border.color), fl.alpha),
-                border.corner_radii,
-                border.widths,
-                fl,
-                &mut out.quads,
-            ),
-            Primitive::Shadow(shadow) => {
-                let sigma = (shadow.blur_radius * 0.5).max(0.5);
-                let expansion = sigma * 3.0;
-                let rect = fl.shift(shadow.rect);
-                let offset_x = shadow.offset[0];
-                let offset_y = shadow.offset[1];
-                let expanded = Rect {
-                    x: rect.x + offset_x - expansion,
-                    y: rect.y + offset_y - expansion,
-                    width: rect.width + expansion * 2.0,
-                    height: rect.height + expansion * 2.0,
+            Primitive::Path(path) => {
+                // Bands are worth building only for a visible path.
+                let shift = (-fl.origin.0, -fl.origin.1);
+                let clip = fl.clip();
+                if path
+                    .bounds()
+                    .offset(shift.0, shift.1)
+                    .intersection(clip.scissor)
+                    .is_none()
+                {
+                    continue;
+                }
+                let mut bands = std::mem::take(&mut fl.path_bands);
+                bands.clear();
+                let mut parts = [None, None];
+                path_parts(
+                    path,
+                    &mut fl.segments,
+                    &mut fl.band_scratch,
+                    &mut bands,
+                    &mut parts,
+                );
+                let draw = Draw {
+                    shift,
+                    clip,
+                    z: fl.z(),
+                    alpha: fl.alpha,
+                    bands: &bands,
+                    segment_base: 0,
+                    run: 0,
                 };
-                let clip = fl.clip();
-                if let Some(bounds) = expanded.intersection(clip.scissor) {
-                    let key = fl.place(PrimKind::Shadow, bounds);
-                    out.shadows.push(ClippedShadow {
-                        key,
-                        instance: ShadowInstance {
-                            draw_bounds: [expanded.x, expanded.y, expanded.width, expanded.height],
-                            shadow_bounds: [
-                                rect.x + offset_x,
-                                rect.y + offset_y,
-                                rect.width,
-                                rect.height,
-                            ],
-                            color: fade(color_to_linear(shadow.color), fl.alpha),
-                            params: [sigma, shadow.corner_radius, 0.0, 0.0],
-                            clip_bounds: clip.clip_bounds_attr(),
-                            clip_radii: clip.clip_radii_attr(),
-                        },
-                        clip: clip.scissor,
-                    });
+                for part in parts.into_iter().flatten() {
+                    emit(part, &draw, fl, out);
                 }
+                fl.path_bands = bands;
             }
-            Primitive::TextRun(text) => {
-                let clip = fl.clip();
-                let rect = fl.shift(text.rect);
-                if let Some(intersection) = rect.intersection(clip.scissor) {
-                    let key = fl.place(PrimKind::Text, intersection);
-                    out.texts.push(ClippedText {
-                        key,
-                        primitive: TextPrimitive {
-                            rect,
-                            layout: text.layout.clone(),
-                            color: fade_color(text.color, fl.alpha),
-                        },
-                        clip: intersection,
-                    });
-                }
-            }
-            Primitive::RichTextRun(text) => {
-                let clip = fl.clip();
-                let rect = fl.shift(text.rect);
-                if let Some(intersection) = rect.intersection(clip.scissor) {
-                    let key = fl.place(PrimKind::Text, intersection);
-                    out.rich_texts.push(ClippedRichText {
-                        key,
-                        primitive: RichTextPrimitive {
-                            rect,
-                            ..text.clone()
-                        },
-                        clip: intersection,
-                        alpha: fl.alpha,
-                    });
-                }
-            }
-            Primitive::BlurRegion(blur) => {
-                let clip = fl.clip();
-                if let Some(rect) = fl.shift(blur.rect).intersection(clip.scissor) {
-                    fl.barrier(FlattenedBlurRegion {
-                        rect,
-                        blur_radius: blur.blur_radius,
-                        corner_radii: blur.corner_radii,
-                    });
-                }
-            }
-            Primitive::EffectQuad(effect) => {
-                let clip = fl.clip();
-                let rect = fl.shift(effect.rect);
-                if let Some(bounds) = rect.intersection(clip.scissor) {
-                    let key = fl.place(PrimKind::Effect, bounds);
-                    out.effect_quads.push(ClippedEffectQuad {
-                        key,
-                        instance: EffectQuadInstance {
-                            bounds: [rect.x, rect.y, rect.width, rect.height],
-                            color_a: fade(color_to_linear(effect.color_a), fl.alpha),
-                            color_b: fade(color_to_linear(effect.color_b), fl.alpha),
-                            params: [
-                                effect.effect_type as u32 as f32,
-                                effect.params[0],
-                                effect.params[1],
-                                effect.corner_radius,
-                            ],
-                            clip_bounds: clip.clip_bounds_attr(),
-                            clip_radii: clip.clip_radii_attr(),
-                        },
-                        clip: clip.scissor,
-                    });
-                }
-            }
-            Primitive::Image(img) => {
-                let clip = fl.clip();
-                let rect = fl.shift(img.rect);
-                if let Some(bounds) = rect.intersection(clip.scissor) {
-                    let key = fl.place(PrimKind::Image, bounds);
-                    out.images.push(ClippedImage {
-                        key,
-                        primitive: crate::scene::ImagePrimitive {
-                            rect,
-                            ..img.clone()
-                        },
-                        clip: clip.scissor,
-                        alpha: fl.alpha,
-                    });
-                }
-            }
-            Primitive::Icon(icon) => {
-                let clip = fl.clip();
-                let shifted = fl.shift(icon.rect);
-                let rect = crate::Rect {
-                    x: shifted.x.round(),
-                    y: shifted.y.round(),
-                    width: shifted.width.round(),
-                    height: shifted.height.round(),
+            Primitive::Chunk(chunk) => chunks::draw_chunk(chunk, fl, out),
+            Primitive::Rect(_)
+            | Primitive::RoundedRect(_)
+            | Primitive::Border(_)
+            | Primitive::Shadow(_)
+            | Primitive::TextRun(_)
+            | Primitive::RichTextRun(_)
+            | Primitive::BlurRegion(_)
+            | Primitive::EffectQuad(_)
+            | Primitive::Image(_)
+            | Primitive::Icon(_) => {
+                let draw = Draw {
+                    shift: (-fl.origin.0, -fl.origin.1),
+                    clip: fl.clip(),
+                    z: fl.z(),
+                    alpha: fl.alpha,
+                    bands: &[],
+                    segment_base: 0,
+                    run: 0,
                 };
-                if let Some(bounds) = rect.intersection(clip.scissor) {
-                    let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
-                    let cache_key = crate::icons::cache_key(&icon.name, px_size, icon.color);
-                    // Only rasterize (and copy RGBA out of the icon cache)
-                    // when the texture is not on the GPU yet; once
-                    // uploaded, the cache key alone is enough to draw.
-                    let (rgba, w, h) = if image_cache.contains_key(&cache_key) {
-                        (empty_rgba(), 0, 0)
-                    } else {
-                        crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
-                    };
-                    let key = fl.place(PrimKind::Image, bounds);
-                    out.images.push(ClippedImage {
-                        key,
-                        primitive: crate::scene::ImagePrimitive {
-                            rect,
-                            width: w,
-                            height: h,
-                            rgba,
-                            cache_key,
-                        },
-                        clip: clip.scissor,
-                        alpha: fl.alpha,
-                    });
+                // Icons already on the GPU skip rasterizing.
+                let rasterize = |key| !image_cache.contains_key(&key);
+                if let Some(drawn) = convert(primitive, rasterize) {
+                    emit(drawn, &draw, fl, out);
                 }
             }
-            Primitive::Path(path) => push_path(path, fl, &mut out.paths),
             Primitive::ClipStart(ClipPrimitive { rect, corner_radii }) => {
-                let rect = fl.shift(*rect);
+                let rect = rect.offset(-fl.origin.0, -fl.origin.1);
                 let next = fl
                     .clips
                     .last()
@@ -3367,16 +3218,186 @@ fn flatten_scene_into(
     }
 }
 
-/// Append the bands of `path`'s fill, then its stroke.
-fn push_path(path: &crate::scene::PathPrimitive, fl: &mut Flattener, out: &mut Vec<ClippedPath>) {
-    let clip = fl.clip();
-    let Some(visible) = fl.shift(path.bounds()).intersection(clip.scissor) else {
-        return;
+/// One primitive's draw before clipping and placement, in the coordinates
+/// it was converted at. Chunks keep these across frames.
+#[derive(Debug, Clone)]
+enum Drawn {
+    Quad(QuadInstance),
+    Shadow(ShadowInstance),
+    Effect(EffectQuadInstance),
+    Image(crate::scene::ImagePrimitive),
+    Text(TextPrimitive),
+    RichText(RichTextPrimitive),
+    /// A path's fill or stroke: every band shares one key, placed with the
+    /// bounds of the whole path.
+    Path {
+        area: Rect,
+        bands: std::ops::Range<u32>,
+    },
+    Blur(FlattenedBlurRegion),
+}
+
+/// How a [`Drawn`] lands this frame.
+struct Draw<'a> {
+    /// Added to the drawn coordinates.
+    shift: (f32, f32),
+    clip: ActiveClip,
+    z: i32,
+    /// Opacity of the layers drawn in place around it.
+    alpha: f32,
+    /// Band instances that `Drawn::Path` ranges index, and what their
+    /// segment starts are relative to in the frame's segments.
+    bands: &'a [PathInstance],
+    segment_base: u32,
+    /// Id of the chunk it is drawn from, zero outside chunks: texts of one
+    /// chunk prepare their glyphs together.
+    run: u64,
+}
+
+/// The draw of a primitive other than a path, a chunk, or a state change,
+/// unclipped and unfaded. `rasterize` says whether an icon's pixels are
+/// needed (its texture is not on the GPU).
+fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option<Drawn> {
+    let quad = |rect: Rect, background, border_color, corner_radii, border_widths| {
+        Drawn::Quad(QuadInstance {
+            bounds: [rect.x, rect.y, rect.width, rect.height],
+            background,
+            border_color,
+            corner_radii,
+            border_widths,
+            clip_bounds: [0.0; 4],
+            clip_radii: [0.0; 4],
+        })
     };
+    Some(match primitive {
+        Primitive::Rect(rect) => quad(
+            rect.rect,
+            color_to_linear(rect.color),
+            [0.0; 4],
+            [0.0; 4],
+            [0.0; 4],
+        ),
+        Primitive::RoundedRect(rect) => quad(
+            rect.rect,
+            color_to_linear(rect.color),
+            [0.0; 4],
+            rect.corner_radii,
+            [0.0; 4],
+        ),
+        Primitive::Border(border) => quad(
+            border.rect,
+            [0.0; 4],
+            color_to_linear(border.color),
+            border.corner_radii,
+            border.widths,
+        ),
+        Primitive::Shadow(shadow) => {
+            let sigma = (shadow.blur_radius * 0.5).max(0.5);
+            let expansion = sigma * 3.0;
+            let rect = shadow.rect;
+            let [offset_x, offset_y] = shadow.offset;
+            Drawn::Shadow(ShadowInstance {
+                draw_bounds: [
+                    rect.x + offset_x - expansion,
+                    rect.y + offset_y - expansion,
+                    rect.width + expansion * 2.0,
+                    rect.height + expansion * 2.0,
+                ],
+                shadow_bounds: [
+                    rect.x + offset_x,
+                    rect.y + offset_y,
+                    rect.width,
+                    rect.height,
+                ],
+                color: color_to_linear(shadow.color),
+                params: [sigma, shadow.corner_radius, 0.0, 0.0],
+                clip_bounds: [0.0; 4],
+                clip_radii: [0.0; 4],
+            })
+        }
+        Primitive::TextRun(text) => Drawn::Text(text.clone()),
+        Primitive::RichTextRun(text) => Drawn::RichText(text.clone()),
+        Primitive::BlurRegion(blur) => Drawn::Blur(FlattenedBlurRegion {
+            rect: blur.rect,
+            blur_radius: blur.blur_radius,
+            corner_radii: blur.corner_radii,
+        }),
+        Primitive::EffectQuad(effect) => {
+            let rect = effect.rect;
+            Drawn::Effect(EffectQuadInstance {
+                bounds: [rect.x, rect.y, rect.width, rect.height],
+                color_a: color_to_linear(effect.color_a),
+                color_b: color_to_linear(effect.color_b),
+                params: [
+                    effect.effect_type as u32 as f32,
+                    effect.params[0],
+                    effect.params[1],
+                    effect.corner_radius,
+                ],
+                clip_bounds: [0.0; 4],
+                clip_radii: [0.0; 4],
+            })
+        }
+        Primitive::Image(img) => Drawn::Image(img.clone()),
+        Primitive::Icon(icon) => {
+            // Whole pixels; moving by whole pixels keeps them whole.
+            let rect = crate::Rect {
+                x: icon.rect.x.round(),
+                y: icon.rect.y.round(),
+                width: icon.rect.width.round(),
+                height: icon.rect.height.round(),
+            };
+            let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
+            let cache_key = crate::icons::cache_key(&icon.name, px_size, icon.color);
+            // Once uploaded, the cache key alone is enough to draw.
+            let (rgba, width, height) = if rasterize(cache_key) {
+                crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
+            } else {
+                (empty_rgba(), 0, 0)
+            };
+            Drawn::Image(crate::scene::ImagePrimitive {
+                rect,
+                width,
+                height,
+                rgba,
+                cache_key,
+            })
+        }
+        Primitive::Path(_)
+        | Primitive::Chunk(_)
+        | Primitive::ClipStart(_)
+        | Primitive::ClipEnd
+        | Primitive::LayerStart(_)
+        | Primitive::LayerEnd
+        | Primitive::ZIndexPush(_)
+        | Primitive::ZIndexPop
+        | Primitive::LayerBoundary => return None,
+    })
+}
+
+/// Scratch buffers for flattening paths into bands.
+#[derive(Debug, Default)]
+struct BandScratch {
+    bands: Vec<Band>,
+    points: Vec<[f32; 4]>,
+}
+
+/// Append the band instances of `path`'s fill, then its stroke, to
+/// `bands`, their segments to `segments` (band segment starts index it),
+/// and describe each in `parts`. Unclipped and unfaded, at the path's own
+/// origin.
+fn path_parts(
+    path: &crate::scene::PathPrimitive,
+    segments: &mut Vec<[f32; 4]>,
+    scratch: &mut BandScratch,
+    bands: &mut Vec<PathInstance>,
+    parts: &mut [Option<Drawn>; 2],
+) {
     if path.path.is_empty() || !(path.scale.is_finite() && path.scale > 0.0) {
         return;
     }
-    let origin = [path.origin[0] - fl.origin.0, path.origin[1] - fl.origin.1];
+    let area = path.bounds();
+    let origin = path.origin;
     let geometry = to_kurbo(&path.path, path.scale);
     let fill = path
         .fill
@@ -3389,39 +3410,179 @@ fn push_path(path: &crate::scene::PathPrimitive, fl: &mut Flattener, out: &mut V
             // Stroke outlines wind consistently and are meant for nonzero.
             (outline, stroke.color, 0.0)
         });
-    for (outline, color, rule) in [fill, stroke].into_iter().flatten() {
-        fl.bands.clear();
-        let Flattener {
-            segments,
-            bands,
-            scratch,
-            ..
-        } = &mut *fl;
-        if !push_bands(&outline, segments, bands, scratch) {
+    for (part, outline) in parts.iter_mut().zip([fill, stroke]) {
+        let Some((outline, color, rule)) = outline else {
+            continue;
+        };
+        scratch.bands.clear();
+        if !push_bands(&outline, segments, &mut scratch.bands, &mut scratch.points) {
             continue;
         }
-        // Fill and stroke each take their own key, so the stroke draws on
-        // top; the bands of one shape never overlap.
-        let key = fl.place(PrimKind::Path, visible);
-        let color = fade(color_to_linear(color), fl.alpha);
-        for band in &fl.bands {
+        let color = color_to_linear(color);
+        let start = bands.len() as u32;
+        bands.extend(scratch.bands.iter().map(|band| {
             let rect = band.rect.offset(origin[0], origin[1]);
-            if rect.intersection(clip.scissor).is_none() {
-                continue;
+            PathInstance {
+                bounds: [rect.x, rect.y, rect.width, rect.height],
+                origin_rule: [origin[0], origin[1], rule, 0.0],
+                color,
+                segments: [band.start, band.count, 0, 0],
+                clip_bounds: [0.0; 4],
+                clip_radii: [0.0; 4],
             }
-            out.push(ClippedPath {
+        }));
+        *part = Some(Drawn::Path {
+            area,
+            bands: start..bands.len() as u32,
+        });
+    }
+}
+
+/// Clip, place, and append `drawn` as `draw` says.
+fn emit(drawn: Drawn, draw: &Draw<'_>, fl: &mut Flattener, out: &mut FlattenedScene) {
+    let (dx, dy) = draw.shift;
+    let clip = draw.clip;
+    let alpha = draw.alpha;
+    let shift = |bounds: &mut [f32; 4]| {
+        bounds[0] += dx;
+        bounds[1] += dy;
+    };
+    match drawn {
+        Drawn::Quad(mut instance) => {
+            shift(&mut instance.bounds);
+            let Some(bounds) = bounds_rect(instance.bounds).intersection(clip.scissor) else {
+                return;
+            };
+            let key = fl.place(draw.z, PrimKind::Quad, bounds);
+            instance.background = fade(instance.background, alpha);
+            instance.border_color = fade(instance.border_color, alpha);
+            instance.clip_bounds = clip.clip_bounds_attr();
+            instance.clip_radii = clip.clip_radii_attr();
+            out.quads.push(ClippedQuad {
                 key,
-                instance: PathInstance {
-                    bounds: [rect.x, rect.y, rect.width, rect.height],
-                    origin_rule: [origin[0], origin[1], rule, 0.0],
-                    color,
-                    segments: [band.start, band.count, 0, 0],
-                    clip_bounds: clip.clip_bounds_attr(),
-                    clip_radii: clip.clip_radii_attr(),
-                },
+                instance,
                 clip: clip.scissor,
             });
         }
+        Drawn::Shadow(mut instance) => {
+            shift(&mut instance.draw_bounds);
+            shift(&mut instance.shadow_bounds);
+            let Some(bounds) = bounds_rect(instance.draw_bounds).intersection(clip.scissor) else {
+                return;
+            };
+            let key = fl.place(draw.z, PrimKind::Shadow, bounds);
+            instance.color = fade(instance.color, alpha);
+            instance.clip_bounds = clip.clip_bounds_attr();
+            instance.clip_radii = clip.clip_radii_attr();
+            out.shadows.push(ClippedShadow {
+                key,
+                instance,
+                clip: clip.scissor,
+            });
+        }
+        Drawn::Effect(mut instance) => {
+            shift(&mut instance.bounds);
+            let Some(bounds) = bounds_rect(instance.bounds).intersection(clip.scissor) else {
+                return;
+            };
+            let key = fl.place(draw.z, PrimKind::Effect, bounds);
+            instance.color_a = fade(instance.color_a, alpha);
+            instance.color_b = fade(instance.color_b, alpha);
+            instance.clip_bounds = clip.clip_bounds_attr();
+            instance.clip_radii = clip.clip_radii_attr();
+            out.effect_quads.push(ClippedEffectQuad {
+                key,
+                instance,
+                clip: clip.scissor,
+            });
+        }
+        Drawn::Image(image) => {
+            let rect = image.rect.offset(dx, dy);
+            let Some(bounds) = rect.intersection(clip.scissor) else {
+                return;
+            };
+            let key = fl.place(draw.z, PrimKind::Image, bounds);
+            out.images.push(ClippedImage {
+                key,
+                primitive: crate::scene::ImagePrimitive { rect, ..image },
+                clip: clip.scissor,
+                alpha,
+            });
+        }
+        Drawn::Text(text) => {
+            let rect = text.rect.offset(dx, dy);
+            let Some(intersection) = rect.intersection(clip.scissor) else {
+                return;
+            };
+            let key = fl.place(draw.z, PrimKind::Text, intersection);
+            out.texts.push(ClippedText {
+                key,
+                primitive: TextPrimitive {
+                    rect,
+                    color: fade_color(text.color, alpha),
+                    ..text
+                },
+                clip: intersection,
+                run: draw.run,
+            });
+        }
+        Drawn::RichText(text) => {
+            let rect = text.rect.offset(dx, dy);
+            let Some(intersection) = rect.intersection(clip.scissor) else {
+                return;
+            };
+            let key = fl.place(draw.z, PrimKind::Text, intersection);
+            out.rich_texts.push(ClippedRichText {
+                key,
+                primitive: RichTextPrimitive { rect, ..text },
+                clip: intersection,
+                alpha,
+                run: draw.run,
+            });
+        }
+        Drawn::Blur(blur) => {
+            if let Some(rect) = blur.rect.offset(dx, dy).intersection(clip.scissor) {
+                fl.barrier(draw.z, FlattenedBlurRegion { rect, ..blur });
+            }
+        }
+        Drawn::Path { area, bands } => {
+            let Some(visible) = area.offset(dx, dy).intersection(clip.scissor) else {
+                return;
+            };
+            // Fill and stroke each take their own key, so the stroke draws
+            // on top; the bands of one shape never overlap.
+            let key = fl.place(draw.z, PrimKind::Path, visible);
+            for band in &draw.bands[bands.start as usize..bands.end as usize] {
+                let mut instance = *band;
+                shift(&mut instance.bounds);
+                if bounds_rect(instance.bounds)
+                    .intersection(clip.scissor)
+                    .is_none()
+                {
+                    continue;
+                }
+                instance.origin_rule[0] += dx;
+                instance.origin_rule[1] += dy;
+                instance.segments[0] += draw.segment_base;
+                instance.color = fade(instance.color, alpha);
+                instance.clip_bounds = clip.clip_bounds_attr();
+                instance.clip_radii = clip.clip_radii_attr();
+                out.paths.push(ClippedPath {
+                    key,
+                    instance,
+                    clip: clip.scissor,
+                });
+            }
+        }
+    }
+}
+
+fn bounds_rect([x, y, width, height]: [f32; 4]) -> Rect {
+    Rect {
+        x,
+        y,
+        width,
+        height,
     }
 }
 
@@ -3441,7 +3602,7 @@ fn push_layer(plan: &LayerPlan, fl: &mut Flattener, out: &mut Vec<ClippedLayer>)
     let Some(bounds) = footprint.intersection(clip.scissor) else {
         return;
     };
-    let key = fl.place(PrimKind::Layer, bounds);
+    let key = fl.place(fl.z(), PrimKind::Layer, bounds);
     out.push(ClippedLayer {
         key,
         instance: LayerInstance {
@@ -3539,13 +3700,12 @@ struct LayerScratch {
 /// Plan every layer of `scene` (in scene order) and number the offscreen
 /// ones' targets from 1. Returns how many render offscreen.
 fn plan_layers(
-    scene: &Scene,
+    prims: &[Primitive],
     viewport: Rect,
     plans: &mut Vec<LayerPlan>,
     scratch: &mut LayerScratch,
 ) -> usize {
     plans.clear();
-    let prims = &scene.primitives;
     if !prims.iter().any(|p| matches!(p, Primitive::LayerStart(_))) {
         return 0;
     }
@@ -3701,6 +3861,38 @@ fn layer_mode(plan: &mut LayerPlan, bounds: Option<Rect>, drawables: u32) -> Lay
     LayerMode::Offscreen
 }
 
+/// Whether a chunk of `prims` starts a layer or sits inside one.
+fn needs_expansion(prims: &[Primitive]) -> bool {
+    let mut depth = 0u32;
+    prims.iter().any(|primitive| match primitive {
+        Primitive::LayerStart(_) => {
+            depth += 1;
+            false
+        }
+        Primitive::LayerEnd => {
+            depth = depth.saturating_sub(1);
+            false
+        }
+        Primitive::Chunk(chunk) => depth > 0 || chunk.chunk.has_layers(),
+        _ => false,
+    })
+}
+
+/// Push `primitive` onto `out`, replacing a chunk that starts a layer or
+/// sits inside one (`depth` layers deep) with its primitives.
+fn expand(primitive: Primitive, depth: &mut u32, out: &mut Vec<Primitive>) {
+    match primitive {
+        Primitive::LayerStart(_) => *depth += 1,
+        Primitive::LayerEnd => *depth = depth.saturating_sub(1),
+        Primitive::Chunk(ref chunk) if *depth > 0 || chunk.chunk.has_layers() => {
+            chunk.for_each_placed(|placed| expand(placed, depth, out));
+            return;
+        }
+        _ => {}
+    }
+    out.push(primitive);
+}
+
 /// Scene bounds a primitive can paint, or `None` for state changes.
 fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
     // Glyphs can overhang their layout box (italics, accents).
@@ -3731,7 +3923,8 @@ fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
         | Primitive::ZIndexPop
         | Primitive::LayerStart(_)
         | Primitive::LayerEnd
-        | Primitive::LayerBoundary => None,
+        | Primitive::LayerBoundary
+        | Primitive::Chunk(_) => None,
     }
 }
 
@@ -3760,34 +3953,6 @@ fn take_run<T>(
     start as u32..*cursor as u32
 }
 
-fn push_quad(
-    rect: Rect,
-    background: [f32; 4],
-    border_color: [f32; 4],
-    corner_radii: [f32; 4],
-    border_widths: [f32; 4],
-    fl: &mut Flattener,
-    out: &mut Vec<ClippedQuad>,
-) {
-    let clip = *fl.clips.last().expect("root clip");
-    if let Some(bounds) = rect.intersection(clip.scissor) {
-        let key = fl.place(PrimKind::Quad, bounds);
-        out.push(ClippedQuad {
-            key,
-            instance: QuadInstance {
-                bounds: [rect.x, rect.y, rect.width, rect.height],
-                background,
-                border_color,
-                corner_radii,
-                border_widths,
-                clip_bounds: clip.clip_bounds_attr(),
-                clip_radii: clip.clip_radii_attr(),
-            },
-            clip: clip.scissor,
-        });
-    }
-}
-
 // ---------------------------------------------------------------------------
 // GPU batches
 // ---------------------------------------------------------------------------
@@ -3807,10 +3972,18 @@ struct FrameBatches {
     quad_cmds: Vec<QuadDrawCommand>,
     image_cmds: Vec<ImageDrawCommand>,
     layer_cmds: Vec<LayerDrawCommand>,
-    /// Per step: a range into `quad_cmds` or `image_cmds`, or for text the
-    /// index of its text renderer (`start`).
+    /// Per step: a range into `quad_cmds`, `image_cmds`, `layer_cmds`, or
+    /// `text_runs`.
     step_cmds: Vec<std::ops::Range<u32>>,
-    text_steps: usize,
+    text_runs: Vec<TextRunItems>,
+}
+
+/// Texts of a step that prepare and draw together: plain runs, then rich
+/// ones, as the step orders them. A run holds texts of one chunk only.
+#[derive(Debug, Clone)]
+struct TextRunItems {
+    plain: std::ops::Range<u32>,
+    rich: std::ops::Range<u32>,
 }
 
 fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
@@ -3843,12 +4016,12 @@ fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
     out.image_cmds.clear();
     out.layer_cmds.clear();
     out.step_cmds.clear();
-    out.text_steps = 0;
+    out.text_runs.clear();
 
     for step in &flat.steps {
         let range = match step {
             DrawStep::Blur(_) => 0..0,
-            DrawStep::Batch { kind, items, .. } => {
+            DrawStep::Batch { kind, items, rich } => {
                 let (start, end) = (items.start as usize, items.end as usize);
                 match kind {
                     PrimKind::Shadow => push_clip_batches(
@@ -3906,15 +4079,47 @@ fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
                         }
                         first as u32..out.image_cmds.len() as u32
                     }
-                    PrimKind::Text => {
-                        out.text_steps += 1;
-                        (out.text_steps - 1) as u32..out.text_steps as u32
-                    }
+                    PrimKind::Text => push_text_runs(flat, items, rich, &mut out.text_runs),
                 }
             }
         };
         out.step_cmds.push(range);
     }
+}
+
+/// Append the runs of a text step, split where the chunk its texts come
+/// from changes, and return the range of runs added.
+fn push_text_runs(
+    flat: &FlattenedScene,
+    items: &std::ops::Range<u32>,
+    rich: &std::ops::Range<u32>,
+    out: &mut Vec<TextRunItems>,
+) -> std::ops::Range<u32> {
+    let first = out.len();
+    let mut current = None;
+    let plain = flat.texts[items.start as usize..items.end as usize].iter();
+    for (index, text) in (items.start..).zip(plain) {
+        match out.last_mut() {
+            Some(run) if current == Some(text.run) => run.plain.end = index + 1,
+            _ => out.push(TextRunItems {
+                plain: index..index + 1,
+                rich: rich.start..rich.start,
+            }),
+        }
+        current = Some(text.run);
+    }
+    let rich_texts = flat.rich_texts[rich.start as usize..rich.end as usize].iter();
+    for (index, text) in (rich.start..).zip(rich_texts) {
+        match out.last_mut() {
+            Some(run) if current == Some(text.run) => run.rich.end = index + 1,
+            _ => out.push(TextRunItems {
+                plain: items.end..items.end,
+                rich: index..index + 1,
+            }),
+        }
+        current = Some(text.run);
+    }
+    first as u32..out.len() as u32
 }
 
 /// Append scissor batches for consecutive instances that share a clip and
@@ -3959,6 +4164,10 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
         height: a.bottom().max(b.bottom()) - y,
     }
 }
+
+#[cfg(test)]
+#[path = "chunk_tests.rs"]
+mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4102,7 +4311,7 @@ mod tests {
         );
     }
 
-    // Guards the single-encoder path: every text segment has its own text
+    // Guards the single-encoder path: every text run has its own text
     // renderer, so preparing a later z-layer's text must not erase earlier text.
     #[test]
     fn render_text_in_two_z_layers_draws_both() {
@@ -4490,7 +4699,7 @@ mod tests {
         let flat = flatten_scene(&scene, rect(0.0, 0.0, 200.0, 100.0), &ImageCache::new());
         let mut recolored = RecoloredBuffers::default();
         recolored.prepare([&flat.rich_texts[..]], &mut text);
-        let areas = prepare_text_areas(&flat.texts, &flat.rich_texts, &recolored);
+        let areas = crate::text::prepare_text_areas(&flat.texts, &flat.rich_texts, &recolored);
         assert_eq!(areas.count(), 1);
     }
 

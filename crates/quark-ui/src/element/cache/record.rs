@@ -1,7 +1,9 @@
 //! Recording a built subtree's output into its cache row, and replaying it.
 
+use std::sync::Arc;
+
 use accesskit::NodeId;
-use quark_render::Primitive;
+use quark::scene::SceneChunk;
 
 use crate::animation::AnimKey;
 
@@ -52,7 +54,13 @@ enum A11yParent {
 pub(super) struct PaintRecord {
     /// The boundary's size when recorded: its content was laid out to it.
     size: (f32, f32),
-    scene: Vec<Primitive>,
+    /// The paint output, drawn by reference from every scene that replays
+    /// it. Scenes hold it until they are cleared, so a rerecording fills
+    /// whichever of this and `spare_scene` no scene holds any more.
+    /// `None` until the first recording, so taking a record out of its
+    /// row allocates nothing.
+    scene: Option<Arc<SceneChunk>>,
+    spare_scene: Option<Arc<SceneChunk>>,
     hit_bounds: Vec<Rect>,
     hit_clip: Vec<Rect>,
     hit_z: Vec<i32>,
@@ -86,7 +94,13 @@ pub(super) struct PaintRecord {
 
 impl PaintRecord {
     pub(super) fn clear(&mut self) {
-        self.scene.clear();
+        // Let go of the primitives' text layouts and paths; a chunk a scene
+        // still draws keeps its content until it is refilled.
+        for chunk in self.scene.iter_mut().chain(&mut self.spare_scene) {
+            if let Some(chunk) = Arc::get_mut(chunk) {
+                chunk.clear();
+            }
+        }
         self.hit_bounds.clear();
         self.hit_clip.clear();
         self.hit_z.clear();
@@ -109,6 +123,24 @@ impl PaintRecord {
         self.geometry_clip.clear();
         self.transitions.clear();
         self.scroll.clear();
+    }
+
+    /// The chunk to record into: one no scene holds, so changing it
+    /// changes no frame already painted.
+    fn writable_scene(&mut self) -> &mut SceneChunk {
+        let shared = self
+            .scene
+            .as_ref()
+            .is_none_or(|chunk| Arc::strong_count(chunk) > 1);
+        if shared {
+            let fresh = match self.spare_scene.take() {
+                Some(spare) if Arc::strong_count(&spare) == 1 => spare,
+                _ => Arc::default(),
+            };
+            self.spare_scene = self.scene.replace(fresh);
+        }
+        let chunk = self.scene.as_mut().expect("recorded chunk");
+        Arc::get_mut(chunk).expect("unshared chunk")
     }
 
     /// Whether every scroll handle the subtree painted is where it was.
@@ -273,8 +305,8 @@ impl Recording {
         let mut complete = cx.text_input_hit_areas.len() == marks.text_inputs;
 
         record
-            .scene
-            .extend(scene.primitives[marks.scene..].iter().map(|p| {
+            .writable_scene()
+            .replace(scene.primitives[marks.scene..].iter().map(|p| {
                 let mut p = p.clone();
                 p.offset(-ox, -oy);
                 p
@@ -473,11 +505,10 @@ pub(super) fn replay_paint(
     }
     let mut record = take_record(cx, row);
 
-    scene.primitives.extend(record.scene.iter().map(|p| {
-        let mut p = p.clone();
-        p.offset(ox, oy);
-        p
-    }));
+    // The recording stays as it is; the scene draws it by reference.
+    if let Some(chunk) = record.scene.as_ref().filter(|chunk| !chunk.is_empty()) {
+        scene.chunk(chunk, [ox, oy]);
+    }
 
     let base = cx.semantic.nodes().len();
     let parent = cx.current_semantic_parent();
