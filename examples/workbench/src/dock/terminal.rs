@@ -32,7 +32,7 @@ use quark_app::{InputEvent, KeyKind, UiContext, ViewContext, Waker};
 use quark_components::{Button, ButtonSize, TabItem, tab_bar};
 use quark_terminal::{
     KeyPress, PointerInput, PtyCommand, TerminalEnv, TerminalEvent, TerminalOutcome,
-    TerminalSignal, TerminalState, terminal_view,
+    TerminalSignal, TerminalState, TerminalStyle, terminal_view,
 };
 
 use crate::contracts::{COMMANDS, Options, SurfaceCx, TerminalMode};
@@ -197,6 +197,25 @@ impl State {
         matches!(self.backend, Backend::Scripted)
     }
 
+    /// Ghostty's look: the user's Ghostty config over Ghostty's defaults
+    /// for real shells (read once), the defaults alone for scripted ones,
+    /// so tests do not depend on the machine.
+    fn style(&self) -> TerminalStyle {
+        static USER: std::sync::OnceLock<TerminalStyle> = std::sync::OnceLock::new();
+        if self.scripted() {
+            return TerminalStyle::ghostty();
+        }
+        USER.get_or_init(|| {
+            TerminalStyle::load_ghostty_config().map_or_else(TerminalStyle::ghostty, |(style, warnings)| {
+                for warning in warnings {
+                    eprintln!("ghostty config: {warning}");
+                }
+                style
+            })
+        })
+        .clone()
+    }
+
     fn index(&self, id: u32) -> Option<usize> {
         self.sessions.iter().position(|s| s.id == id)
     }
@@ -206,7 +225,7 @@ impl State {
         let Some(slot) = (0..IDS.len()).find(|i| self.sessions.iter().all(|s| s.slot != *i)) else {
             return false;
         };
-        let mut term = TerminalState::new(IDS[slot], FOCUS);
+        let mut term = TerminalState::new(IDS[slot], FOCUS).with_style(self.style());
         if self.scripted() {
             if self.sessions.is_empty() {
                 // The scene the thread describes: the fixture test run,
