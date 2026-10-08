@@ -27,7 +27,7 @@ use crate::accessibility::{AccessibilityAction, AccessibilityNode, CollectionInf
 use crate::action::Action;
 use crate::design::Alpha;
 use crate::element::{
-    AnyElement, Bounds, CacheKey, ClickEvent, ClickHandler, CodeBlock, CodeHeader, DragHandler,
+    AnyElement, Bounds, CacheKey, ClickEvent, CodeBlock, CodeHeader, DragHandler,
     DragReleaseResult, DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId,
     LinkClicked, LinkHandler, ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink,
     ScrollTarget, ScrollbarInput, ScrollbarVisibility, Scrollbars, SelectableText, StyledSpan,
@@ -905,7 +905,7 @@ fn block_elements(
                 // its own scrollbar.
                 // A tab stop, so arrow keys can bring hidden columns in.
                 Some((handle, natural)) => div()
-                    .id(format!("document.code:{}:lines", block.key.0).as_str())
+                    .id(super::scroll_area_id(block.key).as_str())
                     .tab_stop(quark::focus::TabStop::new(0))
                     .w(content.width)
                     .h(content.height)
@@ -939,7 +939,7 @@ fn block_elements(
             match scroll {
                 // Wider than the column: scrolls sideways like wide code.
                 Some((handle, _)) => div()
-                    .id(format!("document.table:{}:scroll", block.key.0).as_str())
+                    .id(super::scroll_area_id(block.key).as_str())
                     .tab_stop(quark::focus::TabStop::new(0))
                     .w(content.width)
                     .h(content.height)
@@ -1263,30 +1263,25 @@ impl CodeToolbar<'_> {
                 .tooltip(name)
                 .child(svg_icon(svg, icon).color(self.colors.muted))
         };
-        let copy = {
-            let text = self.block.text.clone();
-            let slot = self.controls.on_copy.clone();
-            button("copy", lucide::COPY, "Copy code").on_click_handler(ClickHandler::new(
-                move |_| {
-                    let copy = CopyCode {
-                        block: key,
-                        text: text.clone(),
-                    };
-                    vec![match &*slot.borrow() {
-                        Some(f) => f(copy),
-                        None => copy.into(),
-                    }]
-                },
-            ))
+        // Rows build at layout, after the element's `on_copy_code`, so the
+        // slot is final here. Plain click actions keep the buttons'
+        // accessibility actions.
+        let copy = CopyCode {
+            block: key,
+            text: self.block.text.clone(),
         };
-        let wrap = {
-            let (on_event, wrap) = (self.controls.on_event.clone(), !self.wrap);
-            button("wrap", lucide::WRAP_TEXT, "Wrap lines")
-                .accessibility_toggled(self.wrap)
-                .on_click_handler(ClickHandler::new(move |_| {
-                    vec![on_event(DocumentEvent::SetCodeWrap { block: key, wrap })]
-                }))
+        let copy = match &*self.controls.on_copy.borrow() {
+            Some(f) => f(copy),
+            None => copy.into(),
         };
+        let copy = button("copy", lucide::COPY, "Copy code").on_click(copy);
+        let toggle = (self.controls.on_event)(DocumentEvent::SetCodeWrap {
+            block: key,
+            wrap: !self.wrap,
+        });
+        let wrap = button("wrap", lucide::WRAP_TEXT, "Wrap lines")
+            .accessibility_toggled(self.wrap)
+            .on_click(toggle);
         let label = self.label.unwrap_or("");
         div()
             .w(rect.width)

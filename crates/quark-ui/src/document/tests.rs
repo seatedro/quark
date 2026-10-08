@@ -2567,3 +2567,56 @@ fn a_held_row_keeps_its_place_while_it_grows_at_the_bottom() {
 
     assert_eq!(doc.screen_top(8), before);
 }
+
+// Catches the document disowning the focus a press on wide code gives its
+// scroll area: the app would then send Copy to the last text field.
+#[test]
+fn a_press_on_wide_code_focuses_a_target_the_document_owns() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    let mut painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+    let code = view
+        .visible_blocks()
+        .iter()
+        .find(|b| b.key == BlockKey(5))
+        .unwrap()
+        .rect;
+    let mut focus = Some(FocusId::from_key("composer"));
+
+    painted
+        .router
+        .pointer_down(code.x + 40.0, code.y + code.height - 10.0, &mut focus);
+
+    let focus = focus.expect("the press focuses something");
+    assert_eq!(
+        (
+            view.owns_focus(focus),
+            view.owns_focus(FocusId::from_key("composer"))
+        ),
+        (true, false)
+    );
+}
+
+// Catches toolbar buttons that only a pointer can press: assistive tech
+// activates them through their click action.
+#[test]
+fn code_toolbar_buttons_offer_assistive_tech_a_click() {
+    let rows = wide_code_rows();
+    let mut view = real_view(&rows);
+    view.set_code_toolbar(true);
+
+    let painted = paint(&mut view, &rows, (300.0, 400.0), 0.0);
+
+    let update = painted.accessibility.tree_update("Test", None);
+    let clickable = |name: &str| {
+        update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some(name))
+            .is_some_and(|(_, n)| n.supports_action(accesskit::Action::Click))
+    };
+    assert_eq!(
+        (clickable("Copy code"), clickable("Wrap lines")),
+        (true, true)
+    );
+}

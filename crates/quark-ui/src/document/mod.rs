@@ -77,6 +77,7 @@ use crate::element::{
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
 use quark::Color;
+use quark::focus::FocusId;
 
 /// What separates blocks in copied text.
 pub const BLOCK_SEPARATOR: &str = "\n\n";
@@ -1534,8 +1535,20 @@ impl<G: BlockGeometry> Document<G> {
         Some(SelectionPoint::new(block.key, byte))
     }
 
-    /// How far block `key`'s content is scrolled left.
-    fn scroll_x(&self, key: BlockKey) -> f32 {
+    /// Whether `focus` is one of the document's own focus targets: the
+    /// sideways scroll of a wide code block or table, which a press or Tab
+    /// focuses so arrow keys reach it. Apps route copy and select-all to
+    /// the document while focus is on nothing or on one of these.
+    pub fn owns_focus(&self, focus: FocusId) -> bool {
+        self.scroll_handles
+            .keys()
+            .any(|key| FocusId::from_key(&scroll_area_id(*key)) == focus)
+    }
+
+    /// How far block `key`'s content is scrolled left: a wide code block
+    /// or table keeps its sideways scroll by key while it stays in the
+    /// document. Zero for blocks that fit their column.
+    pub fn scroll_x(&self, key: BlockKey) -> f32 {
         self.scroll_handles.get(&key).map_or(0.0, |h| h.offset().0)
     }
 
@@ -2071,6 +2084,11 @@ fn vertical_distance(rect: &Rect, y: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// The stable id of the sideways scroll area of wide block `key`.
+fn scroll_area_id(key: BlockKey) -> String {
+    format!("document.block:{}:scroll", key.0)
 }
 
 /// Block text read from the app's model by way of the owning row.

@@ -117,6 +117,12 @@ impl ThreadView {
         &self.doc
     }
 
+    /// Whether `focus` is on one of the transcript's own controls (a card's
+    /// disclosure, a wide block's scroll), where the document's keys apply.
+    fn owns_focus(&self, focus: FocusId) -> bool {
+        self.disclosures.contains_key(&focus) || self.doc.document().owns_focus(focus)
+    }
+
     fn is_expanded(&self, row: &Row) -> bool {
         let Some(call) = &row.tool else {
             return false;
@@ -356,9 +362,7 @@ pub fn update(state: &mut State, action: Action, scx: &SurfaceCx, fx: &mut Effec
             // A press in the transcript leaves a text field, as a press on
             // a page's body does, so Copy reaches the selection it starts.
             if matches!(event, DocumentEvent::PointerDown { .. })
-                && scx
-                    .focus
-                    .is_some_and(|focus| !tv.disclosures.contains_key(&focus))
+                && scx.focus.is_some_and(|focus| !tv.owns_focus(focus))
             {
                 fx.push(Effect::Focus(None));
             }
@@ -445,9 +449,7 @@ pub fn event(state: &mut State, event: &InputEvent, scx: &SurfaceCx, fx: &mut Ef
     let Some((tv, _)) = state.selected(scx) else {
         return false;
     };
-    let ours = scx
-        .focus
-        .is_none_or(|focus| tv.disclosures.contains_key(&focus));
+    let ours = scx.focus.is_none_or(|focus| tv.owns_focus(focus));
     if !ours {
         return false;
     }
