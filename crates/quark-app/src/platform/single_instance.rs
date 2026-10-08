@@ -4,7 +4,8 @@
 //! [`AppEvent::OpenUrls`] after [`EventContext::listen_for_instances`].
 //!
 //! On Unix the socket lives in `$XDG_RUNTIME_DIR`, falling back to a
-//! `0700` directory under the temp dir, and the first instance holds an
+//! `0700` directory under the temp dir (or `/tmp` when both are too deep for
+//! a socket path), and the first instance holds an
 //! exclusive lock on `<socket>.lock` for as long as it runs. On Windows it is
 //! a named pipe.
 //!
@@ -184,24 +185,39 @@ mod imp {
     pub(super) fn endpoint(app_id: &str) -> io::Result<PathBuf> {
         endpoint_in(
             std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            std::env::temp_dir(),
             app_id,
         )
     }
 
-    pub(super) fn endpoint_in(runtime_dir: Option<PathBuf>, app_id: &str) -> io::Result<PathBuf> {
+    pub(super) fn endpoint_in(
+        runtime_dir: Option<PathBuf>,
+        temp_dir: PathBuf,
+        app_id: &str,
+    ) -> io::Result<PathBuf> {
         let file = format!("{}.sock", sanitize(app_id));
-        if let Some(dir) = runtime_dir.filter(|dir| dir.is_absolute()) {
-            let path = dir.join(&file);
-            // sun_path holds about 104 bytes (108 on Linux, minus the NUL);
-            // a deep runtime dir would make bind fail, so use the temp dir.
-            if path.as_os_str().len() < MAX_SOCKET_PATH {
-                return Ok(path);
-            }
+        // sun_path holds about 104 bytes (108 on Linux, minus the NUL). A
+        // path past that makes bind fail, and the lock is released with it,
+        // so every launch would run as its own unguarded primary.
+        let fits = |dir: &Path| dir.join(&file).as_os_str().len() < MAX_SOCKET_PATH;
+        if let Some(dir) = runtime_dir.filter(|dir| dir.is_absolute() && fits(dir)) {
+            return Ok(dir.join(file));
         }
         // A shared temp dir needs a private subdirectory, or another user
-        // could create the socket first and receive our arguments.
+        // could create the socket first and receive our arguments. A $TMPDIR
+        // as deep as the runtime dir falls back to /tmp.
         let user = std::env::var("USER").unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("quark-{}", sanitize(&user)));
+        let private = format!("quark-{}", sanitize(&user));
+        let dir = [temp_dir, PathBuf::from("/tmp")]
+            .into_iter()
+            .map(|temp| temp.join(&private))
+            .find(|dir| fits(dir))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no directory is short enough for the single instance socket",
+                )
+            })?;
         match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -387,16 +403,38 @@ mod tests {
         assert!(matches!(launch, Instance::Primary(_)));
     }
 
+    // Regression: a deep $TMPDIR (the e2e runner's per-spec one) made the
+    // fallback socket path too long to bind, so a second launch ran as its
+    // own primary instead of forwarding its URL.
     #[cfg(unix)]
     #[test]
-    fn runtime_dir_too_deep_for_a_socket_falls_back_to_temp_dir() {
+    fn socket_dir_skips_dirs_too_deep_for_a_socket_path() {
         let deep = PathBuf::from(format!("/{}", "d".repeat(120)));
+        let short = PathBuf::from(format!("/tmp/quark-si-test-{}", std::process::id()));
+        std::fs::create_dir_all(&short).expect("create test dir");
+        let user = format!(
+            "quark-{}",
+            sanitize(&std::env::var("USER").unwrap_or_default())
+        );
+        // (runtime dir, temp dir, expected socket dir)
+        let cases = [
+            (Some(short.clone()), deep.clone(), short.clone()),
+            (Some(deep.clone()), short.clone(), short.join(&user)),
+            (
+                Some(deep.clone()),
+                deep.clone(),
+                PathBuf::from("/tmp").join(&user),
+            ),
+        ];
+        for (runtime_dir, temp_dir, expected) in cases {
+            let path = imp::endpoint_in(runtime_dir.clone(), temp_dir.clone(), "app").unwrap();
 
-        let path = imp::endpoint_in(Some(deep), "app").unwrap();
-
-        let user = sanitize(&std::env::var("USER").unwrap_or_default());
-        let fallback = std::env::temp_dir().join(format!("quark-{user}"));
-        assert_eq!(path, fallback.join("app.sock"));
+            assert_eq!(
+                path,
+                expected.join("app.sock"),
+                "runtime {runtime_dir:?}, temp {temp_dir:?}"
+            );
+        }
     }
 
     // Regression: acquire checked for a live socket, then unlinked and bound
