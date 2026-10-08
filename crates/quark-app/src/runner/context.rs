@@ -131,7 +131,6 @@ pub struct FrameContext<'a> {
     pub(super) ime: FrameIme,
     /// Assistive tech listens to this window.
     pub(super) accessibility_active: bool,
-    #[cfg(feature = "devtools")]
     pub(super) last_render: quark_render::FrameStats,
 }
 
@@ -154,8 +153,9 @@ impl FrameContext<'_> {
         self.accessibility_active
     }
 
-    /// Renderer stats of this window's previous frame.
-    #[cfg(feature = "devtools")]
+    /// Renderer stats of this window's previous frame: CPU encoding,
+    /// swapchain acquire, and present times. Apps exporting frame timings
+    /// pair them with the frame before the one being built.
     pub fn last_render_stats(&self) -> quark_render::FrameStats {
         self.last_render
     }

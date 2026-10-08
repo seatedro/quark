@@ -14,9 +14,9 @@ use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
 use super::{
     Block, BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState,
-    MeasureKey, MeasureSpec, RULE_HEIGHT,
+    MeasureKey, MeasureSpec, RULE_HEIGHT, TableGeometry, TableMetrics,
 };
-use crate::element::{CodeBlock, SelectableText, StyledSpan};
+use crate::element::{CodeBlock, CodeHeader, SelectableText, StyledSpan};
 
 /// Measures blocks with the frame's text system and layout cache.
 /// `font_size` is in logical points; `scale_factor` must be the one the
@@ -63,6 +63,8 @@ pub struct TextGeometry {
     text_len: usize,
     /// Unwrapped content width from the inset (code), padding included.
     natural_width: Option<f32>,
+    /// The grid of a table block.
+    table: Option<Arc<TableGeometry>>,
 }
 
 impl BlockGeometry for TextGeometry {
@@ -72,6 +74,9 @@ impl BlockGeometry for TextGeometry {
 
     fn hit(&self, x: f32, y: f32) -> usize {
         let (ox, oy) = self.text_origin;
+        if let Some(table) = &self.table {
+            return table.hit(x - ox, y - oy);
+        }
         match &self.layout {
             Some(layout) => layout.hit(x - ox, y - oy).get(),
             None if x - ox >= self.width * 0.5 => self.text_len,
@@ -81,6 +86,14 @@ impl BlockGeometry for TextGeometry {
 
     fn range_rects(&self, range: std::ops::Range<usize>, out: &mut Vec<Rect>) {
         let (ox, oy) = self.text_origin;
+        if let Some(table) = &self.table {
+            let first = out.len();
+            table.range_rects(range, out);
+            for rect in &mut out[first..] {
+                *rect = rect.offset(ox, oy);
+            }
+            return;
+        }
         match &self.layout {
             Some(layout) => out.extend(layout.selection_rects(range).map(|r| r.offset(ox, oy))),
             // A block without text (a rule or an image) highlights whole.
@@ -96,6 +109,10 @@ impl BlockGeometry for TextGeometry {
 
     fn natural_width(&self) -> Option<f32> {
         self.natural_width
+    }
+
+    fn table_metrics(&self) -> Option<&TableMetrics> {
+        self.table.as_ref().map(|table| &table.metrics)
     }
 }
 
@@ -141,20 +158,40 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     width,
                     text_len,
                     natural_width: None,
+                    table: None,
                 }
             }
             BlockContent::Code {
                 spans,
                 line_count,
                 label,
+                toolbar,
+                wrap,
             } => {
-                let layout = self.layout(CodeBlock::joined_layout_params(spans, font_size));
-                let metrics = CodeBlock::metrics(font_size, *line_count, label.is_some());
+                let params = if *wrap {
+                    CodeBlock::wrapped_layout_params(spans, font_size, width)
+                } else {
+                    CodeBlock::joined_layout_params(spans, font_size)
+                };
+                let layout = self.layout(params);
+                let header = match (toolbar, label.is_some()) {
+                    (true, _) => CodeHeader::Toolbar,
+                    (false, true) => CodeHeader::Label,
+                    (false, false) => CodeHeader::None,
+                };
+                let rows = match (&layout, wrap) {
+                    (Some(layout), true) => layout.line_count(),
+                    _ => *line_count,
+                };
+                let metrics = CodeBlock::header_metrics(font_size, rows, header);
+                // Wrapped lines fit the column, so nothing scrolls sideways.
                 let natural_width = layout
                     .as_ref()
+                    .filter(|_| !wrap)
                     .map(|l| (l.size().0 + metrics.text_origin.0 * 2.0).ceil());
                 TextGeometry {
                     natural_width,
+                    table: None,
                     layout,
                     text_origin: (inset + metrics.text_origin.0, metrics.text_origin.1),
                     height: metrics.height,
@@ -182,6 +219,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     width,
                     text_len,
                     natural_width: None,
+                    table: None,
                 }
             }
             BlockContent::Image { state, .. } => {
@@ -196,6 +234,19 @@ impl BlockMeasurer for TextMeasurer<'_> {
                     width,
                     text_len,
                     natural_width: None,
+                    table: None,
+                }
+            }
+            BlockContent::Table(cells) => {
+                let table = TableGeometry::new(cells, font_size, |params| self.layout(params));
+                TextGeometry {
+                    layout: None,
+                    text_origin: (inset, 0.0),
+                    height: table.metrics.height(cells.rows),
+                    width,
+                    text_len,
+                    natural_width: Some(table.metrics.width()),
+                    table: Some(Arc::new(table)),
                 }
             }
             BlockContent::Rule => TextGeometry {
@@ -205,6 +256,7 @@ impl BlockMeasurer for TextMeasurer<'_> {
                 width,
                 text_len,
                 natural_width: None,
+                table: None,
             },
         }
     }

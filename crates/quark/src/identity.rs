@@ -24,8 +24,10 @@ macro_rules! string_id {
         }
 
         impl From<&str> for $name {
+            /// Shared through a per-thread intern table: views name the
+            /// same ids every frame, mostly from literals.
             fn from(value: &str) -> Self {
-                Self(value.into())
+                Self($crate::identity::intern(value))
             }
         }
 
@@ -55,6 +57,38 @@ macro_rules! string_id {
     };
 }
 pub(crate) use string_id;
+
+/// Strings interned per thread before the table starts over; ids built
+/// from changing text (formatted ids come in as `String` and are not
+/// interned) cannot grow it without bound.
+const INTERN_MAX: usize = 4096;
+
+/// `value` as a shared string, allocated once per thread while the table
+/// holds it. For names a view repeats every frame (ids, labels from
+/// literals or stable data), so steady frames share them instead of
+/// allocating.
+pub fn intern(value: &str) -> ::std::sync::Arc<str> {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    thread_local! {
+        static TABLE: RefCell<HashSet<Arc<str>>> = RefCell::new(HashSet::new());
+    }
+    TABLE
+        .try_with(|table| {
+            let mut table = table.borrow_mut();
+            if let Some(shared) = table.get(value) {
+                return shared.clone();
+            }
+            if table.len() >= INTERN_MAX {
+                table.clear();
+            }
+            let shared: Arc<str> = value.into();
+            table.insert(shared.clone());
+            shared
+        })
+        .unwrap_or_else(|_| value.into())
+}
 
 /// 64-bit FNV-1a of `key`. Stable across runs and platforms, so ids derived
 /// from it (focus ids, accessibility node ids) survive relaunches.

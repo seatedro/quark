@@ -5,6 +5,7 @@ use quark_render::scene::{FontKind, FontStyle, FontWeight};
 use quark_text::offset;
 use quark_text::{FontEpoch, TextLayout, TextOffset, TextParams, TextSpan, TextStyle, TextSystem};
 
+use super::anchor::CaretAnchor;
 use super::atoms::{InlineAtom, RichClipboard, RichText};
 use super::buffer::{TextBuffer, WordForward};
 use super::hooks::{InputHooks, Insertion, NoHooks};
@@ -137,6 +138,8 @@ pub struct Editor {
     pub cursor_pos: CursorState,
     pub cursor_moved_at_ms: u64,
     font_size: f32,
+    /// Line height in points; `None` follows the font size.
+    line_height: Option<f32>,
     /// Window scale factor; the layout is shaped at it so it can be painted
     /// as is (see `ElementContext::layout_text`).
     scale_factor: f32,
@@ -149,6 +152,8 @@ pub struct Editor {
     /// they change.
     font_epoch: Option<FontEpoch>,
     spelling: Spelling,
+    /// Where the element last placed the caret on screen.
+    caret_anchor: CaretAnchor,
 }
 
 /// The editor's side of spell checking: what was sent, what came back.
@@ -347,12 +352,14 @@ impl Editor {
             cursor_pos: CursorState::default(),
             cursor_moved_at_ms: 0,
             font_size: 14.0,
+            line_height: None,
             scale_factor: 1.0,
             frame_scale: FrameScale::default(),
             last_width: 0.0,
             last_height: 0.0,
             font_epoch: None,
             spelling: Spelling::default(),
+            caret_anchor: CaretAnchor::default(),
         }
     }
 
@@ -391,7 +398,8 @@ impl Editor {
     }
 
     fn line_height(&self) -> f32 {
-        self.font_size * LINE_HEIGHT_FACTOR
+        self.line_height
+            .unwrap_or(self.font_size * LINE_HEIGHT_FACTOR)
     }
 
     fn note_cursor_activity(&mut self) {
@@ -515,6 +523,16 @@ impl Editor {
         }
         self.font_size = font_size;
         self.dirty = true;
+    }
+
+    /// Space each line takes, in points; `None` (the default) uses 1.35
+    /// times the font size.
+    pub fn set_line_height(&mut self, line_height: Option<f32>) {
+        let line_height = line_height.filter(|h| h.is_finite() && *h > 0.0);
+        if self.line_height != line_height {
+            self.line_height = line_height;
+            self.dirty = true;
+        }
     }
 
     /// Shape at `scale_factor`. Painting the editor's element sets this
@@ -643,6 +661,35 @@ impl Editor {
             }
             self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
         }
+    }
+
+    /// [`Self::flush`] at `width`, sizing the viewport to the text: as tall
+    /// as its lines but at least `min_height`, and past `max_height` the
+    /// text scrolls inside. Returns the height to give the element, so a
+    /// chat input grows as the user types and stops growing at a line cap.
+    pub fn flush_fit(
+        &mut self,
+        text_system: &mut TextSystem,
+        width: f32,
+        min_height: f32,
+        max_height: f32,
+    ) -> f32 {
+        let max_height = max_height.max(min_height);
+        // Reveal the caret in the tallest viewport first: when the text
+        // fits, the height below shows all of it anyway.
+        self.sync_size(width, max_height);
+        self.flush(text_system);
+        let height = self.content_height().clamp(min_height, max_height);
+        self.last_height = height;
+        let max_scroll = (self.content_height() - height).max(0.0);
+        self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
+        height
+    }
+
+    /// The caret's last painted position, for anchoring a completion popup
+    /// to it (see [`super::caret_popup`]). Clones of the editor share it.
+    pub fn caret_anchor(&self) -> &CaretAnchor {
+        &self.caret_anchor
     }
 
     /// Lay out the committed text with the preedit spliced in, reusing the
@@ -1170,6 +1217,36 @@ mod tests {
             assert!(
                 visible.contains(&top) && visible.contains(&bottom),
                 "{name}: caret {top}..{bottom} outside {visible:?}"
+            );
+        }
+    }
+
+    // A chat input's growth: as tall as its lines (22pt each here) between
+    // a 48pt floor and a six-line cap, then scrolling to keep the caret on
+    // its last line. Catches the field growing past the cap, staying short,
+    // or keeping a stale scroll after it shrinks back.
+    #[test]
+    fn flush_fit_grows_with_the_lines_up_to_the_cap_then_scrolls() {
+        let mut text_system = TextSystem::vendored_only(&Default::default());
+        let mut editor = Editor::default();
+        editor.set_line_height(Some(22.0));
+        let lines = |n: usize| vec!["line"; n].join("\n");
+        let cases = [
+            (1, 48.0, 0.0),
+            (3, 66.0, 0.0),
+            (6, 132.0, 0.0),
+            (9, 132.0, 9.0 * 22.0 - 132.0),
+            (2, 48.0, 0.0),
+        ];
+        for (n, height, scroll) in cases {
+            editor.set_text(&lines(n));
+            editor.apply(SetTextCursor(usize::MAX));
+            let fit = editor.flush_fit(&mut text_system, 300.0, 48.0, 132.0);
+            assert_eq!((n, fit), (n, height));
+            assert!(
+                (editor.scroll_y - scroll).abs() < 0.5,
+                "{n} lines: scroll {}",
+                editor.scroll_y
             );
         }
     }

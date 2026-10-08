@@ -16,15 +16,16 @@ use std::sync::Arc;
 
 use quark::selection::BlockKey;
 use quark_render::{FontKind, FontWeight};
-use unicode_width::UnicodeWidthStr;
 
-use super::syntax::{CodeLine, SyntaxHighlighter};
+use super::syntax::SyntaxHighlighter;
 use super::{Block, BlockStyle, ImageState, ImageStore, SpanTone};
 use crate::element::StyledSpan;
 use crate::markdown::{BlockKind, ListMarker, MarkdownDoc, SpanFlags};
 
-/// Code block and table font size relative to body text.
+/// Code block font size relative to body text.
 pub const CODE_SCALE: f32 = 0.92;
+/// Table font size relative to body text.
+pub const TABLE_SCALE: f32 = 0.93;
 
 /// Font size scale and base weight of a heading level.
 pub fn heading_style(level: u8) -> (f32, FontWeight) {
@@ -165,7 +166,7 @@ fn convert(
         }
         BlockKind::CodeBlock => Block::toned_code(key, syntax.lines(key, doc.text(index)))
             .with_label(Some(Arc::from(doc.lang(index)))),
-        BlockKind::Table => Block::toned_code(key, table_lines(doc, index)),
+        BlockKind::Table => Block::table(key, table_rows(doc, index)),
         BlockKind::Rule => Block::rule(key),
         BlockKind::Image => Block::image(
             key,
@@ -221,7 +222,8 @@ fn block_style(doc: &MarkdownDoc, index: usize) -> BlockStyle {
     let marker = doc.marker(index);
     let (scale, weight) = match doc.kind(index) {
         BlockKind::Heading(level) => heading_style(level),
-        BlockKind::CodeBlock | BlockKind::Table => (CODE_SCALE, FontWeight::Normal),
+        BlockKind::CodeBlock => (CODE_SCALE, FontWeight::Normal),
+        BlockKind::Table => (TABLE_SCALE, FontWeight::Normal),
         _ => (1.0, FontWeight::Normal),
     };
 
@@ -262,67 +264,37 @@ fn block_style(doc: &MarkdownDoc, index: usize) -> BlockStyle {
         muted: quote > 0,
         // Consecutive list blocks sit closer together.
         tight: index > 0 && depth > 0 && doc.indent(index - 1) > 0,
-        copy_prefix: Arc::from(prefix),
-        copy_line_prefix: Arc::from(quote_prefix),
+        copy_prefix: shared(prefix),
+        copy_line_prefix: shared(quote_prefix),
     }
 }
 
-/// A table as aligned monospace pipe rows, header in bold. Columns are
-/// padded by display width, so wide (CJK) and zero-width chars line up in
-/// the monospace grid. The text is valid markdown, so copying a table
-/// pastes as one.
-fn table_lines(doc: &MarkdownDoc, block: usize) -> Vec<CodeLine> {
+/// `text` as a shared string, the shared empty one when it is empty.
+fn shared(text: String) -> Arc<str> {
+    if text.is_empty() {
+        super::empty_str()
+    } else {
+        Arc::from(text)
+    }
+}
+
+/// A table's cells as styled runs, row by row; the header is semibold.
+fn table_rows(doc: &MarkdownDoc, block: usize) -> Vec<Vec<Vec<(StyledSpan, SpanTone)>>> {
     let columns = doc.table_columns(block).max(1);
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rows: Vec<Vec<Vec<(StyledSpan, SpanTone)>>> = Vec::new();
     for cell in doc.cells(block) {
         let (row, col) = doc.cell_position(cell);
         if rows.len() <= row {
-            rows.resize_with(row + 1, || vec![String::new(); columns]);
+            rows.resize_with(row + 1, || vec![Vec::new(); columns]);
         }
-        if let Some(slot) = rows[row].get_mut(col) {
-            *slot = doc.cell_text(cell).replace('\n', " ");
-        }
-    }
-    let mut widths = vec![3; columns];
-    for row in &rows {
-        for (width, text) in widths.iter_mut().zip(row) {
-            *width = (*width).max(text.width());
-        }
-    }
-
-    let span = |text: String, weight: FontWeight| StyledSpan {
-        font_kind: FontKind::Mono,
-        font_weight: weight,
-        ..StyledSpan::plain(text)
-    };
-    let pipe = |text: &str| (span(text.to_owned(), FontWeight::Normal), SpanTone::Muted);
-    let row_line = |row: &[String], weight: FontWeight| {
-        let mut line = Vec::new();
-        for (text, width) in row.iter().zip(&widths) {
-            line.push(pipe("| "));
-            let pad = width - text.width();
-            line.push((
-                span(format!("{text}{} ", " ".repeat(pad)), weight),
-                SpanTone::Plain,
-            ));
-        }
-        line.push(pipe("|"));
-        line
-    };
-
-    let mut lines = Vec::with_capacity(rows.len() + 1);
-    for (i, row) in rows.iter().enumerate() {
-        if i == 0 {
-            lines.push(row_line(row, FontWeight::Bold));
-            let rule: String = widths
-                .iter()
-                .map(|w| format!("| {} ", "-".repeat(*w)))
-                .chain(std::iter::once("|".to_owned()))
-                .collect();
-            lines.push(vec![pipe(&rule)]);
+        let weight = if row == 0 {
+            FontWeight::Semibold
         } else {
-            lines.push(row_line(row, FontWeight::Normal));
+            FontWeight::Normal
+        };
+        if let Some(slot) = rows[row].get_mut(col) {
+            *slot = styled_spans(doc, doc.cell_spans(cell), weight);
         }
     }
-    lines
+    rows
 }

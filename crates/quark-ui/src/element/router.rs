@@ -134,6 +134,31 @@ impl fmt::Display for Binding {
     }
 }
 
+/// Bindings stay registered for as long as a view declares them, so a
+/// steady frame re-registers the same few strings: parse each once per
+/// thread and share it. Bounded so generated bindings cannot grow it
+/// without limit.
+const PARSED_BINDINGS_MAX: usize = 1024;
+
+fn parsed_binding(text: &str) -> Result<Rc<Binding>, BindingError> {
+    thread_local! {
+        static PARSED: std::cell::RefCell<HashMap<Box<str>, Rc<Binding>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    PARSED.with(|parsed| {
+        let mut parsed = parsed.borrow_mut();
+        if let Some(binding) = parsed.get(text) {
+            return Ok(binding.clone());
+        }
+        let binding = Rc::new(text.parse::<Binding>()?);
+        if parsed.len() >= PARSED_BINDINGS_MAX {
+            parsed.clear();
+        }
+        parsed.insert(text.into(), binding.clone());
+        Ok(binding)
+    })
+}
+
 fn normalize_key(key: &str) -> String {
     let key = key.to_lowercase();
     let canonical = match key.as_str() {
@@ -280,12 +305,11 @@ impl InputHandlers {
     /// `binding` uses the keymap format, e.g. `"enter"` or `"mod+s"`. A
     /// binding that does not parse is a programming error: it panics in
     /// debug builds and never fires in release builds.
-    pub fn on_key(&mut self, node: usize, binding: impl Into<String>, action: Action) {
-        let binding = binding.into();
-        match binding.parse::<Binding>() {
+    pub fn on_key(&mut self, node: usize, binding: impl AsRef<str>, action: Action) {
+        match parsed_binding(binding.as_ref()) {
             Ok(parsed) => {
                 self.key_node.push(node);
-                self.key_binding.push(Rc::new(parsed));
+                self.key_binding.push(parsed);
                 self.key_action.push(action);
             }
             Err(error) => debug_assert!(false, "{error}"),
@@ -1659,6 +1683,7 @@ mod tests {
                     kind: 0,
                 },
                 blocks: vec![Block::plain(BlockKey(i), text)],
+                adornments: Vec::new(),
             }
         }
 

@@ -76,6 +76,10 @@ struct Entry {
     hint: Option<(u32, u32)>,
     /// Bumped whenever `state` changes, so converted blocks know to update.
     version: u64,
+    /// A block has asked for it; a hint alone does not count.
+    used: bool,
+    /// Sent to the worker since the loader was set.
+    requested: bool,
 }
 
 struct Worker {
@@ -134,8 +138,10 @@ impl ImageStore {
 
     /// The state of `src` and its version, starting its load on first use.
     pub fn state(&mut self, src: &str) -> (ImageState, u64) {
-        let fresh = !self.entries.contains_key(src);
         let entry = self.entry(src);
+        // An entry a size hint created is not loading yet.
+        let fresh = !entry.used && !entry.requested;
+        entry.used = true;
         let out = (entry.state.clone(), entry.version);
         if fresh {
             let src: Arc<str> = Arc::from(src);
@@ -159,6 +165,8 @@ impl ImageStore {
                     state: ImageState::Pending { size: None },
                     hint: None,
                     version: 0,
+                    used: false,
+                    requested: false,
                 },
             );
         }
@@ -172,6 +180,7 @@ impl ImageStore {
         let worker = self.worker.get_or_insert_with(|| spawn(loader));
         if worker.requests.send(src.clone()).is_ok() {
             self.in_flight += 1;
+            self.entry(&src).requested = true;
         } else {
             // The worker died (a loader panicked); its images fail.
             self.worker = None;

@@ -579,11 +579,11 @@ impl Element for TextInput {
             // bullets of a masked field), from the committed value.
             let (text_anchor, text_focus) = (to_display(self.anchor), to_display(self.cursor));
             let accessible_value = masked_display.unwrap_or_else(|| self.value.to_string());
-            let semantic_id = format!("text-input:{target:?}");
+            let semantic_id = crate::text_input::target_key("text-input", target);
             // Built only for a listening screen reader; the semantic node
             // then takes the strings.
             let accessibility = cx.accessibility_enabled().then(|| {
-                AccessibilityNode::new(&semantic_id, role, bounds)
+                AccessibilityNode::shared(semantic_id.clone(), role, bounds)
                     .label(accessibility_label.clone())
                     .value(accessible_value.clone())
                     .text(

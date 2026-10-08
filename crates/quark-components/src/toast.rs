@@ -277,8 +277,9 @@ pub struct ToastLayout {
 
 /// Compute total height for a wrapped title + optional description.
 pub fn compute_toast_height(theme: &Theme, title_lines: usize, desc_lines: usize) -> f32 {
-    let title_lh = line_height(theme.metrics.ui_small_font_size);
-    let desc_lh = line_height(theme.metrics.ui_small_font_size - 1.0);
+    let (title, description) = toast_font_sizes(theme);
+    let title_lh = line_height(title);
+    let desc_lh = line_height(description);
     let title_h = title_lines.max(1) as f32 * title_lh;
     let desc_h = if desc_lines == 0 {
         0.0
@@ -288,6 +289,16 @@ pub fn compute_toast_height(theme: &Theme, title_lines: usize, desc_lines: usize
     let content_h = title_h + desc_h;
     let min_h = BADGE_SIZE + PAD_Y * 2.0;
     (content_h + PAD_Y * 2.0).max(min_h)
+}
+
+/// Title and description font sizes: the theme's toast recipe, or the
+/// small UI size and one point less.
+pub fn toast_font_sizes(theme: &Theme) -> (f32, f32) {
+    let m = &theme.metrics;
+    match theme.components.toast.font_size {
+        Some(size) => (size * m.ui_scale(), (size - 1.0) * m.ui_scale()),
+        None => (m.ui_small_font_size, m.ui_small_font_size - 1.0),
+    }
 }
 
 fn line_height(font_size: f32) -> f32 {
@@ -338,10 +349,15 @@ impl RenderOnce for ToastVisuals {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let scale = cx.theme.metrics.ui_scale();
+        let recipe = cx.theme.components.toast;
+        // Unscaled: the view scales `rounded`.
+        let corner_radius = recipe.radius.unwrap_or(CORNER_RADIUS);
+        let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::TOAST, scale);
+        let (title_size, description_size) = toast_font_sizes(cx.theme);
         let accent = severity_color(self.kind, tc);
         let icon_svg = severity_icon(self.kind);
 
-        let progress_inset = CORNER_RADIUS;
+        let progress_inset = corner_radius;
         let progress_track_w = (self.width - progress_inset * 2.0).max(0.0);
         let fill_fraction = self
             .external_progress
@@ -367,9 +383,9 @@ impl RenderOnce for ToastVisuals {
                 bottom={self.bottom}
                 left={self.left}
                 bg={tc.elevated_surface}
-                rounded={CORNER_RADIUS}
+                rounded={corner_radius}
                 border={tc.border}
-                shadow_preset={Shadow::TOAST}
+                shadow_preset={shadows.layers()}
                 on:click={self.dismiss.clone()}
                 hit_identity={HitIdentity::Toast(self.index)}
                 cursor={CursorHint::Pointer}
@@ -397,14 +413,14 @@ impl RenderOnce for ToastVisuals {
 
                     <div class="flex-1 flex-col" min-w={0.0}>
                         for line in self.title_lines {
-                            <text class="text-sm font-medium truncate" color={tc.text_strong}>
+                            <text class="font-medium truncate" size={title_size} color={tc.text_strong}>
                                 {line}
                             </text>
                         }
                         if has_description {
                             <div class="flex-col" pt={DESC_GAP} min-w={0.0}>
                                 for line in self.description_lines {
-                                    <text class="text-xs truncate" color={tc.text_muted}>{line}</text>
+                                    <text class="truncate" size={description_size} color={tc.text_muted}>{line}</text>
                                 }
                             </div>
                         }

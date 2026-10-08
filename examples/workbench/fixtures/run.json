@@ -1,0 +1,22 @@
+{
+  "comment": "The scripted run every sent prompt plays. Offsets are milliseconds after the prompt is accepted; text steps stream in chunk_bytes pieces every chunk_ms.",
+  "chunk_bytes": 24,
+  "chunk_ms": 40,
+  "steps": [
+    { "at": 150, "kind": "text", "text": "I'll make the shortcuts layout-independent and skip keys that belong to an IME composition.\n\n" },
+    { "at": 900, "kind": "tool_start", "tool": "search", "verb": "Searched", "target": "event.key in src/" },
+    { "at": 1100, "kind": "tool_output", "text": "src/commands.ts:21  const key = `${mod}${event.key.toLowerCase()}`;\n\n1 result in 1 file" },
+    { "at": 1300, "kind": "tool_done", "status": "ok", "duration": "0.2s" },
+    { "at": 1400, "kind": "text", "text": "Modifier shortcuts now match `event.code`, which names the physical key, so `mod+n` works on ЙЦУКЕН and AZERTY alike. `?` still matches `event.key`.\n\n```ts\nif (event.isComposing) return undefined;\nconst key = mod ? `mod+${event.code.replace(/^Key/, \"\").toLowerCase()}` : event.key;\n```\n\n" },
+    { "at": 2600, "kind": "file_edit", "path": "src/commands.ts" },
+    { "at": 2700, "kind": "tool_start", "tool": "edit", "verb": "Edited", "target": "src/commands.ts" },
+    { "at": 2800, "kind": "tool_output", "text": "+3 −1" },
+    { "at": 2900, "kind": "tool_done", "status": "ok", "duration": "0.1s" },
+    { "at": 3000, "kind": "tool_start", "tool": "run", "verb": "Ran", "target": "npm test" },
+    { "at": 3400, "kind": "tool_output", "text": " ✓ src/trips.test.ts (4 tests) 12ms\n ✓ src/commands.test.ts (8 tests) 10ms\n ✓ src/App.test.tsx (3 tests) 30ms\n" },
+    { "at": 4200, "kind": "tool_output", "text": "\n Test Files  3 passed (3)\n      Tests  15 passed (15)" },
+    { "at": 4300, "kind": "tool_done", "status": "ok", "duration": "1.3s" },
+    { "at": 4400, "kind": "text", "text": "All 15 tests pass, including two new cases for a Russian layout and an active composition. The updated diff is in the **Diff** panel." },
+    { "at": 5400, "kind": "done", "summary": "Shortcuts match physical keys and skip IME composition; 15 tests pass." }
+  ]
+}

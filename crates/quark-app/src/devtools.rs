@@ -31,6 +31,9 @@ pub(crate) fn intercept(devtools: &mut Devtools, input: &UiInput, cx: &mut Event
         _ => return false,
     };
     let response = devtools.handle(input);
+    if let Some(text) = devtools.take_copy() {
+        cx.set_clipboard_text(&text);
+    }
     if response.redraw {
         cx.request_redraw();
     }

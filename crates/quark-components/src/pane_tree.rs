@@ -175,7 +175,18 @@ impl PaneNode {
     }
 
     pub fn group(&self, id: PaneId) -> Option<&TabGroup> {
-        self.groups().into_iter().find(|g| g.id == id)
+        match self {
+            Self::Tabs(group) => (group.id == id).then_some(group),
+            Self::Split(split) => split.children.iter().find_map(|c| c.group(id)),
+        }
+    }
+
+    /// Whether any group holds a panel; walks the tree without collecting.
+    pub(crate) fn has_panels(&self) -> bool {
+        match self {
+            Self::Tabs(group) => !group.panels.is_empty(),
+            Self::Split(split) => split.children.iter().any(Self::has_panels),
+        }
     }
 
     pub(crate) fn group_mut(&mut self, id: PaneId) -> Option<&mut TabGroup> {

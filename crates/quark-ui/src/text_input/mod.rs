@@ -22,6 +22,7 @@
 #![deny(clippy::string_slice)]
 #![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
+mod anchor;
 mod atoms;
 mod buffer;
 mod completion;
@@ -39,6 +40,10 @@ mod trigger;
 mod undo;
 mod view;
 
+pub use anchor::{
+    CaretAnchor, CaretGeometry, CaretPlacement, CaretPopup, CaretPopupLayout, caret_popup,
+    place_at_caret,
+};
 pub use atoms::{AtomId, AtomIntegrityError, InlineAtom, RichClipboard, RichText};
 pub use completion::{
     Answer, Completion, CompletionItem, CompletionKey, CompletionProvider, CompletionQuery,
@@ -65,3 +70,19 @@ pub use undo::COALESCE_PAUSE_MS;
 pub use view::{
     CARET_BLINK_MS, ClickCounter, HorizontalScroll, MULTI_CLICK_MS, caret_blink, reveal_offset,
 };
+
+/// `"{prefix}:{target:?}"`, the id a text field's semantic and
+/// accessibility nodes share, interned so a steady frame formats it into a
+/// reused buffer and allocates nothing.
+pub(crate) fn target_key(prefix: &str, target: crate::FocusId) -> std::sync::Arc<str> {
+    use std::fmt::Write;
+    thread_local! {
+        static BUF: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        buf.clear();
+        let _ = write!(buf, "{prefix}:{target:?}");
+        quark::intern(&buf)
+    })
+}

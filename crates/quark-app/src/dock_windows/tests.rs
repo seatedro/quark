@@ -49,6 +49,8 @@ struct Desk {
     dock: DockState,
     windows: DockWindows,
     notes: TextField,
+    /// Appended to every tab title, so a test can rename panels.
+    suffix: &'static str,
 }
 
 impl Desk {
@@ -63,6 +65,7 @@ impl Desk {
             dock,
             windows,
             notes: TextField::new(""),
+            suffix: "",
         }
     }
 }
@@ -88,7 +91,9 @@ impl UiApp for Desk {
         for region in DockRegion::ALL {
             dock = dock.always_show_tabs(region);
         }
-        dock.build(cx.theme, name, |panel, (w, h)| match panel {
+        let suffix = self.suffix;
+        let title = |panel| name(panel) + suffix;
+        dock.build(cx.theme, title, |panel, (w, h)| match panel {
             NOTES => text_input("Notes field", "")
                 .field(&self.notes)
                 .focus_target(NOTES_FIELD)
@@ -231,6 +236,22 @@ fn tear_off_alpha(ui: &mut UiTestHarness<Desk>) -> WindowHandle {
 // Catches a drag that stays in its window past the edge, a torn-off window
 // that does not follow the pointer or loses the grab point, and a release
 // on the desktop that drops or snaps back instead of leaving it there.
+// Catches a tab strip replayed from the element cache after its titles
+// changed: the dock's layout is the same, only the app's names are not.
+#[test]
+fn a_renamed_panel_retitles_its_tab_on_the_next_frame() {
+    let stack = ScriptedStack::new();
+    let mut ui = desk(&stack);
+    ui.frame();
+    ui.app_mut().suffix = " (edited)";
+    ui.frame();
+
+    assert!(
+        ui.try_find(By::role_name(Role::Tab, "Charlie (edited)"))
+            .is_some()
+    );
+}
+
 #[test]
 fn a_tab_dragged_off_every_window_follows_the_pointer_and_stays_where_released() {
     let stack = ScriptedStack::new();

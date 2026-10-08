@@ -62,7 +62,7 @@ pub(crate) fn step(
 /// Type-ahead: letters typed in quick succession jump to the first item
 /// whose label starts with them. Typing one letter repeatedly cycles
 /// through the items starting with it.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TypeAhead {
     buffer: String,
     last_ms: u64,

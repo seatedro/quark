@@ -148,7 +148,8 @@ impl Devtools {
                 .child(button(
                     &format!("clear all overrides ({})", self.overrides.len()),
                     DevtoolsMsg::ClearAll,
-                )),
+                ))
+                .child(button("copy patch", DevtoolsMsg::CopyPatch)),
         );
         let pinned_node = pinned.and_then(|i| self.frame.records()[i].semantic);
         panel
@@ -187,6 +188,7 @@ impl Devtools {
                 DevtoolsMsg::Radius(-2.0),
                 DevtoolsMsg::Radius(2.0),
             ))
+            .children(self.overrides.get(key).map(|edit| mono(edit.patch())))
             .child(
                 div()
                     .flex_row()
