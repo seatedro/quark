@@ -41,7 +41,7 @@
 //!         <div class="flex-row" gap={Sp::SM} p={Sp::MD} bg={colors.surface}>
 //!             <div test_id="toolbar.save" on:click={Action::new(Save)} px={Sp::LG}
 //!                  rounded={Rad::XL} bg={colors.accent} hover_bg={colors.accent_strong}>
-//!                 <text color={colors.text_strong} class="font-semibold">"Save"</text>
+//!                 <text color={colors.on_accent} class="font-semibold">"Save"</text>
 //!             </div>
 //!         </div>
 //!     }

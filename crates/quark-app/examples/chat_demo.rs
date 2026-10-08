@@ -206,7 +206,7 @@ fn jump_to_latest(theme: &Theme, width: f32, height: f32) -> AnyElement {
              hover_bg={theme.colors.accent_strong}
              accessibility_id="chat.jump-to-latest" accessibility_role={accesskit::Role::Button}
              aria-label={label.clone()} on:click={Msg::JumpToLatest}>
-            <text size={FONT_SIZE * 0.9} class="font-semibold" color={theme.colors.text_strong}>
+            <text size={FONT_SIZE * 0.9} class="font-semibold" color={theme.colors.on_accent}>
                 {label}
             </text>
         </div>

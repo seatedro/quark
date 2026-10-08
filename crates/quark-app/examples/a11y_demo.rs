@@ -50,7 +50,7 @@ impl A11yDemo {
                  focus_ring={FocusId::from_key(id)} on:click={msg}
                  class="px-4 h-9 items-center justify-center rounded-[8] bg-[colors.accent]"
                  hover_bg={colors.accent_strong}>
-                <text color={colors.text_strong} class="font-semibold">{label}</text>
+                <text color={colors.on_accent} class="font-semibold">{label}</text>
             </div>
         }
     }

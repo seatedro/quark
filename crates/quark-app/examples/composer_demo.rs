@@ -321,7 +321,9 @@ impl ComposerDemo {
                      on:click={msg} bg={colors.accent} hover_bg={colors.accent_strong}
                  }
                  @when {!enabled} { bg={colors.border_soft} }>
-                <text class="text-sm" color={colors.text_strong}>{label}</text>
+                <text class="text-sm" color={if enabled { colors.on_accent } else { colors.text_strong }}>
+                    {label}
+                </text>
             </div>
         }
     }

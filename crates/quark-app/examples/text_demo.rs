@@ -266,7 +266,7 @@ impl TextDemo {
                  class="px-[10] h-[ROW_H] items-center justify-center rounded-[6]"
                  bg={if on { colors.accent } else { colors.element_background }}
                  hover_bg={colors.element_hover}>
-                <text class="text-sm" color={if on { colors.text_strong } else { colors.text }}>
+                <text class="text-sm" color={if on { colors.on_accent } else { colors.text }}>
                     {label}
                 </text>
             </div>
