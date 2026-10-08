@@ -18,6 +18,7 @@ members = [
   "vendor/accesskit_unix",
   "vendor/glyphon",
   "vendor/cosmic-text",
+  "vendor/taffy",
 ]
 # cargo-fuzz targets build on their own with nightly sanitizers.
 exclude = ["fuzz"]
@@ -94,3 +95,6 @@ glyphon = { path = "vendor/glyphon" }
 # cosmic-text 0.15.0 plus allocation reuse in its shaping scratch. See
 # vendor/cosmic-text/VENDORED.md.
 cosmic-text = { path = "vendor/cosmic-text" }
+# taffy 0.9.2, vendored to reuse storage across layouts. See
+# vendor/taffy/VENDORED.md.
+taffy = { path = "vendor/taffy" }
