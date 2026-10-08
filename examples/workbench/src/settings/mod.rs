@@ -289,6 +289,18 @@ pub fn edit_text(
     Some(outcome)
 }
 
+/// An IME composition in the limit field.
+pub fn set_preedit(
+    state: &mut State,
+    target: FocusId,
+    text: String,
+    cursor: Option<(usize, usize)>,
+) {
+    if let Some(open) = state.open.as_mut().filter(|_| target == LIMIT) {
+        open.limit.set_preedit(text, cursor);
+    }
+}
+
 /// Commands settings owns (`OpenSettings`), and its modality: while the
 /// dialog is open, every other command waits. Theme commands run while it
 /// is closed become the saved theme. True when handled.

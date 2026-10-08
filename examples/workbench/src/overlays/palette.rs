@@ -138,6 +138,12 @@ impl Palette {
         (target == PALETTE_INPUT && self.inner.is_open()).then(|| self.inner.edit(command, now_ms))
     }
 
+    pub fn set_preedit(&mut self, target: FocusId, text: String, cursor: Option<(usize, usize)>) {
+        if target == PALETTE_INPUT && self.inner.is_open() {
+            self.inner.set_preedit(text, cursor);
+        }
+    }
+
     /// The palette over a `window`-sized scrim, or `None` while closed.
     pub fn render(
         &self,

@@ -3,6 +3,7 @@
 use quark_workbench::{Workbench, adapter, options, window_options};
 
 fn main() {
+    quark_workbench::perf::mark_process_start();
     let options = match options::from_env() {
         Ok(o) => o,
         Err(message) => {

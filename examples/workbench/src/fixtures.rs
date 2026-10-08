@@ -111,7 +111,8 @@ pub fn load(options: &Options) -> (Model, Script) {
             model.select(ERROR_THREAD);
         }
         ScenarioKind::Stress => {
-            model.queue_history(REVIEW_THREAD, stress_history(options.seed, STRESS_ROWS));
+            let rows = options.stress_rows.unwrap_or(STRESS_ROWS);
+            model.queue_history(REVIEW_THREAD, stress_history(options.seed, rows));
         }
     }
     let script = Script::parse(RUN_JSON).expect("run.json parses");

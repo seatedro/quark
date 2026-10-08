@@ -434,6 +434,16 @@ pub fn edit_text(
     state.palette.edit(target, command, ecx.now_ms)
 }
 
+/// An IME composition in the palette's search field.
+pub fn set_preedit(
+    state: &mut State,
+    target: FocusId,
+    text: String,
+    cursor: Option<(usize, usize)>,
+) {
+    state.palette.set_preedit(target, text, cursor);
+}
+
 /// Commands the overlays own (`OpenPalette`), and the palette's modality:
 /// while it is open in `scx.window`, every other command waits. True
 /// when handled.

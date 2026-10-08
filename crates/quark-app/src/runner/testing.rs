@@ -730,7 +730,6 @@ impl HeadlessRunner {
             waker: &self.waker,
             ime: FrameIme::default(),
             accessibility_active: self.accessibility_active,
-            #[cfg(feature = "devtools")]
             last_render: Default::default(),
         };
         let scene = app.frame(&mut cx);
