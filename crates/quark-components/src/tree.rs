@@ -148,6 +148,9 @@ pub enum TreeEvent {
         dy: f32,
     },
     DragEnd,
+    /// The drag ended without a release (focus loss, Escape): nothing
+    /// moves.
+    DragCancel,
     Key(TreeKey),
     TypeAhead(char),
     /// Wheel lines; positive scrolls down.
@@ -566,6 +569,7 @@ impl TreeState {
             TreeEvent::Toggle(node) => self.toggle(node),
             TreeEvent::DragMove { dy } => self.drag_move(dy),
             TreeEvent::DragEnd => self.drag_end(),
+            TreeEvent::DragCancel => self.drag_cancel(),
             TreeEvent::Key(key) => self.key(key),
             TreeEvent::TypeAhead(ch) => self.type_ahead(ch, now_ms),
             TreeEvent::Scroll(lines) => {
@@ -646,6 +650,13 @@ impl TreeState {
             parent: (parent != ROOT).then_some(NodeId(parent)),
             index: d.sibling_index(drag.source),
         }
+    }
+
+    fn drag_cancel(&mut self) -> TreeOutcome {
+        let d = Rc::make_mut(&mut self.data);
+        let active = d.drag.take().is_some_and(|drag| drag.active);
+        let shown = d.drop.take().is_some();
+        changed(active || shown)
     }
 
     fn key(&mut self, key: TreeKey) -> TreeOutcome {
@@ -1574,6 +1585,10 @@ impl DragHandler for RowDrag {
         DragReleaseResult {
             actions: vec![(self.on_event)(TreeEvent::DragEnd)],
         }
+    }
+
+    fn on_cancel(&mut self) -> Vec<Action> {
+        vec![(self.on_event)(TreeEvent::DragCancel)]
     }
 }
 
