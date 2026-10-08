@@ -369,50 +369,37 @@ fn clear_reserve<T>(column: &mut Vec<T>, len: usize) {
     column.reserve(len);
 }
 
-#[derive(Debug, Default, Clone)]
-struct LineColumns {
-    byte_start: Vec<u32>,
-    byte_end: Vec<u32>,
-    top: Vec<f32>,
-    height: Vec<f32>,
-    baseline: Vec<f32>,
-    width: Vec<f32>,
-    glyph_start: Vec<u32>,
-    glyph_end: Vec<u32>,
-    rtl: Vec<bool>,
+/// One visual line: absolute bytes (line ending excluded), logical-pixel
+/// metrics, and its glyph range. One vector of these, not a column each:
+/// lines are few, and a new layout then allocates once for them.
+#[derive(Debug, Clone, Copy)]
+struct Line {
+    byte_start: u32,
+    byte_end: u32,
+    top: f32,
+    height: f32,
+    baseline: f32,
+    width: f32,
+    glyph_start: u32,
+    glyph_end: u32,
+    rtl: bool,
 }
 
-impl LineColumns {
-    fn clear_reserve(&mut self, lines: usize) {
-        clear_reserve(&mut self.byte_start, lines);
-        clear_reserve(&mut self.byte_end, lines);
-        clear_reserve(&mut self.top, lines);
-        clear_reserve(&mut self.height, lines);
-        clear_reserve(&mut self.baseline, lines);
-        clear_reserve(&mut self.width, lines);
-        clear_reserve(&mut self.glyph_start, lines);
-        clear_reserve(&mut self.glyph_end, lines);
-        clear_reserve(&mut self.rtl, lines);
+impl Line {
+    fn glyphs(&self) -> Range<usize> {
+        self.glyph_start as usize..self.glyph_end as usize
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct RunColumns {
-    line: Vec<u32>,
-    span: Vec<u32>,
-    rtl: Vec<bool>,
-    glyph_start: Vec<u32>,
-    glyph_end: Vec<u32>,
-}
-
-impl RunColumns {
-    fn clear_reserve(&mut self, runs: usize) {
-        clear_reserve(&mut self.line, runs);
-        clear_reserve(&mut self.span, runs);
-        clear_reserve(&mut self.rtl, runs);
-        clear_reserve(&mut self.glyph_start, runs);
-        clear_reserve(&mut self.glyph_end, runs);
-    }
+/// Consecutive glyphs of one line sharing a span and direction; see
+/// [`GlyphRun`].
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    line: u32,
+    span: u32,
+    rtl: bool,
+    glyph_start: u32,
+    glyph_end: u32,
 }
 
 /// Lay `buffer` out again at its widest line when a line runs right to
@@ -459,8 +446,8 @@ pub struct TextLayout {
     width: f32,
     height: f32,
     glyphs: GlyphColumns,
-    lines: LineColumns,
-    runs: RunColumns,
+    lines: Vec<Line>,
+    runs: Vec<Run>,
     /// Physical x at which `buffer` is drawn relative to the layout origin.
     buffer_x: f32,
     // Kept so the renderer can hand it to glyphon's TextRenderer, which only
@@ -493,8 +480,8 @@ impl TextLayout {
             width: 0.0,
             height: 0.0,
             glyphs: GlyphColumns::default(),
-            lines: LineColumns::default(),
-            runs: RunColumns::default(),
+            lines: Vec::new(),
+            runs: Vec::new(),
             buffer_x: 0.0,
             buffer: Buffer::new_empty(Metrics::new(1.0, 1.0)),
             spare_lines: Vec::new(),
@@ -557,19 +544,7 @@ impl TextLayout {
             + cap(&g.flags)
             + cap(&g.phys_x)
             + cap(&g.phys_y);
-        let l = &self.lines;
-        let lines = cap(&l.byte_start)
-            + cap(&l.byte_end)
-            + cap(&l.top)
-            + cap(&l.height)
-            + cap(&l.baseline)
-            + cap(&l.width)
-            + cap(&l.glyph_start)
-            + cap(&l.glyph_end)
-            + cap(&l.rtl);
-        let r = &self.runs;
-        let runs =
-            cap(&r.line) + cap(&r.span) + cap(&r.rtl) + cap(&r.glyph_start) + cap(&r.glyph_end);
+        let (lines, runs) = (cap(&self.lines), cap(&self.runs));
         let buffer = cap(&self.buffer.lines)
             + cap(&self.spare_lines)
             + self
@@ -737,7 +712,7 @@ impl TextLayout {
         // with fewer ligatures, refill this layout without growing it.
         glyphs.clear_reserve(glyph_count.max(text.chars().count()));
         // One more for the line made below when no run was kept.
-        lines.clear_reserve(run_count.max(1));
+        clear_reserve(lines, run_count.max(1));
         let mut width = 0.0_f32;
         let mut height = 0.0_f32;
 
@@ -755,14 +730,13 @@ impl TextLayout {
             // strictly increase for `line_for_byte`, so fold such a line into
             // the previous one; its glyphs keep their own painted positions.
             let continuation = !first_of_paragraph
-                && lines
-                    .byte_start
-                    .last()
-                    .is_some_and(|&prev| min_start == usize::MAX || min_start <= prev as usize);
+                && lines.last().is_some_and(|prev| {
+                    min_start == usize::MAX || min_start <= prev.byte_start as usize
+                });
             let line_index = if continuation {
-                lines.top.len() as u32 - 1
+                lines.len() as u32 - 1
             } else {
-                lines.top.len() as u32
+                lines.len() as u32
             };
             let glyph_start = glyphs.len() as u32;
             for g in run.glyphs {
@@ -790,10 +764,9 @@ impl TextLayout {
             let shift = if run.rtl { 0.0 } else { buffer_x };
             width = width.max((shift + run.line_w) * inv);
             height = height.max((run.line_top + run.line_height) * inv);
-            if continuation {
-                let last = line_index as usize;
-                lines.glyph_end[last] = glyphs.len() as u32;
-                lines.width[last] = lines.width[last].max(run.line_w * inv);
+            if let Some(last) = lines.last_mut().filter(|_| continuation) {
+                last.glyph_end = glyphs.len() as u32;
+                last.width = last.width.max(run.line_w * inv);
                 continue;
             }
             let byte_start = if first_of_paragraph || min_start == usize::MAX {
@@ -801,39 +774,43 @@ impl TextLayout {
             } else {
                 min_start
             };
-            lines.byte_start.push(byte_start as u32);
-            lines.byte_end.push(0); // fixed up below
-            lines.top.push(run.line_top * inv);
-            lines.height.push(run.line_height * inv);
-            lines.baseline.push(run.line_y * inv);
-            lines.width.push(run.line_w * inv);
-            lines.glyph_start.push(glyph_start);
-            lines.glyph_end.push(glyphs.len() as u32);
-            lines.rtl.push(run.rtl);
+            lines.push(Line {
+                byte_start: byte_start as u32,
+                byte_end: 0, // fixed up below
+                top: run.line_top * inv,
+                height: run.line_height * inv,
+                baseline: run.line_y * inv,
+                width: run.line_w * inv,
+                glyph_start,
+                glyph_end: glyphs.len() as u32,
+                rtl: run.rtl,
+            });
             line_paragraph.push(run.line_i);
         }
 
         // cosmic-text yields a run for every laid-out paragraph, but `hit`,
         // `caret`, and `line_at_y` read the last line, so one line is made
         // structural here instead of trusted.
-        if lines.top.is_empty() {
-            lines.byte_start.push(0);
-            lines.byte_end.push(0);
-            lines.top.push(0.0);
-            lines.height.push(style.line_height);
-            lines.baseline.push(style.line_height.min(style.font_size));
-            lines.width.push(0.0);
-            lines.glyph_start.push(0);
-            lines.glyph_end.push(glyphs.len() as u32);
-            lines.rtl.push(false);
+        if lines.is_empty() {
+            lines.push(Line {
+                byte_start: 0,
+                byte_end: 0,
+                top: 0.0,
+                height: style.line_height,
+                baseline: style.line_height.min(style.font_size),
+                width: 0.0,
+                glyph_start: 0,
+                glyph_end: glyphs.len() as u32,
+                rtl: false,
+            });
             line_paragraph.push(0);
             height = height.max(style.line_height);
         }
 
         for i in 0..line_paragraph.len() {
             let same_paragraph_next = line_paragraph.get(i + 1) == Some(&line_paragraph[i]);
-            lines.byte_end[i] = if same_paragraph_next {
-                lines.byte_start[i + 1]
+            lines[i].byte_end = if same_paragraph_next {
+                lines[i + 1].byte_start
             } else {
                 paragraphs[line_paragraph[i]].0.end as u32
             };
@@ -856,8 +833,8 @@ impl TextLayout {
         let l = &self.lines;
         let r = &self.runs;
         let glyph_count = g.len();
-        let line_count = l.top.len();
-        let run_count = r.line.len();
+        let line_count = l.len();
+        let run_count = r.len();
         let columns = [
             ("glyphs", "advance", g.advance.len(), glyph_count),
             ("glyphs", "line", g.line.len(), glyph_count),
@@ -872,18 +849,6 @@ impl TextLayout {
             ("glyphs", "flags", g.flags.len(), glyph_count),
             ("glyphs", "phys_x", g.phys_x.len(), glyph_count),
             ("glyphs", "phys_y", g.phys_y.len(), glyph_count),
-            ("lines", "byte_start", l.byte_start.len(), line_count),
-            ("lines", "byte_end", l.byte_end.len(), line_count),
-            ("lines", "height", l.height.len(), line_count),
-            ("lines", "baseline", l.baseline.len(), line_count),
-            ("lines", "width", l.width.len(), line_count),
-            ("lines", "glyph_start", l.glyph_start.len(), line_count),
-            ("lines", "glyph_end", l.glyph_end.len(), line_count),
-            ("lines", "rtl", l.rtl.len(), line_count),
-            ("runs", "span", r.span.len(), run_count),
-            ("runs", "rtl", r.rtl.len(), run_count),
-            ("runs", "glyph_start", r.glyph_start.len(), run_count),
-            ("runs", "glyph_end", r.glyph_end.len(), run_count),
         ];
         for (table, column, len, expected) in columns {
             if len != expected {
@@ -917,7 +882,7 @@ impl TextLayout {
         };
         let mut next_glyph = 0;
         for line in 0..line_count {
-            let (gs, ge) = (l.glyph_start[line] as usize, l.glyph_end[line] as usize);
+            let (gs, ge) = (l[line].glyph_start as usize, l[line].glyph_end as usize);
             if gs != next_glyph || ge < gs || ge > glyph_count {
                 return Err(IntegrityError::LineGlyphs {
                     line,
@@ -927,10 +892,12 @@ impl TextLayout {
                 });
             }
             next_glyph = ge;
-            let (bs, be) = (l.byte_start[line] as usize, l.byte_end[line] as usize);
+            let (bs, be) = (l[line].byte_start as usize, l[line].byte_end as usize);
             // `line_for_byte` binary-searches line starts.
-            let after_previous = line == 0 || bs > l.byte_start[line - 1] as usize;
-            let before_next = l.byte_start.get(line + 1).is_none_or(|&n| be <= n as usize);
+            let after_previous = line == 0 || bs > l[line - 1].byte_start as usize;
+            let before_next = l
+                .get(line + 1)
+                .is_none_or(|next| be <= next.byte_start as usize);
             if !in_text(bs, be) || !after_previous || !before_next {
                 return Err(IntegrityError::LineBytes {
                     line,
@@ -954,8 +921,7 @@ impl TextLayout {
                 return Err(IntegrityError::GlyphBytes { glyph, start, end });
             }
             let line = g.line[glyph] as usize;
-            let on_line = line < line_count
-                && (l.glyph_start[line] as usize..l.glyph_end[line] as usize).contains(&glyph);
+            let on_line = l.get(line).is_some_and(|l| l.glyphs().contains(&glyph));
             if !on_line {
                 return Err(IntegrityError::GlyphLine { glyph, line });
             }
@@ -970,8 +936,8 @@ impl TextLayout {
 
         let mut next_glyph = 0;
         for run in 0..run_count {
-            let (gs, ge) = (r.glyph_start[run] as usize, r.glyph_end[run] as usize);
-            let line = r.line[run] as usize;
+            let (gs, ge) = (r[run].glyph_start as usize, r[run].glyph_end as usize);
+            let line = r[run].line as usize;
             let same_line = gs < ge
                 && ge <= glyph_count
                 && line < line_count
@@ -1076,7 +1042,7 @@ impl TextLayout {
     }
 
     pub fn line_count(&self) -> usize {
-        self.lines.top.len()
+        self.lines.len()
     }
 
     pub fn line(&self, i: usize) -> Option<LineInfo> {
@@ -1088,15 +1054,15 @@ impl TextLayout {
     }
 
     fn line_info(&self, i: usize) -> LineInfo {
-        let l = &self.lines;
+        let l = &self.lines[i];
         LineInfo {
-            byte_range: l.byte_start[i] as usize..l.byte_end[i] as usize,
-            top: l.top[i],
-            height: l.height[i],
-            baseline: l.baseline[i],
-            width: l.width[i],
-            glyph_range: l.glyph_start[i] as usize..l.glyph_end[i] as usize,
-            rtl: l.rtl[i],
+            byte_range: l.byte_start as usize..l.byte_end as usize,
+            top: l.top,
+            height: l.height,
+            baseline: l.baseline,
+            width: l.width,
+            glyph_range: l.glyphs(),
+            rtl: l.rtl,
         }
     }
 
@@ -1105,12 +1071,11 @@ impl TextLayout {
     }
 
     pub fn glyph_runs(&self) -> impl ExactSizeIterator<Item = GlyphRun> + '_ {
-        let r = &self.runs;
-        (0..r.line.len()).map(|i| GlyphRun {
-            line: r.line[i] as usize,
-            span: r.span[i],
-            rtl: r.rtl[i],
-            glyphs: r.glyph_start[i] as usize..r.glyph_end[i] as usize,
+        self.runs.iter().map(|r| GlyphRun {
+            line: r.line as usize,
+            span: r.span,
+            rtl: r.rtl,
+            glyphs: r.glyph_start as usize..r.glyph_end as usize,
         })
     }
 
@@ -1155,7 +1120,7 @@ impl TextLayout {
         if range.is_empty() {
             // An empty line can start inside a grapheme ("\n\r\n" is "\n\r"
             // plus "\n" to the layout but "\n" plus "\r\n" as graphemes).
-            return TextOffset::snap(self.text(), self.lines.byte_start[line] as usize);
+            return TextOffset::snap(self.text(), self.lines[line].byte_start as usize);
         }
         // Glyph storage order is not visual (RTL runs are stored logically),
         // so scan for the containing glyph and the visual extremes.
@@ -1192,8 +1157,8 @@ impl TextLayout {
             }
             self.cluster_byte_at(i, frac.clamp(0.0, 1.0))
         };
-        let start = self.lines.byte_start[line] as usize;
-        let end = self.lines.byte_end[line] as usize;
+        let start = self.lines[line].byte_start as usize;
+        let end = self.lines[line].byte_end as usize;
         TextOffset::snap(self.text(), byte.clamp(start, end))
     }
 
@@ -1205,8 +1170,8 @@ impl TextLayout {
         let line = self.line_for_byte(byte);
         Caret {
             x: self.x_for_byte(line, byte),
-            y: self.lines.top[line],
-            height: self.lines.height[line],
+            y: self.lines[line].top,
+            height: self.lines[line].height,
             line,
         }
     }
@@ -1226,21 +1191,20 @@ impl TextLayout {
         }
         let g = &self.glyphs;
         for line in self.line_for_byte(a)..self.line_count() {
-            let start = self.lines.byte_start[line] as usize;
+            let start = self.lines[line].byte_start as usize;
             if start >= b {
                 break;
             }
             // Include the line ending so an empty line inside the selection shows.
             let end_with_break = self
                 .lines
-                .byte_start
                 .get(line + 1)
-                .map_or(len, |&s| s as usize);
+                .map_or(len, |next| next.byte_start as usize);
             if start >= b || end_with_break <= a {
                 continue;
             }
-            let top = self.lines.top[line];
-            let height = self.lines.height[line];
+            let top = self.lines[line].top;
+            let height = self.lines[line].height;
             let glyph_range = self.glyph_range(line);
             if glyph_range.is_empty() {
                 if a <= start && b > start {
@@ -1289,23 +1253,21 @@ impl TextLayout {
     }
 
     fn glyph_range(&self, line: usize) -> Range<usize> {
-        self.lines.glyph_start[line] as usize..self.lines.glyph_end[line] as usize
+        self.lines[line].glyphs()
     }
 
     fn line_at_y(&self, y: f32) -> usize {
         // Line tops increase, so the last line starting at or above `y`
         // holds it; `build` guarantees at least one line.
         self.lines
-            .top
-            .partition_point(|&top| top <= y)
+            .partition_point(|line| line.top <= y)
             .saturating_sub(1)
     }
 
     fn line_for_byte(&self, byte: usize) -> usize {
         // Line starts are strictly increasing, so the last start <= byte wins.
         self.lines
-            .byte_start
-            .partition_point(|&s| s as usize <= byte)
+            .partition_point(|line| line.byte_start as usize <= byte)
             .saturating_sub(1)
     }
 
@@ -1434,14 +1396,11 @@ fn rect_span(x0: f32, x1: f32, y: f32, height: f32) -> Rect {
 
 /// Refills `runs` with each line's maximal glyph ranges of one span and
 /// direction.
-fn build_runs(glyphs: &GlyphColumns, lines: &LineColumns, runs: &mut RunColumns) {
+fn build_runs(glyphs: &GlyphColumns, lines: &[Line], runs: &mut Vec<Run>) {
     let breaks = || {
-        (0..lines.top.len()).flat_map(move |line| {
-            let (start, end) = (
-                lines.glyph_start[line] as usize,
-                lines.glyph_end[line] as usize,
-            );
-            (start..end).filter_map(move |i| {
+        lines.iter().enumerate().flat_map(move |(line, l)| {
+            let end = l.glyph_end as usize;
+            l.glyphs().filter_map(move |i| {
                 let next_breaks = i + 1 == end
                     || glyphs.span[i + 1] != glyphs.span[i]
                     || glyphs.rtl(i + 1) != glyphs.rtl(i);
@@ -1449,16 +1408,18 @@ fn build_runs(glyphs: &GlyphColumns, lines: &LineColumns, runs: &mut RunColumns)
             })
         })
     };
-    runs.clear_reserve(breaks().count());
+    clear_reserve(runs, breaks().count());
     let mut run_start = 0;
     for (line, i) in breaks() {
         // A line's first run starts at the line's first glyph.
-        let start = run_start.max(lines.glyph_start[line] as usize);
-        runs.line.push(line as u32);
-        runs.span.push(glyphs.span[i]);
-        runs.rtl.push(glyphs.rtl(i));
-        runs.glyph_start.push(start as u32);
-        runs.glyph_end.push((i + 1) as u32);
+        let start = run_start.max(lines[line].glyph_start as usize);
+        runs.push(Run {
+            line: line as u32,
+            span: glyphs.span[i],
+            rtl: glyphs.rtl(i),
+            glyph_start: start as u32,
+            glyph_end: (i + 1) as u32,
+        });
         run_start = i + 1;
     }
 }
