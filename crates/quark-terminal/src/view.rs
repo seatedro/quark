@@ -143,8 +143,12 @@ pub fn terminal_view(
         layer = layer.child(
             div()
                 .absolute()
-                .left(m.pad + f32::from(at.0) * m.cell_w)
-                .top(m.pad + f32::from(at.1) * m.cell_h)
+                .left(m.pad)
+                .top(m.pad)
+                .translate(
+                    m.points(i32::from(at.0) * m.cell.cell_width as i32),
+                    m.points(i32::from(at.1) * m.cell.cell_height as i32),
+                )
                 .child(
                     cached(key, hash, move || {
                         cursor(cursor_grid, m, at, palette, env.focused, blink)
@@ -263,15 +267,19 @@ fn build(
     let m = frame.metrics;
     let grid_w = f32::from(grid.cols) * m.cell_w;
     let grid_h = grid.rows.len() as f32 * m.cell_h;
+    // Layout rounds positions to whole points, which at a fractional scale
+    // (or with an odd cell height in pixels) are not whole device pixels,
+    // so rows are placed by paint-time offsets instead: each at a multiple
+    // of the cell height, every row edge on the device pixel grid.
     let mut rows = div()
         .absolute()
         .left(m.pad)
+        .top(m.pad)
         // Pinned to the top of the viewport: the terminal, not the scroll
         // container, decides which rows show.
-        .top(top + m.pad)
+        .translate(0.0, top)
         .w(grid_w)
         .h(grid_h)
-        .flex_col()
         .cursor(CursorHint::Text)
         .on_drag_start(drag);
     // Each row is a boundary keyed by its id, unique in the process (so
@@ -283,17 +291,24 @@ fn build(
         let (grid, row_text) = (grid.clone(), row_text.clone());
         let hash = inputs_hash(&(row.hash, grid.colors, m.cell, palette));
         rows = rows.child(
-            cached(key, hash, move || {
-                canvas(move |bounds, scene, cx| {
-                    let row = &grid.rows[i];
-                    let mut row_text = row_text.borrow_mut();
-                    paint_row(bounds, scene, cx, row, &mut row_text, &m, palette);
-                })
-                .w(grid_w)
-                .h(m.cell_h)
-            })
-            .w(grid_w)
-            .h(m.cell_h),
+            div()
+                .absolute()
+                .left(0.0)
+                .top(0.0)
+                .translate(0.0, m.points(i as i32 * m.cell.cell_height as i32))
+                .child(
+                    cached(key, hash, move || {
+                        canvas(move |bounds, scene, cx| {
+                            let row = &grid.rows[i];
+                            let mut row_text = row_text.borrow_mut();
+                            paint_row(bounds, scene, cx, row, &mut row_text, &m, palette);
+                        })
+                        .w(grid_w)
+                        .h(m.cell_h)
+                    })
+                    .w(grid_w)
+                    .h(m.cell_h),
+                ),
         );
     }
     if let Some(Screen {
