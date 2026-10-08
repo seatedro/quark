@@ -350,9 +350,19 @@ pub fn update(state: &mut State, action: Action, scx: &SurfaceCx, fx: &mut Effec
             attachments: Vec::new(),
         }),
         Action::Document(event) => {
-            if let Some((tv, _)) = state.selected(scx) {
-                tv.doc.handle(event);
+            let Some((tv, _)) = state.selected(scx) else {
+                return;
+            };
+            // A press in the transcript leaves a text field, as a press on
+            // a page's body does, so Copy reaches the selection it starts.
+            if matches!(event, DocumentEvent::PointerDown { .. })
+                && scx
+                    .focus
+                    .is_some_and(|focus| !tv.disclosures.contains_key(&focus))
+            {
+                fx.push(Effect::Focus(None));
             }
+            tv.doc.handle(event);
         }
         Action::ToggleTool(tool) => {
             let Some((tv, thread)) = state.selected(scx) else {

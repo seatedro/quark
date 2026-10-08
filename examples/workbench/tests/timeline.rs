@@ -120,6 +120,7 @@ fn timeline_copy_spans_every_row_after_virtualization() {
     );
     let list = transcript(&ui).bounds;
     // A press in the transcript takes focus off the composer.
+    type_in_composer(&mut ui, "draft");
     ui.click((list.x + 40.0, list.y + 40.0));
 
     ui.key("mod+a");
