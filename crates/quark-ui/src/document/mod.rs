@@ -37,6 +37,7 @@ mod images;
 mod markdown;
 mod measure;
 mod syntax;
+mod table;
 #[cfg(test)]
 mod tests;
 
@@ -53,6 +54,7 @@ pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage}
 pub use markdown::{BlockKeys, CODE_SCALE, MarkdownBlocks, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 pub use syntax::SyntaxHighlighter;
+pub use table::{TableCell, TableCells, TableGeometry, TableMetrics};
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -120,6 +122,9 @@ pub enum BlockContent {
         /// [`Document::set_code_wrap`].
         wrap: bool,
     },
+    /// A grid of cells with a header row; see [`Block::table`]. Its text is
+    /// the table as markdown, which selection indexes and copy reads.
+    Table(TableCells),
     /// A horizontal rule. Its text is `---`, so copy keeps it.
     Rule,
     /// An image scaled to the block's width (never past its own width),
@@ -132,7 +137,7 @@ impl BlockContent {
     fn spans(&self) -> Option<&Arc<[StyledSpan]>> {
         match self {
             Self::Prose(spans) | Self::Code { spans, .. } => Some(spans),
-            Self::Rule | Self::Image { .. } => None,
+            Self::Rule | Self::Image { .. } | Self::Table(_) => None,
         }
     }
 }
@@ -443,6 +448,7 @@ impl Block {
                     ..
                 },
             ) => Arc::ptr_eq(a, b) && la.is_some() == lb.is_some() && (ta, wa) == (tb, wb),
+            (BlockContent::Table(a), BlockContent::Table(b)) => Arc::ptr_eq(&a.cells, &b.cells),
             (BlockContent::Rule, BlockContent::Rule) => true,
             (BlockContent::Image { state: a, .. }, BlockContent::Image { state: b, .. }) => {
                 image_height_class(a) == image_height_class(b)
@@ -648,6 +654,13 @@ pub trait BlockGeometry: Clone {
     /// wrap (code), or `None` when it fits any width. Content wider than
     /// the column scrolls horizontally.
     fn natural_width(&self) -> Option<f32> {
+        None
+    }
+
+    /// The grid of a table block, when the measurer lays tables out as
+    /// one; the element places the cells by it. Blocks without one show
+    /// a table's markdown text.
+    fn table_metrics(&self) -> Option<&TableMetrics> {
         None
     }
 }

@@ -13,7 +13,7 @@ use accesskit::Role as AccessibilityRole;
 use quark::hit::{CursorHint, HitFlags, HitId};
 use quark::{SemanticActions, SemanticNode, SemanticRole, Transform2D};
 use quark_render::scene::Rect;
-use quark_render::{ImagePrimitive, RoundedRectPrimitive, Scene};
+use quark_render::{BorderPrimitive, ImagePrimitive, RoundedRectPrimitive, Scene};
 
 use quark::selection::BlockKey;
 
@@ -21,9 +21,9 @@ use super::measure::{failed_image_spans, image_extent};
 use super::{
     AdornmentAccessibility, AdornmentCx, Block, BlockContent, BlockGeometry, Decorator, Document,
     DocumentSource, ImageState, LIST_STEP, Palette, QUOTE_STEP, RowAdornment, RowChrome,
-    VisibleRow,
+    TableCells, TableMetrics, VisibleRow,
 };
-use crate::accessibility::{AccessibilityAction, AccessibilityNode};
+use crate::accessibility::{AccessibilityAction, AccessibilityNode, CollectionInfo};
 use crate::action::Action;
 use crate::design::Alpha;
 use crate::element::{
@@ -203,6 +203,38 @@ struct BlockBuild {
     /// The horizontal scroll and unwrapped width of content wider than
     /// the column.
     scroll: Option<(ScrollHandle, f32)>,
+    table: Option<TableBuild>,
+}
+
+/// A table block's grid and its cells' spans with theme colors resolved.
+struct TableBuild {
+    metrics: TableMetrics,
+    cells: Vec<Arc<[StyledSpan]>>,
+}
+
+impl TableBuild {
+    fn new(block: &Block, metrics: Option<&TableMetrics>, palette: &Palette) -> Option<Self> {
+        let BlockContent::Table(table) = &block.content else {
+            return None;
+        };
+        let cells = table
+            .cells
+            .iter()
+            .map(|cell| match &cell.tones {
+                None => cell.spans.clone(),
+                Some(tones) => cell
+                    .spans
+                    .iter()
+                    .zip(tones.iter())
+                    .map(|(span, tone)| palette.paint(span, *tone))
+                    .collect(),
+            })
+            .collect();
+        Some(Self {
+            metrics: metrics?.clone(),
+            cells,
+        })
+    }
 }
 
 /// The theme colors a row paints with besides its spans' own.
@@ -491,6 +523,7 @@ impl<G: BlockGeometry> Document<G> {
                 rect,
                 selection: self.block_selection(block.key, visible.text_len),
                 scroll,
+                table: TableBuild::new(block, visible.geometry.table_metrics(), palette),
             });
         }
         RowBuild {
@@ -565,6 +598,7 @@ impl RowElement {
                     controls,
                     colors: &build.colors,
                     scroll: b.scroll.as_ref(),
+                    table: b.table.as_ref(),
                 },
                 &mut placed,
             );
@@ -746,6 +780,7 @@ struct BlockPaint<'a> {
     controls: &'a CodeControls,
     colors: &'a RowColors,
     scroll: Option<&'a (ScrollHandle, f32)>,
+    table: Option<&'a TableBuild>,
 }
 
 /// The elements of one block at `rect`: quote bars and the list marker in
@@ -765,6 +800,7 @@ fn block_elements(
         controls,
         colors,
         scroll,
+        table,
     } = paint;
     let style = &block.style;
     let font_size = base_font_size * style.scale;
@@ -886,6 +922,35 @@ fn block_elements(
                 None => code(content.width).into_any(),
             }
         }
+        BlockContent::Table(cells) => {
+            let Some(table) = table else {
+                // A measurer without table grids: show the markdown.
+                return placed.push(Placed {
+                    rect: content,
+                    element: selectable_rich_text(vec![StyledSpan::plain(&*block.text)])
+                        .width(content.width)
+                        .size(font_size)
+                        .source(block.key.0)
+                        .selection(selection)
+                        .into_any(),
+                });
+            };
+            let grid = TableGrid::new(block.key, cells, table, font_size, selection, colors, links);
+            match scroll {
+                // Wider than the column: scrolls sideways like wide code.
+                Some((handle, _)) => div()
+                    .id(format!("document.table:{}:scroll", block.key.0).as_str())
+                    .tab_stop(quark::focus::TabStop::new(0))
+                    .w(content.width)
+                    .h(content.height)
+                    .track_scroll(handle)
+                    .overflow_x_scroll()
+                    .scrollbar_auto_hide()
+                    .child(grid)
+                    .into_any(),
+                None => grid.into_any(),
+            }
+        }
         BlockContent::Image {
             state: ImageState::Failed,
             ..
@@ -931,6 +996,238 @@ fn block_elements(
         element,
     });
     placed.extend(overlay);
+}
+
+/// A table block's grid: a tinted header row, separators between rows, a
+/// rounded border, and each cell's text as selectable text in its cell.
+/// Assistive tech gets a table of rows of header and data cells.
+struct TableGrid {
+    key: BlockKey,
+    columns: usize,
+    rows: usize,
+    metrics: TableMetrics,
+    colors: RowColors,
+    /// One selectable text per cell, row-major, placed at the cell's text.
+    cells: Vec<Placed>,
+}
+
+impl TableGrid {
+    fn new(
+        key: BlockKey,
+        table: &TableCells,
+        build: &TableBuild,
+        font_size: f32,
+        selection: Option<(usize, usize)>,
+        colors: &RowColors,
+        links: &LinkHandler,
+    ) -> Self {
+        let metrics = build.metrics.clone();
+        let (pad_x, pad_y) = metrics.pad;
+        let cells = table
+            .cells
+            .iter()
+            .zip(&build.cells)
+            .map(|(cell, spans)| {
+                let rect = metrics.cell(cell.row, cell.column);
+                let text = Rect {
+                    x: rect.x + pad_x,
+                    y: rect.y + pad_y,
+                    width: (rect.width - pad_x * 2.0).max(1.0),
+                    height: TableMetrics::line_height(font_size).ceil(),
+                };
+                // The selection in the cell's own bytes.
+                let local = selection.and_then(|(lo, hi)| {
+                    let (lo, hi) = (lo.max(cell.range.start), hi.min(cell.range.end));
+                    (lo < hi).then(|| (lo - cell.range.start, hi - cell.range.start))
+                });
+                Placed {
+                    rect: text,
+                    element: selectable_rich_text(spans.clone())
+                        .width(text.width)
+                        .size(font_size)
+                        .source(key.0)
+                        .selection(local)
+                        .link_handler(links.clone())
+                        .into_any(),
+                }
+            })
+            .collect();
+        Self {
+            key,
+            columns: table.columns,
+            rows: table.rows,
+            metrics,
+            colors: *colors,
+            cells,
+        }
+    }
+
+    fn size(&self) -> (f32, f32) {
+        (self.metrics.width(), self.metrics.height(self.rows))
+    }
+
+    /// Pushes a semantic node of `role` with its accessibility node and
+    /// makes it the parent of what is painted next.
+    fn push_node(
+        cx: &mut ElementContext,
+        bounds: Rect,
+        (role, accessible): (SemanticRole, AccessibilityRole),
+        id: String,
+        info: CollectionInfo,
+    ) {
+        let mut node = SemanticNode::new(bounds);
+        node.parent = cx.current_semantic_parent();
+        node.role = Some(role);
+        let index = cx.semantic.push(node);
+        cx.push_accessibility_for_semantic(
+            AccessibilityNode::new(id, accessible, bounds).collection(info),
+            index,
+        );
+        cx.push_semantic_parent(index);
+    }
+}
+
+impl Element for TableGrid {
+    type LayoutState = ();
+    type PrepaintState = ();
+
+    fn request_layout(
+        &mut self,
+        engine: &mut LayoutEngine,
+        cx: &mut ElementContext,
+    ) -> (LayoutId, ()) {
+        let mut ids = Vec::with_capacity(self.cells.len());
+        for placed in &mut self.cells {
+            let child = placed.element.request_layout(engine, cx);
+            ids.push(engine.request_layout(absolute(placed.rect), &[child]));
+        }
+        let (width, height) = self.size();
+        let id = engine.request_layout(
+            taffy::Style {
+                size: taffy::Size {
+                    width: taffy::Dimension::length(width),
+                    height: taffy::Dimension::length(height),
+                },
+                flex_shrink: 0.0,
+                ..Default::default()
+            },
+            &ids,
+        );
+        (id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _bounds: Bounds,
+        _layout_state: &mut (),
+        engine: &LayoutEngine,
+        cx: &mut ElementContext,
+    ) {
+        for placed in &mut self.cells {
+            placed.element.prepaint(engine, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        bounds: Bounds,
+        _layout_state: &mut (),
+        _prepaint_state: &mut (),
+        engine: &LayoutEngine,
+        scene: &mut Scene,
+        cx: &mut ElementContext,
+    ) {
+        let radius = 6.0;
+        let row_height = self.metrics.row_height;
+        let header = Rect {
+            height: row_height,
+            ..bounds
+        };
+        scene.rounded_rect(RoundedRectPrimitive {
+            corner_radii: [radius, radius, 0.0, 0.0],
+            ..RoundedRectPrimitive::uniform(header, 0.0, self.colors.placeholder)
+        });
+        for row in 1..self.rows {
+            let line = Rect {
+                y: bounds.y + row_height * row as f32,
+                height: 1.0,
+                ..bounds
+            };
+            scene.rounded_rect(RoundedRectPrimitive::uniform(line, 0.0, self.colors.border));
+        }
+        scene.border(BorderPrimitive::uniform(
+            bounds,
+            1.0,
+            radius,
+            self.colors.border,
+        ));
+
+        let key = self.key.0;
+        let table_info = CollectionInfo {
+            row_count: Some(self.rows),
+            column_count: Some(self.columns),
+            ..CollectionInfo::default()
+        };
+        Self::push_node(
+            cx,
+            bounds,
+            (SemanticRole::Table, AccessibilityRole::Table),
+            format!("document.table:{key}"),
+            table_info,
+        );
+        let mut cells = self.cells.iter_mut();
+        for row in 0..self.rows {
+            let row_bounds = Rect {
+                y: bounds.y + row_height * row as f32,
+                height: row_height,
+                ..bounds
+            };
+            let row_info = CollectionInfo {
+                row_index: Some(row),
+                ..CollectionInfo::default()
+            };
+            Self::push_node(
+                cx,
+                row_bounds,
+                (SemanticRole::Row, AccessibilityRole::Row),
+                format!("document.table:{key}:{row}"),
+                row_info,
+            );
+            for column in 0..self.columns {
+                let Some(placed) = cells.next() else {
+                    break;
+                };
+                let cell = self.metrics.cell(row, column).offset(bounds.x, bounds.y);
+                let role = if row == 0 {
+                    AccessibilityRole::ColumnHeader
+                } else {
+                    AccessibilityRole::Cell
+                };
+                let info = CollectionInfo {
+                    row_index: Some(row),
+                    column_index: Some(column),
+                    ..CollectionInfo::default()
+                };
+                Self::push_node(
+                    cx,
+                    cell,
+                    (SemanticRole::Cell, role),
+                    format!("document.table:{key}:{row}:{column}"),
+                    info,
+                );
+                placed.element.paint(engine, scene, cx);
+                cx.pop_semantic_parent();
+            }
+            cx.pop_semantic_parent();
+        }
+        cx.pop_semantic_parent();
+    }
+}
+
+impl IntoAnyElement for TableGrid {
+    fn into_any(self) -> AnyElement {
+        AnyElement::new(self)
+    }
 }
 
 /// A code block's toolbar: its label, then Copy and the wrap toggle at

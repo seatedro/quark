@@ -910,6 +910,7 @@ fn dump_blocks(message: &DocumentRow) -> String {
                     format!("code({})", label.as_deref().unwrap_or(""))
                 }
                 BlockContent::Rule => "rule".to_owned(),
+                BlockContent::Table(t) => format!("table({}x{})", t.rows, t.columns),
                 BlockContent::Image { src, state } => format!("image({src}, {state:?})"),
             };
             let s = &block.style;
@@ -960,33 +961,11 @@ fn markdown_blocks_become_separate_keyed_blocks_with_markers_and_prefixes() {
             r###"2 prose l2 q0 [•] "  - " "nested""###,
             r###"3 prose l1 q0 [1.] "1. " "first""###,
             r###"4 prose l0 q1 [] "> " "quoted""###,
-            r###"5 code() l0 q0 [] "" "| a   | bb  |\n| --- | --- |\n| 1   | 2   |""###,
+            r###"5 table(2x2) l0 q0 [] "" "| a | bb |\n| --- | --- |\n| 1 | 2 |""###,
             r###"6 code(rust) l0 q0 [] "" "fn main() {}""###,
             r###"7 rule l0 q0 [] "" "---""###,
         ]
         .join("\n")
-    );
-}
-
-// Catches columns padded by char count, which misaligns wide (CJK) text in
-// the monospace grid.
-#[test]
-fn table_columns_align_by_display_width() {
-    let source = "| 名前 | n |\n|---|---|\n| 日本語テキスト | 1 |\n| abc | 22 |";
-
-    let message = markdown_message(
-        0,
-        &mut MarkdownBlocks::new(),
-        source,
-        &mut SyntaxHighlighter::new(),
-    );
-
-    assert_eq!(
-        message.blocks[0].text(),
-        "| 名前           | n   |\n\
-         | -------------- | --- |\n\
-         | 日本語テキスト | 1   |\n\
-         | abc            | 22  |"
     );
 }
 
@@ -2405,4 +2384,163 @@ fn code_text_is_painted_where_it_was_measured_with_toolbar_and_wrap() {
         );
         assert_eq!(shown, measured, "toolbar {toolbar} wrap {wrap}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tables
+// ---------------------------------------------------------------------------
+
+const TABLE: &str = "| 名前 | n |\n|---|---|\n| 日本語テキスト | 1 |\n| a \\| b | 22 |";
+
+/// Cell texts of the first table block in `markdown`, row by row.
+fn parsed_cells(markdown: &str) -> Vec<Vec<String>> {
+    let doc = crate::markdown::MarkdownDoc::parse(markdown);
+    let block = (0..doc.len())
+        .find(|&b| doc.kind(b) == crate::markdown::BlockKind::Table)
+        .unwrap_or_else(|| panic!("no table in {markdown:?}"));
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for cell in doc.cells(block) {
+        let (row, _) = doc.cell_position(cell);
+        if rows.len() <= row {
+            rows.resize_with(row + 1, Vec::new);
+        }
+        rows[row].push(doc.cell_text(cell).to_owned());
+    }
+    rows
+}
+
+/// A real-text document holding row 0 with `TABLE` as its markdown.
+fn table_view() -> (HashMap<RowKey, DocumentRow>, Document, BlockKey) {
+    let message = markdown_message(
+        0,
+        &mut MarkdownBlocks::new(),
+        TABLE,
+        &mut SyntaxHighlighter::new(),
+    );
+    let key = message.blocks[0].key;
+    let rows: HashMap<RowKey, DocumentRow> = [(message.key, message)].into();
+    let mut view = real_view(&rows);
+    view.set_scroll_offset(0.0);
+    (rows, view, key)
+}
+
+// Catches a copied table that no longer parses as the same table: a pipe
+// inside a cell must stay escaped.
+#[test]
+fn a_copied_table_parses_back_to_the_same_cells() {
+    let mut md = markdown_document(TABLE);
+    md.document_mut().select_all();
+
+    let copied = md.selected_text();
+
+    assert_eq!(parsed_cells(&copied), parsed_cells(TABLE), "{copied}");
+}
+
+// Catches columns sized by char count or per row: a wide CJK cell must
+// push its whole column right, and every row's cells must line up.
+#[test]
+fn table_cells_line_up_in_columns_as_wide_as_their_widest_cell() {
+    let (rows, mut view, key) = table_view();
+
+    let painted = paint(&mut view, &rows, (500.0, 300.0), 0.0);
+
+    // Text regions of the table's cells, row-major.
+    let cells: Vec<&crate::element::SelectableTextRegion> = painted
+        .regions
+        .iter()
+        .filter(|r| r.source_key == key.0)
+        .collect();
+    let lefts: Vec<Vec<f32>> = cells
+        .chunks(2)
+        .map(|row| row.iter().map(|r| r.text_origin.0).collect())
+        .collect();
+    // A cell narrower than its text would wrap it onto more lines.
+    let wrapped: Vec<String> = cells
+        .iter()
+        .filter(|r| r.layout.line_count() > 1)
+        .map(|r| r.layout.source().to_string())
+        .collect();
+    assert_eq!(
+        (lefts[1].clone(), lefts[2].clone(), wrapped),
+        (lefts[0].clone(), lefts[0].clone(), Vec::<String>::new()),
+        "{lefts:?}"
+    );
+}
+
+// Catches a press in a cell landing in another cell, or on the pipes and
+// rule between them: dragging across one cell copies exactly its text.
+#[test]
+fn dragging_across_a_cell_copies_exactly_its_text() {
+    let (rows, mut view, key) = table_view();
+    paint(&mut view, &rows, (500.0, 300.0), 0.0);
+    let block = view.visible_blocks().iter().find(|b| b.key == key).unwrap();
+    let metrics = block.geometry.table_metrics().unwrap().clone();
+    let cell = metrics.cell(2, 1).offset(block.rect.x, block.rect.y);
+    let mid = cell.y + cell.height * 0.5;
+
+    view.handle(DocumentEvent::PointerDown {
+        x: cell.x + 1.0,
+        y: mid,
+    });
+    view.handle(DocumentEvent::PointerDrag {
+        x: cell.x + cell.width - 1.0,
+        y: mid,
+    });
+    view.handle(DocumentEvent::PointerUp);
+
+    assert_eq!(view.selected_text(&rows), "22");
+}
+
+// Catches tables published as loose text: assistive tech needs the
+// header cells, the data cells, and their row and column.
+#[test]
+fn a_table_publishes_header_and_data_cells_with_their_text() {
+    let (rows, mut view, _) = table_view();
+
+    let painted = paint(&mut view, &rows, (500.0, 300.0), 0.0);
+
+    let update = painted.accessibility.tree_update("Test", None);
+    let node = |id: &accesskit::NodeId| update.nodes.iter().find(|(n, _)| n == id).map(|(_, n)| n);
+    let cells: Vec<String> = update
+        .nodes
+        .iter()
+        .filter(|(_, n)| {
+            matches!(
+                n.role(),
+                accesskit::Role::ColumnHeader | accesskit::Role::Cell
+            )
+        })
+        .map(|(_, n)| {
+            let text: String = n
+                .children()
+                .iter()
+                .filter_map(|c| node(c).and_then(|c| c.value().or(c.label())))
+                .collect();
+            format!(
+                "{:?} {},{} {text}",
+                n.role(),
+                n.row_index().unwrap_or(99),
+                n.column_index().unwrap_or(99)
+            )
+        })
+        .collect();
+    let table = update
+        .nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::Table)
+        .map(|(_, n)| (n.row_count(), n.column_count()));
+    assert_eq!(
+        (table, cells),
+        (
+            Some((Some(3), Some(2))),
+            vec![
+                "ColumnHeader 0,0 名前".to_owned(),
+                "ColumnHeader 0,1 n".to_owned(),
+                "Cell 1,0 日本語テキスト".to_owned(),
+                "Cell 1,1 1".to_owned(),
+                "Cell 2,0 a \\| b".to_owned(),
+                "Cell 2,1 22".to_owned(),
+            ]
+        )
+    );
 }
