@@ -47,6 +47,7 @@
 //! for another Windows target fails unless a prebuilt libghostty-vt is
 //! supplied (see build.rs).
 
+mod ghostty;
 mod grid;
 pub mod input;
 mod metrics;
@@ -81,12 +82,14 @@ static ALLOCATOR: quark_ui::test_alloc::Counting = quark_ui::test_alloc::Countin
 #[allow(dead_code)]
 mod ghostty_deps;
 
+pub use ghostty::GHOSTTY_FONT_FAMILY;
 pub use grid::{CellStyle, Colors, Cursor, CursorShape, Grid, GridRow, Rgb, Run, Underline};
 pub use input::KeyPress;
+pub use metrics::{InvalidModifier, MetricModifier};
 pub use pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 pub use state::{
-    INPUT_BACKLOG, PointerInput, Preedit, TerminalEvent, TerminalOutcome, TerminalSignal,
-    TerminalState, TerminalStyle,
+    INPUT_BACKLOG, PointerInput, Preedit, TerminalColors, TerminalEvent, TerminalOutcome,
+    TerminalSignal, TerminalState, TerminalStyle,
 };
 pub use view::{TerminalEnv, terminal_view};
 pub use vt::UnsafePaste;

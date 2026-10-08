@@ -1017,7 +1017,7 @@ impl TerminalState {
                     cap_height: None,
                     ex_height: None,
                 };
-                self.measured(&face, 1.0, px * 0.6)
+                self.measured(&face, 1.0, px * 0.6, self.style.font_family)
             },
             |(m, _)| m,
         )
@@ -1025,7 +1025,13 @@ impl TerminalState {
 
     /// The metrics of `face` at `scale`, whose glyphs advance `advance`
     /// device pixels.
-    fn measured(&self, face: &FaceMetrics, scale: f32, advance: f64) -> Metrics {
+    fn measured(
+        &self,
+        face: &FaceMetrics,
+        scale: f32,
+        advance: f64,
+        family: Option<&'static str>,
+    ) -> Metrics {
         let cell = CellMetrics::new(face, self.style.adjust_cell_height);
         let px_per_em = f64::from(self.style.font_size * scale);
         let cell_px = f64::from(cell.cell_width);
@@ -1036,7 +1042,7 @@ impl TerminalState {
             pad: self.style.padding,
             scale,
             cell,
-            family: self.style.font_family,
+            family,
             letter_spacing: ((cell_px - advance) / px_per_em) as f32,
             glyph_x: if advance < cell_px {
                 ((cell_px - advance) / 2.0).round() as i32
@@ -1160,9 +1166,17 @@ impl TerminalState {
         layouts: &mut LayoutCache,
         scale: f32,
     ) -> Option<Metrics> {
+        // A family that is not installed falls back to the monospace one,
+        // not to whatever face the fallback chain reaches first.
+        let family = self.style.font_family.filter(|name| {
+            text.font_system()
+                .db()
+                .faces()
+                .any(|face| face.families.iter().any(|(family, _)| family == name))
+        });
         let style = TextStyle::new(self.style.font_size)
             .kind(FontKind::Mono)
-            .family(self.style.font_family);
+            .family(family);
         let params = TextParams::new("0000000000", style).scale_factor(scale);
         let layout = layouts.layout(text, &params).ok()?;
         let advance = f64::from(layout.size().0 / 10.0 * scale);
@@ -1171,7 +1185,7 @@ impl TerminalState {
         let font = text.raster_font_system().get_font(id, weight)?;
         let px_per_em = f64::from(self.style.font_size * scale);
         let face = FaceMetrics::from_font(&font, px_per_em, advance);
-        Some(self.measured(&face, scale, advance))
+        Some(self.measured(&face, scale, advance, family))
     }
 
     /// The visible text for screen readers and the cursor's byte in it.
