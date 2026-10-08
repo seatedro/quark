@@ -17,7 +17,10 @@ use crate::scene::{
 use crate::shaders::{
     BLIT_SHADER, BLUR_SHADER, EFFECT_SHADER, LAYER_SHADER, PATH_SHADER, QUAD_SHADER, SHADOW_SHADER,
 };
-use crate::text::{RecoloredBuffers, color_to_linear, measure_mono_char_width, prepare_text_areas};
+use crate::text::{
+    RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width, positioned_glyphs,
+    prepare_text_areas,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextMetrics {
@@ -847,6 +850,9 @@ pub struct Renderer {
     /// False when this frame's glyphs did not fit the atlas; its text
     /// segments are skipped.
     text_ready: bool,
+    /// Positioned glyphs unless a test compares against the buffer path.
+    pub(crate) text_path: TextPath,
+    /// Buffer path only.
     recolored: RecoloredBuffers,
     /// `(font size, TextSystem generation, width)` of the last measurement.
     cached_mono_char_width: Option<(f32, u64, f32)>,
@@ -1021,6 +1027,7 @@ impl Renderer {
             atlas,
             text_renderers: vec![text_renderer],
             text_ready: true,
+            text_path: TextPath::default(),
             recolored: RecoloredBuffers::default(),
             cached_mono_char_width: None,
             flattener: Flattener::default(),
@@ -1483,28 +1490,12 @@ impl Renderer {
 
         // Prepare every text segment before recording any pass.
         self.fit_text_renderers(text_steps);
-        self.recolored
-            .prepare(frames.iter().map(|frame| &frame.flat.rich_texts[..]), text);
-        self.text_ready = match self.prepare_text(frames, text) {
-            Ok(()) => true,
-            Err(_) => {
-                // The atlas is full of glyphs pinned by this frame. Unpin
-                // them and prepare every segment again, since the retry may
-                // evict glyphs that earlier segments' vertices point at.
-                self.atlas.trim();
-                match self.prepare_text(frames, text) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        // This frame's glyphs do not fit even alone. Draw
-                        // everything else rather than failing the frame, and
-                        // unpin so the next frame starts from a clean atlas.
-                        tracing::warn!("skipping text for one frame: {error}");
-                        self.atlas.trim();
-                        false
-                    }
-                }
+        self.text_ready = self.prepare_frame_text(frames, text);
+        if self.text_ready && self.text_path == TextPath::Positioned {
+            for renderer in &mut self.text_renderers[..text_steps] {
+                renderer.upload(&self.device, &self.queue);
             }
-        };
+        }
 
         for frame in frames.iter_mut() {
             frame.blur =
@@ -1695,6 +1686,36 @@ impl Renderer {
         }
     }
 
+    /// Prepare every text segment of `frames`, retrying once with the atlas
+    /// unpinned. False when this frame's glyphs do not fit and its text is
+    /// skipped. On the positioned path the vertices still need uploading.
+    fn prepare_frame_text(&mut self, frames: &[TargetFrame], text: &mut TextSystem) -> bool {
+        if self.text_path == TextPath::Buffer {
+            self.recolored
+                .prepare(frames.iter().map(|frame| &frame.flat.rich_texts[..]), text);
+        }
+        match self.prepare_text(frames, text) {
+            Ok(()) => true,
+            Err(_) => {
+                // The atlas is full of glyphs pinned by this frame. Unpin
+                // them and prepare every segment again, since the retry may
+                // evict glyphs that earlier segments' vertices point at.
+                self.atlas.trim();
+                match self.prepare_text(frames, text) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        // This frame's glyphs do not fit even alone. Draw
+                        // everything else rather than failing the frame, and
+                        // unpin so the next frame starts from a clean atlas.
+                        tracing::warn!("skipping text for one frame: {error}");
+                        self.atlas.trim();
+                        false
+                    }
+                }
+            }
+        }
+    }
+
     /// Prepare each text segment of every target into its own renderer.
     fn prepare_text(
         &mut self,
@@ -1717,20 +1738,29 @@ impl Renderer {
                 else {
                     continue;
                 };
-                let text_areas = prepare_text_areas(
-                    &flat.texts[items.start as usize..items.end as usize],
-                    &flat.rich_texts[rich.start as usize..rich.end as usize],
-                    &self.recolored,
-                );
-                self.text_renderers[text_index].prepare(
-                    &self.device,
-                    &self.queue,
-                    text.font_system_mut(),
-                    &mut self.atlas,
-                    viewport,
-                    text_areas,
-                    &mut self.swash_cache,
-                )?;
+                let texts = &flat.texts[items.start as usize..items.end as usize];
+                let rich_texts = &flat.rich_texts[rich.start as usize..rich.end as usize];
+                let renderer = &mut self.text_renderers[text_index];
+                match self.text_path {
+                    TextPath::Positioned => renderer.prepare_glyphs(
+                        &self.device,
+                        &self.queue,
+                        text.font_system_mut(),
+                        &mut self.atlas,
+                        viewport,
+                        positioned_glyphs(texts, rich_texts),
+                        &mut self.swash_cache,
+                    )?,
+                    TextPath::Buffer => renderer.prepare(
+                        &self.device,
+                        &self.queue,
+                        text.font_system_mut(),
+                        &mut self.atlas,
+                        viewport,
+                        prepare_text_areas(texts, rich_texts, &self.recolored),
+                        &mut self.swash_cache,
+                    )?,
+                }
                 text_index += 1;
             }
         }
@@ -4077,8 +4107,7 @@ mod tests {
             .count()
     }
 
-    // The renderer bakes span colors into a copy of the layout's buffer; each
-    // span must keep its own color and the other span's glyphs must not
+    // Each span must keep its own color and the other span's glyphs must not
     // bleed over.
     #[test]
     fn render_rich_text_paints_each_span_in_its_color() {
@@ -4126,6 +4155,211 @@ mod tests {
         assert_eq!(count_pixels(&image, right, red), 0, "red right of split");
     }
 
+    fn span(range: std::ops::Range<usize>) -> quark_text::TextSpan {
+        quark_text::TextSpan {
+            range,
+            weight: None,
+            style: None,
+            kind: None,
+        }
+    }
+
+    const RED: quark::Color = quark::Color::rgba(255, 0, 0, 255);
+    const GREEN: quark::Color = quark::Color::rgba(0, 255, 0, 255);
+    const BLUE: quark::Color = quark::Color::rgba(0, 0, 255, 255);
+
+    /// White text shaped by `system`, for tests that hold the shared one.
+    fn white_text_with(system: &mut TextSystem, rect: Rect, text: &str) -> Primitive {
+        let layout = system.layout(&TextParams::new(text, TextStyle::new(16.0)));
+        Primitive::TextRun(TextPrimitive {
+            rect,
+            layout: ShapedText::new(Arc::new(layout.expect("layout"))),
+            color: quark::Color::rgba(255, 255, 255, 255),
+        })
+    }
+
+    /// Highlighted code: four lines whose keywords draw in `colors[0]` and
+    /// whose numbers draw in `colors[1]`, under plain white text.
+    fn code_scene(text: &mut TextSystem, layout: &ShapedText, colors: [quark::Color; 2]) -> Scene {
+        let mut scene = Scene::default();
+        scene.push(white_text_with(text, rect(4.0, 2.0, 200.0, 20.0), "plain"));
+        scene.rich_text(RichTextPrimitive {
+            rect: rect(4.0, 24.0, 200.0, 100.0),
+            layout: layout.clone(),
+            default_color: quark::Color::rgba(255, 255, 255, 255),
+            span_colors: Arc::from(colors),
+        });
+        scene
+    }
+
+    fn code_layout(text: &mut TextSystem) -> ShapedText {
+        let source = "let a = 1;\nlet b = 2;\nlet c = 3;\nlet d = 4;";
+        // Span 1 is each `let`, span 2 each digit.
+        let mut spans = Vec::new();
+        for (start, _) in source.match_indices("let") {
+            spans.push((start, span(start..start + 3)));
+        }
+        for (start, _) in source.match_indices(|c: char| c.is_ascii_digit()) {
+            spans.push((start, span(start..start + 1)));
+        }
+        spans.sort_by_key(|(start, _)| *start);
+        let params = TextParams::new(source, TextStyle::new(16.0))
+            .spans(spans.into_iter().map(|(_, span)| span).collect::<Vec<_>>());
+        ShapedText::new(Arc::new(text.layout(&params).expect("layout")))
+    }
+
+    /// Allocations of preparing `scene`'s text on `renderer`, which has
+    /// already drawn a frame. Flattening happens before counting.
+    fn count_text_preparation(
+        renderer: &mut Renderer,
+        scene: &Scene,
+        text: &mut TextSystem,
+    ) -> (bool, u64) {
+        renderer.flatten(scene, CODE_SIZE.0, CODE_SIZE.1);
+        let frames = std::mem::take(&mut renderer.frames);
+        let active = renderer.active_frames;
+        let result =
+            quark_ui::test_alloc::count(|| renderer.prepare_frame_text(&frames[..active], text));
+        renderer.frames = frames;
+        result
+    }
+
+    const CODE_SIZE: (u32, u32) = (200, 128);
+
+    fn render_code(
+        renderer: &mut Renderer,
+        scene: &Scene,
+        text: &mut TextSystem,
+    ) -> image::RgbaImage {
+        let (w, h) = CODE_SIZE;
+        let pixels = renderer
+            .render_to_rgba(scene, text, w, h)
+            .expect("offscreen render");
+        image::RgbaImage::from_raw(w, h, pixels).expect("pixel buffer size")
+    }
+
+    fn has_pixels(image: &image::RgbaImage, color: quark::Color) -> bool {
+        let area = rect(0.0, 0.0, CODE_SIZE.0 as f32, CODE_SIZE.1 as f32);
+        let near = |p: [u8; 4]| {
+            [
+                p[0].abs_diff(color.r),
+                p[1].abs_diff(color.g),
+                p[2].abs_diff(color.b),
+            ]
+            .iter()
+            .all(|&d| d < 60)
+        };
+        count_pixels(image, area, near) > 10
+    }
+
+    // Preparing an unchanged frame's text with every glyph in the atlas
+    // reuses glyphon's vertex storage and walks the layouts in place.
+    #[test]
+    fn repeated_text_preparation_allocates_nothing() {
+        let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
+            return;
+        };
+        let mut text = test_text();
+        let scene = {
+            let layout = code_layout(&mut text);
+            code_scene(&mut text, &layout, [RED, GREEN])
+        };
+        render_code(&mut renderer, &scene, &mut text);
+
+        let (ready, allocated) = count_text_preparation(&mut renderer, &scene, &mut text);
+        assert!(ready);
+        assert_eq!(allocated, 0);
+        let image = render_code(&mut renderer, &scene, &mut text);
+        assert!(has_pixels(&image, RED) && has_pixels(&image, GREEN));
+    }
+
+    // Regression: changing a rich text's colors copied and reshaped its
+    // layout to bake the new colors into a buffer.
+    #[test]
+    fn recoloring_text_allocates_nothing() {
+        let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
+            return;
+        };
+        let mut text = test_text();
+        let layout = code_layout(&mut text);
+        let scene = code_scene(&mut text, &layout, [RED, GREEN]);
+        render_code(&mut renderer, &scene, &mut text);
+
+        let recolored = code_scene(&mut text, &layout, [BLUE, GREEN]);
+        let (ready, allocated) = count_text_preparation(&mut renderer, &recolored, &mut text);
+        assert!(ready);
+        assert_eq!(allocated, 0);
+        let image = render_code(&mut renderer, &recolored, &mut text);
+        assert!(has_pixels(&image, BLUE), "keywords not recolored");
+        assert!(!has_pixels(&image, RED), "old keyword color left");
+    }
+
+    // The positioned path must draw what glyphon draws from text areas:
+    // fractional origins, a clip through a line, an overflowing RTL line
+    // shifted inside its box, a color glyph, and multi-colored spans.
+    #[test]
+    fn positioned_text_draws_the_buffer_paths_pixels() {
+        let (w, h) = (160, 160);
+        let mut text = test_text();
+        let mut scene = Scene::default();
+        scene.push(white_text_with(
+            &mut text,
+            rect(3.4, 2.6, 150.0, 20.0),
+            "Fractional origin",
+        ));
+        scene.push(Primitive::ClipStart(ClipPrimitive {
+            rect: rect(0.0, 24.0, 160.0, 9.5),
+            corner_radii: [0.0; 4],
+        }));
+        scene.push(white_text_with(
+            &mut text,
+            rect(2.0, 22.0, 150.0, 20.0),
+            "Clipped mid line",
+        ));
+        scene.push(Primitive::ClipEnd);
+        let rtl = TextParams::new("\u{1f600}\u{5e9}\u{5dc}\u{5d5}", TextStyle::new(14.0))
+            .wrap_width(Some(1.0));
+        let rtl = text.layout(&rtl).expect("layout");
+        assert!(rtl.buffer_x() != 0.0, "fixture must shift its RTL lines");
+        scene.push(Primitive::TextRun(TextPrimitive {
+            rect: rect(120.5, 40.25, 30.0, 80.0),
+            layout: ShapedText::new(Arc::new(rtl)),
+            color: GREEN,
+        }));
+        let code = code_layout(&mut text);
+        scene.rich_text(RichTextPrimitive {
+            rect: rect(1.75, 44.5, 110.0, 100.0),
+            layout: code,
+            default_color: quark::Color::rgba(200, 200, 200, 255),
+            span_colors: Arc::from([RED, BLUE]),
+        });
+
+        let render = |path: TextPath, text: &mut TextSystem| {
+            let mut renderer = gpu_renderer(w, h)?;
+            renderer.text_path = path;
+            Some(
+                renderer
+                    .render_to_rgba(&scene, text, w, h)
+                    .expect("offscreen render"),
+            )
+        };
+        let Some(positioned) = render(TextPath::Positioned, &mut text) else {
+            return;
+        };
+        let buffer = render(TextPath::Buffer, &mut text).expect("renderer");
+        let lit = positioned
+            .chunks_exact(4)
+            .filter(|p| p[..3] != [0, 0, 0])
+            .count();
+        assert!(lit > 500, "{lit} lit pixels: the fixture drew too little");
+        let differing = positioned
+            .chunks_exact(4)
+            .zip(buffer.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differing, 0, "pixels differ between text paths");
+    }
+
     // Regression: rich text drew one glyphon area per same-colored stretch of
     // each line, and glyphon walks the buffer's lines for every area, so
     // highlighted code cost grew with the square of its line count.
@@ -4156,7 +4390,7 @@ mod tests {
         let mut recolored = RecoloredBuffers::default();
         recolored.prepare([&flat.rich_texts[..]], &mut text);
         let areas = prepare_text_areas(&flat.texts, &flat.rich_texts, &recolored);
-        assert_eq!(areas.len(), 1);
+        assert_eq!(areas.count(), 1);
     }
 
     // Splitting at every kind transition would cost one draw and one text

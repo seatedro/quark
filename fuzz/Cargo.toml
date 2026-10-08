@@ -18,6 +18,10 @@ unicode-segmentation = "1.12"
 [workspace]
 members = ["."]
 
+# The root workspace's patch does not reach this one; quark-render needs it.
+[patch.crates-io]
+glyphon = { path = "../vendor/glyphon" }
+
 [[bin]]
 name = "text_layout"
 path = "fuzz_targets/text_layout.rs"

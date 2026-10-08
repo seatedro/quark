@@ -20,6 +20,10 @@ pub mod renderer;
 mod shaders;
 mod text;
 
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: quark_ui::test_alloc::Counting = quark_ui::test_alloc::Counting;
+
 /// Fonts are loaded and configured by quark-text; re-exported for callers
 /// that reach them through the renderer.
 pub use quark_text::fonts;

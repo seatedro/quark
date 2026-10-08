@@ -3,8 +3,6 @@
 //! when told, an in-memory clipboard, and a waker that raises a flag instead
 //! of waking a loop. [`crate::testing`] builds its public harness on it.
 
-use std::collections::BTreeSet;
-
 use super::*;
 
 /// How far a frame's own redraw request pushes the next frame: one 60 Hz
@@ -15,6 +13,13 @@ pub(crate) const FRAME_INTERVAL_MS: u64 = 16;
 /// Steps [`HeadlessRunner::run_until_idle`] takes before deciding the app
 /// never settles.
 const IDLE_STEP_LIMIT: usize = 10_000;
+
+/// Add a frame at `ms` to the sorted, deduplicated `frames`.
+fn schedule(frames: &mut Vec<u64>, ms: u64) {
+    if let Err(at) = frames.binary_search(&ms) {
+        frames.insert(at, ms);
+    }
+}
 
 pub(crate) struct HeadlessRunner {
     windows: WindowTable<WindowEntry>,
@@ -36,9 +41,11 @@ pub(crate) struct HeadlessRunner {
     pub(crate) accessibility_active: bool,
     now_ms: u64,
     last_frame_ms: Option<u64>,
-    /// Times frames were requested for, in ms since launch. One frame
-    /// serves every request due by then, as the real frame clock does.
-    frames: BTreeSet<u64>,
+    /// Times frames were requested for, in ms since launch, sorted and
+    /// deduplicated. One frame serves every request due by then, as the
+    /// real frame clock does. A vector so a frame that schedules the next
+    /// one reuses its capacity instead of allocating tree nodes.
+    frames: Vec<u64>,
     /// Window size in logical points.
     size: (f32, f32),
     pub(crate) input: HeadlessWindow,
@@ -73,7 +80,7 @@ impl HeadlessRunner {
             accessibility_active: true,
             now_ms: 0,
             last_frame_ms: None,
-            frames: BTreeSet::new(),
+            frames: Vec::new(),
             size,
             input: HeadlessWindow {
                 pointer: None,
@@ -124,19 +131,19 @@ impl HeadlessRunner {
     /// Resize the window, in points, and ask for a frame.
     pub(crate) fn resize(&mut self, size: (f32, f32)) {
         self.size = size;
-        self.frames.insert(self.now_ms);
+        schedule(&mut self.frames, self.now_ms);
     }
 
     /// Move the window to a display with another scale and ask for a frame.
     /// The pointer stays at the same point.
     pub(crate) fn set_scale_factor(&mut self, scale_factor: f64) {
         self.input.scale_factor = scale_factor;
-        self.frames.insert(self.now_ms);
+        schedule(&mut self.frames, self.now_ms);
     }
 
     /// Ask for a frame now, as the platform does when a window is exposed.
     pub(crate) fn request_frame(&mut self) {
-        self.frames.insert(self.now_ms);
+        schedule(&mut self.frames, self.now_ms);
     }
 
     fn event_cx(&mut self) -> EventContext<'_> {
@@ -183,13 +190,14 @@ impl HeadlessRunner {
         let flags = &mut self.flags;
         if !flags.redraw.is_empty() || std::mem::take(&mut flags.redraw_all) {
             flags.redraw.clear();
-            self.frames.insert(soonest(now));
+            schedule(&mut self.frames, soonest(now));
         }
-        for (_, at) in std::mem::take(&mut flags.frame_at) {
+        // Drain, not take: the request vector keeps its capacity.
+        for (_, at) in flags.frame_at.drain(..) {
             // Round up: a frame drawn early would see its animation unfinished.
             let since = at.saturating_duration_since(self.launch);
             let ms = since.as_nanos().div_ceil(1_000_000) as u64;
-            self.frames.insert(soonest(ms));
+            schedule(&mut self.frames, soonest(ms));
         }
         // The one window cannot close or open others; drop such requests.
         flags.close.clear();
@@ -198,7 +206,7 @@ impl HeadlessRunner {
     /// Draw a frame now, whether or not one was requested.
     pub(crate) fn draw<A: App>(&mut self, app: &mut A) -> Scene {
         let now = self.now_ms;
-        self.frames = self.frames.split_off(&(now + 1));
+        self.frames.retain(|&ms| ms > now);
         let delta = self
             .last_frame_ms
             .map_or(Duration::ZERO, |last| Duration::from_millis(now - last));
