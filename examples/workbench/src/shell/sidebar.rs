@@ -7,7 +7,6 @@
 
 use quark::view;
 use quark_app::ViewContext;
-use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::accessibility::AccessibilityRole;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::icons::lucide;
@@ -15,6 +14,7 @@ use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
 use quark_app::quark_ui::theme::Color;
 use quark_app::quark_ui::virtual_list::virtual_list_window;
+use quark_app::quark_ui::{Action as QAction, FocusId};
 use quark_components::{Button, ButtonSize, search_field};
 use std::rc::Rc;
 
@@ -129,7 +129,8 @@ impl State {
         self.scroll_to(self.scroll + lines as f32 * WHEEL_LINE_PX);
     }
 
-    /// The thread `step` rows after `from` among the visible threads.
+    /// The thread `step` threads after `from` among the listed ones,
+    /// clamped to the ends; the first listed when `from` is not listed.
     pub fn step(&self, _model: &Model, from: ThreadId, step: i32) -> Option<ThreadId> {
         let threads: Vec<ThreadId> = self
             .rows
@@ -139,9 +140,30 @@ impl State {
                 Row::Header(_) => None,
             })
             .collect();
-        let at = threads.iter().position(|t| *t == from)?;
-        let next = (at as i32 + step).clamp(0, threads.len() as i32 - 1);
+        let last = threads.len().checked_sub(1)? as i64;
+        let at = threads
+            .iter()
+            .position(|t| *t == from)
+            .map_or(-1, |i| i as i64);
+        let next = (at + i64::from(step)).clamp(0, last);
         threads.get(next as usize).copied()
+    }
+
+    /// Scroll just enough to show `thread`'s row.
+    pub fn reveal(&mut self, thread: ThreadId) {
+        let Some(i) = self
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Thread(id, _) if *id == thread))
+        else {
+            return;
+        };
+        let (top, bottom) = (i as f32 * ROW, (i + 1) as f32 * ROW);
+        if top < self.scroll {
+            self.scroll_to(top);
+        } else if bottom > self.scroll + self.viewport {
+            self.scroll_to(bottom - self.viewport);
+        }
     }
 
     /// Thread titles as listed (headers as `## name`), one per line; for
@@ -283,6 +305,11 @@ fn list(sidebar: &mut State, scx: &SurfaceCx, width: f32, list_h: f32) -> AnyEle
     let element = view! {
         <div w={width} h={list_h} class="flex-col px-2" scroll_y={sidebar.scroll}
              scroll_total={window.total_extent} on:scroll={scroll} track_focus={LIST}
+             focus_ring={LIST}
+             on_key={("up", QAction::from(Action::Step(-1)))}
+             on_key={("down", QAction::from(Action::Step(1)))}
+             on_key={("home", QAction::from(Action::Step(i32::MIN)))}
+             on_key={("end", QAction::from(Action::Step(i32::MAX)))}
              accessibility_role={AccessibilityRole::List} aria-label="Threads">
             <div class="w-full shrink-0" h={window.top_spacer} />
             for data in rows.iter() {
