@@ -885,8 +885,9 @@ impl ShapeSpan {
         let mut words = mem::take(&mut self.words);
 
         // Cache the shape words in reverse order so they can be popped for reuse in the same order.
+        // Words earlier spans had left over stay beneath them, so a span with more words than
+        // this one had reuses those before allocating.
         let mut cached_words = mem::take(&mut font_system.shape_buffer.words);
-        cached_words.clear();
         if line_rtl != level.is_rtl() {
             // Un-reverse previous words so the internal glyph counts match accurately when rewriting memory.
             cached_words.append(&mut words);
@@ -956,10 +957,14 @@ impl ShapeSpan {
         self.level = level;
         self.words = words;
 
-        // Cache buffer for future reuse.
+        // Cache buffer for future reuse, keeping the oldest spare words up to the cap.
+        cached_words.truncate(MAX_SPARE_WORDS);
         font_system.shape_buffer.words = cached_words;
     }
 }
+
+/// Most shape words, with their glyph storage, kept across lines for reuse.
+const MAX_SPARE_WORDS: usize = 256;
 
 /// A shaped line (or paragraph)
 #[derive(Clone, Debug)]

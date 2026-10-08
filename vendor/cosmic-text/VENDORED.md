@@ -95,6 +95,15 @@ own pull request.
   each class, and the stream budget in `quark-text/src/alloc_budget.rs`
   checks the skip.
 
+- Spare shape words (`src/shape.rs`): `ShapeSpan::build` keeps the words
+  earlier spans left over in `ShapeBuffer`, up to 256, beneath the span's
+  own, where it cleared them at the start of every span. A line reshaped
+  with more words than it had (a rebuilt layout taking longer text, a
+  `TextBlock` edit) took a new word and glyph vector for each extra word:
+  20 allocations for a twelve-word line refilled after a one-word one,
+  now 2. It takes the words shorter lines gave up instead. Remove once upstream
+  keeps spare words across spans; quark-text's
+  `block_edits_within_warmed_capacity_copy_no_text` budget checks it.
 - Storage measurement (`src/attrs.rs`, `src/shape.rs`,
   `src/buffer_line.rs`): `BufferLine::storage_bytes`,
   `ShapeLine::storage_bytes`, and `AttrsList::storage_bytes` report the
