@@ -35,7 +35,7 @@ pub mod offset;
 mod row;
 mod system;
 
-pub use cache::{LayoutCache, LayoutCacheStats, LayoutKey};
+pub use cache::{LayoutCache, LayoutCacheLimits, LayoutCacheMemory, LayoutCacheStats, LayoutKey};
 pub use cosmic_text;
 pub use epoch::{FontEpoch, TextSystemId};
 pub use fonts::{BundledFallback, FontRole, FontSettings, MONO_FAMILY, UI_FAMILY};

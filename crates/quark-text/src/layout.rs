@@ -565,6 +565,54 @@ impl TextLayout {
         self.glyphs.x.capacity()
     }
 
+    /// Bytes this layout keeps, at capacity: itself, its glyph, line, and
+    /// run columns, cosmic-text's shaped lines (with those kept for reuse),
+    /// and its text and spans.
+    pub fn storage_bytes(&self) -> usize {
+        fn cap<T>(column: &Vec<T>) -> usize {
+            column.capacity() * size_of::<T>()
+        }
+        let g = &self.glyphs;
+        let glyphs = cap(&g.x)
+            + cap(&g.advance)
+            + cap(&g.line)
+            + cap(&g.byte_start)
+            + cap(&g.byte_end)
+            + cap(&g.level)
+            + cap(&g.span)
+            + cap(&g.font_id)
+            + cap(&g.glyph_id)
+            + cap(&g.font_size)
+            + cap(&g.font_weight)
+            + cap(&g.flags)
+            + cap(&g.phys_x)
+            + cap(&g.phys_y);
+        let l = &self.lines;
+        let lines = cap(&l.byte_start)
+            + cap(&l.byte_end)
+            + cap(&l.top)
+            + cap(&l.height)
+            + cap(&l.baseline)
+            + cap(&l.width)
+            + cap(&l.glyph_start)
+            + cap(&l.glyph_end)
+            + cap(&l.rtl);
+        let r = &self.runs;
+        let runs =
+            cap(&r.line) + cap(&r.span) + cap(&r.rtl) + cap(&r.glyph_start) + cap(&r.glyph_end);
+        let buffer = cap(&self.buffer.lines)
+            + cap(&self.spare_lines)
+            + self
+                .buffer
+                .lines
+                .iter()
+                .chain(&self.spare_lines)
+                .map(BufferLine::storage_bytes)
+                .sum::<usize>();
+        let inputs = self.text.len() + self.spans.len() * size_of::<TextSpan>();
+        size_of::<Self>() + glyphs + lines + runs + buffer + inputs
+    }
+
     /// Takes `params`' text and spans, sharing their allocations.
     pub(crate) fn share_inputs(&mut self, params: &TextParams) {
         self.text = params.text.clone();

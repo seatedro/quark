@@ -60,14 +60,22 @@ fn text_id(text: &str) -> (usize, usize) {
     (text.as_ptr() as usize, text.len())
 }
 
+/// No slot: the end of the recency list.
+const NIL: u32 = u32::MAX;
+
 #[derive(Debug)]
-struct Entry {
+struct Slot {
+    key: LayoutKey,
     layout: Arc<TextLayout>,
+    /// [`TextLayout::storage_bytes`] when admitted; layouts are immutable.
+    bytes: usize,
     /// The scope that used the entry last, and that scope's frame then.
     scope: u64,
     last_used: u64,
-    /// [`LayoutCache::lookups`] at the last use, for evicting past the cap.
-    touched: u64,
+    /// Neighbors in recency order, toward the most recently used and away
+    /// from it.
+    newer: u32,
+    older: u32,
 }
 
 /// Frame-scoped layout cache. Call [`Self::begin_frame`] once per frame and
@@ -79,35 +87,45 @@ struct Entry {
 /// the frames of the window that last used an entry, so a window animating
 /// at full rate does not evict the layouts of a window that is not drawing.
 ///
-/// Past `max_entries` the least recently used entries are evicted even when
-/// they are within the idle horizon.
-///
-/// Evicted layouts nothing else holds are kept, up to 256 of them and about
-/// 8 MiB, and a miss rebuilds one in place, so fresh text reuses their
-/// storage instead of allocating its own. A layout still held when evicted
-/// is left untouched until its last holder drops it.
+/// Memory is bounded in bytes ([`LayoutCacheLimits`]). Past
+/// `history_bytes` of cached layouts, a miss evicts the least recently used
+/// layouts nothing else holds; past `max_entries` the least recently used
+/// are evicted whatever holds them. Evicted layouts nothing else holds are
+/// kept, up to `spare_bytes`, and a miss rebuilds one in place, so fresh
+/// text reuses their storage instead of allocating its own. A layout still
+/// held when evicted is left untouched until its last holder drops it.
+/// [`Self::memory`] reports where the bytes are.
 #[derive(Debug)]
 pub struct LayoutCache {
-    entries: HashMap<LayoutKey, Entry>,
-    /// Content hash of every cached layout's text, by its `Arc<str>`. The
-    /// entries keep those allocations alive, so an address found here holds
-    /// the same text, and a lookup with that `Arc` skips hashing the text.
+    /// Slot of each cached layout.
+    index: HashMap<LayoutKey, u32>,
+    slots: Vec<Slot>,
+    /// The most and least recently used slots.
+    newest: u32,
+    oldest: u32,
+    /// Content hash of every cached layout's text, by its address. The
+    /// entries keep those allocations alive and unchanged, so an address
+    /// found here holds the same text, and a lookup of that text (such as
+    /// [`TextLayout::query`] at another width) skips hashing it.
     content_hashes: HashMap<(usize, usize), u64>,
     /// Frame count of each scope that has begun a frame.
     scopes: HashMap<u64, u64>,
     scope: u64,
-    /// Lookups so far; stamps entries in recency order.
-    lookups: u64,
     max_idle_frames: u64,
     max_entries: usize,
+    limits: LayoutCacheLimits,
+    /// The slots' bytes.
+    cached_bytes: usize,
+    /// `cached_bytes` past which a miss evicts. Above the limit while
+    /// layouts held elsewhere alone exceed it, so that each miss does not
+    /// walk them all again.
+    evict_at: usize,
     /// The fonts the entries were shaped with. A lookup with another
     /// system, or after its fonts changed, clears the cache first.
     fonts: Option<FontEpoch>,
     stats: LayoutCacheStats,
     /// Evicted layouts, refilled by later misses.
     pool: LayoutPool,
-    /// Recency stamps, kept for [`Self::evict_least_recent`].
-    stamps: Vec<u64>,
 }
 
 /// Lifetime lookup counters. A miss is a lookup that shaped a new layout.
@@ -117,23 +135,67 @@ pub struct LayoutCacheStats {
     pub misses: u64,
 }
 
+/// How much memory a [`LayoutCache`] keeps, in bytes as
+/// [`TextLayout::storage_bytes`] counts them. Configurable starting points,
+/// not measured optima.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutCacheLimits {
+    /// Cached layouts. Past it, misses evict the least recently used ones
+    /// nothing else holds. Layouts held elsewhere stay cached, since
+    /// evicting them frees nothing, so they can keep the cache past this.
+    pub history_bytes: usize,
+    /// Evicted layouts kept for misses to refill.
+    pub spare_bytes: usize,
+}
+
+impl Default for LayoutCacheLimits {
+    fn default() -> Self {
+        Self {
+            history_bytes: 8 << 20,
+            spare_bytes: 8 << 20,
+        }
+    }
+}
+
+/// Where a [`LayoutCache`]'s memory is, in bytes as
+/// [`TextLayout::storage_bytes`] counts them; see [`LayoutCache::memory`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LayoutCacheMemory {
+    /// Cached layouts only the cache holds.
+    pub resident_bytes: usize,
+    /// Cached layouts something else holds too (a scene, a recording, an
+    /// element's state). Their holders keep them alive whatever the cache
+    /// does, so no limit bounds them.
+    pub pinned_bytes: usize,
+    /// Evicted layouts nothing else holds, kept for misses to refill.
+    pub free_bytes: usize,
+    /// Layouts evicted while held elsewhere, kept unchanged until released
+    /// and then refilled.
+    pub retired_bytes: usize,
+}
+
 /// Default [`LayoutCache`] entry cap.
 const DEFAULT_MAX_ENTRIES: usize = 8192;
 
 impl LayoutCache {
     pub fn new(max_idle_frames: u64) -> Self {
+        let limits = LayoutCacheLimits::default();
         Self {
-            entries: HashMap::new(),
+            index: HashMap::new(),
+            slots: Vec::new(),
+            newest: NIL,
+            oldest: NIL,
             content_hashes: HashMap::new(),
             scopes: HashMap::new(),
             scope: 0,
-            lookups: 0,
             max_idle_frames,
             max_entries: DEFAULT_MAX_ENTRIES,
+            limits,
+            cached_bytes: 0,
+            evict_at: limits.history_bytes,
             fonts: None,
             stats: LayoutCacheStats::default(),
-            pool: LayoutPool::default(),
-            stamps: Vec::new(),
+            pool: LayoutPool::new(limits.spare_bytes),
         }
     }
 
@@ -141,6 +203,19 @@ impl LayoutCache {
     pub fn with_max_entries(mut self, max_entries: usize) -> Self {
         self.max_entries = max_entries.max(1);
         self
+    }
+
+    /// Sets the memory limits; layouts already kept past them go at the
+    /// next miss.
+    pub fn with_limits(mut self, limits: LayoutCacheLimits) -> Self {
+        self.limits = limits;
+        self.evict_at = limits.history_bytes;
+        self.pool.max_free_bytes = limits.spare_bytes;
+        self
+    }
+
+    pub fn limits(&self) -> LayoutCacheLimits {
+        self.limits
     }
 
     /// Begins a frame of the default scope; see [`Self::begin_frame_for`].
@@ -169,40 +244,67 @@ impl LayoutCache {
 
     /// Returns the number of evicted entries.
     pub fn trim(&mut self) -> usize {
-        let (scopes, max_idle) = (&self.scopes, self.max_idle_frames);
-        let idle = self.entries.extract_if(|_, entry| {
-            !scopes
-                .get(&entry.scope)
-                .is_some_and(|frame| frame.wrapping_sub(entry.last_used) <= max_idle)
-        });
         let mut evicted = 0;
-        for (_, entry) in idle {
-            self.pool.recycle(entry.layout);
-            evicted += 1;
+        // Removing a slot moves the last one into its place, which this
+        // walk has already visited.
+        for i in (0..self.slots.len()).rev() {
+            let slot = &self.slots[i];
+            let live = self
+                .scopes
+                .get(&slot.scope)
+                .is_some_and(|frame| frame.wrapping_sub(slot.last_used) <= self.max_idle_frames);
+            if !live {
+                self.evict_slot(i as u32);
+                evicted += 1;
+            }
         }
-        if evicted > 0 {
-            self.reindex();
-        }
+        self.evict_at = self.limits.history_bytes;
         evicted
     }
 
     pub fn clear(&mut self) {
-        for (_, entry) in self.entries.drain() {
-            self.pool.recycle(entry.layout);
+        for slot in self.slots.drain(..) {
+            self.pool.recycle(slot.layout, slot.bytes);
         }
+        self.index.clear();
         self.content_hashes.clear();
+        self.newest = NIL;
+        self.oldest = NIL;
+        self.cached_bytes = 0;
+        self.evict_at = self.limits.history_bytes;
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.slots.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.slots.is_empty()
     }
 
     pub fn stats(&self) -> LayoutCacheStats {
         self.stats
+    }
+
+    /// Where the cache's memory is. Walks every entry, so it is for
+    /// diagnostics rather than every frame. Whether something else holds a
+    /// layout can change at any moment on other threads, so the split
+    /// between resident and pinned is a snapshot.
+    pub fn memory(&self) -> LayoutCacheMemory {
+        let mut memory = LayoutCacheMemory {
+            free_bytes: self.pool.free_bytes,
+            retired_bytes: self.pool.retired.iter().map(|spare| spare.bytes).sum(),
+            ..LayoutCacheMemory::default()
+        };
+        for slot in &self.slots {
+            let held = Arc::strong_count(&slot.layout) > 1 || Arc::weak_count(&slot.layout) > 0;
+            if held {
+                memory.pinned_bytes += slot.bytes;
+            } else {
+                memory.resident_bytes += slot.bytes;
+            }
+        }
+        memory
     }
 
     pub fn layout(
@@ -241,79 +343,209 @@ impl LayoutCache {
             None => hash_text(params.text),
         };
         let key = LayoutKey::with_content(params, content);
-        self.lookups += 1;
-        let (scope, frame, touched) = (self.scope, self.frame(), self.lookups);
-        if let Some(entry) = self.entries.get_mut(&key) {
+        let (scope, frame) = (self.scope, self.frame());
+        if let Some(&i) = self.index.get(&key) {
             // Guard against 64-bit hash collisions before trusting the hit.
-            if same_inputs(&entry.layout, params) {
-                entry.scope = scope;
-                entry.last_used = frame;
-                entry.touched = touched;
+            let slot = &mut self.slots[i as usize];
+            if same_inputs(&slot.layout, params) {
+                slot.scope = scope;
+                slot.last_used = frame;
+                let layout = slot.layout.clone();
+                self.make_newest(i);
                 self.stats.hits += 1;
-                return Ok(entry.layout.clone());
+                return Ok(layout);
             }
+            // A colliding entry gives way.
+            self.evict_slot(i);
         }
         self.stats.misses += 1;
         params.validate()?;
-        let mut layout = self
-            .pool
-            .take(params.text)
-            .unwrap_or_else(|| Arc::new(TextLayout::empty()));
-        let own = Arc::get_mut(&mut layout).expect("pooled layouts are unshared");
-        match shared {
-            Some(shared) => own.share_inputs(shared),
-            None => own.copy_inputs(params),
-        }
-        system.rebuild(own);
-        self.content_hashes
-            .insert(text_id(layout.text()), key.content);
-        let replaced = self.entries.insert(
+        let pooled = self.pool.take(params.text);
+        let layout = refill(pooled, |own| {
+            match shared {
+                Some(shared) => own.share_inputs(shared),
+                None => own.copy_inputs(params),
+            }
+            system.rebuild(own);
+        });
+        let bytes = layout.storage_bytes();
+        self.insert_slot(Slot {
             key,
-            Entry {
-                layout: layout.clone(),
-                scope,
-                last_used: frame,
-                touched,
-            },
-        );
-        if let Some(replaced) = replaced {
-            self.pool.recycle(replaced.layout);
-            // A colliding entry may have held the only reference to its text.
-            self.reindex();
-        }
-        if self.entries.len() > self.max_entries {
-            self.evict_least_recent();
-        }
+            layout: layout.clone(),
+            bytes,
+            scope,
+            last_used: frame,
+            newer: NIL,
+            older: NIL,
+        });
+        self.evict_past_limits();
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         Ok(layout)
     }
 
-    /// Evicts the least recently used entries down to three quarters of the
-    /// cap, so a working set at the cap does not evict on every miss.
-    fn evict_least_recent(&mut self) {
-        let keep = self.max_entries / 4 * 3;
-        let touched = &mut self.stamps;
-        touched.clear();
-        touched.extend(self.entries.values().map(|e| e.touched));
-        let cut = touched.len() - keep.max(1);
-        let (_, &mut threshold, _) = touched.select_nth_unstable(cut - 1);
-        for (_, entry) in self
-            .entries
-            .extract_if(|_, entry| entry.touched <= threshold)
-        {
-            self.pool.recycle(entry.layout);
+    /// Evicts past the entry cap, least recently used first, down to three
+    /// quarters of it; then past the byte limit, least recently used first
+    /// among layouts nothing else holds, down to three quarters of it. The
+    /// quarter of headroom keeps a working set at a limit from evicting on
+    /// every miss.
+    fn evict_past_limits(&mut self) {
+        if self.slots.len() > self.max_entries {
+            let keep = (self.max_entries / 4 * 3).max(1);
+            while self.slots.len() > keep {
+                self.evict_slot(self.oldest);
+            }
         }
-        self.reindex();
+        if self.cached_bytes <= self.evict_at {
+            return;
+        }
+        let target = self.limits.history_bytes / 4 * 3;
+        // A held layout moves to the newest end, so each slot is visited
+        // at most once.
+        for _ in 0..self.slots.len() {
+            if self.cached_bytes <= target {
+                break;
+            }
+            let i = self.oldest;
+            // Only `get_mut` proves nothing else holds it; see `LayoutPool`.
+            if Arc::get_mut(&mut self.slots[i as usize].layout).is_some() {
+                self.evict_slot(i);
+            } else {
+                // Its holder keeps it alive anyway, and it is likely on
+                // screen (a replayed recording looks nothing up).
+                self.make_newest(i);
+            }
+        }
+        self.evict_at =
+            (self.cached_bytes + self.limits.history_bytes / 4).max(self.limits.history_bytes);
     }
 
-    /// Rebuilds [`Self::content_hashes`] from the surviving entries, dropping
-    /// addresses whose text may have been freed and reused.
-    fn reindex(&mut self) {
-        self.content_hashes.clear();
-        for (key, entry) in &self.entries {
-            self.content_hashes
-                .insert(text_id(entry.layout.text()), key.content);
+    fn insert_slot(&mut self, mut slot: Slot) {
+        let i = self.slots.len() as u32;
+        slot.newer = NIL;
+        slot.older = self.newest;
+        match self.slots.get_mut(self.newest as usize) {
+            Some(newest) => newest.newer = i,
+            None => self.oldest = i,
+        }
+        self.newest = i;
+        self.index.insert(slot.key, i);
+        self.content_hashes
+            .insert(text_id(slot.layout.text()), slot.key.content);
+        self.cached_bytes += slot.bytes;
+        self.slots.push(slot);
+    }
+
+    /// Removes slot `i` into the pool, moving the last slot into its place.
+    fn evict_slot(&mut self, i: u32) {
+        self.unlink(i);
+        let slot = self.slots.swap_remove(i as usize);
+        self.index.remove(&slot.key);
+        self.content_hashes.remove(&text_id(slot.layout.text()));
+        self.cached_bytes -= slot.bytes;
+        let moved = self.slots.len() as u32;
+        if i != moved {
+            // The slot that was last is now `i`: repoint its neighbors and
+            // its key.
+            let (newer, older, key) = {
+                let slot = &self.slots[i as usize];
+                (slot.newer, slot.older, slot.key)
+            };
+            match self.slots.get_mut(newer as usize) {
+                Some(slot) => slot.older = i,
+                None => self.newest = i,
+            }
+            match self.slots.get_mut(older as usize) {
+                Some(slot) => slot.newer = i,
+                None => self.oldest = i,
+            }
+            self.index.insert(key, i);
+        }
+        self.pool.recycle(slot.layout, slot.bytes);
+    }
+
+    /// Takes slot `i` out of the recency list.
+    fn unlink(&mut self, i: u32) {
+        let (newer, older) = {
+            let slot = &self.slots[i as usize];
+            (slot.newer, slot.older)
+        };
+        match self.slots.get_mut(newer as usize) {
+            Some(slot) => slot.older = older,
+            None => self.newest = older,
+        }
+        match self.slots.get_mut(older as usize) {
+            Some(slot) => slot.newer = newer,
+            None => self.oldest = newer,
         }
     }
+
+    fn make_newest(&mut self, i: u32) {
+        if self.newest == i {
+            return;
+        }
+        self.unlink(i);
+        let slot = &mut self.slots[i as usize];
+        slot.newer = NIL;
+        slot.older = self.newest;
+        self.slots[self.newest as usize].newer = i;
+        self.newest = i;
+    }
+
+    /// Checks that the recency list orders every slot once, the key index
+    /// and byte total match the slots, and the pool is sound.
+    fn verify_integrity(&self) -> Result<(), CacheError> {
+        let mut seen = 0;
+        let (mut at, mut newer) = (self.newest, NIL);
+        while at != NIL {
+            let slot = self.slots.get(at as usize).ok_or(CacheError::Recency)?;
+            if slot.newer != newer || seen >= self.slots.len() {
+                return Err(CacheError::Recency);
+            }
+            seen += 1;
+            (newer, at) = (at, slot.older);
+        }
+        if seen != self.slots.len() || self.oldest != newer {
+            return Err(CacheError::Recency);
+        }
+        let indexed = self.index.len() == self.slots.len()
+            && (self.slots.iter().enumerate())
+                .all(|(i, slot)| self.index.get(&slot.key) == Some(&(i as u32)));
+        if !indexed {
+            return Err(CacheError::Index);
+        }
+        let bytes: usize = self.slots.iter().map(|slot| slot.bytes).sum();
+        if bytes != self.cached_bytes {
+            return Err(CacheError::Bytes {
+                counted: self.cached_bytes,
+                actual: bytes,
+            });
+        }
+        self.pool.verify_integrity().map_err(CacheError::Pool)
+    }
+}
+
+/// A [`LayoutCache`] invariant broken.
+#[derive(Debug, PartialEq)]
+enum CacheError {
+    Recency,
+    Index,
+    Bytes { counted: usize, actual: usize },
+    Pool(PoolError),
+}
+
+/// `pooled` refilled by `fill`, or a new layout when there is none or
+/// something reached it after all. Only [`Arc::get_mut`] decides that
+/// nothing else holds a layout.
+fn refill(pooled: Option<Arc<TextLayout>>, fill: impl FnOnce(&mut TextLayout)) -> Arc<TextLayout> {
+    if let Some(mut layout) = pooled
+        && let Some(own) = Arc::get_mut(&mut layout)
+    {
+        fill(own);
+        return layout;
+    }
+    let mut layout = TextLayout::empty();
+    fill(&mut layout);
+    Arc::new(layout)
 }
 
 /// Layouts the cache evicted, kept so a miss refills one instead of
@@ -328,27 +560,25 @@ impl LayoutCache {
 /// the counts read 1 and 0 while that thread holds the layout. `get_mut`
 /// locks out new `Weak`s while it checks, and once a layout is free nothing
 /// but the pool can reach it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LayoutPool {
-    free: Vec<Arc<TextLayout>>,
+    free: Vec<Spare>,
     /// Oldest first.
-    retired: VecDeque<Arc<TextLayout>>,
-    /// [`spare_bytes`] of the `free` layouts.
+    retired: VecDeque<Spare>,
+    /// The `free` layouts' bytes.
     free_bytes: usize,
+    max_free_bytes: usize,
+}
+
+/// A pooled layout and its [`TextLayout::storage_bytes`].
+#[derive(Debug)]
+struct Spare {
+    layout: Arc<TextLayout>,
+    bytes: usize,
 }
 
 /// Most layouts `free` and `retired` each keep.
 const POOL_CAP: usize = 256;
-
-/// Most storage the free layouts keep, by [`spare_bytes`].
-const MAX_FREE_BYTES: usize = 8 << 20;
-
-/// Storage a pooled layout keeps: its glyph capacity at a rough 256 bytes a
-/// glyph (its own columns plus cosmic-text's shaped and laid-out glyphs),
-/// and its text.
-fn spare_bytes(layout: &TextLayout) -> usize {
-    layout.glyph_capacity() * 256 + layout.text().len()
-}
 
 /// A [`LayoutPool`] invariant broken.
 #[derive(Debug, PartialEq)]
@@ -359,26 +589,35 @@ enum PoolError {
 }
 
 impl LayoutPool {
-    fn recycle(&mut self, mut layout: Arc<TextLayout>) {
+    fn new(max_free_bytes: usize) -> Self {
+        Self {
+            free: Vec::new(),
+            retired: VecDeque::new(),
+            free_bytes: 0,
+            max_free_bytes,
+        }
+    }
+
+    fn recycle(&mut self, mut layout: Arc<TextLayout>, bytes: usize) {
         if Arc::get_mut(&mut layout).is_some() {
-            self.free(layout);
+            self.free(Spare { layout, bytes });
         } else {
             // A holder that never lets go must not block later ones, so
             // the oldest retiree gives way.
             if self.retired.len() == POOL_CAP {
                 self.retired.pop_front();
             }
-            self.retired.push_back(layout);
+            self.retired.push_back(Spare { layout, bytes });
         }
         debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
 
-    /// Keeps unshared `layout` if it fits the caps, and drops it otherwise.
-    fn free(&mut self, layout: Arc<TextLayout>) {
-        let bytes = spare_bytes(&layout);
-        if self.free.len() < POOL_CAP && self.free_bytes + bytes <= MAX_FREE_BYTES {
-            self.free_bytes += bytes;
-            self.free.push(layout);
+    /// Keeps unshared `spare` if it fits the caps, and drops it otherwise.
+    fn free(&mut self, spare: Spare) {
+        let fits = self.free_bytes + spare.bytes <= self.max_free_bytes;
+        if self.free.len() < POOL_CAP && fits {
+            self.free_bytes += spare.bytes;
+            self.free.push(spare);
         }
     }
 
@@ -389,27 +628,27 @@ impl LayoutPool {
         // One turn of the queue: freed retirees leave it, the rest go
         // back in their order.
         for _ in 0..self.retired.len() {
-            let Some(mut layout) = self.retired.pop_front() else {
+            let Some(mut spare) = self.retired.pop_front() else {
                 break;
             };
-            if Arc::get_mut(&mut layout).is_some() {
-                self.free(layout);
+            if Arc::get_mut(&mut spare.layout).is_some() {
+                self.free(spare);
             } else {
-                self.retired.push_back(layout);
+                self.retired.push_back(spare);
             }
         }
         let chars = text.chars().count();
         let i = (0..self.free.len()).max_by_key(|&i| {
-            let layout = &self.free[i];
+            let layout = &self.free[i].layout;
             let room = layout.glyph_capacity();
             let fits = room >= chars;
             let snug = if fits { usize::MAX - room } else { room };
             (fits, layout.text().len() == text.len(), snug)
         })?;
-        let layout = self.free.swap_remove(i);
-        self.free_bytes -= spare_bytes(&layout);
+        let spare = self.free.swap_remove(i);
+        self.free_bytes -= spare.bytes;
         debug_assert_eq!(self.verify_integrity(), Ok(()));
-        Some(layout)
+        Some(spare.layout)
     }
 
     fn verify_integrity(&self) -> Result<(), PoolError> {
@@ -421,11 +660,11 @@ impl LayoutPool {
         }
         // Free layouts stay unshared once `get_mut` found them so, which
         // makes reading the counts here exact.
-        if let Some(index) = self.free.iter().position(|layout| !unshared(layout)) {
+        if let Some(index) = self.free.iter().position(|spare| !unshared(&spare.layout)) {
             return Err(PoolError::SharedFree { index });
         }
-        let actual = self.free.iter().map(|layout| spare_bytes(layout)).sum();
-        if self.free_bytes != actual || actual > MAX_FREE_BYTES {
+        let actual = self.free.iter().map(|spare| spare.bytes).sum();
+        if self.free_bytes != actual || actual > self.max_free_bytes {
             return Err(PoolError::FreeBytes {
                 counted: self.free_bytes,
                 actual,
@@ -605,6 +844,73 @@ mod tests {
             cache.layout_query(&mut sys, &query(other)).expect("layout");
             assert_eq!(held.text().as_ref(), text, "round {round}");
             assert_eq!(format!("{:?}", held.glyphs()), glyphs, "round {round}");
+        }
+    }
+
+    /// Row `i` of a stream of distinct lines, of varying length.
+    fn fresh_row(i: usize) -> String {
+        let words = ["amber", "brisk", "cedar", "dune", "ember", "fjord", "gale"];
+        let tail: Vec<&str> = (0..i % 9).map(|w| words[(i + w) % words.len()]).collect();
+        format!("row {i} {}", tail.join(" "))
+    }
+
+    // Idle eviction keeps everything used within the horizon, however much
+    // text that is; a stream of fresh rows must stay within the byte limits
+    // all the same, the evicted storage beyond the spare limit dropped.
+    #[test]
+    fn layout_cache_stream_of_fresh_text_stays_within_byte_limits() {
+        let mut sys = test_system();
+        let limits = LayoutCacheLimits {
+            history_bytes: 160 << 10,
+            spare_bytes: 48 << 10,
+        };
+        let mut cache = LayoutCache::new(240).with_limits(limits);
+        for i in 0..300 {
+            cache.begin_frame();
+            let row = fresh_row(i);
+            let layout = cache
+                .layout_query(&mut sys, &TextQuery::new(&row, TextStyle::new(14.0)))
+                .expect("layout");
+            assert_eq!(layout.text().as_ref(), row);
+            drop(layout);
+            let memory = cache.memory();
+            assert!(
+                memory.resident_bytes <= limits.history_bytes
+                    && memory.free_bytes <= limits.spare_bytes,
+                "row {i}: {memory:?}"
+            );
+        }
+        assert_eq!(cache.memory().pinned_bytes, 0);
+    }
+
+    // Layouts held elsewhere cost the cache nothing to keep and free
+    // nothing when evicted. They must be reported as pinned rather than
+    // resident, and stay unchanged while the byte limit evicts around them.
+    #[test]
+    fn layout_cache_reports_held_layouts_as_pinned_and_leaves_them_unchanged() {
+        let mut sys = test_system();
+        let mut cache = LayoutCache::new(240).with_limits(LayoutCacheLimits {
+            history_bytes: 128 << 10,
+            spare_bytes: 48 << 10,
+        });
+        let query = |text| TextQuery::new(text, TextStyle::new(14.0));
+        let rows: Vec<String> = (0..200).map(fresh_row).collect();
+        cache.begin_frame();
+        let held: Vec<_> = rows[..3]
+            .iter()
+            .map(|row| cache.layout_query(&mut sys, &query(row)).expect("layout"))
+            .collect();
+        let glyphs: Vec<String> = held.iter().map(|l| format!("{:?}", l.glyphs())).collect();
+        for row in &rows[3..] {
+            cache.begin_frame();
+            cache.layout_query(&mut sys, &query(row)).expect("layout");
+        }
+        let held_bytes: usize = held.iter().map(|layout| layout.storage_bytes()).sum();
+        let memory = cache.memory();
+        assert_eq!(memory.pinned_bytes, held_bytes, "{memory:?}");
+        for ((layout, row), glyphs) in held.iter().zip(&rows).zip(&glyphs) {
+            assert_eq!(layout.text().as_ref(), row.as_str());
+            assert_eq!(&format!("{:?}", layout.glyphs()), glyphs);
         }
     }
 

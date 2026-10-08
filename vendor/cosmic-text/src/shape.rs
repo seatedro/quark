@@ -988,6 +988,19 @@ impl VisualLine {
 }
 
 impl ShapeLine {
+    /// Heap bytes the line keeps: its spans, their words, and the words'
+    /// glyphs, at capacity.
+    pub fn storage_bytes(&self) -> usize {
+        let mut bytes = self.spans.capacity() * mem::size_of::<ShapeSpan>();
+        for span in &self.spans {
+            bytes += span.words.capacity() * mem::size_of::<ShapeWord>();
+            for word in &span.words {
+                bytes += word.glyphs.capacity() * mem::size_of::<ShapeGlyph>();
+            }
+        }
+        bytes
+    }
+
     /// Creates an empty line.
     ///
     /// The returned line is in an invalid state until [`Self::build_in_buffer`] is called.

@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::hash::{Hash, Hasher};
+use core::mem;
 use core::ops::Range;
 use rangemap::RangeMap;
 use smol_str::SmolStr;
@@ -431,6 +432,21 @@ pub struct AttrsList {
 }
 
 impl AttrsList {
+    /// Heap bytes the list keeps: its span map entries (at their size, not
+    /// the map's node layout) and every attribute set's features.
+    pub fn storage_bytes(&self) -> usize {
+        let entry = mem::size_of::<(Range<usize>, AttrsOwned)>();
+        let features = |attrs: &AttrsOwned| {
+            attrs.font_features.features.capacity() * mem::size_of::<Feature>()
+        };
+        features(&self.defaults)
+            + self
+                .spans
+                .iter()
+                .map(|(_, attrs)| entry + features(attrs))
+                .sum::<usize>()
+    }
+
     /// Create a new attributes list with a set of default [Attrs]
     pub fn new(defaults: &Attrs) -> Self {
         Self {

@@ -95,6 +95,15 @@ own pull request.
   each class, and the stream budget in `quark-text/src/alloc_budget.rs`
   checks the skip.
 
+- Storage measurement (`src/attrs.rs`, `src/shape.rs`,
+  `src/buffer_line.rs`): `BufferLine::storage_bytes`,
+  `ShapeLine::storage_bytes`, and `AttrsList::storage_bytes` report the
+  heap bytes a line keeps at capacity, including shaping and layout kept
+  unused for reuse. quark-text's layout cache bounds its memory in bytes
+  and cannot see those capacities otherwise. Remove once upstream reports
+  retained storage; the cache's byte-limit tests in
+  `quark-text/src/cache.rs` use it.
+
 ## Not patched: bidi analysis
 
 For lines the fast path above does not take, `ShapeLine::build` runs
