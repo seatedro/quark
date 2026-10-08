@@ -12,6 +12,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -104,8 +105,14 @@ impl Grammar {
         })
     }
 
-    /// Parses `source`, reading only `ranges` when there are any.
-    fn parse(&self, source: &str, ranges: &[ts::Range]) -> Option<ts::Tree> {
+    /// Parses `source`, reading only `ranges` when there are any; `None`
+    /// when the parse failed or `cancelled` stopped it.
+    fn parse(
+        &self,
+        source: &str,
+        ranges: &[ts::Range],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<ts::Tree> {
         PARSERS.with(|cache| {
             let mut cache = cache.borrow_mut();
             let parser = match cache.entry(self.id) {
@@ -118,15 +125,37 @@ impl Grammar {
             };
             // An empty list resets the parser to the whole document.
             parser.set_included_ranges(ranges).ok()?;
-            parser.parse(source, None)
+            let bytes = source.as_bytes();
+            let mut progress = |_: &ts::ParseState| stop_if(cancelled());
+            let options = ts::ParseOptions::new().progress_callback(&mut progress);
+            let tree = parser.parse_with_options(
+                &mut |i, _| bytes.get(i..).unwrap_or_default(),
+                None,
+                Some(options),
+            );
+            if tree.is_none() {
+                // Unless reset, a stopped parse would resume where it left
+                // off on the next call, which parses other text.
+                parser.reset();
+            }
+            tree
         })
     }
 
     /// `(start, end, kind, pattern)` for every capture with a highlight
     /// kind, and the ranges of `@none` captures.
-    fn collect_spans(&self, tree: &ts::Tree, source: &str) -> (Vec<Captured>, Vec<(usize, usize)>) {
+    /// `cancelled` stops the query early, leaving the lists partial.
+    fn collect_spans(
+        &self,
+        tree: &ts::Tree,
+        source: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> (Vec<Captured>, Vec<(usize, usize)>) {
         let mut cursor = ts::QueryCursor::new();
-        let mut captures = cursor.captures(&self.query, tree.root_node(), source.as_bytes());
+        let mut progress = |_: &ts::QueryCursorState| stop_if(cancelled());
+        let options = ts::QueryCursorOptions::new().progress_callback(&mut progress);
+        let mut captures =
+            cursor.captures_with_options(&self.query, tree.root_node(), source.as_bytes(), options);
         let (mut raw, mut clears) = (Vec::new(), Vec::new());
         while let Some((query_match, capture_index)) = captures.next() {
             let capture = query_match.captures[*capture_index];
@@ -208,23 +237,39 @@ impl Injections {
         })
     }
 
-    /// The embedded documents in `tree`: each one's language and its
-    /// ranges, clipped to `parent` (the ranges of the layer `tree` parsed).
+    /// Calls `visit` with each embedded document in `tree`: its language
+    /// and its ranges, clipped to `parent` (the ranges of the layer `tree`
+    /// parsed). Documents arrive as they are found, in match order, then
+    /// the combined ones in order of first match; `visit` breaks to end the
+    /// search once no later document could become a layer.
+    ///
+    /// Each match, and each content node's child walked to cut it out,
+    /// spends one unit of `budget`: `false` when the budget ran out first.
+    /// `cancelled` ends the search early.
     fn find(
         &self,
         tree: &ts::Tree,
         source: &str,
         parent: &[ts::Range],
-    ) -> Vec<(Target, Vec<ts::Range>)> {
+        budget: &mut usize,
+        cancelled: &dyn Fn() -> bool,
+        visit: &mut dyn FnMut(Target, Vec<ts::Range>) -> ControlFlow<()>,
+    ) -> bool {
         let Some(content) = self.content else {
-            return Vec::new();
+            return true;
         };
-        let mut found = Vec::new();
         // One document per pattern and language, in order of first match.
         let mut combined: Vec<(usize, Target, Vec<ts::Node<'_>>)> = Vec::new();
         let mut cursor = ts::QueryCursor::new();
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source.as_bytes());
+        let mut progress = |_: &ts::QueryCursorState| stop_if(cancelled());
+        let options = ts::QueryCursorOptions::new().progress_callback(&mut progress);
+        let mut matches =
+            cursor.matches_with_options(&self.query, tree.root_node(), source.as_bytes(), options);
         while let Some(found_match) = matches.next() {
+            let Some(left) = budget.checked_sub(1) else {
+                return false;
+            };
+            *budget = left;
             let pattern = &self.patterns[found_match.pattern_index];
             let mut nodes = Vec::new();
             let mut named = None;
@@ -259,19 +304,26 @@ impl Injections {
                     Some((_, _, all)) => all.extend(nodes),
                     None => combined.push((index, target, nodes)),
                 }
-            } else {
-                found.push((
-                    target,
-                    content_ranges(&nodes, pattern.include_children, parent),
-                ));
+                continue;
+            }
+            let Some(ranges) = content_ranges(&nodes, pattern.include_children, parent, budget)
+            else {
+                return false;
+            };
+            if !ranges.is_empty() && visit(target, ranges).is_break() {
+                return true;
             }
         }
         for (index, target, nodes) in combined {
             let include_children = self.patterns[index].include_children;
-            found.push((target, content_ranges(&nodes, include_children, parent)));
+            let Some(ranges) = content_ranges(&nodes, include_children, parent, budget) else {
+                return false;
+            };
+            if !ranges.is_empty() && visit(target, ranges).is_break() {
+                return true;
+            }
         }
-        found.retain(|(_, ranges)| !ranges.is_empty());
-        found
+        true
     }
 }
 
@@ -284,12 +336,14 @@ enum Target {
 }
 
 /// The ranges of `nodes` (without their children's unless
-/// `include_children`), sorted, merged, and clipped to `parent`.
+/// `include_children`), sorted, merged, and clipped to `parent`. Each
+/// child walked spends one unit of `budget`; `None` when it runs out.
 fn content_ranges(
     nodes: &[ts::Node<'_>],
     include_children: bool,
     parent: &[ts::Range],
-) -> Vec<ts::Range> {
+    budget: &mut usize,
+) -> Option<Vec<ts::Range>> {
     let mut own = Vec::new();
     for node in nodes {
         if include_children {
@@ -303,6 +357,7 @@ fn content_ranges(
         // quote's `> ` continuation) are not.
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
+            *budget = budget.checked_sub(1)?;
             if child.start_byte() > at.0 {
                 own.push(range(at, (child.start_byte(), child.start_position())));
             }
@@ -328,7 +383,7 @@ fn content_ranges(
             _ => merged.push(next),
         }
     }
-    intersect(&merged, parent)
+    Some(intersect(&merged, parent))
 }
 
 fn range(start: (usize, ts::Point), end: (usize, ts::Point)) -> ts::Range {
@@ -363,7 +418,7 @@ fn intersect(a: &[ts::Range], b: &[ts::Range]) -> Vec<ts::Range> {
 }
 
 /// Bounds on the embedded layers of one highlight, so a deeply nested or
-/// adversarial source costs a bounded amount of parsing.
+/// adversarial source costs a bounded amount of parsing and searching.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Limits {
     /// Nesting below the host layer: 1 allows embedded languages but not
@@ -373,15 +428,24 @@ pub(crate) struct Limits {
     pub(crate) layers: usize,
     /// Bytes parsed across embedded layers.
     pub(crate) bytes: usize,
+    /// Injection query matches, plus content children walked, across all
+    /// layers. The other limits count only regions that become layers;
+    /// this one also bounds regions that never do (languages without a
+    /// grammar, repeats).
+    pub(crate) discovery: usize,
 }
 
 impl Limits {
     pub(crate) fn for_source(len: usize) -> Self {
+        let bytes = len.saturating_mul(4).saturating_add(64 << 10);
         Self {
             depth: 8,
             // One per paragraph of a long Markdown document.
             layers: 4096,
-            bytes: len.saturating_mul(4).saturating_add(64 << 10),
+            bytes,
+            // A match or child per node, and nodes are at most about one
+            // per byte parsed.
+            discovery: bytes,
         }
     }
 }
@@ -395,6 +459,16 @@ pub(crate) struct Highlights {
     pub(crate) unresolved: Vec<LanguageId>,
     /// A limit left embedded regions unparsed.
     pub(crate) truncated: bool,
+    pub(crate) work: Work,
+}
+
+/// What a highlight spent against its [`Limits`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Work {
+    /// Embedded layers queued for parsing.
+    pub(crate) layers: usize,
+    /// Units of [`Limits::discovery`] spent.
+    pub(crate) discovered: usize,
 }
 
 /// One parse: a grammar over some ranges of the source.
@@ -416,11 +490,15 @@ type Captured = (usize, usize, HighlightKind, usize);
 /// looking embedded languages up with `resolve` (which returns shared
 /// handles, so no store lock is held while parsing). Deeper layers take
 /// precedence over the host spans they overlap.
+///
+/// `cancelled` is polled while parsing and searching; once it returns
+/// true the highlight stops and returns nothing.
 pub(crate) fn highlight(
     root: &Arc<Grammar>,
     source: &str,
     limits: Limits,
     resolve: &mut dyn FnMut(&LanguageId) -> Tag,
+    cancelled: &dyn Fn() -> bool,
 ) -> Highlights {
     let mut out = Highlights::default();
     if source.is_empty() {
@@ -438,20 +516,24 @@ pub(crate) fn highlight(
         ranges: vec![whole],
         depth: 0,
     }]);
-    let (mut layers, mut bytes) = (0usize, 0usize);
+    let mut bytes = 0usize;
+    let mut budget = limits.discovery;
     let mut merged: Vec<Raw> = Vec::new();
     while let Some(layer) = queue.pop_front() {
+        if cancelled() {
+            return Highlights::default();
+        }
         let included = if layer.depth == 0 {
             &[][..]
         } else {
             &layer.ranges
         };
-        let Some(tree) = layer.grammar.parse(source, included) else {
+        let Some(tree) = layer.grammar.parse(source, included, cancelled) else {
             continue;
         };
         // A node spanning several ranges (an embedded document's root) also
         // covers the host text between them, which stays the host's.
-        let (captured, clears) = layer.grammar.collect_spans(&tree, source);
+        let (captured, clears) = layer.grammar.collect_spans(&tree, source, cancelled);
         let spans = clip(subtract(compact_spans(captured), &clears), &layer.ranges);
         // Breadth first, so layers arrive shallowest first and each deeper
         // one overrides what it covers.
@@ -459,53 +541,88 @@ pub(crate) fn highlight(
         let Some(injections) = &layer.grammar.injections else {
             continue;
         };
-        for (target, ranges) in injections.find(&tree, source, &layer.ranges) {
-            if layer.depth >= limits.depth {
-                out.truncated = true;
-                break;
-            }
-            let grammar = match target {
-                Target::Itself => layer.grammar.clone(),
-                Target::Parent => match &layer.parent {
-                    Some(parent) => parent.clone(),
-                    None => continue,
-                },
-                Target::Named(language) => match resolve(&language) {
-                    Tag::Ready(grammar) => grammar,
-                    Tag::Pending => {
-                        if !out.unresolved.contains(&language) {
-                            out.unresolved.push(language);
+        // Past these limits no region of this layer can become a layer, so
+        // the search only has to find out whether there is one to report,
+        // and once that is reported there is nothing left to look for.
+        let full = layer.depth >= limits.depth || out.work.layers >= limits.layers || budget == 0;
+        if full && out.truncated {
+            continue;
+        }
+        let complete = injections.find(
+            &tree,
+            source,
+            &layer.ranges,
+            &mut budget,
+            cancelled,
+            &mut |target, ranges| {
+                if layer.depth >= limits.depth {
+                    out.truncated = true;
+                    return ControlFlow::Break(());
+                }
+                // Budgets come before resolving, which can load a pack or
+                // start a download. A region past them counts as truncated
+                // even when its grammar would turn out to be missing.
+                let len: usize = ranges.iter().map(|r| r.end_byte - r.start_byte).sum();
+                if out.work.layers >= limits.layers {
+                    out.truncated = true;
+                    return ControlFlow::Break(());
+                }
+                if bytes.saturating_add(len) > limits.bytes {
+                    out.truncated = true;
+                    // A later, smaller region may still fit.
+                    return ControlFlow::Continue(());
+                }
+                let grammar = match target {
+                    Target::Itself => layer.grammar.clone(),
+                    Target::Parent => match &layer.parent {
+                        Some(parent) => parent.clone(),
+                        None => return ControlFlow::Continue(()),
+                    },
+                    Target::Named(language) => match resolve(&language) {
+                        Tag::Ready(grammar) => grammar,
+                        Tag::Pending => {
+                            if !out.unresolved.contains(&language) {
+                                out.unresolved.push(language);
+                            }
+                            return ControlFlow::Continue(());
                         }
-                        continue;
-                    }
-                    Tag::Unavailable => continue,
-                },
-            };
-            let key = (
-                grammar.id,
-                ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect(),
-            );
-            if seen.contains(&key) {
-                continue;
-            }
-            let len: usize = ranges.iter().map(|r| r.end_byte - r.start_byte).sum();
-            if layers >= limits.layers || bytes.saturating_add(len) > limits.bytes {
-                out.truncated = true;
-                continue;
-            }
-            seen.insert(key);
-            layers += 1;
-            bytes += len;
-            queue.push_back(Layer {
-                grammar,
-                parent: Some(layer.grammar.clone()),
-                ranges,
-                depth: layer.depth + 1,
-            });
+                        Tag::Unavailable => return ControlFlow::Continue(()),
+                    },
+                };
+                let key = (
+                    grammar.id,
+                    ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect(),
+                );
+                if !seen.insert(key) {
+                    return ControlFlow::Continue(());
+                }
+                out.work.layers += 1;
+                bytes += len;
+                queue.push_back(Layer {
+                    grammar,
+                    parent: Some(layer.grammar.clone()),
+                    ranges,
+                    depth: layer.depth + 1,
+                });
+                ControlFlow::Continue(())
+            },
+        );
+        if !complete {
+            out.truncated = true;
         }
     }
+    out.work.discovered = limits.discovery - budget;
     out.spans = finish(merged, source);
     out
+}
+
+/// Stops a tree-sitter parse or query when `cancelled`.
+fn stop_if(cancelled: bool) -> ControlFlow<()> {
+    if cancelled {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
 }
 
 /// The row and byte column just past the end of `source`.
