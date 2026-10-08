@@ -39,7 +39,14 @@ jobs:
         with:
           version: 0.16.0
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # kache caches each rustc call by its inputs, workspace crates
+      # included. Only master saves, so branch runs read master's cache
+      # without evicting it from the repo's 10 GB budget.
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          cache-key-prefix: kache-check
+          save-cache: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci/kache' }}
+          pr-comment: false
 
       - name: Format
         run: cargo fmt --all --check
@@ -117,7 +124,14 @@ jobs:
         with:
           version: 0.16.0
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # kache caches each rustc call by its inputs, workspace crates
+      # included. Only master saves, so branch runs read master's cache
+      # without evicting it from the repo's 10 GB budget.
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          cache-key-prefix: kache-${{ matrix.os }}
+          save-cache: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci/kache' }}
+          pr-comment: false
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -198,6 +212,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+        with:
           workspaces: fuzz
 
       # The prebuilt cargo-fuzz binary is a musl build and defaults to that
@@ -238,6 +254,8 @@ jobs:
           cargo miri setup
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # quark only: quark-text has no unsafe of its own, and shaping the
       # vendored fonts under Miri takes ~16 s per layout (its properties take

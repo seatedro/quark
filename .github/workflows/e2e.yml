@@ -31,9 +31,14 @@ jobs:
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # kache caches each rustc call by its inputs, workspace crates
+      # included. Only master saves, so branch runs read master's cache
+      # without evicting it from the repo's 10 GB budget.
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
-          key: e2e
+          cache-key-prefix: kache-e2e
+          save-cache: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci/kache' }}
+          pr-comment: false
 
       # Debug builds (opt-level 1): quicker to build, and debug assertions
       # turn integrity violations into spec failures.
