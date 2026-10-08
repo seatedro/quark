@@ -494,8 +494,8 @@ pub struct InputFrame {
 pub struct Delivery {
     pub node: Option<usize>,
     pub actions: Vec<Action>,
-    /// The event moved a [`ScrollHandle`] (or its scrollbar state), so the
-    /// window needs a repaint even without actions.
+    /// The event moved a [`ScrollHandle`] (or its scrollbar state) or a
+    /// drag preview, so the window needs a repaint even without actions.
     pub redraw: bool,
 }
 
@@ -506,6 +506,17 @@ struct Capture {
     /// The node in the current frame, if it is still there.
     node: Option<usize>,
     drag: Box<dyn DragHandler>,
+    press: (f32, f32),
+    pointer: (f32, f32),
+    /// The pointer has gone [`DRAG_PREVIEW_THRESHOLD`] from the press.
+    moved: bool,
+}
+
+impl Capture {
+    /// Whether the drag's preview is on screen.
+    fn shows_preview(&self) -> bool {
+        self.moved && self.drag.preview().is_some()
+    }
 }
 
 /// Routes pointer, wheel, and key input through the last painted frame.
@@ -607,6 +618,9 @@ impl InputRouter {
                 identity: node_identities(&self.frame.semantic)[node],
                 node: Some(node),
                 drag,
+                press: (x, y),
+                pointer: (x, y),
+                moved: false,
             });
             return Delivery {
                 node: Some(node),
@@ -666,15 +680,21 @@ impl InputRouter {
         }
     }
 
-    /// Moves go to the capturing drag, wherever the pointer is.
+    /// Moves go to the capturing drag, wherever the pointer is. A drag
+    /// showing a preview redraws on every move, so the preview follows.
     pub fn pointer_move(&mut self, x: f32, y: f32) -> Delivery {
         let epoch = scroll_epoch();
         match &mut self.capture {
-            Some(capture) => Delivery {
-                node: capture.node,
-                actions: capture.drag.on_move(x, y),
-                redraw: scroll_epoch() != epoch,
-            },
+            Some(capture) => {
+                capture.pointer = (x, y);
+                let (dx, dy) = (x - capture.press.0, y - capture.press.1);
+                capture.moved |= dx.hypot(dy) >= DRAG_PREVIEW_THRESHOLD;
+                Delivery {
+                    node: capture.node,
+                    actions: capture.drag.on_move(x, y),
+                    redraw: scroll_epoch() != epoch || capture.shows_preview(),
+                }
+            }
             None => Delivery::default(),
         }
     }
@@ -686,19 +706,39 @@ impl InputRouter {
             Some(mut capture) => Delivery {
                 node: capture.node,
                 actions: capture.drag.on_release().actions,
-                redraw: scroll_epoch() != epoch,
+                redraw: scroll_epoch() != epoch || capture.shows_preview(),
             },
             None => Delivery::default(),
         }
     }
 
-    /// End pointer capture without a release from the platform, which will
-    /// not send one once the window has lost focus. The drag still gets its
-    /// release, so handlers that act while the button is held (selection
-    /// autoscroll) stop.
+    /// End pointer capture without a release: the platform sends none once
+    /// the window has lost focus, the app cancelled the drag, or a native
+    /// drag took the pointer. The drag gets [`DragHandler::on_cancel`], never
+    /// its release, so cancelling commits no drop.
     pub fn cancel_pointer(&mut self) -> Delivery {
         self.wheel_lines = [0.0; 2];
-        self.pointer_up()
+        let epoch = scroll_epoch();
+        match self.capture.take() {
+            Some(mut capture) => Delivery {
+                node: capture.node,
+                actions: capture.drag.on_cancel(),
+                redraw: scroll_epoch() != epoch || capture.shows_preview(),
+            },
+            None => Delivery::default(),
+        }
+    }
+
+    /// The drag's preview and the window point its top left goes at,
+    /// while one shows: the pointer has moved [`DRAG_PREVIEW_THRESHOLD`]
+    /// from the press and the drag's source is still in `next`, the frame
+    /// being painted.
+    pub fn drag_preview(&self, next: &InputFrame) -> Option<(&DragPreview, (f32, f32))> {
+        let capture = self.capture.as_ref().filter(|c| c.moved)?;
+        let preview = capture.drag.preview()?;
+        node_identities(&next.semantic)
+            .contains(&capture.identity)
+            .then(|| (preview, preview.origin_at(capture.pointer)))
     }
 
     /// Vertical wheel motion; see [`Self::scroll_wheel`].
