@@ -778,11 +778,9 @@ mod verification {
         f32::from(kani::any::<u8>() % 64)
     }
 
-    /// Three panes with the flex pane anywhere, arbitrary constraints and
+    /// Three panes with the flex pane at `flex`, arbitrary constraints and
     /// stored sizes, and any panes other than `pane` collapsed.
-    fn any_state(pane: usize) -> SplitState {
-        let flex: usize = kani::any();
-        kani::assume(flex < N && flex != pane);
+    fn any_state(pane: usize, flex: usize) -> SplitState {
         let mut panes = [Pane::fixed("", 0.0); N];
         let mut sizes = [0.0; N];
         let mut collapsed = [false; N];
@@ -807,15 +805,9 @@ mod verification {
         state
     }
 
-    #[kani::proof]
-    #[kani::unwind(5)]
-    // CaDiCaL, the default, ran past the 30 minute job on this float work.
-    #[kani::solver(kissat)]
-    fn split_resize_pushes_far_panes_and_keeps_minimums() {
-        let pane: usize = kani::any();
-        kani::assume(pane < N);
-        let mut state = any_state(pane);
-        let flex = state.flex;
+    /// Resizing `pane` with the flex pane at `flex`.
+    fn check(pane: usize, flex: usize) {
+        let mut state = any_state(pane, flex);
         let extent = f32::from(kani::any::<u8>());
         let mins: f32 = state.panes.iter().map(|p| p.min).sum();
         // Room for every minimum and divider; below that no layout can
@@ -856,6 +848,51 @@ mod verification {
                 assert!(r[i] == state.panes[i].min);
             }
         }
+    }
+
+    // One harness per placement of the resized and flex panes: with both
+    // indices symbolic the proof ran past the 30 minute job under CaDiCaL
+    // and under kissat.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane0_flex1() {
+        check(0, 1);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane0_flex2() {
+        check(0, 2);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane1_flex0() {
+        check(1, 0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane1_flex2() {
+        check(1, 2);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane2_flex0() {
+        check(2, 0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::solver(kissat)]
+    fn split_resize_pane2_flex1() {
+        check(2, 1);
     }
 }
 

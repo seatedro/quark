@@ -470,6 +470,8 @@ mod verification {
 
     #[kani::proof]
     #[kani::unwind(6)]
+    // Kissat took 607 s where the default CaDiCaL took 1133 s.
+    #[kani::solver(kissat)]
     fn push_divider_keeps_minimums_and_drains_nearest_first() {
         check(0);
         check(1);

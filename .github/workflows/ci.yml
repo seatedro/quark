@@ -275,9 +275,15 @@ jobs:
           - name: quark-app
             args: -p quark-app
           - name: quark-components
-            args: "-p quark-components --harness list_nav:: --harness pane_tree:: --harness slider::"
-          - name: quark-components split
-            args: "-p quark-components --harness split::"
+            args: "-p quark-components --harness list_nav:: --harness slider::"
+          - name: quark-components pane_tree
+            args: "-p quark-components --harness pane_tree::"
+          - name: quark-components split 0
+            args: "-p quark-components --harness split_resize_pane0"
+          - name: quark-components split 1
+            args: "-p quark-components --harness split_resize_pane1"
+          - name: quark-components split 2
+            args: "-p quark-components --harness split_resize_pane2"
           - name: quark-diff
             args: -p quark-diff
     steps:

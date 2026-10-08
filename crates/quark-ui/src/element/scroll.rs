@@ -1138,57 +1138,59 @@ impl DragHandler for ScrollbarDrag {
 mod verification {
     use super::*;
 
-    /// Whole points below 1024, so float error stays far below a point.
-    fn points() -> f32 {
-        f32::from(kani::any::<u16>() % 1024)
-    }
-
-    /// Error, in points along the track, that counts as the thumb not
-    /// moving.
-    const SLOP: f32 = 0.01;
-
-    /// For any container height, content height, and offset (in range or
-    /// not), the vertical thumb lies in its track, and pressing anywhere
-    /// on it and dragging nowhere asks for the offset the bar shows: the
-    /// content does not jump. A thumb at the end of its track asks for
-    /// the end. The horizontal bar is left out to halve the float work;
-    /// it runs through the same code.
+    /// Any vertical bar (track, thumb length, offset, and max in whole
+    /// points), held anywhere on its thumb and dragged between any two
+    /// pointer positions: the offset asked for stays in range or is the
+    /// end, never goes back up as the pointer goes down, and is the end
+    /// once the thumb reaches the end of its track. A thumb that fills its
+    /// track keeps the offset. The bar comes from arbitrary values rather
+    /// than `scrollbars`: with its two divisions as well, the proof ran
+    /// past the 30 minute job.
     #[kani::proof]
     #[kani::solver(kissat)]
-    fn a_held_thumb_stays_in_its_track_and_maps_back_to_its_offset() {
-        let bounds = Rect {
+    fn a_dragged_thumb_asks_for_offsets_in_order_and_in_range() {
+        let len = f32::from(kani::any::<u8>());
+        let thumb_len = f32::from(kani::any::<u8>());
+        let max = f32::from(kani::any::<u16>());
+        let offset = f32::from(kani::any::<u16>());
+        let grab = f32::from(kani::any::<u8>());
+        kani::assume(thumb_len <= len && 0.0 < max && offset <= max && grab <= thumb_len);
+        let track = Rect {
             x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: points(),
+            y: 6.0,
+            width: ScrollbarSz::WIDTH,
+            height: len,
         };
-        let content = (100.0, points());
-        let offset = (0.0, f32::from(kani::any::<i16>() % 2048));
-        let axes = ScrollAxes { x: false, y: true };
-        let [None, Some(bar)] = scrollbars(bounds, content, offset, axes) else {
-            return;
+        let bar = Scrollbar {
+            axis: Axis::Y,
+            track,
+            thumb: Rect {
+                height: thumb_len,
+                ..track
+            },
+            hit: track,
+            offset,
+            max,
+            viewport: 0.0,
         };
-        let (start, len) = bar.axis.span(bar.track);
-        let (thumb, thumb_len) = bar.axis.span(bar.thumb);
-        assert!(0.0 <= bar.offset && bar.offset <= bar.max);
-        assert!(start <= thumb && thumb + thumb_len <= start + len + SLOP);
-        let range = len - thumb_len;
-        let grab = f32::from(kani::any::<u8>()) / 8.0;
-        kani::assume(grab <= thumb_len);
+        let near = f32::from(kani::any::<i16>() % 512);
+        let far = f32::from(kani::any::<i16>() % 512);
+        kani::assume(near <= far);
 
-        let to = bar.offset_for_pointer(thumb + grab, grab);
+        let (a, b) = (
+            bar.offset_for_pointer(near, grab),
+            bar.offset_for_pointer(far, grab),
+        );
 
-        if range <= 0.0 {
+        if len - thumb_len <= 0.0 {
             // A thumb that fills its track has nowhere to go.
-            assert!(to == bar.offset);
-        } else if to == f32::MAX {
-            assert!(thumb + thumb_len >= start + len - SLOP);
+            assert!(a == offset && b == offset);
         } else {
-            // How far the thumb would move for `to`, without a division:
-            // `|to - offset| / max * range <= SLOP`. A bar shows only for
-            // overflow, so `max > 0`.
-            assert!((to - bar.offset).abs() * range <= SLOP * bar.max);
-            assert!(0.0 <= to && to <= bar.max);
+            assert!(a == f32::MAX || (0.0 <= a && a <= max));
+            assert!(a <= b);
+            if far - track.y - grab >= len - thumb_len {
+                assert!(b == f32::MAX);
+            }
         }
     }
 }

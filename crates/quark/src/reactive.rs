@@ -675,46 +675,72 @@ mod verification {
 
     const OPS: usize = 5;
 
-    /// Any five creates and disposes, where a dispose may name any handle
-    /// made so far (live or already disposed): every live handle reads
-    /// its own value, and a disposed one never resolves again, even once
-    /// a later signal reuses its slot. Generation wraparound after 2^32
-    /// reuses of one slot is beyond this bound.
-    ///
-    /// Values are read from the slot rather than through `read`: that path
-    /// reaches memo recompute and its thread local, whose destructor
-    /// machinery uses an intrinsic Kani 0.68 cannot compile.
+    /// Every handle made so far, and whether it is still live.
+    struct Model {
+        made: [Option<Signal<u8>>; OPS],
+        alive: [bool; OPS],
+    }
+
+    /// Step `step`: create a signal holding `step`, or dispose any handle
+    /// made so far, live or already disposed.
+    fn any_op(store: &SignalStore, model: &mut Model, step: usize) {
+        if kani::any() {
+            model.made[step] = Some(store.create(step as u8));
+            model.alive[step] = true;
+        } else {
+            let j: usize = kani::any();
+            kani::assume(j < step);
+            if let Some(signal) = model.made[j] {
+                store.dispose(signal);
+                model.alive[j] = false;
+            }
+        }
+    }
+
+    /// Handle `j` resolves exactly while it is live, to its own value.
+    /// Values are read from the slot rather than through `read`: that
+    /// path reaches memo recompute and its thread local, whose destructor
+    /// code Kani 0.68 cannot compile.
+    fn check(store: &SignalStore, model: &Model, j: usize) -> usize {
+        let Some(signal) = model.made[j] else {
+            return 0;
+        };
+        let inner = store.inner_ref();
+        assert!(inner.live(signal.id) == model.alive[j]);
+        if !model.alive[j] {
+            return 0;
+        }
+        let value = inner.nodes[signal.id.index as usize].value.as_ref();
+        assert!(value.unwrap().downcast_ref::<u8>() == Some(&(j as u8)));
+        1
+    }
+
+    /// Any five creates and disposes: every live handle reads its own
+    /// value, and a disposed one never resolves again, even once a later
+    /// signal reuses its slot (five steps reach a double dispose followed
+    /// by two creates). Generation wraparound after 2^32 reuses of one
+    /// slot is beyond this bound. The steps are unrolled by hand so the
+    /// unwind bound stays at 2: at 7 the symbolic execution alone took 25
+    /// minutes.
     #[kani::proof]
-    #[kani::unwind(7)]
+    #[kani::unwind(2)]
+    #[kani::solver(kissat)]
     fn reused_slots_never_alias_a_handle() {
         let store = SignalStore::new();
-        let mut made: [Option<Signal<u8>>; OPS] = [None; OPS];
-        let mut alive = [false; OPS];
-        for step in 0..OPS {
-            if kani::any() {
-                made[step] = Some(store.create(step as u8));
-                alive[step] = true;
-            } else {
-                let j: usize = kani::any();
-                kani::assume(j < step);
-                if let Some(signal) = made[j] {
-                    store.dispose(signal);
-                    alive[j] = false;
-                }
-            }
-        }
-        let inner = store.inner_ref();
-        let mut live = 0;
-        for j in 0..OPS {
-            let Some(signal) = made[j] else { continue };
-            assert!(inner.live(signal.id) == alive[j]);
-            if alive[j] {
-                let value = inner.nodes[signal.id.index as usize].value.as_ref();
-                assert!(value.unwrap().downcast_ref::<u8>() == Some(&(j as u8)));
-                live += 1;
-            }
-        }
-        drop(inner);
+        let mut model = Model {
+            made: [None; OPS],
+            alive: [false; OPS],
+        };
+        any_op(&store, &mut model, 0);
+        any_op(&store, &mut model, 1);
+        any_op(&store, &mut model, 2);
+        any_op(&store, &mut model, 3);
+        any_op(&store, &mut model, 4);
+        let live = check(&store, &model, 0)
+            + check(&store, &model, 1)
+            + check(&store, &model, 2)
+            + check(&store, &model, 3)
+            + check(&store, &model, 4);
         assert!(store.len() == live);
     }
 }
