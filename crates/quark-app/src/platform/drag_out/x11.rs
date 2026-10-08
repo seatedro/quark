@@ -207,13 +207,13 @@ impl Session {
                 }
                 Event::ClientMessage(event) if event.type_ == self.atoms.XdndFinished => {
                     drag.finished(event.data.as_data32()[0]);
-                    Vec::new()
+                    Sends::default()
                 }
                 Event::SelectionRequest(request) => {
                     self.answer(&request)?;
-                    Vec::new()
+                    Sends::default()
                 }
-                _ => Vec::new(),
+                _ => Sends::default(),
             };
             self.send(sends)?;
         }
@@ -264,7 +264,7 @@ impl Session {
         }
     }
 
-    fn send(&self, sends: Vec<Send>) -> Result<(), String> {
+    fn send(&self, sends: Sends) -> Result<(), String> {
         for send in sends {
             let (target, kind, data) = match send {
                 Send::Enter(target) => (
@@ -461,6 +461,47 @@ enum Send {
     },
 }
 
+/// What one event sends: at most a Leave, an Enter, and a Position. Kept
+/// inline rather than in a `Vec`, which also made the Kani proof below run
+/// out of memory.
+#[derive(Debug, Default)]
+struct Sends {
+    items: [Option<Send>; 3],
+    len: usize,
+}
+
+impl Sends {
+    fn push(&mut self, send: Send) {
+        self.items[self.len] = Some(send);
+        self.len += 1;
+    }
+}
+
+impl Extend<Send> for Sends {
+    fn extend<I: IntoIterator<Item = Send>>(&mut self, sends: I) {
+        for send in sends {
+            self.push(send);
+        }
+    }
+}
+
+impl FromIterator<Send> for Sends {
+    fn from_iter<I: IntoIterator<Item = Send>>(sends: I) -> Self {
+        let mut out = Self::default();
+        out.extend(sends);
+        out
+    }
+}
+
+impl IntoIterator for Sends {
+    type Item = Send;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<Send>, 3>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter().flatten()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// The button is held.
@@ -506,11 +547,11 @@ impl Drag {
         self.phase
     }
 
-    fn moved(&mut self, target: Option<Target>, x: i16, y: i16, time: u32) -> Vec<Send> {
+    fn moved(&mut self, target: Option<Target>, x: i16, y: i16, time: u32) -> Sends {
         if self.phase != Phase::Dragging {
-            return Vec::new();
+            return Sends::default();
         }
-        let mut sends = Vec::new();
+        let mut sends = Sends::default();
         if target.map(|t| t.window) != self.target.map(|t| t.window) {
             sends.extend(self.target.take().map(Send::Leave));
             self.target = target;
@@ -530,12 +571,12 @@ impl Drag {
         sends
     }
 
-    fn status(&mut self, from: Window, accept: bool) -> Vec<Send> {
+    fn status(&mut self, from: Window, accept: bool) -> Sends {
         let Some(target) = self.target else {
-            return Vec::new();
+            return Sends::default();
         };
         if from != target.window || !self.waiting {
-            return Vec::new();
+            return Sends::default();
         }
         self.waiting = false;
         self.accepted = accept;
@@ -544,34 +585,38 @@ impl Drag {
             _ => match self.queued.take() {
                 Some((x, y, time)) => {
                     self.waiting = true;
-                    vec![Send::Position { target, x, y, time }]
+                    [Send::Position { target, x, y, time }]
+                        .into_iter()
+                        .collect()
                 }
-                None => Vec::new(),
+                None => Sends::default(),
             },
         }
     }
 
-    fn released(&mut self, time: u32) -> Vec<Send> {
+    fn released(&mut self, time: u32) -> Sends {
         if self.phase != Phase::Dragging {
-            return Vec::new();
+            return Sends::default();
         }
         self.release_time = time;
         if self.waiting {
             // The answer to the last position decides.
             self.phase = Phase::Releasing;
-            return Vec::new();
+            return Sends::default();
         }
         self.drop_or_leave()
     }
 
-    fn drop_or_leave(&mut self) -> Vec<Send> {
+    fn drop_or_leave(&mut self) -> Sends {
         match self.target.take() {
             Some(target) if self.accepted => {
                 self.phase = Phase::Dropped(target.window);
-                vec![Send::Drop {
+                [Send::Drop {
                     target,
                     time: self.release_time,
                 }]
+                .into_iter()
+                .collect()
             }
             target => {
                 self.phase = Phase::Over;
@@ -587,7 +632,7 @@ impl Drag {
     }
 
     /// Escape, or a target that stopped answering.
-    fn cancel(&mut self) -> Vec<Send> {
+    fn cancel(&mut self) -> Sends {
         let sends = match self.phase {
             Phase::Dragging | Phase::Releasing => self.target.take().map(Send::Leave),
             Phase::Dropped(_) | Phase::Over => None,
@@ -632,6 +677,127 @@ fn escape_keycode(conn: &RustConnection) -> Option<u8> {
     let per = usize::from(mapping.keysyms_per_keycode).max(1);
     let index = mapping.keysyms.iter().position(|&sym| sym == ESCAPE)?;
     u8::try_from(index / per).ok().map(|offset| min + offset)
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// What a target has been told, checked against XDND's rules as each
+    /// message goes out.
+    #[derive(Default)]
+    struct Monitor {
+        /// The target between our Enter and our Leave or Drop.
+        entered: Option<Window>,
+        /// A Position the entered target has not answered.
+        in_flight: bool,
+        /// The entered target's latest answer accepted a drop.
+        accepted: bool,
+        /// Nothing may follow a Drop.
+        dropped: bool,
+    }
+
+    impl Monitor {
+        fn sent(&mut self, send: Send, release_time: u32) {
+            assert!(!self.dropped);
+            match send {
+                Send::Enter(t) => {
+                    assert!(self.entered.is_none());
+                    *self = Self {
+                        entered: Some(t.window),
+                        ..Self::default()
+                    };
+                }
+                Send::Position { target, .. } => {
+                    assert!(self.entered == Some(target.window));
+                    // One position at a time.
+                    assert!(!self.in_flight);
+                    self.in_flight = true;
+                }
+                Send::Leave(t) => {
+                    assert!(self.entered == Some(t.window));
+                    self.entered = None;
+                }
+                Send::Drop { target, time } => {
+                    assert!(self.entered == Some(target.window));
+                    // Only on an answered position that accepted.
+                    assert!(!self.in_flight && self.accepted);
+                    assert!(time == release_time);
+                    self.entered = None;
+                    self.dropped = true;
+                }
+            }
+        }
+
+        fn answered(&mut self, from: Window, accept: bool) {
+            if self.entered == Some(from) && self.in_flight {
+                self.in_flight = false;
+                self.accepted = accept;
+            }
+        }
+    }
+
+    fn any_window() -> Window {
+        if kani::any() { 5 } else { 6 }
+    }
+
+    /// One arbitrary event: a pointer move, a target's answer (from either
+    /// window, due or not), a release, escape, or a finish.
+    fn any_event(drag: &mut Drag, monitor: &mut Monitor, release_time: &mut Option<u32>) {
+        let window = any_window();
+        let sends = match kani::any::<u8>() % 5 {
+            0 => {
+                let target = kani::any::<bool>().then_some(Target {
+                    window,
+                    send_to: window,
+                    version: VERSION,
+                });
+                drag.moved(target, kani::any(), kani::any(), kani::any())
+            }
+            1 => {
+                let accept = kani::any();
+                monitor.answered(window, accept);
+                drag.status(window, accept)
+            }
+            2 => {
+                let time = kani::any();
+                if drag.phase() == Phase::Dragging {
+                    *release_time = Some(time);
+                }
+                drag.released(time)
+            }
+            3 => drag.cancel(),
+            _ => {
+                drag.finished(window);
+                Sends::default()
+            }
+        };
+        for send in sends {
+            monitor.sent(send, release_time.unwrap_or(0));
+        }
+        match drag.phase() {
+            Phase::Dragging => {}
+            Phase::Releasing => assert!(monitor.in_flight),
+            Phase::Dropped(_) | Phase::Over => assert!(monitor.entered.is_none()),
+        }
+    }
+
+    /// Any five events in any order send only messages XDND allows, and an
+    /// ended drag leaves no target entered.
+    #[kani::proof]
+    // Calls send at most three messages; the steps are unrolled by hand so
+    // this bound stays small.
+    #[kani::unwind(4)]
+    fn drag_messages_follow_xdnd_for_any_event_order() {
+        let mut drag = Drag::default();
+        let mut monitor = Monitor::default();
+        let mut release_time = None;
+        any_event(&mut drag, &mut monitor, &mut release_time);
+        any_event(&mut drag, &mut monitor, &mut release_time);
+        any_event(&mut drag, &mut monitor, &mut release_time);
+        any_event(&mut drag, &mut monitor, &mut release_time);
+        any_event(&mut drag, &mut monitor, &mut release_time);
+    }
 }
 
 #[cfg(test)]
@@ -760,7 +926,7 @@ mod tests {
                 Step::Escape => drag.cancel(),
                 Step::Finished(window) => {
                     drag.finished(window);
-                    Vec::new()
+                    Sends::default()
                 }
             };
             for send in sends {
