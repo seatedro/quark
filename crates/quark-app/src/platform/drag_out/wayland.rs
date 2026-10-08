@@ -183,6 +183,9 @@ pub(crate) enum DockSignal {
     Drop,
     /// The user released the drag, wherever (`dnd_drop_performed`).
     DropPerformed,
+    /// Another client asked for the drag's data: it was dropped there.
+    /// Hyprland ends such a drag with nothing else.
+    Taken,
     /// It ended without a drop on a window of ours that took it: released
     /// elsewhere, or cancelled.
     Cancelled,
@@ -1242,6 +1245,10 @@ impl Dispatch<WlDataSource, Payload> for State {
             wl_data_source::Event::Send { mime_type, fd } => {
                 let Offered::Files(uris) = &payload.offered else {
                     // A dock drag carries nothing; closing the pipe ends it.
+                    // Our own windows never ask, so another client took it.
+                    if let Some(dock) = dock {
+                        dock.signal(DockSignal::Taken);
+                    }
                     return;
                 };
                 if mime_type != URI_LIST {

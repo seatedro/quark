@@ -38,10 +38,9 @@
 //! that follows the pointer. Released over a group it re-docks there;
 //! released anywhere else it stays a window; Escape puts it back where it
 //! was. Where windows cannot follow the pointer, a release outside the
-//! app's windows opens the new window there instead. Wayland compositors
-//! without the extension cannot tell such a release from a refused drop,
-//! so it moves nothing; "Move to new window" ([`DockEvent::MoveToNewHost`])
-//! works everywhere.
+//! app's windows opens the new window there instead (on Wayland, wherever
+//! the compositor puts it). "Move to new window"
+//! ([`DockEvent::MoveToNewHost`]) works everywhere.
 //!
 //! # Closing and quitting
 //!

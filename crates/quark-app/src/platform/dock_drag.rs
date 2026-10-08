@@ -44,10 +44,9 @@
 //!   (`cancel_live_detach`).
 //!
 //! On Wayland without `xdg_toplevel_drag_v1` ([`DockDrag::can_live_detach`]
-//! is false) nothing can follow the pointer, and a release outside the
-//! app's windows cannot be told from a refusal, so it arrives as
-//! [`DockDragEvent::Cancelled`] with [`CancelReason::NoTarget`]; offer
-//! "Move to new window" instead.
+//! is false) nothing can follow the pointer; a drag that ends away from
+//! the app's windows arrives as [`DockDragEvent::Released`] at
+//! [`DragLocation::Outside`], to open the payload in a new window there.
 
 use quark_ui::element::{DragLocation, DragWindowId};
 use winit::event::{ElementState, MouseButton};
@@ -162,9 +161,6 @@ pub enum CancelReason {
     CaptureLost,
     /// The source window, or the window following the pointer, closed.
     WindowClosed,
-    /// Wayland: released where no window of the app took the drop, which
-    /// the compositor cannot tell apart from a refusal.
-    NoTarget,
     /// The compositor ended the drag without a drop (Escape on Wayland).
     Platform,
 }
@@ -303,7 +299,7 @@ impl DockDrag {
 
     /// Whether a torn-off window can follow the pointer
     /// ([`Self::follow`]). Where it cannot, a release outside the app's
-    /// windows cancels.
+    /// windows still ends at [`DragLocation::Outside`].
     pub fn can_live_detach(&self, cx: &EventContext) -> bool {
         match &self.backend {
             Backend::Desktop { .. } => cx.capabilities().window_positions,

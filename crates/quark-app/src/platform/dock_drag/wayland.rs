@@ -11,9 +11,14 @@
 //!
 //! The compositor reports a release away from our windows as the source
 //! cancelled after `dnd_drop_performed`, and Escape as cancelled without
-//! it. With a window attached through `xdg_toplevel_drag_v1` the first
-//! leaves that window where it was dropped ([`DragLocation::Outside`]);
-//! without one there is no window to leave, so it cancels too.
+//! it; either is a release outside ([`DragLocation::Outside`]) or a cancel.
+//! Hyprland sends no `dnd_drop_performed`: it cancels a release over no
+//! window without it, and ends one over another app's window by that app
+//! asking for the data and nothing else. Without a window attached through
+//! `xdg_toplevel_drag_v1`, which Hyprland lacks, a drag that ends with the
+//! pointer away from our windows is therefore taken as a release there,
+//! so the payload opens in a window of its own; Escape away from them does
+//! the same.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, mpsc};
@@ -83,6 +88,8 @@ struct Machine {
     following: bool,
     /// The window the drag is over and the pointer's last point in it.
     entered: Option<(Surface, (f32, f32))>,
+    /// The drag left our windows and has not come back.
+    away: bool,
     /// The user released the drag (`dnd_drop_performed`).
     performed: bool,
     /// The compositor ended the drag.
@@ -119,6 +126,7 @@ impl Machine {
             DockSignal::Enter { surface, x, y } => {
                 let point = point(x, y);
                 self.entered = Some((surface, point));
+                self.away = false;
                 Some(Step::Moved(Spot::Over { surface, point }))
             }
             DockSignal::Motion { x, y } => {
@@ -131,6 +139,7 @@ impl Machine {
             }
             DockSignal::Leave => {
                 self.entered = None;
+                self.away = true;
                 Some(Step::Moved(Spot::Unknown))
             }
             DockSignal::Drop => {
@@ -148,12 +157,19 @@ impl Machine {
                 self.performed = true;
                 None
             }
+            DockSignal::Taken => {
+                self.over = true;
+                Some(Step::Released(Spot::Outside))
+            }
             DockSignal::Cancelled | DockSignal::Finished => {
                 self.over = true;
-                Some(match (self.performed, self.following) {
-                    (true, true) => Step::Released(Spot::Outside),
-                    (true, false) => Step::Cancelled(CancelReason::NoTarget),
-                    (false, _) => Step::Cancelled(CancelReason::Platform),
+                // A following window can only be put back on a cancel the
+                // compositor says is one.
+                let released = self.performed || (self.away && !self.following);
+                Some(if released {
+                    Step::Released(Spot::Outside)
+                } else {
+                    Step::Cancelled(CancelReason::Platform)
                 })
             }
         }
@@ -275,10 +291,9 @@ mod tests {
     const TOOLS: Surface = 0xb000;
 
     // A drag must end exactly once, the way the compositor's signals say:
-    // dropped on a window of ours at its last point, left floating where a
-    // window follows the pointer and was released elsewhere, and cancelled
-    // otherwise, since without a following window a release elsewhere
-    // cannot be told from a refusal.
+    // dropped on a window of ours at its last point, released outside when
+    // dropped elsewhere (including Hyprland's way, with no
+    // dnd_drop_performed), and cancelled otherwise.
     #[test]
     fn compositor_signals_end_the_drag_once_as_released_or_cancelled() {
         use DockSignal::*;
@@ -287,7 +302,7 @@ mod tests {
             x: 10.0,
             y: 20.0,
         };
-        let cases: [(&str, bool, &[DockSignal], &str); 7] = [
+        let cases: [(&str, bool, &[DockSignal], &str); 11] = [
             (
                 "dropped on a window",
                 false,
@@ -317,7 +332,31 @@ mod tests {
                 "released elsewhere with nothing following",
                 false,
                 &[enter(MAIN), Leave, DropPerformed, Cancelled],
-                "Cancelled(NoTarget)",
+                "Released(Outside)",
+            ),
+            (
+                "Hyprland: released over no window",
+                false,
+                &[enter(MAIN), Leave, Cancelled],
+                "Released(Outside)",
+            ),
+            (
+                "Hyprland: released over another app",
+                false,
+                &[enter(MAIN), Leave, Taken, Cancelled],
+                "Released(Outside)",
+            ),
+            (
+                "cancelled back over a window of ours",
+                false,
+                &[enter(MAIN), Leave, enter(MAIN), Cancelled],
+                "Cancelled(Platform)",
+            ),
+            (
+                "cancelled away with a window following",
+                true,
+                &[enter(MAIN), Leave, Cancelled],
+                "Cancelled(Platform)",
             ),
             (
                 "cancelled by the compositor (Escape) with a window following",
