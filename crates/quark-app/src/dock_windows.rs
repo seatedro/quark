@@ -908,7 +908,7 @@ impl DockWindows {
     /// tab, announce, save, and retitle. Returns whether it set focus.
     fn settle(
         &mut self,
-        dock: &DockState,
+        dock: &mut DockState,
         effects: &DockEffects,
         arrival: Arrival,
         cx: &mut UiContext,
@@ -976,8 +976,18 @@ impl DockWindows {
         Some(self.bound.remove(at))
     }
 
-    /// Title every floating window by its tabs.
-    fn retitle(&mut self, dock: &DockState, cx: &mut UiContext) {
+    /// Title every floating window, and name its tab lists for assistive
+    /// tech, by its tabs.
+    fn retitle(&mut self, dock: &mut DockState, cx: &mut UiContext) {
+        for bound in &self.bound {
+            let tabs = self.host_title(dock, bound.host);
+            if !tabs.is_empty() {
+                let label = format!("{tabs} window");
+                if dock.host_label(bound.host) != label {
+                    dock.set_host_label(bound.host, label);
+                }
+            }
+        }
         let titles: Vec<(usize, String)> = self
             .bound
             .iter()
@@ -1027,7 +1037,7 @@ impl DockWindows {
 
     /// A group's name for menus and announcements: its region's label,
     /// numbered when the region is split, or for a group in a floating
-    /// host, "window" and the window's tabs.
+    /// host, its window's tabs and "window".
     pub fn group_name(&self, dock: &DockState, pane: quark_components::PaneId) -> String {
         let Some(host) = dock.host_of(pane) else {
             return String::new();
@@ -1042,7 +1052,7 @@ impl DockWindows {
 
     fn location_name(&self, dock: &DockState, at: DockLocation) -> String {
         if at.host != HostId::MAIN {
-            return format!("window {}", self.host_title(dock, at.host));
+            return dock.host_label(at.host).to_owned();
         }
         let groups = dock.root(at.region).groups();
         let label = dock.label(at.region);
