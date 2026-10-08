@@ -15,7 +15,8 @@ use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::{Action, FocusId};
-use quark_app::{UiApp, UiContext, ViewContext, WindowOptions};
+use quark_app::winit::keyboard::NamedKey;
+use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
 use quark_components::{
     CellStyle, CollectionEnv, SelectMods, TableData, TableEvent, TableOutcome, TableState,
     TreeEvent, TreeOutcome, TreeState, table_view, tree_view,
@@ -188,6 +189,17 @@ impl UiApp for Demo {
                 {table}
             </div>
         }
+    }
+
+    /// Escape mid-drag drops nothing: a dragged row or column goes back.
+    fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
+        let escape = matches!(event, InputEvent::KeyPress(chord)
+            if chord.named() == Some(NamedKey::Escape));
+        if escape && cx.is_dragging() {
+            cx.cancel_drag();
+            return true;
+        }
+        false
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
@@ -439,6 +451,32 @@ mod tests {
         }
     }
 
+    type Cancel = fn(&mut UiTestHarness<Demo>);
+    const CANCELS: [(&str, Cancel); 2] = [
+        ("focus loss", |ui| ui.focus_loss()),
+        ("cancel_drag", |ui| ui.key("escape")),
+    ];
+
+    // Regression: a cancelled drag fell back to its release and dropped the
+    // row on the target under the pointer.
+    #[test]
+    fn a_cancelled_row_drag_moves_nothing() {
+        for (name, cancel) in CANCELS {
+            let mut ui = harness(project(), 10);
+            let from = ui.find(item("README.md")).center();
+            let to = ui.find(item("docs")).center();
+            ui.pointer_down(from);
+            ui.pointer_move((from.0, to.1));
+            let held = ui.app().tree.drop_target().is_some();
+            cancel(&mut ui);
+            ui.pointer_up((from.0, to.1));
+
+            assert!(held, "{name}: README.md was over docs");
+            assert_eq!(ui.app().tree.drop_target(), None, "{name}");
+            assert_eq!(rows(&mut ui), "> src\n> docs\nREADME.md * <\n", "{name}");
+        }
+    }
+
     #[test]
     fn tree_items_publish_level_position_and_state() {
         let mut ui = harness(project(), 10);
@@ -531,6 +569,31 @@ mod tests {
         assert_eq!(table_head(&ui, 1), "Size | Kind | Name");
         // A move is not a click: nothing got sorted.
         assert_eq!(ui.app().table.sort(), None);
+    }
+
+    // Regression: a cancelled header press fell back to its release, so it
+    // moved the column dragged, or sorted by the column pressed.
+    #[test]
+    fn a_cancelled_header_drag_neither_moves_nor_sorts() {
+        for (name, cancel) in CANCELS {
+            for dragged in [true, false] {
+                let mut ui = harness(project(), 5);
+                let from = ui.find(header("Name")).center();
+                let to = ui.find(header("Kind")).center();
+                ui.pointer_down(from);
+                ui.pointer_move(if dragged { to } else { from });
+                cancel(&mut ui);
+                ui.pointer_up(to);
+                let after_cancel = table_head(&ui, 1);
+                // A click after the cancel only sorts: no column move left
+                // over from the cancelled drag.
+                ui.click_node(header("Size"));
+
+                let case = format!("{name}, dragged {dragged}");
+                assert_eq!(after_cancel, "Name | Size | Kind", "{case}");
+                assert_eq!(table_head(&ui, 1), "Name | Size ^ | Kind", "{case}");
+            }
+        }
     }
 
     #[test]

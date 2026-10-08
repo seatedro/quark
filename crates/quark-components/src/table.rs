@@ -104,6 +104,9 @@ pub enum TableEvent {
     HeaderRelease {
         column: u32,
     },
+    /// The header drag ended without a release (focus loss, Escape): no
+    /// sort and no column move.
+    HeaderCancel,
     /// The resize handle of `column` was dragged to `width`.
     Resize {
         column: u32,
@@ -473,6 +476,15 @@ impl TableState {
                     None => {}
                 }
                 TableOutcome::Changed
+            }
+            TableEvent::HeaderCancel => {
+                let moving = t.header.is_some_and(|h| h.target.is_some());
+                self.m().header = None;
+                if moving {
+                    TableOutcome::Changed
+                } else {
+                    TableOutcome::Unchanged
+                }
             }
             TableEvent::Resize { column, width } => {
                 self.resize_column(column, width);
@@ -1139,6 +1151,11 @@ impl DragHandler for HeaderDrag {
             })],
         }
     }
+
+    /// Neither the column move nor the sort a release would make.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        vec![(self.on_event)(TableEvent::HeaderCancel)]
+    }
 }
 
 struct ResizeDrag {
@@ -1158,6 +1175,12 @@ impl DragHandler for ResizeDrag {
 
     fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult::empty()
+    }
+
+    /// The width follows the pointer as it moves, so cancelling keeps the
+    /// width dragged to, like a release.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        Vec::new()
     }
 
     fn cursor(&self) -> CursorHint {

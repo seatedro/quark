@@ -779,6 +779,12 @@ impl DragHandler for DividerDrag {
         }
     }
 
+    /// The panes follow the pointer as it moves, so cancelling keeps the
+    /// sizes dragged to and settles them, like a release.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        self.on_release().actions
+    }
+
     fn cursor(&self) -> CursorHint {
         self.cursor
     }

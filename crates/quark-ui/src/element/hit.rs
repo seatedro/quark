@@ -73,13 +73,15 @@ pub trait DragHandler {
     fn on_release(&mut self) -> DragReleaseResult;
     /// The drag ended without a release: the window lost focus, the app
     /// cancelled it (Escape), or the platform took the pointer for a
-    /// native drag. Defaults to [`Self::on_release`], so handlers that act
-    /// while the button is held (selection autoscroll) stop; a handler
-    /// whose release commits something, such as a drop, overrides it to
-    /// back out instead.
-    fn on_cancel(&mut self) -> Vec<Action> {
-        self.on_release().actions
-    }
+    /// native drag. Back out: commit nothing a release would (a drop, a
+    /// move, a sort), but end everything the drag keeps going while the
+    /// button is held (selection autoscroll, a held thumb, drag state in
+    /// the app's model), or it stays stuck.
+    ///
+    /// There is no default. A default of `on_release` committed drops on
+    /// cancel, and a default of nothing left autoscroll running, so every
+    /// handler states which of its release actions are cleanup.
+    fn on_cancel(&mut self) -> Vec<Action>;
     /// A picture to show under the pointer while the drag lasts; see
     /// [`DragPreview`].
     fn preview(&self) -> Option<&DragPreview> {

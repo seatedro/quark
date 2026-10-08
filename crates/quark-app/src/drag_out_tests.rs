@@ -33,6 +33,10 @@ impl DragHandler for Track {
             actions: vec![Msg::Released.into()],
         }
     }
+
+    fn on_cancel(&mut self) -> Vec<quark_ui::Action> {
+        Vec::new()
+    }
 }
 
 /// A file row that tries to drag `paths` out on its drag's first move.

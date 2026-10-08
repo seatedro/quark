@@ -1206,6 +1206,12 @@ impl DragHandler for ScrollbarDrag {
             }
         }
     }
+
+    /// The offset dragged to stays, as it does with every live drag; the
+    /// release only lets go of the thumb and reports the drag's end.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        self.on_release().actions
+    }
 }
 
 #[cfg(kani)]
