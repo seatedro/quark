@@ -141,8 +141,9 @@ fn overlays_modal_blocks_background_shortcut() {
     );
 }
 
-// Catches Cancel keeping a previewed theme: picking Dark repaints the app
-// dark at once, and Cancel brings back the theme it had.
+// Catches Cancel keeping a previewed theme: picking Light repaints the
+// app light at once, and Cancel brings back the theme it had (dark: the
+// harness reports no desktop preference).
 #[test]
 fn overlays_settings_cancel_reverts_preview() {
     let mut ui = harness(ScenarioKind::Review);
@@ -151,10 +152,10 @@ fn overlays_settings_cancel_reverts_preview() {
     // Theme: Match system, Light, Dark.
     ui.key("enter");
     ui.key("arrowdown");
-    ui.key("arrowdown");
     ui.key("enter");
-    let dark = quark_workbench::design::dark().colors.background;
-    assert_eq!(ui.theme().colors.background, dark, "previewed");
+    let light = quark_workbench::design::light().colors.background;
+    assert_ne!(light, before);
+    assert_eq!(ui.theme().colors.background, light, "previewed");
 
     ui.click_node(By::role_name(Role::Button, "Cancel"));
     assert_eq!(
@@ -201,8 +202,9 @@ fn overlays_context_menu_opens_thread() {
     );
 }
 
-// Catches an unbounded toast stack: four toasts in a row leave the three
-// newest on screen.
+// Catches toasts piling up behind the three shown: of four in a row the
+// oldest is gone, so dismissing the newest leaves two, not the oldest
+// sliding back in.
 #[test]
 fn overlays_toast_stack_keeps_three() {
     let mut ui = harness(ScenarioKind::Review);
@@ -215,11 +217,22 @@ fn overlays_toast_stack_keeps_three() {
         thread_menu(&mut ui, name, "Copy title");
     }
     ui.advance(500);
-    let shown = toasts(&ui);
-    assert_eq!(shown.len(), 3, "{shown:?}");
+    let three = toasts(&ui).len();
+    let newest = ui
+        .find_all(By::role_name(Role::Button, "Dismiss"))
+        .into_iter()
+        .max_by_key(|b| {
+            b.id.as_deref()
+                .and_then(|id| id.rsplit(':').next()?.parse::<u64>().ok())
+        })
+        .expect("dismiss buttons");
+    ui.click(newest.center());
+    ui.advance(500);
+    let left = toasts(&ui);
+    assert_eq!((three, left.len()), (3, 2), "{left:?}");
     assert!(
-        !shown.iter().any(|t| t.contains("Add keyboard shortcuts")),
-        "{shown:?}"
+        !left.iter().any(|t| t.contains("Add keyboard shortcuts")),
+        "{left:?}"
     );
 }
 
