@@ -87,6 +87,10 @@ tokens! {
         modal_surface,
         overlay_scrim,
         border,
+        /// The outline that marks out a control with no fill of its own:
+        /// an unchecked radio or checkbox. At least 3:1 against what it sits
+        /// on (WCAG 1.4.11), unlike `border`, which separates surfaces.
+        control_border,
         border_variant,
         focus_border,
         text,
@@ -389,6 +393,7 @@ fn dark_colors(
         // Borders — subtle but visible separation
         border_soft: n[ElementHover],
         border: n[ElementActive],
+        control_border: n[Solid],
         border_variant: n[ElementHover],
         focus_border: b[Solid],
         empty_state_border: n[ElementActive],
@@ -494,6 +499,7 @@ fn light_colors(
         // Borders
         border_soft: n[Border],
         border: n[Border],
+        control_border: n[Solid],
         border_variant: n[BorderSubtle],
         focus_border: b[Solid],
         empty_state_border: n[Border],
@@ -615,6 +621,7 @@ fn high_contrast_dark_colors() -> ThemeColors {
         modal_surface: rgb(0x141414),
         overlay_scrim: rgba(0x000000, 0xcc),
         border: rgb(0xbdbdbd),
+        control_border: rgb(0xbdbdbd),
         border_variant: rgb(0xa3a3a3),
         focus_border: rgb(0xffd60a),
         text: rgb(0xffffff),
@@ -685,6 +692,7 @@ fn high_contrast_light_colors() -> ThemeColors {
         modal_surface: rgb(0xffffff),
         overlay_scrim: rgba(0x000000, 0x99),
         border: rgb(0x4d4d4d),
+        control_border: rgb(0x4d4d4d),
         border_variant: rgb(0x6b6b6b),
         focus_border: rgb(0x7a00cc),
         text: rgb(0x000000),
@@ -942,6 +950,7 @@ mod tests {
         const BOUNDARIES: &[&str] = &[
             "focus_border",
             "border",
+            "control_border",
             "border_variant",
             "border_soft",
             "empty_state_border",
@@ -1016,6 +1025,32 @@ mod tests {
                 assert!(
                     ratio >= 2.0,
                     "{:?}: text_disabled vs {name}: {ratio:.2}",
+                    theme.mode
+                );
+            }
+        }
+    }
+
+    // Catches an unchecked radio or checkbox fading into what holds it: the
+    // dark theme drew their outlines in `border`, about 1.4:1.
+    #[test]
+    fn standard_control_outlines_stand_out_from_their_backgrounds() {
+        for theme in [Theme::default_dark(), Theme::default_light()] {
+            let c = &theme.colors;
+            for bg in [
+                "background",
+                "surface",
+                "panel",
+                "element_background",
+                "elevated_surface",
+                "modal_surface",
+                "editor_surface",
+                "sidebar_background",
+            ] {
+                let ratio = contrast_ratio(c.control_border, c.get(bg).expect(bg));
+                assert!(
+                    ratio >= 3.0,
+                    "{:?}: control_border on {bg}: {ratio:.2}",
                     theme.mode
                 );
             }

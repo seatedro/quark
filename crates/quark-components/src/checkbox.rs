@@ -58,7 +58,7 @@ impl RenderOnce for Checkbox {
         } else if self.checked {
             (tc.accent, tc.accent, tc.on_accent)
         } else {
-            (Color::TRANSPARENT, tc.border, tc.icon)
+            (Color::TRANSPARENT, tc.control_border, tc.icon)
         };
 
         let can_hover = !self.disabled && !self.checked;

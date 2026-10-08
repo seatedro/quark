@@ -131,7 +131,7 @@ impl RenderOnce for RadioGroup {
                              border={match (option.disabled, self.selected == Some(i)) {
                                  (true, _) => tc.border_variant,
                                  (false, true) => tc.accent,
-                                 (false, false) => tc.border,
+                                 (false, false) => tc.control_border,
                              }}>
                             if self.selected == Some(i) {
                                 <div w={dot} h={dot} rounded={dot / 2.0}
