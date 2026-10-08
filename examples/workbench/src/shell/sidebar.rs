@@ -231,6 +231,9 @@ fn section_label(model: &Model, section: Section) -> &str {
     }
 }
 
+/// Height of the search input inside its field: one 13/18 line.
+const SEARCH_INPUT_H: f32 = 18.0;
+
 pub fn view(state: &mut super::State, scx: &SurfaceCx, _vcx: &mut ViewContext) -> AnyElement {
     let sidebar = &mut state.sidebar;
     sidebar.rebuild(scx.model);
@@ -248,7 +251,11 @@ pub fn view(state: &mut super::State, scx: &SurfaceCx, _vcx: &mut ViewContext) -
         .field(&sidebar.search)
         .on_click(Action::FocusSearch)
         .search(true)
-        .bare();
+        .bare()
+        // A bare input has no size of its own; without one it collapsed to
+        // nothing, hiding its placeholder and taking no clicks.
+        .w_full()
+        .h(SEARCH_INPUT_H);
     let search = search_field(
         input,
         has_query,

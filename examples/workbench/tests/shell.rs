@@ -145,3 +145,15 @@ fn shell_widening_restores_the_users_sidebar_width() {
     );
     assert_eq!(ui.find(divider).value, widened);
 }
+
+// Catches a sidebar search input with no size of its own: it collapsed to
+// nothing inside its field, so its placeholder never showed and only the
+// field's edge took clicks. The empty search paints its placeholder.
+#[test]
+fn shell_search_field_shows_its_placeholder() {
+    let ui = harness(ScenarioKind::Review);
+    let field = ui.find(By::name("Search threads")).bounds;
+
+    assert!(field.width > 100.0, "{field:?}");
+    assert!(ui.painted_text().contains("Search threads"));
+}
