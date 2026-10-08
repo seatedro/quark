@@ -17,6 +17,9 @@
 #   QUARK_E2E_OUT      artifacts root (default target/e2e/artifacts)
 #   QUARK_E2E_KEEP=1   keep the artifacts of passing specs too, with a final
 #                      screen.png and tree.txt, for visual review
+#   QUARK_SYNTAX_PACKS grammar pack root for apps that highlight code
+#                      (default target/syntax-packs, which
+#                      `cargo run -p syntax-pack -- build` writes)
 #
 # A spec can set its app's environment with header lines, applied before
 # the app launches (the runner starts binaries without arguments):
@@ -38,6 +41,11 @@ fi
 export CUA_DRIVER
 export PYTHONPATH=$E2E_DIR${PYTHONPATH:+:$PYTHONPATH}
 export PYTHONDONTWRITEBYTECODE=1
+# Local grammar packs, so code blocks and diffs are highlighted (the apps
+# never download them). Without packs they render as plain text.
+if [[ -z ${QUARK_SYNTAX_PACKS:-} && -d $ROOT/target/syntax-packs ]]; then
+  export QUARK_SYNTAX_PACKS=$ROOT/target/syntax-packs
+fi
 
 # Polls a command until it succeeds or the deadline passes.
 wait_until() {

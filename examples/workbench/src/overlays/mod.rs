@@ -321,7 +321,7 @@ fn run(pick: Pick, scx: &SurfaceCx, fx: &mut Effects) {
             if let Some(thread) = scx.model.thread(id) {
                 fx.push(Effect::CopyText(thread.title.clone()));
                 fx.push(Effect::Toast(Toast {
-                    kind: ToastKind::Info,
+                    kind: ToastKind::Success,
                     text: format!("Copied “{}”", thread.title),
                     undo: None,
                 }));

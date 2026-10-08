@@ -149,7 +149,7 @@ fn header(tool: ToolId, call: ToolCall, expanded: bool) -> RowAdornment {
             let control = (tokens::TYPE_CONTROL.0, tokens::ICON);
             view! {
             <div w={cx.width} h={cx.height} class="flex-row items-center gap-[8] px-[4]"
-                 bg={c.surface} border={c.border} class="rounded-[8]">
+                 bg={c.surface} border={c.border_variant} class="rounded-[8]">
                 <div id={disclosure_id(tool).as_str()} class="flex-row items-center gap-[8] grow h-full px-[6] rounded-[6]"
                      hover_bg={c.element_hover} on:click={toggle}
                      track_focus={disclosure_focus(tool)}

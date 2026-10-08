@@ -172,7 +172,7 @@ impl Header {
         });
         view! {
             <div w={width} h={TOOLBAR_H} class="flex-row items-center shrink-0"
-                 px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border}
+                 px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border_variant}
                  bg={colors.panel} accessibility_role={accesskit::Role::Toolbar}
                  aria-label="Diff actions">
                 <Badge label={badge} variant={variant} />

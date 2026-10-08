@@ -67,13 +67,17 @@ pub fn options(labels: impl IntoIterator<Item = &'static str>) -> Rc<[SelectOpti
     labels.into_iter().map(SelectOption::new).collect()
 }
 
-/// A section heading over its fields.
+/// A section heading over its fields: 11/16 semibold capitals in muted
+/// text, a step below the dialog's 16-point title and its 13-point field
+/// labels. The group keeps the title as written for assistive tech.
 pub fn section(title: &str, fields: Vec<AnyElement>, theme: &Theme) -> AnyElement {
-    let (size, _) = tokens::TYPE_HEADING;
+    let (size, line) = tokens::TYPE_META;
     view! {
         <div class="flex-col w-full" gap={tokens::SPACE_12}
              accessibility_role={accesskit::Role::Group} aria-label={title.to_owned()}>
-            <text size={size} semibold color={theme.colors.text_strong}>{title.to_owned()}</text>
+            <text size={size} line_height={line / size} semibold color={theme.colors.text_muted}>
+                {title.to_uppercase()}
+            </text>
             {...fields}
         </div>
     }

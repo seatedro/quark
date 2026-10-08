@@ -1,14 +1,14 @@
 //! The command palette: quark's `CommandPalette` over the shared
-//! [`COMMANDS`] registry plus the thread list, sized to the workbench's
-//! 560-point recipe. A chosen item never acts here: it becomes a
+//! [`COMMANDS`] registry plus the thread list, 560 points wide, with
+//! command icons and shortcut keycaps. A chosen item never acts here: it becomes a
 //! [`Pick`], which the overlay layer turns into the same
 //! `Effect::Command` keys and menus produce.
 
 use quark_app::quark_ui::FocusId;
-use quark_app::quark_ui::element::{AnyElement, Binding, IntoAnyElement, div};
-use quark_app::quark_ui::style::Styled;
+use quark_app::quark_ui::element::{AnyElement, Binding};
+use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome};
-use quark_app::quark_ui::theme::{Color, Theme};
+use quark_app::quark_ui::theme::Theme;
 use quark_components::{
     CommandPalette, PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome, PaletteProvider,
 };
@@ -16,11 +16,8 @@ use quark_components::{
 use crate::contracts::{COMMANDS, CommandId, SurfaceCx, ThreadId};
 use crate::overlays::Pick;
 
-/// Panel width and distance from the window's top edge (design section 3).
+/// Panel width (design section 3).
 pub const WIDTH: f32 = 560.0;
-/// The margin `CommandPalette` keeps from the edges of the area it is
-/// given; the area is sized so the panel comes out at [`WIDTH`].
-const MARGIN: f32 = 48.0;
 /// Thread items' keys start here, after every command's index.
 const THREAD_KEYS: u64 = 10_000;
 
@@ -58,7 +55,8 @@ impl PaletteProvider<Catalog> for Commands {
             {
                 continue;
             }
-            let mut item = PaletteItem::new(i as u64, spec.title, pick(Pick::Command(spec.id)));
+            let mut item = PaletteItem::new(i as u64, spec.title, pick(Pick::Command(spec.id)))
+                .icon(command_icon(spec.id));
             if let Some(binding) = spec.binding.and_then(|b| b.parse::<Binding>().ok()) {
                 item = item.binding(binding);
             }
@@ -82,9 +80,38 @@ impl PaletteProvider<Catalog> for Threads {
                     title.as_str(),
                     pick(Pick::Thread(*id)),
                 )
+                .icon(lucide::HASH)
                 .subtitle("Thread"),
             );
         }
+    }
+}
+
+/// The icon a command's palette row shows.
+fn command_icon(id: CommandId) -> &'static str {
+    match id {
+        CommandId::OpenPalette => lucide::COMMAND,
+        CommandId::NewThread => lucide::PLUS,
+        CommandId::OpenSettings => lucide::SETTINGS,
+        CommandId::ToggleSidebar => lucide::PANEL_LEFT,
+        CommandId::ToggleRightDock => lucide::SPLIT,
+        CommandId::ToggleTerminal => lucide::TERMINAL,
+        CommandId::FindInDocument => lucide::SEARCH,
+        CommandId::FocusComposer => lucide::PENCIL,
+        CommandId::SendPrompt => lucide::ARROW_UP,
+        CommandId::StopRun => lucide::X,
+        CommandId::ShowDiff => lucide::FILE_DIFF,
+        CommandId::ShowFiles => lucide::FOLDER,
+        CommandId::ShowPreview => lucide::EYE,
+        CommandId::ApplyDiff => lucide::CHECK,
+        CommandId::UndoDiff => lucide::CORNER_UP_LEFT,
+        CommandId::NextThread => lucide::ARROW_DOWN,
+        CommandId::PreviousThread => lucide::ARROW_UP,
+        CommandId::ThemeSystem => lucide::CIRCLE_DOT,
+        CommandId::ThemeLight => lucide::SUN,
+        CommandId::ThemeDark => lucide::MOON,
+        CommandId::AdvanceDemoStep => lucide::PLAY,
+        CommandId::ResetDemo => lucide::REFRESH,
     }
 }
 
@@ -98,7 +125,10 @@ pub struct Palette {
 
 impl Default for Palette {
     fn default() -> Self {
-        let mut inner = CommandPalette::new().placeholder("Search commands and threads");
+        let mut inner = CommandPalette::new()
+            .placeholder("Search commands and threads")
+            .width(WIDTH)
+            .keycaps(true);
         inner.register(Commands);
         inner.register(Threads);
         Self { inner }
@@ -152,40 +182,6 @@ impl Palette {
         focused: bool,
         on_event: impl Fn(PaletteEvent) -> quark_app::quark_ui::Action,
     ) -> Option<AnyElement> {
-        if !self.inner.is_open() {
-            return None;
-        }
-        let scale = theme.metrics.ui_scale();
-        // CommandPalette sizes its panel from the area it is given (640
-        // points less margins); give it a column that yields 560 and paint
-        // the window-wide scrim here, so its own scrim must be clear.
-        let column = ((WIDTH + MARGIN) * scale).min(window.0);
-        let mut clear = theme.clone();
-        clear.colors.overlay_scrim = Color::TRANSPARENT;
-        let panel = self
-            .inner
-            .render((column, window.1), &clear, focused, &on_event)?;
-        Some(
-            div()
-                .absolute()
-                .left(0.0)
-                .top(0.0)
-                .w(window.0)
-                .h(window.1)
-                .z_index(400)
-                .bg(theme.colors.overlay_scrim)
-                .on_click(on_event(PaletteEvent::Dismiss))
-                .block_mouse()
-                .child(
-                    div()
-                        .absolute()
-                        .left(((window.0 - column) / 2.0).round())
-                        .top(0.0)
-                        .w(column)
-                        .h(window.1)
-                        .child(panel),
-                )
-                .into_any(),
-        )
+        self.inner.render(window, theme, focused, on_event)
     }
 }

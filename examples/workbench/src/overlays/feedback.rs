@@ -74,7 +74,8 @@ impl Toasts {
         for toast in self.pending.drain(..) {
             let kind = match toast.kind {
                 ToastKind::Error => ToastViewKind::Error,
-                ToastKind::Info | ToastKind::Success => ToastViewKind::Info,
+                ToastKind::Success => ToastViewKind::Success,
+                ToastKind::Info => ToastViewKind::Info,
             };
             let mut view = ToastView::new(kind, toast.text);
             if let Some(command) = toast.undo {

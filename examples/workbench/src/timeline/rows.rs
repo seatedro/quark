@@ -12,12 +12,14 @@ use quark_app::quark_ui::document::{
     RowDecorator,
 };
 use quark_app::quark_ui::element::*;
+use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::{Color, Theme};
 use quark_components::{Button, ButtonStyle};
 
 use super::tool_card;
 use crate::contracts::ToolId;
+use crate::design::recipes::{status_tint, text_color, tint};
 use crate::design::tokens;
 use crate::model::{Role, Row};
 
@@ -114,14 +116,18 @@ fn cursor() -> RowAdornment {
     })
 }
 
-/// An error card's Retry. The accessible name stays "Retry" (e2e specs
-/// select it by name).
+/// An error card's Retry, a secondary button. The accessible name stays
+/// "Retry" (e2e specs select it by name).
 fn error_actions(tool: ToolId) -> RowAdornment {
     RowAdornment::new(ACTIONS, AdornmentSlot::End, ERROR_ACTIONS, 0, move |cx| {
         let retry: Action = super::Action::Retry(tool).into();
         view! {
             <div w={cx.width} h={cx.height} class="flex-row items-center">
-                {Button::new(retry).label("Retry").style(ButtonStyle::Subtle).into_any()}
+                {Button::new(retry)
+                    .icon(lucide::REFRESH)
+                    .label("Retry")
+                    .style(ButtonStyle::Subtle)
+                    .into_any()}
             </div>
         }
         .into_any()
@@ -129,36 +135,50 @@ fn error_actions(tool: ToolId) -> RowAdornment {
     .accessibility(AdornmentAccessibility::Exposed)
 }
 
+/// Width of an error card's leading edge.
+const ERROR_EDGE: f32 = 3.0;
+
 /// Draws the author line above messages, a soft inset behind user turns,
-/// and an error tint behind error cards. Tool rows draw their own card.
+/// and an error card's tint and red leading edge. Tool rows draw their own
+/// card.
 pub struct TimelineChrome;
 
 impl RowDecorator for TimelineChrome {
     fn background(&self, chrome: &RowChrome, theme: &Theme) -> Option<Color> {
         let c = &theme.colors;
         match chrome.kind {
-            KIND_USER => Some(c.element_background),
-            KIND_ERROR => Some(c.status_error.with_alpha(20)),
+            KIND_USER => Some(c.surface),
+            KIND_ERROR => Some(tint(c.background, c.status_error, status_tint(theme))),
             _ => None,
         }
+    }
+
+    fn leading_edge(&self, chrome: &RowChrome, theme: &Theme) -> Option<(Color, f32)> {
+        (chrome.kind == KIND_ERROR).then_some((theme.colors.status_error, ERROR_EDGE))
     }
 
     fn header(&self, chrome: &RowChrome, width: f32, theme: &Theme) -> Option<AnyElement> {
         let label: &Arc<str> = chrome.label.as_ref()?;
         let (author, at) = label.split_once(", ").unwrap_or((label, ""));
         let c = &theme.colors;
-        let author_color = if chrome.kind == KIND_ERROR {
-            c.status_error
-        } else {
-            c.text_strong
-        };
+        let error = chrome.kind == KIND_ERROR;
+        let author_color = if error { c.status_error } else { c.text_strong };
+        // Author 13/18 semibold in strong text, then the 11/16 timestamp in
+        // muted text: the document paints headers muted, so the author
+        // sets its own color.
+        let author = text(author.to_owned())
+            .size(tokens::TYPE_CONTROL.0)
+            .line_height(tokens::TYPE_CONTROL.1 / tokens::TYPE_CONTROL.0)
+            .semibold();
         Some(
             view! {
                 <div w={width} h={AUTHOR_LINE} class="flex-row items-center gap-[8]">
-                    <text size={tokens::TYPE_CONTROL.0} class="font-semibold" color={author_color}>
-                        {author.to_owned()}
-                    </text>
-                    <text size={tokens::TYPE_META.0} color={c.text_muted}>{at.to_owned()}</text>
+                    if error {
+                        <icon svg={lucide::ALERT_CIRCLE} size={14.0} color={c.status_error} />
+                    }
+                    {text_color(author_color, author)}
+                    <text size={tokens::TYPE_META.0} line_height={tokens::TYPE_META.1 / tokens::TYPE_META.0}
+                          color={c.text_muted}>{at.to_owned()}</text>
                 </div>
             }
             .into_any(),

@@ -23,7 +23,7 @@ use quark_components::{Button, ButtonStyle, HostId, Modal, SelectMsg, SelectStat
 use crate::contracts::{
     CommandId, EditCx, Effect, Effects, SurfaceCx, ThemeChoice, Toast, ToastKind,
 };
-use crate::design::tokens;
+use crate::design::{recipes, tokens};
 use forms::{LIMIT, MODELS, THEMES, Values};
 
 /// The dialog's accessibility id (the Modal names it after its title).
@@ -124,8 +124,15 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> Option
         .flex_1()
         .min_h(0.0)
         .gap(tokens::SPACE_24)
+        // The body clips; inset its content by the focus ring's reach, and
+        // pull the box out as far on the left so fields still line up
+        // with the title.
+        .margin_left(-tokens::RING_ROOM)
+        .px(tokens::RING_ROOM)
+        .py(tokens::RING_ROOM)
         .track_scroll(&open.scroll)
         .overflow_y_scroll()
+        .scrollbar_auto_hide()
         .test_id("settings-body")
         .child(forms::section("Appearance", vec![theme_field], theme))
         .child(forms::section(
@@ -173,7 +180,38 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> Option
     )
     .height(MAX_SIZE.1)
     .body_child(body);
-    Some(modal.into_any())
+    // The Modal draws only a bottom border; raised surfaces get a hairline
+    // all round (in dark mode the shadow barely shows), drawn over the
+    // panel where it was last laid out (so the first frame asks for a
+    // second). It takes no clicks.
+    let panel = vcx.geometry().by_id(DIALOG).ok();
+    if panel.is_none() {
+        vcx.frame.request_frame();
+    }
+    let ring = panel.map(|panel| {
+        let r = panel.bounds;
+        div()
+            .absolute()
+            .left(r.x)
+            .top(r.y)
+            .w(r.width)
+            .h(r.height)
+            .z_index(101)
+            .rounded(recipes::pt(theme, tokens::RADIUS_MODAL))
+            .border(theme.colors.border)
+    });
+    Some(match ring {
+        Some(ring) => div()
+            .absolute()
+            .left(0.0)
+            .top(0.0)
+            .w(width)
+            .h(height)
+            .child(modal)
+            .child(ring)
+            .into_any(),
+        None => modal.into_any(),
+    })
 }
 
 pub fn update(state: &mut State, action: Action, scx: &SurfaceCx, fx: &mut Effects) {

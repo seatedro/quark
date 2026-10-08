@@ -261,13 +261,13 @@ impl Workbench {
             }
             Effect::ApplyDiff => self.apply_diff(),
             Effect::UndoDiff => {
-                let text = if self.model.files.undo() {
-                    "Changes undone"
+                let (kind, text) = if self.model.files.undo() {
+                    (ToastKind::Success, "Changes undone")
                 } else {
-                    "Nothing to undo"
+                    (ToastKind::Info, "Nothing to undo")
                 };
                 self.fx.push(Effect::Toast(Toast {
-                    kind: ToastKind::Info,
+                    kind,
                     text: text.to_owned(),
                     undo: None,
                 }));
@@ -490,6 +490,7 @@ impl UiApp for Workbench {
         });
         let dock_size = (size.0, (size.1 - top).max(0.0));
         let overlay_open = main && shell::overlay_open(&self.shell, self.policy);
+        self.dock.tab_labels.update(theme, vcx);
         let shell_state = &mut self.shell;
         let timeline_state = &mut self.timeline;
         let composer_state = &mut self.composer;
@@ -505,9 +506,18 @@ impl UiApp for Workbench {
                 _ => dock::panel_view(panel_states, id, &scx, vcx),
             }
         };
+        let label_widths = &self.dock.tab_labels;
+        let label_width = |panel| label_widths.width(panel);
+        // Tabs sized to their titles (up to 160 points), a close button
+        // only on the hovered or active tab, and an accent bar under the
+        // active one.
         let mut dock_el = Dock::new(&self.dock.layout, dock_size, |e| {
             Msg::Dock(dock::Action::Dock(e)).into()
-        });
+        })
+        .tab_width(dock::TAB_MAX_WIDTH)
+        .fit_tabs(&label_width)
+        .tab_close_on_hover(true)
+        .tab_indicator(true);
         if !main {
             dock_el = dock_el.host(host);
         }

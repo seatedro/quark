@@ -73,7 +73,7 @@ pub fn view(state: &mut super::State, scx: &SurfaceCx, _vcx: &mut ViewContext) -
     let colors = &scx.theme.colors;
     let (bg, border, muted, strong) = (
         colors.title_bar_background,
-        colors.border,
+        colors.border_variant,
         colors.text_muted,
         colors.text_strong,
     );

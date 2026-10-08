@@ -397,3 +397,17 @@ fn overlays_batched_completions_all_announced() {
         "{spoken_before:?} then {spoken:?}"
     );
 }
+
+// Catches the palette losing the design's geometry: 560 points wide,
+// centered in the window, 80 points below its top edge.
+#[test]
+fn overlays_palette_is_560_points_wide_and_centered() {
+    let mut ui = harness(ScenarioKind::Review);
+    ui.key("mod+k");
+    let panel = ui.find(palette()).bounds;
+
+    assert_eq!(
+        (panel.width, panel.x + panel.width / 2.0, panel.y),
+        (560.0, WIDE.0 / 2.0, 80.0)
+    );
+}

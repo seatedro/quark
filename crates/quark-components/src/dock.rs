@@ -1389,7 +1389,70 @@ struct GroupHit {
     rect: Rect,
     /// Height of its tab strip; zero when it shows none.
     strip: f32,
-    tab_width: f32,
+    tabs: TabWidths,
+}
+
+/// Strips with more tabs than this share one width even when the dock
+/// fits tabs to their titles, so the widths live inline (no allocation).
+const MAX_FITTED_TABS: usize = 24;
+
+/// The widths of a strip's tabs, left to right: one shared width, or each
+/// tab's own when the dock fits tabs to their titles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TabWidths {
+    count: usize,
+    shared: f32,
+    own: Option<[f32; MAX_FITTED_TABS]>,
+}
+
+impl TabWidths {
+    fn shared(width: f32, count: usize) -> Self {
+        Self {
+            count,
+            shared: width,
+            own: None,
+        }
+    }
+
+    fn width(&self, index: usize) -> f32 {
+        self.own.map_or(self.shared, |own| own[index])
+    }
+
+    /// The left edge of tab `index` (the right edge of the last tab for
+    /// `count`), from the strip's left edge.
+    fn left(&self, index: usize) -> f32 {
+        let index = index.min(self.count);
+        match &self.own {
+            Some(own) => own[..index].iter().sum(),
+            None => self.shared * index as f32,
+        }
+    }
+
+    /// The tab under `x` from the strip's left edge, or `count` past the
+    /// last tab.
+    fn index_at(&self, x: f32) -> usize {
+        match &self.own {
+            None => ((x / self.shared).floor().max(0.0) as usize).min(self.count),
+            Some(own) => {
+                let mut right = 0.0;
+                for (index, width) in own[..self.count].iter().enumerate() {
+                    right += width;
+                    if x < right {
+                        return index;
+                    }
+                }
+                self.count
+            }
+        }
+    }
+
+    fn hash_into(&self, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.count.hash(hasher);
+        for index in 0..self.count {
+            self.width(index).to_bits().hash(hasher);
+        }
+    }
 }
 
 /// Stable id of the root of a dock given no [`Dock::handle`].
@@ -1431,9 +1494,10 @@ impl DragContext {
         for hit in &hits {
             let r = hit.rect;
             (hit.pane, hit.region).hash(&mut hasher);
-            for v in [r.x, r.y, r.width, r.height, hit.strip, hit.tab_width] {
+            for v in [r.x, r.y, r.width, r.height, hit.strip] {
                 v.to_bits().hash(&mut hasher);
             }
+            hit.tabs.hash_into(&mut hasher);
         }
         policies.map(|p| (p.can_leave, p.accepts)).hash(&mut hasher);
         match root {
@@ -1455,7 +1519,7 @@ impl DragContext {
         let hit = self.hits.iter().find(|h| h.rect.contains(x, y))?;
         let (lx, ly) = (x - hit.rect.x, y - hit.rect.y);
         let zone = if ly < hit.strip {
-            DropZone::Tabs((lx / hit.tab_width).floor().max(0.0) as usize)
+            DropZone::Tabs(hit.tabs.index_at(lx))
         } else {
             DropZone::in_body(
                 hit.rect.width,
@@ -1487,6 +1551,10 @@ pub struct Dock<'a> {
     always_tabs: [bool; 4],
     tab_width: f32,
     grips: bool,
+    /// Measured title widths, when tabs fit their titles.
+    fit: Option<&'a dyn Fn(PanelId) -> f32>,
+    close_on_hover: bool,
+    indicator: bool,
 }
 
 /// Width of a group's grip at the end of its tab strip.
@@ -1511,6 +1579,9 @@ impl<'a> Dock<'a> {
             always_tabs: [false; 4],
             tab_width: 120.0,
             grips: false,
+            fit: None,
+            close_on_hover: false,
+            indicator: false,
         }
     }
 
@@ -1620,9 +1691,37 @@ impl<'a> Dock<'a> {
     }
 
     /// Width of every tab, shrunk so all tabs fit the strip. Tabs share one
-    /// width so a drag maps to a slot without measuring titles.
+    /// width so a drag maps to a slot without measuring titles. With
+    /// [`Self::fit_tabs`], the most any one tab takes.
     pub fn tab_width(mut self, width: f32) -> Self {
         self.tab_width = width;
+        self
+    }
+
+    /// Size each tab to its title rather than giving every tab the same
+    /// width: `label_width` is a panel title's width in points at the
+    /// theme's small font size (the app measures it with its text system;
+    /// the dock does not), and each tab adds its padding and close button,
+    /// up to [`Self::tab_width`]. Longer titles end in an ellipsis, and the
+    /// tabs shrink together when the strip is too narrow for all of them.
+    /// Off by default.
+    pub fn fit_tabs(mut self, label_width: &'a dyn Fn(PanelId) -> f32) -> Self {
+        self.fit = Some(label_width);
+        self
+    }
+
+    /// Show an inactive tab's close button only while the pointer is over
+    /// the tab; the active tab always shows it. The button stays in the
+    /// accessibility tree either way. Off by default.
+    pub fn tab_close_on_hover(mut self, on: bool) -> Self {
+        self.close_on_hover = on;
+        self
+    }
+
+    /// Mark the active tab with a 2-point accent bar along its bottom edge.
+    /// Off by default.
+    pub fn tab_indicator(mut self, on: bool) -> Self {
+        self.indicator = on;
         self
     }
 
@@ -1651,6 +1750,43 @@ impl<'a> Dock<'a> {
 
     fn tab_width_for(&self, width: f32, count: usize) -> f32 {
         self.tab_width.min(width / count.max(1) as f32).floor()
+    }
+
+    /// The widths of `group`'s tabs in a strip `width` wide.
+    fn tab_widths(&self, theme: &Theme, width: f32, group: &TabGroup) -> TabWidths {
+        let width = self.tabs_width(width);
+        let count = group.panels.len();
+        let shared = TabWidths::shared(self.tab_width_for(width, count), count);
+        let Some(label_width) = self.fit else {
+            return shared;
+        };
+        if count == 0 || count > MAX_FITTED_TABS {
+            return shared;
+        }
+        let m = &theme.metrics;
+        // Around the title: padding on both sides, the gap, the close
+        // button (an icon with 2 points of padding), and the divider on the
+        // tab's right, as `StripView::tab` lays them out; plus a point, so a
+        // title that just fits is not cut short by rounding.
+        let chrome = m.spacing_sm * 2.0 + m.spacing_xs + m.ui_small_font_size + 4.0 + 2.0;
+        let min = chrome + m.ui_small_font_size * 2.0;
+        let max = self.tab_width.max(min);
+        let mut own = [0.0; MAX_FITTED_TABS];
+        for (slot, panel) in own.iter_mut().zip(&group.panels) {
+            *slot = (label_width(*panel) + chrome).ceil().clamp(min, max);
+        }
+        let total: f32 = own[..count].iter().sum();
+        if total > width {
+            let shrink = width / total;
+            for slot in &mut own[..count] {
+                *slot = (*slot * shrink).floor();
+            }
+        }
+        TabWidths {
+            count,
+            shared: shared.shared,
+            own: Some(own),
+        }
     }
 
     /// What assistive tech calls a region's tab lists and dividers.
@@ -1724,7 +1860,7 @@ impl<'a> Dock<'a> {
                     region,
                     rect,
                     strip: if tabs { strip } else { 0.0 },
-                    tab_width: self.tab_width_for(self.tabs_width(rect.width), group.panels.len()),
+                    tabs: self.tab_widths(theme, rect.width, group),
                 });
             }
         }
@@ -1802,7 +1938,7 @@ impl<'a> Dock<'a> {
                     region: DockRegion::Center,
                     rect,
                     strip,
-                    tab_width: self.tab_width_for(self.tabs_width(rect.width), group.panels.len()),
+                    tabs: self.tab_widths(theme, rect.width, group),
                 })
             })
             .collect();
@@ -2027,7 +2163,7 @@ impl<'a> Dock<'a> {
             0.0
         };
         let body_height = (height - strip_height).max(0.0);
-        let tab_width = self.tab_width_for(self.tabs_width(width), group.panels.len());
+        let tabs = self.tab_widths(theme, width, group);
         // Where a dragged tab would land in this group.
         let preview = self
             .state
@@ -2035,8 +2171,7 @@ impl<'a> Dock<'a> {
             .filter(|target| target.pane == group.id)
             .map(|target| match target.zone {
                 DropZone::Tabs(i) => {
-                    let tab = tab_width;
-                    let x = (i.min(group.panels.len()) as f32 * tab - 1.0).max(0.0);
+                    let x = (tabs.left(i) - 1.0).max(0.0);
                     (x, 0.0, 2.0, strip_height)
                 }
                 zone => {
@@ -2044,7 +2179,7 @@ impl<'a> Dock<'a> {
                     (x, y + strip_height, w, h)
                 }
             });
-        let targets = self.drop_targets(group, (width, height), strip_height, tab_width);
+        let targets = self.drop_targets(group, (width, height), strip_height, tabs);
         view! {
             <div class="relative flex-col" w={width} h={height} bg={colors.surface}>
                 <div class="absolute" left={0.0} top={0.0} w={width} h={height}>{targets}</div>
@@ -2075,7 +2210,7 @@ impl<'a> Dock<'a> {
         group: &TabGroup,
         (width, height): (f32, f32),
         strip: f32,
-        tab_width: f32,
+        tabs: TabWidths,
     ) -> AnyElement {
         let scope = Self::drop_scope(self.handle);
         let key = u64::from(group.id.0) << 1;
@@ -2089,10 +2224,10 @@ impl<'a> Dock<'a> {
                 height,
             };
             if strip > 0.0 {
-                let tabs = tab_width * count as f32;
+                let end = tabs.left(count);
                 let slots: Vec<quark::Rect> = (0..count)
-                    .map(|i| rect(b.x + tab_width * i as f32, b.y, tab_width, strip))
-                    .chain([rect(b.x + tabs, b.y, (b.width - tabs).max(0.0), strip)])
+                    .map(|i| rect(b.x + tabs.left(i), b.y, tabs.width(i), strip))
+                    .chain([rect(b.x + end, b.y, (b.width - end).max(0.0), strip)])
                     .collect();
                 cx.add_drop_target(DropTarget {
                     id: DropTargetId {
@@ -2126,7 +2261,7 @@ impl<'a> Dock<'a> {
         title: &impl Fn(PanelId) -> T,
     ) -> AnyElement {
         use std::hash::{Hash, Hasher};
-        let tab_width = self.tab_width_for(self.tabs_width(width), group.panels.len());
+        let tabs = self.tab_widths(theme, width, group);
         // Everything the strip reads besides the theme (which the element
         // cache compares itself) and the event map (which must be pure).
         let mut hasher = std::hash::DefaultHasher::new();
@@ -2145,7 +2280,9 @@ impl<'a> Dock<'a> {
         }
         let policies = self.state.policies.map(|p| (p.can_leave, p.accepts));
         (policies, &self.move_keys, self.grips, drag.hash).hash(&mut hasher);
-        (tab_width.to_bits(), height.to_bits(), width.to_bits()).hash(&mut hasher);
+        (self.close_on_hover, self.indicator).hash(&mut hasher);
+        tabs.hash_into(&mut hasher);
+        (height.to_bits(), width.to_bits()).hash(&mut hasher);
         let hash = hasher.finish();
         let data = self
             .state
@@ -2181,9 +2318,11 @@ impl<'a> Dock<'a> {
                     })
                     .unwrap_or_default(),
                 label: self.state.group_label(group.id),
-                tab_width,
+                tabs,
                 height,
                 grips: self.grips,
+                close_on_hover: self.close_on_hover,
+                indicator: self.indicator,
             });
         let strip = StripView {
             data,
@@ -2238,9 +2377,11 @@ struct StripData {
     /// so a refused move leaves the key to the app.
     moves: Vec<(Cow<'static, str>, Action)>,
     label: String,
-    tab_width: f32,
+    tabs: TabWidths,
     height: f32,
     grips: bool,
+    close_on_hover: bool,
+    indicator: bool,
 }
 
 /// The last [`StripData`] built per tab group, with the inputs hash it was
@@ -2372,7 +2513,7 @@ impl StripView {
         let colors = &self.colors;
         let m = &self.metrics;
         let (pane, region) = (data.pane, data.region);
-        let (tab_width, tab_height) = (data.tab_width, data.height);
+        let (tab_width, tab_height) = (data.tabs.width(index), data.height);
         let panel = data.panels[index];
         let count = data.panels.len();
         let selected = index == data.active;
@@ -2398,6 +2539,15 @@ impl StripView {
             [("name", quark_ui::i18n::Arg::Text(&name))],
         );
         let drag_title = name.clone();
+        // An inactive tab's close button can wait for the pointer: drawn
+        // clear, and in the muted color while the tab is hovered.
+        let hidden_close = data.close_on_hover && !selected;
+        let close_color = if hidden_close {
+            Color::TRANSPARENT
+        } else {
+            colors.text_muted
+        };
+        let (hover_fill, hover_icon) = (colors.ghost_element_hover, colors.text_muted);
         view! {
             <div class="flex-row flex-none items-center" gap={m.spacing_xs} px={m.spacing_sm}
                  w={tab_width} class="h-full" border_r={colors.border_variant}
@@ -2444,8 +2594,12 @@ impl StripView {
                  // A click makes an inactive tab focusable without making it
                  // a Tab stop: a press focuses it, and the selection then
                  // hands focus to the group (`DockOutcome::focus`).
-                 @when {!selected} {
+                 @when {!selected && !hidden_close} {
                      hover_bg={colors.ghost_element_hover} tab_stop={TabStop::disabled(0)}
+                 }
+                 @when {hidden_close} {
+                     hover={move |s| s.bg(hover_fill).icon_color(hover_icon)}
+                     tab_stop={TabStop::disabled(0)}
                  }>
                 // Let a long title shrink and truncate instead of pushing the
                 // close button out of the tab.
@@ -2456,8 +2610,12 @@ impl StripView {
                      p={2.0} hover_bg={colors.ghost_element_hover}
                      accessibility_id={format!("dock:close:{}", panel.0)}
                      accessibility_role={Role::Button} aria-label={close_label} on:click={close}>
-                    <icon svg={lucide::X} size={m.ui_small_font_size} color={colors.text_muted} />
+                    <icon svg={lucide::X} size={m.ui_small_font_size} color={close_color} />
                 </div>
+                if data.indicator && selected {
+                    <div class="absolute" left={0.0} bottom={0.0} w={tab_width} h={2.0}
+                         bg={colors.accent} test_id="dock-tab-indicator" />
+                }
             </div>
         }
     }

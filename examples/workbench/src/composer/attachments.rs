@@ -192,7 +192,7 @@ pub fn chips(attachments: &Attachments, theme: &Theme) -> AnyElement {
             for a in &attachments.items {
                 <div accessibility_role={Role::Group} aria-label={a.name.clone()}
                      class="flex-row items-center gap-[6] pl-2 pr-1 h-7 rounded-[6]"
-                     bg={colors.element_background} border={colors.border}>
+                     bg={colors.element_background} border={colors.border_variant}>
                     {svg_icon(match a.kind {
                         Kind::Image => lucide::EYE,
                         Kind::File => lucide::FILE,

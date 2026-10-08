@@ -38,6 +38,9 @@ use crate::contracts::{
 use crate::design::tokens;
 use crate::model::Model;
 
+/// The most a dock tab takes; shorter titles get narrower tabs.
+pub const TAB_MAX_WIDTH: f32 = 160.0;
+
 /// Where the tab move menu opens inside its panel, below the tab strip.
 const MENU_INSET: (f32, f32) = (8.0, 4.0);
 
@@ -48,6 +51,51 @@ pub struct State {
     pub layout: DockState,
     pub windows: DockWindows,
     pub panels: Panels,
+    /// Panel titles' widths, for tabs sized to their titles.
+    pub tab_labels: TabLabels,
+}
+
+/// Every panel title's width at the tab strip's font, measured again only
+/// when the font size or scale changes, so a frame allocates nothing for
+/// it.
+#[derive(Default)]
+pub struct TabLabels {
+    key: Option<(u32, u32)>,
+    widths: Vec<(PanelId, f32)>,
+}
+
+impl TabLabels {
+    /// Measure the titles for `theme` on `vcx`'s window if its tab font or
+    /// scale changed.
+    pub fn update(&mut self, theme: &quark_app::quark_ui::theme::Theme, vcx: &mut ViewContext) {
+        use quark_text::{TextQuery, TextStyle};
+        let size = theme.metrics.ui_small_font_size;
+        let scale = vcx.frame.scale_factor();
+        let key = (size.to_bits(), scale.to_bits());
+        if self.key == Some(key) {
+            return;
+        }
+        self.key = Some(key);
+        let text = vcx.frame.text();
+        self.widths.clear();
+        for spec in PANELS {
+            let query = TextQuery::new(spec.title, TextStyle::new(size)).scale_factor(scale);
+            let width = text
+                .layouts
+                .layout_query(&mut text.system, &query)
+                .map_or(0.0, |layout| layout.size().0.ceil());
+            self.widths.push((spec.id, width));
+        }
+    }
+
+    /// The width of `panel`'s title; a long guess for an unknown panel, so
+    /// its tab takes the most room a tab may.
+    pub fn width(&self, panel: PanelId) -> f32 {
+        self.widths
+            .iter()
+            .find(|(id, _)| *id == panel)
+            .map_or(f32::MAX, |(_, width)| *width)
+    }
 }
 
 /// Content state of the dock panels, keyed by panel, not by host window:
@@ -120,6 +168,7 @@ pub fn new_state(_options: &Options) -> State {
         layout,
         windows,
         panels: Panels::default(),
+        tab_labels: TabLabels::default(),
     }
 }
 

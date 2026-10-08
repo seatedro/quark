@@ -579,6 +579,13 @@ pub trait RowDecorator {
         None
     }
 
+    /// A bar along the row's leading edge, over the background, as its
+    /// color and width in points: the accent of an alert or error row.
+    fn leading_edge(&self, chrome: &RowChrome, theme: &Theme) -> Option<(Color, f32)> {
+        let _ = (chrome, theme);
+        None
+    }
+
     /// The element filling the header band, `width` wide and
     /// `chrome.header_height` tall. Called only when the row is rebuilt.
     fn header(&self, chrome: &RowChrome, width: f32, theme: &Theme) -> Option<AnyElement> {
