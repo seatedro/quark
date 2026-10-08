@@ -41,7 +41,7 @@ const SCROLL_ROW_BUDGET: u64 = 64;
 const SCROLL_ROW_CEILING: u64 = 170;
 
 /// A settled harness: accessibility as asked, nothing focused (no caret
-/// blink), warm-up frames drawn.
+/// blink), warm-up frames drawn, the transcript's workers finished.
 fn settled(options: Options, accessibility: bool) -> UiTestHarness<Workbench> {
     let mut ui = harness_with(options, WIDE);
     ui.set_accessibility_active(accessibility);
@@ -49,7 +49,18 @@ fn settled(options: Options, accessibility: bool) -> UiTestHarness<Workbench> {
         ui.run_until_idle();
         ui.frame();
     }
+    settle_transcript(&mut ui);
     ui
+}
+
+/// Finish the transcript's background row measurement, highlighting, and
+/// image decoding, which run on worker threads the fake clock does not
+/// drive, and draw the frames that take their results (the measured
+/// heights settle the scroll anchor one frame later).
+fn settle_transcript(ui: &mut UiTestHarness<Workbench>) {
+    ui.app_mut().timeline.finish_measures();
+    ui.frame();
+    ui.advance(32);
 }
 
 fn options(scenario: ScenarioKind) -> Options {
@@ -87,7 +98,7 @@ fn stress(rows: usize) -> UiTestHarness<Workbench> {
         ui.run_until_idle();
         ui.frame();
     }
-    ui.frame();
+    settle_transcript(&mut ui);
     ui
 }
 
