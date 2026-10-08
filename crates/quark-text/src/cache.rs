@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::mem;
 use std::sync::Arc;
 
 use quark::scene::FontStyle;
@@ -60,6 +61,62 @@ fn text_id(text: &str) -> (usize, usize) {
     (text.as_ptr() as usize, text.len())
 }
 
+/// A hash map that grows only when its length passes half its capacity,
+/// so it never grows during churn. Removals leave tombstones wherever the
+/// keys' hashes put them, and a plain `HashMap` that runs out of empty
+/// buckets while more than half full grows rather than clearing them. That
+/// made whether a miss allocated depend on the process's hash seed (and,
+/// for `content_hashes`, on heap addresses). At most half full, running out
+/// rehashes in place, which allocates nothing, so allocations follow the
+/// length alone.
+#[derive(Debug)]
+struct HalfLoadMap<K, V> {
+    map: HashMap<K, V>,
+    /// `map.capacity()` when it was built: tombstones lower `capacity()`.
+    built_capacity: usize,
+}
+
+impl<K, V> Default for HalfLoadMap<K, V> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            built_capacity: 0,
+        }
+    }
+}
+
+impl<K: Hash + Eq, V> HalfLoadMap<K, V> {
+    fn get(&self, key: &K) -> Option<&V> {
+        self.map.get(key)
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.map.get_mut(key)
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        let len = self.map.len() + 1;
+        if len > self.built_capacity / 2 {
+            let old = mem::replace(&mut self.map, HashMap::with_capacity(2 * len));
+            self.built_capacity = self.map.capacity();
+            self.map.extend(old);
+        }
+        self.map.insert(key, value);
+    }
+
+    fn remove(&mut self, key: &K) {
+        self.map.remove(key);
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+    }
+}
+
 /// No slot: the end of the recency list.
 const NIL: u32 = u32::MAX;
 
@@ -98,7 +155,7 @@ struct Slot {
 #[derive(Debug)]
 pub struct LayoutCache {
     /// Slot of each cached layout.
-    index: HashMap<LayoutKey, u32>,
+    index: HalfLoadMap<LayoutKey, u32>,
     slots: Vec<Slot>,
     /// The most and least recently used slots.
     newest: u32,
@@ -107,7 +164,7 @@ pub struct LayoutCache {
     /// entries keep those allocations alive and unchanged, so an address
     /// found here holds the same text, and a lookup of that text (such as
     /// [`TextLayout::query`] at another width) skips hashing it.
-    content_hashes: HashMap<(usize, usize), u64>,
+    content_hashes: HalfLoadMap<(usize, usize), u64>,
     /// Frame count of each scope that has begun a frame.
     scopes: HashMap<u64, u64>,
     scope: u64,
@@ -181,11 +238,11 @@ impl LayoutCache {
     pub fn new(max_idle_frames: u64) -> Self {
         let limits = LayoutCacheLimits::default();
         Self {
-            index: HashMap::new(),
+            index: HalfLoadMap::default(),
             slots: Vec::new(),
             newest: NIL,
             oldest: NIL,
-            content_hashes: HashMap::new(),
+            content_hashes: HalfLoadMap::default(),
             scopes: HashMap::new(),
             scope: 0,
             max_idle_frames,
@@ -455,7 +512,9 @@ impl LayoutCache {
                 Some(slot) => slot.newer = i,
                 None => self.oldest = i,
             }
-            self.index.insert(key, i);
+            if let Some(at) = self.index.get_mut(&key) {
+                *at = i;
+            }
         }
         self.pool.recycle(slot.layout, slot.bytes);
     }
