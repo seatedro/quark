@@ -225,7 +225,7 @@ test = true
 
 [[example]]
 name = "panels_demo"
-required-features = ["ui"]
+required-features = ["ui", "components"]
 # Its test module drives the dock through `quark_app::testing`.
 test = true
 
