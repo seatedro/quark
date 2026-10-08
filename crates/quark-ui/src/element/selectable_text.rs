@@ -579,7 +579,8 @@ pub(super) fn span_colors(
 }
 
 impl Element for SelectableText {
-    type LayoutState = Option<Arc<TextLayout>>;
+    /// The element's node and its shaped text.
+    type LayoutState = (LayoutId, Option<Arc<TextLayout>>);
     type PrepaintState = Vec<LinkHits>;
 
     fn request_layout(
@@ -625,25 +626,24 @@ impl Element for SelectableText {
                 )
             }
         };
-        (id, layout)
+        (id, (id, layout))
     }
 
     fn prepaint(
         &mut self,
         bounds: Bounds,
-        layout_state: &mut Self::LayoutState,
-        _engine: &LayoutEngine,
+        (id, layout_state): &mut Self::LayoutState,
+        engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> Vec<LinkHits> {
-        // Shaped at the width layout resolved, which the last measure query
-        // may not have been (it can be an intrinsic-size probe). Link hits,
-        // `max_lines` clipping, paint, and the selectable region all use
-        // this layout.
+        // Shaped where measurement wrapped at the width layout resolved,
+        // which the last measure query may not have been (it can be an
+        // intrinsic-size probe). Link hits, `max_lines` clipping, paint,
+        // and the selectable region all use this layout.
         let wrapped = match layout_state {
-            Some(unwrapped) if self.wrap == WrapMode::Auto => {
-                auto_wrap_width(bounds.width, unwrapped.size().0.ceil())
-                    .and_then(|w| cx.layout_text_query(&unwrapped.query().wrap_width(Some(w))))
-            }
+            Some(unwrapped) if self.wrap == WrapMode::Auto => engine
+                .auto_wrap_width(*id)
+                .and_then(|w| cx.layout_text_query(&unwrapped.query().wrap_width(Some(w)))),
             _ => None,
         };
         if wrapped.is_some() {
@@ -658,7 +658,7 @@ impl Element for SelectableText {
     fn paint(
         &mut self,
         bounds: Bounds,
-        state: &mut Option<Arc<TextLayout>>,
+        (_, state): &mut Self::LayoutState,
         links: &mut Vec<LinkHits>,
         _engine: &LayoutEngine,
         scene: &mut Scene,

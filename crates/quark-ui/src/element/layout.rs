@@ -109,12 +109,23 @@ impl TextMeasure {
             AvailableSpace::Definite(offered) => offered.min(self.max_content()),
         });
         let height = known.height.unwrap_or_else(|| {
-            let wrapped = auto_wrap_width(width, self.max_content())
+            let wrapped = self
+                .wrap_width(width)
                 .and_then(|wrap| cx.layout(&self.unwrapped.query().wrap_width(Some(wrap))));
             let layout = wrapped.as_deref().unwrap_or(&self.unwrapped);
             text_height(layout, self.max_lines, self.line_height)
         });
         taffy::Size { width, height }
+    }
+
+    /// The width the text is shaped at in a box `width` wide: `None` when
+    /// it fits unwrapped.
+    ///
+    /// The width is floored: taffy rounds a box to whole pixels after
+    /// measuring it, and the rounded width is never below the floor of the
+    /// measured one, so the wrapped lines fit the painted box.
+    fn wrap_width(&self, width: f32) -> Option<f32> {
+        (width < self.max_content()).then(|| width.floor().max(1.0))
     }
 }
 
@@ -126,18 +137,6 @@ pub(super) fn text_height(layout: &TextLayout, max_lines: Option<usize>, line_he
         None => layout.size().1,
     };
     height.max(line_height).ceil()
-}
-
-/// The wrap width automatically wrapped text of max-content width
-/// `max_content` is shaped at in a box `width` wide: `None` when it fits
-/// unwrapped. Measurement and paint both use it, so the painted lines are
-/// the measured ones.
-///
-/// The width is floored: taffy rounds a box to whole pixels after
-/// measuring it, and the rounded width is never below the floor of the
-/// measured one, so paint never wraps narrower than measurement did.
-pub(super) fn auto_wrap_width(width: f32, max_content: f32) -> Option<f32> {
-    (width < max_content).then(|| width.floor().max(1.0))
 }
 
 /// One measure query a cache boundary answered: what the parent offered
@@ -633,6 +632,22 @@ impl LayoutEngine {
             width: layout.size.width,
             height: layout.size.height,
         }
+    }
+
+    /// The width automatically wrapping text at `id` is shaped at, `None`
+    /// when it fits unwrapped or `id` is not such text: the decision its
+    /// measure made at the width layout resolved. Paint shapes the text
+    /// here, so the painted lines are the measured ones.
+    ///
+    /// It reads the unrounded width. The rounded box can be up to a pixel
+    /// wider or narrower than the width measured, which can cross a line
+    /// break: rewrapping at it would paint more or fewer lines than the
+    /// height layout reserved.
+    pub(super) fn auto_wrap_width(&self, id: LayoutId) -> Option<f32> {
+        let Some(NodeMeasure::Text(text)) = self.tree.get_node_context(id) else {
+            return None;
+        };
+        text.wrap_width(self.tree.unrounded_layout(id).size.width)
     }
 
     /// Width and height of what a scroll container at `id` scrolls over:
