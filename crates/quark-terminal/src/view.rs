@@ -14,7 +14,7 @@ use accesskit::Role;
 use quark::Color;
 use quark_render::scene::{BorderPrimitive, Rect, RectPrimitive, RichTextPrimitive, ShapedText};
 use quark_render::{FontStyle, FontWeight, Scene};
-use quark_text::{FontEpoch, TextBlock, TextLayout, TextQuery, TextSpan, TextStyle};
+use quark_text::{TextBlock, TextLayout, TextQuery, TextSpan, TextStyle};
 use quark_ui::accessibility::{AccessibilityNode, AccessibleText};
 use quark_ui::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult,
@@ -190,8 +190,6 @@ struct Screen {
 #[derive(Default)]
 pub(crate) struct RowText {
     rows: Vec<(u64, Vec<TextBlock>)>,
-    /// The fonts the blocks were laid out with.
-    epoch: Option<FontEpoch>,
 }
 
 impl RowText {
@@ -201,13 +199,8 @@ impl RowText {
             .retain(|(id, _)| grid.rows.iter().any(|row| row.id == *id));
     }
 
-    /// The blocks of row `id`, for fonts `epoch`. A font change drops them
-    /// all, since a block keeps its layout for the same text and style.
-    fn blocks(&mut self, id: u64, epoch: FontEpoch) -> &mut Vec<TextBlock> {
-        if self.epoch != Some(epoch) {
-            self.epoch = Some(epoch);
-            self.rows.clear();
-        }
+    /// The blocks of row `id`.
+    fn blocks(&mut self, id: u64) -> &mut Vec<TextBlock> {
         let i = match self.rows.iter().position(|(row, _)| *row == id) {
             Some(i) => i,
             None => {
@@ -257,7 +250,7 @@ fn build(
                 canvas(move |bounds, scene, cx| {
                     let row = &grid.rows[i];
                     let mut row_text = row_text.borrow_mut();
-                    let blocks = row_text.blocks(row.id, cx.text.font_epoch());
+                    let blocks = row_text.blocks(row.id);
                     paint_row(bounds, scene, cx, row, blocks, &m, palette);
                 })
                 .w(grid_w)
