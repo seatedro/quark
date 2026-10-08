@@ -229,9 +229,13 @@ impl PaletteDemo {
         if let Some((x, y)) = pointer {
             changed |= self.menu.pointer_moved(x, y);
         }
-        changed |= self
-            .card
-            .pointer_moved(pointer, &[(1, HOVER_ANCHOR)], self.now_ms);
+        // The open palette covers the anchor, so it cannot be hovered.
+        let anchors: &[(u64, Rect)] = if self.palette.is_open() {
+            &[]
+        } else {
+            &[(1, HOVER_ANCHOR)]
+        };
+        changed |= self.card.pointer_moved(pointer, anchors, self.now_ms);
         if changed {
             cx.window.request_redraw();
         }
@@ -250,6 +254,9 @@ impl PaletteDemo {
             return true;
         }
         if binding("mod+k").matches(pressed) {
+            // The palette is modal: a hover card open under the pointer
+            // would otherwise sit above it.
+            self.card.hide();
             let focus = self.palette.open(&self.library, cx.focus());
             cx.set_focus(Some(focus));
             cx.window.request_redraw();
@@ -593,6 +600,24 @@ mod tests {
 
         ui.advance(100);
         assert!(card_open(&ui));
+    }
+
+    // Catches a hover card left open over the command palette: resting on
+    // the anchor and pressing Mod+K showed the card on top of it.
+    #[test]
+    fn opening_the_palette_closes_the_hover_card() {
+        let mut ui = demo();
+        ui.pointer_move(anchor_center());
+        ui.advance(500);
+        assert!(card_open(&ui));
+
+        ui.key("mod+k");
+        assert!(ui.app().palette.is_open());
+        assert!(!card_open(&ui));
+        // Resting over the covered anchor does not bring it back.
+        ui.pointer_move((anchor_center().0 + 1.0, anchor_center().1));
+        ui.advance(1_000);
+        assert!(!card_open(&ui));
     }
 
     // Catches a card that closes when the pointer moves onto it, which
