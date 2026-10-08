@@ -167,7 +167,7 @@ struct SelectDrag {
 /// App-owned terminal: the VT state, the optional PTY, and what the view
 /// paints. Each frame the app calls [`Self::set_viewport`] and
 /// [`Self::prepare`], then builds [`crate::terminal_view`]. Output from the
-/// PTY comes back as [`PtyEvent`]s for [`Self::handle_pty`]; keys and
+/// PTY waits in pooled buffers until [`Self::read_pty`] feeds it; keys and
 /// pointer reports come from the app's raw input hook through
 /// [`Self::key_press`], [`Self::text_input`], and [`Self::pointer`];
 /// selection comes from the view as [`TerminalEvent`]s for [`Self::handle`].
@@ -343,15 +343,15 @@ impl TerminalState {
 
     // ---- Program ---------------------------------------------------------
 
-    /// Starts `command` on a PTY sized to the grid. `on_event` runs on the
-    /// PTY's reader thread; point it at the app's `UiSender` and hand what
-    /// arrives to [`Self::handle_pty`].
+    /// Starts `command` on a PTY sized to the grid. `on_ready` runs when
+    /// output waits (see [`Pty::spawn`]); point it at the app's waker and
+    /// call [`Self::read_pty`] when it fires.
     pub fn spawn(
         &mut self,
         command: &PtyCommand,
-        on_event: impl Fn(PtyEvent) + Send + 'static,
+        on_ready: impl Fn() + Send + 'static,
     ) -> std::io::Result<()> {
-        let pty = Pty::spawn(command, self.geometry(), on_event)?;
+        let pty = Pty::spawn(command, self.geometry(), on_ready)?;
         self.pty = Some(pty);
         self.exited = false;
         self.flush();
@@ -369,9 +369,23 @@ impl TerminalState {
         }
     }
 
-    pub fn handle_pty(&mut self, event: PtyEvent) {
+    /// Feeds the PTY's waiting output through the VT, and handles its exit
+    /// once the output before it is fed. Returns whether there was any.
+    pub fn read_pty(&mut self) -> bool {
+        let Some(inbox) = self.pty.as_ref().map(Pty::inbox) else {
+            return false;
+        };
+        let mut any = false;
+        inbox.drain(|event| {
+            any = true;
+            self.handle_pty(event);
+        });
+        any
+    }
+
+    pub fn handle_pty(&mut self, event: PtyEvent<'_>) {
         match event {
-            PtyEvent::Output(bytes) => self.feed(&bytes),
+            PtyEvent::Output(bytes) => self.feed(bytes),
             PtyEvent::Exited(code) => {
                 self.exited = true;
                 self.pty = None;

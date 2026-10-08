@@ -12,7 +12,7 @@
 use quark_app::quark_ui::element::AnyElement;
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::{UiApp, UiContext, ViewContext, WindowOptions};
-use quark_terminal::{PtyCommand, PtyEvent};
+use quark_terminal::PtyCommand;
 
 #[cfg(not(windows))]
 use quark_terminal::{TerminalEvent, TerminalState};
@@ -37,8 +37,8 @@ struct Demo {
     /// What to run once the window opens; `None` runs nothing (tests feed
     /// the terminal directly).
     command: Option<PtyCommand>,
-    /// Called on the PTY thread after each event is sent, so tests can
-    /// wait for output without polling.
+    /// Called on the PTY thread after each wake, so tests can wait for
+    /// output without polling.
     #[cfg(all(test, not(windows)))]
     on_pty: Option<std::sync::mpsc::Sender<()>>,
     /// Allocations the last frame's `TerminalState::prepare` made.
@@ -118,18 +118,18 @@ mod app {
 
     impl UiApp for Demo {
         type Action = Msg;
-        type Message = PtyEvent;
+        type Message = ();
 
         fn init(&mut self, cx: &mut UiContext) {
             cx.set_focus(Some(TERM_FOCUS));
             let Some(command) = self.command.clone() else {
                 return;
             };
-            let sender = cx.sender::<PtyEvent>();
+            let waker = cx.window.waker().clone();
             #[cfg(test)]
             let notify = self.on_pty.clone();
-            let spawned = self.term.spawn(&command, move |event| {
-                sender.send(event);
+            let spawned = self.term.spawn(&command, move || {
+                waker.wake();
                 #[cfg(test)]
                 if let Some(notify) = &notify {
                     let _ = notify.send(());
@@ -172,10 +172,11 @@ mod app {
             self.apply(outcome, cx);
         }
 
-        fn message(&mut self, event: PtyEvent, cx: &mut UiContext) {
-            self.term.handle_pty(event);
-            self.signals(cx);
-            cx.window.request_redraw();
+        fn wake(&mut self, cx: &mut UiContext) {
+            if self.term.read_pty() {
+                self.signals(cx);
+                cx.window.request_redraw();
+            }
         }
 
         fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
@@ -241,7 +242,7 @@ mod app {
 #[cfg(windows)]
 impl UiApp for Demo {
     type Action = Msg;
-    type Message = PtyEvent;
+    type Message = ();
 
     fn init(&mut self, cx: &mut UiContext) {
         let _ = (&self.command, TERM_FOCUS);
