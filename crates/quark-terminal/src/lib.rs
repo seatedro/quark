@@ -11,6 +11,16 @@
 //! wide characters and emoji through the bundled fallback fonts, and the
 //! cursor in each DECSCUSR shape, blinking when the program asks.
 //!
+//! Drawing follows Ghostty's renderer. The cell is the font's advance by
+//! its line height in whole device pixels, glyphs step by cells and sit on
+//! the cell's baseline; box drawing, block elements, braille, powerline,
+//! and the legacy computing symbols are drawn procedurally to the cell
+//! (Ghostty's sprite face), so they tile without seams; characters that
+//! default to text presentation draw from a text face; and glyph edges
+//! blend as Ghostty's `linear-corrected` does. [`TerminalStyle`] carries
+//! Ghostty's options, and [`TerminalStyle::from_ghostty_config`] reads them
+//! from a Ghostty config file.
+//!
 //! Scrollback scrolls with a [`quark_ui::element::ScrollHandle`] over the
 //! full history (wheel, fling, scrollbar), while only the visible rows are
 //! ever built. Drag selects; double and triple click select words and

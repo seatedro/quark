@@ -923,8 +923,8 @@ fn render(
     scale: f32,
     style: crate::TerminalStyle,
 ) -> Option<(quark_app::testing::Pixels, (u32, u32), u32)> {
-    let mut t = TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal"))
-        .with_style(style);
+    let mut t =
+        TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal")).with_style(style);
     t.feed(output.as_bytes());
     let mut ui = quark_app::testing::UiTestHarness::new(Probe(t), (320.0, 200.0), scale);
     ui.frame();
@@ -1064,7 +1064,10 @@ fn linear_correction_weighs_text_like_srgb_blending() {
     let white = Rgb::new(255, 255, 255);
     let black = Rgb::new(0, 0, 0);
     // (case, foreground, background, corrected draws more ink)
-    let table = [("dark on light", black, white, true), ("light on dark", white, black, false)];
+    let table = [
+        ("dark on light", black, white, true),
+        ("light on dark", white, black, false),
+    ];
     for (name, fg, bg, heavier) in table {
         let ink = |blending| {
             let style = crate::TerminalStyle {
@@ -1085,11 +1088,38 @@ fn linear_correction_weighs_text_like_srgb_blending() {
             }
             Some(ink)
         };
-        let (Some(linear), Some(corrected)) =
-            (ink(AlphaBlending::Linear), ink(AlphaBlending::LinearCorrected))
-        else {
+        let (Some(linear), Some(corrected)) = (
+            ink(AlphaBlending::Linear),
+            ink(AlphaBlending::LinearCorrected),
+        ) else {
             return;
         };
-        assert_eq!(corrected > linear, heavier, "{name}: {corrected} vs {linear}");
+        assert_eq!(
+            corrected > linear,
+            heavier,
+            "{name}: {corrected} vs {linear}"
+        );
+    }
+}
+
+/// `font_thicken` emboldens glyph outlines: the same text draws more ink.
+#[test]
+fn font_thicken_draws_heavier_glyphs() {
+    let ink = |thicken| {
+        let style = crate::TerminalStyle {
+            font_thicken: thicken,
+            ..white_on_black()
+        };
+        let (pixels, (cw, ch), o) = render("WMWMWMWM", 2.0, style)?;
+        let mut ink = 0u64;
+        for y in o..o + ch {
+            for x in o..o + 8 * cw {
+                ink += u64::from(pixels.pixel(x, y)[0]);
+            }
+        }
+        Some(ink)
+    };
+    if let (Some(plain), Some(thick)) = (ink(false), ink(true)) {
+        assert!(thick > plain * 21 / 20, "{thick} vs {plain}");
     }
 }
