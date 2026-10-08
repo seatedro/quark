@@ -2153,7 +2153,7 @@ mod tests {
         let mut system = TextSystem::vendored_only(&FontSettings::default());
         // Smaller than the mix's working set, so lookups hit, promote, and
         // evict.
-        system.font_system_mut().set_shape_plan_capacity(3);
+        system.set_shape_plan_capacity(3);
         let order = (0..expected.len()).chain((0..expected.len()).rev());
         for i in order.clone().chain(order.step_by(2)) {
             let layout = system.layout(&plan_mix()[i]).expect("layout");

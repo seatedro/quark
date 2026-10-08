@@ -197,6 +197,12 @@ impl TextSystem {
         &mut self.font_system
     }
 
+    /// How many shaping plans the font system keeps. Plans only speed up
+    /// shaping, so changing this keeps the font epoch.
+    pub fn set_shape_plan_capacity(&mut self, capacity: usize) {
+        self.font_system.set_shape_plan_capacity(capacity);
+    }
+
     /// Shapes and lays out text without caching. Prefer
     /// [`crate::LayoutCache::layout`] for per-frame use.
     pub fn layout(&mut self, params: &TextParams) -> Result<TextLayout, TextError> {
