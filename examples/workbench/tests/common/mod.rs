@@ -36,13 +36,32 @@ pub fn thread_row(name: &str) -> By {
     By::role_name(Role::ListItem, name)
 }
 
-/// Names of the rows the accessibility tree reports as selected.
+/// Names of the threads the sidebar lists (its list items, not the
+/// transcript's).
+pub fn listed_threads(ui: &UiTestHarness<Workbench>) -> Vec<String> {
+    let Some(list) = ui.try_find(By::role_name(Role::List, "Threads")) else {
+        return Vec::new();
+    };
+    let inside = |b: quark::Rect| {
+        b.x >= list.bounds.x && b.right() <= list.bounds.right() && b.y >= list.bounds.y - 1.0
+    };
+    ui.find_all(By::role(Role::ListItem))
+        .into_iter()
+        .filter(|n| inside(n.bounds))
+        .filter_map(|n| n.name)
+        .collect()
+}
+
+/// Names of the sidebar threads the accessibility tree reports as
+/// selected.
 pub fn selected_rows(ui: &UiTestHarness<Workbench>) -> Vec<String> {
+    let listed = listed_threads(ui);
     ui.accessibility_update()
         .nodes
         .iter()
         .filter(|(_, n)| n.role() == Role::ListItem && n.is_selected() == Some(true))
         .filter_map(|(_, n)| n.label().map(str::to_owned))
+        .filter(|name| listed.contains(name))
         .collect()
 }
 

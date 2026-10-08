@@ -37,13 +37,13 @@ fn shell_filtering_retains_stable_selection() {
     ui.click_node(By::name("Search threads"));
     ui.type_text("tile");
     let filtered = selected_rows(&ui);
-    let shown = ui.find_all(By::role(Role::ListItem)).len();
+    let shown = listed_threads(&ui);
     ui.click_node(By::role_name(Role::Button, "Clear"));
     let cleared = selected_rows(&ui);
 
     let want = vec!["Offline tile cache".to_owned()];
     assert_eq!((&before, &filtered, &cleared), (&want, &want, &want));
-    assert_eq!(shown, 1, "only the matching thread is listed");
+    assert_eq!(shown, want, "only the matching thread is listed");
 }
 
 // Catches a stopped run still writing: after Stop, the scenario's later
