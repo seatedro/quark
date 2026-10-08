@@ -102,6 +102,28 @@ fn dragging_the_thumb_maps_its_travel_onto_the_content() {
     assert_eq!(offset(&ui), (0.0, 400.0));
 }
 
+/// A 40 point strip over 400 points of content: its 28 point track is
+/// shorter than the minimum thumb, so the thumb fills it.
+fn strip(handle: &ScrollHandle) -> Div {
+    div()
+        .w(200.0)
+        .h(40.0)
+        .track_scroll(handle)
+        .overflow_y_scroll()
+        .child(div().w_full().h(400.0).flex_shrink_0())
+}
+
+// Regression: a thumb that fills its track asked for offset 0 on any drag,
+// so grabbing it jumped the content to the top.
+#[test]
+fn dragging_a_thumb_that_fills_its_track_keeps_the_offset() {
+    let mut ui = harness(strip, Theme::default_dark());
+    ui.app().handle.set_offset(0.0, 60.0);
+    ui.frame();
+    ui.drag((196.0, 20.0), (196.0, 30.0));
+    assert_eq!(offset(&ui), (0.0, 60.0));
+}
+
 #[test]
 fn pressing_the_track_pages_toward_the_press() {
     // A page of the 200 point viewport is 160 points.

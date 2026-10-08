@@ -989,11 +989,12 @@ impl Scrollbar {
     /// end of its track asks for `f32::MAX`, which sinks clamp to their
     /// current end: content that grew since the press (a streaming
     /// transcript) is still reached, so a drag to the bottom stays there.
+    /// A thumb that fills its track has no travel and keeps the offset.
     pub fn offset_for_pointer(&self, pointer: f32, grab: f32) -> f32 {
         let (start, len) = self.axis.span(self.track);
         let range = len - self.axis.span(self.thumb).1;
         if range <= 0.0 {
-            return 0.0;
+            return self.offset;
         }
         let travel = (pointer - start - grab).clamp(0.0, range);
         if travel >= range {
