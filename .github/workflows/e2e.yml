@@ -72,6 +72,16 @@ jobs:
           WGPU_BACKEND: vulkan
         run: e2e/run.sh
 
+      # Full kache counters (hits, misses, passthroughs, remote) for judging
+      # the cache; informational, so it never fails the job.
+      - name: Cache diagnostics
+        if: always()
+        continue-on-error: true
+        run: |
+          kache --version
+          kache daemon status
+          kache stats --full || kache stats
+
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

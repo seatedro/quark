@@ -112,6 +112,16 @@ jobs:
         # runs the document's highlighting tests against the pack above.
         run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax
 
+      # Full kache counters (hits, misses, passthroughs, remote) for judging
+      # the cache; informational, so it never fails the job.
+      - name: Cache diagnostics
+        if: always()
+        continue-on-error: true
+        run: |
+          kache --version
+          kache daemon status
+          kache stats --full || kache stats
+
   # macOS (Apple silicon) and Windows: the Linux job's clippy and tests, then
   # a smoke launch of hello_ui. Formatting and feature combinations are
   # platform independent and stay on Linux.
@@ -154,7 +164,11 @@ jobs:
       # also keeps pull requests and unprotected branches read-only. Without
       # the secrets (fork pull requests) it falls back to the Actions cache.
       # cache-executables covers proc macros and build scripts too.
+      # Not on Windows: kache 1.0.0 runs ring's and tree-sitter's rustc calls
+      # uncached there (cc writes both libNAME.a and NAME.lib, which kache
+      # rejects as ambiguous), and copies between the C: and D: volumes.
       - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        if: runner.os != 'Windows'
         with:
           cache-key-prefix: kache-${{ matrix.os }}
           s3-bucket: ${{ secrets.KACHE_S3_ACCESS_KEY_ID != '' && 'quark-kache' || '' }}
@@ -166,8 +180,33 @@ jobs:
           pr-comment: false
           cache-executables: true
 
+      # Windows caches the dependencies' target outputs instead, in the
+      # workspace's target directory on the build volume. Only master saves.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: runner.os == 'Windows'
+        with:
+          key: windows-native-v1
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # libghostty-vt, which build.rs stages under target/debug/ghostty-vt
+      # by a key of Ghostty commit, target, mode, Zig version and CRT. No
+      # rustc cache covers this Zig build, so it gets its own entry rather
+      # than relying on rust-cache's target cleanup to keep it.
+      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        if: runner.os == 'Windows'
+        id: ghostty-vt
+        with:
+          path: target/debug/ghostty-vt
+          key: ghostty-vt-${{ runner.os }}-${{ runner.arch }}-zig0.16.0-${{ hashFiles('crates/quark-terminal/build.rs') }}-v1
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        if: success() && runner.os == 'Windows' && github.ref == 'refs/heads/master' && steps.ghostty-vt.outputs.cache-hit != 'true'
+        with:
+          path: target/debug/ghostty-vt
+          key: ${{ steps.ghostty-vt.outputs.cache-primary-key }}
 
       # Built with this platform's compiler and linker (MSVC on Windows), so
       # the tests load a dylib or DLL the way apps do.
@@ -218,6 +257,16 @@ jobs:
               $bmp.Save("target/smoke/hello_ui.png")'
           fi
           kill "$pid"
+
+      # Full kache counters (hits, misses, passthroughs, remote) for judging
+      # the cache; informational, so it never fails the job.
+      - name: Cache diagnostics
+        if: always() && runner.os != 'Windows'
+        continue-on-error: true
+        run: |
+          kache --version
+          kache daemon status
+          kache stats --full || kache stats
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
