@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::*;
 use crate::accessibility::{AccessibilityFrame, dump_accessibility};
@@ -586,6 +587,32 @@ fn rebuilding_leaves_a_replayed_frame_as_it_was() {
 
     assert_eq!(replayed.fills(), [BUTTON]);
     assert_eq!(rebuilt.fills(), [HOVER]);
+}
+
+// Catches the recorder taking a chunk only a `Weak` still observes for
+// its own: a strong count of one does not make it writable, and the
+// rebuild must record into another chunk instead of failing.
+#[test]
+fn rebuilding_while_a_weak_handle_observes_the_recording() {
+    let mut window = Window::new();
+    let action = Action::from(Pressed(1));
+    window.paint(swatch(0, BUTTON, &action));
+    let replayed = window.paint(swatch(0, BUTTON, &action));
+    let observer = replayed
+        .scene
+        .primitives
+        .iter()
+        .find_map(|p| match p {
+            quark_render::Primitive::Chunk(c) => Some(Arc::downgrade(&c.chunk)),
+            _ => None,
+        })
+        .expect("a replayed chunk");
+    drop(replayed);
+
+    let rebuilt = window.paint(swatch(0, HOVER, &action));
+
+    assert_eq!(rebuilt.fills(), [HOVER]);
+    drop(observer);
 }
 
 // Catches per-rebuild bookkeeping allocations: the recorded handler
