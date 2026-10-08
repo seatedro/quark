@@ -40,6 +40,8 @@ pub struct State {
     pub sidebar_overlay: bool,
     /// The policy last applied to the dock.
     pub applied: Option<WidthPolicy>,
+    /// The title bar's content as of the last frame.
+    title: Option<std::rc::Rc<titlebar::TitleData>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +54,9 @@ pub enum Action {
     /// Wheel lines over the sidebar list, or a thumb drag to a pixel.
     ScrollLines(i32),
     ScrollTo(u32),
+    /// Arrow keys on the focused list: move the selection this many
+    /// threads (`i32::MIN`/`MAX` for the first and last).
+    Step(i32),
     DismissOverlay,
 }
 
@@ -63,6 +68,7 @@ pub fn new_state() -> State {
         dock_forced: false,
         sidebar_overlay: false,
         applied: None,
+        title: None,
     }
 }
 
@@ -119,6 +125,12 @@ pub fn update(state: &mut State, action: Action, scx: &SurfaceCx, fx: &mut Effec
         Action::ToggleSection(section) => state.sidebar.toggle(section),
         Action::ScrollLines(lines) => state.sidebar.scroll_by_lines(lines),
         Action::ScrollTo(px) => state.sidebar.scroll_to(px as f32),
+        Action::Step(step) => {
+            if let Some(next) = state.sidebar.step(scx.model, scx.model.selected, step) {
+                state.sidebar.reveal(next);
+                fx.push(Effect::SelectThread(next));
+            }
+        }
         Action::DismissOverlay => state.sidebar_overlay = false,
     }
 }

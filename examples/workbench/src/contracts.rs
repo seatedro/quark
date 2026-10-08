@@ -362,6 +362,9 @@ pub enum Effect {
     OpenFile(String),
     /// Show the diff panel, scrolled to `path` when given.
     RevealDiff(Option<String>),
+    /// Show `panel` in the right dock, opening the dock (through the
+    /// shell's width policy) when it is hidden.
+    RevealPanel(PanelId),
     ApplyDiff,
     UndoDiff,
     Toast(Toast),
@@ -450,6 +453,8 @@ pub struct Options {
     pub manual_clock: bool,
     /// Restore and save dock and settings here; session-only when unset.
     pub state_dir: Option<PathBuf>,
+    /// Rows of stress history (`ScenarioKind::Stress`); 50,000 when unset.
+    pub stress_rows: Option<usize>,
     /// Write JSONL frame samples here and exit after the scripted run
     /// (`--perf <path>`).
     pub perf_out: Option<PathBuf>,

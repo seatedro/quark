@@ -22,7 +22,7 @@ use crate::contracts::{
 };
 use crate::design::tokens;
 use crate::model::Model;
-use crate::perf::Marks;
+use crate::perf::{Marks, Recorder};
 use crate::scenario::{DemoClock, Event, EventKind, SCENARIO_TIME, Scenario};
 use crate::{composer, design, dock, fixtures, overlays, settings, shell, timeline};
 
@@ -51,8 +51,13 @@ macro_rules! surface_cx {
 /// Values the app sends itself.
 #[derive(Debug)]
 pub enum Message {
-    /// Play scenario events due by now and load the next history batch.
-    Pump,
+    /// Announce what playback queued during the last frame (views have no
+    /// `UiContext` to announce through).
+    Flush,
+    /// A watched theme file changed (`QUARK_WORKBENCH_THEME_DIR`).
+    ThemeFiles,
+    /// `--perf`: start the scripted run, or write the recording and exit.
+    Perf,
 }
 
 pub struct Workbench {
@@ -67,11 +72,14 @@ pub struct Workbench {
     pub overlays: overlays::State,
     pub settings: settings::State,
     pub marks: Marks,
+    pub recorder: Recorder,
     fx: Effects,
     events: Vec<Event>,
     sender: Option<UiSender<Message>>,
-    /// A Pump is queued and not yet delivered.
-    pump_queued: bool,
+    /// Announcements playback queued for the next `Message::Flush`.
+    announcements: Vec<String>,
+    /// The theme choice in effect (launch option, then `SetTheme`).
+    theme_choice: crate::contracts::ThemeChoice,
     /// Runner time of the latest callback, for text edits (which get no
     /// context).
     runner_ms: u64,
@@ -108,10 +116,12 @@ impl Workbench {
             overlays: overlays::new_state(),
             settings: settings::new_state(),
             marks: Marks::new(options.perf_out.is_some()),
+            recorder: Recorder::new(options.perf_out.clone()),
             fx: Effects::default(),
             events: Vec::new(),
             sender: None,
-            pump_queued: false,
+            announcements: Vec::new(),
+            theme_choice: options.theme,
             runner_ms: 0,
             main_size: (0.0, 0.0),
             policy: WidthPolicy {
@@ -127,17 +137,11 @@ impl Workbench {
         self.clock.now(self.runner_ms)
     }
 
-    fn queue_pump(&mut self) {
-        if !self.pump_queued
-            && let Some(sender) = &self.sender
-        {
-            self.pump_queued = sender.send(Message::Pump);
-        }
-    }
-
     /// Apply scenario events due by now and adopt one batch of queued
-    /// history. Returns whether anything changed.
-    fn pump(&mut self, cx: &mut UiContext) -> bool {
+    /// history. Runs at the top of each main-window frame, so a frame
+    /// drawn at an event's due time shows it. Returns whether anything
+    /// changed.
+    fn pump(&mut self) -> bool {
         let now = self.now_ms();
         self.scenario.advance_to(now, &mut self.events);
         let mut changed = false;
@@ -146,16 +150,17 @@ impl Workbench {
                 continue;
             }
             changed = true;
+            // Completions are announced once; streamed chunks never are.
             match &event.kind {
                 EventKind::ToolDone { status, .. } => {
                     let word = match status {
                         crate::model::ToolStatus::Failed => "Tool failed",
                         _ => "Tool finished",
                     };
-                    cx.announce(word, Politeness::Polite);
+                    self.announcements.push(word.to_owned());
                 }
                 EventKind::Done { summary } => {
-                    cx.announce(format!("Run complete. {summary}"), Politeness::Polite);
+                    self.announcements.push(format!("Run complete. {summary}"));
                 }
                 _ => {}
             }
@@ -167,7 +172,51 @@ impl Workbench {
             }
             changed = true;
         }
+        if !self.announcements.is_empty()
+            && let Some(sender) = &self.sender
+        {
+            sender.send(Message::Flush);
+        }
         changed
+    }
+
+    /// `--perf`: sample this frame, start the run on the first frame, and
+    /// finish once the run and the history are done (a few frames later,
+    /// so the last sample gets its render stats).
+    fn record_perf(&mut self, vcx: &mut ViewContext, build_us: u64) {
+        let thread = self.model.selected;
+        let rows = self.model.thread(thread).map_or(0, |t| t.transcript.len());
+        let running = self.model.run(thread).is_some();
+        let stats = vcx.frame.last_render_stats();
+        let previous = (stats.cpu_us, stats.acquire_us, stats.present_us);
+        self.recorder
+            .record(self.runner_ms, build_us, previous, rows, running);
+        let done = self.recorder.started
+            && !running
+            && self.scenario.is_idle()
+            && self.model.history_pending() == 0;
+        if (!self.recorder.started || done)
+            && let Some(sender) = &self.sender
+        {
+            sender.send(Message::Perf);
+        }
+        // Keep frames coming so every sample gets a successor.
+        vcx.frame.request_frame();
+    }
+
+    /// Ask for the frame that plays the next due event, and for the next
+    /// history batch.
+    fn schedule(&mut self, vcx: &mut ViewContext) {
+        if self.model.history_pending() > 0 {
+            vcx.frame.request_frame();
+        }
+        if self.clock.is_manual() {
+            return;
+        }
+        if let Some(due) = self.scenario.next_due() {
+            let wait = due.saturating_sub(self.now_ms());
+            vcx.frame.request_frame_in(Duration::from_millis(wait));
+        }
     }
 
     fn apply_effects(&mut self, cx: &mut UiContext) {
@@ -199,12 +248,16 @@ impl Workbench {
                 self.send_prompt(thread, "Retry the last step.", cx);
             }
             Effect::OpenFile(path) => {
-                self.shell.dock_wanted = true;
+                self.show_dock();
                 dock::open_file(&mut self.dock, &path);
             }
             Effect::RevealDiff(path) => {
-                self.shell.dock_wanted = true;
+                self.show_dock();
                 dock::reveal_diff(&mut self.dock, path.as_deref());
+            }
+            Effect::RevealPanel(panel) => {
+                self.show_dock();
+                dock::reveal_panel(&mut self.dock, panel);
             }
             Effect::ApplyDiff => self.apply_diff(),
             Effect::UndoDiff => {
@@ -227,12 +280,22 @@ impl Workbench {
             Effect::Announce(text) => cx.announce(text, Politeness::Polite),
             Effect::CopyText(text) => cx.window.set_clipboard_text(&text),
             Effect::SetTheme(choice) => {
+                self.theme_choice = choice;
                 let (light, dark) = design::themes_for(choice);
                 cx.set_themes(light, dark);
             }
             Effect::SetRegionVisible(region, visible) => {
                 dock::set_region_visible(&mut self.dock, region, visible);
             }
+        }
+    }
+
+    /// Ask the shell to show the right dock; below the dock breakpoint it
+    /// opens anyway, as the toggle does. The next frame applies it.
+    fn show_dock(&mut self) {
+        self.shell.dock_wanted = true;
+        if self.main_size.0 < shell::DOCK_BREAKPOINT {
+            self.shell.dock_forced = true;
         }
     }
 
@@ -247,7 +310,6 @@ impl Workbench {
         };
         self.scenario.start(thread, generation, self.now_ms());
         cx.announce("Prompt sent", Politeness::Polite);
-        self.queue_pump();
     }
 
     fn apply_diff(&mut self) {
@@ -306,7 +368,6 @@ impl Workbench {
             CommandId::AdvanceDemoStep => {
                 if let Some(due) = self.scenario.next_due() {
                     self.clock.set(due);
-                    self.queue_pump();
                 }
             }
             CommandId::ResetDemo => {
@@ -364,23 +425,6 @@ impl Workbench {
         }
         .into_any()
     }
-
-    fn schedule_pump(&mut self, vcx: &mut ViewContext) {
-        if self.clock.is_manual() && self.model.history_pending() == 0 {
-            return;
-        }
-        let now = self.now_ms();
-        match self.scenario.next_due() {
-            Some(due) if due <= now => self.queue_pump(),
-            Some(due) if !self.clock.is_manual() => {
-                vcx.frame.request_frame_in(Duration::from_millis(due - now));
-            }
-            _ => {}
-        }
-        if self.model.history_pending() > 0 {
-            self.queue_pump();
-        }
-    }
 }
 
 impl UiApp for Workbench {
@@ -389,21 +433,26 @@ impl UiApp for Workbench {
 
     fn init(&mut self, cx: &mut UiContext) {
         self.sender = Some(cx.sender::<Message>());
+        let sender = cx.sender::<Message>();
+        design::reload::watch(move || {
+            sender.send(Message::ThemeFiles);
+        });
         dock::init(&mut self.dock, cx);
-        if self.model.history_pending() > 0 {
-            self.queue_pump();
-        }
     }
 
     fn view(&mut self, vcx: &mut ViewContext) -> AnyElement {
         let window = vcx.window_handle();
         let size = vcx.frame.size();
         self.runner_ms = vcx.frame.elapsed().as_millis() as u64;
-        self.schedule_pump(vcx);
         let Some(host) = self.dock.windows.host(window) else {
             return div().w(size.0).h(size.1).into_any();
         };
         let main = host == HostId::MAIN;
+        let build_started = std::time::Instant::now();
+        if main {
+            self.pump();
+            self.schedule(vcx);
+        }
         if main {
             self.main_size = size;
             self.policy = shell::sync_width(&mut self.shell, size.0, &mut self.fx);
@@ -501,6 +550,9 @@ impl UiApp for Workbench {
         .into_any();
         if main {
             self.marks.first_frame(self.runner_ms);
+            if self.recorder.is_active() {
+                self.record_perf(vcx, build_started.elapsed().as_micros() as u64);
+            }
         }
         element
     }
@@ -535,10 +587,37 @@ impl UiApp for Workbench {
     fn message(&mut self, message: Message, cx: &mut UiContext) {
         self.runner_ms = cx.window.elapsed().as_millis() as u64;
         match message {
-            Message::Pump => {
-                self.pump_queued = false;
-                if self.pump(cx) {
+            Message::Flush => {
+                for text in self.announcements.drain(..) {
+                    cx.announce(text, Politeness::Polite);
+                }
+            }
+            Message::Perf => {
+                if !self.recorder.started {
+                    self.recorder.started = true;
+                    let thread = self.model.selected;
+                    self.send_prompt(thread, "Make the shortcuts layout independent.", cx);
                     cx.window.request_redraw_all();
+                } else if !self.recorder.finished {
+                    match self.recorder.write(&self.marks) {
+                        Ok(path) => {
+                            eprintln!("workbench: wrote {}", path.unwrap_or_default().display())
+                        }
+                        Err(e) => eprintln!("workbench: could not write the perf recording: {e}"),
+                    }
+                    cx.window.exit();
+                }
+            }
+            Message::ThemeFiles => {
+                let (light, dark) = design::themes_for(self.theme_choice);
+                cx.set_themes(light, dark);
+                if let Some(why) = design::reload::take_rejection() {
+                    self.fx.push(Effect::Toast(Toast {
+                        kind: ToastKind::Error,
+                        text: format!("Theme file rejected: {why}"),
+                        undo: None,
+                    }));
+                    self.apply_effects(cx);
                 }
             }
         }
@@ -549,7 +628,8 @@ impl UiApp for Workbench {
         if dock::input(&mut self.dock, event, cx) {
             return true;
         }
-        if !matches!(event, InputEvent::KeyPress(_)) {
+        // Keys, and dropped files for the composer's attachments.
+        if !matches!(event, InputEvent::KeyPress(_) | InputEvent::FileDropped(_)) {
             return false;
         }
         let handled = {
@@ -565,6 +645,10 @@ impl UiApp for Workbench {
             self.apply_effects(cx);
         }
         handled
+    }
+
+    fn set_preedit(&mut self, target: FocusId, text: String, cursor: Option<(usize, usize)>) {
+        composer::set_preedit(&mut self.composer, target, text, cursor);
     }
 
     fn edit_text(&mut self, target: FocusId, command: TextEditCommand) -> TextEditOutcome {

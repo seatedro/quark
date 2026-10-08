@@ -164,7 +164,6 @@ impl<A: App> Runner<A> {
             scale_factor,
             surface_size: size,
             frame_clock: FrameClock::default(),
-            #[cfg(feature = "devtools")]
             last_render: Default::default(),
             traffic_lights: options.traffic_lights,
             persist_key: options.persist_key.clone(),
@@ -360,7 +359,6 @@ impl<A: App> Runner<A> {
             waker: &self.waker,
             ime: FrameIme::default(),
             accessibility_active: state.accessibility_state.is_active(),
-            #[cfg(feature = "devtools")]
             last_render: state.last_render,
         };
 
@@ -407,10 +405,7 @@ impl<A: App> Runner<A> {
             }
         }
         match rendered {
-            #[cfg(feature = "devtools")]
             Ok(stats) => state.last_render = stats,
-            #[cfg(not(feature = "devtools"))]
-            Ok(_) => {}
             // Nothing reached the screen; try again on the next pass.
             Err(RenderError::SurfaceReconfigured) => {
                 tracing::debug!("surface reconfigured; redrawing");

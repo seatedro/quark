@@ -37,13 +37,13 @@ fn shell_filtering_retains_stable_selection() {
     ui.click_node(By::name("Search threads"));
     ui.type_text("tile");
     let filtered = selected_rows(&ui);
-    let shown = ui.find_all(By::role(Role::ListItem)).len();
+    let shown = listed_threads(&ui);
     ui.click_node(By::role_name(Role::Button, "Clear"));
     let cleared = selected_rows(&ui);
 
     let want = vec!["Offline tile cache".to_owned()];
     assert_eq!((&before, &filtered, &cleared), (&want, &want, &want));
-    assert_eq!(shown, 1, "only the matching thread is listed");
+    assert_eq!(shown, want, "only the matching thread is listed");
 }
 
 // Catches a stopped run still writing: after Stop, the scenario's later
@@ -101,4 +101,47 @@ fn shell_960_layout_leaves_composer_reachable() {
         "composer field at {field:?}"
     );
     assert_eq!(ui.find(By::name("Message")).value.as_deref(), Some("fits"));
+}
+
+// Catches the sidebar costing a Tab stop per thread or ignoring arrow
+// keys: the list is one stop, Down and End move the selection through the
+// listed threads, and the title bar follows.
+#[test]
+fn shell_arrow_keys_move_the_selection_from_the_focused_list() {
+    let mut ui = harness(ScenarioKind::Review);
+    ui.click_node(By::role_name(Role::List, "Threads"));
+    ui.key("down");
+    let after_down = selected_rows(&ui);
+    ui.key("end");
+
+    assert_eq!(after_down, ["Share trips as read-only links"]);
+    assert_eq!(selected_rows(&ui), ["Empty library onboarding"]);
+    assert!(ui.find(By::role_name(Role::List, "Threads")).focused);
+}
+
+// Catches the width policy resetting the layout: a sidebar the user
+// widened keeps its width after a narrow window hid it and a wide one
+// brought it back.
+#[test]
+fn shell_widening_restores_the_users_sidebar_width() {
+    let mut ui = harness(ScenarioKind::Review);
+    let divider = By::role_name(Role::Splitter, "Resize Sidebar");
+    ui.click_node(divider.clone());
+    ui.key("right");
+    ui.key("right");
+    let widened = ui.find(divider.clone()).value;
+    ui.resize(1000.0, 700.0);
+    let narrow = ui.try_find(divider.clone()).is_some();
+    ui.resize(WIDE.0, WIDE.1);
+
+    assert_ne!(
+        widened.as_deref(),
+        Some("232"),
+        "the keys moved the divider"
+    );
+    assert!(
+        !narrow,
+        "no sidebar divider while the sidebar is an overlay"
+    );
+    assert_eq!(ui.find(divider).value, widened);
 }
