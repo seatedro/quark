@@ -1,0 +1,41 @@
+[package]
+name = "quark-workbench"
+description = "Quark Workbench: a deterministic coding-agent client built from quark's primitives."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "workbench"
+path = "src/main.rs"
+
+[dependencies]
+quark.workspace = true
+quark-app = { workspace = true, features = ["components", "syntax", "images"] }
+quark-ui = { workspace = true, features = ["syntax", "images"] }
+quark-components.workspace = true
+quark-text.workspace = true
+quark-syntax.workspace = true
+quark-terminal.workspace = true
+quark-diff.workspace = true
+accesskit.workspace = true
+serde.workspace = true
+serde_json = "1.0"
+
+[dev-dependencies]
+# The headless harness (`quark_app::testing`) and the allocation counter
+# the perf tests wrap the global allocator in.
+quark-app = { workspace = true, features = ["components", "syntax", "images", "test-support"] }
+quark-ui = { workspace = true, features = ["syntax", "images", "test-alloc"] }
+
+[features]
+default = []
+# Forwarded quark-app tooling; enable one profiler at a time.
+devtools = ["quark-app/devtools"]
+hot-reload = ["quark-app/hot-reload"]
+profile-puffin = ["quark-app/profile-puffin"]
+profile-tracy = ["quark-app/profile-tracy"]
+# Pixel readback in tests through a headless GPU device.
+headless-render = ["quark-app/headless-render"]
