@@ -1467,9 +1467,9 @@ impl Renderer {
     }
 
     /// Upload, prepare, and encode the flattened frame into `encoder`,
-    /// targeting `target`. Everything goes into one encoder: each text segment
+    /// targeting `target`. Everything goes into one encoder: each text run
     /// has its own `TextRenderer`, so preparing one cannot overwrite the
-    /// vertices another segment's pass reads.
+    /// vertices another run's pass reads.
     fn record_frame(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1702,7 +1702,7 @@ impl Renderer {
         Some(texture.bind_group.clone())
     }
 
-    /// Prepare every text segment of `frames`, retrying once with the atlas
+    /// Prepare every text run of `frames`, retrying once with the atlas
     /// unpinned. False when this frame's glyphs do not fit and its text is
     /// skipped. On the positioned path the vertices still need uploading.
     fn prepare_frame_text(&mut self, frames: &[TargetFrame], text: &mut TextSystem) -> bool {
@@ -4311,7 +4311,7 @@ mod tests {
         );
     }
 
-    // Guards the single-encoder path: every text segment has its own text
+    // Guards the single-encoder path: every text run has its own text
     // renderer, so preparing a later z-layer's text must not erase earlier text.
     #[test]
     fn render_text_in_two_z_layers_draws_both() {
