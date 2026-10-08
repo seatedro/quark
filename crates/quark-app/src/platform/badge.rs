@@ -199,8 +199,10 @@ mod windows_overlay {
     unsafe fn icon(rgba: &[u8]) -> Option<HICON> {
         let size = OVERLAY_SIZE as i32;
         let bgra: Vec<u8> = rgba
-            .chunks_exact(4)
-            .flat_map(|p| [p[2], p[1], p[0], p[3]])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, a]| [b, g, r, a])
             .collect();
         // An all-zero mask: the color bitmap's alpha decides transparency.
         let mask = [0u8; OVERLAY_SIZE * OVERLAY_SIZE / 8];

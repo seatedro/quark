@@ -489,10 +489,12 @@ mod tests {
             cuts.sort_unstable();
             cuts.dedup();
             let spans: Vec<HighlightSpan> = cuts
-                .chunks_exact(2)
-                .map(|pair| HighlightSpan {
-                    offset: pair[0] as u32,
-                    length: (pair[1] - pair[0]) as u32,
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[start, end]| HighlightSpan {
+                    offset: start as u32,
+                    length: (end - start) as u32,
                     kind: HighlightKind::Keyword,
                 })
                 .collect();
