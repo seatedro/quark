@@ -58,6 +58,8 @@ pub struct State {
     scroll: f32,
     /// List viewport height as of the last frame, for clamping scrolls.
     viewport: f32,
+    /// When the list's auto-hiding scrollbar shows (the offset is ours).
+    scrollbar: ScrollbarVisibility,
     /// Rows as of the last frame; reused so steady frames do not allocate.
     rows: Vec<Row>,
     /// Row data of the rows on screen, reused across frames.
@@ -74,6 +76,7 @@ impl Default for State {
             collapsed: Vec::new(),
             scroll: 0.0,
             viewport: 0.0,
+            scrollbar: ScrollbarVisibility::new(),
             rows: Vec::new(),
             visible: Vec::new(),
             memo: RowMemo::default(),
@@ -345,6 +348,7 @@ fn list(sidebar: &mut State, scx: &SurfaceCx, width: f32, list_h: f32) -> AnyEle
         width,
         list_h,
         scroll: sidebar.scroll,
+        scrollbar: sidebar.scrollbar.clone(),
         top: window.top_spacer,
         bottom: window.bottom_spacer,
         total: window.total_extent,
@@ -383,6 +387,7 @@ struct ListView {
     width: f32,
     list_h: f32,
     scroll: f32,
+    scrollbar: ScrollbarVisibility,
     top: f32,
     bottom: f32,
     total: f32,
@@ -395,6 +400,7 @@ impl ListView {
         view! {
             <div w={self.width} h={self.list_h} class="flex-col px-2" scroll_y={self.scroll}
                  scroll_total={self.total} on:scroll={scroll} track_focus={LIST}
+                 scrollbar_visibility={&self.scrollbar} scrollbar_auto_hide
                  focus_ring={LIST}
                  on_key={("up", QAction::from(Action::Step(-1)))}
                  on_key={("down", QAction::from(Action::Step(1)))}
