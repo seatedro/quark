@@ -270,8 +270,12 @@ fn slot(id: LayoutId) -> usize {
 pub struct LayoutEngine {
     pub(super) tree: taffy::TaffyTree<NodeMeasure>,
     /// Nodes in request order; this frame has requested `nodes[..cursor]`.
+    /// The rest are spares a larger earlier frame left: detached, without
+    /// measure contexts, kept for a later frame to reuse with their storage.
     nodes: Vec<LayoutId>,
     cursor: usize,
+    /// The cursor when the last pass finished: nodes past it are spares.
+    finished: usize,
     /// Absolute origin of every node reachable from the computed root, by
     /// slot; NaN for nodes the last pass did not reach.
     origins: Vec<(f32, f32)>,
@@ -302,6 +306,7 @@ impl LayoutEngine {
             tree: taffy::TaffyTree::new(),
             nodes: Vec::new(),
             cursor: 0,
+            finished: 0,
             origins: Vec::new(),
             walk: Vec::new(),
             child_ids: Vec::new(),
@@ -554,10 +559,21 @@ impl LayoutEngine {
     /// After the pass: lay every subtree out at its host's final size, and
     /// record absolute origins so [`Self::layout_bounds`] is a lookup.
     fn finish(&mut self, root: LayoutId, cx: &mut MeasureContext) {
-        // Nodes past the cursor belong to a larger earlier frame.
-        for node in self.nodes.drain(self.cursor..) {
-            self.tree.remove(node).expect("valid node");
+        // Nodes past the cursor belong to a larger earlier frame. They stay,
+        // so a frame that needs them again reuses them (and their child
+        // lists) instead of creating nodes: no node of this frame has them
+        // as children, and dropping their contexts releases the text and
+        // closures those hold.
+        for &node in self
+            .nodes
+            .get(self.cursor..self.finished)
+            .unwrap_or_default()
+        {
+            if self.tree.get_node_context(node).is_some() {
+                self.tree.set_node_context(node, None).expect("valid node");
+            }
         }
+        self.finished = self.cursor;
         for sub in &mut self.subtrees[..self.live_subtrees] {
             let (Some(host), Some(sub_root)) = (sub.host, sub.root) else {
                 continue;
@@ -688,5 +704,155 @@ fn boundary_root_style() -> taffy::Style {
     taffy::Style {
         display: taffy::Display::Block,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_alloc;
+    use taffy::{Dimension, LengthPercentage, LengthPercentageAuto};
+
+    fn sized(width: f32, height: f32) -> taffy::Style {
+        taffy::Style {
+            size: taffy::Size {
+                width: Dimension::length(width),
+                height: Dimension::length(height),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn flex(direction: taffy::FlexDirection) -> taffy::Style {
+        taffy::Style {
+            display: taffy::Display::Flex,
+            flex_direction: direction,
+            ..Default::default()
+        }
+    }
+
+    /// One frame of a window of nested flex rows and columns, a block, a
+    /// wrapping row, and an absolute overlay: `width` sizes one deep leaf,
+    /// and `popup` adds a container with two children.
+    fn frame(engine: &mut LayoutEngine, cx: &mut MeasureContext, width: f32, popup: bool) {
+        engine.clear();
+        let title = engine.request_layout(sized(120.0, 20.0), &[]);
+        let spacer = engine.request_layout(
+            taffy::Style {
+                flex_grow: 1.0,
+                ..Default::default()
+            },
+            &[],
+        );
+        let button = engine.request_layout(sized(30.0, 20.0), &[]);
+        let header = engine.request_layout(
+            taffy::Style {
+                gap: taffy::Size {
+                    width: LengthPercentage::length(8.0),
+                    height: LengthPercentage::length(0.0),
+                },
+                ..flex(taffy::FlexDirection::Row)
+            },
+            &[title, spacer, button],
+        );
+        let items = [
+            engine.request_layout(sized(30.0, 30.0), &[]),
+            engine.request_layout(sized(30.0, 30.0), &[]),
+        ];
+        let sidebar = engine.request_layout(
+            taffy::Style {
+                size: taffy::Size {
+                    width: Dimension::length(80.0),
+                    height: Dimension::auto(),
+                },
+                ..flex(taffy::FlexDirection::Column)
+            },
+            &items,
+        );
+        let tiles: [LayoutId; 6] =
+            std::array::from_fn(|_| engine.request_layout(sized(50.0, 24.0), &[]));
+        let grid = engine.request_layout(
+            taffy::Style {
+                flex_wrap: taffy::FlexWrap::Wrap,
+                ..flex(taffy::FlexDirection::Row)
+            },
+            &tiles,
+        );
+        let deep = engine.request_layout(sized(width, 10.0), &[]);
+        let column = engine.request_layout(flex(taffy::FlexDirection::Column), &[deep]);
+        let content = engine.request_layout(
+            taffy::Style {
+                display: taffy::Display::Block,
+                flex_grow: 1.0,
+                ..Default::default()
+            },
+            &[grid, column],
+        );
+        let body = engine.request_layout(
+            taffy::Style {
+                flex_grow: 1.0,
+                ..flex(taffy::FlexDirection::Row)
+            },
+            &[sidebar, content],
+        );
+        let mark = engine.begin_children();
+        engine.push_child(header);
+        engine.push_child(body);
+        if popup {
+            let lines = [
+                engine.request_layout(sized(60.0, 12.0), &[]),
+                engine.request_layout(sized(40.0, 12.0), &[]),
+            ];
+            let popup = engine.request_layout(
+                taffy::Style {
+                    position: taffy::Position::Absolute,
+                    inset: taffy::Rect {
+                        left: LengthPercentageAuto::percent(0.5),
+                        top: LengthPercentageAuto::length(40.0),
+                        right: LengthPercentageAuto::auto(),
+                        bottom: LengthPercentageAuto::auto(),
+                    },
+                    ..flex(taffy::FlexDirection::Column)
+                },
+                &lines,
+            );
+            engine.push_child(popup);
+        }
+        let root = engine.finish_children(
+            &taffy::Style {
+                padding: taffy::Rect::length(4.0_f32),
+                ..flex(taffy::FlexDirection::Column)
+            },
+            mark,
+        );
+        engine.compute_layout(root, 400.0, 300.0, cx);
+    }
+
+    /// Allocations of the last of `frames`, each `(width, popup)`.
+    fn last_frame_allocations(frames: &[(f32, bool)]) -> u64 {
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        let mut cx = MeasureContext {
+            text: &mut text,
+            layouts: &mut layouts,
+        };
+        let mut engine = LayoutEngine::new();
+        let (last, warmup) = frames.split_last().unwrap();
+        for &(width, popup) in warmup {
+            frame(&mut engine, &mut cx, width, popup);
+        }
+        test_alloc::count(|| frame(&mut engine, &mut cx, last.0, last.1)).1
+    }
+
+    #[test]
+    fn warmed_relayout_allocates_nothing() {
+        let frames = [(10.0, false), (20.0, false), (10.0, false), (20.0, false)];
+        assert_eq!(last_frame_allocations(&frames), 0);
+    }
+
+    #[test]
+    fn warmed_frame_that_adds_nodes_allocates_nothing() {
+        let frames = [(10.0, false), (10.0, true), (10.0, false), (10.0, true)];
+        assert_eq!(last_frame_allocations(&frames), 0);
     }
 }
