@@ -361,6 +361,62 @@ mod tests {
             .collect()
     }
 
+    /// Whether a scrollbar thumb is painted at the window's right edge (the
+    /// track is the faint rounded rect beside it).
+    fn scrollbar_shown(ui: &UiTestHarness<Demo>) -> bool {
+        ui.scene().primitives.iter().any(|p| {
+            matches!(p, quark::scene::Primitive::RoundedRect(r)
+                if r.rect.x > SIZE.0 - 20.0 && r.color.a != 10)
+        })
+    }
+
+    /// Scrolling the history shows the scrollbar for a moment, even with
+    /// the pointer gone from the terminal, and it hides again with no more
+    /// output or pointer movement.
+    #[test]
+    fn scrolling_shows_the_scrollbar_until_it_lingers_out() {
+        let mut ui = harness(None);
+        ui.app_mut().term.feed(lines(0, 100).as_bytes());
+        ui.frame();
+        ui.advance(5_000);
+        assert!(!scrollbar_shown(&ui), "before scrolling");
+        let bottom = ui.app().term.scrollbar().offset;
+
+        ui.pointer_move((100.0, 100.0));
+        ui.wheel(0.0, -200.0);
+        ui.pointer_leave();
+        ui.frame();
+        assert!(ui.app().term.scrollbar().offset < bottom, "did not scroll");
+        assert!(scrollbar_shown(&ui), "while scrolling");
+
+        ui.advance(500);
+        assert!(scrollbar_shown(&ui), "half a second later");
+        ui.advance(1_000);
+        assert!(!scrollbar_shown(&ui), "after the linger");
+    }
+
+    /// A wheel the program takes as mouse reports moves no history, so it
+    /// shows no scrollbar once the pointer leaves.
+    #[test]
+    fn a_wheel_reported_to_the_program_shows_no_scrollbar() {
+        let mut ui = harness(None);
+        ui.app_mut().term.feed(lines(0, 100).as_bytes());
+        ui.app_mut().term.feed(b"\x1b[?1000h");
+        ui.frame();
+        ui.advance(5_000);
+        let _ = ui.app_mut().term.take_input();
+
+        ui.pointer_move((100.0, 100.0));
+        ui.wheel(0.0, -200.0);
+        ui.pointer_leave();
+        ui.frame();
+        assert!(
+            ui.app_mut().term.take_input().starts_with(b"\x1b[M"),
+            "no wheel report"
+        );
+        assert!(!scrollbar_shown(&ui));
+    }
+
     /// With no screen reader, preparing a changed frame allocates nothing
     /// once the rows have held lines as long: the grid updates in place and
     /// no screen text is built.
