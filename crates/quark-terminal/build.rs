@@ -14,10 +14,10 @@
 //!
 //! Ghostty's build runs with `-Demit-lib-vt`, which installs one static
 //! archive with its SIMD dependencies (simdutf, highway) and compiler-rt
-//! folded in; it needs only libc at link time. On ELF targets build.rs
-//! then renames compiler-rt's copies of C library functions in the archive
-//! so programs use the C library's (see build/compiler_rt.rs); Ghostty's
-//! build does the same for macOS.
+//! folded in; it needs only libc at link time. On Linux and Windows
+//! build.rs then renames compiler-rt's copies of C library functions in
+//! the archive so programs use the C library's (see build/compiler_rt.rs);
+//! Ghostty's build does the same for macOS.
 //!
 //! The archive is cached in the target directory per commit, Zig target,
 //! optimize mode, Zig version, and (for MSVC) C runtime, so feature changes
@@ -76,7 +76,7 @@ const GHOSTTY_HASH: &str = "ghostty-1.3.2-dev-5UdBC4gaYwVruUDKYxdTyGQF6L_6LjdKdJ
 
 /// Part of the cache key; bump it when build.rs changes the archive it
 /// installs without changing anything else in the key.
-const ARCHIVE_REVISION: u32 = 1;
+const ARCHIVE_REVISION: u32 = 2;
 
 /// What to tell a user whose build failed.
 const HELP: &str = "To build without network access, set QUARK_GHOSTTY_VT_SOURCE_DIR to a \
@@ -203,8 +203,8 @@ fn build_with_zig(os: &str, archive: &str) -> PathBuf {
         "quark-terminal: zig build installed no lib/{archive} in {}",
         staging.display()
     );
-    if !matches!(os, "windows" | "macos" | "ios") {
-        compiler_rt::prefer_libc(&staging.join("lib").join(archive), &zig);
+    if !matches!(os, "macos" | "ios") {
+        compiler_rt::prefer_libc(&staging.join("lib").join(archive), &zig, os == "windows");
     }
     // A leftover entry without the archive (from before installs were
     // atomic) would block the rename.

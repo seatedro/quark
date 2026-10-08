@@ -1,14 +1,16 @@
-//! Post-processing of the ELF archive's bundled compiler-rt.
+//! Post-processing of the ELF and COFF archives' bundled compiler-rt.
 //!
 //! The static libghostty-vt bundles Zig's compiler-rt as one member,
-//! `compiler_rt.o`, which also defines C library functions (`memcpy`,
-//! `bcmp`, `sin`, ...) as weak hidden symbols, and Ghostty's own code
-//! defines a `memset` the same way (src/quirks_memset.zig, to replace
-//! compiler-rt's). A link pulls those members in (Rust code alone
-//! references `bcmp` and `memcpy`), and a definition in a linked object
-//! beats the C library's shared one, so every slice comparison and copy in
-//! the program ran compiler-rt's portable loops (its `bcmp` compares a byte
-//! at a time, about nine times slower than glibc's on 640 bytes).
+//! `compiler_rt.o` (`.obj` on Windows), which also defines C library
+//! functions (`memcpy`, `bcmp`, `sin`, ...) as weak symbols, and Ghostty's
+//! own code defines a `memset` the same way on Linux
+//! (src/quirks_memset.zig, to replace compiler-rt's). A link pulls those
+//! members in (Rust code alone references `memcmp` and `memcpy`), and
+//! their definitions beat the C library's: ELF linkers prefer a linked
+//! object's definition to a shared library's, and link.exe takes the weak
+//! externals over the C runtime's. So every slice comparison and copy in
+//! the program ran compiler-rt's portable loops (its `bcmp` compares a
+//! byte at a time, about nine times slower than glibc's on 640 bytes).
 //! [`prefer_libc`] renames those definitions so references from other
 //! members and the program bind to the C library, while a member's calls
 //! to its own definitions keep their targets. Ghostty does the same to
@@ -102,10 +104,10 @@ const RENAMED: &str = "__ghostty_vt_";
 const MAGIC: &[u8] = b"!<arch>\n";
 const HEADER: usize = 60;
 
-/// Rewrites the GNU archive at `archive` so no member defines any of
-/// [`LIBC_SYMBOLS`] and its compiler-rt member is intact, then rebuilds the
-/// archive's symbol index with `zig ranlib`.
-pub fn prefer_libc(archive: &Path, zig: &str) {
+/// Rewrites the archive at `archive` (GNU format, or COFF if `coff`) so no
+/// member defines any of [`LIBC_SYMBOLS`] and its compiler-rt member is
+/// intact, then rebuilds the archive's symbol index with `zig ar`.
+pub fn prefer_libc(archive: &Path, zig: &str, coff: bool) {
     let data = fs::read(archive)
         .unwrap_or_else(|e| panic!("quark-terminal: read {}: {e}", archive.display()));
     assert!(
@@ -113,8 +115,9 @@ pub fn prefer_libc(archive: &Path, zig: &str) {
         "quark-terminal: {} is not an ar archive",
         archive.display()
     );
-    let mut out = MAGIC.to_vec();
     let mut long_names: &[u8] = &[];
+    // Each object member's full name, header, and contents.
+    let mut members = Vec::new();
     let mut changed = false;
     let mut pos = MAGIC.len();
     while pos < data.len() {
@@ -123,39 +126,67 @@ pub fn prefer_libc(archive: &Path, zig: &str) {
         let raw = &data[pos + HEADER..pos + HEADER + size];
         pos += HEADER + size + (size & 1);
         let name = field(&header[..16]);
-        let mut body = Cow::Borrowed(raw);
         match name {
-            // The symbol index names old member offsets; ranlib rebuilds it.
+            // The symbol index (two members in COFF) names old member
+            // offsets; `zig ar s` rebuilds it.
             "/" | "/SYM64/" => continue,
+            // Rewritten below.
             "//" => long_names = raw,
             _ => {
                 let full = member_name(name, long_names);
-                let compiler_rt = Path::new(&full).file_name() == Some("compiler_rt.o".as_ref());
+                let compiler_rt = Path::new(&full)
+                    .file_stem()
+                    .is_some_and(|stem| stem == "compiler_rt");
                 let mut object = raw.to_vec();
                 if compiler_rt {
                     object = intact_compiler_rt(object, &full);
                 }
                 if !rename_definitions(&mut object) && compiler_rt {
-                    // An ELF this cannot edit links as it is, just slower.
+                    // An object this cannot edit links as it is, just slower.
                     println!(
                         "cargo:warning=quark-terminal: left compiler-rt's C library \
-                         functions in {} (not 64-bit little-endian ELF)",
+                         functions in {} (neither 64-bit little-endian ELF nor COFF)",
                         archive.display()
                     );
                 }
-                if object != raw {
+                let body = if object != raw {
                     changed = true;
-                    body = object.into();
-                }
+                    Cow::Owned(object)
+                } else {
+                    Cow::Borrowed(raw)
+                };
+                members.push((full, header, body));
             }
         }
-        let mut header = header.to_vec();
-        header[48..58].copy_from_slice(format!("{:<10}", body.len()).as_bytes());
+    }
+    // Every name goes in a GNU long name table, which `zig ar` reads
+    // without a symbol index (it can only tell a COFF archive's NUL
+    // terminated names apart by its index) and writes back in the format
+    // asked for.
+    let mut names = Vec::new();
+    let mut offsets = Vec::new();
+    for (full, _, _) in &members {
+        offsets.push(names.len());
+        names.extend_from_slice(full.as_bytes());
+        names.extend_from_slice(b"/\n");
+    }
+    let mut out = MAGIC.to_vec();
+    let mut push = |header: Vec<u8>, body: &[u8]| {
         out.extend_from_slice(&header);
-        out.extend_from_slice(&body);
+        out.extend_from_slice(body);
         if body.len() % 2 == 1 {
             out.push(b'\n');
         }
+    };
+    push(
+        format!("{:<48}{:<10}`\n", "//", names.len()).into_bytes(),
+        &names,
+    );
+    for ((_, header, body), offset) in members.iter().zip(offsets) {
+        let mut header = header.to_vec();
+        header[..16].copy_from_slice(format!("/{offset:<15}").as_bytes());
+        header[48..58].copy_from_slice(format!("{:<10}", body.len()).as_bytes());
+        push(header, body);
     }
     if !changed {
         // Nothing to fix; keep the archive and its index as Zig wrote them.
@@ -163,14 +194,22 @@ pub fn prefer_libc(archive: &Path, zig: &str) {
     }
     fs::write(archive, &out)
         .unwrap_or_else(|e| panic!("quark-terminal: write {}: {e}", archive.display()));
-    let mut ranlib = Command::new(zig);
-    ranlib.arg("ranlib").arg(archive);
-    let status = ranlib
+    let mut index = Command::new(zig);
+    index
+        .arg("ar")
+        .arg(if coff {
+            "--format=coff"
+        } else {
+            "--format=gnu"
+        })
+        .arg("s")
+        .arg(archive);
+    let status = index
         .status()
-        .unwrap_or_else(|e| panic!("quark-terminal: could not run {ranlib:?}: {e}"));
+        .unwrap_or_else(|e| panic!("quark-terminal: could not run {index:?}: {e}"));
     assert!(
         status.success(),
-        "quark-terminal: {ranlib:?} failed: {status}"
+        "quark-terminal: {index:?} failed: {status}"
     );
 }
 
@@ -182,14 +221,14 @@ fn field(bytes: &[u8]) -> &str {
 }
 
 /// A member's full name: `name/` inline, or `/offset` into the `//` table,
-/// where names end in `/\n`.
+/// where names end in `/\n` (GNU) or NUL (COFF).
 fn member_name(name: &str, long_names: &[u8]) -> String {
     match name.strip_prefix('/').and_then(|n| n.parse::<usize>().ok()) {
         Some(offset) => {
             let rest = &long_names[offset..];
             let end = rest
                 .windows(2)
-                .position(|w| w == b"/\n")
+                .position(|w| w == b"/\n" || w[0] == 0)
                 .unwrap_or(rest.len());
             String::from_utf8_lossy(&rest[..end]).into_owned()
         }
@@ -221,14 +260,22 @@ fn intact_compiler_rt(object: Vec<u8>, path: &str) -> Vec<u8> {
     })
 }
 
-/// Renames the global definitions of [`LIBC_SYMBOLS`] in an ELF object,
-/// writing the new names into a copy of the string table appended to the
-/// file. Returns false, leaving `object` alone, if it is not 64-bit
-/// little-endian ELF.
+/// Renames the global definitions of [`LIBC_SYMBOLS`] in an object.
+/// Returns false, leaving `object` alone, if it is neither 64-bit
+/// little-endian ELF nor x86-64 or ARM64 COFF.
 fn rename_definitions(object: &mut Vec<u8>) -> bool {
-    let Some(elf) = Elf::parse(object) else {
-        return false;
-    };
+    if Elf::parse(object).is_some() {
+        rename_elf(object);
+        true
+    } else {
+        rename_coff(object)
+    }
+}
+
+/// Renames in an ELF object, writing the new names into a copy of the
+/// string table appended to the file.
+fn rename_elf(object: &mut Vec<u8>) {
+    let elf = Elf::parse(object).expect("ELF");
     let symtab = elf.symtab();
     let strtab = elf.section(symtab.link);
     let mut names = object[strtab.offset..][..strtab.size].to_vec();
@@ -249,7 +296,7 @@ fn rename_definitions(object: &mut Vec<u8>) -> bool {
         }
     }
     if renames.is_empty() {
-        return true;
+        return;
     }
     for (at, name) in renames {
         put(object, at, &name.to_le_bytes());
@@ -262,6 +309,58 @@ fn rename_definitions(object: &mut Vec<u8>) -> bool {
         strtab.header + 32,
         &(names.len() as u64).to_le_bytes(),
     );
+}
+
+/// Renames in a COFF object: the weak externals (and any strong
+/// definitions) of [`LIBC_SYMBOLS`] get long names added to the string
+/// table, which ends the file. Returns false if this is not a COFF object
+/// it can edit.
+fn rename_coff(object: &mut Vec<u8>) -> bool {
+    const SYMBOL: usize = 18;
+    // IMAGE_FILE_MACHINE_AMD64 or ARM64; a big object header (which
+    // starts 00 00 ff ff) has no machine there.
+    if object.len() < 20 || !matches!(u16_at(object, 0), 0x8664 | 0xaa64) {
+        return false;
+    }
+    let symtab = u32_at(object, 8) as usize;
+    let count = u32_at(object, 12) as usize;
+    let strtab = symtab + count * SYMBOL;
+    if strtab + 4 > object.len() || strtab + u32_at(object, strtab) as usize != object.len() {
+        return false;
+    }
+    let mut strings = object[strtab..].to_vec();
+    let mut renames = Vec::new();
+    let mut i = 0;
+    while i < count {
+        let at = symtab + i * SYMBOL;
+        let section = u16_at(object, at + 12) as i16;
+        let class = object[at + 16];
+        i += 1 + object[at + 17] as usize;
+        // IMAGE_SYM_CLASS_WEAK_EXTERNAL, or IMAGE_SYM_CLASS_EXTERNAL in a
+        // section.
+        if class != 105 && !(class == 2 && section > 0) {
+            continue;
+        }
+        let name = if u32_at(object, at) == 0 {
+            c_str(&object[strtab + u32_at(object, at + 4) as usize..])
+        } else {
+            c_str(&object[at..at + 8])
+        };
+        if LIBC_SYMBOLS.iter().any(|s| s.as_bytes() == name) {
+            renames.push((at, strings.len() as u32));
+            strings.extend_from_slice(RENAMED.as_bytes());
+            strings.extend_from_slice(name);
+            strings.push(0);
+        }
+    }
+    for &(at, offset) in &renames {
+        put(object, at, &[0; 4]);
+        put(object, at + 4, &offset.to_le_bytes());
+    }
+    let size = strings.len() as u32;
+    put(&mut strings, 0, &size.to_le_bytes());
+    object.truncate(strtab);
+    object.extend_from_slice(&strings);
     true
 }
 
