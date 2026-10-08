@@ -75,10 +75,12 @@ jobs:
           cargo check --workspace --all-targets --features
           quark-app/hot-reload,quark-app/syntax-download,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-app/autostart,quark-app/global-shortcut,quark-app/telemetry,quark-render/headless-render,quark-syntax/download,quark-ui/syntax-download,quark-ui/devtools,quark-ui/profile,quark-text/profile
 
-      # The Rust grammar pack that quark-syntax's and quark-ui's highlighting
-      # tests load, built from its pinned source like a released pack.
-      - name: Build test grammar pack
-        run: cargo run -p syntax-pack -- build rust
+      # The grammar packs that quark-syntax's and quark-ui's highlighting
+      # tests load, built from their pinned sources like released packs:
+      # Rust, plus HTML, JavaScript, CSS, and Markdown for embedded
+      # languages. The build also loads each and checks its sample.
+      - name: Build test grammar packs
+        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline
 
       - name: Test
         env:
@@ -154,8 +156,8 @@ jobs:
 
       # Built with this platform's compiler and linker (MSVC on Windows), so
       # the tests load a dylib or DLL the way apps do.
-      - name: Build test grammar pack
-        run: cargo run -p syntax-pack -- build rust
+      - name: Build test grammar packs
+        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline
 
       - name: Test
         env:
