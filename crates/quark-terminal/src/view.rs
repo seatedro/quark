@@ -54,30 +54,44 @@ pub fn terminal_view(
     let Some(frame) = state.frame() else {
         return div().into_any();
     };
+    let grid = state.shared_grid();
+    // Built only for a screen reader. Turning one on changes the hash, so
+    // the current screen is published without new output.
+    let screen = env.accessible.then(|| state.screen_text());
     let (width, height) = frame.viewport;
     let palette = palette(theme);
     let top = state.scroll_top();
     let hash = inputs_hash(&(
-        frame.generation,
+        frame.revision,
+        screen.as_ref().map(|s| s.1),
         top.to_bits(),
         state.nonce(),
-        env.accessible,
         palette,
         on_event as usize,
     ));
-    let grid_frame = frame.clone();
-    let grid = cached(frame.id, hash, move || {
-        build(&grid_frame, top, palette, env, on_event)
+    let (grid_frame, rows_grid) = (frame.clone(), grid.clone());
+    let content = cached(frame.id, hash, move || {
+        build(&grid_frame, &rows_grid, screen, top, palette, on_event)
     })
     .w(width)
     .h(height);
     let m = frame.metrics;
-    let mut layer = div().w(width).h(height).relative().child(grid);
-    if let Some(at) = frame.grid.cursor.at {
-        let cursor_frame = frame.clone();
-        let blink = env.focused && frame.grid.cursor.blinking;
-        let hash = inputs_hash(&(frame.generation, env.focused, palette));
+    let mut layer = div().w(width).h(height).relative().child(content);
+    if let Some(at) = grid.cursor.at {
+        let blink = env.focused && grid.cursor.blinking;
+        // Everything the cursor paints: its cell's row (the glyph under a
+        // block), its style, and the cell size.
+        let row_hash = grid.rows.get(at.1 as usize).map_or(0, |r| r.hash);
+        let hash = inputs_hash(&(
+            grid.cursor,
+            row_hash,
+            grid.colors,
+            [m.font_size, m.cell_w, m.cell_h].map(f32::to_bits),
+            env.focused,
+            palette,
+        ));
         let key = CacheKey(quark::stable_hash(frame.id) ^ 0x6375_7273_6f72);
+        let cursor_grid = grid.clone();
         layer = layer.child(
             div()
                 .absolute()
@@ -85,7 +99,7 @@ pub fn terminal_view(
                 .top(m.pad + f32::from(at.1) * m.cell_h)
                 .child(
                     cached(key, hash, move || {
-                        cursor(&cursor_frame, at, palette, env.focused, blink)
+                        cursor(cursor_grid, m, at, palette, env.focused, blink)
                     })
                     .w(m.cell_w * 2.0)
                     .h(m.cell_h),
@@ -97,23 +111,23 @@ pub fn terminal_view(
         bounds: state.bounds_cell(),
         inset: (
             m.pad,
-            f32::from(frame.grid.cols) * m.cell_w,
-            frame.grid.rows.len() as f32 * m.cell_h,
+            f32::from(grid.cols) * m.cell_w,
+            grid.rows.len() as f32 * m.cell_h,
         ),
     }
     .into_any()
 }
 
 fn build(
-    frame: &Rc<Frame>,
+    frame: &Frame,
+    grid: &Rc<Grid>,
+    screen: Option<(Arc<str>, usize)>,
     top: f32,
     palette: Palette,
-    env: TerminalEnv,
     on_event: fn(TerminalEvent) -> Action,
 ) -> AnyElement {
     let (width, height) = frame.viewport;
     let m = frame.metrics;
-    let grid = &frame.grid;
     let grid_w = f32::from(grid.cols) * m.cell_w;
     let grid_h = grid.rows.len() as f32 * m.cell_h;
     let mut rows = div()
@@ -134,7 +148,7 @@ fn build(
         // their cache keys apart.
         let nth = grid.rows[..i].iter().filter(|r| r.hash == row.hash).count() as u64;
         let key = CacheKey(row.hash ^ (nth + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let grid = frame.grid.clone();
+        let grid = grid.clone();
         let hash = inputs_hash(&(row.hash, grid.colors, m.cell_w.to_bits(), palette));
         rows = rows.child(
             cached(key, hash, move || {
@@ -148,7 +162,7 @@ fn build(
             .h(m.cell_h),
         );
     }
-    if env.accessible {
+    if let Some((text, caret)) = screen {
         let frame = frame.clone();
         let screen = canvas(move |bounds, _scene, cx| {
             let title: &str = if frame.title.is_empty() {
@@ -161,7 +175,7 @@ fn build(
                     .label(title.to_owned())
                     .read_only(true)
                     .focus(frame.focus)
-                    .text(AccessibleText::new(frame.text.clone()).caret(frame.caret)),
+                    .text(AccessibleText::new(text).caret(caret)),
             );
         })
         .w(grid_w)
@@ -366,14 +380,13 @@ fn decorate(
 
 /// The cursor at cell `at`, over the grid.
 fn cursor(
-    frame: &Frame,
+    grid: Rc<Grid>,
+    m: Metrics,
     at: (u16, u16),
     palette: Palette,
     focused: bool,
     blink: bool,
 ) -> AnyElement {
-    let m = frame.metrics;
-    let grid = frame.grid.clone();
     canvas(move |bounds, scene, cx| {
         if blink {
             let phase = cx.clock_ms / BLINK_MS;

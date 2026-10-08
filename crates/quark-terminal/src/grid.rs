@@ -195,19 +195,25 @@ pub struct Grid {
 impl Grid {
     /// Visible text, rows joined by `\n`, trailing blank rows dropped.
     pub fn text(&self) -> String {
+        let mut out = String::new();
+        self.write_text(&mut out);
+        out
+    }
+
+    /// Replaces `out` with [`Self::text`], reusing its buffer.
+    pub fn write_text(&self, out: &mut String) {
+        out.clear();
         let last = self
             .rows
             .iter()
             .rposition(|r| !r.text.is_empty())
             .map_or(0, |i| i + 1);
-        let mut out = String::new();
         for (i, row) in self.rows[..last].iter().enumerate() {
             if i > 0 {
                 out.push('\n');
             }
             out.push_str(&row.text);
         }
-        out
     }
 
     /// Byte offset of viewport cell `(col, row)` in [`Self::text`]: the

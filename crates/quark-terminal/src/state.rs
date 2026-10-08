@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use quark_render::FontKind;
 use quark_render::scene::Rect;
@@ -129,23 +130,22 @@ impl std::hash::Hash for Palette {
     }
 }
 
-/// Everything [`crate::terminal_view`] reads, rebuilt by
-/// [`TerminalState::prepare`] when the terminal changed.
-#[derive(Debug)]
+/// What [`crate::terminal_view`] reads besides the grid, refreshed by
+/// [`TerminalState::prepare`] when the terminal changed. A plain value of
+/// shared handles, so updating it allocates nothing.
+#[derive(Debug, Clone)]
 pub(crate) struct Frame {
     pub id: &'static str,
     pub focus: FocusId,
     pub viewport: (f32, f32),
     pub metrics: Metrics,
-    pub grid: Rc<Grid>,
     /// Height of the scrollable content: every row of the scrollback.
     pub content_h: f32,
     pub scroll: ScrollHandle,
     pub title: Rc<str>,
-    /// Visible text for screen readers, and the cursor's byte in it.
-    pub text: std::sync::Arc<str>,
-    pub caret: usize,
-    pub generation: u64,
+    /// Bumped when the rows or anything above changed; a cursor that only
+    /// moved leaves it alone.
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,10 +185,14 @@ pub struct TerminalState {
     /// Grid size in cells, and the scale it was sized at.
     size: (u16, u16, u32),
     grid: Rc<Grid>,
-    frame: Option<Rc<Frame>>,
-    /// Something the frame shows changed since it was built.
+    frame: Option<Frame>,
+    /// Something the frame shows may have changed since it was built.
     dirty: bool,
-    generation: u64,
+    revision: u64,
+    /// The screen reader text, the frame revision it was built at, and the
+    /// buffer it is built in. Built only while a screen reader listens.
+    screen_text: Option<(u64, Arc<str>)>,
+    screen_buf: String,
     scroll: ScrollHandle,
     /// The scrollbar row the handle and the terminal last agreed on.
     synced_row: u64,
@@ -242,7 +246,9 @@ impl TerminalState {
             grid: Rc::default(),
             frame: None,
             dirty: true,
-            generation: 0,
+            revision: 0,
+            screen_text: None,
+            screen_buf: String::new(),
             scroll: ScrollHandle::new(),
             synced_row: 0,
             pending_scroll: false,
@@ -376,6 +382,9 @@ impl TerminalState {
 
     /// Feeds program output through the VT parser.
     pub fn feed(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         self.vt.write(bytes);
         let effects = self.vt.take_effects();
         if !effects.pty.is_empty() {
@@ -818,27 +827,52 @@ impl TerminalState {
             return;
         }
         self.dirty = false;
-        self.generation += 1;
-        // Drop the last frame's hold on the grid so it updates in place.
-        self.frame = None;
-        self.vt.snapshot(Rc::make_mut(&mut self.grid));
-        let grid = self.grid.clone();
-        let caret = grid.cursor.at.map_or(0, |(x, y)| grid.text_offset(x, y));
+        // The last frame's views of the grid are dropped by now, so this
+        // updates it in place; a copy an app still holds is cloned first.
+        let changes = self.vt.snapshot(Rc::make_mut(&mut self.grid));
         let sb = self.vt.scrollbar();
         let leftover = (self.viewport.1 - f32::from(rows) * m.cell_h).max(0.0);
-        self.frame = Some(Rc::new(Frame {
+        let content_h = sb.total as f32 * m.cell_h + leftover;
+        // The cursor boundary reads the grid itself, so a cursor that only
+        // moved needs no new frame.
+        let unchanged = self.frame.as_ref().is_some_and(|f| {
+            !changes.rows
+                && f.viewport == self.viewport
+                && f.metrics == m
+                && f.content_h == content_h
+                && Rc::ptr_eq(&f.title, &self.title)
+        });
+        if unchanged {
+            return;
+        }
+        self.revision += 1;
+        self.frame = Some(Frame {
             id: self.id,
             focus: self.focus,
             viewport: self.viewport,
             metrics: m,
-            text: std::sync::Arc::from(grid.text()),
-            caret,
-            grid,
-            content_h: sb.total as f32 * m.cell_h + leftover,
+            content_h,
             scroll: self.scroll.clone(),
             title: self.title.clone(),
-            generation: self.generation,
-        }));
+            revision: self.revision,
+        });
+    }
+
+    /// The visible text for screen readers and the cursor's byte in it.
+    /// The text is rebuilt only when the frame revision moved since the
+    /// last call, so a cursor move reuses it.
+    pub(crate) fn screen_text(&mut self) -> (Arc<str>, usize) {
+        let grid = &self.grid;
+        let caret = grid.cursor.at.map_or(0, |(x, y)| grid.text_offset(x, y));
+        match &self.screen_text {
+            Some((revision, text)) if *revision == self.revision => (text.clone(), caret),
+            _ => {
+                grid.write_text(&mut self.screen_buf);
+                let text: Arc<str> = Arc::from(self.screen_buf.as_str());
+                self.screen_text = Some((self.revision, text.clone()));
+                (text, caret)
+            }
+        }
     }
 
     /// Keeps the scroll handle and the terminal's viewport on the same row:
@@ -880,8 +914,12 @@ impl TerminalState {
         self.nonce
     }
 
-    pub(crate) fn frame(&self) -> Option<Rc<Frame>> {
+    pub(crate) fn frame(&self) -> Option<Frame> {
         self.frame.clone()
+    }
+
+    pub(crate) fn shared_grid(&self) -> Rc<Grid> {
+        self.grid.clone()
     }
 
     pub(crate) fn bounds_cell(&self) -> Rc<Cell<Rect>> {
