@@ -26,7 +26,13 @@ use crate::model::{Model, ThreadStatus};
 /// The sidebar's search field.
 pub const SEARCH: FocusId = FocusId::from_key("sidebar.search");
 /// The thread list, for focus and the accessibility tree.
-const LIST: FocusId = FocusId::from_key("sidebar.list");
+pub const LIST: FocusId = FocusId::from_key("sidebar.list");
+/// The element id of `thread`'s row, where the overlays find a right-click's
+/// target in the last frame's geometry.
+pub fn thread_row_id(thread: ThreadId) -> String {
+    format!("thread:{}", thread.0)
+}
+
 /// Height of the search area above the list.
 const SEARCH_AREA: f32 = 48.0;
 const ROW: f32 = tokens::SIDEBAR_ROW;
@@ -504,7 +510,7 @@ fn build_row(data: &RowData, colors: RowColors) -> AnyElement {
             view! {
                 <div class="w-full flex-row items-center gap-[8] px-2 rounded-[6]" h={ROW}
                      bg={bg} hover_bg={if selected { bg } else { colors.hover }}
-                     on:click={Action::SelectThread(id)}
+                     on:click={Action::SelectThread(id)} id={thread_row_id(id)}
                      accessibility_role={AccessibilityRole::ListItem} aria-label={data.name.clone()}
                      accessibility_selected={selected} tooltip={data.label.clone()}>
                     <div class="w-[6] h-[6] rounded-[3] shrink-0"
