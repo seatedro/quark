@@ -241,6 +241,13 @@ impl FontSystem {
     }
 
     /// Get a mutable reference to the database.
+    /// Sets how many harfrust shape plans to keep (see
+    /// [`DEFAULT_SHAPE_PLAN_CAPACITY`](crate::DEFAULT_SHAPE_PLAN_CAPACITY)),
+    /// dropping the least recently used past it.
+    pub fn set_shape_plan_capacity(&mut self, capacity: usize) {
+        self.shape_buffer.set_shape_plan_capacity(capacity);
+    }
+
     pub fn db_mut(&mut self) -> &mut fontdb::Database {
         self.font_matches_cache.clear();
         &mut self.db

@@ -2103,6 +2103,57 @@ mod tests {
         assert_eq!(dump(&reused), dump(&fresh));
     }
 
+    /// Texts that each need different shape plans: scripts, directions,
+    /// UI and mono fonts, and weights.
+    fn plan_mix() -> Vec<TextParams> {
+        let style = TextStyle::new(14.0);
+        let span = |range, weight, kind| TextSpan {
+            range,
+            weight,
+            style: None,
+            kind,
+        };
+        vec![
+            TextParams::new("office affine", style),
+            TextParams::new("fn main() -> x != y", style.kind(FontKind::Mono)),
+            TextParams::new(
+                "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd}",
+                style,
+            ),
+            TextParams::new("\u{627}\u{644}\u{633}\u{644}\u{627}\u{645}", style),
+            TextParams::new(
+                "\u{1f600}\u{1f469}\u{200d}\u{1f4bb} \u{65e5}\u{672c}\u{8a9e}",
+                style,
+            ),
+            TextParams::new("ab \u{5e9}\u{5dc}\u{5d5}\u{5dd} cd office", style).spans(vec![
+                span(0..2, Some(FontWeight::Bold), Some(FontKind::Mono)),
+                span(12..14, Some(FontWeight::Semibold), None),
+            ]),
+        ]
+    }
+
+    // The shape plan cache is keyed by font, script, direction, features,
+    // and variation instance. A lookup that returns another key's plan, or
+    // loses track of a plan when a hit moves it or a miss evicts, shapes
+    // with the wrong plan.
+    #[test]
+    fn layout_with_evicting_shape_plan_cache_matches_cold_layout() {
+        let mut cold = TextSystem::vendored_only(&FontSettings::default());
+        let expected: Vec<String> = plan_mix()
+            .iter()
+            .map(|params| dump(&cold.layout(params).expect("layout")))
+            .collect();
+        let mut system = TextSystem::vendored_only(&FontSettings::default());
+        // Smaller than the mix's working set, so lookups hit, promote, and
+        // evict.
+        system.font_system_mut().set_shape_plan_capacity(3);
+        let order = (0..expected.len()).chain((0..expected.len()).rev());
+        for i in order.clone().chain(order.step_by(2)) {
+            let layout = system.layout(&plan_mix()[i]).expect("layout");
+            assert_eq!(dump(&layout), expected[i], "text {i}");
+        }
+    }
+
     #[test]
     fn layout_invalid_params_return_matching_error() {
         let style = TextStyle::new(12.0);

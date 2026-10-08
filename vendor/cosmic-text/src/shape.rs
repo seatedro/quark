@@ -79,14 +79,23 @@ impl Shaping {
     }
 }
 
-const NUM_SHAPE_PLANS: usize = 6;
+/// How many harfrust shape plans [`ShapeBuffer`] keeps by default.
+///
+/// Font fallback shapes a run with each candidate font until its glyphs are
+/// found, so text in a script no font covers needs a plan for every font in
+/// the fallback chain. A cache smaller than that working set rebuilds every
+/// plan on every run. A plan is about 2 KB.
+pub const DEFAULT_SHAPE_PLAN_CAPACITY: usize = 128;
 
 /// A set of buffers containing allocations for shaped text.
-#[derive(Default)]
 pub struct ShapeBuffer {
-    /// Cache for harfrust shape plans. Stores up to [`NUM_SHAPE_PLANS`] plans at once. Inserting a new one past that
-    /// will remove the one that was least recently added (not least recently used).
+    /// Cache for harfrust shape plans, least recently used first. Stores up to
+    /// `shape_plan_capacity` plans; inserting one past that removes the least
+    /// recently used.
     shape_plan_cache: VecDeque<(fontdb::ID, harfrust::ShapePlan)>,
+
+    /// How many plans `shape_plan_cache` keeps.
+    shape_plan_capacity: usize,
 
     /// Buffer for holding unicode text.
     harfrust_buffer: Option<harfrust::UnicodeBuffer>,
@@ -106,6 +115,35 @@ pub struct ShapeBuffer {
 
     /// Buffer for sets of layout glyphs.
     glyph_sets: Vec<Vec<LayoutGlyph>>,
+}
+
+impl Default for ShapeBuffer {
+    fn default() -> Self {
+        Self {
+            shape_plan_cache: VecDeque::new(),
+            shape_plan_capacity: DEFAULT_SHAPE_PLAN_CAPACITY,
+            harfrust_buffer: None,
+            scripts: Vec::new(),
+            spans: Vec::new(),
+            words: Vec::new(),
+            visual_lines: Vec::new(),
+            cached_visual_lines: Vec::new(),
+            glyph_sets: Vec::new(),
+        }
+    }
+}
+
+impl ShapeBuffer {
+    /// Sets how many shape plans to keep, dropping the least recently used
+    /// past it.
+    pub fn set_shape_plan_capacity(&mut self, capacity: usize) {
+        self.shape_plan_capacity = capacity.max(1);
+        let excess = self
+            .shape_plan_cache
+            .len()
+            .saturating_sub(self.shape_plan_capacity);
+        self.shape_plan_cache.drain(..excess);
+    }
 }
 
 impl fmt::Debug for ShapeBuffer {
@@ -168,12 +206,19 @@ fn shape_fallback(
         .instance(Some(font.shaper_instance()))
         .language(language.as_ref());
 
-    let shape_plan = match scratch
-        .shape_plan_cache
+    let cache = &mut scratch.shape_plan_cache;
+    match cache
         .iter()
-        .find(|(id, plan)| *id == font.id() && key.matches(plan))
+        .rposition(|(id, plan)| *id == font.id() && key.matches(plan))
     {
-        Some((_font_id, plan)) => plan,
+        // Move a hit to the back, so eviction from the front drops the
+        // least recently used plan.
+        Some(i) => {
+            if i + 1 != cache.len() {
+                let entry = cache.remove(i).expect("position is in bounds");
+                cache.push_back(entry);
+            }
+        }
         None => {
             let plan = harfrust::ShapePlan::new(
                 font.shaper(),
@@ -182,17 +227,13 @@ fn shape_fallback(
                 buffer.language().as_ref(),
                 &rb_font_features,
             );
-            if scratch.shape_plan_cache.len() >= NUM_SHAPE_PLANS {
-                scratch.shape_plan_cache.pop_front();
+            if cache.len() >= scratch.shape_plan_capacity {
+                cache.pop_front();
             }
-            scratch.shape_plan_cache.push_back((font.id(), plan));
-            &scratch
-                .shape_plan_cache
-                .back()
-                .expect("we just pushed the shape plan")
-                .1
+            cache.push_back((font.id(), plan));
         }
-    };
+    }
+    let shape_plan = &cache.back().expect("the plan is cached").1;
 
     let glyph_buffer = font
         .shaper()
