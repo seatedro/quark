@@ -5,20 +5,30 @@ use super::*;
 pub(super) enum WindowEntry {
     Pending(Box<WindowOptions>),
     Open(Box<WindowState>),
+    /// An open window of the headless runner, with no native window.
+    #[cfg(feature = "test-support")]
+    Virtual(Box<VirtualWindow>),
 }
 
 impl WindowEntry {
     pub(super) fn open(&self) -> Option<&WindowState> {
         match self {
             Self::Open(state) => Some(state),
-            Self::Pending(_) => None,
+            _ => None,
         }
     }
 
     pub(super) fn open_mut(&mut self) -> Option<&mut WindowState> {
         match self {
             Self::Open(state) => Some(state),
-            Self::Pending(_) => None,
+            _ => None,
+        }
+    }
+
+    pub(super) fn pending(&self) -> Option<&WindowOptions> {
+        match self {
+            Self::Pending(options) => Some(options),
+            _ => None,
         }
     }
 }
@@ -42,6 +52,10 @@ pub(super) struct WindowState {
     pub(super) last_render: quark_render::FrameStats,
     pub(super) traffic_lights: Option<TrafficLights>,
     pub(super) persist_key: Option<String>,
+    /// The window's placement as last captured, for a `persist_key`
+    /// window: its normal size and position survive closing it maximized.
+    pub(super) saved_placement: Option<PlacementRecord>,
+    pub(super) position: CachedPosition,
 }
 
 impl WindowState {
@@ -49,20 +63,24 @@ impl WindowState {
         self.window.id()
     }
 
-    /// Save the window's geometry if it opted in. Failures only cost the
+    /// Capture the window's placement, if it opted in to persistence: on
+    /// every settled move, resize, and scale change, so a window closed
+    /// maximized still knows its normal bounds.
+    pub(super) fn note_placement(&mut self) {
+        if self.persist_key.is_some() {
+            let record = capture(&self.placement(), self.saved_placement.as_ref());
+            self.saved_placement = Some(record);
+        }
+    }
+
+    /// Save the window's placement if it opted in. Failures only cost the
     /// saved placement, so they are logged and dropped.
     pub(super) fn persist(&self) {
         let Some(path) = self.persist_key.as_deref().and_then(state_path) else {
             return;
         };
-        let size = self.window.inner_size();
-        let geometry = WindowGeometry::from_physical(
-            self.window.outer_position().ok().map(|p| (p.x, p.y)),
-            (size.width, size.height),
-            self.window.scale_factor(),
-            self.window.is_maximized(),
-        );
-        if let Err(error) = geometry.save_to(&path) {
+        let record = capture(&self.placement(), self.saved_placement.as_ref());
+        if let Err(error) = save_placement(&path, &record) {
             tracing::warn!("could not save window state to {}: {error}", path.display());
         }
     }
@@ -77,6 +95,7 @@ impl WindowState {
         self.input.set_scale_factor(scale_factor);
         self.renderer.resize(size.width, size.height, scale_factor);
         position_traffic_lights(&self.window, self.traffic_lights);
+        self.refresh_position();
     }
 }
 
@@ -142,29 +161,21 @@ pub(super) fn window_attributes(
         .with_window_icon(options.icon.clone())
         // Shown once the renderer exists, so the first paint isn't blank.
         .with_visible(false);
-    if let Some(path) = options.persist_key.as_deref().and_then(state_path) {
-        let monitors: Vec<MonitorArea> = event_loop
-            .available_monitors()
-            .map(|monitor| {
-                let position = monitor.position();
-                let size = monitor.size();
-                MonitorArea {
-                    x: position.x,
-                    y: position.y,
-                    width: size.width,
-                    height: size.height,
-                    scale_factor: monitor.scale_factor(),
-                }
-            })
-            .collect();
-        if let Some(saved) = WindowGeometry::load_from(&path, &monitors) {
-            let geometry = saved.clamped_to(&monitors);
-            attrs = attrs
-                .with_inner_size(LogicalSize::new(geometry.width, geometry.height))
-                .with_maximized(geometry.maximized);
-            if let Some((x, y)) = geometry.position {
-                attrs = attrs.with_position(LogicalPosition::new(x, y));
-            }
+    if let Some(position) = options.position {
+        attrs = attrs.with_position(to_winit(position));
+    }
+    if options.maximized {
+        attrs = attrs.with_maximized(true);
+    }
+    if !options.active {
+        attrs = attrs.with_active(false);
+    }
+    if let Some((restored, monitors)) = restore_persisted(options, event_loop) {
+        attrs = attrs
+            .with_inner_size(LogicalSize::new(restored.size.0, restored.size.1))
+            .with_maximized(restored.maximized);
+        if let Some(position) = restored_position(&restored, &monitors) {
+            attrs = attrs.with_position(to_winit(position));
         }
     }
     if let Some((width, height)) = options.min_size {
@@ -174,6 +185,45 @@ pub(super) fn window_attributes(
         WindowChrome::System => attrs,
         WindowChrome::Custom => custom_chrome(attrs),
     }
+}
+
+/// The saved placement of a `persist_key` window, restored onto the
+/// monitors connected now (the primary first), and those monitors.
+fn restore_persisted(
+    options: &WindowOptions,
+    event_loop: &ActiveEventLoop,
+) -> Option<(RestoredPlacement, Vec<MonitorInfo>)> {
+    let monitors = monitors(event_loop);
+    let record = saved_placement(options, event_loop)?;
+    let options = RestoreOptions {
+        can_position: PlatformCapabilities::detect(event_loop).window_positions,
+        ..RestoreOptions::default()
+    };
+    Some((restore(&record, &monitors, &options), monitors))
+}
+
+/// The saved placement of a `persist_key` window.
+pub(super) fn saved_placement(
+    options: &WindowOptions,
+    event_loop: &ActiveEventLoop,
+) -> Option<PlacementRecord> {
+    let path = options.persist_key.as_deref().and_then(state_path)?;
+    load_placement(&path, &monitors(event_loop))
+}
+
+/// The connected monitors, the primary one first.
+fn monitors(event_loop: &ActiveEventLoop) -> Vec<MonitorInfo> {
+    let primary = event_loop.primary_monitor();
+    primary
+        .iter()
+        .map(monitor_info)
+        .chain(
+            event_loop
+                .available_monitors()
+                .filter(|m| Some(m) != primary.as_ref())
+                .map(|m| monitor_info(&m)),
+        )
+        .collect()
 }
 
 #[cfg(target_os = "macos")]

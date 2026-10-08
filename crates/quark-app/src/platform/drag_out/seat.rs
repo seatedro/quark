@@ -175,6 +175,11 @@ impl<T> Seats<T> {
         self.next_generation += 1;
     }
 
+    /// Whether `surface` is one of the app's open windows.
+    pub fn is_window(&self, surface: Surface) -> bool {
+        self.windows.contains_key(&surface)
+    }
+
     pub fn window_destroyed(&mut self, surface: Surface) {
         self.windows.remove(&surface);
         for seat in self.seats.values_mut() {

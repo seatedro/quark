@@ -4,34 +4,44 @@
 //! along the bottom. Drag the dividers (double click one to reset it), or
 //! focus one and use the arrow keys and Enter. Drag a tab along its strip to
 //! reorder it, onto another strip or panel to move it there, or onto a
-//! panel's edge to split it. The right panel is sealed: its tabs split and
-//! reorder inside it but never leave, and other tabs cannot enter. Middle
-//! click a tab to close it.
+//! panel's edge to split it; drag the grip at the end of a strip to move the
+//! whole group. The right panel is sealed: its tabs split and reorder inside
+//! it but never leave, and other tabs cannot enter. Middle click a tab to
+//! close it.
+//!
+//! Tabs and groups leave the window too. Dragged outside it, a tab or group
+//! tears off into a window of its own that follows the pointer (on Wayland,
+//! where the compositor supports it); drop it on a group in any window to
+//! dock it there, anywhere else to leave it floating, or press Escape to put
+//! it back. Closing a floating window docks its tabs back where they came
+//! from. Mod+L locks the main window against new tabs, so closing a floating
+//! window is refused with a note saying why.
+//!
 //! On a focused tab, Mod+Shift+Page Up and Page Down move it into the
 //! previous or next group that takes it, and Shift+F10 opens a menu under
-//! it to move it to any such group or split its group with it. The
-//! dividers between split groups move with the arrow keys too. The
-//! terminal drawer's sessions are a `TabBar` whose tabs close by their
-//! close button, a middle click, or Delete.
+//! it to move it to any such group, split its group with it, or move it or
+//! its group to a new window. The dividers between split groups move with
+//! the arrow keys too. The terminal drawer's sessions are a `TabBar` whose
+//! tabs close by their close button, a middle click, or Delete.
 //! Mod+B toggles the sidebar, Mod+Alt+B the right panel, Mod+J the drawer.
-//! The layout is saved to the system temp directory and restored on the
-//! next launch. Escape cancels a tab drag, else closes the menu, else
-//! quits.
-
-use std::path::PathBuf;
+//! The workspace, floating windows and where they were included, is saved
+//! to the platform's state directory and restored on the next launch.
+//! Escape cancels a tab drag, else closes the menu, else quits.
 
 use quark::view;
+use quark_app::dock_windows::DockWindows;
 use quark_app::quark_ui::Action;
-use quark_app::quark_ui::accessibility::Politeness;
 use quark_app::quark_ui::element::{AnyElement, Binding, IntoAnyElement, NoopAction, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Theme;
 use quark_app::winit::keyboard::NamedKey;
-use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
+use quark_app::{
+    AppEvent, CloseReason, InputEvent, UiApp, UiContext, ViewContext, WindowHandle, WindowOptions,
+};
 use quark_components::{
-    ContextMenuEntry, ContextMenuOutcome, ContextMenuState, Dock, DockEvent, DockLayout,
-    DockRegion, DockSnapshot, DockState, DropZone, Pane, PaneDrop, PaneId, PanelId, TabItem,
-    TabPolicy, tab_bar,
+    ContextMenuEntry, ContextMenuOutcome, ContextMenuState, Dock, DockDestination, DockEvent,
+    DockLayout, DockRegion, DockState, DropZone, HostId, MovePayload, MoveTarget, Pane, PanelId,
+    TabItem, TabPolicy, tab_bar,
 };
 
 const THREADS: PanelId = PanelId(1);
@@ -54,11 +64,17 @@ const PANELS: [(PanelId, &str); 8] = [
     (DRAWER, "Terminal drawer"),
 ];
 
+const APP_TITLE: &str = "Quark Panels";
+
 fn title(id: PanelId) -> &'static str {
     PANELS
         .iter()
         .find(|(p, _)| *p == id)
         .map_or("Panel", |(_, t)| t)
+}
+
+fn known(id: PanelId) -> bool {
+    PANELS.iter().any(|(p, _)| *p == id)
 }
 
 /// The terminal drawer's sessions, as `(id, name)`.
@@ -70,6 +86,9 @@ fn session_key(id: u32) -> String {
 
 /// Space between a tab and the menu opened under it.
 const MENU_GAP: f32 = 4.0;
+
+/// The main window's regions Mod+L locks against new tabs.
+const LOCKABLE: [DockRegion; 3] = [DockRegion::Left, DockRegion::Center, DockRegion::Bottom];
 
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
@@ -89,14 +108,17 @@ impl From<Msg> for Action {
 
 struct PanelsDemo {
     dock: DockState,
-    /// The "Move to group" menu.
+    /// Floating hosts' windows, drags between windows, and saving.
+    windows: DockWindows,
+    /// The "Move to group" menu, and the window it is open in.
     menu: ContextMenuState,
+    menu_window: Option<WindowHandle>,
     sessions: Vec<(u32, &'static str)>,
     session: u32,
     /// The window's size as of the last frame, to place the menu.
     size: (f32, f32),
-    /// Where settled layout changes are saved; `None` in tests.
-    save_to: Option<PathBuf>,
+    /// Mod+L: the main window takes no tabs from elsewhere.
+    locked: bool,
 }
 
 impl PanelsDemo {
@@ -120,23 +142,19 @@ impl PanelsDemo {
         dock.set_visible(DockRegion::Bottom, false);
         Self {
             dock,
+            windows: DockWindows::new(|id| title(id).to_owned()).app_title(APP_TITLE),
             menu: ContextMenuState::default(),
+            menu_window: None,
             sessions: SESSIONS.to_vec(),
             session: SESSIONS[0].0,
             size: (0.0, 0.0),
-            save_to: None,
+            locked: false,
         }
     }
 
-    /// A group's name for the menu and announcements, as its tab list
-    /// publishes it.
-    fn group_name(&self, pane: PaneId) -> String {
-        self.dock.group_label(pane)
-    }
-
     /// Open the "Move to group" menu for `panel` under its tab, listing
-    /// every group the dock lets it move into and the splits of its own
-    /// group it can make.
+    /// every group the dock lets it move into, the splits of its own group
+    /// it can make, and new windows for it and its group.
     fn open_move_menu(&mut self, panel: PanelId, cx: &UiContext) {
         let mut entries: Vec<ContextMenuEntry> = self
             .dock
@@ -149,20 +167,51 @@ impl PanelsDemo {
                     index: None,
                 };
                 ContextMenuEntry::item(
-                    format!("Move to {}", self.group_name(destination)),
+                    format!(
+                        "Move to {}",
+                        self.windows.group_name(&self.dock, destination)
+                    ),
                     Msg::Dock(event),
                 )
             })
             .collect();
-        if let Some((_, pane, _)) = self.dock.locate(panel) {
+        let location = self.dock.location(panel).map(|(at, _)| at);
+        if let Some(at) = location {
             for (zone, label) in [
                 (DropZone::Right, "Split right"),
                 (DropZone::Bottom, "Split down"),
             ] {
-                if self.dock.can_drop(panel, PaneDrop { pane, zone }) {
+                let d = DockDestination {
+                    host: at.host,
+                    pane: at.pane,
+                    zone,
+                };
+                if self.dock.prepare(MovePayload::Panel(panel), d).is_ok() {
                     entries.push(ContextMenuEntry::item(label, Msg::SplitTab(panel, zone)));
                 }
             }
+        }
+        let new_window = |payload| {
+            self.dock
+                .move_options(payload)
+                .contains(&MoveTarget::NewHost)
+        };
+        if new_window(MovePayload::Panel(panel)) {
+            let event = DockEvent::MoveToNewHost(MovePayload::Panel(panel));
+            entries.push(ContextMenuEntry::item(
+                "Move to new window",
+                Msg::Dock(event),
+            ));
+        }
+        if let Some(at) = location
+            && self.dock.group(at.pane).is_some_and(|g| g.panels.len() > 1)
+            && new_window(MovePayload::Group(at.pane))
+        {
+            let event = DockEvent::MoveToNewHost(MovePayload::Group(at.pane));
+            entries.push(ContextMenuEntry::item(
+                "Move group to new window",
+                Msg::Dock(event),
+            ));
         }
         if entries.is_empty() {
             entries.push(ContextMenuEntry::item("No group takes this tab", NoopAction).disabled());
@@ -174,27 +223,42 @@ impl PanelsDemo {
             |tab| (tab.bounds.x, tab.bounds.bottom() + MENU_GAP),
         );
         self.menu.open(entries, x, y);
+        self.menu_window = cx.window_handle();
     }
 
     fn split_tab(&mut self, panel: PanelId, zone: DropZone, cx: &mut UiContext) {
-        self.menu.close();
-        let Some((_, pane, _)) = self.dock.locate(panel) else {
+        let Some((at, _)) = self.dock.location(panel) else {
             return;
         };
-        if self.dock.drop_panel(panel, PaneDrop { pane, zone }) {
-            // The tab's new group, the region's most recent.
-            let pane = self.dock.locate(panel).map(|(_, pane, _)| pane);
-            cx.set_focus(pane.map(Dock::tab_focus));
-            self.save();
-        }
+        let destination = DockDestination {
+            host: at.host,
+            pane: at.pane,
+            zone,
+        };
+        let event = DockEvent::Transfer {
+            payload: MovePayload::Panel(panel),
+            destination,
+        };
+        self.windows.apply(&mut self.dock, event, cx);
     }
 
-    fn save(&self) {
-        if let Some(path) = &self.save_to
-            && let Ok(json) = serde_json::to_string(&self.dock.snapshot())
-        {
-            let _ = std::fs::write(path, json);
+    /// Mod+L: lock or unlock the main window against tabs from elsewhere.
+    fn toggle_lock(&mut self, cx: &mut UiContext) {
+        self.locked = !self.locked;
+        let policy = TabPolicy {
+            can_leave: true,
+            accepts: !self.locked,
+        };
+        for region in LOCKABLE {
+            self.dock.set_policy(region, policy);
         }
+        let text = if self.locked {
+            "Main window locked"
+        } else {
+            "Main window unlocked"
+        };
+        cx.announce(text, quark_app::quark_ui::accessibility::Politeness::Polite);
+        cx.window.request_redraw_all();
     }
 
     fn close_session(&mut self, id: u32, cx: &mut UiContext) {
@@ -252,9 +316,9 @@ impl PanelsDemo {
         }
     }
 
-    fn restore(&mut self, snapshot: &DockSnapshot) {
-        self.dock
-            .restore(snapshot, |id| PANELS.iter().any(|(p, _)| *p == id));
+    #[cfg(test)]
+    fn restore(&mut self, snapshot: &quark_components::DockSnapshot) {
+        self.dock.restore(snapshot, known);
     }
 
     fn content(id: PanelId, (width, height): (f32, f32), theme: &Theme) -> AnyElement {
@@ -278,36 +342,70 @@ impl PanelsDemo {
             </div>
         }
     }
+
+    /// Why the window refused to close, along its bottom edge.
+    fn notice(note: &str, (width, height): (f32, f32), theme: &Theme) -> AnyElement {
+        let colors = &theme.colors;
+        view! {
+            <div class="absolute px-3 py-2" left={0.0} top={height - 36.0} w={width} h={36.0}
+                 z_index={20} bg={colors.elevated_surface} border_t={colors.border}
+                 role="alert" aria-label={note.to_owned()} test_id="dock-close-notice">
+                <text class="text-sm" color={colors.text_strong}>{note.to_owned()}</text>
+            </div>
+        }
+    }
 }
 
 impl UiApp for PanelsDemo {
     type Action = Msg;
     type Message = ();
 
+    fn init(&mut self, cx: &mut UiContext) {
+        self.windows.init(&mut self.dock, cx);
+    }
+
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let size = cx.frame.size();
-        self.size = size;
+        let window = cx.window_handle();
         let theme = cx.theme;
-        let dock = Dock::new(&self.dock, size, |e| Msg::Dock(e).into())
-            .toggle_key(DockRegion::Left, "mod+b")
-            .toggle_key(DockRegion::Right, "mod+alt+b")
-            .toggle_key(DockRegion::Bottom, "mod+j")
-            .always_show_tabs(DockRegion::Left)
-            .always_show_tabs(DockRegion::Center)
-            .always_show_tabs(DockRegion::Right)
-            .always_show_tabs(DockRegion::Bottom)
-            .build(
-                theme,
-                |id| title(id).to_owned(),
-                |id, size| match id {
-                    DRAWER => self.drawer(size, theme),
-                    _ => Self::content(id, size, theme),
-                },
-            );
-        let menu = self.menu.render(size, theme);
+        let Some(host) = self.windows.host(window) else {
+            return div().w(size.0).h(size.1).into_any();
+        };
+        let mut dock = Dock::new(&self.dock, size, |e| Msg::Dock(e).into()).group_grips(true);
+        if host == HostId::MAIN {
+            self.size = size;
+            dock = dock
+                .toggle_key(DockRegion::Left, "mod+b")
+                .toggle_key(DockRegion::Right, "mod+alt+b")
+                .toggle_key(DockRegion::Bottom, "mod+j")
+                .always_show_tabs(DockRegion::Left)
+                .always_show_tabs(DockRegion::Center)
+                .always_show_tabs(DockRegion::Right)
+                .always_show_tabs(DockRegion::Bottom);
+        } else {
+            dock = dock.host(host);
+        }
+        let dock = dock.build(
+            theme,
+            |id| title(id).to_owned(),
+            |id, size| match id {
+                DRAWER => self.drawer(size, theme),
+                _ => Self::content(id, size, theme),
+            },
+        );
+        let menu = (self.menu_window == Some(window))
+            .then(|| self.menu.render(size, theme))
+            .flatten();
+        let notice = self
+            .windows
+            .notice(window)
+            .map(|text| Self::notice(text, size, theme));
         view! {
             <div class="relative" w={size.0} h={size.1}>
                 {dock}
+                if let Some(notice) = notice {
+                    {notice}
+                }
                 if let Some(menu) = menu {
                     {menu}
                 }
@@ -319,6 +417,7 @@ impl UiApp for PanelsDemo {
         let event = match msg {
             Msg::Dock(event) => event,
             Msg::SplitTab(panel, zone) => {
+                self.menu.close();
                 self.split_tab(panel, zone, cx);
                 return;
             }
@@ -332,26 +431,17 @@ impl UiApp for PanelsDemo {
             }
         };
         // A choice from the menu, or anything else done in the dock,
-        // closes it.
-        self.menu.close();
-        let now_ms = cx.window.elapsed().as_millis() as u64;
-        let outcome = self.dock.apply_event(event, now_ms);
-        if let Some(focus) = outcome.focus() {
-            cx.set_focus(Some(focus));
+        // closes it; a drag's motion leaves it.
+        if !matches!(event, DockEvent::TabHover { .. } | DockEvent::Hover { .. }) {
+            self.menu.close();
         }
-        if let Some(moved) = outcome.moved {
-            let to = self.group_name(moved.pane);
-            cx.announce(
-                format!("Moved {} to {to}", title(moved.panel)),
-                Politeness::Polite,
-            );
-        }
-        if outcome.settled {
-            self.save();
-        }
+        self.windows.apply(&mut self.dock, event, cx);
     }
 
     fn event(&mut self, event: &InputEvent, cx: &mut UiContext) -> bool {
+        if self.windows.input(&mut self.dock, event, cx) {
+            return true;
+        }
         let InputEvent::KeyPress(chord) = event else {
             return false;
         };
@@ -361,11 +451,13 @@ impl UiApp for PanelsDemo {
             return true;
         }
         if let Some(pressed) = chord.binding() {
-            if let Some(outcome) = self.menu.handle_key(&pressed) {
+            if self.menu_window == cx.window_handle()
+                && let Some(outcome) = self.menu.handle_key(&pressed)
+            {
                 if let ContextMenuOutcome::Activate(action) = outcome {
                     self.run(action, cx);
                 }
-                cx.window.request_redraw();
+                cx.window.request_redraw_all();
                 return true;
             }
             let menu_key: Binding = "shift+f10".parse().expect("valid binding");
@@ -373,36 +465,71 @@ impl UiApp for PanelsDemo {
                 && let Some(panel) = self.dock.focused_panel(cx.focus())
             {
                 self.open_move_menu(panel, cx);
-                cx.window.request_redraw();
+                cx.window.request_redraw_all();
+                return true;
+            }
+            let lock_key: Binding = "mod+l".parse().expect("valid binding");
+            if lock_key.matches(&pressed) {
+                self.toggle_lock(cx);
                 return true;
             }
         }
         if chord.named() == Some(NamedKey::Escape) {
+            self.windows.save(&self.dock, cx);
             cx.window.exit();
             return true;
         }
         false
     }
+
+    fn wake(&mut self, cx: &mut UiContext) {
+        self.windows.wake(&mut self.dock, cx);
+    }
+
+    fn app_event(&mut self, event: AppEvent, cx: &mut UiContext) {
+        self.windows.app_event(&event, cx);
+    }
+
+    fn window_opened(&mut self, window: WindowHandle, cx: &mut UiContext) {
+        self.windows.window_opened(&mut self.dock, window, cx);
+    }
+
+    fn window_closed(&mut self, window: WindowHandle, reason: CloseReason, cx: &mut UiContext) {
+        if self.menu_window == Some(window) {
+            self.menu.close();
+            self.menu_window = None;
+        }
+        self.windows
+            .window_closed(&mut self.dock, window, reason, cx);
+    }
+
+    fn window_close_requested(&mut self, reason: CloseReason, cx: &mut UiContext) -> bool {
+        self.windows.close_requested(&mut self.dock, reason, cx)
+    }
+
+    fn drag_session_ended(
+        &mut self,
+        end: quark_app::quark_ui::element::DragEnd,
+        cx: &mut UiContext,
+    ) {
+        self.windows.drag_session_ended(&mut self.dock, &end, cx);
+    }
 }
 
 fn main() -> Result<(), quark_app::RunError> {
-    let path = std::env::temp_dir().join("quark-panels-demo.json");
+    let path = quark_app::platform::window_state::checkpoint_path("panels-demo")
+        .unwrap_or_else(|| std::env::temp_dir().join("quark-panels-demo.json"));
     let mut app = PanelsDemo::new();
-    if let Some(snapshot) = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
-    {
-        app.restore(&snapshot);
-    }
-    app.save_to = Some(path);
-    quark_app::run_ui(
-        app,
-        WindowOptions {
-            title: "Quark Panels".into(),
-            size: (1200.0, 760.0),
-            ..WindowOptions::default()
-        },
-    )
+    app.windows = DockWindows::new(|id| title(id).to_owned())
+        .app_title(APP_TITLE)
+        .save_to(path);
+    app.windows.restore(&mut app.dock, known);
+    let options = app.windows.main_window_options(WindowOptions {
+        title: APP_TITLE.into(),
+        size: (1200.0, 760.0),
+        ..WindowOptions::default()
+    });
+    quark_app::run_ui(app, options)
 }
 
 /// The dock driven as a user would: dragging dividers and tabs, keys on
@@ -607,7 +734,7 @@ mod tests {
         ui.click_node(By::role_name(Role::Button, "Close Files"));
         let json = serde_json::to_string(&ui.app().dock.snapshot()).unwrap();
 
-        let snapshot: DockSnapshot = serde_json::from_str(&json).unwrap();
+        let snapshot: quark_components::DockSnapshot = serde_json::from_str(&json).unwrap();
         let mut app = PanelsDemo::new();
         app.restore(&snapshot);
         let restored = UiTestHarness::new(app, SIZE, 1.0);
@@ -865,7 +992,10 @@ mod tests {
             .into_iter()
             .filter_map(|n| n.name)
             .collect();
-        assert_eq!(items, ["Move to Chat", "Move to Drawer"]);
+        assert_eq!(
+            items,
+            ["Move to Chat", "Move to Drawer", "Move to new window"]
+        );
 
         ui.click_node(By::role_name(Role::MenuItem, "Move to Drawer"));
         assert!(ui.try_find(By::role(Role::Menu)).is_none());
@@ -875,6 +1005,49 @@ mod tests {
             announcement(&ui).as_deref(),
             Some("Moved Threads to Drawer")
         );
+    }
+
+    /// Threads moved to a new window from its menu; that window.
+    fn threads_to_new_window(ui: &mut UiTestHarness<PanelsDemo>) -> quark_app::WindowHandle {
+        ui.click_node(By::role_name(Role::Tab, "Threads"));
+        ui.key("shift+f10");
+        ui.click_node(By::role_name(Role::MenuItem, "Move to new window"));
+        let main = ui.main_window();
+        let windows: Vec<_> = ui.windows().into_iter().filter(|w| *w != main).collect();
+        assert_eq!(windows.len(), 1, "{windows:?}");
+        windows[0]
+    }
+
+    #[test]
+    fn the_menu_moves_a_tab_to_a_titled_window_of_its_own() {
+        let mut ui = harness();
+        let window = threads_to_new_window(&mut ui);
+        let floating = ui.window(window);
+        assert_eq!(floating.title(), "Threads - Quark Panels");
+        assert_eq!(
+            floating.focused().and_then(|n| n.name).as_deref(),
+            Some("Threads")
+        );
+        assert!(ui.try_find(By::role_name(Role::Tab, "Threads")).is_none());
+    }
+
+    #[test]
+    fn a_locked_main_window_keeps_a_floating_window_open_with_a_note() {
+        let mut ui = harness();
+        let window = threads_to_new_window(&mut ui);
+        ui.key("mod+l");
+        assert!(!ui.window(window).request_close());
+        let note = "Cannot close this window: no group takes Threads";
+        assert!(
+            ui.window(window).painted_text().contains(note),
+            "{}",
+            ui.window(window).painted_text()
+        );
+
+        ui.key("mod+l");
+        assert!(ui.window(window).request_close());
+        assert_eq!(ui.windows(), [ui.main_window()]);
+        assert_eq!(strip(&ui, "Sidebar"), ["Threads"]);
     }
 
     #[test]

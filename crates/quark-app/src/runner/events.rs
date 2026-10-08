@@ -5,12 +5,47 @@ use super::*;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum AppEvent {
-    /// A window closed, by the user or through [`EventContext::close_window`].
-    /// Its handle is stale from here on.
-    WindowClosed(WindowHandle),
-    /// A window requested through [`EventContext::open_window`] could not be
-    /// created. The handle is stale.
-    WindowOpenFailed(WindowHandle),
+    /// The window's native window exists. Every window gets this once,
+    /// before its first frame: windows from [`EventContext::open_window`]
+    /// once they are created, the first window right after [`App::init`].
+    /// The context is bound to the window.
+    WindowOpened(WindowHandle),
+    /// The window is closing, or never opened when `reason` is
+    /// [`CloseReason::OpenFailed`]. Every handle the runner issues ends
+    /// with exactly one of these, except windows requested while the app
+    /// quits, which are never created. During this event a window that
+    /// opened still answers [`EventContext::placement`], so its placement
+    /// can be saved; afterwards its handle is stale. The context is bound
+    /// to another window, if any is open.
+    WindowClosed {
+        window: WindowHandle,
+        reason: CloseReason,
+    },
+    /// The window moved on the desktop, by the user or the app: its outer
+    /// position in desktop units (see [`DesktopPoint`]). Never sent where
+    /// windows have no readable position
+    /// ([`PlatformCapabilities::window_positions`]).
+    WindowMoved {
+        window: WindowHandle,
+        position: DesktopPoint,
+    },
+    /// The window's content area changed size, in logical points. The
+    /// runner has already scheduled a frame at the new size.
+    WindowResized {
+        window: WindowHandle,
+        size: (f32, f32),
+    },
+    /// The window moved to a display with another scale factor, or the
+    /// display's scale changed. A [`Self::WindowResized`] follows when the
+    /// physical size changes with it.
+    WindowScaleChanged {
+        window: WindowHandle,
+        scale_factor: f64,
+    },
+    /// A token from [`EventContext::request_activation_token`], for handing
+    /// to the desktop (or another process) to activate a window with.
+    /// X11 and Wayland only.
+    ActivationToken { window: WindowHandle, token: String },
     /// URLs or paths to open: arguments another launch of the app forwarded
     /// through [`crate::platform::single_instance`] before exiting, or, on
     /// macOS, URLs of the app's schemes that the system delivered as an
@@ -45,6 +80,29 @@ pub enum AppEvent {
     /// A tray menu item was picked; carries its id.
     #[cfg(feature = "tray")]
     TrayMenu(String),
+}
+
+/// Why a window closed, in [`AppEvent::WindowClosed`]. [`App::close_requested`]
+/// is asked first for [`Self::User`] and [`Self::Quit`]; the window closes
+/// only if it agrees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CloseReason {
+    /// The user closed the window: its close button, or the Close Window
+    /// menu item.
+    User,
+    /// The app closed it with [`EventContext::close_window`], without
+    /// asking [`App::close_requested`].
+    Program,
+    /// The app is quitting: the Quit menu item, which asks first, or
+    /// [`EventContext::exit`] and other exits with windows still open, which
+    /// do not ask. An app that closes some windows on [`Self::User`] (say,
+    /// moving their contents back to the main window) can tell quitting
+    /// apart and save them as they are instead.
+    Quit,
+    /// The native window could not be created. The window never opened and
+    /// got no [`AppEvent::WindowOpened`].
+    OpenFailed,
 }
 
 /// What other threads and native callbacks hand the runner.

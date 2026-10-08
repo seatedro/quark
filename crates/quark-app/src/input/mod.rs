@@ -1,5 +1,8 @@
 //! Platform-neutral input events and the winit normalization that produces
 //! them. Routing events to widgets is left to the app or a UI layer.
+//!
+//! Window changes that are not input (moves, resizes, scale changes,
+//! activation tokens) reach the app as [`crate::AppEvent`]s instead.
 
 mod scroll;
 #[cfg(feature = "ui")]
@@ -31,6 +34,9 @@ pub enum InputEvent {
         x: f32,
         y: f32,
     },
+    /// The pointer came over the window's content area. Its position
+    /// arrives with the [`Self::PointerMoved`] that follows.
+    PointerEntered,
     PointerLeft,
     PointerButton {
         button: MouseButton,
@@ -40,6 +46,8 @@ pub enum InputEvent {
         delta: MouseScrollDelta,
         phase: TouchPhase,
     },
+    /// The window became the active window (gained keyboard focus), or
+    /// stopped being it.
     Focused(bool),
     /// The IME composition changed: its text, with the caret or selection
     /// at a byte range. Empty text ends it.
@@ -336,6 +344,7 @@ impl InputNormalizer {
                 self.pointer_position = Some((x, y));
                 vec![InputEvent::PointerMoved { x, y }]
             }
+            WindowEvent::CursorEntered { .. } => vec![InputEvent::PointerEntered],
             WindowEvent::CursorLeft { .. } => {
                 self.pointer_position = None;
                 vec![InputEvent::PointerLeft]
@@ -467,6 +476,18 @@ mod tests {
             key_text(Some("\u{8}"), ModifiersState::empty(), false),
             None
         );
+    }
+
+    // Hover tracking across windows needs to know when the pointer comes
+    // over a window, not only when it leaves.
+    #[test]
+    fn cursor_entry_is_kept_as_pointer_entered() {
+        let mut input = InputNormalizer::default();
+        let device_id = winit::event::DeviceId::dummy();
+
+        let entered = input.normalize(WindowEvent::CursorEntered { device_id });
+
+        assert_eq!(entered, vec![InputEvent::PointerEntered]);
     }
 
     #[test]

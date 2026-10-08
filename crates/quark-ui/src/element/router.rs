@@ -486,6 +486,8 @@ pub struct InputFrame {
     pub semantic: SemanticFrame,
     /// Where the frame's identified elements landed.
     pub geometry: LayoutSnapshot,
+    /// Where the frame takes drops.
+    pub drop_targets: DropTargets,
 }
 
 /// The outcome of routing one event: the semantic node that handled it
@@ -727,6 +729,33 @@ impl InputRouter {
             },
             None => Delivery::default(),
         }
+    }
+
+    /// Move the drag holding the pointer into a [`DragSession`] started in
+    /// window `source`, when its handler agrees
+    /// ([`DragHandler::on_handoff`]). The router lets go of the pointer:
+    /// later moves, releases, and [`Self::cancel_pointer`] reach the
+    /// handler no more, and its preview leaves this router for the
+    /// session. The delivery carries the handler's handoff actions and
+    /// asks for a repaint when a preview was showing.
+    pub fn hand_off_capture(
+        &mut self,
+        source: DragWindowId,
+    ) -> Result<(DragSession, Delivery), HandoffError> {
+        let capture = self.capture.as_mut().ok_or(HandoffError::NoCapture)?;
+        let epoch = scroll_epoch();
+        let handoff = capture.drag.on_handoff().ok_or(HandoffError::Refused)?;
+        let Some(capture) = self.capture.take() else {
+            return Err(HandoffError::NoCapture);
+        };
+        let delivery = Delivery {
+            node: capture.node,
+            actions: handoff.actions,
+            redraw: scroll_epoch() != epoch || capture.shows_preview(),
+        };
+        let session =
+            DragSession::handed_off(source, handoff.payload, capture.pointer, capture.drag);
+        Ok((session, delivery))
     }
 
     /// The drag's preview and the window point its top left goes at,
@@ -1387,6 +1416,79 @@ mod tests {
         let moved = dump(&router, moved);
 
         assert_eq!([cancelled, moved], ["handle [Cancel]", "-"]);
+    }
+
+    /// [`RecordDrag`] that agrees to move into a session carrying "tab".
+    struct TearDrag;
+
+    impl DragHandler for TearDrag {
+        fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+            RecordDrag.on_move(x, y)
+        }
+
+        fn on_release(&mut self) -> DragReleaseResult {
+            RecordDrag.on_release()
+        }
+
+        fn on_cancel(&mut self) -> Vec<Action> {
+            RecordDrag.on_cancel()
+        }
+
+        fn on_handoff(&mut self) -> Option<DragHandoff> {
+            Some(DragHandoff {
+                payload: Box::new("tab"),
+                actions: vec![Msg::Click("handed off").into()],
+            })
+        }
+    }
+
+    fn drag_frame(start: fn(ClickEvent) -> Box<dyn DragHandler>) -> InputRouter {
+        let root = div()
+            .w(400.0)
+            .h(400.0)
+            .child(div().w(50.0).h(50.0).test_id("handle").on_drag(start));
+        routed(root, 400.0, 400.0)
+    }
+
+    // Catches a handed-off drag still driven by its source router: a blur
+    // of the source window cancelling a drag now over another window, or
+    // a release there committing a local drop. The session ends it, once.
+    #[test]
+    fn a_handed_off_drag_hears_only_from_its_session() {
+        let mut router = drag_frame(|_| Box::new(TearDrag));
+        router.pointer_down(10.0, 10.0, &mut None);
+        router.pointer_move(30.0, 30.0);
+
+        let (session, handed) = router
+            .hand_off_capture(DragWindowId(1))
+            .expect("handed off");
+        let handed = dump(&router, handed);
+        let after = [
+            router.pointer_move(300.0, 300.0),
+            router.cancel_pointer(),
+            router.pointer_up(),
+        ]
+        .map(|delivery| dump(&router, delivery));
+        let ended = session.cancel();
+
+        assert_eq!(handed, r#"handle [Click("handed off")]"#);
+        assert_eq!(after, ["-", "-", "-"]);
+        assert_eq!(format!("{:?}", ended.actions), "[Cancel]");
+        assert_eq!(ended.payload.downcast_ref::<&str>(), Some(&"tab"));
+    }
+
+    // Catches a handoff taking drags that never opted in (a scrollbar
+    // thumb, a text selection) away from their window.
+    #[test]
+    fn a_drag_that_refuses_handoff_keeps_the_pointer() {
+        let mut router = drag_frame(|_| Box::new(RecordDrag));
+        router.pointer_down(10.0, 10.0, &mut None);
+
+        let refused = router.hand_off_capture(DragWindowId(1)).err();
+        let moved = router.pointer_move(300.0, 300.0);
+
+        assert_eq!(refused, Some(HandoffError::Refused));
+        assert_eq!(dump(&router, moved), "handle [Move(300, 300)]");
     }
 
     // Regression: capture kept the pressed node's index, so once a new frame

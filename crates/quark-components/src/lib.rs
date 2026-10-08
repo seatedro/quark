@@ -53,8 +53,10 @@ pub use diff_view::{
     CopySide, DiffEvent, DiffKey, DiffOutcome, DiffStyle, DiffViewState, diff_view,
 };
 pub use dock::{
-    Dock, DockEvent, DockIntegrityError, DockLayout, DockOutcome, DockRegion, DockSnapshot,
-    DockSplit, DockState, PaneDividerEvent, PanelId, TabMove, TabPolicy,
+    Boundary, Dock, DockDestination, DockEffects, DockEvent, DockIntegrityError, DockLayout,
+    DockLocation, DockOutcome, DockRegion, DockSnapshot, DockSplit, DockState, FloatingSnapshot,
+    HostId, MovePayload, MoveTarget, PaneDividerEvent, PanelId, ReturnSnapshot, StoredDock,
+    TabMove, TabPolicy, Transfer, TransferRefusal, WORKSPACE_VERSION, WorkspaceSnapshot,
 };
 pub use dropdown::*;
 pub use hover_card::*;

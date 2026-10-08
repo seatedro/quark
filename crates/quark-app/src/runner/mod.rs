@@ -22,7 +22,7 @@ use quark_render::fonts::FontSettings;
 use quark_render::{GpuContext, RenderError, Renderer, TextMetrics};
 use quark_text::{LayoutCache, TextError, TextLayout, TextParams, TextSystem};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -30,13 +30,18 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Icon, Theme, Window, WindowAttributes, WindowId};
 
 use crate::input::{InputEvent, InputNormalizer};
-use crate::platform::window_state::{MonitorArea, WindowGeometry, state_path};
+pub use crate::platform::placement::MonitorInfo;
+use crate::platform::placement::{
+    PhysicalRect, PlacementRecord, RestoreOptions, RestoredPlacement, WindowObservation, restore,
+};
+use crate::platform::window_state::{load_placement, save_placement, state_path};
 
 mod accessibility;
 mod app;
 mod context;
 mod event_loop;
 mod events;
+mod placement;
 mod platform;
 mod scale;
 mod table;
@@ -50,11 +55,15 @@ pub use app::*;
 pub use context::*;
 pub use event_loop::*;
 pub use events::*;
+#[cfg(target_os = "linux")]
+pub use placement::WaylandSurface;
+use placement::*;
+pub use placement::{DesktopPoint, PlatformCapabilities, WindowPlacement, restored_position};
 use platform::PlatformState;
 pub use scale::scene_to_physical;
 pub use table::WindowHandle;
 use table::WindowTable;
 #[cfg(feature = "test-support")]
-pub(crate) use testing::HeadlessRunner;
+pub(crate) use testing::{HeadlessRunner, VirtualWindow};
 pub use text::AppText;
 use window::*;

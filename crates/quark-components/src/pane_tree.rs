@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::dock::PanelId;
 use crate::split::{Axis, DIVIDER_THICKNESS};
 
-/// Identity of a tab group or split inside a dock. Not stable across
-/// [`crate::DockState::restore`], which numbers them afresh.
+/// Identity of a tab group or split, unique across every host of a
+/// [`crate::DockState`]. Not stable across [`crate::DockState::restore`],
+/// which numbers them afresh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaneId(pub u32);
 
@@ -126,9 +127,15 @@ impl TabGroup {
 
     /// Insert `panel` before `index` (clamped) and make it active.
     pub(crate) fn insert(&mut self, index: usize, panel: PanelId) {
+        self.insert_all(index, &[panel], 0);
+    }
+
+    /// Insert `panels` in order before `index` (clamped), making
+    /// `panels[active]` active.
+    pub(crate) fn insert_all(&mut self, index: usize, panels: &[PanelId], active: usize) {
         let index = index.min(self.panels.len());
-        self.panels.insert(index, panel);
-        self.active = index;
+        self.panels.splice(index..index, panels.iter().copied());
+        self.active = index + active.min(panels.len().saturating_sub(1));
     }
 }
 
@@ -196,7 +203,7 @@ impl PaneNode {
         }
     }
 
-    fn id(&self) -> PaneId {
+    pub(crate) fn id(&self) -> PaneId {
         match self {
             Self::Tabs(group) => group.id,
             Self::Split(split) => split.id,
@@ -256,6 +263,23 @@ impl PaneNode {
         true
     }
 
+    /// Where to put the node `id` back beside its nearest group once it is
+    /// gone: the first group of the sibling after it (the node going
+    /// first), else the last group of the one before, and the split's axis.
+    pub(crate) fn neighbor(&self, id: PaneId) -> Option<(PaneId, Axis, bool)> {
+        let Self::Split(split) = self else {
+            return None;
+        };
+        if let Some(i) = split.children.iter().position(|c| c.id() == id) {
+            if let Some(next) = split.children.get(i + 1) {
+                return Some((next.groups()[0].id, split.axis, true));
+            }
+            let before = &split.children[i.checked_sub(1)?];
+            return Some((before.groups().last()?.id, split.axis, false));
+        }
+        split.children.iter().find_map(|c| c.neighbor(id))
+    }
+
     fn contains_group(&self, id: PaneId) -> bool {
         match self {
             Self::Tabs(group) => group.id == id,
@@ -306,11 +330,13 @@ impl PaneNode {
         }
     }
 
-    /// Give every node a fresh id from `next`, and replace weights that are
-    /// not usable (wrong count, not finite, not positive) with equal ones.
-    pub(crate) fn renumber(&mut self, next: &mut u32) {
+    /// Give every node a fresh id from `next`, recording `(old, new)` in
+    /// `map`, and replace weights that are not usable (wrong count, not
+    /// finite, not positive) with equal ones.
+    pub(crate) fn renumber(&mut self, next: &mut u32, map: &mut Vec<(PaneId, PaneId)>) {
         let id = PaneId(*next);
         *next += 1;
+        map.push((self.id(), id));
         match self {
             Self::Tabs(group) => {
                 group.id = id;
@@ -325,7 +351,7 @@ impl PaneNode {
                     split.weights = vec![1.0; n];
                 }
                 for child in &mut split.children {
-                    child.renumber(next);
+                    child.renumber(next, map);
                 }
             }
         }

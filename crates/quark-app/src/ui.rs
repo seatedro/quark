@@ -1,9 +1,9 @@
 //! Lite adapter from quark-ui elements to the runner.
 //!
-//! Implement [`UiApp`] to describe the window as an element tree each frame
-//! and handle your action type; [`run_ui`] (or [`UiAdapter`] with [`run`])
-//! does layout, paint, hit testing, focus, text editing, and accessibility
-//! publishing.
+//! Implement [`UiApp`] to describe each window as an element tree each
+//! frame and handle your action type; [`run_ui`] (or [`UiAdapter`] with
+//! [`run`]) does layout, paint, hit testing, focus, text editing, and
+//! accessibility publishing.
 //!
 //! The element tree is laid out in logical points, like the runner's scenes
 //! and pointer events; text is shaped at the window's scale factor so it
@@ -15,6 +15,24 @@
 //! field changed, or the theme changed. Animations schedule their own
 //! frames, and an app that changes state elsewhere asks with
 //! `cx.window.request_redraw()`.
+//!
+//! # Windows
+//!
+//! One app serves every window it opens ([`crate::EventContext::open_window`]).
+//! [`UiApp::view`] is called per window; branch on
+//! [`ViewContext::window_handle`]. Each window keeps its own input routing,
+//! geometry, element handles, focus, hover, text selection, IME
+//! composition, accessibility tree and announcements, and animations, so an
+//! idle window stays idle while another animates. The app, its messages,
+//! signals, theme, and key bindings are shared: a theme change repaints
+//! every window. Refer to things in another window as
+//! `(WindowHandle, FocusId)` or `(WindowHandle, ElementHandle)`; the same
+//! [`FocusId`] in two windows names two elements, which
+//! [`UiApp::edit_text_in`] tells apart.
+//!
+//! An IME composition belongs to its window. Focus moving onto an element
+//! of another window, or the window closing, ends it: its preedit is
+//! cancelled and anything the platform still delivers for it is dropped.
 
 use std::any::Any;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -28,12 +46,12 @@ use quark::SemanticFrame;
 use quark::hit::HitId;
 use quark::reactive::SignalStore;
 use quark::scene::Scene;
-use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer, Politeness};
+use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Politeness};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
-    AnyElement, Binding, CursorHint, Delivery, DragPreviewLayer, ElementCache, ElementContext,
-    ElementHandle, ElementHandles, ImeTarget, InputRouter, LayoutSnapshot, Mods, TextInputHitArea,
-    TooltipRegion, WheelEvent, render_element,
+    AnyElement, Binding, CursorHint, Delivery, DragEnd, DragLocation, DragOutcome, DragSession,
+    DropPolicy, DropTargets, ElementContext, ElementHandle, ElementHandles, HandoffError,
+    ImeTarget, LayoutSnapshot, Mods, TextInputHitArea, WheelEvent, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
@@ -45,8 +63,19 @@ use winit::window::{CursorIcon, Theme as SystemTheme};
 
 use crate::input::{PointerButton, UiInput};
 use crate::{
-    App, AppEvent, EventContext, FrameContext, InputEvent, RunError, Waker, WindowOptions, run,
+    App, AppEvent, CloseReason, EventContext, FrameContext, InputEvent, RunError, Waker,
+    WindowHandle, WindowOptions, run,
 };
+
+mod drag;
+#[cfg(test)]
+mod multi_window_tests;
+mod window;
+
+use drag::ActiveDrag;
+pub use drag::{drag_location, drag_window_id};
+pub(crate) use window::WindowUiState;
+use window::{Composition, Parked, WindowStates};
 
 /// Lines scrolled per accessibility ScrollUp/ScrollDown request.
 const ACCESSIBILITY_SCROLL_LINES: i32 = 3;
@@ -65,6 +94,9 @@ const PLATFORM_MOMENTUM: bool = cfg!(any(target_os = "macos", target_os = "windo
 /// [`UiApp::edit_text`] (and [`UiApp::set_preedit`] for IME). While it has
 /// focus, the adapter turns typed text, IME commits, editing keys, paste,
 /// and pointer selection into [`TextEditCommand`]s for it.
+///
+/// Every window the app opens shares it; contexts name the window they are
+/// for. See the [module docs](self#windows).
 pub trait UiApp: 'static {
     type Action: Any + Clone;
 
@@ -72,33 +104,58 @@ pub trait UiApp: 'static {
     /// finished jobs). Use `()` when the app takes none.
     type Message: Send + 'static;
 
-    /// Called once after the window and renderer exist.
+    /// Called once after the first window and renderer exist.
     fn init(&mut self, _cx: &mut UiContext) {}
 
-    /// Build the element tree for the next frame.
+    /// Build the element tree for the next frame of the context's window
+    /// ([`ViewContext::window_handle`]).
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement;
 
     /// Handle an action emitted by a click, scroll, drag, key binding, or
-    /// assistive tech.
+    /// assistive tech, in the context's window.
     fn update(&mut self, action: Self::Action, cx: &mut UiContext);
 
     /// A value sent through a [`UiSender`], delivered on the UI thread in
-    /// send order. Redraw with `cx.window.request_redraw()` if it changed
-    /// what the view shows.
+    /// send order, once whatever windows are open. Redraw with
+    /// `cx.window.request_redraw()` if it changed what the view shows.
     fn message(&mut self, _message: Self::Message, _cx: &mut UiContext) {}
 
-    /// Events about the app and its window: theme changes, URLs from later
-    /// launches, notification and tray clicks, closed windows and dialogs.
-    /// The adapter has already applied a [`AppEvent::ThemeChanged`] to its
-    /// theme when this runs.
+    /// Events about the app and its windows: theme changes, URLs from later
+    /// launches, notification and tray clicks, opened and closed windows
+    /// and dialogs. The adapter has already applied a
+    /// [`AppEvent::ThemeChanged`] to its theme when this runs.
     fn app_event(&mut self, _event: AppEvent, _cx: &mut UiContext) {}
+
+    /// `window` opened, before its first frame; the context is bound to
+    /// it. The first window gets this right after [`Self::init`]. Called
+    /// before [`Self::app_event`] gets the [`AppEvent::WindowOpened`].
+    fn window_opened(&mut self, _window: WindowHandle, _cx: &mut UiContext) {}
+
+    /// `window` closed for `reason`, or never opened
+    /// ([`CloseReason::OpenFailed`]); every window gets this once. The
+    /// context is bound to another window, if any is open, and the closed
+    /// window's focus and geometry still answer through
+    /// [`UiContext::focus_in`] and [`UiContext::geometry_in`]. Its IME
+    /// composition and a drag session started in it have already ended.
+    /// Called before [`Self::app_event`] gets the
+    /// [`AppEvent::WindowClosed`].
+    fn window_closed(&mut self, _window: WindowHandle, _reason: CloseReason, _cx: &mut UiContext) {}
 
     /// The user asked to close the window. Return false to keep it open.
     fn close_requested(&mut self, _cx: &mut UiContext) -> bool {
         true
     }
 
-    /// Assistive tech set the value of the text field `target`.
+    /// The context's window is about to close for `reason`
+    /// ([`App::close_requested`]): [`CloseReason::User`] for its close
+    /// button, [`CloseReason::Quit`] when quitting asks every window.
+    /// Return false to keep it open. Defaults to [`Self::close_requested`].
+    fn window_close_requested(&mut self, _reason: CloseReason, cx: &mut UiContext) -> bool {
+        self.close_requested(cx)
+    }
+
+    /// Assistive tech set the value of the text field `target` in the
+    /// context's window.
     fn set_text_value(&mut self, _target: FocusId, _value: String, _cx: &mut UiContext) {}
 
     /// Apply `command` to the model behind the text field `target` and
@@ -106,15 +163,39 @@ pub trait UiApp: 'static {
     /// The adapter writes the outcome's `clipboard_write` through
     /// [`UiApp::write_clipboard`] and redraws when the text or selection
     /// changed. Pointer selection steps may arrive while a frame is built,
-    /// so this gets no context.
+    /// so this gets no context. An app with fields in several windows
+    /// implements [`Self::edit_text_in`] instead.
     fn edit_text(&mut self, _target: FocusId, _command: TextEditCommand) -> TextEditOutcome {
         TextEditOutcome::default()
+    }
+
+    /// [`Self::edit_text`] for the field `target` in `window`, which the
+    /// adapter calls. Defaults to [`Self::edit_text`].
+    fn edit_text_in(
+        &mut self,
+        _window: WindowHandle,
+        target: FocusId,
+        command: TextEditCommand,
+    ) -> TextEditOutcome {
+        self.edit_text(target, command)
     }
 
     /// The IME composition in the text field `target` changed
     /// (`TextField::set_preedit`). A composition that ends without a commit
     /// arrives as [`TextEditCommand::CancelPreedit`] instead.
     fn set_preedit(&mut self, _target: FocusId, _text: String, _cursor: Option<(usize, usize)>) {}
+
+    /// [`Self::set_preedit`] for the field `target` in `window`, which the
+    /// adapter calls. Defaults to [`Self::set_preedit`].
+    fn set_preedit_in(
+        &mut self,
+        _window: WindowHandle,
+        target: FocusId,
+        text: String,
+        cursor: Option<(usize, usize)>,
+    ) {
+        self.set_preedit(target, text, cursor);
+    }
 
     /// Text to paste into a text field. Defaults to the system clipboard.
     fn read_clipboard(&mut self, cx: &mut UiContext) -> Option<String> {
@@ -129,6 +210,8 @@ pub trait UiApp: 'static {
 
     /// Sees every input event first. Return `true` to stop the adapter's own
     /// handling (clicks, wheel, keys, text editing, Tab focus traversal).
+    /// A transport moving the drag session ([`UiContext::update_drag`])
+    /// hooks pointer input here.
     fn event(&mut self, _event: &InputEvent, _cx: &mut UiContext) -> bool {
         false
     }
@@ -136,6 +219,15 @@ pub trait UiApp: 'static {
     /// Called after any [`crate::Waker::wake`], once pending messages have
     /// been delivered.
     fn wake(&mut self, _cx: &mut UiContext) {}
+
+    /// The adapter ended the drag session by itself, cancelled: Escape, its
+    /// source window closed, a release [`UiContext::finish_drag`] was not
+    /// called for, [`UiContext::cancel_drag`], or a new session replacing
+    /// it. `end` carries the payload back; the handler's actions were
+    /// already delivered. Sessions the app ends with
+    /// [`UiContext::finish_drag`] or [`UiContext::cancel_drag_session`]
+    /// return their end there instead.
+    fn drag_session_ended(&mut self, _end: DragEnd, _cx: &mut UiContext) {}
 }
 
 /// Sends [`UiApp::Message`]s to the UI thread from any thread. Clone it
@@ -169,7 +261,7 @@ impl<M: Send> UiSender<M> {
     }
 }
 
-/// What [`UiApp::view`] can see while building a frame.
+/// What [`UiApp::view`] can see while building a frame of one window.
 pub struct ViewContext<'a, 'f> {
     pub frame: &'a mut FrameContext<'f>,
     pub theme: &'a Theme,
@@ -180,15 +272,21 @@ pub struct ViewContext<'a, 'f> {
 }
 
 impl ViewContext<'_, '_> {
-    /// Where the elements of the last completed frame landed: the frame
-    /// before the one this view builds. Empty before the first frame.
+    /// The window this frame is for.
+    pub fn window_handle(&self) -> WindowHandle {
+        self.frame.window_handle()
+    }
+
+    /// Where the elements of the window's last completed frame landed: the
+    /// frame before the one this view builds. Empty before the first frame.
     /// Reading it lays nothing out.
     pub fn geometry(&self) -> &LayoutSnapshot {
         self.geometry
     }
 
-    /// A new handle to name an element with (`Div::element_handle`) and
-    /// find it in [`Self::geometry`]. Release it once the element is gone.
+    /// A new handle to name an element of this window with
+    /// (`Div::element_handle`) and find it in [`Self::geometry`]. Release
+    /// it once the element is gone.
     pub fn new_element_handle(&mut self) -> ElementHandle {
         self.handles.allocate()
     }
@@ -198,11 +296,12 @@ impl ViewContext<'_, '_> {
     }
 
     /// The window's animation table, ticked to this frame's clock. Rows
-    /// still moving after paint schedule the next frame.
+    /// still moving after paint schedule the window's next frame.
     pub fn animations(&mut self) -> &mut AnimationTable {
         self.animations
     }
 
+    /// The window's focus.
     pub fn focus(&self) -> Option<FocusId> {
         self.focus
     }
@@ -212,51 +311,69 @@ impl ViewContext<'_, '_> {
     }
 }
 
-/// An [`EventContext`] plus the adapter's focus and message sender.
+/// An [`EventContext`] plus the adapter's focus and message sender. Methods
+/// without a window in their name act on the context's window.
 pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
-    focus: &'a mut Option<FocusId>,
-    key_bindings: &'a mut KeyBindings,
-    /// Set when the adapter must end its pointer capture: a drag out took
-    /// the pointer, or the app cancelled the drag.
-    pointer_taken: &'a mut bool,
-    dragging: bool,
-    announcer: &'a mut Announcer,
-    theme: &'a mut Theme,
-    theme_choice: &'a mut ThemeChoice,
+    windows: WindowStates<'a>,
+    shared: &'a mut Shared,
     /// The adapter's `UiSender<U::Message>`.
     sender: &'a dyn Any,
-    geometry: &'a LayoutSnapshot,
-    handles: &'a mut ElementHandles,
 }
 
 impl UiContext<'_, '_> {
-    /// Where the elements of the last completed frame landed, the frame
-    /// input is routed through. Empty before the first frame. Reading it
-    /// lays nothing out, so it does not see changes the app made since.
-    pub fn geometry(&self) -> &LayoutSnapshot {
-        self.geometry
+    /// The window this callback is for. `None` only for app events that
+    /// arrive while no window is open.
+    pub fn window_handle(&self) -> Option<WindowHandle> {
+        self.windows.handle
     }
 
-    /// A new handle to name an element with (`Div::element_handle`) and
-    /// find it in [`Self::geometry`]. Release it once the element is gone.
+    /// Where the elements of the window's last completed frame landed, the
+    /// frame input is routed through. Empty before the first frame. Reading
+    /// it lays nothing out, so it does not see changes the app made since.
+    pub fn geometry(&self) -> &LayoutSnapshot {
+        &self.windows.current.router.frame().geometry
+    }
+
+    /// [`Self::geometry`] of `window`, if it has painted or is open.
+    pub fn geometry_in(&self, window: WindowHandle) -> Option<&LayoutSnapshot> {
+        let state = self.windows.get(window)?;
+        Some(&state.router.frame().geometry)
+    }
+
+    /// Where `window`'s last completed frame takes drops.
+    pub fn drop_targets_in(&self, window: WindowHandle) -> Option<&DropTargets> {
+        let state = self.windows.get(window)?;
+        Some(&state.router.frame().drop_targets)
+    }
+
+    /// A new handle to name an element of this window with
+    /// (`Div::element_handle`) and find it in [`Self::geometry`]. Release
+    /// it once the element is gone.
     pub fn new_element_handle(&mut self) -> ElementHandle {
-        self.handles.allocate()
+        self.windows.current.element_handles.allocate()
     }
 
     pub fn release_element_handle(&mut self, handle: ElementHandle) {
-        self.handles.release(handle);
+        self.windows.current.element_handles.release(handle);
     }
 
+    /// The window's focus.
     pub fn focus(&self) -> Option<FocusId> {
-        *self.focus
+        self.windows.current.focus
+    }
+
+    /// The focus `window` remembers, whether or not it is the active
+    /// window.
+    pub fn focus_in(&self, window: WindowHandle) -> Option<FocusId> {
+        self.windows.get(window)?.focus
     }
 
     /// The window's key bindings, resolved against the key contexts on
-    /// the focus path; see [`UiAdapter::with_key_bindings`]. Replace them
-    /// when the user edits the keymap.
+    /// the focus path; see [`UiAdapter::with_key_bindings`]. Every window
+    /// shares them. Replace them when the user edits the keymap.
     pub fn key_bindings_mut(&mut self) -> &mut KeyBindings {
-        self.key_bindings
+        &mut self.shared.key_bindings
     }
 
     /// Drag `paths` out of the window as files
@@ -279,29 +396,61 @@ impl UiContext<'_, '_> {
         options: &crate::platform::drag_out::DragOutOptions,
     ) -> Result<(), crate::platform::drag_out::DragOutError> {
         self.window.start_drag_out_with_options(paths, options)?;
-        *self.pointer_taken = true;
+        self.windows.current.pointer_taken = true;
         Ok(())
     }
 
     /// Whether a pointer drag holds the pointer: a dragged tab, divider,
-    /// or text selection.
+    /// or text selection in this window, or a drag session.
     pub fn is_dragging(&self) -> bool {
-        self.dragging
+        self.windows.current.router.is_capturing() || self.shared.drag.is_some()
     }
 
     /// End the pointer drag, if any, without its release, as Escape does in
     /// most apps: its handler backs out (`DragHandler::on_cancel`), so a
-    /// dragged tab drops nowhere.
+    /// dragged tab drops nowhere. A drag session ends too, reported to
+    /// [`UiApp::drag_session_ended`].
     pub fn cancel_drag(&mut self) {
-        if self.dragging {
-            *self.pointer_taken = true;
+        if self.windows.current.router.is_capturing() {
+            self.windows.current.pointer_taken = true;
+        }
+        let shared = &mut *self.shared;
+        if let Some(end) = drag::cancel(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+        ) {
+            shared.ended.push(end);
         }
     }
 
+    /// Focus `focus` in this window.
     pub fn set_focus(&mut self, focus: Option<FocusId>) {
-        if *self.focus != focus {
-            *self.focus = focus;
-            redraw(Redraw::Focus, self.window);
+        if self.windows.current.focus != focus {
+            self.windows.current.focus = focus;
+            redraw(Redraw::Focus, self.windows.handle, self.window);
+        }
+    }
+
+    /// Focus `focus` in `window`, which may be another window than the
+    /// context's: a panel moved there and keeps its focus. Focus landing on
+    /// an element ends IME compositions in every other window, so text
+    /// they still deliver cannot reach it. Activating the native window is
+    /// up to the caller. Works for a window just opened, before its first
+    /// frame; stale handles are ignored.
+    pub fn set_focus_in(&mut self, window: WindowHandle, focus: Option<FocusId>) {
+        if self.windows.handle == Some(window) {
+            self.set_focus(focus);
+            return;
+        }
+        let Some(state) = self.state_in(window) else {
+            return;
+        };
+        if state.focus != focus {
+            state.focus = focus;
+            self.shared.refocused.push(window);
+            redraw(Redraw::Focus, Some(window), self.window);
         }
     }
 
@@ -311,21 +460,64 @@ impl UiContext<'_, '_> {
     /// screen (a toast), make its element a live region instead
     /// (`Div::live`).
     pub fn announce(&mut self, text: impl Into<String>, politeness: Politeness) {
-        self.announcer.announce(text, politeness);
+        self.windows.current.announcer.announce(text, politeness);
         // The announcement is published with the next frame's tree.
-        self.window.request_redraw();
+        redraw(Redraw::Announce, self.windows.handle, self.window);
+    }
+
+    /// [`Self::announce`] through `window`'s tree, as for a panel that
+    /// just moved there.
+    pub fn announce_in(
+        &mut self,
+        window: WindowHandle,
+        text: impl Into<String>,
+        politeness: Politeness,
+    ) {
+        if let Some(state) = self.state_in(window) {
+            state.announcer.announce(text, politeness);
+            redraw(Redraw::Announce, Some(window), self.window);
+        }
+    }
+
+    /// `window`'s state, made now for a window open or opening that has
+    /// had no callback yet.
+    fn state_in(&mut self, window: WindowHandle) -> Option<&mut WindowUiState> {
+        if self.windows.get(window).is_none() {
+            if !self.window.windows().contains(&window) {
+                return None;
+            }
+            let state = Box::new(WindowUiState::new());
+            self.windows.parked.push((Some(window), state));
+        }
+        self.windows.get_mut(window)
+    }
+
+    /// Name the window's accessibility tree, as assistive tech lists it
+    /// among the app's windows. Defaults to the adapter's name.
+    pub fn set_window_name(&mut self, name: impl Into<String>) {
+        self.windows.current.name = Some(name.into());
+        redraw(Redraw::Announce, self.windows.handle, self.window);
+    }
+
+    /// [`Self::set_window_name`] for `window`, which may be another window
+    /// than the context's, or one still opening.
+    pub fn set_window_name_in(&mut self, window: WindowHandle, name: impl Into<String>) {
+        if let Some(state) = self.state_in(window) {
+            state.name = Some(name.into());
+            redraw(Redraw::Announce, Some(window), self.window);
+        }
     }
 
     /// The theme the next frame paints with.
     pub fn theme(&self) -> &Theme {
-        self.theme
+        &self.shared.theme
     }
 
-    /// Paint with `theme` from the next frame on, whatever the desktop
-    /// prefers. Cached elements rebuild in the new colors; text layouts
-    /// are reused unless the theme's font sizes changed.
+    /// Paint every window with `theme` from the next frame on, whatever
+    /// the desktop prefers. Cached elements rebuild in the new colors; text
+    /// layouts are reused unless the theme's font sizes changed.
     pub fn set_theme(&mut self, theme: Theme) {
-        *self.theme_choice = ThemeChoice::Fixed;
+        self.shared.theme_choice = ThemeChoice::Fixed;
         self.apply_theme(theme);
     }
 
@@ -336,7 +528,7 @@ impl UiContext<'_, '_> {
             Some(SystemTheme::Light) => light.clone(),
             _ => dark.clone(),
         };
-        *self.theme_choice = ThemeChoice::System {
+        self.shared.theme_choice = ThemeChoice::System {
             light: Box::new(light),
             dark: Box::new(dark),
         };
@@ -344,9 +536,9 @@ impl UiContext<'_, '_> {
     }
 
     fn apply_theme(&mut self, theme: Theme) {
-        if *self.theme != theme {
-            *self.theme = theme;
-            redraw(Redraw::Theme, self.window);
+        if self.shared.theme != theme {
+            self.shared.theme = theme;
+            redraw_all(Redraw::Theme, self.window);
         }
     }
 
@@ -376,6 +568,122 @@ impl UiContext<'_, '_> {
             .expect("UiContext::sender: M must be the app's UiApp::Message")
             .clone()
     }
+
+    // ---- Drag session ----------------------------------------------------
+
+    /// The drag the app holds across windows, if one is under way. See
+    /// [`DragSession`].
+    pub fn drag_session(&self) -> Option<&DragSession> {
+        self.shared.drag.as_ref().map(|active| &active.session)
+    }
+
+    /// The window the drag session started in, while it is open.
+    pub fn drag_source(&self) -> Option<WindowHandle> {
+        self.shared.drag.as_ref().and_then(|active| active.source)
+    }
+
+    /// The window a [`DragLocation`] names, if it is open.
+    pub fn drag_window(&self, location: DragLocation) -> Option<WindowHandle> {
+        match location {
+            DragLocation::Window { window, .. } => drag::window_of(&self.windows, window),
+            DragLocation::Outside | DragLocation::Unknown => None,
+        }
+    }
+
+    /// Move the drag holding this window's pointer into the drag session
+    /// ([`quark_ui::element::InputRouter::hand_off_capture`]), so it can
+    /// follow the pointer into other windows; its handler must agree
+    /// ([`quark_ui::element::DragHandler::on_handoff`]). The session starts
+    /// over this window at the pointer; a session already under way ends
+    /// cancelled. Window blur no longer cancels the drag: move it with
+    /// [`Self::update_drag`] and end it with [`Self::finish_drag`].
+    pub fn hand_off_drag(&mut self) -> Result<(), HandoffError> {
+        let window = self.windows.handle.ok_or(HandoffError::NoCapture)?;
+        let (session, delivery) = self
+            .windows
+            .current
+            .router
+            .hand_off_capture(drag_window_id(window))?;
+        let shared = &mut *self.shared;
+        shared.queued.extend(delivery.actions);
+        if let Some(end) = drag::start(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+            session,
+        ) {
+            shared.ended.push(end);
+        }
+        redraw(Redraw::Action, Some(window), self.window);
+        Ok(())
+    }
+
+    /// Start `session`, a drag no window's router holds: a keyboard move,
+    /// or one a native transport began. Name its source with
+    /// [`drag_window_id`]. Returns the session it replaced, cancelled.
+    pub fn start_drag(&mut self, session: DragSession) -> Option<DragEnd> {
+        let shared = &mut *self.shared;
+        drag::start(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+            session,
+        )
+    }
+
+    /// The session's pointer moved to `location` ([`drag_location`] for a
+    /// point over one of the app's windows): resolve it against that
+    /// window's last completed drop targets and `policy`, and show the
+    /// preview there. Returns what a release now would do, or `None`
+    /// without a session. A window whose targets are stale is repainted.
+    pub fn update_drag(
+        &mut self,
+        location: DragLocation,
+        policy: &(impl DropPolicy + ?Sized),
+    ) -> Option<DragOutcome> {
+        drag::update(
+            &mut self.shared.drag,
+            &self.windows,
+            self.window,
+            location,
+            policy,
+        )
+    }
+
+    /// Release the session at `release`, or where the last update left it,
+    /// resolved again against that window's current targets (see
+    /// [`DragSession::finish`]). Commit only a [`DragOutcome::Target`]
+    /// result. The handler's actions are delivered once this callback
+    /// returns, so the returned end carries none.
+    pub fn finish_drag(
+        &mut self,
+        release: Option<DragLocation>,
+        policy: &(impl DropPolicy + ?Sized),
+    ) -> Option<DragEnd> {
+        let shared = &mut *self.shared;
+        drag::finish(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+            release,
+            policy,
+        )
+    }
+
+    /// End the session without a drop. The handler's actions are delivered
+    /// once this callback returns.
+    pub fn cancel_drag_session(&mut self) -> Option<DragEnd> {
+        let shared = &mut *self.shared;
+        drag::cancel(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+        )
+    }
 }
 
 /// Why the adapter asked for a frame.
@@ -391,11 +699,24 @@ enum Redraw {
     /// Input moved a scroll handle.
     Scroll,
     Theme,
+    /// The accessibility tree has something new to publish.
+    Announce,
 }
 
-fn redraw(reason: Redraw, cx: &mut EventContext) {
-    tracing::trace!(?reason, "redraw");
-    cx.request_redraw();
+/// Ask for a frame of `window`, or of the context's window without one.
+/// Explicit, since the context may be bound to another window than the
+/// one whose state changed.
+fn redraw(reason: Redraw, window: Option<WindowHandle>, cx: &mut EventContext) {
+    tracing::trace!(?reason, ?window, "redraw");
+    match window {
+        Some(window) => cx.request_redraw_window(window),
+        None => cx.request_redraw(),
+    }
+}
+
+fn redraw_all(reason: Redraw, cx: &mut EventContext) {
+    tracing::trace!(?reason, "redraw every window");
+    cx.request_redraw_all();
 }
 
 /// Which theme the adapter paints with.
@@ -406,60 +727,39 @@ enum ThemeChoice {
     System { light: Box<Theme>, dark: Box<Theme> },
 }
 
-/// Runs a [`UiApp`] as an [`App`].
-pub struct UiAdapter<U: UiApp> {
-    pub(crate) app: U,
+/// What every window shares.
+struct Shared {
+    /// Names each window's accessibility tree unless the app names it.
     name: String,
     theme: Theme,
     theme_choice: ThemeChoice,
     signals: SignalStore,
-    focus: Option<FocusId>,
-    pointer: Option<(f32, f32)>,
-    /// Hit entries under the pointer in the routed frame, topmost first:
-    /// what hover styles were painted from.
-    hovered: Vec<HitId>,
-    /// Routes input through the last painted frame until the next replaces it.
-    router: InputRouter,
-    /// Handles the app names elements with.
-    element_handles: ElementHandles,
     key_bindings: KeyBindings,
-    /// A drag out took the pointer, or the app cancelled the drag, during
-    /// the last call into the app.
-    pointer_taken: bool,
-    /// Paints the preview of the drag holding the pointer.
-    drag_preview: DragPreviewLayer,
-    accessibility: AccessibilityFrame,
-    announcer: Announcer,
-    /// Text fields of the last frame, for pointer selection and IME.
-    text_areas: Vec<TextInputHitArea>,
-    text_pointer: TextPointer,
-    /// The focused text field as of the last input, to cancel its
-    /// composition once focus leaves it.
-    edit_focus: Option<FocusId>,
-    /// IME state last sent to the window.
-    ime_allowed: bool,
-    ime_area: Option<Rect>,
-    /// The platform IME's composition and the element it belongs to.
-    composition: Composition,
-    /// Scale factor of the last painted frame, for accessibility bounds.
-    scale_factor: f32,
-    animations: AnimationTable,
-    /// Cached subtrees and the layout engine, reused every frame.
-    element_cache: ElementCache,
-    /// Buffers of the frame before last, reused by the next frame: the
-    /// scene the runner handed back, the input frame routing let go of,
-    /// the text input areas, the IME targets, and the accessibility frame.
-    spare_scene: Scene,
-    spare_accessibility: AccessibilityFrame,
-    spare_input: quark_ui::element::InputFrame,
-    spare_text_areas: Vec<TextInputHitArea>,
-    spare_ime_targets: Vec<ImeTarget>,
-    /// Last frame's scrollbar track buffer, reused by the next frame.
-    spare_tooltip_regions: Vec<TooltipRegion>,
+    drag: Option<ActiveDrag>,
+    /// Actions a call into the app produced (drag handlers' handoff and
+    /// end actions), delivered once it returns.
+    queued: Vec<Action>,
+    /// Drag sessions the adapter ended, for [`UiApp::drag_session_ended`].
+    ended: Vec<DragEnd>,
+    /// Windows whose focus the app set from another window's callback.
+    refocused: Vec<WindowHandle>,
+}
+
+/// Runs a [`UiApp`] as an [`App`].
+pub struct UiAdapter<U: UiApp> {
+    pub(crate) app: U,
+    shared: Shared,
+    /// The window the adapter is acting for: every callback selects the
+    /// window its context is bound to before touching window state.
+    win_handle: Option<WindowHandle>,
+    win: Box<WindowUiState>,
+    /// `win` is the state the adapter was made with and no window has
+    /// claimed yet: the first window adopts it.
+    win_unclaimed: bool,
+    /// Every other window's state.
+    parked: Parked,
     sender: UiSender<U::Message>,
     messages: Receiver<U::Message>,
-    #[cfg(feature = "devtools")]
-    devtools: quark_ui::inspector::Devtools,
 }
 
 /// Open a window titled by `options` and run `app` in it.
@@ -476,59 +776,43 @@ impl<U: UiApp> UiAdapter<U> {
         let (sender, messages) = mpsc::channel();
         Self {
             app,
-            name: name.into(),
-            theme: Theme::default_dark(),
-            theme_choice: ThemeChoice::System {
-                light: Box::new(Theme::default_light()),
-                dark: Box::new(Theme::default_dark()),
+            shared: Shared {
+                name: name.into(),
+                theme: Theme::default_dark(),
+                theme_choice: ThemeChoice::System {
+                    light: Box::new(Theme::default_light()),
+                    dark: Box::new(Theme::default_dark()),
+                },
+                signals: SignalStore::new(),
+                key_bindings: KeyBindings::new(),
+                drag: None,
+                queued: Vec::new(),
+                ended: Vec::new(),
+                refocused: Vec::new(),
             },
-            signals: SignalStore::new(),
-            focus: None,
-            pointer: None,
-            hovered: Vec::new(),
-            router: InputRouter::default(),
-            element_handles: ElementHandles::default(),
-            key_bindings: KeyBindings::new(),
-            pointer_taken: false,
-            drag_preview: DragPreviewLayer::default(),
-            accessibility: AccessibilityFrame::default(),
-            announcer: Announcer::default(),
-            text_areas: Vec::new(),
-            text_pointer: TextPointer::default(),
-            edit_focus: None,
-            ime_allowed: false,
-            ime_area: None,
-            composition: Composition::None,
-            scale_factor: 1.0,
-            animations: AnimationTable::new(),
-            element_cache: ElementCache::new(),
-            spare_scene: Scene::default(),
-            spare_accessibility: AccessibilityFrame::default(),
-            spare_input: Default::default(),
-            spare_text_areas: Vec::new(),
-            spare_ime_targets: Vec::new(),
-            spare_tooltip_regions: Vec::new(),
+            win_handle: None,
+            win: Box::new(WindowUiState::new()),
+            win_unclaimed: true,
+            parked: Vec::new(),
             sender: UiSender {
                 sender,
                 waker: Arc::new(OnceLock::new()),
             },
             messages,
-            #[cfg(feature = "devtools")]
-            devtools: quark_ui::inspector::Devtools::from_env(),
         }
     }
 
     /// Paint with `theme` whatever the desktop prefers.
     pub fn with_theme(mut self, theme: Theme) -> Self {
-        self.theme = theme;
-        self.theme_choice = ThemeChoice::Fixed;
+        self.shared.theme = theme;
+        self.shared.theme_choice = ThemeChoice::Fixed;
         self
     }
 
     /// Paint with `light` or `dark` as the desktop prefers.
     pub fn with_themes(mut self, light: Theme, dark: Theme) -> Self {
-        self.theme = dark.clone();
-        self.theme_choice = ThemeChoice::System {
+        self.shared.theme = dark.clone();
+        self.shared.theme_choice = ThemeChoice::System {
             light: Box::new(light),
             dark: Box::new(dark),
         };
@@ -543,7 +827,7 @@ impl<U: UiApp> UiAdapter<U> {
     /// element's handler does, and a binding without a predicate only gets
     /// keys no element handles.
     pub fn with_key_bindings(mut self, bindings: KeyBindings) -> Self {
-        self.key_bindings = bindings;
+        self.shared.key_bindings = bindings;
         self
     }
 
@@ -553,13 +837,49 @@ impl<U: UiApp> UiAdapter<U> {
 
     /// The theme the next frame paints with.
     pub fn theme(&self) -> &Theme {
-        &self.theme
+        &self.shared.theme
     }
 
     /// A sender for [`UiApp::message`], for threads started before
     /// [`run`]. Inside the app, [`UiContext::sender`] gives the same.
     pub fn sender(&self) -> UiSender<U::Message> {
         self.sender.clone()
+    }
+
+    /// Act for `window`: make its state the current one. Cheap, and free
+    /// of allocation once every window has state.
+    fn select(&mut self, window: Option<WindowHandle>) {
+        if self.win_handle == window {
+            return;
+        }
+        if self.win_unclaimed && window.is_some() {
+            self.win_unclaimed = false;
+            self.win_handle = window;
+            return;
+        }
+        let from = self.win_handle;
+        match self.parked.iter().position(|(handle, _)| *handle == window) {
+            Some(index) => {
+                let slot = &mut self.parked[index];
+                std::mem::swap(&mut slot.1, &mut self.win);
+                slot.0 = from;
+            }
+            None => {
+                let state = std::mem::replace(&mut self.win, Box::new(WindowUiState::new()));
+                self.parked.push((from, state));
+            }
+        }
+        self.win_handle = window;
+    }
+
+    fn window_states(&self, window: WindowHandle) -> Option<&WindowUiState> {
+        if self.win_handle == Some(window) {
+            return Some(&self.win);
+        }
+        self.parked
+            .iter()
+            .find(|(handle, _)| *handle == Some(window))
+            .map(|(_, state)| &**state)
     }
 
     /// Run `f` with the app and a [`UiContext`] over `cx`.
@@ -570,18 +890,29 @@ impl<U: UiApp> UiAdapter<U> {
     ) -> R {
         let mut ucx = UiContext {
             window: cx,
-            focus: &mut self.focus,
-            key_bindings: &mut self.key_bindings,
-            pointer_taken: &mut self.pointer_taken,
-            dragging: self.router.is_capturing(),
-            announcer: &mut self.announcer,
-            theme: &mut self.theme,
-            theme_choice: &mut self.theme_choice,
+            windows: WindowStates {
+                handle: self.win_handle,
+                current: &mut self.win,
+                parked: &mut self.parked,
+            },
+            shared: &mut self.shared,
             sender: &self.sender,
-            geometry: &self.router.frame().geometry,
-            handles: &mut self.element_handles,
         };
         f(&mut self.app, &mut ucx)
+    }
+
+    /// The app's [`UiApp::edit_text_in`] for `window`, or
+    /// [`UiApp::edit_text`] when the adapter acts for no window.
+    fn edit_text_in(
+        app: &mut U,
+        window: Option<WindowHandle>,
+        target: FocusId,
+        command: TextEditCommand,
+    ) -> TextEditOutcome {
+        match window {
+            Some(window) => app.edit_text_in(window, target, command),
+            None => app.edit_text(target, command),
+        }
     }
 
     fn deliver_messages(&mut self, cx: &mut EventContext) {
@@ -596,10 +927,11 @@ impl<U: UiApp> UiAdapter<U> {
                 let extend = cx.modifiers().shift_key();
                 let now_ms = cx.elapsed().as_millis() as u64;
                 if let Some((target, command)) =
-                    self.text_pointer
-                        .event(*event, &self.text_areas, now_ms, extend)
+                    self.win
+                        .text_pointer
+                        .event(*event, &self.win.text_areas, now_ms, extend)
                 {
-                    self.app.edit_text(target, command);
+                    Self::edit_text_in(&mut self.app, self.win_handle, target, command);
                 }
                 continue;
             }
@@ -609,15 +941,15 @@ impl<U: UiApp> UiAdapter<U> {
             };
             self.with_app(cx, |app, ucx| app.update(action, ucx));
         }
-        redraw(Redraw::Action, cx);
+        redraw(Redraw::Action, self.win_handle, cx);
         self.end_taken_pointer(cx);
     }
 
     /// Cancel the pointer capture the app gave up: the platform's drag loop
     /// gets the release of a drag out, and a cancelled drag gets none.
     fn end_taken_pointer(&mut self, cx: &mut EventContext) {
-        if std::mem::take(&mut self.pointer_taken) {
-            let delivery = self.router.cancel_pointer();
+        if std::mem::take(&mut self.win.pointer_taken) {
+            let delivery = self.win.router.cancel_pointer();
             self.deliver(delivery, cx);
         }
     }
@@ -628,60 +960,91 @@ impl<U: UiApp> UiAdapter<U> {
         if !delivery.actions.is_empty() {
             self.dispatch(delivery.actions, cx);
         } else if delivery.redraw {
-            redraw(Redraw::Scroll, cx);
+            redraw(Redraw::Scroll, self.win_handle, cx);
+        }
+    }
+
+    /// Deliver what calls into the app left for after them: drag handler
+    /// actions, and drag sessions the adapter ended.
+    fn flush_queued(&mut self, cx: &mut EventContext) {
+        loop {
+            if !self.shared.queued.is_empty() {
+                let actions = std::mem::take(&mut self.shared.queued);
+                self.dispatch(actions, cx);
+            } else if !self.shared.ended.is_empty() {
+                let end = self.shared.ended.remove(0);
+                self.with_app(cx, |app, ucx| app.drag_session_ended(end, ucx));
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// End the drag session, cancelled, on the adapter's own account.
+    fn end_session(&mut self, cx: &mut EventContext) {
+        let windows = WindowStates {
+            handle: self.win_handle,
+            current: &mut self.win,
+            parked: &mut self.parked,
+        };
+        let shared = &mut self.shared;
+        if let Some(end) = drag::cancel(&mut shared.drag, &windows, cx, &mut shared.queued) {
+            shared.ended.push(end);
         }
     }
 
     /// Track the elements under the pointer; hover styles only change when
     /// they do.
     fn update_hover(&mut self, cx: &mut EventContext) {
-        let hovered = self.hovered_at(self.pointer);
-        if hovered != self.hovered {
-            self.hovered = hovered;
+        let hovered = self.hovered_at(self.win.pointer);
+        if hovered != self.win.hovered {
+            self.win.hovered = hovered;
             self.update_cursor(cx);
-            redraw(Redraw::Hover, cx);
+            redraw(Redraw::Hover, self.win_handle, cx);
         }
     }
 
     fn hovered_at(&self, pointer: Option<(f32, f32)>) -> Vec<HitId> {
-        pointer.map_or_else(Vec::new, |(x, y)| self.router.frame().hits.stack_at(x, y))
+        pointer.map_or_else(Vec::new, |(x, y)| {
+            self.win.router.frame().hits.stack_at(x, y)
+        })
     }
 
     fn pointer_pressed(&mut self, cx: &mut EventContext) {
-        let Some((x, y)) = self.pointer else {
+        let Some((x, y)) = self.win.pointer else {
             return;
         };
-        let before = self.focus;
-        let delivery = self.router.pointer_down(x, y, &mut self.focus);
-        if self.focus != before {
-            redraw(Redraw::Focus, cx);
+        let win = &mut *self.win;
+        let before = win.focus;
+        let delivery = win.router.pointer_down(x, y, &mut win.focus);
+        if win.focus != before {
+            redraw(Redraw::Focus, self.win_handle, cx);
         }
         self.deliver(delivery, cx);
-    }
-
-    /// The focused text field, if focus is on one painted last frame.
-    fn focused_field(&self) -> Option<FocusId> {
-        self.focus
-            .filter(|focus| self.text_areas.iter().any(|a| a.focus_target == *focus))
     }
 
     /// Apply `command` to the text field `target`, passing any copied text
     /// to the clipboard.
     fn edit(&mut self, target: FocusId, command: TextEditCommand, cx: &mut EventContext) {
-        let outcome = self.app.edit_text(target, command);
+        let outcome = Self::edit_text_in(&mut self.app, self.win_handle, target, command);
         if let Some(text) = outcome.clipboard_write {
             self.with_app(cx, |app, ucx| app.write_clipboard(text, ucx));
         }
         if outcome.text_changed || outcome.selection_changed {
-            redraw(Redraw::TextEdit, cx);
+            redraw(Redraw::TextEdit, self.win_handle, cx);
         }
     }
 
     /// Keys go to the focused text field when they edit text, then to key
     /// bindings on the focus path, then to Tab focus traversal, so an
-    /// editor that binds Tab keeps it.
+    /// editor that binds Tab keeps it. Escape first ends a drag session.
     fn key(&mut self, binding: Binding, cx: &mut EventContext) {
-        if let Some(target) = self.focused_field() {
+        if self.shared.drag.is_some() && binding.key == "escape" && binding.mods == Mods::default()
+        {
+            self.end_session(cx);
+            return;
+        }
+        if let Some(target) = self.win.focused_field() {
             let paste = Binding::new(
                 Mods {
                     primary: true,
@@ -700,7 +1063,7 @@ impl<U: UiApp> UiAdapter<U> {
                 return;
             }
         }
-        let delivery = self.router.key_down(&binding, self.focus);
+        let delivery = self.win.router.key_down(&binding, self.win.focus);
         if let Some(action) = self.bound_action(&binding, delivery.node) {
             self.dispatch(vec![action], cx);
             return;
@@ -711,22 +1074,22 @@ impl<U: UiApp> UiAdapter<U> {
         }
         // Enter or Space on a focused clickable that binds neither clicks it,
         // so everything a pointer can press is reachable from the keyboard.
-        let delivery = self.router.activate(&binding, self.focus);
+        let delivery = self.win.router.activate(&binding, self.win.focus);
         if delivery.node.is_some() {
             self.deliver(delivery, cx);
             return;
         }
-        let delivery = self.router.scroll_key(&binding, self.focus);
+        let delivery = self.win.router.scroll_key(&binding, self.win.focus);
         if delivery.node.is_some() {
             self.deliver(delivery, cx);
             return;
         }
         let mods = binding.mods;
         if binding.key == "tab" && !(mods.cmd || mods.ctrl || mods.alt) {
-            let next = self.router.traverse_focus(self.focus, mods.shift);
-            if next != self.focus {
-                self.focus = next;
-                redraw(Redraw::Focus, cx);
+            let next = self.win.router.traverse_focus(self.win.focus, mods.shift);
+            if next != self.win.focus {
+                self.win.focus = next;
+                redraw(Redraw::Focus, self.win_handle, cx);
             }
         }
     }
@@ -735,13 +1098,13 @@ impl<U: UiApp> UiAdapter<U> {
     /// `handled_by` that routing found: it matched through a key context
     /// inside that element, or no element handled the key.
     fn bound_action(&self, pressed: &Binding, handled_by: Option<usize>) -> Option<Action> {
-        if self.key_bindings.is_empty() {
+        if self.shared.key_bindings.is_empty() {
             return None;
         }
-        let semantic = &self.router.frame().semantic;
-        let path = context_path(semantic, self.focus);
+        let semantic = &self.win.router.frame().semantic;
+        let path = context_path(semantic, self.win.focus);
         let entries: Vec<_> = path.iter().map(|(_, entry)| entry.clone()).collect();
-        let found = self.key_bindings.resolve(pressed, &entries)?;
+        let found = self.shared.key_bindings.resolve(pressed, &entries)?;
         let context_node = found.depth.checked_sub(1).map(|i| path[i].0);
         let wins = match (handled_by, context_node) {
             (None, _) => true,
@@ -756,30 +1119,35 @@ impl<U: UiApp> UiAdapter<U> {
     fn input(&mut self, input: UiInput, cx: &mut EventContext) {
         match input {
             UiInput::PointerMove { x, y } => {
-                self.pointer = Some((x, y));
-                let delivery = self.router.pointer_move(x, y);
+                self.win.pointer = Some((x, y));
+                let delivery = self.win.router.pointer_move(x, y);
                 self.deliver(delivery, cx);
                 self.update_hover(cx);
             }
             // Capture survives the pointer leaving: a drag outside the
             // window keeps its moves and its release on every platform.
             UiInput::PointerLeave => {
-                self.pointer = None;
+                self.win.pointer = None;
                 self.update_hover(cx);
             }
             UiInput::PointerDown(PointerButton::Primary) => self.pointer_pressed(cx),
             UiInput::PointerUp(PointerButton::Primary) => {
-                let delivery = self.router.pointer_up();
+                let delivery = self.win.router.pointer_up();
                 self.deliver(delivery, cx);
+                // A release the app's hook did not finish the session on
+                // completes nothing it could name: back out.
+                if self.shared.drag.is_some() {
+                    self.end_session(cx);
+                }
             }
             UiInput::PointerDown(PointerButton::Middle) => {
-                if let Some((x, y)) = self.pointer {
-                    self.router.middle_down(x, y);
+                if let Some((x, y)) = self.win.pointer {
+                    self.win.router.middle_down(x, y);
                 }
             }
             UiInput::PointerUp(PointerButton::Middle) => {
-                if let Some((x, y)) = self.pointer {
-                    let delivery = self.router.middle_up(x, y);
+                if let Some((x, y)) = self.win.pointer {
+                    let delivery = self.win.router.middle_up(x, y);
                     self.deliver(delivery, cx);
                 }
             }
@@ -792,34 +1160,38 @@ impl<U: UiApp> UiAdapter<U> {
                 } else {
                     (dx, dy)
                 };
-                if let Some((x, y)) = self.pointer {
+                if let Some((x, y)) = self.win.pointer {
                     let event = WheelEvent { dx, dy, now_ms };
-                    let delivery = self.router.scroll_wheel(x, y, event);
+                    let delivery = self.win.router.scroll_wheel(x, y, event);
                     self.deliver(delivery, cx);
                 }
-                if ended && !PLATFORM_MOMENTUM && self.router.fling(now_ms) {
-                    redraw(Redraw::Scroll, cx);
+                if ended && !PLATFORM_MOMENTUM && self.win.router.fling(now_ms) {
+                    redraw(Redraw::Scroll, self.win_handle, cx);
                 }
             }
             UiInput::Key(binding) => self.key(binding, cx),
             UiInput::Text(text) | UiInput::ImeCommit(text) => {
-                if let Some(target) = self.focused_field() {
+                if let Some(target) = self.win.focused_field() {
                     self.edit(target, TextEditCommand::InsertText(text), cx);
                 }
             }
             UiInput::Preedit { text, cursor } => {
-                if let Some(target) = self.focused_field() {
+                if let Some(target) = self.win.focused_field() {
                     if text.is_empty() {
-                        self.app.edit_text(target, TextEditCommand::CancelPreedit);
+                        let cancel = TextEditCommand::CancelPreedit;
+                        Self::edit_text_in(&mut self.app, self.win_handle, target, cancel);
+                    } else if let Some(window) = self.win_handle {
+                        self.app.set_preedit_in(window, target, text, cursor);
                     } else {
                         self.app.set_preedit(target, text, cursor);
                     }
-                    redraw(Redraw::TextEdit, cx);
+                    redraw(Redraw::TextEdit, self.win_handle, cx);
                 }
             }
-            // The platform sends no release once the window lost focus.
+            // The platform sends no release once the window lost focus. A
+            // drag session is not the window's: its transport ends it.
             UiInput::WindowFocus(false) => {
-                let delivery = self.router.cancel_pointer();
+                let delivery = self.win.router.cancel_pointer();
                 self.deliver(delivery, cx);
             }
             UiInput::WindowFocus(true) => {}
@@ -833,26 +1205,28 @@ impl<U: UiApp> UiAdapter<U> {
     /// land in the element focused now.
     fn ime_request(&mut self, targets: &[ImeTarget]) -> ImeRequest {
         let target = self
+            .win
             .focus
             .and_then(|focus| targets.iter().find(|t| t.focus_target == focus));
         let mut request = ImeRequest::default();
         let allowed = target.is_some();
         self.orphan_moved_composition();
-        if self.composition == Composition::Orphaned {
-            self.composition = Composition::None;
+        let win = &mut *self.win;
+        if win.composition == Composition::Orphaned {
+            win.composition = Composition::None;
             // Turning IME off drops the composition by itself.
-            request.reset = self.ime_allowed && allowed;
+            request.reset = win.ime_allowed && allowed;
         }
-        if allowed != self.ime_allowed || request.reset {
+        if allowed != win.ime_allowed || request.reset {
             request.allowed = Some(allowed);
-            self.ime_allowed = allowed;
-            self.ime_area = None;
+            win.ime_allowed = allowed;
+            win.ime_area = None;
         }
         if let Some(caret) = target.and_then(|area| area.caret)
-            && self.ime_area != Some(caret)
+            && win.ime_area != Some(caret)
         {
             request.cursor_area = Some(caret);
-            self.ime_area = Some(caret);
+            win.ime_area = Some(caret);
         }
         request
     }
@@ -862,24 +1236,68 @@ impl<U: UiApp> UiAdapter<U> {
     /// reports no `Ime::Disabled` for either, so a preedit would otherwise
     /// linger. Returns whether a field was told.
     fn cancel_stale_preedit(&mut self, window_blurred: bool) -> bool {
-        let current = self.focused_field();
+        let current = self.win.focused_field();
         let stale = self
+            .win
             .edit_focus
             .filter(|previous| window_blurred || Some(*previous) != current);
-        self.edit_focus = current;
+        self.win.edit_focus = current;
         if let Some(target) = stale {
-            self.app.edit_text(target, TextEditCommand::CancelPreedit);
+            let cancel = TextEditCommand::CancelPreedit;
+            Self::edit_text_in(&mut self.app, self.win_handle, target, cancel);
         }
         stale.is_some()
     }
 
     fn after_input(&mut self, window_blurred: bool, cx: &mut EventContext) {
+        self.flush_queued(cx);
+        self.settle_focus(window_blurred, cx);
+        // Focus the app moved in other windows from this callback.
+        while let Some(window) = self.shared.refocused.pop() {
+            let home = self.win_handle;
+            self.select(Some(window));
+            self.settle_focus(false, cx);
+            self.select(home);
+        }
+    }
+
+    /// Bring the current window's IME in line with its focus after input.
+    /// When focus landed on one of its elements, compositions in every
+    /// other window end.
+    fn settle_focus(&mut self, window_blurred: bool, cx: &mut EventContext) {
         if self.cancel_stale_preedit(window_blurred) {
-            redraw(Redraw::TextEdit, cx);
+            redraw(Redraw::TextEdit, self.win_handle, cx);
         }
         if self.orphan_moved_composition() {
             // The frame resets the platform IME.
-            redraw(Redraw::Focus, cx);
+            redraw(Redraw::Focus, self.win_handle, cx);
+        }
+        if self.win.focus != self.win.focus_seen {
+            self.win.focus_seen = self.win.focus;
+            if self.win.focus.is_some() {
+                self.end_other_compositions(cx);
+            }
+        }
+    }
+
+    /// Focus moved onto an element of the current window, so the
+    /// compositions of every other window end: their preedits are
+    /// cancelled, and the rest the platform delivers for them is dropped
+    /// until their next frame resets their IME. Otherwise a commit queued
+    /// in a window the user left could land in a field that moved out of
+    /// it under the same focus id. Their text selection drags stop too.
+    fn end_other_compositions(&mut self, cx: &mut EventContext) {
+        for (handle, state) in &mut self.parked {
+            let Some(window) = *handle else {
+                continue;
+            };
+            state.text_pointer = TextPointer::default();
+            if let Composition::Owned(target) = state.composition {
+                state.composition = Composition::Orphaned;
+                let cancel = TextEditCommand::CancelPreedit;
+                self.app.edit_text_in(window, target, cancel);
+                redraw(Redraw::Focus, Some(window), cx);
+            }
         }
     }
 
@@ -888,10 +1306,11 @@ impl<U: UiApp> UiAdapter<U> {
     /// deliver the rest of it before that frame resets the IME. Returns
     /// whether it did.
     fn orphan_moved_composition(&mut self) -> bool {
+        let win = &mut *self.win;
         let moved =
-            matches!(self.composition, Composition::Owned(owner) if Some(owner) != self.focus);
+            matches!(win.composition, Composition::Owned(owner) if Some(owner) != win.focus);
         if moved {
-            self.composition = Composition::Orphaned;
+            win.composition = Composition::Orphaned;
         }
         moved
     }
@@ -905,26 +1324,62 @@ impl<U: UiApp> UiAdapter<U> {
     /// blur, since the platform sends the commit after both: only the
     /// commit or the IME reset ends the composition.
     fn ime_event_is_current(&mut self, event: &InputEvent) -> bool {
-        match (event, self.composition) {
+        let win = &mut *self.win;
+        match (event, win.composition) {
             (InputEvent::ImePreedit(..) | InputEvent::ImeCommit(_), Composition::Orphaned) => false,
             (InputEvent::ImePreedit(text, _), _) if !text.is_empty() => {
-                self.composition = self.focus.map_or(Composition::None, Composition::Owned);
+                win.composition = win.focus.map_or(Composition::None, Composition::Owned);
                 true
             }
             // A commit without a preedit, as some IMEs send for plain
             // typing, goes to the focused element.
             (InputEvent::ImeCommit(_), _) => {
-                self.composition = Composition::None;
+                win.composition = Composition::None;
                 true
             }
             _ => true,
         }
     }
 
+    /// `window` is closing: end its composition, so its field shows no
+    /// preedit that no commit will ever end, and a drag session that
+    /// started in it.
+    fn window_closing(&mut self, window: WindowHandle, cx: &mut EventContext) {
+        if drag::window_closing(&mut self.shared.drag, window) {
+            self.end_session(cx);
+        }
+        let state = if self.win_handle == Some(window) {
+            Some(&mut *self.win)
+        } else {
+            self.parked
+                .iter_mut()
+                .find(|(handle, _)| *handle == Some(window))
+                .map(|(_, state)| &mut **state)
+        };
+        let Some(state) = state else {
+            return;
+        };
+        state.text_pointer = TextPointer::default();
+        if let Composition::Owned(target) = state.composition {
+            state.composition = Composition::None;
+            self.app
+                .edit_text_in(window, target, TextEditCommand::CancelPreedit);
+        }
+    }
+
+    /// Drop a closed window's state.
+    fn forget_window(&mut self, window: WindowHandle) {
+        if self.win_handle == Some(window) {
+            self.select(None);
+        }
+        self.parked.retain(|(handle, _)| *handle != Some(window));
+    }
+
     fn update_cursor(&self, cx: &mut EventContext) {
         let hint = self
+            .win
             .pointer
-            .map(|(x, y)| self.router.cursor_at(x, y))
+            .map(|(x, y)| self.win.router.cursor_at(x, y))
             .unwrap_or_default();
         cx.set_cursor(match hint {
             CursorHint::Default => CursorIcon::Default,
@@ -946,19 +1401,6 @@ impl<U: UiApp> UiAdapter<U> {
             CursorHint::Help => CursorIcon::Help,
         });
     }
-}
-
-/// The platform IME's composition, as IME events and focus left it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Composition {
-    None,
-    /// Composing in this element, focused when its preedit began, until
-    /// the commit ends it.
-    Owned(FocusId),
-    /// Focus left the element composing. Until the next frame resets the
-    /// platform IME, events still arriving for that composition are
-    /// dropped.
-    Orphaned,
 }
 
 /// IME changes for the window, applied once the frame is built.
@@ -1018,7 +1460,6 @@ fn scale_tree(update: &mut TreeUpdate, scale: f32) {
         node.set_transform(Affine::scale(f64::from(scale)));
     }
 }
-
 /// What an accessibility request asks the app to do.
 #[derive(Debug)]
 enum Routed {
@@ -1105,6 +1546,7 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
 
 impl<U: UiApp> App for UiAdapter<U> {
     fn init(&mut self, cx: &mut EventContext) {
+        self.select(cx.window_handle());
         let _ = self.sender.waker.set(cx.waker().clone());
         self.with_app(cx, |app, ucx| app.init(ucx));
         self.deliver_messages(cx);
@@ -1112,24 +1554,31 @@ impl<U: UiApp> App for UiAdapter<U> {
     }
 
     fn frame(&mut self, cx: &mut FrameContext) -> Scene {
+        let window = cx.window_handle();
+        self.select(Some(window));
         let (width, height) = cx.size();
         let scale = cx.scale_factor();
         let clock_ms = cx.elapsed().as_millis() as u64;
         // A pointer held past a text field's edge keeps selecting (and so
         // scrolling) without moving; apply the step before this frame's view.
-        if let Some((target, command)) = self.text_pointer.autoscroll(&self.text_areas, clock_ms) {
-            self.app.edit_text(target, command);
+        if let Some((target, command)) = self
+            .win
+            .text_pointer
+            .autoscroll(&self.win.text_areas, clock_ms)
+        {
+            self.app.edit_text_in(window, target, command);
         }
-        self.animations.tick(clock_ms);
+        self.win.animations.tick(clock_ms);
         #[cfg(feature = "devtools")]
         let view_started = std::time::Instant::now();
+        let win = &mut *self.win;
         let mut root = self.app.view(&mut ViewContext {
             frame: cx,
-            theme: &self.theme,
-            focus: self.focus,
-            animations: &mut self.animations,
-            geometry: &self.router.frame().geometry,
-            handles: &mut self.element_handles,
+            theme: &self.shared.theme,
+            focus: win.focus,
+            animations: &mut win.animations,
+            geometry: &win.router.frame().geometry,
+            handles: &mut win.element_handles,
         });
         #[cfg(feature = "devtools")]
         let build_us = view_started.elapsed().as_micros() as u64;
@@ -1137,41 +1586,44 @@ impl<U: UiApp> App for UiAdapter<U> {
         let accessibility = cx.accessibility_active();
         let text = cx.text();
         let mut ecx = ElementContext::new(
-            &self.theme,
+            &self.shared.theme,
             scale,
             &mut text.system,
             &mut text.layouts,
-            self.pointer,
-            &self.signals,
+            win.pointer,
+            &self.shared.signals,
         )
-        .with_focus(self.focus)
+        .with_focus(win.focus)
         .with_clock(clock_ms)
-        .with_animations(&mut self.animations)
-        .with_element_cache(&mut self.element_cache)
+        .with_animations(&mut win.animations)
+        .with_element_cache(&mut win.element_cache)
         .with_accessibility(accessibility)
-        .with_input_frame(std::mem::take(&mut self.spare_input));
-        ecx.text_input_hit_areas = std::mem::take(&mut self.spare_text_areas);
+        .with_input_frame(std::mem::take(&mut win.spare_input));
+        ecx.text_input_hit_areas = std::mem::take(&mut win.spare_text_areas);
         ecx.text_input_hit_areas.clear();
-        ecx.ime_targets = std::mem::take(&mut self.spare_ime_targets);
+        ecx.ime_targets = std::mem::take(&mut win.spare_ime_targets);
         ecx.ime_targets.clear();
-        ecx.accessibility = std::mem::take(&mut self.spare_accessibility);
-        ecx.tooltip_regions = std::mem::take(&mut self.spare_tooltip_regions);
+        ecx.accessibility = std::mem::take(&mut win.spare_accessibility);
+        ecx.tooltip_regions = std::mem::take(&mut win.spare_tooltip_regions);
         ecx.tooltip_regions.clear();
         #[cfg(feature = "devtools")]
-        self.devtools.begin_frame(&mut ecx.devtools);
-        let scene = std::mem::take(&mut self.spare_scene);
+        win.devtools.begin_frame(&mut ecx.devtools);
+        let scene = std::mem::take(&mut win.spare_scene);
         let mut painted = paint(&mut root, &mut ecx, scene, width, height);
         // After the root, outside its clips; checked against this frame so
-        // a removed source shows no preview.
-        self.drag_preview.paint(
-            self.router.drag_preview(&painted.input),
-            &mut painted.scene,
-            &mut ecx,
-        );
-        self.spare_tooltip_regions = std::mem::take(&mut ecx.tooltip_regions);
+        // a removed source shows no preview. A drag session's preview shows
+        // over whichever window it is in, whatever its source paints.
+        let session = self.shared.drag.as_ref().map(|active| &active.session);
+        let preview = win
+            .router
+            .drag_preview(&painted.input)
+            .or_else(|| session.and_then(|session| session.preview_in(drag_window_id(window))));
+        win.drag_preview
+            .paint(preview, &mut painted.scene, &mut ecx);
+        win.spare_tooltip_regions = std::mem::take(&mut ecx.tooltip_regions);
         #[cfg(feature = "devtools")]
-        let phases = self.devtools.end_frame(&mut ecx.devtools);
-        self.scale_factor = scale;
+        let phases = win.devtools.end_frame(&mut ecx.devtools);
+        win.scale_factor = scale;
         if let Some(at_ms) = painted.next_frame_ms {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
@@ -1185,23 +1637,28 @@ impl<U: UiApp> App for UiAdapter<U> {
         if let Some(caret) = ime.cursor_area {
             cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
         }
-        if let Some(at_ms) = self.text_pointer.next_autoscroll_ms(&self.text_areas) {
+        if let Some(at_ms) = self
+            .win
+            .text_pointer
+            .next_autoscroll_ms(&self.win.text_areas)
+        {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
         #[cfg(feature = "devtools")]
         let frame = crate::devtools::PaintedFrame {
-            router: &self.router,
-            theme: &self.theme,
-            signals: &self.signals,
+            router: &self.win.router,
+            theme: &self.shared.theme,
+            signals: &self.shared.signals,
             build_us,
             phases,
         };
         #[cfg(feature = "devtools")]
-        let scene = crate::devtools::finish_frame(&mut self.devtools, scene, cx, frame);
+        let scene = crate::devtools::finish_frame(&mut self.win.devtools, scene, cx, frame);
         scene
     }
 
     fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
+        self.select(cx.window_handle());
         // Checked before the app's own hook, which may take IME events for
         // an element it drives itself (a terminal).
         self.orphan_moved_composition();
@@ -1216,57 +1673,94 @@ impl<U: UiApp> App for UiAdapter<U> {
     }
 
     fn wake(&mut self, cx: &mut EventContext) {
+        self.select(cx.window_handle());
         self.deliver_messages(cx);
         self.with_app(cx, |app, ucx| app.wake(ucx));
         self.after_input(false, cx);
     }
 
     fn app_event(&mut self, event: AppEvent, cx: &mut EventContext) {
+        self.select(cx.window_handle());
         if let AppEvent::ThemeChanged(system) = &event
-            && let ThemeChoice::System { light, dark } = &self.theme_choice
+            && let ThemeChoice::System { light, dark } = &self.shared.theme_choice
         {
-            self.theme = match system {
+            self.shared.theme = match system {
                 SystemTheme::Light => (**light).clone(),
                 SystemTheme::Dark => (**dark).clone(),
             };
-            redraw(Redraw::Theme, cx);
+            // The runner reports the desktop's theme once for the app.
+            redraw_all(Redraw::Theme, cx);
         }
+        match event {
+            AppEvent::WindowOpened(window) => {
+                self.with_app(cx, |app, ucx| app.window_opened(window, ucx));
+            }
+            AppEvent::WindowClosed { window, reason } => {
+                self.window_closing(window, cx);
+                self.with_app(cx, |app, ucx| app.window_closed(window, reason, ucx));
+            }
+            _ => {}
+        }
+        let closed = match event {
+            AppEvent::WindowClosed { window, .. } => Some(window),
+            _ => None,
+        };
         self.with_app(cx, |app, ucx| app.app_event(event, ucx));
+        if let Some(window) = closed {
+            self.forget_window(window);
+        }
         self.after_input(false, cx);
     }
 
-    fn close_requested(&mut self, cx: &mut EventContext) -> bool {
-        self.with_app(cx, |app, ucx| app.close_requested(ucx))
+    fn close_requested(&mut self, reason: CloseReason, cx: &mut EventContext) -> bool {
+        self.select(cx.window_handle());
+        let close = self.with_app(cx, |app, ucx| app.window_close_requested(reason, ucx));
+        self.after_input(false, cx);
+        close
     }
 
-    fn recycle_scene(&mut self, scene: Scene) {
-        self.spare_scene = scene;
+    fn recycle_scene(&mut self, window: WindowHandle, scene: Scene) {
+        if self.win_handle == Some(window) {
+            self.win.spare_scene = scene;
+        } else if let Some((_, state)) = self
+            .parked
+            .iter_mut()
+            .find(|(handle, _)| *handle == Some(window))
+        {
+            state.spare_scene = scene;
+        }
     }
 
-    fn accessibility(&mut self) -> Option<TreeUpdate> {
+    fn accessibility(&mut self, window: WindowHandle) -> Option<TreeUpdate> {
         // A full tree; accesskit diffs it against the last one.
-        let mut update = self.logical_accessibility_tree();
-        scale_tree(&mut update, self.scale_factor);
+        let mut update = self.logical_accessibility_tree(window)?;
+        let scale = self.window_states(window)?.scale_factor;
+        scale_tree(&mut update, scale);
         Some(update)
     }
 
     fn accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
+        self.select(cx.window_handle());
         self.handle_accessibility_action(request, cx);
         self.after_input(false, cx);
     }
 }
 
-/// What [`crate::testing`] reads from the adapter.
+/// What [`crate::testing`] reads from the adapter, per window. `None` for
+/// a window the adapter has heard nothing of.
 #[cfg(feature = "test-support")]
 impl<U: UiApp> UiAdapter<U> {
     pub(crate) fn app_mut(&mut self) -> &mut U {
         &mut self.app
     }
 
-    pub(crate) fn focus(&self) -> Option<FocusId> {
-        self.focus
+    pub(crate) fn window_state(&self, window: WindowHandle) -> Option<&WindowUiState> {
+        self.window_states(window)
     }
+}
 
+#[cfg(feature = "test-support")]
+impl WindowUiState {
     pub(crate) fn accessibility_frame(&self) -> &AccessibilityFrame {
         &self.accessibility
     }
@@ -1279,6 +1773,10 @@ impl<U: UiApp> UiAdapter<U> {
         &self.router.frame().geometry
     }
 
+    pub(crate) fn focus(&self) -> Option<FocusId> {
+        self.focus
+    }
+
     /// The semantic node of the topmost hit region at a point that has one.
     pub(crate) fn semantic_node_at(&self, x: f32, y: f32) -> Option<usize> {
         let hits = &self.router.frame().hits;
@@ -1287,40 +1785,43 @@ impl<U: UiApp> UiAdapter<U> {
 }
 
 impl<U: UiApp> UiAdapter<U> {
-    /// The last painted frame's accessibility tree, in points.
-    pub(crate) fn logical_accessibility_tree(&self) -> TreeUpdate {
-        let mut update = self.accessibility.tree_update(&self.name, self.focus);
-        self.announcer.publish(&mut update);
-        update
+    /// `window`'s last painted accessibility tree, in points.
+    pub(crate) fn logical_accessibility_tree(&self, window: WindowHandle) -> Option<TreeUpdate> {
+        let state = self.window_states(window)?;
+        let name = state.name.as_deref().unwrap_or(&self.shared.name);
+        let mut update = state.accessibility.tree_update(name, state.focus);
+        state.announcer.publish(&mut update);
+        Some(update)
     }
 
     /// Keep `painted`'s input state for routing until the next frame, and
     /// return its scene with the IME changes for the caret it painted.
     fn finish_frame(&mut self, painted: Painted) -> (Scene, ImeRequest) {
-        self.spare_input = self.router.replace_frame(painted.input);
+        let win = &mut *self.win;
+        win.spare_input = win.router.replace_frame(painted.input);
         // This frame painted hover for the current pointer; later moves
         // compare against it. Into the kept buffer: a pointer resting over
         // the window must not cost an allocation per frame.
-        match self.pointer {
-            Some((x, y)) => self
+        match win.pointer {
+            Some((x, y)) => win
                 .router
                 .frame()
                 .hits
-                .stack_at_into(x, y, &mut self.hovered),
-            None => self.hovered.clear(),
+                .stack_at_into(x, y, &mut win.hovered),
+            None => win.hovered.clear(),
         }
-        self.spare_accessibility =
-            std::mem::replace(&mut self.accessibility, painted.accessibility);
+        win.spare_accessibility = std::mem::replace(&mut win.accessibility, painted.accessibility);
         let ime = self.ime_request(&painted.ime_targets);
-        self.spare_text_areas = std::mem::replace(&mut self.text_areas, painted.text_areas);
-        self.spare_ime_targets = painted.ime_targets;
+        let win = &mut *self.win;
+        win.spare_text_areas = std::mem::replace(&mut win.text_areas, painted.text_areas);
+        win.spare_ime_targets = painted.ime_targets;
         (painted.scene, ime)
     }
 
     fn handle_event(&mut self, event: &InputEvent, input: Option<UiInput>, cx: &mut EventContext) {
         #[cfg(feature = "devtools")]
         if let Some(input) = &input
-            && crate::devtools::intercept(&mut self.devtools, input, cx)
+            && crate::devtools::intercept(&mut self.win.devtools, input, cx)
         {
             return;
         }
@@ -1335,37 +1836,37 @@ impl<U: UiApp> UiAdapter<U> {
     }
 
     fn handle_accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
-        match route_accessibility(&self.accessibility, &request) {
+        match route_accessibility(&self.win.accessibility, &request) {
             Some(Routed::Dispatch(action)) => self.dispatch(vec![action], cx),
             Some(Routed::Click(action, focus)) => {
                 if let Some(focus) = focus
-                    && self.focus != Some(focus)
+                    && self.win.focus != Some(focus)
                 {
-                    self.focus = Some(focus);
-                    redraw(Redraw::Focus, cx);
+                    self.win.focus = Some(focus);
+                    redraw(Redraw::Focus, self.win_handle, cx);
                 }
                 self.dispatch(vec![action], cx);
             }
             Some(Routed::Focus(focus)) => {
-                if self.focus != Some(focus) {
-                    self.focus = Some(focus);
-                    redraw(Redraw::Focus, cx);
+                if self.win.focus != Some(focus) {
+                    self.win.focus = Some(focus);
+                    redraw(Redraw::Focus, self.win_handle, cx);
                 }
             }
             Some(Routed::SetValue(target, value)) => {
                 self.with_app(cx, |app, ucx| app.set_text_value(target, value, ucx));
-                redraw(Redraw::TextEdit, cx);
+                redraw(Redraw::TextEdit, self.win_handle, cx);
             }
             Some(Routed::Select {
                 target,
                 anchor,
                 focus,
             }) => {
-                self.app
-                    .edit_text(target, TextEditCommand::SetTextCursor(anchor));
+                let cursor = TextEditCommand::SetTextCursor(anchor);
+                Self::edit_text_in(&mut self.app, self.win_handle, target, cursor);
                 self.edit(target, TextEditCommand::ExtendTextSelection(focus), cx);
                 // The cursor move alone may have changed the selection.
-                redraw(Redraw::TextEdit, cx);
+                redraw(Redraw::TextEdit, self.win_handle, cx);
             }
             Some(Routed::Edit(target, command)) => self.edit(target, command, cx),
             None => tracing::debug!("unhandled accessibility request: {request:?}"),
@@ -1379,7 +1880,7 @@ mod tests {
 
     use accesskit::{NodeId, Role};
     use quark::scene::ShapedText;
-    use quark_ui::element::{IntoAnyElement, canvas, div, text_input};
+    use quark_ui::element::{InputRouter, IntoAnyElement, canvas, div, text_input};
     use quark_ui::style::Styled;
     use quark_ui::text_input::TextField;
 
@@ -1493,7 +1994,7 @@ mod tests {
             },
             "Test",
         );
-        adapter.focus = Some(FIELD);
+        adapter.win.focus = Some(FIELD);
         adapter
     }
 
@@ -1538,7 +2039,7 @@ mod tests {
             adapter.cancel_stale_preedit(false);
             adapter.app.field.set_preedit("にほ", None);
 
-            adapter.focus = focus;
+            adapter.win.focus = focus;
             adapter.cancel_stale_preedit(window_blurred);
 
             let preedit = adapter.app.field.preedit().map(|p| p.text.as_str());
@@ -1955,6 +2456,8 @@ mod tests {
     #[test]
     fn app_event_reaches_the_app_and_the_theme_follows() {
         let mut ui = composer("");
+        // Opening the window was one too.
+        ui.app_mut().events.clear();
 
         ui.app_event(AppEvent::ThemeChanged(SystemTheme::Light));
 

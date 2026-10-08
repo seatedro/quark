@@ -145,6 +145,11 @@ mod x11;
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{shutdown, window_created, window_destroyed};
+// The Wayland side of dock drags, which share the drag out thread's seats.
+#[cfg(all(target_os = "linux", feature = "ui"))]
+pub(crate) use linux::{end_dock, start_dock};
+#[cfg(all(target_os = "linux", feature = "ui"))]
+pub(crate) use wayland::{DockRequest, DockSignal, DockStarted};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -183,6 +188,26 @@ mod linux {
             }
             _ => Err(DragOutError::Unsupported),
         }
+    }
+
+    /// Start a dock drag from `window`, on Wayland.
+    #[cfg(feature = "ui")]
+    pub(crate) fn start_dock(
+        window: &Window,
+        request: wayland::DockRequest,
+        seat: Option<String>,
+        image: Option<&super::DragImage>,
+    ) -> Result<wayland::DockStarted, DragOutError> {
+        let handle = window
+            .window_handle()
+            .map_err(|error| DragOutError::Platform(error.to_string()))?;
+        wayland::start_dock(handle, request, seat, image)
+    }
+
+    /// Stop the dock drag with `token`, if it still runs.
+    #[cfg(feature = "ui")]
+    pub(crate) fn end_dock(token: u64) {
+        wayland::end_dock(token);
     }
 
     /// Set up for drags from a new window. On Wayland this binds the

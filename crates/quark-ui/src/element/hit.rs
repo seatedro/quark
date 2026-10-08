@@ -93,6 +93,24 @@ pub trait DragHandler {
     /// elements (a dock's tab groups) looks them up here rather than
     /// trusting positions known when the view was built.
     fn set_geometry(&mut self, _geometry: &LayoutSnapshot) {}
+    /// The drag is leaving this window's router for a [`DragSession`]
+    /// ([`InputRouter::hand_off_capture`]), as when it must follow the
+    /// pointer into other windows. Return what the session carries and
+    /// any actions to deliver now (hide a local drop indicator). From then
+    /// on the router sends this handler nothing, not even a cancel on
+    /// window blur; the session ends it with [`Self::on_cancel`] or
+    /// [`Self::on_session_drop`]. `None`, the default, refuses: the drag
+    /// stays local and keeps the pointer.
+    fn on_handoff(&mut self) -> Option<DragHandoff> {
+        None
+    }
+    /// The session this drag was handed to was released, resolved to
+    /// `outcome`. The session's owner commits the drop from its payload,
+    /// so the default commits nothing and ends the drag as
+    /// [`Self::on_cancel`] does.
+    fn on_session_drop(&mut self, _outcome: &DragOutcome) -> Vec<Action> {
+        self.on_cancel()
+    }
     fn cursor(&self) -> CursorHint {
         CursorHint::Default
     }

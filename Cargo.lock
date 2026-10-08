@@ -2994,6 +2994,7 @@ dependencies = [
  "tungstenite",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
  "windows",
  "winit",
  "x11-dl",
@@ -3014,6 +3015,7 @@ dependencies = [
  "quark-text",
  "quark-ui",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
