@@ -99,6 +99,10 @@ fn one(ui: &UiTestHarness<Workbench>, name: &str, toast: bool) -> Node {
         .into_iter()
         .filter(|n| on_toast(n) == toast)
         .collect();
-    assert_eq!(found.len(), 1, "buttons named {name:?} (toast {toast}): {found:?}");
+    assert_eq!(
+        found.len(),
+        1,
+        "buttons named {name:?} (toast {toast}): {found:?}"
+    );
     found.into_iter().next().expect("one")
 }
