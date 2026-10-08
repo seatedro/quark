@@ -2,10 +2,14 @@
 //! scrollbar, keys, programmatic and smooth scrolls, and flings, driven by
 //! [`UiTestHarness`] with its fake clock.
 
-use quark_ui::FocusId;
-use quark_ui::element::{AnyElement, Div, IntoAnyElement, ScrollAlign, ScrollHandle, div};
+use quark::scene::Primitive;
+use quark_ui::element::{
+    AnyElement, CacheKey, Div, IntoAnyElement, SCROLLBAR_LINGER_MS, ScrollActionBuilder,
+    ScrollAlign, ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX, cached, div, inputs_hash,
+};
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
+use quark_ui::{Action, FocusId};
 use winit::keyboard::ModifiersState;
 
 use crate::InputEvent;
@@ -232,4 +236,254 @@ fn a_fling_coasts_after_the_fingers_lift_then_slows_to_a_stop() {
     // Exponential decay covers at most velocity * 325 ms.
     assert!(stopped > coasting && stopped <= lifted + 650.0, "{stopped}");
     assert!(!ui.frame_requested(), "no frames once stopped");
+}
+
+// ---------------------------------------------------------------------------
+// Auto-hiding scrollbars
+// ---------------------------------------------------------------------------
+
+/// Two auto-hiding lists, 80 points tall over 400 points of content, at
+/// y=0 and y=120 of the window. The app owns their offsets and keeps a
+/// [`ScrollbarVisibility`] for each, or scrolls the top one with a handle.
+struct Lists {
+    offsets: [f32; 2],
+    visibility: [ScrollbarVisibility; 2],
+    /// Scroll the top list with this handle instead of `offsets[0]`.
+    handle: Option<ScrollHandle>,
+    /// Build the top list inside a cache boundary.
+    cached: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ListMsg {
+    Lines(usize, i32),
+    To(usize, f32),
+}
+
+const LIST_H: f32 = 80.0;
+const LIST_CONTENT: f32 = 400.0;
+/// Between the two lists, over neither.
+const BETWEEN: (f32, f32) = (100.0, 100.0);
+
+/// List `i` at its app-owned `offset`.
+fn app_list(i: usize, offset: f32, visibility: &ScrollbarVisibility) -> Div {
+    div()
+        .w_full()
+        .h(LIST_H)
+        .flex_shrink_0()
+        .scroll_y(offset)
+        .scroll_total(LIST_CONTENT)
+        .on_scroll(
+            ScrollActionBuilder::new(move |lines| Action::new(ListMsg::Lines(i, lines)))
+                .with_to_px(move |px| Action::new(ListMsg::To(i, px as f32))),
+        )
+        .scrollbar_visibility(visibility)
+        .scrollbar_auto_hide()
+        .focus_ring(FocusId::from_key(if i == 0 { "top" } else { "bottom" }))
+        .child(div().w_full().h(LIST_CONTENT).flex_shrink_0())
+}
+
+impl UiApp for Lists {
+    type Action = ListMsg;
+    type Message = ();
+
+    fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+        let top = match &self.handle {
+            Some(handle) => div()
+                .w_full()
+                .h(LIST_H)
+                .flex_shrink_0()
+                .track_scroll(handle)
+                .overflow_y_scroll()
+                .scrollbar_auto_hide()
+                .focus_ring(FocusId::from_key("top"))
+                .child(div().w_full().h(LIST_CONTENT).flex_shrink_0()),
+            None => app_list(0, self.offsets[0], &self.visibility[0]),
+        };
+        let top = if self.cached {
+            // The app's offset is the boundary's input; a handle's is not.
+            let offset = self.handle.is_none().then_some(self.offsets[0].to_bits());
+            cached(CacheKey(1), inputs_hash(&offset), move || top)
+                .w_full()
+                .h(LIST_H)
+                .into_any()
+        } else {
+            top.into_any()
+        };
+        div()
+            .size_full()
+            .flex_col()
+            .justify_between()
+            .child(top)
+            .child(app_list(1, self.offsets[1], &self.visibility[1]))
+            .into_any()
+    }
+
+    fn update(&mut self, action: ListMsg, _cx: &mut UiContext) {
+        let (i, to) = match action {
+            ListMsg::Lines(i, lines) => (i, self.offsets[i] + lines as f32 * WHEEL_LINE_PX),
+            ListMsg::To(i, px) => (i, px),
+        };
+        self.offsets[i] = to.clamp(0.0, LIST_CONTENT - LIST_H);
+    }
+}
+
+fn lists(handle: bool, cached: bool) -> UiTestHarness<Lists> {
+    let app = Lists {
+        offsets: [0.0; 2],
+        visibility: Default::default(),
+        handle: handle.then(ScrollHandle::new),
+        cached,
+    };
+    let adapter = UiAdapter::new(app, "lists").with_theme(Theme::default_dark());
+    let mut ui = UiTestHarness::with_adapter(adapter, SIZE, 1.0);
+    ui.pointer_move(BETWEEN);
+    ui
+}
+
+/// The lists painting a scrollbar: anything along their right edge.
+fn bars(ui: &UiTestHarness<Lists>) -> Vec<&'static str> {
+    let mut shown = Vec::new();
+    for primitive in &ui.scene().primitives {
+        if let Primitive::RoundedRect(r) = primitive
+            && r.rect.x >= SIZE.0 - 12.0
+        {
+            let list = if r.rect.y < BETWEEN.1 {
+                "top"
+            } else {
+                "bottom"
+            };
+            if !shown.contains(&list) {
+                shown.push(list);
+            }
+        }
+    }
+    shown
+}
+
+/// A way the top list moves, ending with the pointer off both lists.
+type Move = fn(&mut UiTestHarness<Lists>);
+
+fn wheel(ui: &mut UiTestHarness<Lists>) {
+    ui.pointer_move((100.0, 40.0));
+    ui.wheel(0.0, 60.0);
+    ui.pointer_move(BETWEEN);
+}
+
+fn set_offset(ui: &mut UiTestHarness<Lists>) {
+    match ui.app().handle.clone() {
+        Some(handle) => handle.set_offset(0.0, 120.0),
+        None => ui.app_mut().offsets[0] = 120.0,
+    }
+    ui.frame();
+}
+
+fn drag_thumb(ui: &mut UiTestHarness<Lists>) {
+    ui.drag((196.0, 20.0), (196.0, 40.0));
+    ui.pointer_move(BETWEEN);
+}
+
+#[test]
+fn moving_a_list_shows_its_scrollbar_until_the_linger_ends() {
+    let moves: [(&str, Move); 3] = [
+        ("wheel", wheel),
+        ("set offset", set_offset),
+        ("thumb drag", drag_thumb),
+    ];
+    for handle in [false, true] {
+        for (name, move_top) in moves {
+            let mut ui = lists(handle, false);
+            assert_eq!(bars(&ui), [] as [&str; 0], "{name}, handle {handle}: idle");
+            move_top(&mut ui);
+            let moved = bars(&ui);
+            ui.advance(SCROLLBAR_LINGER_MS - 1);
+            let lingering = bars(&ui);
+            ui.advance(1);
+            assert_eq!(
+                (moved, lingering, bars(&ui)),
+                (vec!["top"], vec!["top"], vec![]),
+                "{name}, handle {handle}"
+            );
+            assert!(
+                !ui.frame_requested(),
+                "{name}, handle {handle}: idle once hidden"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_held_thumb_keeps_its_scrollbar_after_the_linger() {
+    let mut ui = lists(false, false);
+    ui.pointer_down((196.0, 20.0));
+    ui.pointer_move((196.0, 30.0));
+    // Off the list, still holding.
+    ui.pointer_move((196.0, 110.0));
+    ui.advance(2 * SCROLLBAR_LINGER_MS);
+    ui.frame();
+    let held = bars(&ui);
+    ui.pointer_up((196.0, 110.0));
+    assert_eq!((held, bars(&ui)), (vec!["top"], vec![]));
+}
+
+#[test]
+fn keyboard_focus_shows_the_scrollbar_until_the_linger_ends() {
+    let mut ui = lists(false, false);
+    ui.key("tab");
+    assert_eq!(ui.focus(), Some(FocusId::from_key("top")));
+    let focused = bars(&ui);
+    ui.advance(SCROLLBAR_LINGER_MS);
+    assert_eq!((focused, bars(&ui)), (vec!["top"], vec![]));
+}
+
+#[test]
+fn each_list_lingers_on_its_own_motion() {
+    let mut ui = lists(false, false);
+    wheel(&mut ui);
+    ui.advance(SCROLLBAR_LINGER_MS / 2);
+    ui.pointer_move((100.0, 160.0));
+    ui.wheel(0.0, 60.0);
+    ui.pointer_move(BETWEEN);
+    let both = bars(&ui);
+    ui.advance(SCROLLBAR_LINGER_MS / 2);
+    let bottom = bars(&ui);
+    ui.advance(SCROLLBAR_LINGER_MS / 2);
+    assert_eq!(
+        (both, bottom, bars(&ui)),
+        (vec!["top", "bottom"], vec!["bottom"], vec![])
+    );
+}
+
+#[test]
+fn a_cached_list_hides_its_scrollbar_when_the_linger_ends() {
+    for handle in [false, true] {
+        let mut ui = lists(handle, true);
+        // Replayed frames first, so the boundary holds a hidden recording.
+        ui.frame();
+        ui.frame();
+        wheel(&mut ui);
+        let moved = bars(&ui);
+        ui.advance(SCROLLBAR_LINGER_MS);
+        let expired = bars(&ui);
+        ui.frame();
+        assert_eq!(
+            (moved, expired, bars(&ui)),
+            (vec!["top"], vec![], vec![]),
+            "handle {handle}"
+        );
+    }
+}
+
+#[test]
+fn hidden_scrollbars_leave_keyboard_scrolling() {
+    let mut ui = lists(true, false);
+    ui.click((100.0, 40.0));
+    ui.pointer_move(BETWEEN);
+    ui.advance(SCROLLBAR_LINGER_MS);
+    assert_eq!(bars(&ui), [] as [&str; 0]);
+    ui.key("pagedown");
+    ui.advance(300);
+    // A page of the 80 point list is half of it.
+    let handle = ui.app().handle.clone().unwrap();
+    assert_eq!(handle.offset().1.round(), 40.0);
 }

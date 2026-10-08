@@ -12,6 +12,11 @@
 //! The app-owned alternative (`scroll_y`/`scroll_x` with `on_scroll`
 //! builders) stays: the app keeps the offset and turns line deltas into
 //! actions. Both kinds chain per axis and get the same scrollbars.
+//!
+//! Scrollbars show persistently unless the container asks for
+//! `scrollbar_auto_hide`. Then a [`ScrollbarVisibility`] decides when they
+//! show: a handle keeps one, and a container whose offset the app owns
+//! attaches its own with `scrollbar_visibility`.
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -292,9 +297,6 @@ struct ScrollState {
     smooth: Option<[f32; 2]>,
     fling: Option<Fling>,
     samples: Samples,
-    /// Offset painted last frame, and the clock when it last changed.
-    painted: [f32; 2],
-    changed_ms: Option<u64>,
     /// The axis whose thumb is held.
     dragging: Option<Axis>,
     key: AnimKey,
@@ -308,7 +310,7 @@ struct ScrollState {
 /// paints and rebuilds when one moves or has motion pending, so its inputs
 /// hash need not cover the offset.
 #[derive(Clone)]
-pub struct ScrollHandle(Rc<RefCell<ScrollState>>);
+pub struct ScrollHandle(Rc<RefCell<ScrollState>>, ScrollbarVisibility);
 
 impl Default for ScrollHandle {
     fn default() -> Self {
@@ -330,7 +332,7 @@ impl ScrollHandle {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        Self(Rc::new(RefCell::new(ScrollState {
+        let state = Rc::new(RefCell::new(ScrollState {
             offset: [0.0; 2],
             max: [0.0; 2],
             viewport: Rect::default(),
@@ -340,15 +342,20 @@ impl ScrollHandle {
             smooth: None,
             fling: None,
             samples: Samples::default(),
-            painted: [0.0; 2],
-            changed_ms: None,
             dragging: None,
             // Hash the counter so handle keys spread over the key space
             // instead of sitting next to small app-chosen keys.
             key: AnimKey(
                 quark::stable_hash("scroll-handle") ^ id.wrapping_mul(0x9E37_79B9_7F4A_7C15),
             ),
-        })))
+        }));
+        Self(state, ScrollbarVisibility::new())
+    }
+
+    /// When the container's auto-hiding scrollbars show; shared by every
+    /// clone of the handle.
+    pub(crate) fn scrollbar_visibility(&self) -> &ScrollbarVisibility {
+        &self.1
     }
 
     /// Offset painted last frame (or set since): `(x, y)`, positive when the
@@ -535,22 +542,6 @@ impl ScrollHandle {
         self.0.borrow().dragging
     }
 
-    /// Whether the scrollbars of an auto-hiding container should show at
-    /// `now_ms` because it scrolled recently; asks for the frame that hides
-    /// them.
-    pub(crate) fn recently_scrolled(&self, cx: &mut ElementContext) -> bool {
-        let Some(changed) = self.0.borrow().changed_ms else {
-            return false;
-        };
-        let until = changed + SCROLLBAR_LINGER_MS;
-        if cx.clock_ms < until {
-            cx.request_frame_at_ms(until);
-            true
-        } else {
-            false
-        }
-    }
-
     /// Start a frame: take the container's `viewport` and `content` size,
     /// resolve requests, advance a smooth scroll or fling, and return the
     /// offset to paint children at. Keyed descendants painted before
@@ -648,10 +639,6 @@ impl ScrollHandle {
         }
 
         s.offset = clamp(s.offset, s.max);
-        if s.offset != s.painted {
-            s.painted = s.offset;
-            s.changed_ms = Some(now);
-        }
         s.recording.clear();
         cx.watch_scroll(|| ScrollWatch {
             handle: self.clone(),
@@ -763,6 +750,81 @@ fn item_offset(
 }
 
 // ---------------------------------------------------------------------------
+// Scrollbar visibility
+// ---------------------------------------------------------------------------
+
+/// When the auto-hiding scrollbars of one container show, kept across
+/// frames; clones refer to the same state. Besides while the pointer is
+/// over the container or a thumb is held, the bars show for
+/// [`SCROLLBAR_LINGER_MS`] after the painted offset moves (wheel, keys, a
+/// drag, or the app setting it) or the container gains keyboard focus.
+///
+/// A [`ScrollHandle`] keeps one. A container whose offset the app owns
+/// (`scroll_y` with `on_scroll`) keeps one in app state, next to the
+/// offset, and attaches it each frame:
+/// `.scrollbar_visibility(&state).scrollbar_auto_hide()`. Without one, such
+/// a container's bars show only on hover and while held.
+///
+/// The bars are observed while the container prepaints, against the
+/// frame's clock, and a lingering bar asks for the frame that hides it.
+/// That request also keeps an enclosing [`cached`](super::cached) boundary
+/// from replaying the shown bars past the deadline.
+#[derive(Clone, Default)]
+pub struct ScrollbarVisibility(Rc<Cell<Visibility>>);
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Visibility {
+    /// Offset and focus seen by the last frame; `None` before the first.
+    seen: Option<([f32; 2], bool)>,
+    /// When the offset last moved or focus last arrived.
+    revealed_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for ScrollbarVisibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let v = self.0.get();
+        f.debug_struct("ScrollbarVisibility")
+            .field("revealed_ms", &v.revealed_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScrollbarVisibility {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Note the container's offset and focus at `now_ms`. A change from
+    /// the last frame starts the linger; the first frame only sets the
+    /// baseline, so a view does not flash its bars when it appears.
+    pub(crate) fn observe(&self, offset: [f32; 2], focused: bool, now_ms: u64) {
+        let mut v = self.0.get();
+        if let Some((was_offset, was_focused)) = v.seen
+            && (offset != was_offset || (focused && !was_focused))
+        {
+            v.revealed_ms = Some(now_ms);
+        }
+        v.seen = Some((offset, focused));
+        self.0.set(v);
+    }
+
+    /// Whether the linger still runs at the frame's clock; asks for the
+    /// frame that ends it.
+    pub(crate) fn lingering(&self, cx: &mut ElementContext) -> bool {
+        let Some(revealed) = self.0.get().revealed_ms else {
+            return false;
+        };
+        let until = revealed + SCROLLBAR_LINGER_MS;
+        if cx.clock_ms < until {
+            cx.request_frame_at_ms(until);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scrollbars
 // ---------------------------------------------------------------------------
 
@@ -809,8 +871,13 @@ pub(crate) struct ScrollbarInput {
     /// Input target of each axis's bar: `[x, y]`.
     pub sinks: [Option<ScrollSink>; 2],
     /// Show the bars only while the pointer is over the container, a thumb
-    /// is held, or (with a handle) it scrolled recently.
+    /// is held, or `visibility` lingers.
     pub auto_hide: bool,
+    /// What decides the linger of auto-hiding bars: a handle's, or one the
+    /// view attached.
+    pub visibility: Option<ScrollbarVisibility>,
+    /// The container holds keyboard focus.
+    pub focused: bool,
 }
 
 impl Scrollbars {
@@ -825,7 +892,15 @@ impl Scrollbars {
             axes,
             mut sinks,
             auto_hide,
+            visibility,
+            focused,
         } = input;
+        let visibility = visibility.filter(|_| auto_hide);
+        // Observed before the overflow check, so content that starts to
+        // overflow does not count an offset from frames ago as a scroll.
+        if let Some(visibility) = &visibility {
+            visibility.observe([offset.0, offset.1], focused, cx.clock_ms);
+        }
         let bars = scrollbars(bounds, content, offset, axes);
         if bars.iter().all(Option::is_none) {
             return Self::default();
@@ -841,10 +916,9 @@ impl Scrollbars {
             let pointer_inside = cx
                 .mouse_position
                 .is_some_and(|(x, y)| bounds.contains(x, y) && cx.current_clip().contains(x, y));
-            let visible = pointer_inside || slots.iter().flatten().any(|slot| {
-                slot.held()
-                    || matches!(&slot.sink, Some(ScrollSink::Handle(h)) if h.recently_scrolled(cx))
-            });
+            let visible = pointer_inside
+                || slots.iter().flatten().any(BarSlot::held)
+                || visibility.is_some_and(|v| v.lingering(cx));
             if !visible {
                 return Self::default();
             }

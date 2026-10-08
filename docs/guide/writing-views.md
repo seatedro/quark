@@ -95,7 +95,7 @@ the call.
 | `aria-selected`, `aria-checked`/`aria-pressed`, `aria-expanded`, `aria-disabled` | `.accessibility_selected`, `_toggled`, `_expanded`, `_disabled`; alone they mean `true` |
 | `aria-invalid`, `aria-required`, `aria-readonly`, `aria-multiselectable`, `aria-level`, `aria-rowindex`, `aria-colindex`, `aria-sort`, `aria-live` | The matching `accessibility_*` builder, or `.live` |
 | `key={..}`, `id="..."`, `test-id="..."` | `.key(..)`, `.id(..)`, `.test_id(..)` |
-| `track_scroll={&handle}` | `.track_scroll(&handle)`: the only handle-style attribute, because it is the only one the builders have |
+| `track_scroll={&handle}`, `scrollbar_visibility={&state}` | `.track_scroll(&handle)`, `.scrollbar_visibility(&state)`: the only handle-style attributes, because they are the only ones the builders have |
 
 `role` takes the ARIA names `alert`, `button`, `cell`, `checkbox`,
 `combobox`, `dialog`, `document`, `grid`, `gridcell`, `group`, `heading`,
