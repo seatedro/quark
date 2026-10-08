@@ -705,6 +705,17 @@ impl Element for RowElement {
         if let Some(color) = background {
             scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, 0.0, color));
         }
+        let edge = build
+            .decorator
+            .as_ref()
+            .and_then(|d| d.0.leading_edge(&build.chrome, cx.theme));
+        if let Some((color, width)) = edge {
+            let bar = Rect {
+                width: width.min(bounds.width),
+                ..bounds
+            };
+            scene.rounded_rect(RoundedRectPrimitive::uniform(bar, 0.0, color));
+        }
         for &(rect, current) in &build.highlights {
             let color = if current {
                 build.colors.current_highlight
