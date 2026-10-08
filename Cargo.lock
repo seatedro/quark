@@ -3014,6 +3014,7 @@ dependencies = [
  "quark-text",
  "quark-ui",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
