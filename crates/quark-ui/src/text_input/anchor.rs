@@ -40,9 +40,10 @@ impl CaretAnchor {
     }
 }
 
-/// Where a popup of `size` goes for `caret` in a `viewport`: below the
-/// caret and left-aligned with it, or above it when it does not fit below
-/// and there is more room above; then moved inside the viewport.
+/// Where a popup of `size` goes for `caret` in a `viewport`: on the
+/// preferred side of the caret line (below, or above with `prefer_above`)
+/// and left-aligned with the caret, or on the other side when it does not
+/// fit and there is more room there; then moved inside the viewport.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaretPlacement {
     pub x: f32,
@@ -55,12 +56,17 @@ pub fn place_at_caret(
     size: (f32, f32),
     viewport: (f32, f32),
     gap: f32,
+    prefer_above: bool,
 ) -> CaretPlacement {
     let (w, h) = size;
     let (vw, vh) = viewport;
     let below = vh - (caret.y + caret.height) - gap;
     let above_room = caret.y - gap;
-    let above = below < h && above_room > below;
+    let above = if prefer_above {
+        !(above_room < h && below > above_room)
+    } else {
+        below < h && above_room > below
+    };
     let y = if above {
         caret.y - gap - h
     } else {
@@ -84,6 +90,7 @@ pub struct CaretPopup {
     child: AnyElement,
     viewport: (f32, f32),
     gap: f32,
+    prefer_above: bool,
     /// The caret the child was placed against in prepaint.
     placed: Option<CaretGeometry>,
 }
@@ -98,6 +105,7 @@ pub fn caret_popup(
         child: child.into_any(),
         viewport,
         gap: 4.0,
+        prefer_above: false,
         placed: None,
     }
 }
@@ -106,6 +114,14 @@ impl CaretPopup {
     /// Distance between the caret line and the popup, in points.
     pub fn gap(mut self, gap: f32) -> Self {
         self.gap = gap;
+        self
+    }
+
+    /// Open above the caret line unless only below has room, as suits an
+    /// input docked at the bottom, where a popup below would cover the
+    /// input's own controls.
+    pub fn prefer_above(mut self, above: bool) -> Self {
+        self.prefer_above = above;
         self
     }
 }
@@ -169,6 +185,7 @@ impl Element for CaretPopup {
             (child.width, child.height),
             self.viewport,
             self.gap,
+            self.prefer_above,
         );
         let offset = (placed.x - bounds.x, placed.y - bounds.y);
         layout.offset = Some(offset);
@@ -216,41 +233,65 @@ mod tests {
         }
     }
 
-    // Each row: caret, popup size, expected placement. Viewport 400x300,
-    // gap 4, caret lines 20 tall.
+    fn case(caret: Rect, size: (f32, f32), prefer_above: bool) -> CaretPlacement {
+        place_at_caret(caret, size, (400.0, 300.0), 4.0, prefer_above)
+    }
+
+    // Each row: caret, popup size, whether above is preferred, expected
+    // x, y, and side. Viewport 400x300, gap 4, caret lines 20 tall.
     #[test]
-    fn caret_popups_flip_above_near_the_bottom_and_stay_inside_the_viewport() {
+    fn caret_popups_flip_away_from_edges_and_stay_inside_the_viewport() {
+        let below = false;
+        let above = true;
         let cases = [
             // Room below: under the caret line, at the caret.
             (
                 rect(50.0, 40.0, 2.0, 20.0),
                 (120.0, 80.0),
-                (50.0, 64.0, false),
+                below,
+                (50.0, 64.0, below),
             ),
-            // A composer at the bottom: above the caret line.
+            // Near the bottom: flips above the caret line.
             (
                 rect(50.0, 260.0, 2.0, 20.0),
                 (120.0, 80.0),
-                (50.0, 176.0, true),
+                below,
+                (50.0, 176.0, above),
             ),
             // Caret near the right edge: pulled left to fit.
             (
                 rect(390.0, 40.0, 2.0, 20.0),
                 (120.0, 80.0),
-                (280.0, 64.0, false),
+                below,
+                (280.0, 64.0, below),
             ),
             // Too tall for either side: the roomier side, pinned inside.
             (
                 rect(50.0, 200.0, 2.0, 20.0),
                 (120.0, 260.0),
-                (50.0, 0.0, true),
+                below,
+                (50.0, 0.0, above),
+            ),
+            // Preferring above with room on both sides: above.
+            (
+                rect(50.0, 200.0, 2.0, 20.0),
+                (120.0, 40.0),
+                above,
+                (50.0, 156.0, above),
+            ),
+            // Preferring above at the top edge: flips below.
+            (
+                rect(50.0, 20.0, 2.0, 20.0),
+                (120.0, 80.0),
+                above,
+                (50.0, 44.0, below),
             ),
         ];
-        for (caret, size, (x, y, above)) in cases {
+        for (caret, size, prefer_above, (x, y, side)) in cases {
             assert_eq!(
-                place_at_caret(caret, size, (400.0, 300.0), 4.0),
-                CaretPlacement { x, y, above },
-                "caret {caret:?}"
+                case(caret, size, prefer_above),
+                CaretPlacement { x, y, above: side },
+                "caret {caret:?}, prefer above {prefer_above}"
             );
         }
     }
