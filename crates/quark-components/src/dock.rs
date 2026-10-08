@@ -1408,6 +1408,7 @@ impl<'a> Dock<'a> {
             })
         };
         let nudge = |delta: f32| event(PaneDividerEvent::Nudge { delta, extent });
+        let to = |position: f32| event(PaneDividerEvent::SetPosition { position, extent });
         let set_position = event.clone();
         let numeric_actions = NumericActions::new(move |position| {
             set_position(PaneDividerEvent::SetPosition {
@@ -1457,6 +1458,8 @@ impl<'a> Dock<'a> {
                      on_key={(forward, nudge(NUDGE_STEP))}
                      on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
                      on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
+                     // Home and End: the ends of the range it may move in.
+                     on_key={("home", to(lo))} on_key={("end", to(hi))}
                      test_id="dock-pane-divider" cursor={cursor} hover_bg={colors.accent}
                      on:drag={move |press: ClickEvent| {
                          Box::new(PaneDividerDrag {

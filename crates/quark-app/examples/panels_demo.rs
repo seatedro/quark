@@ -486,7 +486,8 @@ mod tests {
             ("Sidebar", 1000.0, Some("480")),
             ("Sidebar", -60.0, Some("200")),
             ("Sidebar", -150.0, Some("180")),
-            ("Sidebar", -200.0, None),
+            // Collapsed by the drag, the divider stays to drag back out.
+            ("Sidebar", -200.0, Some("0")),
             ("Right panel", -100.0, Some("520")),
             ("Right panel", -1000.0, Some("698")),
             ("Right panel", 200.0, Some("280")),
@@ -522,15 +523,45 @@ mod tests {
         ui.advance(1_000);
         ui.click_node(divider("Sidebar"));
         ui.key("enter");
-        assert_eq!(announced(&ui, "Sidebar"), None);
         assert!(
             ui.try_find(By::role_name(Role::TabPanel, "Threads"))
                 .is_none()
         );
-
-        ui.key("mod+b");
+        // The divider stays, focused at the edge, so Enter undoes it.
+        assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("0"));
+        assert_eq!(focused_name(&ui).as_deref(), Some("Resize Sidebar"));
+        ui.key("enter");
         assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("400"));
         assert_eq!(divider_x(&ui, "Sidebar"), 400.0);
+
+        // Hidden by its toggle key, it restores the same way.
+        ui.key("mod+b");
+        assert_eq!(announced(&ui, "Sidebar"), None);
+        ui.key("mod+b");
+        assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("400"));
+    }
+
+    #[test]
+    fn home_and_end_move_a_divider_to_its_limits() {
+        // (divider, key, announced size): the sidebar is 180..=480, and
+        // the right panel, pushing the sidebar to its minimum, stops at
+        // 1200 - 2 dividers - 320 - 180 = 698.
+        let cases = [
+            ("Sidebar", "end", "480"),
+            ("Sidebar", "home", "180"),
+            ("Right panel", "end", "698"),
+            ("Right panel", "home", "280"),
+        ];
+        for (label, key, expected) in cases {
+            let mut ui = harness();
+            ui.click_node(divider(label));
+            ui.key(key);
+            assert_eq!(
+                announced(&ui, label).as_deref(),
+                Some(expected),
+                "{label} {key}"
+            );
+        }
     }
 
     #[test]

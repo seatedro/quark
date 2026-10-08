@@ -182,6 +182,9 @@ pub struct SplitState {
     /// Expanded size of each fixed pane; the flex pane's entry is unused.
     sizes: Vec<f32>,
     collapsed: Vec<bool>,
+    /// Per pane, collapsed from its own divider (Enter or a drag), which
+    /// then stays in place to restore it even when collapsed dividers hide.
+    collapsed_by_divider: Vec<bool>,
     flex: usize,
     hide_collapsed_dividers: bool,
     drag: Option<DragOrigin>,
@@ -217,6 +220,7 @@ impl SplitState {
         let state = Self {
             axis,
             collapsed: vec![false; panes.len()],
+            collapsed_by_divider: vec![false; panes.len()],
             panes,
             sizes,
             flex,
@@ -228,8 +232,10 @@ impl SplitState {
         state
     }
 
-    /// Leave out the divider of a collapsed pane, for panes the app hides
-    /// and shows by command rather than by dragging.
+    /// Leave out the divider of a pane the app collapses by command
+    /// ([`Self::set_collapsed`], [`Self::toggle`]). A pane collapsed from its
+    /// divider keeps it, so focus stays there and Enter or a drag restores
+    /// the pane.
     pub fn hide_collapsed_dividers(mut self, hide: bool) -> Self {
         self.hide_collapsed_dividers = hide;
         self
@@ -286,6 +292,7 @@ impl SplitState {
     pub fn set_collapsed(&mut self, pane: usize, collapsed: bool) {
         if pane != self.flex {
             self.collapsed[pane] = collapsed;
+            self.collapsed_by_divider[pane] = false;
         }
         self.debug_verify();
     }
@@ -293,6 +300,7 @@ impl SplitState {
     pub fn toggle(&mut self, pane: usize) {
         if pane != self.flex && self.panes[pane].collapsible {
             self.collapsed[pane] = !self.collapsed[pane];
+            self.collapsed_by_divider[pane] = false;
         }
         self.debug_verify();
     }
@@ -313,7 +321,8 @@ impl SplitState {
     }
 
     fn divider_visible(&self, divider: usize) -> bool {
-        !(self.hide_collapsed_dividers && self.collapsed[self.divider_pane(divider)])
+        let pane = self.divider_pane(divider);
+        !(self.hide_collapsed_dividers && self.collapsed[pane] && !self.collapsed_by_divider[pane])
     }
 
     fn visible_dividers(&self) -> usize {
@@ -385,6 +394,7 @@ impl SplitState {
         let p = self.panes[pane];
         if may_collapse && p.collapsible && target < p.min / 2.0 {
             self.collapsed[pane] = true;
+            self.collapsed_by_divider[pane] = true;
             return;
         }
         // Resolve with the pane at its minimum, so the others show their
@@ -507,7 +517,9 @@ impl SplitState {
                 true
             }
             SplitEvent::Toggle { divider } => {
-                self.toggle(self.divider_pane(divider));
+                let pane = self.divider_pane(divider);
+                self.toggle(pane);
+                self.collapsed_by_divider[pane] = self.collapsed[pane];
                 true
             }
         };
@@ -541,6 +553,7 @@ impl SplitState {
                 p.default.clamp(p.min, p.max)
             };
             self.collapsed[i] = snapshot.collapsed[i];
+            self.collapsed_by_divider[i] = false;
         }
         self.drag = None;
         self.debug_verify();
@@ -549,7 +562,10 @@ impl SplitState {
 
     pub fn verify_integrity(&self) -> Result<(), SplitIntegrityError> {
         let n = self.panes.len();
-        if self.sizes.len() != n || self.collapsed.len() != n {
+        if self.sizes.len() != n
+            || self.collapsed.len() != n
+            || self.collapsed_by_divider.len() != n
+        {
             return Err(SplitIntegrityError::Lengths);
         }
         if n > MAX_PANES || self.panes.iter().filter(|p| p.flex).count() != 1 {
@@ -722,6 +738,10 @@ fn divider(
                  on_key={(forward, nudge(NUDGE_STEP))}
                  on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
                  on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
+                 // Home and End give the pane its smallest and largest size
+                 // (the window splitter pattern); the state clamps to what fits.
+                 on_key={("home", nudge((p.min - size) * grow))}
+                 on_key={("end", nudge((p.max.min(extent) - size) * grow))}
                  on:drag={move |press: ClickEvent| {
                      Box::new(DividerDrag {
                          map: drag_map.clone(),
