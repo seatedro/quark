@@ -289,17 +289,56 @@ def wait_for(what, probe, timeout=15.0, interval=0.1):
     raise AssertionError(f"timed out waiting for {what}{detail}")
 
 
-def app_tree(content=True):
-    """The first window frame of the app run.sh launched. With `content`,
-    waits until the frame has children; a raw `App` publishes none."""
+def app_frames():
+    """Every window frame the app run.sh launched publishes, one per open
+    window, in the order AT-SPI lists them."""
+    app = atspi_tree(os.environ["QUARK_E2E_APP"])
+    return app.find_all("frame") if app else []
+
+
+def app_tree(content=True, window=None):
+    """The window frame named `window` of the app run.sh launched, or its
+    first one. With `content`, waits until the frame has children; a raw
+    `App` publishes none."""
     name = os.environ["QUARK_E2E_APP"]
 
     def probe():
-        app = atspi_tree(name)
-        frame = app and app.find("frame")
+        frames = [f for f in app_frames() if window is None or f.name == window]
+        frame = frames[0] if frames else None
         return frame if frame and (frame.children or not content) else None
 
-    return wait_for(f"{name}'s accessibility tree", probe)
+    what = f"{name}'s window {window!r}" if window else f"{name}'s accessibility tree"
+    return wait_for(what, probe)
+
+
+def window_closed(window, timeout=15.0):
+    """Wait until no frame of the app is named `window`."""
+    wait_for(f"window {window!r} to close", lambda: all(f.name != window for f in app_frames()), timeout)
+
+
+def center(node):
+    """The middle of a node's screen extents."""
+    x, y, w, h = node.extents
+    return (x + w // 2, y + h // 2)
+
+
+def xdotool(*args):
+    """Run xdotool on the spec's display and return its output."""
+    done = subprocess.run(["xdotool", *map(str, args)], check=True, capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+def pointer_drag(start, path, release=True):
+    """Press the primary button at screen point `start` and move through
+    `path` one step at a time, each waiting for the pointer to get there,
+    so the app sees motion rather than a jump. Releases at the end unless
+    `release` is false."""
+    xdotool("mousemove", "--sync", *start)
+    xdotool("mousedown", 1)
+    for x, y in path:
+        xdotool("mousemove", "--sync", x, y)
+    if release:
+        xdotool("mouseup", 1)
 
 
 class CuaError(AssertionError):
