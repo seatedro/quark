@@ -24,6 +24,8 @@ pub struct CursorSnapshot {
 pub struct TextEditorElement {
     is_empty: bool,
     placeholder: String,
+    /// The accessible name; the placeholder when empty.
+    label: String,
     focused: bool,
     cursor: Option<CursorSnapshot>,
     selection_rects: Vec<SelectionRect>,
@@ -72,6 +74,7 @@ pub fn text_editor_element(
     TextEditorElement {
         is_empty: true,
         placeholder: String::new(),
+        label: String::new(),
         focused: false,
         cursor: None,
         selection_rects: Vec::new(),
@@ -109,6 +112,13 @@ impl TextEditorElement {
 
     pub fn focused(mut self, f: bool) -> Self {
         self.focused = f;
+        self
+    }
+
+    /// The name assistive tech reads for the editor, when it should not be
+    /// the placeholder (which disappears once the user types).
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
         self
     }
 
@@ -273,7 +283,9 @@ impl Element for TextEditorElement {
         cx: &mut ElementContext,
     ) {
         let theme = cx.theme;
-        let accessibility_label = if self.placeholder.is_empty() {
+        let accessibility_label = if !self.label.is_empty() {
+            std::mem::take(&mut self.label)
+        } else if self.placeholder.is_empty() {
             format!("{:?}", self.focus_target)
         } else {
             self.placeholder.clone()
@@ -534,6 +546,7 @@ impl Element for TextEditorElement {
                     bounds,
                 )
                 .label(accessibility_label)
+                .value(self.text.clone())
                 .text(match self.text_selection {
                     Some((anchor, caret)) => {
                         AccessibleText::new(self.text.clone()).selection(anchor, caret)
