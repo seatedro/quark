@@ -862,6 +862,7 @@ pub struct Renderer {
     /// Targets in use this frame.
     active_frames: usize,
     plans: Vec<LayerPlan>,
+    layer_scratch: LayerScratch,
     /// Viewport uniform and glyphon viewport of layer target `i + 1`.
     layer_uniforms: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     layer_viewports: Vec<Viewport>,
@@ -1034,6 +1035,7 @@ impl Renderer {
             frames: Vec::new(),
             active_frames: 0,
             plans: Vec::new(),
+            layer_scratch: LayerScratch::default(),
             layer_uniforms: Vec::new(),
             layer_viewports: Vec::new(),
             segment_texture: None,
@@ -1367,7 +1369,7 @@ impl Renderer {
             width: width as f32,
             height: height as f32,
         };
-        let offscreen = plan_layers(scene, viewport, &mut self.plans);
+        let offscreen = plan_layers(scene, viewport, &mut self.plans, &mut self.layer_scratch);
         self.active_frames = 1 + offscreen;
         if self.frames.len() < self.active_frames {
             self.frames
@@ -2745,6 +2747,9 @@ pub(super) struct ClippedRichText {
     pub(super) key: DrawKey,
     pub(super) primitive: RichTextPrimitive,
     pub(super) clip: Rect,
+    /// Inline layer opacity, applied to each glyph's color as it is
+    /// prepared so a fade allocates no faded copy of the span colors.
+    pub(super) alpha: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -3012,7 +3017,7 @@ impl ActiveClip {
 fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> FlattenedScene {
     let mut out = FlattenedScene::default();
     let mut plans = Vec::new();
-    plan_layers(scene, viewport, &mut plans);
+    plan_layers(scene, viewport, &mut plans, &mut LayerScratch::default());
     flatten_scene_into(
         &scene.primitives,
         0..scene.primitives.len(),
@@ -3032,7 +3037,7 @@ fn fade(mut color: [f32; 4], alpha: f32) -> [f32; 4] {
     color
 }
 
-fn fade_color(color: quark::Color, alpha: f32) -> quark::Color {
+pub(super) fn fade_color(color: quark::Color, alpha: f32) -> quark::Color {
     if alpha >= 1.0 {
         return color;
     }
@@ -3155,23 +3160,14 @@ fn flatten_scene_into(
                 let rect = fl.shift(text.rect);
                 if let Some(intersection) = rect.intersection(clip.scissor) {
                     let key = fl.place(PrimKind::Text, intersection);
-                    let mut primitive = RichTextPrimitive {
-                        rect,
-                        ..text.clone()
-                    };
-                    if fl.alpha < 1.0 {
-                        let alpha = fl.alpha;
-                        primitive.default_color = fade_color(text.default_color, alpha);
-                        primitive.span_colors = text
-                            .span_colors
-                            .iter()
-                            .map(|c| fade_color(*c, alpha))
-                            .collect();
-                    }
                     out.rich_texts.push(ClippedRichText {
                         key,
-                        primitive,
+                        primitive: RichTextPrimitive {
+                            rect,
+                            ..text.clone()
+                        },
                         clip: intersection,
+                        alpha: fl.alpha,
                     });
                 }
             }
@@ -3520,17 +3516,32 @@ struct OpenLayer {
     drawables: u32,
 }
 
+/// Working storage of [`plan_layers`], kept so planning a frame with layers
+/// allocates nothing once warm.
+#[derive(Default)]
+struct LayerScratch {
+    open: Vec<OpenLayer>,
+    /// Clip rects in the coordinates of the innermost open layer's content.
+    clips: Vec<Rect>,
+}
+
 /// Plan every layer of `scene` (in scene order) and number the offscreen
 /// ones' targets from 1. Returns how many render offscreen.
-fn plan_layers(scene: &Scene, viewport: Rect, plans: &mut Vec<LayerPlan>) -> usize {
+fn plan_layers(
+    scene: &Scene,
+    viewport: Rect,
+    plans: &mut Vec<LayerPlan>,
+    scratch: &mut LayerScratch,
+) -> usize {
     plans.clear();
     let prims = &scene.primitives;
     if !prims.iter().any(|p| matches!(p, Primitive::LayerStart(_))) {
         return 0;
     }
-    let mut open: Vec<OpenLayer> = Vec::new();
-    // Clip rects in the coordinates of the innermost open layer's content.
-    let mut clips = vec![viewport];
+    let LayerScratch { open, clips } = scratch;
+    open.clear();
+    clips.clear();
+    clips.push(viewport);
     for (index, primitive) in prims.iter().enumerate() {
         match primitive {
             Primitive::LayerStart(layer) => {
@@ -3565,7 +3576,7 @@ fn plan_layers(scene: &Scene, viewport: Rect, plans: &mut Vec<LayerPlan>) -> usi
             }
             Primitive::LayerEnd => {
                 if let Some(layer) = open.pop() {
-                    close_layer(layer, index, plans, &mut open, &mut clips);
+                    close_layer(layer, index, plans, open, clips);
                 }
             }
             Primitive::ClipStart(clip) => {
@@ -3592,7 +3603,7 @@ fn plan_layers(scene: &Scene, viewport: Rect, plans: &mut Vec<LayerPlan>) -> usi
         }
     }
     while let Some(layer) = open.pop() {
-        close_layer(layer, prims.len(), plans, &mut open, &mut clips);
+        close_layer(layer, prims.len(), plans, open, clips);
     }
     let mut targets = 0;
     for plan in plans.iter_mut() {
@@ -4292,6 +4303,81 @@ mod tests {
         let image = render_code(&mut renderer, &recolored, &mut text);
         assert!(has_pixels(&image, BLUE), "keywords not recolored");
         assert!(!has_pixels(&image, RED), "old keyword color left");
+    }
+
+    /// The code layout alone in a layer of `opacity`. A single drawable,
+    /// so flattening folds the opacity into the text instead of drawing the
+    /// layer offscreen.
+    fn faded_code_scene(layout: &ShapedText, colors: [quark::Color; 3], opacity: f32) -> Scene {
+        let mut scene = Scene::default();
+        scene.push(layer(opacity, Transform2D::IDENTITY));
+        scene.rich_text(RichTextPrimitive {
+            rect: rect(4.0, 4.0, 190.0, 100.0),
+            layout: layout.clone(),
+            default_color: colors[0],
+            span_colors: Arc::from([colors[1], colors[2]]),
+        });
+        scene.push(Primitive::LayerEnd);
+        scene
+    }
+
+    // Regression: fading rich text collected a faded copy of its span
+    // colors every frame it was flattened.
+    #[test]
+    fn fading_rich_text_allocates_nothing() {
+        let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
+            return;
+        };
+        let mut text = test_text();
+        let layout = code_layout(&mut text);
+        let colors = [quark::Color::rgba(255, 255, 255, 255), RED, GREEN];
+        render_code(
+            &mut renderer,
+            &faded_code_scene(&layout, colors, 0.9),
+            &mut text,
+        );
+
+        // A fade animation's next frame: same text, another opacity.
+        let scene = faded_code_scene(&layout, colors, 0.5);
+        let ((), flattening) = quark_ui::test_alloc::count(|| {
+            renderer.flatten(&scene, CODE_SIZE.0, CODE_SIZE.1);
+        });
+        assert_eq!(flattening, 0);
+        let (ready, preparing) = count_text_preparation(&mut renderer, &scene, &mut text);
+        assert!(ready);
+        assert_eq!(preparing, 0);
+    }
+
+    // Faded rich text draws what the same text with its colors' alpha
+    // already halved draws, on both text paths.
+    #[test]
+    fn faded_rich_text_draws_its_colors_at_reduced_alpha() {
+        let mut text = test_text();
+        let layout = code_layout(&mut text);
+        let [white, red, blue] = [quark::Color::rgba(255, 255, 255, 255), RED, BLUE];
+        let faded = faded_code_scene(&layout, [white, red, blue], 0.5);
+        // 255 * 0.5, rounded.
+        let half = |c: quark::Color| quark::Color::rgba(c.r, c.g, c.b, 128);
+        let prefaded = faded_code_scene(&layout, [half(white), half(red), half(blue)], 1.0);
+        for path in [TextPath::Positioned, TextPath::Buffer] {
+            let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
+                return;
+            };
+            renderer.text_path = path;
+            let faded = render_code(&mut renderer, &faded, &mut text);
+            let prefaded = render_code(&mut renderer, &prefaded, &mut text);
+            let lit = faded.pixels().filter(|p| p.0[..3] != [0, 0, 0]).count();
+            assert!(
+                lit > 200,
+                "{path:?}: {lit} lit pixels, the fixture drew too little"
+            );
+            let differing = faded
+                .pixels()
+                .zip(prefaded.pixels())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(differing, 0, "{path:?}: faded pixels differ");
+        }
     }
 
     // The positioned path must draw what glyphon draws from text areas:
