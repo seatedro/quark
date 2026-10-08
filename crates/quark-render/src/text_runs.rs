@@ -16,6 +16,12 @@
 //! a clip moved alike inside the target. Nothing is prepared or uploaded
 //! but the offsets. Anything else (a fractional move, a clip that now
 //! cuts the text differently, a glyph evicted since) prepares it again.
+//!
+//! A vertical move proves that per text instead of per glyph: with the
+//! same left edge every column and subpixel bin is the same, and the
+//! row offsets kept from preparing (each line top and glyph offset added
+//! to the text's top) say exactly which lines pass the clip and where
+//! each glyph's row lands. Other moves compare every glyph.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -27,7 +33,9 @@ use glyphon::{
 use quark_text::{TextLayout, TextSystem};
 
 use super::{ClippedRichText, ClippedText, Renderer, TargetFrame, TextRunItems};
-use crate::text::{TextPath, prepare_text_areas, push_positioned_glyphs, visit_positioned_glyphs};
+use crate::text::{
+    RowOffsets, TextPath, prepare_text_areas, push_positioned_glyphs, visit_positioned_glyphs,
+};
 
 /// Run hashes are already mixed.
 #[derive(Default)]
@@ -82,8 +90,11 @@ struct RunMemo {
     epoch: u64,
     texts: Vec<ClippedText>,
     rich_texts: Vec<ClippedRichText>,
-    /// The glyphs prepared, on the positioned path.
+    /// The glyphs prepared, on the positioned path, where they were
+    /// prepared: the renderer's draw offset has moved them since.
     glyphs: Vec<PositionedGlyph>,
+    /// The row offsets of the texts prepared.
+    rows: RowOffsets,
 }
 
 impl RunMemo {
@@ -170,17 +181,45 @@ impl RunMemo {
         self.texts.clear();
         self.rich_texts.clear();
         self.glyphs.clear();
+        self.rows.clear();
+    }
+
+    /// Whether `texts` and `rich_texts`, the texts prepared moved by
+    /// `(0, dy)` as [`Self::moved_by`] found, place every glyph prepared
+    /// exactly `dy` pixels lower, decided per text from its row offsets.
+    fn moved_down(
+        &self,
+        texts: &[ClippedText],
+        rich_texts: &[ClippedRichText],
+        dy: i32,
+        resolution: Resolution,
+    ) -> bool {
+        let size = (resolution.width, resolution.height);
+        let plain = self
+            .texts
+            .iter()
+            .zip(texts)
+            .map(|(a, b)| ((a.primitive.rect, a.clip), (b.primitive.rect, b.clip)));
+        let rich = self
+            .rich_texts
+            .iter()
+            .zip(rich_texts)
+            .map(|(a, b)| ((a.primitive.rect, a.clip), (b.primitive.rect, b.clip)));
+        plain
+            .chain(rich)
+            .enumerate()
+            .all(|(index, (was, now))| self.rows.moved_down(index, was, now, dy, size))
     }
 }
 
 /// Whether `texts` and `rich_texts` place exactly the glyphs `prepared`
-/// moved by `(dx, dy)`, clips included, with every clip inside
-/// `resolution` both times, so glyphon's clamp to the viewport changes
-/// none.
+/// moved by `to`, clips included, with every clip inside `resolution`
+/// both times (`prepared` moved by `from`, and by `to`), so glyphon's
+/// clamp to the viewport changes none.
 fn glyphs_moved(
     prepared: &[PositionedGlyph],
     (texts, rich_texts): (&[ClippedText], &[ClippedRichText]),
-    (dx, dy): (i32, i32),
+    (from, to): ([i32; 2], [i32; 2]),
     resolution: Resolution,
 ) -> bool {
     let (width, height) = (resolution.width as i32, resolution.height as i32);
@@ -191,13 +230,13 @@ fn glyphs_moved(
         let moved = prepared.next().is_some_and(|was| {
             glyph
                 == PositionedGlyph {
-                    x: was.x + dx,
-                    y: was.y + dy,
-                    bounds: moved_bounds(was.bounds, (dx, dy)),
+                    x: was.x + to[0],
+                    y: was.y + to[1],
+                    bounds: moved_bounds(was.bounds, (to[0], to[1])),
                     ..*was
                 }
                 && inside(glyph.bounds)
-                && inside(was.bounds)
+                && inside(moved_bounds(was.bounds, (from[0], from[1])))
         });
         if moved {
             ControlFlow::Continue(())
@@ -323,23 +362,21 @@ impl TextRuns {
         rich_texts: &[ClippedRichText],
     ) -> bool {
         let memo = &mut self.memos[slot];
+        let offset = &mut self.offsets[slot];
         let Some(moved) = memo.moved_by(target, resolution, epoch, texts, rich_texts) else {
             return false;
         };
-        if !glyphs_moved(&memo.glyphs, (texts, rich_texts), moved, resolution) {
+        let to = [offset[0] + moved.0, offset[1] + moved.1];
+        let exact = (moved.0 == 0 && memo.moved_down(texts, rich_texts, moved.1, resolution))
+            || glyphs_moved(&memo.glyphs, (texts, rich_texts), (*offset, to), resolution);
+        if !exact {
             return false;
-        }
-        for glyph in &mut memo.glyphs {
-            glyph.x += moved.0;
-            glyph.y += moved.1;
-            glyph.bounds = moved_bounds(glyph.bounds, moved);
         }
         memo.texts.clear();
         memo.texts.extend_from_slice(texts);
         memo.rich_texts.clear();
         memo.rich_texts.extend_from_slice(rich_texts);
-        let offset = &mut self.offsets[slot];
-        *offset = [offset[0] + moved.0, offset[1] + moved.1];
+        *offset = to;
         true
     }
 }
@@ -518,7 +555,7 @@ impl Renderer {
         match self.text_path {
             TextPath::Positioned => {
                 // Kept to check a later move of the run against.
-                push_positioned_glyphs(texts, rich_texts, &mut memo.glyphs);
+                push_positioned_glyphs(texts, rich_texts, &mut memo.glyphs, &mut memo.rows);
                 renderer.prepare_glyphs(
                     &self.device,
                     &self.queue,

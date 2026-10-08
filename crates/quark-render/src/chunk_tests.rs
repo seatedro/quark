@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use glyphon::MAX_DRAW_OFFSETS;
 use quark::scene::SceneChunk;
 use quark_text::{TextParams, TextSpan, TextStyle};
 
@@ -260,7 +261,7 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         });
         scene.push(chunk);
     };
-    let cases: [(&str, Scene, Scene); 9] = [
+    let cases: [(&str, Scene, Scene); 10] = [
         (
             "unchanged",
             framed(&card, [10.0, 10.0], just),
@@ -290,6 +291,11 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
             "moved by a fraction at 1.5x",
             physical(framed(&card, [10.0, 10.0], just), 1.5),
             physical(framed(&card, [10.5, 12.25], just), 1.5),
+        ),
+        (
+            "back from outside its clip",
+            framed(&card, [10.0, 170.0], just),
+            framed(&card, [10.0, 10.0], just),
         ),
         (
             "in a faded layer",
@@ -482,10 +488,60 @@ fn scrolling_rows(text: &mut TextSystem, scale: f32) -> Vec<Arc<SceneChunk>> {
         .collect()
 }
 
+/// Six lines of text in a chunk at its origin, in pixels, starting 40.5
+/// pixels above a clip of the chunk's own that cuts through its third and
+/// fourth lines. Drawn without a scale its top stays fractional, so
+/// scrolled it crosses zero while the clip stays in view: glyph rows
+/// truncate toward zero, so there the same whole-pixel move lands them a
+/// pixel apart.
+fn tall_row(text: &mut TextSystem) -> Arc<SceneChunk> {
+    let lines = (0..6).map(|i| format!("Line {i} Ag")).collect::<Vec<_>>();
+    let params = TextParams::new(lines.join("\n"), TextStyle::new(15.0));
+    let layout = ShapedText::new(Arc::new(text.layout(&params).expect("layout")));
+    chunk(vec![
+        Primitive::ClipStart(ClipPrimitive {
+            rect: rect(0.0, 2.0, 170.0, 38.0),
+            corner_radii: [0.0; 4],
+        }),
+        Primitive::TextRun(TextPrimitive {
+            rect: rect(2.0, -40.5, 160.0, 130.0),
+            layout,
+            color: color(120, 255, 160),
+        }),
+        Primitive::ClipEnd,
+    ])
+}
+
+/// Renders `scene` on `renderer`, and expanded on a fresh renderer, and
+/// asserts every pixel matches.
+fn assert_draws_prepared(
+    gpu: &GpuContext,
+    renderer: &mut Renderer,
+    scene: &Scene,
+    text: &mut TextSystem,
+    what: &str,
+) {
+    let (w, h) = SIZE;
+    let drawn = renderer.render_to_rgba(scene, text, w, h).unwrap();
+    let expected = Renderer::headless_with_gpu(gpu, w, h, 1.0)
+        .render_to_rgba(&expanded(scene), text, w, h)
+        .unwrap();
+    let differing = drawn
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<4>().0)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(differing, 0, "{what}");
+}
+
 // Text scrolled by whole pixels draws its kept glyphs moved, exactly where
 // preparing them again draws them: rows scrolled one or more pixels at a
-// time, by fractions, back up, across a clip that cuts their glyphs at the
-// edges, with clips of their own that move with them, at several scales.
+// time, by fractions, back up, sideways, across a clip that cuts their
+// glyphs at the edges, with clips of their own that move with them, with
+// a fractional top crossing zero, after the atlas forgets its glyphs, at
+// several scales, and in more runs than glyphon has draw offsets.
 #[test]
 fn scrolled_text_draws_the_pixels_of_text_prepared_again() {
     let (w, h) = SIZE;
@@ -501,37 +557,72 @@ fn scrolled_text_draws_the_pixels_of_text_prepared_again() {
         }
         Err(error) => panic!("headless context failed: {error}"),
     };
+    // Scroll positions in physical pixels, sideways and down. Rows cross
+    // the list's bottom edge and the tall row's top crosses zero (from 19
+    // to 20) during the single steps from 17 to 27; the atlas is cleared
+    // before 19.
+    let mut scrolls = vec![(0.0, 0.0), (0.0, 1.0), (0.0, 2.0), (0.0, 3.0), (0.0, 7.0)];
+    scrolls.extend([(0.0, 7.5), (0.0, 8.5), (0.0, 9.5)]);
+    scrolls.extend((17..=27).map(|y| (0.0, y as f32)));
+    scrolls.extend([(0.0, 40.0), (0.0, 41.0), (0.0, 13.0), (0.0, 12.0)]);
+    scrolls.extend([(3.0, 12.0), (5.0, 14.0), (5.0, 15.0), (4.5, 15.0)]);
     for scale in [1.0, 1.5, 2.0] {
         let rows = scrolling_rows(&mut text, scale);
-        // Scroll positions in physical pixels.
-        let list = |scroll: f32| {
+        let tall = tall_row(&mut text);
+        let list = |(x, scroll): (f32, f32)| {
             let mut scene = Scene::default();
             scene.clip(rect(0.0, 20.0 / scale, 190.0 / scale, 110.0 / scale));
             for (i, row) in rows.iter().enumerate() {
                 let y = 24.0 + i as f32 * 26.0 - scroll;
-                scene.chunk(row, [5.0 / scale, y / scale]);
+                scene.chunk(row, [(5.0 + x) / scale, y / scale]);
             }
             scene.pop_clip();
-            physical(scene, scale)
+            let mut scene = physical(scene, scale);
+            scene.chunk(&tall, [10.0 + x, 60.0 - scroll]);
+            scene
         };
         let mut scrolled = Renderer::headless_with_gpu(&gpu, w, h, 1.0);
-        for scroll in [
-            0.0, 1.0, 2.0, 3.0, 7.0, 7.5, 8.5, 9.5, 21.0, 40.0, 41.0, 13.0, 12.0,
-        ] {
-            let scene = list(scroll);
-            let drawn = scrolled.render_to_rgba(&scene, &mut text, w, h).unwrap();
-            let expected = Renderer::headless_with_gpu(&gpu, w, h, 1.0)
-                .render_to_rgba(&expanded(&scene), &mut text, w, h)
-                .unwrap();
-            let differing = drawn
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(expected.as_chunks::<4>().0)
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(differing, 0, "at {scale}x, scrolled to {scroll}");
+        for &scroll in &scrolls {
+            if scroll == (0.0, 19.0) {
+                // What a text system replacement does before a frame.
+                scrolled.atlas.clear();
+            }
+            let what = format!("at {scale}x, scrolled to {scroll:?}");
+            assert_draws_prepared(&gpu, &mut scrolled, &list(scroll), &mut text, &what);
         }
+    }
+
+    // A run per chunk, past the draw offsets glyphon has: the runs beyond
+    // them share one offset that never moves.
+    let runs = MAX_DRAW_OFFSETS + 60;
+    let glyph = text
+        .layout(&TextParams::new("o".to_owned(), TextStyle::new(8.0)))
+        .expect("layout");
+    let glyph = ShapedText::new(Arc::new(glyph));
+    let cells = (0..runs)
+        .map(|i| {
+            let shade = (i % 200) as u8 + 55;
+            chunk(vec![Primitive::TextRun(TextPrimitive {
+                rect: rect(0.0, 0.0, 8.0, 10.0),
+                layout: glyph.clone(),
+                color: color(shade, 255 - shade, 200),
+            })])
+        })
+        .collect::<Vec<_>>();
+    let grid = |scroll: f32| {
+        let mut scene = Scene::default();
+        scene.clip(rect(0.0, 0.0, 200.0, 150.0));
+        for (i, cell) in cells.iter().enumerate() {
+            let (column, row) = ((i % 48) as f32, (i / 48) as f32);
+            scene.chunk(cell, [column * 4.0, row * 3.0 - scroll]);
+        }
+        scene.pop_clip();
+        scene
+    };
+    let mut scrolled = Renderer::headless_with_gpu(&gpu, w, h, 1.0);
+    for scroll in [0.0, 1.0, 3.0] {
+        let what = format!("{runs} runs scrolled to {scroll}");
+        assert_draws_prepared(&gpu, &mut scrolled, &grid(scroll), &mut text, &what);
     }
 }
 

@@ -20,7 +20,9 @@
 //! and place them span by span (consecutive items of one kind and
 //! z-index), assigning the segments that placing them one by one would.
 //! A chunk drawn somewhere new each frame (a scrolling row) records
-//! nothing.
+//! nothing. One drawn wholly outside the clip around it (a row scrolled
+//! out of view) appends nothing, which its converted bounds tell without
+//! visiting its items.
 //!
 //! Chunks that start a layer, or that a layer groups, are not drawn here:
 //! layer planning needs their primitives, so the renderer expands them
@@ -33,7 +35,7 @@ use quark::scene::ChunkPrimitive;
 
 use super::{
     ActiveClip, BandScratch, Draw, DrawKey, Drawn, FlattenedBlurRegion, FlattenedScene, Flattener,
-    PathInstance, PrimKind, Primitive, Rect, convert, emit, path_parts, rect_union,
+    PathInstance, PrimKind, Primitive, Rect, bounds_rect, convert, emit, path_parts, rect_union,
 };
 
 /// Frames a chunk may go undrawn before its entry is dropped. A recording
@@ -388,6 +390,9 @@ struct ChunkEntry {
     origin: Option<([f32; 2], [f32; 2])>,
     last_used: u64,
     items: Vec<Item>,
+    /// Union of every item's extent where it was converted, when the
+    /// chunk holds no nested chunk and every extent is finite.
+    bounds: Option<Rect>,
     /// Clips inside the chunk; `clips[0]` is none.
     clips: Vec<LocalClip>,
     /// Band instances of the chunk's paths; their segment starts index
@@ -501,6 +506,7 @@ impl ChunkEntry {
         self.placement.context = None;
         self.placement.recorded = false;
         self.items.clear();
+        self.bounds = None;
         self.clips.clear();
         self.clips.push(LocalClip::NONE);
         self.bands.clear();
@@ -563,7 +569,59 @@ impl ChunkEntry {
                 }
             }
         }
+        self.bounds = items_bounds(&self.items);
     }
+
+    /// Whether no item can show under `scissor` with the chunk moved by
+    /// `shift`. Each item is clipped by `scissor` or a clip inside it, so
+    /// bounds a pixel short of `scissor` (more than the rounding of the
+    /// items' own moves and clips) show nothing.
+    fn hidden(&self, (dx, dy): (f32, f32), scissor: Rect) -> bool {
+        let Some(bounds) = self.bounds else {
+            return false;
+        };
+        let bounds = bounds.offset(dx, dy);
+        let edges = [
+            bounds.x - 1.0,
+            bounds.y - 1.0,
+            bounds.right() + 1.0,
+            bounds.bottom() + 1.0,
+        ];
+        let [left, top, right, bottom] = edges;
+        edges.iter().all(|edge| edge.abs() < 1_048_576.0)
+            && (right <= scissor.x
+                || left >= scissor.right()
+                || bottom <= scissor.y
+                || top >= scissor.bottom())
+    }
+}
+
+/// The union of what `items` can draw, as [`ChunkEntry::bounds`] says.
+fn items_bounds(items: &[Item]) -> Option<Rect> {
+    let mut union: Option<Rect> = None;
+    for item in items {
+        let extent = match &item.draw {
+            ItemDraw::Chunk(_) => return None,
+            ItemDraw::Drawn(drawn) => match drawn {
+                Drawn::Quad(instance) => bounds_rect(instance.bounds),
+                Drawn::Shadow(instance) => bounds_rect(instance.draw_bounds),
+                Drawn::Effect(instance) => bounds_rect(instance.bounds),
+                Drawn::Image(image) => image.rect,
+                Drawn::Text(text) => text.rect,
+                Drawn::RichText(text) => text.rect,
+                Drawn::Path { area, .. } => *area,
+                Drawn::Blur(blur) => blur.rect,
+            },
+        };
+        let finite = [extent.x, extent.y, extent.right(), extent.bottom()]
+            .iter()
+            .all(|v| v.is_finite());
+        if !finite {
+            return None;
+        }
+        union = Some(union.map_or(extent, |union| rect_union(union, extent)));
+    }
+    union
 }
 
 /// Draw `chunk` under the flattener's current clip, z-index, and inline
@@ -603,9 +661,16 @@ fn draw(
         z,
         alpha,
     });
+    let hidden = entry.hidden(shift, outer.scissor);
     let placement = &mut entry.placement;
     if placement.recorded && placement.context == context {
         placement.replay(fl, out);
+        fl.chunks.entries.insert(id, entry);
+        return;
+    }
+    if hidden {
+        placement.context = context;
+        placement.recorded = false;
         fl.chunks.entries.insert(id, entry);
         return;
     }

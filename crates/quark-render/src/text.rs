@@ -51,17 +51,25 @@ impl GlyphOwner {
     }
 }
 
-/// Append the glyphs of `texts` then `rich_texts` to `out`; see
+/// Append the glyphs of `texts` then `rich_texts` to `out`, and the
+/// offsets their rows were placed at to `rows`; see
 /// [`visit_positioned_glyphs`].
 pub(super) fn push_positioned_glyphs(
     texts: &[ClippedText],
     rich_texts: &[ClippedRichText],
     out: &mut Vec<PositionedGlyph>,
+    rows: &mut RowOffsets,
 ) {
-    let _ = visit_positioned_glyphs(texts, rich_texts, |glyph| {
-        out.push(glyph);
-        ControlFlow::Continue(())
-    });
+    rows.clear();
+    let _ = visit_glyphs(
+        texts,
+        rich_texts,
+        |glyph| {
+            out.push(glyph);
+            ControlFlow::Continue(())
+        },
+        rows,
+    );
 }
 
 /// Call `visit` with the glyphs of `texts` then `rich_texts` until it
@@ -72,38 +80,61 @@ pub(super) fn push_positioned_glyphs(
 pub(super) fn visit_positioned_glyphs(
     texts: &[ClippedText],
     rich_texts: &[ClippedRichText],
+    visit: impl FnMut(PositionedGlyph) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    visit_glyphs(texts, rich_texts, visit, &mut ())
+}
+
+fn visit_glyphs(
+    texts: &[ClippedText],
+    rich_texts: &[ClippedRichText],
     mut visit: impl FnMut(PositionedGlyph) -> ControlFlow<()>,
+    rows: &mut impl RowSink,
 ) -> ControlFlow<()> {
     // Plain loops: nested `flat_map`s cost several times the glyph math.
     for text in texts {
         let primitive = &text.primitive;
-        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
-            continue;
-        };
-        let color = glyphon_color(primitive.color);
-        visit_layout_glyphs(layout, primitive.rect, text.clip, &mut visit, |glyph| {
-            glyph.color_opt.unwrap_or(color)
-        })?;
+        if let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() {
+            let color = glyphon_color(primitive.color);
+            visit_layout_glyphs(
+                layout,
+                primitive.rect,
+                text.clip,
+                &mut visit,
+                rows,
+                |glyph| glyph.color_opt.unwrap_or(color),
+            )?;
+        }
+        rows.end_text();
     }
     for text in rich_texts {
         let primitive = &text.primitive;
-        let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() else {
-            continue;
-        };
-        let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
-        visit_layout_glyphs(layout, primitive.rect, text.clip, &mut visit, |glyph| {
-            let color = span_color(glyph.metadata as u32, default_color, span_colors);
-            glyph
-                .color_opt
-                .unwrap_or(glyphon_color(fade_color(color, text.alpha)))
-        })?;
+        if let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() {
+            let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+            visit_layout_glyphs(
+                layout,
+                primitive.rect,
+                text.clip,
+                &mut visit,
+                rows,
+                |glyph| {
+                    let color = span_color(glyph.metadata as u32, default_color, span_colors);
+                    glyph
+                        .color_opt
+                        .unwrap_or(glyphon_color(fade_color(color, text.alpha)))
+                },
+            )?;
+        }
+        rows.end_text();
     }
     ControlFlow::Continue(())
 }
 
 /// Visit `layout`'s glyphs on lines that reach `clip`, placed as glyphon
 /// places a text area's: the same physical position, rounded baseline,
-/// and line culling, so both paths draw identical pixels.
+/// and line culling, so both paths draw identical pixels. `rows` hears
+/// every vertical offset added to `origin.y`: the top of each line
+/// checked against the clip, and each glyph's own offset.
 ///
 /// Positions come from the layout's cosmic-text buffer. The glyph columns
 /// cannot replace it yet: their `phys_y` adds the baseline before
@@ -116,6 +147,7 @@ fn visit_layout_glyphs(
     origin: Rect,
     clip: Rect,
     visit: &mut impl FnMut(PositionedGlyph) -> ControlFlow<()>,
+    rows: &mut impl RowSink,
     color: impl Fn(&LayoutGlyph) -> GlyphonColor,
 ) -> ControlFlow<()> {
     // The layout's hit-testing and carets already include this shift.
@@ -123,6 +155,7 @@ fn visit_layout_glyphs(
     let bounds = text_bounds(clip);
     let mut reached = false;
     for run in layout.buffer().layout_runs() {
+        rows.offset(run.line_top);
         let start = (top + run.line_top) as i32;
         let end = start + run.line_height as i32;
         if !(start <= bounds.bottom && bounds.top <= end) {
@@ -135,6 +168,8 @@ fn visit_layout_glyphs(
         reached = true;
         let line_y = run.line_y.round() as i32;
         for glyph in run.glyphs {
+            // What `physical` adds `top` to, before truncating.
+            rows.offset(glyph.y - glyph.font_size * glyph.y_offset);
             // The buffer is already shaped at physical size.
             let physical = glyph.physical((left, top), 1.0);
             visit(PositionedGlyph {
@@ -147,6 +182,112 @@ fn visit_layout_glyphs(
         }
     }
     ControlFlow::Continue(())
+}
+
+/// Hears the vertical offsets [`visit_layout_glyphs`] places rows at.
+trait RowSink {
+    fn offset(&mut self, offset: f32);
+    fn end_text(&mut self);
+}
+
+impl RowSink for () {
+    fn offset(&mut self, _: f32) {}
+    fn end_text(&mut self) {}
+}
+
+/// Per text of a run whose glyphs were visited, the distinct vertical
+/// offsets the visit added to the text's top: every line top it checked
+/// against the clip and every glyph's own offset. A glyph's row is that
+/// sum truncated, so these decide exactly where the same texts land
+/// when only their top changes, without visiting a glyph.
+#[derive(Debug, Default)]
+pub(super) struct RowOffsets {
+    offsets: Vec<f32>,
+    /// Per text, the end of its offsets.
+    ends: Vec<u32>,
+}
+
+impl RowSink for RowOffsets {
+    fn offset(&mut self, offset: f32) {
+        let start = self.ends.last().map_or(0, |&end| end as usize);
+        // Most glyphs share their line's offset; sort the rest out at the
+        // end of the text.
+        if self.offsets[start..].last().map(|o| o.to_bits()) != Some(offset.to_bits()) {
+            self.offsets.push(offset);
+        }
+    }
+
+    fn end_text(&mut self) {
+        let start = self.ends.last().map_or(0, |&end| end as usize);
+        let mine = &mut self.offsets[start..];
+        mine.sort_unstable_by(f32::total_cmp);
+        let len = start + dedup_bits(mine);
+        self.offsets.truncate(len);
+        self.ends.push(len as u32);
+    }
+}
+
+/// Move the distinct values (by bits) of sorted `values` to its front and
+/// return how many there are.
+fn dedup_bits(values: &mut [f32]) -> usize {
+    let mut len = 0;
+    for i in 0..values.len() {
+        if len == 0 || values[len - 1].to_bits() != values[i].to_bits() {
+            values[len] = values[i];
+            len += 1;
+        }
+    }
+    len
+}
+
+impl RowOffsets {
+    pub(super) fn clear(&mut self) {
+        self.offsets.clear();
+        self.ends.clear();
+    }
+
+    /// Whether text `index` of the visited run, placed at `was` and
+    /// clipped to `was_clip`, then at `now` and clipped to `now_clip`
+    /// with the same layout and colors, places exactly the same glyphs
+    /// `dy` pixels lower: the same left edge, so the same columns and
+    /// subpixel bins; every row offset lands `dy` lower once truncated,
+    /// so the same lines pass the clip and every glyph's row moves by
+    /// `dy`; and clip bounds moved by `dy`, inside `(width, height)` both
+    /// times so glyphon's clamp to the viewport changes none.
+    pub(super) fn moved_down(
+        &self,
+        index: usize,
+        (was, was_clip): (Rect, Rect),
+        (now, now_clip): (Rect, Rect),
+        dy: i32,
+        (width, height): (u32, u32),
+    ) -> bool {
+        let Some(&end) = self.ends.get(index) else {
+            return false;
+        };
+        let start = index.checked_sub(1).map_or(0, |i| self.ends[i]);
+        let (before, after) = (text_bounds(was_clip), text_bounds(now_clip));
+        let (width, height) = (width as i32, height as i32);
+        let inside =
+            |b: TextBounds| b.left >= 0 && b.top >= 0 && b.right <= width && b.bottom <= height;
+        // Rows far from the target could saturate or overflow on the way.
+        const LIMIT: u32 = 1 << 30;
+        was.x.to_bits() == now.x.to_bits()
+            && after.left == before.left
+            && after.right == before.right
+            && i64::from(after.top) == i64::from(before.top) + i64::from(dy)
+            && i64::from(after.bottom) == i64::from(before.bottom) + i64::from(dy)
+            && inside(before)
+            && inside(after)
+            && self.offsets[start as usize..end as usize]
+                .iter()
+                .all(|&offset| {
+                    let (a, b) = ((was.y + offset) as i32, (now.y + offset) as i32);
+                    a.unsigned_abs() < LIMIT
+                        && b.unsigned_abs() < LIMIT
+                        && i64::from(b) == i64::from(a) + i64::from(dy)
+                })
+    }
 }
 
 /// Builds glyphon areas straight from the shaped layouts; nothing is shaped
