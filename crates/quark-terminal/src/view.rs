@@ -17,8 +17,9 @@ use quark_text::{TextQuery, TextSpan};
 use quark_ui::Action;
 use quark_ui::accessibility::{AccessibilityNode, AccessibleText};
 use quark_ui::element::{
-    AnyElement, Bounds, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult, Element,
-    ElementContext, IntoAnyElement, LayoutEngine, LayoutId, cached, canvas, div, inputs_hash,
+    AnyElement, Bounds, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult,
+    DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId, cached, canvas,
+    div, inputs_hash,
 };
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
@@ -69,9 +70,14 @@ pub fn terminal_view(
         palette,
         on_event as usize,
     ));
+    let drag = state.drag_start(on_event as usize, || {
+        DragStart::new(move |press: ClickEvent| {
+            Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
+        })
+    });
     let (grid_frame, rows_grid) = (frame.clone(), grid.clone());
     let content = cached(frame.id, hash, move || {
-        build(&grid_frame, &rows_grid, screen, top, palette, on_event)
+        build(&grid_frame, &rows_grid, screen, top, palette, drag)
     })
     .w(width)
     .h(height);
@@ -124,7 +130,7 @@ fn build(
     screen: Option<(Arc<str>, usize)>,
     top: f32,
     palette: Palette,
-    on_event: fn(TerminalEvent) -> Action,
+    drag: DragStart,
 ) -> AnyElement {
     let (width, height) = frame.viewport;
     let m = frame.metrics;
@@ -140,14 +146,22 @@ fn build(
         .h(grid_h)
         .flex_col()
         .cursor(CursorHint::Text)
-        .on_drag(move |press: ClickEvent| {
-            Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
-        });
+        .on_drag_start(drag);
+    // Rows that repeat (blank lines) share a hash; the occurrence keeps
+    // their cache keys apart, and the terminal's id keeps them apart from
+    // another terminal's rows. Sorting by hash finds each row's occurrence
+    // without comparing every pair.
+    let mut by_hash: Vec<usize> = (0..grid.rows.len()).collect();
+    by_hash.sort_unstable_by_key(|&i| (grid.rows[i].hash, i));
+    let mut nth = vec![0u64; grid.rows.len()];
+    for pair in by_hash.windows(2) {
+        if grid.rows[pair[0]].hash == grid.rows[pair[1]].hash {
+            nth[pair[1]] = nth[pair[0]] + 1;
+        }
+    }
+    let terminal = quark::stable_hash(frame.id);
     for (i, row) in grid.rows.iter().enumerate() {
-        // Rows that repeat (blank lines) share a hash; the occurrence keeps
-        // their cache keys apart.
-        let nth = grid.rows[..i].iter().filter(|r| r.hash == row.hash).count() as u64;
-        let key = CacheKey(row.hash ^ (nth + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let key = CacheKey(inputs_hash(&(terminal, row.hash, nth[i])));
         let grid = grid.clone();
         let hash = inputs_hash(&(row.hash, grid.colors, m.cell_w.to_bits(), palette));
         rows = rows.child(

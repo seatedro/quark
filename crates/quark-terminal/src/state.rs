@@ -8,7 +8,7 @@ use quark_render::FontKind;
 use quark_render::scene::Rect;
 use quark_text::{LayoutCache, TextParams, TextStyle, TextSystem};
 use quark_ui::FocusId;
-use quark_ui::element::ScrollHandle;
+use quark_ui::element::{DragStart, ScrollHandle};
 use quark_ui::theme::Theme;
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -206,6 +206,9 @@ pub struct TerminalState {
     nonce: u64,
     /// The rows block's bounds in the window as of the last frame.
     bounds: Rc<Cell<Rect>>,
+    /// The rows' drag start for the view's `on_event` (by address), kept so
+    /// a rebuilt frame registers it without allocating.
+    drag_start: Option<(usize, DragStart)>,
     drag: Option<SelectDrag>,
     last_click: Option<(u64, (u16, u16), u8)>,
     modifiers: ModifiersState,
@@ -259,6 +262,7 @@ impl TerminalState {
             pending_scroll: false,
             nonce: 0,
             bounds: Rc::default(),
+            drag_start: None,
             drag: None,
             last_click: None,
             modifiers: ModifiersState::empty(),
@@ -964,6 +968,14 @@ impl TerminalState {
 
     pub(crate) fn bounds_cell(&self) -> Rc<Cell<Rect>> {
         self.bounds.clone()
+    }
+
+    /// The drag start kept for `key`, made by `make` when there is none.
+    pub(crate) fn drag_start(&mut self, key: usize, make: impl FnOnce() -> DragStart) -> DragStart {
+        match &self.drag_start {
+            Some((k, start)) if *k == key => start.clone(),
+            _ => self.drag_start.insert((key, make())).1.clone(),
+        }
     }
 }
 
