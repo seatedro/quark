@@ -134,8 +134,6 @@ pub(crate) struct HeadlessRunner {
     open_failures: usize,
     /// The scale factor windows open at.
     open_scale: f64,
-    /// The window drawn last.
-    last_drawn: Option<WindowHandle>,
     /// Open windows from bottom to top. Opening and focusing raise.
     stack: Vec<WindowHandle>,
     /// Where the desktop pointer is, once a test moved it there.
@@ -188,7 +186,6 @@ impl HeadlessRunner {
             capabilities: PlatformCapabilities::DESKTOP,
             open_failures: 0,
             open_scale: scale_factor,
-            last_drawn: None,
             stack: vec![main],
             desktop_pointer: None,
             hovered: None,
@@ -229,12 +226,6 @@ impl HeadlessRunner {
             WindowEntry::Virtual(virtual_window) => Some(virtual_window),
             _ => None,
         }
-    }
-
-    /// The window drawn last: the one a UI adapter keeping a single
-    /// window's state holds the state of.
-    pub(crate) fn last_drawn(&self) -> Option<WindowHandle> {
-        self.last_drawn
     }
 
     /// The earliest frame requested of any window, in ms since launch.
@@ -646,9 +637,6 @@ impl HeadlessRunner {
         if self.focused == Some(window) {
             self.focused = None;
         }
-        if self.last_drawn == Some(window) {
-            self.last_drawn = None;
-        }
         for held in [&mut self.hovered, &mut self.grab] {
             if *held == Some(window) {
                 *held = None;
@@ -748,7 +736,6 @@ impl HeadlessRunner {
         self.text.end_frame();
         virtual_window.frames_drawn += 1;
         let previous = std::mem::replace(&mut virtual_window.scene, scene);
-        self.last_drawn = Some(window);
         app.recycle_scene(window, previous);
         self.queue_requested_frames(true);
         true
