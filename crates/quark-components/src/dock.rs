@@ -1,29 +1,42 @@
 //! Docked regions of tabbed panels around a center, built on [`Split`].
 //!
-//! A [`DockState`] has four regions: left, right, and bottom docks that can
-//! be resized and hidden, and a center that fills the rest. Each region
-//! holds a [`PaneNode`] tree of tab groups, each an ordered list of
-//! app-defined [`PanelId`]s with one active. Click a tab to select and
-//! focus it, close it with its close button or a middle click, or move
-//! between tabs with the arrow keys. The dividers between split groups
-//! move with the pointer, the arrow keys (Shift for larger steps), or
-//! assistive tech setting their value.
+//! A [`DockState`] is a workspace of hosts. Its main host has four regions:
+//! left, right, and bottom docks that can be resized and hidden, and a
+//! center that fills the rest. Each region holds a [`PaneNode`] tree of tab
+//! groups, each an ordered list of app-defined [`PanelId`]s with one active.
+//! Floating hosts (one per extra window the app opens) each hold a single
+//! tree. Click a tab to select and focus it, close it with its close button
+//! or a middle click, or move between tabs with the arrow keys. The dividers
+//! between split groups move with the pointer, the arrow keys (Shift for
+//! larger steps), or assistive tech setting their value.
 //!
 //! Tabs drag anywhere: into a group's tab strip to reorder or move them,
 //! onto a group's body to join it, or onto one of its edges to split the
 //! group and open the tab beside it. While a tab is dragged it follows the
 //! pointer and the dock shows where it would land; a cancelled drag
 //! (Escape through the app, or the window losing focus) leaves it where it
-//! was. Apps constrain this per region with a [`TabPolicy`] (a region
-//! whose tabs stay in it, or that takes no tabs from elsewhere) and per
-//! panel with [`DockState::confine`].
+//! was. Apps constrain this per area, a region of the main host or a whole
+//! floating host, with a [`TabPolicy`] (an area whose tabs stay in it, or
+//! that takes no tabs from elsewhere) and per panel with
+//! [`DockState::confine`].
+//!
+//! Every move, whether a drop, a keyboard move, a group move, a move to a
+//! new window, or re-docking a closed window's panels, goes through one
+//! checked operation ([`DockState::prepare`] and [`DockState::commit`]) and
+//! reports what the app should do next as [`DockEffects`]. A drag can
+//! also tear a tab or group off live into a window of its own
+//! ([`DockState::begin_live_detach`]) and then drop, keep, or cancel it.
+//! The dock knows
+//! nothing about windows: the app binds each floating [`HostId`] to one and
+//! renders it with [`Dock::host`].
 //!
 //! The dock knows nothing about what panels are: the app gives each one a
 //! title and builds the active ones' content. Like [`Split`], it emits
 //! [`DockEvent`]s through a caller supplied mapping, and the app passes them
-//! back to [`DockState::apply`]. [`DockState::snapshot`] persists sizes,
-//! visibility, and the tab groups.
+//! back to [`DockState::apply`]. [`DockState::workspace_snapshot`] persists
+//! sizes, visibility, the tab groups, and floating hosts.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use accesskit::Role;
@@ -47,6 +60,22 @@ use crate::pane_tree::{
 use crate::split::{
     Axis, DIVIDER_THICKNESS, NUDGE_STEP, NUDGE_STEP_LARGE, Pane, Split, SplitEvent, SplitSnapshot,
     SplitState,
+};
+
+mod live;
+mod persist;
+#[cfg(test)]
+mod tests_workspace;
+mod workspace;
+
+use live::LiveDetach;
+pub use persist::{
+    FloatingSnapshot, ReturnSnapshot, StoredDock, WORKSPACE_VERSION, WorkspaceSnapshot,
+};
+use workspace::FloatingHost;
+pub use workspace::{
+    Boundary, DockDestination, DockEffects, DockLocation, HostId, MovePayload, MoveTarget,
+    Transfer, TransferRefusal,
 };
 
 /// An app-chosen panel identity. Persisted, so keep values stable.
@@ -87,13 +116,14 @@ pub enum DockSplit {
     Rows,
 }
 
-/// Which tab moves a region allows across its boundary. Moves inside a
-/// region, splits included, are always allowed.
+/// Which tab moves an area (a main host region, or a floating host)
+/// allows across its boundary. Moves inside an area, splits included, are
+/// always allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabPolicy {
-    /// Its tabs may be dragged into other regions.
+    /// Its tabs may be dragged into other areas.
     pub can_leave: bool,
-    /// Tabs from other regions may be dropped into it.
+    /// Tabs from other areas may be dropped into it.
     pub accepts: bool,
 }
 
@@ -180,19 +210,38 @@ pub enum DockEvent {
         destination: PaneId,
         index: Option<usize>,
     },
+    /// Move a panel or a whole group to `destination`, in any host: a
+    /// "Move group to" command, or a drop routed between windows. Checked
+    /// when applied; see [`DockState::transfer`].
+    Transfer {
+        payload: MovePayload,
+        destination: DockDestination,
+    },
+    /// "Move to new window" and "Move group to new window": reserve a
+    /// floating host for the payload ([`DockState::reserve_host`]). The
+    /// outcome's [`DockEffects::create_host`] names the host to open a
+    /// window for; the panels stay where they are until
+    /// [`DockState::commit_host`].
+    MoveToNewHost(MovePayload),
 }
 
 /// What [`DockState::apply_event`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DockOutcome {
     /// The change is settled and worth persisting.
     pub settled: bool,
-    /// Where a [`DockEvent::MoveTab`] put its tab; `None` when it was
-    /// refused or the event was another kind.
+    /// Where a [`DockEvent::MoveTab`] or [`DockEvent::Transfer`] put its
+    /// tab (a group's active one); `None` when it was refused or the event
+    /// was another kind.
     pub moved: Option<TabMove>,
     /// The group a [`DockEvent::Select`] (a tab clicked, pressed to drag,
     /// or activated by assistive tech) made a tab active in.
     pub selected: Option<PaneId>,
+    /// What a move, close, or new host reservation asks of the app.
+    pub effects: DockEffects,
+    /// Why a [`DockEvent::Transfer`] or [`DockEvent::MoveToNewHost`] was
+    /// refused.
+    pub refused: Option<TransferRefusal>,
 }
 
 impl DockOutcome {
@@ -211,6 +260,7 @@ impl DockOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TabMove {
     pub panel: PanelId,
+    pub host: HostId,
     pub region: DockRegion,
     pub pane: PaneId,
 }
@@ -240,7 +290,8 @@ impl Default for DockLayout {
     }
 }
 
-/// The persisted part of a [`DockState`].
+/// The persisted part of a [`DockState`]'s main host: the format before
+/// floating hosts, and the main host inside a [`WorkspaceSnapshot`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DockSnapshot {
     pub columns: SplitSnapshot,
@@ -253,7 +304,7 @@ pub struct DockSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockIntegrityError {
-    /// A panel shows in more than one tab.
+    /// A panel shows in more than one tab, in any host.
     DuplicatePanel(PanelId),
     /// Two nodes share an id, or one is not below the next fresh id.
     PaneIds,
@@ -264,6 +315,16 @@ pub enum DockIntegrityError {
     SplitShape(PaneId),
     /// A group's active index is past its tabs.
     Active(PaneId),
+    /// A floating host is the main host's id, shares another's id, or is
+    /// not below the next fresh host id; a reservation names an existing
+    /// host; or a live tear-off names none, or one another does.
+    HostIds(HostId),
+    /// A floating host has no panels.
+    EmptyHost(HostId),
+    /// The panel lookup disagrees with the trees about this panel.
+    Index(PanelId),
+    /// A return location kept for a panel that is not in a floating host.
+    ReturnLocation(PanelId),
 }
 
 /// Smallest a group gets when a divider between groups is dragged.
@@ -290,8 +351,39 @@ struct Origin {
     count: usize,
 }
 
-/// Whether a tab from `from` may land on `target` in `to`. The single rule
-/// both [`DockState::can_drop`] and a drag in progress use.
+/// Why tabs may not cross from an area with policy `leave` to one with
+/// `enter`; `confined` when one of them is [`DockState::confine`]d. The
+/// single boundary rule for drops, keyboard moves, group moves, new hosts,
+/// and re-docking.
+fn crossing_refusal(leave: TabPolicy, enter: TabPolicy, confined: bool) -> Option<Boundary> {
+    if confined {
+        Some(Boundary::Confined)
+    } else if !leave.can_leave {
+        Some(Boundary::CannotLeave)
+    } else if !enter.accepts {
+        Some(Boundary::NotAccepted)
+    } else {
+        None
+    }
+}
+
+/// Whether dropping a tab from `from`'s group, `count` tabs with it at
+/// `index`, on `target` leaves the layout as it is.
+fn drop_is_noop(pane: PaneId, index: usize, count: usize, target: PaneDrop) -> bool {
+    if pane != target.pane {
+        return false;
+    }
+    match target.zone {
+        DropZone::Center => true,
+        DropZone::Tabs(i) => i.min(count - 1) == index,
+        // Splitting a group off its only tab would leave it empty.
+        _ => count <= 1,
+    }
+}
+
+/// Whether a tab from `from` may land on `target` in `to`, both in the
+/// host whose regions have `policies`: what a drag in progress shows. The
+/// drop itself is checked again by [`DockState::prepare`].
 fn drop_allowed(
     policies: &[TabPolicy; 4],
     confined: bool,
@@ -300,19 +392,16 @@ fn drop_allowed(
     target: PaneDrop,
 ) -> bool {
     if from.region != to
-        && (confined || !policies[from.region.index()].can_leave || !policies[to.index()].accepts)
+        && crossing_refusal(
+            policies[from.region.index()],
+            policies[to.index()],
+            confined,
+        )
+        .is_some()
     {
         return false;
     }
-    if from.pane != target.pane {
-        return true;
-    }
-    match target.zone {
-        DropZone::Center => false,
-        DropZone::Tabs(i) => i.min(from.count - 1) != from.index,
-        // Splitting a group off its only tab would leave it empty.
-        _ => from.count > 1,
-    }
+    !drop_is_noop(from.pane, from.index, from.count, target)
 }
 
 /// The drop a [`DockEvent::MoveTab`] makes.
@@ -323,19 +412,35 @@ fn move_drop(pane: PaneId, index: Option<usize>) -> PaneDrop {
     }
 }
 
-/// Panels, sizes, and visibility of a dock, owned by the app.
+/// Panels, sizes, and visibility of a dock workspace, owned by the app.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DockState {
     columns: SplitState,
     rows: SplitState,
+    /// The main host's regions.
     roots: [PaneNode; 4],
     labels: [&'static str; 4],
     policies: [TabPolicy; 4],
+    /// Floating hosts in the order they were made.
+    floating: Vec<FloatingHost>,
+    /// Hosts reserved for a new window, with the move each waits on.
+    reservations: Vec<(HostId, Transfer)>,
+    /// Floating hosts a live tear-off made whose drag is still going, and
+    /// how to put their panels back.
+    live: Vec<LiveDetach>,
     confined: Vec<PanelId>,
-    /// Per region, the group last selected or dropped into: where
+    /// Per main host region, the group last selected or dropped into: where
     /// [`Self::open`] adds panels.
     recent: [PaneId; 4],
+    /// Where each docked panel is, and its tab index: the one lookup every
+    /// query goes through. Rebuilt from the trees after each change.
+    index: HashMap<PanelId, (DockLocation, usize)>,
+    /// For panels in floating hosts, the main host region, group, and tab
+    /// index they left from: where closing their host puts them back.
+    returns: HashMap<PanelId, (DockRegion, PaneId, usize)>,
     next_id: u32,
+    next_host: u64,
+    revision: u64,
     tab_drag: Option<(PanelId, Option<PaneDrop>)>,
     divider_drag: Option<(PaneId, usize, Vec<f32>)>,
 }
@@ -371,9 +476,16 @@ impl DockState {
                 layout.center_label,
             ],
             policies: [TabPolicy::OPEN; 4],
+            floating: Vec::new(),
+            reservations: Vec::new(),
+            live: Vec::new(),
             confined: Vec::new(),
             recent: [PaneId(0), PaneId(1), PaneId(2), PaneId(3)],
+            index: HashMap::new(),
+            returns: HashMap::new(),
             next_id: 4,
+            next_host: 1,
+            revision: 0,
             tab_drag: None,
             divider_drag: None,
         };
@@ -414,7 +526,7 @@ impl DockState {
         self.labels[region.index()]
     }
 
-    /// Constrain which tab moves cross `region`'s boundary.
+    /// Constrain which tab moves cross the main host `region`'s boundary.
     pub fn set_policy(&mut self, region: DockRegion, policy: TabPolicy) {
         self.policies[region.index()] = policy;
     }
@@ -423,8 +535,8 @@ impl DockState {
         self.policies[region.index()]
     }
 
-    /// Keep `panel` in whichever region it is in: it can still be
-    /// reordered and split off inside it.
+    /// Keep `panel` in whichever area (main host region, or floating host)
+    /// it is in: it can still be reordered and split off inside it.
     pub fn confine(&mut self, panel: PanelId, confined: bool) {
         self.confined.retain(|p| *p != panel);
         if confined {
@@ -432,42 +544,112 @@ impl DockState {
         }
     }
 
-    /// The region's tree of tab groups.
+    /// The main host region's tree of tab groups.
     pub fn root(&self, region: DockRegion) -> &PaneNode {
         &self.roots[region.index()]
     }
 
+    /// The tree of the area `(host, region)`: a main host region, or a
+    /// floating host's one tree, whose region is always
+    /// [`DockRegion::Center`].
+    pub fn area_root(&self, host: HostId, region: DockRegion) -> Option<&PaneNode> {
+        if host == HostId::MAIN {
+            return Some(&self.roots[region.index()]);
+        }
+        if region != DockRegion::Center {
+            return None;
+        }
+        self.floating_host(host).map(|h| &h.root)
+    }
+
+    fn area_root_mut(&mut self, host: HostId, region: DockRegion) -> Option<&mut PaneNode> {
+        if host == HostId::MAIN {
+            return Some(&mut self.roots[region.index()]);
+        }
+        if region != DockRegion::Center {
+            return None;
+        }
+        self.floating
+            .iter_mut()
+            .find(|h| h.id == host)
+            .map(|h| &mut h.root)
+    }
+
+    /// Every area and its tree: the main host's regions, then each
+    /// floating host in the order they were made.
+    fn areas(&self) -> impl Iterator<Item = (HostId, DockRegion, &PaneNode)> {
+        DockRegion::ALL
+            .into_iter()
+            .map(|r| (HostId::MAIN, r, &self.roots[r.index()]))
+            .chain(
+                self.floating
+                    .iter()
+                    .map(|h| (h.id, DockRegion::Center, &h.root)),
+            )
+    }
+
+    fn trees_mut(&mut self) -> impl Iterator<Item = &mut PaneNode> {
+        self.roots
+            .iter_mut()
+            .chain(self.floating.iter_mut().map(|h| &mut h.root))
+    }
+
+    /// The area holding the group or split `pane`.
+    fn area_of(&self, pane: PaneId) -> Option<(HostId, DockRegion)> {
+        self.areas()
+            .find(|(_, _, root)| root.group(pane).is_some() || root.split(pane).is_some())
+            .map(|(host, region, _)| (host, region))
+    }
+
+    /// The host holding the group or split `pane`.
+    pub fn host_of(&self, pane: PaneId) -> Option<HostId> {
+        self.area_of(pane).map(|(host, _)| host)
+    }
+
+    /// The tab policy of an area. A floating host is one area.
+    pub fn area_policy(&self, host: HostId, region: DockRegion) -> TabPolicy {
+        if host == HostId::MAIN {
+            self.policies[region.index()]
+        } else {
+            self.floating_host(host)
+                .map_or(TabPolicy::OPEN, |h| h.policy)
+        }
+    }
+
     pub fn group(&self, pane: PaneId) -> Option<&TabGroup> {
-        self.roots.iter().find_map(|root| root.group(pane))
+        self.areas().find_map(|(_, _, root)| root.group(pane))
     }
 
     fn group_mut(&mut self, pane: PaneId) -> Option<&mut TabGroup> {
-        self.roots.iter_mut().find_map(|root| root.group_mut(pane))
+        self.trees_mut().find_map(|root| root.group_mut(pane))
     }
 
-    fn region_of(&self, pane: PaneId) -> Option<DockRegion> {
-        DockRegion::ALL
-            .into_iter()
-            .find(|r| self.roots[r.index()].group(pane).is_some())
-    }
-
-    /// Where `panel` is: its region, group, and tab index.
+    /// Where `panel` is: its region, group, and tab index. A panel in a
+    /// floating host reports [`DockRegion::Center`]; [`Self::location`]
+    /// names its host too.
     pub fn locate(&self, panel: PanelId) -> Option<(DockRegion, PaneId, usize)> {
-        DockRegion::ALL.into_iter().find_map(|region| {
-            self.roots[region.index()]
-                .groups()
-                .into_iter()
-                .find_map(|g| {
-                    let index = g.panels.iter().position(|p| *p == panel)?;
-                    Some((region, g.id, index))
-                })
-        })
+        self.location(panel)
+            .map(|(at, index)| (at.region, at.pane, index))
     }
 
-    /// Every panel in a region, group by group.
+    /// Where `panel` is, in any host, and its tab index.
+    pub fn location(&self, panel: PanelId) -> Option<(DockLocation, usize)> {
+        self.index.get(&panel).copied()
+    }
+
+    /// Changes whenever panels, groups, hosts, or region visibility do: a
+    /// drop target computed from an older layout is stale.
+    pub fn layout_revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Every panel in a main host region, group by group.
     pub fn panels(&self, region: DockRegion) -> Vec<PanelId> {
-        self.roots[region.index()]
-            .groups()
+        Self::tree_panels(&self.roots[region.index()])
+    }
+
+    fn tree_panels(root: &PaneNode) -> Vec<PanelId> {
+        root.groups()
             .into_iter()
             .flat_map(|g| g.panels.iter().copied())
             .collect()
@@ -481,6 +663,14 @@ impl DockState {
             recent
         } else {
             root.groups()[0].id
+        }
+    }
+
+    fn set_recent(&mut self, host: HostId, region: DockRegion, pane: PaneId) {
+        if host == HostId::MAIN {
+            self.recent[region.index()] = pane;
+        } else if let Some(h) = self.floating.iter_mut().find(|h| h.id == host) {
+            h.recent = pane;
         }
     }
 
@@ -499,6 +689,15 @@ impl DockState {
         region == DockRegion::Center || !self.split(split).is_collapsed(pane)
     }
 
+    /// A shown main host region, or an existing floating host.
+    fn area_visible(&self, host: HostId, region: DockRegion) -> bool {
+        if host == HostId::MAIN {
+            self.is_visible(region)
+        } else {
+            self.floating_host(host).is_some()
+        }
+    }
+
     /// Size of a side region while shown, kept while hidden.
     pub fn size(&self, region: DockRegion) -> f32 {
         let (split, pane) = region.place();
@@ -509,6 +708,7 @@ impl DockState {
     pub fn set_visible(&mut self, region: DockRegion, visible: bool) {
         if !self.panels(region).is_empty() {
             self.set_hidden(region, !visible);
+            self.changed();
         }
     }
 
@@ -516,84 +716,133 @@ impl DockState {
         self.set_visible(region, !self.is_visible(region));
     }
 
-    /// Make `panel` active where it is, or add it at the end of the
-    /// region's most recently used group. Shows its region.
+    /// Make `panel` active where it is, or add it at the end of the main
+    /// host region's most recently used group. Shows its region.
     pub fn open(&mut self, region: DockRegion, panel: PanelId) {
-        let (region, pane, index) = match self.locate(panel) {
-            Some(found) => found,
+        let (host, region, pane, index) = match self.location(panel) {
+            Some((at, index)) => (at.host, at.region, at.pane, index),
             None => {
                 let pane = self.recent_group(region);
                 let group = self.group_mut(pane).expect("recent group exists");
                 group.panels.push(panel);
-                (region, pane, group.panels.len() - 1)
+                (HostId::MAIN, region, pane, group.panels.len() - 1)
             }
         };
+        if host == HostId::MAIN {
+            self.set_hidden(region, false);
+        }
+        self.changed();
         self.select(pane, index);
-        self.set_hidden(region, false);
-        self.debug_verify();
     }
 
     pub fn select(&mut self, pane: PaneId, index: usize) {
-        let Some(region) = self.region_of(pane) else {
+        let Some((host, region)) = self.area_of(pane) else {
             return;
         };
         if let Some(group) = self.group_mut(pane)
             && index < group.panels.len()
         {
             group.active = index;
-            self.recent[region.index()] = pane;
+            self.set_recent(host, region, pane);
         }
     }
 
     /// Remove a panel. The neighbor after it becomes active (or before it,
-    /// at the end); an emptied group is removed, and a side region left
-    /// empty hides.
+    /// at the end); an emptied group is removed, a side region left empty
+    /// hides, and a floating host left empty is removed (see
+    /// [`Self::hosts`]).
     pub fn close(&mut self, pane: PaneId, index: usize) -> Option<PanelId> {
-        let region = self.region_of(pane)?;
-        let removed = self.group_mut(pane)?.remove(index)?;
-        self.confined.retain(|p| *p != removed);
-        self.settle(region);
-        Some(removed)
+        self.close_tab(pane, index).map(|(panel, _)| panel)
     }
 
-    /// Prune the region's tree after a removal and hide it when empty.
-    fn settle(&mut self, region: DockRegion) {
-        let i = region.index();
-        let placeholder = PaneNode::Tabs(TabGroup::new(self.roots[i].groups()[0].id));
-        let root = std::mem::replace(&mut self.roots[i], placeholder);
-        if let Some(pruned) = root.prune() {
-            self.roots[i] = pruned;
+    /// [`Self::close`], also naming a floating host it emptied.
+    fn close_tab(&mut self, pane: PaneId, index: usize) -> Option<(PanelId, Option<HostId>)> {
+        let (host, region) = self.area_of(pane)?;
+        let removed = self.group_mut(pane)?.remove(index)?;
+        self.confined.retain(|p| *p != removed);
+        self.returns.remove(&removed);
+        let emptied = self.settle(host, region).then_some(host);
+        self.changed();
+        Some((removed, emptied))
+    }
+
+    /// Prune an area's tree after a removal: a side region left empty
+    /// hides, and a floating host left empty is removed, returning true.
+    fn settle(&mut self, host: HostId, region: DockRegion) -> bool {
+        if host == HostId::MAIN {
+            let i = region.index();
+            let placeholder = PaneNode::Tabs(TabGroup::new(self.roots[i].groups()[0].id));
+            let root = std::mem::replace(&mut self.roots[i], placeholder);
+            if let Some(pruned) = root.prune() {
+                self.roots[i] = pruned;
+            }
+            if self.panels(region).is_empty() {
+                self.set_hidden(region, true);
+            }
+            return false;
         }
-        if self.panels(region).is_empty() {
-            self.set_hidden(region, true);
+        let Some(at) = self.floating.iter().position(|h| h.id == host) else {
+            return false;
+        };
+        let placeholder = PaneNode::Tabs(TabGroup::new(self.floating[at].root.id()));
+        let root = std::mem::replace(&mut self.floating[at].root, placeholder);
+        match root.prune() {
+            Some(pruned) => {
+                self.floating[at].root = pruned;
+                false
+            }
+            None => {
+                self.floating.remove(at);
+                true
+            }
         }
+    }
+
+    /// After any change to panels, groups, hosts, or visibility: a new
+    /// revision, the panel lookup rebuilt, and (in debug builds) every
+    /// invariant checked.
+    fn changed(&mut self) {
+        // A tear-off whose host is gone, its panels moved out, is over.
+        let floating = &self.floating;
+        self.live
+            .retain(|l| floating.iter().any(|h| h.id == l.host));
+        self.revision += 1;
+        self.index = self.build_index();
         self.debug_verify();
     }
 
-    fn origin(&self, panel: PanelId) -> Option<Origin> {
-        let (region, pane, index) = self.locate(panel)?;
-        let count = self.group(pane)?.panels.len();
-        Some(Origin {
-            region,
-            pane,
-            index,
-            count,
+    fn build_index(&self) -> HashMap<PanelId, (DockLocation, usize)> {
+        let mut index = HashMap::new();
+        for (host, region, root) in self.areas() {
+            for group in root.groups() {
+                for (i, &panel) in group.panels.iter().enumerate() {
+                    let at = DockLocation {
+                        host,
+                        region,
+                        pane: group.id,
+                    };
+                    index.entry(panel).or_insert((at, i));
+                }
+            }
+        }
+        index
+    }
+
+    /// The destination a drop on `target` names: its group's host.
+    fn drop_destination(&self, target: PaneDrop) -> Option<DockDestination> {
+        let host = self.host_of(target.pane)?;
+        Some(DockDestination {
+            host,
+            pane: target.pane,
+            zone: target.zone,
         })
     }
 
     /// Whether dropping `panel` on `target` would move it, under the
-    /// regions' [`TabPolicy`]s and [`Self::confine`].
+    /// areas' [`TabPolicy`]s and [`Self::confine`].
     pub fn can_drop(&self, panel: PanelId, target: PaneDrop) -> bool {
-        let (Some(from), Some(to)) = (self.origin(panel), self.region_of(target.pane)) else {
-            return false;
-        };
-        drop_allowed(
-            &self.policies,
-            self.confined.contains(&panel),
-            from,
-            to,
-            target,
-        )
+        self.drop_destination(target)
+            .is_some_and(|d| self.prepare(MovePayload::Panel(panel), d).is_ok())
     }
 
     /// Move `panel` to `target`: reorder it in its strip, move it into
@@ -601,45 +850,20 @@ impl DockState {
     /// on that side. Returns false, changing nothing, when
     /// [`Self::can_drop`] refuses.
     pub fn drop_panel(&mut self, panel: PanelId, target: PaneDrop) -> bool {
-        if !self.can_drop(panel, target) {
-            return false;
-        }
-        let (Some(from), Some(to)) = (self.origin(panel), self.region_of(target.pane)) else {
-            return false;
-        };
-        if let Some(group) = self.group_mut(from.pane) {
-            group.remove(from.index);
-        }
-        match target.zone.edge() {
-            None => {
-                let index = match target.zone {
-                    DropZone::Tabs(i) => i,
-                    _ => usize::MAX,
-                };
-                if let Some(group) = self.group_mut(target.pane) {
-                    group.insert(index, panel);
-                }
-                self.recent[to.index()] = target.pane;
-            }
-            Some((axis, first)) => {
-                let mut group = TabGroup::new(self.fresh_id());
-                group.panels.push(panel);
-                let new_group = group.id;
-                let split_id = self.fresh_id();
-                self.roots[to.index()].insert_beside(target.pane, axis, first, group, split_id);
-                self.recent[to.index()] = new_group;
-            }
-        }
-        self.settle(from.region);
-        if to != from.region {
-            self.settle(to);
-        }
-        true
+        self.drop_destination(target)
+            .is_some_and(|d| self.transfer(MovePayload::Panel(panel), d).is_ok())
     }
 
-    /// Every group of the shown regions, in tree order: left, center,
-    /// bottom, right, and within a region its groups in reading order.
-    fn shown_groups(&self) -> Vec<PaneId> {
+    /// Every group of `host` that is shown, in tree order: for the main
+    /// host left, center, bottom, right, and within a region its groups in
+    /// reading order.
+    fn shown_groups(&self, host: HostId) -> Vec<PaneId> {
+        if host != HostId::MAIN {
+            return self
+                .floating_host(host)
+                .map(|h| h.root.groups().iter().map(|g| g.id).collect())
+                .unwrap_or_default();
+        }
         TREE_ORDER
             .into_iter()
             .filter(|r| self.is_visible(*r))
@@ -648,28 +872,32 @@ impl DockState {
     }
 
     /// Whether [`Self::move_tab`] would move `panel`: `destination` is in
-    /// a shown region and [`Self::can_drop`] allows it.
+    /// a shown area and [`Self::can_drop`] allows it.
     pub fn can_move(&self, panel: PanelId, destination: PaneId, index: Option<usize>) -> bool {
-        self.region_of(destination)
-            .is_some_and(|r| self.is_visible(r))
+        self.area_of(destination)
+            .is_some_and(|(h, r)| self.area_visible(h, r))
             && self.can_drop(panel, move_drop(destination, index))
     }
 
-    /// The groups `panel` can move into whole, in tree order: every shown
-    /// group but its own that takes it. What a "Move to group" menu lists.
+    /// The groups `panel` can move into whole, in tree order, the main
+    /// host's then each floating host's: every shown group but its own
+    /// that takes it. What a "Move to group" menu lists;
+    /// [`Self::move_options`] adds new windows and group moves.
     pub fn move_targets(&self, panel: PanelId) -> Vec<PaneId> {
-        self.shown_groups()
-            .into_iter()
+        std::iter::once(HostId::MAIN)
+            .chain(self.hosts())
+            .flat_map(|host| self.shown_groups(host))
             .filter(|&pane| self.can_move(panel, pane, None))
             .collect()
     }
 
     /// The nearest group before (or with `forward`, after) `panel`'s own
-    /// in tree order that it can move into. Does not wrap around.
+    /// in its host's tree order that it can move into. Does not wrap
+    /// around, or leave the host.
     pub fn move_target(&self, panel: PanelId, forward: bool) -> Option<PaneId> {
-        let own = self.locate(panel)?.1;
-        let groups = self.shown_groups();
-        let at = groups.iter().position(|g| *g == own)?;
+        let (at, _) = self.location(panel)?;
+        let groups = self.shown_groups(at.host);
+        let at = groups.iter().position(|g| *g == at.pane)?;
         let eligible = |pane: &&PaneId| self.can_move(panel, **pane, None);
         if forward {
             groups[at + 1..].iter().find(eligible).copied()
@@ -687,12 +915,11 @@ impl DockState {
     }
 
     /// The panel whose tab has `focus`, a [`Dock::tab_focus`] target: the
-    /// active panel of that group.
+    /// active panel of that group, in any host.
     pub fn focused_panel(&self, focus: Option<FocusId>) -> Option<PanelId> {
         let focus = focus?;
-        self.roots
-            .iter()
-            .flat_map(PaneNode::groups)
+        self.areas()
+            .flat_map(|(_, _, root)| root.groups())
             .find(|g| Dock::tab_focus(g.id) == focus)?
             .active_panel()
     }
@@ -706,9 +933,8 @@ impl DockState {
     }
 
     fn split_weights(&self, split: PaneId) -> Option<Vec<f32>> {
-        self.roots
-            .iter()
-            .find_map(|r| r.split(split))
+        self.areas()
+            .find_map(|(_, _, r)| r.split(split))
             .map(|s| s.weights.clone())
     }
 
@@ -757,7 +983,7 @@ impl DockState {
         let min = divider_min(MIN_GROUP, avail, sizes.len());
         let (at, _, _) = divider_span(&sizes, min, divider);
         push_divider(&mut sizes, min, divider, delta(at));
-        if let Some(s) = self.roots.iter_mut().find_map(|r| r.split_mut(split)) {
+        if let Some(s) = self.trees_mut().find_map(|r| r.split_mut(split)) {
             s.weights = sizes.iter().map(|size| size / avail).collect();
         }
     }
@@ -772,11 +998,10 @@ impl DockState {
 
     /// Apply an event from the dock's element, like [`Self::apply`]. After
     /// a [`DockEvent::MoveTab`], focus [`DockOutcome::focus`] and announce
-    /// the destination.
+    /// the destination; after any move, act on [`DockOutcome::effects`].
     pub fn apply_event(&mut self, event: DockEvent, now_ms: u64) -> DockOutcome {
-        let mut moved = None;
-        let mut selected = None;
-        let settled = match event {
+        let mut outcome = DockOutcome::default();
+        outcome.settled = match event {
             DockEvent::Split(which, event) => self.split_mut(which).apply(event, now_ms),
             DockEvent::PaneDivider {
                 split,
@@ -793,10 +1018,17 @@ impl DockState {
             }
             DockEvent::Select { pane, index } => {
                 self.select(pane, index);
-                selected = self.group(pane).map(|g| g.id);
+                outcome.selected = self.group(pane).map(|g| g.id);
                 true
             }
-            DockEvent::Close { pane, index } => self.close(pane, index).is_some(),
+            DockEvent::Close { pane, index } => match self.close_tab(pane, index) {
+                Some((_, emptied)) => {
+                    outcome.effects.persist = true;
+                    outcome.effects.closed_hosts.extend(emptied);
+                    true
+                }
+                None => false,
+            },
             DockEvent::Toggle(region) => {
                 self.toggle(region);
                 true
@@ -807,32 +1039,73 @@ impl DockState {
             }
             DockEvent::TabDrop { panel, target } => {
                 self.tab_drag = None;
-                target.is_some_and(|t| self.drop_panel(panel, t))
+                let moved = target
+                    .and_then(|t| self.drop_destination(t))
+                    .and_then(|d| self.transfer(MovePayload::Panel(panel), d).ok());
+                if let Some(effects) = moved {
+                    outcome.effects = effects;
+                    true
+                } else {
+                    false
+                }
             }
             DockEvent::MoveTab {
                 panel,
                 destination,
                 index,
             } => {
-                let ok = self.move_tab(panel, destination, index);
-                if ok && let Some((region, pane, _)) = self.locate(panel) {
-                    moved = Some(TabMove {
-                        panel,
-                        region,
-                        pane,
-                    });
+                if self.can_move(panel, destination, index)
+                    && let Some(d) = self.drop_destination(move_drop(destination, index))
+                    && let Ok(effects) = self.transfer(MovePayload::Panel(panel), d)
+                {
+                    outcome.moved = self.tab_move(panel);
+                    outcome.effects = effects;
+                    true
+                } else {
+                    false
                 }
-                ok
+            }
+            DockEvent::Transfer {
+                payload,
+                destination,
+            } => match self.transfer(payload, destination) {
+                Ok(effects) => {
+                    outcome.moved = effects
+                        .destination
+                        .and_then(|d| self.group(d.pane)?.active_panel())
+                        .and_then(|p| self.tab_move(p));
+                    outcome.effects = effects;
+                    true
+                }
+                Err(refusal) => {
+                    outcome.refused = Some(refusal);
+                    false
+                }
+            },
+            DockEvent::MoveToNewHost(payload) => {
+                match self.reserve_host(payload) {
+                    Ok(host) => outcome.effects.create_host = Some(host),
+                    Err(refusal) => outcome.refused = Some(refusal),
+                }
+                false
             }
         };
         self.debug_verify();
-        DockOutcome {
-            settled,
-            moved,
-            selected,
-        }
+        outcome
     }
 
+    fn tab_move(&self, panel: PanelId) -> Option<TabMove> {
+        let (at, _) = self.location(panel)?;
+        Some(TabMove {
+            panel,
+            host: at.host,
+            region: at.region,
+            pane: at.pane,
+        })
+    }
+
+    /// The main host's layout, in the format from before floating hosts.
+    /// [`Self::workspace_snapshot`] saves the whole workspace.
     pub fn snapshot(&self) -> DockSnapshot {
         let [left, right, bottom, center] = self.roots.clone();
         DockSnapshot {
@@ -845,57 +1118,12 @@ impl DockState {
         }
     }
 
-    /// Restore a snapshot. Panels `keep` rejects (ones the app no longer
-    /// has) are dropped, and so are repeats; emptied groups are pruned and
-    /// regions left empty hide. Groups get fresh ids.
+    /// Restore a main host snapshot, closing every floating host. Panels
+    /// `keep` rejects (ones the app no longer has) are dropped, and so are
+    /// repeats; emptied groups are pruned and regions left empty hide.
+    /// Groups get fresh ids.
     pub fn restore(&mut self, snapshot: &DockSnapshot, keep: impl Fn(PanelId) -> bool) {
-        self.columns.restore(&snapshot.columns);
-        self.rows.restore(&snapshot.rows);
-        let saved = [
-            &snapshot.left,
-            &snapshot.right,
-            &snapshot.bottom,
-            &snapshot.center,
-        ];
-        let mut seen: Vec<PanelId> = Vec::new();
-        let mut next = 0;
-        for region in DockRegion::ALL {
-            let mut root = saved[region.index()].clone();
-            root.renumber(&mut next);
-            let ids: Vec<PaneId> = root.groups().iter().map(|g| g.id).collect();
-            for id in ids {
-                let Some(group) = root.group_mut(id) else {
-                    continue;
-                };
-                let active = group.active_panel();
-                let mut kept = Vec::with_capacity(group.panels.len());
-                for &p in &group.panels {
-                    if keep(p) && !seen.contains(&p) {
-                        seen.push(p);
-                        kept.push(p);
-                    }
-                }
-                group.panels = kept;
-                group.active = active
-                    .and_then(|a| group.panels.iter().position(|p| *p == a))
-                    .unwrap_or(0);
-            }
-            self.roots[region.index()] = root
-                .prune()
-                .unwrap_or_else(|| PaneNode::Tabs(TabGroup::new(PaneId(next))));
-            next += 1;
-        }
-        self.next_id = next;
-        self.recent = DockRegion::ALL.map(|r| self.roots[r.index()].groups()[0].id);
-        self.confined.retain(|p| seen.contains(p));
-        self.tab_drag = None;
-        self.divider_drag = None;
-        for region in DockRegion::ALL {
-            if self.panels(region).is_empty() {
-                self.set_hidden(region, true);
-            }
-        }
-        self.debug_verify();
+        self.restore_workspace(&WorkspaceSnapshot::from(snapshot.clone()), keep);
     }
 
     pub fn verify_integrity(&self) -> Result<(), DockIntegrityError> {
@@ -906,10 +1134,7 @@ impl DockState {
             ids: &mut Vec<PaneId>,
             panels: &mut Vec<PanelId>,
         ) -> Result<(), DockIntegrityError> {
-            let id = match node {
-                PaneNode::Tabs(g) => g.id,
-                PaneNode::Split(s) => s.id,
-            };
+            let id = node.id();
             if id.0 >= next_id || ids.contains(&id) {
                 return Err(DockIntegrityError::PaneIds);
             }
@@ -954,10 +1179,50 @@ impl DockState {
             }
             Ok(())
         }
+        // Pane ids and panels are unique across every host.
         let mut ids = Vec::new();
         let mut panels = Vec::new();
         for root in &self.roots {
             walk(root, true, self.next_id, &mut ids, &mut panels)?;
+        }
+        let mut hosts = Vec::new();
+        for host in &self.floating {
+            if host.id == HostId::MAIN || host.id.0 >= self.next_host || hosts.contains(&host.id) {
+                return Err(DockIntegrityError::HostIds(host.id));
+            }
+            hosts.push(host.id);
+            if Self::tree_panels(&host.root).is_empty() {
+                return Err(DockIntegrityError::EmptyHost(host.id));
+            }
+            walk(&host.root, true, self.next_id, &mut ids, &mut panels)?;
+        }
+        for (host, _) in &self.reservations {
+            if *host == HostId::MAIN || host.0 >= self.next_host || hosts.contains(host) {
+                return Err(DockIntegrityError::HostIds(*host));
+            }
+        }
+        for (i, live) in self.live.iter().enumerate() {
+            if !hosts.contains(&live.host) || self.live[..i].iter().any(|l| l.host == live.host) {
+                return Err(DockIntegrityError::HostIds(live.host));
+            }
+        }
+        let fresh = self.build_index();
+        if let Some(p) = panels
+            .iter()
+            .chain(self.index.keys())
+            .find(|p| fresh.get(p) != self.index.get(p))
+        {
+            return Err(DockIntegrityError::Index(*p));
+        }
+        // A return location's group may since have gone; re-docking then
+        // falls back to its region.
+        for &panel in self.returns.keys() {
+            if !fresh
+                .get(&panel)
+                .is_some_and(|(at, _)| at.host != HostId::MAIN)
+            {
+                return Err(DockIntegrityError::ReturnLocation(panel));
+            }
         }
         Ok(())
     }
@@ -966,9 +1231,9 @@ impl DockState {
         debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
 
-    /// Each region's tree as text, one line per region with panels:
+    /// Each area's tree as text, one line per area with panels:
     /// `right: row([10* 11] | col([12*] | [13*]))`, `*` marking the active
-    /// tab.
+    /// tab, then floating hosts as `host 1: [14*]`.
     #[cfg(test)]
     fn dump(&self) -> String {
         fn node(n: &PaneNode, out: &mut String) {
@@ -1008,6 +1273,11 @@ impl DockState {
             out.push_str(name);
             out.push_str(": ");
             node(self.root(region), &mut out);
+            out.push('\n');
+        }
+        for host in &self.floating {
+            out.push_str(&format!("host {}: ", host.id.0));
+            node(&host.root, &mut out);
             out.push('\n');
         }
         out
@@ -1082,6 +1352,7 @@ impl DragContext {
 /// Builds the element for a [`DockState`].
 pub struct Dock<'a> {
     state: &'a DockState,
+    host: HostId,
     handle: Option<ElementHandle>,
     size: (f32, f32),
     map: EventMap,
@@ -1101,6 +1372,7 @@ impl<'a> Dock<'a> {
     ) -> Self {
         Self {
             state,
+            host: HostId::MAIN,
             handle: None,
             size,
             map: Rc::new(on_event),
@@ -1117,6 +1389,14 @@ impl<'a> Dock<'a> {
     /// one dock gives each a handle.
     pub fn handle(mut self, handle: ElementHandle) -> Self {
         self.handle = Some(handle);
+        self
+    }
+
+    /// Build the floating host `host` instead of the main host: its tree
+    /// fills the dock, and every group shows its tabs so they can be
+    /// dragged. A host that no longer exists builds an empty dock.
+    pub fn host(mut self, host: HostId) -> Self {
+        self.host = host;
         self
     }
 
@@ -1170,15 +1450,26 @@ impl<'a> Dock<'a> {
     }
 
     /// A group shows tabs with more than one panel, when its region asks,
-    /// or when its region is split, so every group's tabs can be dragged.
+    /// when its region is split, or in a floating host, so every group's
+    /// tabs can be dragged.
     fn shows_tabs(&self, region: DockRegion, group: &TabGroup) -> bool {
-        group.panels.len() > 1
+        self.host != HostId::MAIN
+            || group.panels.len() > 1
             || self.always_tabs[region.index()]
             || matches!(self.state.root(region), PaneNode::Split(_))
     }
 
     fn tab_width_for(&self, width: f32, count: usize) -> f32 {
         self.tab_width.min(width / count.max(1) as f32).floor()
+    }
+
+    /// What assistive tech calls a region's tab lists and dividers.
+    fn area_label(&self, region: DockRegion) -> &'a str {
+        if self.host == HostId::MAIN {
+            self.state.label(region)
+        } else {
+            self.state.host_label(self.host)
+        }
     }
 
     /// Each shown region's rect inside the dock.
@@ -1215,6 +1506,9 @@ impl<'a> Dock<'a> {
         title: impl Fn(PanelId) -> String,
         mut content: impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
+        if self.host != HostId::MAIN {
+            return self.build_floating(theme, title, content);
+        }
         let state = self.state;
         let (width, height) = self.size;
         let rects = self.region_rects();
@@ -1289,6 +1583,60 @@ impl<'a> Dock<'a> {
                      on_key={(binding.clone(), (self.map)(DockEvent::Toggle(*r)))}
                  }>
                 {body}
+            </div>
+        }
+    }
+
+    /// A floating host: its one tree filling the dock.
+    fn build_floating(
+        self,
+        theme: &Theme,
+        title: impl Fn(PanelId) -> String,
+        mut content: impl FnMut(PanelId, (f32, f32)) -> AnyElement,
+    ) -> AnyElement {
+        let (width, height) = self.size;
+        let strip = Self::strip_height(theme);
+        let root = self.state.host_root(self.host);
+        let mut groups = Vec::new();
+        if let Some(root) = root {
+            root.layout(Rect::new(0.0, 0.0, width, height), &mut groups);
+        }
+        let hits = groups
+            .into_iter()
+            .filter_map(|(pane, rect)| {
+                let group = self.state.group(pane)?;
+                Some(GroupHit {
+                    pane,
+                    region: DockRegion::Center,
+                    rect,
+                    strip,
+                    tab_width: self.tab_width_for(rect.width, group.panels.len()),
+                })
+            })
+            .collect();
+        let drag = Rc::new(DragContext {
+            hits,
+            policies: [self.state.area_policy(self.host, DockRegion::Center); 4],
+            root: self.handle.map_or(DockRoot::Id, DockRoot::Handle),
+        });
+        let body = root.map(|root| {
+            self.node(
+                theme,
+                DockRegion::Center,
+                root,
+                (width, height),
+                &drag,
+                &title,
+                &mut content,
+            )
+        });
+        view! {
+            <div w={width} h={height} bg={theme.colors.background}
+                 @when {let Some(handle) = self.handle} { element_handle={handle} }
+                 @when {self.handle.is_none()} { id={DOCK_ID} }>
+                if let Some(body) = body {
+                    {body}
+                }
             </div>
         }
     }
@@ -1430,7 +1778,7 @@ impl<'a> Dock<'a> {
                      accessibility_role={Role::Splitter} role="separator"
                      aria-label={quark_ui::i18n::tr_args(
                          "quark-resize-named",
-                         [("name", self.state.label(region).into())],
+                         [("name", self.area_label(region).into())],
                      )}
                      aria-valuetext={format!("{percent:.0}%")}
                      accessibility_numeric={NumericValue {
@@ -1542,7 +1890,7 @@ impl<'a> Dock<'a> {
                  border_b={colors.border_variant}
                  accessibility_id={format!("dock:pane:{}:tabs", group.id.0)}
                  accessibility_role={Role::TabList} role="tablist"
-                 aria-label={self.state.label(region)} test_id="dock-tabs">
+                 aria-label={self.area_label(region)} test_id="dock-tabs">
                 for (index, &panel) in group.panels.iter().enumerate() {
                     {self.tab(theme, region, group, index, panel, (tab_width, height), drag, title)}
                 }
@@ -2088,6 +2436,7 @@ mod tests {
             outcome.moved,
             Some(TabMove {
                 panel: B,
+                host: HostId::MAIN,
                 region: DockRegion::Center,
                 pane: pane_of(&dock, CHAT),
             })
