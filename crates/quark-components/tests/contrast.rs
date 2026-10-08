@@ -239,7 +239,7 @@ fn composite(over: Color, under: Color) -> Color {
 
 /// An icon's color: its most opaque pixel, unpremultiplied.
 fn icon_color(rgba: &[u8]) -> Option<Color> {
-    let px = rgba.chunks_exact(4).max_by_key(|px| px[3])?;
+    let px = rgba.as_chunks::<4>().0.iter().max_by_key(|px| px[3])?;
     let un = |c: u8| (u16::from(c) * 255 / u16::from(px[3].max(1))).min(255) as u8;
     Some(Color::rgba(un(px[0]), un(px[1]), un(px[2]), 255))
 }
