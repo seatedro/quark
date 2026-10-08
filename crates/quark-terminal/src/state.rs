@@ -16,6 +16,7 @@ use winit::keyboard::{ModifiersState, NamedKey};
 
 use crate::grid::{Grid, Rgb};
 use crate::input::{self, KeyPress};
+use crate::metrics::{CellMetrics, FaceMetrics, MetricModifier};
 use crate::pty::{INPUT_QUEUE, Pty, PtyCommand, PtyEvent, PtyGeometry};
 use crate::view::RowText;
 use crate::vt::timed;
@@ -27,26 +28,60 @@ use crate::vt::{
 /// Clicks closer together than this count as a double or triple click.
 const MULTI_CLICK_MS: u64 = 400;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// How a terminal draws, with Ghostty's defaults and meanings: the cell is
+/// the font's advance by its line height, in whole device pixels.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TerminalStyle {
-    /// Monospace text size in points.
+    /// The font family by name; `None` uses the text system's monospace
+    /// family ([`quark_text::FontSettings::mono_family`]). Ghostty's
+    /// default, JetBrains Mono, is bundled.
+    pub font_family: Option<&'static str>,
+    /// Text size in points.
     pub font_size: f32,
-    /// Cell height as a multiple of the font size.
-    pub line_height: f32,
+    /// Grows or shrinks the cell from the font's line height, keeping the
+    /// text centered (Ghostty's `adjust-cell-height`).
+    pub adjust_cell_height: Option<MetricModifier>,
     /// Space around the grid, in points.
     pub padding: f32,
     pub scrollback_lines: usize,
+    /// Colors that replace the theme's.
+    pub colors: TerminalColors,
+    /// The least contrast ratio (1 to 21) text keeps against its
+    /// background; text below it turns black or white (Ghostty's
+    /// `minimum-contrast`). 1 changes nothing.
+    pub minimum_contrast: f32,
+    /// Embolden glyph outlines slightly (Ghostty's `font-thicken`).
+    pub font_thicken: bool,
 }
 
 impl Default for TerminalStyle {
     fn default() -> Self {
         Self {
+            font_family: None,
             font_size: 13.0,
-            line_height: 1.3,
+            adjust_cell_height: None,
             padding: 6.0,
             scrollback_lines: 10_000,
+            colors: TerminalColors::default(),
+            minimum_contrast: 1.0,
+            font_thicken: false,
         }
     }
+}
+
+/// Terminal colors that replace the theme's; `None` keeps the theme's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalColors {
+    pub foreground: Option<Rgb>,
+    pub background: Option<Rgb>,
+    pub cursor: Option<Rgb>,
+    /// The glyph under a block cursor; the background by default.
+    pub cursor_text: Option<Rgb>,
+    /// Drawn opaque under selected cells; a translucent accent by default.
+    pub selection_background: Option<Rgb>,
+    /// Entries of the 256-color palette by index (the 16 ANSI colors are
+    /// 0 to 15).
+    pub palette: Vec<(u8, Rgb)>,
 }
 
 /// Input from [`crate::terminal_view`], in window coordinates.
@@ -133,29 +168,57 @@ pub struct Preedit {
     pub revision: u64,
 }
 
-/// Cell and text sizes in logical points.
+/// Cell and text sizes: `cell` in device pixels, the rest in logical
+/// points (a cell is `cell.cell_width / scale` points wide).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Metrics {
     pub font_size: f32,
     pub cell_w: f32,
     pub cell_h: f32,
     pub pad: f32,
+    pub scale: f32,
+    pub cell: CellMetrics,
+    pub family: Option<&'static str>,
+    /// Extra advance after each glyph, in ems, so glyphs step by whole
+    /// cells.
+    pub letter_spacing: f32,
+    /// Device pixels from a cell's left edge to its glyph's origin, which
+    /// centers a glyph narrower than the rounded cell, as Ghostty does.
+    pub glyph_x: i32,
+    pub thicken: bool,
 }
 
 impl Metrics {
+    /// Text in the terminal's font. Its line height is the cell's; the
+    /// view moves each run so its baseline lands on the cell's.
     pub fn text_style(&self) -> TextStyle {
         TextStyle::new(self.font_size)
             .kind(FontKind::Mono)
+            .family(self.family)
             .line_height(self.cell_h)
+            .thicken(self.thicken)
+    }
+
+    /// Device pixels to logical points.
+    pub fn points(&self, px: i32) -> f32 {
+        px as f32 / self.scale
     }
 }
 
-/// Colors the view paints with besides the cells', from the theme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Colors the view paints with besides the cells', from the theme and the
+/// style.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Palette {
     pub selection: quark::Color,
     pub cursor: quark::Color,
+    /// The glyph under a block cursor; the background when `None`.
+    pub cursor_text: Option<quark::Color>,
     pub link: quark::Color,
+    /// See [`TerminalStyle::minimum_contrast`].
+    pub minimum_contrast: f32,
+    /// The terminal's default background, which minimum contrast holds
+    /// text against where a cell has none; the view sets it from the grid.
+    pub background: Rgb,
 }
 
 impl std::hash::Hash for Palette {
@@ -163,6 +226,9 @@ impl std::hash::Hash for Palette {
         for c in [self.selection, self.cursor, self.link] {
             [c.r, c.g, c.b, c.a].hash(state);
         }
+        self.cursor_text.map(|c| [c.r, c.g, c.b, c.a]).hash(state);
+        self.minimum_contrast.to_bits().hash(state);
+        self.background.hash(state);
     }
 }
 
@@ -322,10 +388,22 @@ impl TerminalState {
     }
 
     pub fn with_style(mut self, style: TerminalStyle) -> Self {
+        self.set_style(style);
+        self
+    }
+
+    /// Changes the style; the next [`Self::prepare`] remeasures the cell
+    /// and resizes the grid to match.
+    pub fn set_style(&mut self, style: TerminalStyle) {
         self.vt.set_scrollback_lines(style.scrollback_lines);
         self.style = style;
         self.metrics = None;
-        self
+        self.colors = None;
+        self.dirty = true;
+    }
+
+    pub fn style(&self) -> &TerminalStyle {
+        &self.style
     }
 
     /// Let programs write the clipboard with OSC 52. Off by default: any
@@ -415,12 +493,13 @@ impl TerminalState {
 
     fn geometry(&self) -> PtyGeometry {
         let m = self.metrics();
-        let scale = f32::from_bits(self.size.2).max(1.0);
         PtyGeometry {
             cols: self.size.0,
             rows: self.size.1,
-            pixel_width: (f32::from(self.size.0) * m.cell_w * scale) as u16,
-            pixel_height: (f32::from(self.size.1) * m.cell_h * scale) as u16,
+            pixel_width: (u32::from(self.size.0) * m.cell.cell_width).min(u32::from(u16::MAX))
+                as u16,
+            pixel_height: (u32::from(self.size.1) * m.cell.cell_height).min(u32::from(u16::MAX))
+                as u16,
         }
     }
 
@@ -780,8 +859,8 @@ impl TerminalState {
         let geometry = MouseGeometry {
             width: (b.width * scale) as u32,
             height: (b.height * scale) as u32,
-            cell_width: (m.cell_w * scale).round() as u32,
-            cell_height: (m.cell_h * scale).round() as u32,
+            cell_width: m.cell.cell_width,
+            cell_height: m.cell.cell_height,
         };
         let at = ((x - b.x) * scale, (y - b.y) * scale);
         let sent = self.vt.mouse(
@@ -923,16 +1002,49 @@ impl TerminalState {
     pub(crate) fn metrics(&self) -> Metrics {
         self.metrics.map_or_else(
             || {
-                let font_size = self.style.font_size;
-                Metrics {
-                    font_size,
-                    cell_w: font_size * 0.6,
-                    cell_h: (font_size * self.style.line_height).round(),
-                    pad: self.style.padding,
-                }
+                // Estimates until a frame measures the font: a typical
+                // monospace face's proportions at scale 1.
+                let px = f64::from(self.style.font_size);
+                let face = FaceMetrics {
+                    cell_width: px * 0.6,
+                    ascent: px * 0.95,
+                    descent: -px * 0.25,
+                    line_gap: 0.0,
+                    underline_position: None,
+                    underline_thickness: None,
+                    strikethrough_position: None,
+                    strikethrough_thickness: None,
+                    cap_height: None,
+                    ex_height: None,
+                };
+                self.measured(&face, 1.0, px * 0.6)
             },
             |(m, _)| m,
         )
+    }
+
+    /// The metrics of `face` at `scale`, whose glyphs advance `advance`
+    /// device pixels.
+    fn measured(&self, face: &FaceMetrics, scale: f32, advance: f64) -> Metrics {
+        let cell = CellMetrics::new(face, self.style.adjust_cell_height);
+        let px_per_em = f64::from(self.style.font_size * scale);
+        let cell_px = f64::from(cell.cell_width);
+        Metrics {
+            font_size: self.style.font_size,
+            cell_w: cell.cell_width as f32 / scale,
+            cell_h: cell.cell_height as f32 / scale,
+            pad: self.style.padding,
+            scale,
+            cell,
+            family: self.style.font_family,
+            letter_spacing: ((cell_px - advance) / px_per_em) as f32,
+            glyph_x: if advance < cell_px {
+                ((cell_px - advance) / 2.0).round() as i32
+            } else {
+                0
+            },
+            thicken: self.style.font_thicken,
+        }
     }
 
     /// Sizes the grid to the viewport, follows the scroll handle, and
@@ -952,26 +1064,35 @@ impl TerminalState {
         let key = (scale.to_bits(), Some(text.font_epoch()));
         let remeasured = self.metrics.is_none_or(|(_, k)| k != key);
         if remeasured {
-            let style = TextStyle::new(self.style.font_size).kind(FontKind::Mono);
-            let params = TextParams::new("0000000000", style).scale_factor(scale);
-            let cell_w = layouts
-                .layout(text, &params)
-                .map_or(self.style.font_size * 0.6, |l| l.size().0 / 10.0);
-            let mut m = self.metrics();
-            m.cell_w = cell_w;
+            self.metrics = None;
+            let m = self
+                .measure(text, layouts, scale)
+                .unwrap_or_else(|| self.metrics());
             self.metrics = Some((m, key));
             self.dirty = true;
         }
         let c = &theme.colors;
+        let custom = &self.style.colors;
         let colors = (
-            Rgb::new(c.text.r, c.text.g, c.text.b),
-            Rgb::new(c.editor_surface.r, c.editor_surface.g, c.editor_surface.b),
+            custom
+                .foreground
+                .unwrap_or(Rgb::new(c.text.r, c.text.g, c.text.b)),
+            custom.background.unwrap_or(Rgb::new(
+                c.editor_surface.r,
+                c.editor_surface.g,
+                c.editor_surface.b,
+            )),
             theme.mode,
         );
         if self.colors != Some(colors) {
             self.colors = Some(colors);
             self.vt.set_default_colors(colors.0, colors.1);
-            self.vt.set_ansi_colors(ansi_colors(theme.mode));
+            if custom.palette.is_empty() {
+                self.vt.set_ansi_colors(ansi_colors(theme.mode));
+            } else {
+                self.vt
+                    .set_palette(ansi_colors(theme.mode), &custom.palette);
+            }
             self.dirty = true;
         }
         let m = self.metrics();
@@ -983,12 +1104,8 @@ impl TerminalState {
             .max(1.0) as u16;
         if remeasured || (cols, rows, scale.to_bits()) != self.size {
             self.size = (cols, rows, scale.to_bits());
-            self.vt.resize(
-                cols,
-                rows,
-                (m.cell_w * scale).round() as u32,
-                (m.cell_h * scale).round() as u32,
-            );
+            self.vt
+                .resize(cols, rows, m.cell.cell_width, m.cell.cell_height);
             let geometry = self.geometry();
             if let Some(pty) = &mut self.pty {
                 let _ = pty.resize(geometry);
@@ -1033,6 +1150,28 @@ impl TerminalState {
             title: self.title.clone(),
             revision: self.revision,
         });
+    }
+
+    /// Measures the terminal's font at `scale`: the advance of its digits
+    /// and the vertical metrics of the face that drew them.
+    fn measure(
+        &self,
+        text: &mut TextSystem,
+        layouts: &mut LayoutCache,
+        scale: f32,
+    ) -> Option<Metrics> {
+        let style = TextStyle::new(self.style.font_size)
+            .kind(FontKind::Mono)
+            .family(self.style.font_family);
+        let params = TextParams::new("0000000000", style).scale_factor(scale);
+        let layout = layouts.layout(text, &params).ok()?;
+        let advance = f64::from(layout.size().0 / 10.0 * scale);
+        let glyphs = layout.glyphs();
+        let (&id, &weight) = glyphs.font_id.first().zip(glyphs.font_weight.first())?;
+        let font = text.raster_font_system().get_font(id, weight)?;
+        let px_per_em = f64::from(self.style.font_size * scale);
+        let face = FaceMetrics::from_font(&font, px_per_em, advance);
+        Some(self.measured(&face, scale, advance))
     }
 
     /// The visible text for screen readers and the cursor's byte in it.
@@ -1127,7 +1266,7 @@ impl TerminalState {
         state.size = (cols, rows, 1f32.to_bits());
         state
             .vt
-            .resize(cols, rows, m.cell_w as u32, m.cell_h as u32);
+            .resize(cols, rows, m.cell.cell_width, m.cell.cell_height);
         state.bounds.set(Rect {
             x: 0.0,
             y: 0.0,
@@ -1174,13 +1313,21 @@ pub(crate) fn ansi_colors(mode: ThemeMode) -> Option<&'static [Rgb; 16]> {
     (mode == ThemeMode::Light).then_some(&LIGHT_ANSI)
 }
 
-/// The palette the view uses from the theme.
-pub(crate) fn palette(theme: &Theme) -> Palette {
+/// The palette the view uses from the theme, with the style's colors
+/// over it.
+pub(crate) fn palette(theme: &Theme, style: &TerminalStyle) -> Palette {
     use quark_ui::design::Alpha;
     let c = &theme.colors;
+    let custom = &style.colors;
+    let color = |c: Rgb| quark::Color::rgba(c.r, c.g, c.b, 255);
     Palette {
-        selection: c.accent.with_alpha(Alpha::SOFT),
-        cursor: c.text,
+        selection: custom
+            .selection_background
+            .map_or(c.accent.with_alpha(Alpha::SOFT), color),
+        cursor: custom.cursor.map_or(c.text, color),
+        cursor_text: custom.cursor_text.map(color),
         link: c.text_accent,
+        minimum_contrast: style.minimum_contrast,
+        background: Rgb::new(c.editor_surface.r, c.editor_surface.g, c.editor_surface.b),
     }
 }

@@ -532,6 +532,24 @@ impl Terminal {
         );
     }
 
+    /// The 256-color palette: Ghostty's default, its first 16 entries
+    /// replaced by `ansi` when given, then each `(index, color)` entry.
+    pub fn set_palette(&mut self, ansi: Option<&[Rgb; 16]>, entries: &[(u8, Rgb)]) {
+        let mut palette = [c_rgb(Rgb::new(0, 0, 0)); 256];
+        // SAFETY: `palette` holds the 256 entries the call writes.
+        unsafe { sys::ghostty_color_palette_default(palette.as_mut_ptr()) };
+        for (slot, color) in palette.iter_mut().zip(ansi.into_iter().flatten()) {
+            *slot = c_rgb(*color);
+        }
+        for &(index, color) in entries {
+            palette[usize::from(index)] = c_rgb(color);
+        }
+        self.set(
+            sys::GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+            palette.as_ptr().cast(),
+        );
+    }
+
     // ---- Snapshot -------------------------------------------------------
 
     /// Refreshes `grid` from the terminal: rows the render state marks

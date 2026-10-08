@@ -18,6 +18,10 @@ quark-ui.workspace = true
 winit.workspace = true
 # Unix PTYs and Windows ConPTY behind one interface.
 portable-pty = "0.9"
+# Rasterizes the procedurally drawn cells (box drawing, blocks, powerline)
+# the way Ghostty's sprite face does with z2d. Already in every build
+# through resvg, with these features.
+tiny-skia = "0.11"
 
 [target.'cfg(unix)'.dependencies]
 # Polling the PTY so closing it stops blocked reads and writes, and killing

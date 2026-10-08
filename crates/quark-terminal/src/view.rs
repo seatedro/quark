@@ -26,6 +26,7 @@ use quark_ui::theme::Theme;
 use quark_ui::{Action, FocusId};
 
 use crate::grid::{CellStyle, CursorShape, Grid, GridRow, Rgb, Underline};
+use crate::sprite;
 use crate::state::{Frame, Metrics, Palette, Preedit, TerminalEvent, TerminalState, palette};
 use crate::vt::timed;
 
@@ -80,7 +81,10 @@ pub fn terminal_view(
             .map(|(p, at)| (p.clone(), at)),
     });
     let (width, height) = frame.viewport;
-    let palette = palette(theme);
+    let palette = Palette {
+        background: grid.colors.background,
+        ..palette(theme, state.style())
+    };
     let top = state.scroll_top();
     let hash = inputs_hash(&(
         frame.revision,
@@ -129,7 +133,8 @@ pub fn terminal_view(
             grid.cursor,
             row_hash,
             grid.colors,
-            [m.font_size, m.cell_w, m.cell_h].map(f32::to_bits),
+            m.cell,
+            m.scale.to_bits(),
             env.focused,
             palette,
         ));
@@ -276,7 +281,7 @@ fn build(
     for (i, row) in grid.rows.iter().enumerate() {
         let key = CacheKey(row.id.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ ROW_KEY_SALT);
         let (grid, row_text) = (grid.clone(), row_text.clone());
-        let hash = inputs_hash(&(row.hash, grid.colors, m.cell_w.to_bits(), palette));
+        let hash = inputs_hash(&(row.hash, grid.colors, m.cell, palette));
         rows = rows.child(
             cached(key, hash, move || {
                 canvas(move |bounds, scene, cx| {
@@ -356,7 +361,10 @@ static NO_SPAN_COLORS: LazyLock<Arc<[Color]>> = LazyLock::new(|| Arc::from(Vec::
 /// Keeps row cache keys apart from other elements' hashed keys.
 const ROW_KEY_SALT: u64 = 0x7465_726d_2e72_6f77;
 
-/// Paints one row: backgrounds, selection, text runs, then decorations.
+/// Paints one row: backgrounds, selection, text runs and sprites, then
+/// decorations. Horizontal positions come from whole device pixels
+/// (`bounds.x` plus a pixel count), so an edge two cells share is the same
+/// number in both and snaps to the same pixel.
 fn paint_row(
     bounds: Bounds,
     scene: &mut Scene,
@@ -366,14 +374,16 @@ fn paint_row(
     m: &Metrics,
     palette: Palette,
 ) {
-    let x_of = |col: u16| bounds.x + f32::from(col) * m.cell_w;
+    let cw = m.cell.cell_width as i32;
+    let x_of = |col: u16| bounds.x + m.points(i32::from(col) * cw);
+    let width_of = |col: u16, cols: u16| x_of(col + cols) - x_of(col);
     for run in &row.runs {
         if let Some(bg) = run.style.bg {
             scene.rect(RectPrimitive {
                 rect: Rect {
                     x: x_of(run.col),
                     y: bounds.y,
-                    width: f32::from(run.cols) * m.cell_w,
+                    width: width_of(run.col, run.cols),
                     height: m.cell_h,
                 },
                 color: color(bg),
@@ -381,11 +391,12 @@ fn paint_row(
         }
     }
     if let Some((from, to)) = row.selection {
+        let cols = to.saturating_sub(from) + 1;
         scene.rect(RectPrimitive {
             rect: Rect {
                 x: x_of(from),
                 y: bounds.y,
-                width: f32::from(to.saturating_sub(from) + 1) * m.cell_w,
+                width: width_of(from, cols),
                 height: m.cell_h,
             },
             color: palette.selection,
@@ -398,7 +409,13 @@ fn paint_row(
         if text.trim().is_empty() {
             continue;
         }
-        let (style, italic) = text_style(m, run.style, text.len());
+        let fg = text_color(run.style, palette, None);
+        if let Some(cp) = sprite::sprite_char(text) {
+            paint_sprite(scene, m, cp, run.cols, (bounds.x, bounds.y), run.col, fg);
+            continue;
+        }
+        let ascii = text.len() == usize::from(run.cols);
+        let (style, italic) = text_style(m, run.style, text.len(), ascii);
         let block = row_text.block(at, drawn, text, italic.as_slice());
         drawn += 1;
         let Ok(layout) = block.layout(cx.text, style, None, cx.scale_factor) else {
@@ -408,11 +425,11 @@ fn paint_row(
             scene,
             m,
             layout,
-            run.style,
             x_of(run.col),
             bounds.y,
             run.cols,
-            None,
+            ascii,
+            fg,
         );
     }
     for run in &row.runs {
@@ -422,16 +439,100 @@ fn paint_row(
             run.style,
             x_of(run.col),
             bounds.y,
-            run.cols,
+            width_of(run.col, run.cols),
             palette,
         );
     }
 }
 
+/// Paints sprite `cp`, `cols` cells wide at column `col` of the row whose
+/// top-left is `origin`, as rectangles of `fg` at each one's coverage.
+fn paint_sprite(
+    scene: &mut Scene,
+    m: &Metrics,
+    cp: u32,
+    cols: u16,
+    origin: (f32, f32),
+    col: u16,
+    fg: Color,
+) {
+    let Some(rects) = sprite::sprite(cp, u32::from(cols), &m.cell) else {
+        return;
+    };
+    let left = i32::from(col) * m.cell.cell_width as i32;
+    for r in rects.iter() {
+        let x0 = origin.0 + m.points(left + r.x);
+        let x1 = origin.0 + m.points(left + r.x + i32::from(r.width));
+        let y0 = origin.1 + m.points(r.y);
+        let y1 = origin.1 + m.points(r.y + i32::from(r.height));
+        let alpha = (u32::from(fg.a) * u32::from(r.alpha) / 255) as u8;
+        scene.rect(RectPrimitive {
+            rect: Rect {
+                x: x0,
+                y: y0,
+                width: x1 - x0,
+                height: y1 - y0,
+            },
+            color: fg.with_alpha(alpha),
+        });
+    }
+}
+
+/// The color a run's glyphs take: `fg` (the glyph under a block cursor)
+/// or the run's, faint and held to the minimum contrast against the
+/// run's background.
+fn text_color(style: CellStyle, palette: Palette, fg: Option<Color>) -> Color {
+    if let Some(fg) = fg {
+        return fg;
+    }
+    let mut c = color(style.fg);
+    if palette.minimum_contrast > 1.0
+        && let bg = style.bg.unwrap_or(palette.background)
+    {
+        c = contrasted(c, color(bg), palette.minimum_contrast);
+    }
+    if style.faint {
+        c = c.with_alpha(140);
+    }
+    c
+}
+
+/// `fg`, or black or white (whichever contrasts more with `bg`) when `fg`
+/// has less than `min` contrast with it (Ghostty's `contrasted_color`).
+fn contrasted(fg: Color, bg: Color, min: f32) -> Color {
+    let lin = |c: u8| {
+        let c = f32::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = |c: Color| 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+    let ratio = |a: f32, b: f32| (a.max(b) + 0.05) / (a.min(b) + 0.05);
+    let bg_l = luminance(bg);
+    if ratio(luminance(fg), bg_l) >= min {
+        return fg;
+    }
+    if ratio(1.0, bg_l) > ratio(0.0, bg_l) {
+        Color::rgba(255, 255, 255, fg.a)
+    } else {
+        Color::rgba(0, 0, 0, fg.a)
+    }
+}
+
 /// The text style of a run in `style`, and its italic span over `len`
-/// bytes when italic.
-fn text_style(m: &Metrics, style: CellStyle, len: usize) -> (TextStyle, Option<TextSpan>) {
+/// bytes when italic. ASCII runs step by whole cells.
+fn text_style(
+    m: &Metrics,
+    style: CellStyle,
+    len: usize,
+    ascii: bool,
+) -> (TextStyle, Option<TextSpan>) {
     let mut text_style = m.text_style();
+    if ascii {
+        text_style = text_style.letter_spacing(m.letter_spacing);
+    }
     if style.bold {
         text_style = text_style.weight(FontWeight::Bold);
     }
@@ -444,97 +545,115 @@ fn text_style(m: &Metrics, style: CellStyle, len: usize) -> (TextStyle, Option<T
     (text_style, italic)
 }
 
-/// Draws `layout`, text in `style`, at `(x, y)`, `cols` cells wide. `fg`
-/// overrides the style's color (the glyph under a block cursor).
+/// Draws `layout`, a run `cols` cells wide at `(x, y)`, in `color`. Its
+/// baseline lands on the cell's in whole device pixels, whatever font
+/// drew it. An ASCII run's glyphs already step by cells; any other run (one
+/// grapheme) is centered in its cells.
 #[allow(clippy::too_many_arguments)]
 fn draw_layout(
     scene: &mut Scene,
     m: &Metrics,
     layout: Arc<TextLayout>,
-    style: CellStyle,
     x: f32,
     y: f32,
     cols: u16,
-    fg: Option<Color>,
+    ascii: bool,
+    color: Color,
 ) {
-    let mut default_color = fg.unwrap_or(color(style.fg));
-    if style.faint && fg.is_none() {
-        default_color = default_color.with_alpha(140);
-    }
+    let baseline = layout
+        .line(0)
+        .map_or(0, |line| (line.baseline * m.scale).round() as i32);
+    let dy = m.cell.baseline_from_top() as i32 - baseline;
+    let dx = if ascii {
+        m.glyph_x
+    } else {
+        let room = i32::from(cols) * m.cell.cell_width as i32;
+        let width = (layout.size().0 * m.scale).round() as i32;
+        ((room - width) / 2).max(0)
+    };
     scene.rich_text(RichTextPrimitive {
         rect: Rect {
-            x,
-            y,
+            x: x + m.points(dx),
+            y: y + m.points(dy),
             // Italic and wide glyphs ink past their cells.
             width: f32::from(cols) * m.cell_w + m.font_size,
             height: m.cell_h,
         },
         layout: ShapedText::new(layout),
-        default_color,
+        default_color: color,
         span_colors: NO_SPAN_COLORS.clone(),
     });
 }
 
-/// Underlines, strikethrough, overline, and the link underline.
+/// Underlines, strikethrough, overline, and the link underline, at the
+/// font's positions and thickness.
 fn decorate(
     scene: &mut Scene,
     m: &Metrics,
     style: CellStyle,
     x: f32,
     y: f32,
-    cols: u16,
+    width: f32,
     palette: Palette,
 ) {
-    let width = f32::from(cols) * m.cell_w;
-    let thick = (m.font_size / 13.0).round().max(1.0);
+    let c = &m.cell;
     let fg = color(style.fg);
-    let mut line = |y: f32, from: f32, w: f32, c: Color| {
+    let mut line = |top_px: i32, thick_px: u32, from: f32, w: f32, color: Color| {
         scene.rect(RectPrimitive {
             rect: Rect {
                 x: from,
-                y,
+                y: y + m.points(top_px),
                 width: w,
-                height: thick,
+                height: m.points(thick_px as i32),
             },
-            color: c,
+            color,
         });
     };
-    let base = y + m.cell_h - thick * 2.0;
+    let (base, thick) = (c.underline_position as i32, c.underline_thickness);
+    let t = m.points(thick as i32);
     let under = style.underline_color.map_or(fg, color);
     match style.underline {
-        Underline::None if style.hyperlink => line(base, x, width, palette.link.with_alpha(160)),
+        Underline::None if style.hyperlink => {
+            line(base, thick, x, width, palette.link.with_alpha(160));
+        }
         Underline::None => {}
-        Underline::Single => line(base, x, width, under),
+        Underline::Single => line(base, thick, x, width, under),
         Underline::Double => {
-            line(base, x, width, under);
-            line(base - thick * 2.0, x, width, under);
+            line(base, thick, x, width, under);
+            line(base - 2 * thick as i32, thick, x, width, under);
         }
         Underline::Dotted | Underline::Dashed | Underline::Curly => {
             let (on, step) = match style.underline {
-                Underline::Dotted => (thick, thick * 2.0),
-                Underline::Dashed => (thick * 3.0, thick * 5.0),
-                _ => (thick * 2.0, thick * 2.0),
+                Underline::Dotted => (t, t * 2.0),
+                Underline::Dashed => (t * 3.0, t * 5.0),
+                _ => (t * 2.0, t * 2.0),
             };
             let mut at = x;
             let mut up = false;
             while at < x + width {
                 // A curly underline alternates between two heights.
                 let dy = if style.underline == Underline::Curly && up {
-                    -thick
+                    -(thick as i32)
                 } else {
-                    0.0
+                    0
                 };
-                line(base + dy, at, on.min(x + width - at), under);
+                line(base + dy, thick, at, on.min(x + width - at), under);
                 at += step;
                 up = !up;
             }
         }
     }
     if style.strikethrough {
-        line(y + (m.cell_h / 2.0).round(), x, width, fg);
+        line(
+            c.strikethrough_position as i32,
+            c.strikethrough_thickness,
+            x,
+            width,
+            fg,
+        );
     }
     if style.overline {
-        line(y, x, width, fg);
+        line(c.overline_position, c.overline_thickness, x, width, fg);
     }
 }
 
@@ -575,11 +694,11 @@ fn paint_cursor(
 ) {
     let c = grid.cursor;
     let cursor_color = c.cursor_color(palette);
-    let cells = if c.wide { 2.0 } else { 1.0 };
+    let cells = if c.wide { 2 } else { 1 };
     let rect = Rect {
         x: bounds.x,
         y: bounds.y,
-        width: m.cell_w * cells,
+        width: m.points(cells * m.cell.cell_width as i32),
         height: m.cell_h,
     };
     let bar = (m.font_size / 7.0).round().max(1.0);
@@ -606,16 +725,18 @@ fn paint_cursor(
                 } else {
                     (text, run.cols)
                 };
-                let (style, italic) = text_style(m, run.style, text.len());
-                let query = TextQuery {
-                    spans: italic.as_slice(),
-                    ..TextQuery::new(text, style)
-                };
-                if !text.trim().is_empty()
-                    && let Some(layout) = cx.layout_text_query(&query)
-                {
-                    let bg = color(grid.colors.background);
-                    draw_layout(scene, m, layout, run.style, rect.x, rect.y, cols, Some(bg));
+                let fg = palette.cursor_text.unwrap_or(color(grid.colors.background));
+                if let Some(cp) = sprite::sprite_char(text) {
+                    paint_sprite(scene, m, cp, cols, (rect.x, rect.y), 0, fg);
+                } else if !text.trim().is_empty() {
+                    let (style, italic) = text_style(m, run.style, text.len(), ascii);
+                    let query = TextQuery {
+                        spans: italic.as_slice(),
+                        ..TextQuery::new(text, style)
+                    };
+                    if let Some(layout) = cx.layout_text_query(&query) {
+                        draw_layout(scene, m, layout, rect.x, rect.y, cols, ascii, fg);
+                    }
                 }
             }
         }

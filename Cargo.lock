@@ -3098,6 +3098,7 @@ dependencies = [
  "quark-render",
  "quark-text",
  "quark-ui",
+ "tiny-skia",
  "winit",
 ]
 

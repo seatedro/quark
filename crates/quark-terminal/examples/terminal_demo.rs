@@ -270,7 +270,9 @@ mod tests {
     #[global_allocator]
     static ALLOCATOR: Counting = Counting;
 
-    const SIZE: (f32, f32) = (640.0, 400.0);
+    /// 80 columns and 22 rows of the default font's 8 by 17 pixel cells,
+    /// with the padding.
+    const SIZE: (f32, f32) = (652.0, 400.0);
 
     fn harness(command: Option<PtyCommand>) -> UiTestHarness<Demo> {
         UiTestHarness::new(Demo::new(command), SIZE, 1.0)

@@ -49,7 +49,9 @@
 
 mod grid;
 pub mod input;
+mod metrics;
 mod pty;
+mod sprite;
 mod state;
 #[allow(
     dead_code,
