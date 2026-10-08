@@ -51,7 +51,10 @@ pub use app::*;
 pub use context::*;
 pub use event_loop::*;
 pub use events::*;
-pub use placement::*;
+#[cfg(target_os = "linux")]
+pub use placement::WaylandSurface;
+use placement::*;
+pub use placement::{DesktopPoint, MonitorInfo, PlatformCapabilities, WindowPlacement};
 use platform::PlatformState;
 pub use scale::scene_to_physical;
 pub use table::WindowHandle;

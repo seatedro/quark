@@ -21,12 +21,13 @@ pub enum AppEvent {
         window: WindowHandle,
         reason: CloseReason,
     },
-    /// The window moved on the desktop: its outer position in physical
-    /// desktop pixels. Never sent where windows have no readable position
-    /// (see [`PlatformCapabilities::window_positions`]).
+    /// The window moved on the desktop, by the user or the app: its outer
+    /// position in desktop units (see [`DesktopPoint`]). Never sent where
+    /// windows have no readable position
+    /// ([`PlatformCapabilities::window_positions`]).
     WindowMoved {
         window: WindowHandle,
-        position: (i32, i32),
+        position: DesktopPoint,
     },
     /// The window's content area changed size, in logical points. The
     /// runner has already scheduled a frame at the new size.

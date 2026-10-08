@@ -168,6 +168,7 @@ impl<A: App> Runner<A> {
             last_render: Default::default(),
             traffic_lights: options.traffic_lights,
             persist_key: options.persist_key.clone(),
+            position: Default::default(),
         })
     }
 
@@ -311,8 +312,9 @@ impl<A: App> Runner<A> {
         options: &WindowOptions,
     ) {
         let error = match self.create_window(event_loop, options) {
-            Ok(state) => {
+            Ok(mut state) => {
                 self.platform.window_opened(&state.window);
+                state.refresh_position();
                 if let Some(entry) = self.windows.get_mut(handle) {
                     *entry = WindowEntry::Open(Box::new(state));
                 }
@@ -659,9 +661,10 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 self.with_event_cx(event_loop, Some(handle), |app, cx| app.app_event(event, cx));
             }
             WindowEvent::Moved(position) => {
+                state.refresh_position();
                 let event = AppEvent::WindowMoved {
                     window: handle,
-                    position: (position.x, position.y),
+                    position: state.desktop_position(position),
                 };
                 self.with_event_cx(event_loop, Some(handle), |app, cx| app.app_event(event, cx));
             }

@@ -475,8 +475,7 @@ mod tests {
     #[test]
     fn cursor_entry_is_kept_as_pointer_entered() {
         let mut input = InputNormalizer::default();
-        // SAFETY: a placeholder id is only compared, never dereferenced.
-        let device_id = unsafe { winit::event::DeviceId::dummy() };
+        let device_id = winit::event::DeviceId::dummy();
 
         let entered = input.normalize(WindowEvent::CursorEntered { device_id });
 

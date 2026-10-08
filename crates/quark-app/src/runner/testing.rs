@@ -38,9 +38,13 @@ pub(crate) struct VirtualWindow {
     pub(crate) ime: ImeState,
     /// Whether this is the active window, holding keyboard focus.
     pub(crate) focused: bool,
-    /// Top-left corner on the virtual desktop in physical pixels. Virtual
-    /// windows have no decorations, so the content area starts here too.
-    pub(crate) position: (i32, i32),
+    /// Outer top-left corner on the virtual desktop. The virtual desktop is
+    /// laid out like Windows and X11: desktop units are physical pixels, so
+    /// the content area spans `size * scale_factor` units.
+    pub(crate) position: DesktopPoint,
+    /// The content area's corner from the outer corner: the decorations.
+    /// None by default.
+    pub(crate) client_offset: DesktopPoint,
     pub(crate) monitor: Option<MonitorInfo>,
     /// Times frames were requested for, in ms since launch, sorted and
     /// deduplicated. One frame serves every request due by then, as the
@@ -56,7 +60,7 @@ pub(crate) struct VirtualWindow {
 }
 
 impl VirtualWindow {
-    fn new(title: String, size: (f32, f32), scale_factor: f64, position: (i32, i32)) -> Self {
+    fn new(title: String, size: (f32, f32), scale_factor: f64, position: DesktopPoint) -> Self {
         Self {
             title,
             size,
@@ -66,6 +70,7 @@ impl VirtualWindow {
             ime: ImeState::default(),
             focused: false,
             position,
+            client_offset: (0.0, 0.0),
             monitor: None,
             frames: Vec::new(),
             last_frame_ms: None,
@@ -75,17 +80,32 @@ impl VirtualWindow {
     }
 
     pub(crate) fn placement(&self, capabilities: PlatformCapabilities) -> WindowPlacement {
-        let position = capabilities.window_positions.then_some(self.position);
+        let positions = capabilities.window_positions;
         WindowPlacement {
-            inner_position: position,
-            outer_position: position,
+            inner_position: positions.then(|| self.client_origin().0),
+            outer_position: positions.then_some(self.position),
             size: self.size,
             scale_factor: self.scale_factor,
+            desktop_scale: self.scale_factor,
             monitor: self.monitor.clone(),
             maximized: false,
             minimized: Some(false),
             focused: self.focused,
         }
+    }
+
+    /// The content area's corner on the desktop, and desktop units per
+    /// point.
+    pub(crate) fn client_origin(&self) -> (DesktopPoint, f64) {
+        let (x, y) = self.position;
+        let (dx, dy) = self.client_offset;
+        ((x + dx, y + dy), self.scale_factor)
+    }
+
+    /// Whether the desktop point is over the content area.
+    fn contains(&self, point: DesktopPoint) -> bool {
+        let (x, y) = desktop_to_local(self.client_origin(), point);
+        (0.0..self.size.0).contains(&x) && (0.0..self.size.1).contains(&y)
     }
 
     /// The frame due soonest, in ms since launch.
@@ -116,6 +136,16 @@ pub(crate) struct HeadlessRunner {
     open_scale: f64,
     /// The window drawn last.
     last_drawn: Option<WindowHandle>,
+    /// Open windows from bottom to top. Opening and focusing raise.
+    stack: Vec<WindowHandle>,
+    /// Where the desktop pointer is, once a test moved it there.
+    desktop_pointer: Option<DesktopPoint>,
+    /// The window under the desktop pointer.
+    hovered: Option<WindowHandle>,
+    /// The window a desktop button press went to. Like the platforms with
+    /// desktop pointers, it gets all pointer input until the release, even
+    /// outside it.
+    grab: Option<WindowHandle>,
     /// The base the fake clock's milliseconds count from. Frame contexts
     /// hand out `Instant`s, so it has to be a real one; nothing reads the
     /// wall clock after construction.
@@ -137,7 +167,7 @@ impl HeadlessRunner {
         let waker = Waker::detached();
         let (events, app_events) = EventSink::new(waker.clone());
         let mut windows = WindowTable::default();
-        let mut main = VirtualWindow::new("Test".to_owned(), size, scale_factor, (0, 0));
+        let mut main = VirtualWindow::new("Test".to_owned(), size, scale_factor, (0.0, 0.0));
         main.focused = true;
         let main = windows.insert(WindowEntry::Virtual(Box::new(main)));
         Self {
@@ -159,6 +189,10 @@ impl HeadlessRunner {
             open_failures: 0,
             open_scale: scale_factor,
             last_drawn: None,
+            stack: vec![main],
+            desktop_pointer: None,
+            hovered: None,
+            grab: None,
             launch: Instant::now(),
             accessibility_active: true,
             now_ms: 0,
@@ -301,7 +335,7 @@ impl HeadlessRunner {
         &mut self,
         app: &mut A,
         window: WindowHandle,
-        position: (i32, i32),
+        position: DesktopPoint,
     ) {
         let reported = self.capabilities.window_positions;
         let Some(virtual_window) = self.window_mut(window) else {
@@ -315,26 +349,108 @@ impl HeadlessRunner {
         }
     }
 
-    /// Give `window` keyboard focus, or take it away. Focusing a window
-    /// first blurs the one that had focus, as desktops do.
+    /// Give `window` keyboard focus, raising it, or take focus away.
+    /// Focusing a window first blurs the one that had focus, as desktops
+    /// do.
     pub(crate) fn set_focus<A: App>(&mut self, app: &mut A, window: WindowHandle, focused: bool) {
+        self.shift_focus(app, window, focused);
+        self.settle(app);
+    }
+
+    /// [`Self::set_focus`] without applying what the callbacks asked for.
+    fn shift_focus<A: App>(&mut self, app: &mut A, window: WindowHandle, focused: bool) {
         if self.window(window).is_none() {
             return;
         }
         if focused {
-            let blurred: Option<WindowHandle> =
-                self.windows.iter().find_map(|(handle, entry)| match entry {
-                    WindowEntry::Virtual(other) if other.focused && handle != window => {
-                        Some(handle)
-                    }
-                    _ => None,
-                });
+            let blurred = self.windows.iter().find_map(|(handle, entry)| match entry {
+                WindowEntry::Virtual(other) if other.focused && handle != window => Some(handle),
+                _ => None,
+            });
             if let Some(blurred) = blurred {
-                self.input(app, blurred, InputEvent::Focused(false));
+                self.deliver_input(app, blurred, InputEvent::Focused(false));
             }
             self.focused = Some(window);
+            self.stack.retain(|&other| other != window);
+            self.stack.push(window);
         }
-        self.input(app, window, InputEvent::Focused(focused));
+        self.deliver_input(app, window, InputEvent::Focused(focused));
+    }
+
+    /// Put the decorations' size on `window`: its content area then starts
+    /// `offset` desktop units from its outer corner.
+    pub(crate) fn set_client_offset(&mut self, window: WindowHandle, offset: DesktopPoint) {
+        if let Some(virtual_window) = self.window_mut(window) {
+            virtual_window.client_offset = offset;
+        }
+    }
+
+    /// The topmost window whose content area is under `point`.
+    fn window_at(&self, point: DesktopPoint) -> Option<WindowHandle> {
+        self.stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|&window| self.window(window).is_some_and(|w| w.contains(point)))
+    }
+
+    /// Move the desktop pointer to `at`, as a mouse does across windows:
+    /// the window under it gets the motion in its own coordinates, with
+    /// [`InputEvent::PointerLeft`] and [`InputEvent::PointerEntered`] as it
+    /// crosses between windows. While a button pressed in a window is held,
+    /// that window alone gets the motion, even outside it, as Windows,
+    /// macOS, and X11 deliver it.
+    pub(crate) fn desktop_pointer_move<A: App>(&mut self, app: &mut A, at: DesktopPoint) {
+        self.desktop_pointer = Some(at);
+        if self.grab.is_none() {
+            self.update_hover(app, at);
+        }
+        if let Some(window) = self.grab.or(self.hovered)
+            && let Some(origin) = self.window(window).map(VirtualWindow::client_origin)
+        {
+            let (x, y) = desktop_to_local(origin, at);
+            self.deliver_input(app, window, InputEvent::PointerMoved { x, y });
+        }
+        self.settle(app);
+    }
+
+    /// Press or release `button` at the desktop pointer. A press goes to the
+    /// window under the pointer, which keeps the pointer until the release.
+    pub(crate) fn desktop_button<A: App>(
+        &mut self,
+        app: &mut A,
+        button: winit::event::MouseButton,
+        state: winit::event::ElementState,
+    ) {
+        let pressed = state == winit::event::ElementState::Pressed;
+        let target = self.grab.or(self.hovered);
+        if let Some(window) = target {
+            self.deliver_input(app, window, InputEvent::PointerButton { button, state });
+        }
+        if pressed {
+            self.grab = self.grab.or(target);
+        } else {
+            self.grab = None;
+            if let Some(at) = self.desktop_pointer {
+                self.update_hover(app, at);
+            }
+        }
+        self.settle(app);
+    }
+
+    /// Track which window the desktop pointer is over, telling the one it
+    /// left and the one it entered.
+    fn update_hover<A: App>(&mut self, app: &mut A, at: DesktopPoint) {
+        let under = self.window_at(at);
+        if under == self.hovered {
+            return;
+        }
+        if let Some(left) = std::mem::replace(&mut self.hovered, under) {
+            self.deliver_input(app, left, InputEvent::PointerLeft);
+        }
+        if let Some(entered) = under {
+            self.deliver_input(app, entered, InputEvent::PointerEntered);
+        }
     }
 
     /// Ask the app to close `window` for `reason`, as its close button
@@ -391,6 +507,12 @@ impl HeadlessRunner {
     /// Hand `event` to the app for `window`, keeping the window's pointer
     /// and modifiers in step as the platform layer does.
     pub(crate) fn input<A: App>(&mut self, app: &mut A, window: WindowHandle, event: InputEvent) {
+        self.deliver_input(app, window, event);
+        self.settle(app);
+    }
+
+    /// [`Self::input`] without applying what the callback asked for.
+    fn deliver_input<A: App>(&mut self, app: &mut A, window: WindowHandle, event: InputEvent) {
         let Some(virtual_window) = self.window_mut(window) else {
             return;
         };
@@ -401,7 +523,7 @@ impl HeadlessRunner {
             InputEvent::Focused(focused) => virtual_window.focused = *focused,
             _ => {}
         }
-        self.callback_in(window, app, |app, cx| app.event(event, cx));
+        app.event(event, &mut self.event_cx(Some(window)));
     }
 
     fn event_cx(&mut self, window: Option<WindowHandle>) -> EventContext<'_> {
@@ -476,7 +598,7 @@ impl HeadlessRunner {
                     continue;
                 }
                 let (width, height) = options.size;
-                let position = options.position.unwrap_or_default();
+                let position = options.position.unwrap_or((0.0, 0.0));
                 let opened = VirtualWindow::new(
                     options.title,
                     (width as f32, height as f32),
@@ -487,8 +609,20 @@ impl HeadlessRunner {
                     *entry = WindowEntry::Virtual(Box::new(opened));
                 }
                 self.flags.redraw.push(window);
+                self.stack.push(window);
                 let mut cx = self.event_cx(Some(window));
                 app.app_event(AppEvent::WindowOpened(window), &mut cx);
+                if options.active {
+                    self.shift_focus(app, window, true);
+                }
+                continue;
+            }
+            if !self.flags.moved.is_empty() {
+                let window = self.flags.moved.remove(0);
+                if let Some(position) = self.window(window).map(|w| w.position) {
+                    let mut cx = self.event_cx(Some(window));
+                    app.app_event(AppEvent::WindowMoved { window, position }, &mut cx);
+                }
                 continue;
             }
             // In request order: a quit closes windows in table order.
@@ -515,6 +649,12 @@ impl HeadlessRunner {
         if self.last_drawn == Some(window) {
             self.last_drawn = None;
         }
+        for held in [&mut self.hovered, &mut self.grab] {
+            if *held == Some(window) {
+                *held = None;
+            }
+        }
+        self.stack.retain(|&other| other != window);
         let bound = self
             .default_window()
             .filter(|&other| other != window)
@@ -732,6 +872,8 @@ impl HeadlessRunner {
 mod tests {
     use std::collections::HashMap;
 
+    use winit::event::{ElementState, MouseButton};
+
     use super::*;
 
     /// An app that logs its frames and wakes, and asks for frames as told.
@@ -932,13 +1074,15 @@ mod tests {
         (runner, app)
     }
 
-    /// Open a `size` window named `name` from a callback on the main window.
+    /// Open a 200x100 point window named `name` from a callback on the main
+    /// window, without focus, beside the main window.
     fn open(runner: &mut HeadlessRunner, app: &mut Shell, name: &str) -> WindowHandle {
         runner.callback(app, |app, cx| {
             let window = cx.open_window(WindowOptions {
                 title: name.to_owned(),
                 size: (200.0, 100.0),
-                position: Some((30, 40)),
+                position: Some((500.0, 0.0)),
+                active: false,
                 ..WindowOptions::default()
             });
             app.names.insert(window, name.to_owned());
@@ -1113,8 +1257,8 @@ mod tests {
         let cases: [(&str, Change, &str); 3] = [
             (
                 "move",
-                |runner, app, tools| runner.move_window(app, tools, (500, 60)),
-                "tools: moved tools to (500, 60)",
+                |runner, app, tools| runner.move_window(app, tools, (500.0, 60.0)),
+                "tools: moved tools to (500.0, 60.0)",
             ),
             (
                 "resize",
@@ -1139,9 +1283,10 @@ mod tests {
         }
     }
 
-    // Where windows have no desktop position (Wayland), placements must
-    // not invent one and moves must go unreported, or docking would place
-    // drop targets at made-up coordinates.
+    // Where windows have no desktop position (Wayland), placements and
+    // desktop pointer coordinates must not invent one and moves must go
+    // unreported, or docking would place drop targets at made-up
+    // coordinates.
     #[test]
     fn without_window_positions_placement_has_none_and_moves_are_silent() {
         let (mut runner, mut app) = shell();
@@ -1149,10 +1294,16 @@ mod tests {
         let tools = open(&mut runner, &mut app, "tools");
         app.log.clear();
 
-        runner.move_window(&mut app, tools, (500, 60));
+        runner.move_window(&mut app, tools, (500.0, 60.0));
 
         assert_eq!(app.log, Vec::<String>::new());
-        let placement = runner.callback(&mut app, |_, cx| cx.placement(tools).unwrap());
+        let (placement, desktop) = runner.callback(&mut app, |_, cx| {
+            (
+                cx.placement(tools).unwrap(),
+                cx.to_desktop(tools, (1.0, 1.0)),
+            )
+        });
+        assert_eq!(desktop, None);
         assert_eq!(
             (placement.inner_position, placement.outer_position),
             (None, None)
@@ -1176,5 +1327,127 @@ mod tests {
             ["tools: pointer 5,6 (context sees Some((5.0, 6.0)))"]
         );
         assert_eq!(main_pointer, None);
+    }
+
+    // A window opened mid-drag must not take focus from the window the
+    // drag started in; an ordinary window does take it.
+    #[test]
+    fn only_a_window_opened_active_takes_focus() {
+        for (active, expected) in [
+            (
+                true,
+                &[
+                    "tools: opened tools",
+                    "main: focused false",
+                    "tools: focused true",
+                ][..],
+            ),
+            (false, &["tools: opened tools"][..]),
+        ] {
+            let (mut runner, mut app) = shell();
+
+            runner.callback(&mut app, |app, cx| {
+                let tools = cx.open_window(WindowOptions {
+                    active,
+                    ..WindowOptions::default()
+                });
+                app.names.insert(tools, "tools".to_owned());
+            });
+
+            assert_eq!(app.log, expected, "active {active}");
+        }
+    }
+
+    // Desktop motion must reach the topmost window under the pointer, in
+    // that window's coordinates, with leave and enter as it crosses: what
+    // a dock needs to find the window under a dragged tab.
+    #[test]
+    fn desktop_motion_reaches_the_window_under_it_in_its_coordinates() {
+        let (mut runner, mut app) = shell();
+        let tools = open(&mut runner, &mut app, "tools");
+        // Over the main window's right part, so the windows overlap.
+        runner.move_window(&mut app, tools, (300.0, 200.0));
+        app.log.clear();
+
+        runner.desktop_pointer_move(&mut app, (50.0, 50.0));
+        runner.desktop_pointer_move(&mut app, (350.0, 250.0));
+
+        assert_eq!(
+            app.log,
+            [
+                "main: PointerEntered",
+                "main: pointer 50,50 (context sees Some((50.0, 50.0)))",
+                "main: PointerLeft",
+                "tools: PointerEntered",
+                "tools: pointer 50,50 (context sees Some((50.0, 50.0)))",
+            ]
+        );
+    }
+
+    // During a drag the pressed window keeps the pointer outside its
+    // bounds, as desktops deliver it, so a tab dragged out of a window can
+    // be followed; the window under the pointer takes over at release.
+    #[test]
+    fn a_pressed_window_keeps_the_pointer_until_release() {
+        let (mut runner, mut app) = shell();
+        open(&mut runner, &mut app, "tools");
+        runner.desktop_pointer_move(&mut app, (50.0, 50.0));
+        runner.desktop_button(&mut app, MouseButton::Left, ElementState::Pressed);
+        app.log.clear();
+
+        runner.desktop_pointer_move(&mut app, (550.0, 50.0));
+        runner.desktop_button(&mut app, MouseButton::Left, ElementState::Released);
+
+        assert_eq!(
+            app.log,
+            [
+                "main: pointer 550,50 (context sees Some((550.0, 50.0)))",
+                "main: PointerButton { button: Left, state: Released }",
+                "main: PointerLeft",
+                "tools: PointerEntered",
+            ]
+        );
+    }
+
+    // A point in one window must land on the desktop by that window's
+    // content corner (decorations included) and its own scale, and come
+    // back unchanged, or cross-window drops land in the wrong place.
+    #[test]
+    fn desktop_points_follow_the_windows_content_corner_and_scale() {
+        let (mut runner, mut app) = shell();
+        let tools = open(&mut runner, &mut app, "tools");
+        runner.move_window(&mut app, tools, (100.0, 50.0));
+        runner.set_client_offset(tools, (0.0, 20.0));
+        runner.set_scale_factor(&mut app, tools, 2.0);
+
+        let (desktop, back, offset) = runner.callback(&mut app, |_, cx| {
+            let desktop = cx.to_desktop(tools, (10.0, 5.0));
+            let offset = cx.placement(tools).unwrap().client_offset();
+            (desktop, cx.from_desktop(tools, desktop.unwrap()), offset)
+        });
+
+        assert_eq!(desktop, Some((120.0, 80.0)));
+        assert_eq!(back, Some((10.0, 5.0)));
+        assert_eq!(offset, Some((0.0, 20.0)));
+    }
+
+    // A torn-off window follows the pointer by its grab point: aligning
+    // must account for decorations and scale, and the move must be
+    // reported like any other.
+    #[test]
+    fn align_window_puts_the_hotspot_on_the_desktop_point() {
+        let (mut runner, mut app) = shell();
+        let tools = open(&mut runner, &mut app, "tools");
+        runner.set_client_offset(tools, (4.0, 20.0));
+        runner.set_scale_factor(&mut app, tools, 2.0);
+        app.log.clear();
+
+        let hotspot = runner.callback(&mut app, |_, cx| {
+            cx.align_window(tools, (10.0, 5.0), (500.0, 300.0));
+            cx.to_desktop(tools, (10.0, 5.0))
+        });
+
+        assert_eq!(hotspot, Some((500.0, 300.0)));
+        assert_eq!(app.log, ["tools: moved tools to (476.0, 270.0)"]);
     }
 }

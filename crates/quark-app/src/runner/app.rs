@@ -84,11 +84,16 @@ pub struct WindowOptions {
     /// and restore them when a window with the same key opens. See
     /// [`crate::platform::window_state`].
     pub persist_key: Option<String>,
-    /// Initial outer position in physical desktop pixels, as
+    /// Initial outer position in desktop units (see [`DesktopPoint`]), as
     /// [`WindowPlacement::outer_position`] reports it. Ignored where windows
     /// cannot be positioned ([`PlatformCapabilities::window_positions`]),
     /// and when `persist_key` restores a saved position.
-    pub position: Option<(i32, i32)>,
+    pub position: Option<DesktopPoint>,
+    /// Take keyboard focus when the window opens. Turn off for a window
+    /// that appears under the pointer mid-drag and must not take focus from
+    /// the window the drag started in; platforms that cannot open windows
+    /// unfocused ignore it.
+    pub active: bool,
 }
 
 impl Default for WindowOptions {
@@ -104,6 +109,7 @@ impl Default for WindowOptions {
             panic_hook: true,
             persist_key: None,
             position: None,
+            active: true,
         }
     }
 }

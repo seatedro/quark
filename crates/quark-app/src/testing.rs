@@ -41,8 +41,8 @@ use winit::keyboard::{ModifiersState, NamedKey};
 
 use crate::runner::{HeadlessRunner, VirtualWindow};
 use crate::{
-    App, AppEvent, CloseReason, InputEvent, KeyChord, KeyKind, MonitorInfo, PlatformCapabilities,
-    UiAdapter, UiApp, UiSender, WindowHandle, WindowPlacement,
+    App, AppEvent, CloseReason, DesktopPoint, InputEvent, KeyChord, KeyKind, MonitorInfo,
+    PlatformCapabilities, UiAdapter, UiApp, UiSender, WindowHandle, WindowPlacement,
 };
 
 /// What the app asked of the window's IME, as the frames so far left it
@@ -195,6 +195,39 @@ impl<U: UiApp> UiTestHarness<U> {
         let quit = self.runner.request_quit(&mut self.adapter);
         self.run_until_idle();
         quit
+    }
+
+    // ---- Desktop pointer -------------------------------------------------
+
+    /// Move the pointer to `at` on the virtual desktop, across windows: the
+    /// topmost window under it gets the motion in its own coordinates, with
+    /// [`InputEvent::PointerLeft`] and [`InputEvent::PointerEntered`] as it
+    /// crosses between windows. While the primary button pressed with
+    /// [`Self::desktop_press`] is held, the window it was pressed in gets
+    /// all motion, even outside it, as Windows, macOS, and X11 deliver a
+    /// drag. Windows stack in the order they opened or took focus.
+    ///
+    /// The window-scoped pointer methods skip this simulation: they send
+    /// one window input directly.
+    pub fn desktop_move(&mut self, at: DesktopPoint) {
+        self.runner.desktop_pointer_move(&mut self.adapter, at);
+        self.run_until_idle();
+    }
+
+    /// Press the primary button at the desktop pointer.
+    pub fn desktop_press(&mut self) {
+        let state = ElementState::Pressed;
+        self.runner
+            .desktop_button(&mut self.adapter, MouseButton::Left, state);
+        self.run_until_idle();
+    }
+
+    /// Release the primary button at the desktop pointer.
+    pub fn desktop_release(&mut self) {
+        let state = ElementState::Released;
+        self.runner
+            .desktop_button(&mut self.adapter, MouseButton::Left, state);
+        self.run_until_idle();
     }
 
     // ---- Time and frames -------------------------------------------------
@@ -797,14 +830,22 @@ impl<U: UiApp> UiWindow<'_, U> {
         ui.run_until_idle();
     }
 
-    /// Move the window on the desktop, in physical pixels, as dragging its
-    /// title bar does. The app gets [`AppEvent::WindowMoved`] unless the
-    /// capabilities say windows have no positions.
-    pub fn move_to(&mut self, position: (i32, i32)) {
+    /// Move the window's outer corner on the desktop, as dragging its title
+    /// bar does. The app gets [`AppEvent::WindowMoved`] unless the
+    /// capabilities say windows have no positions. The virtual desktop's
+    /// units are physical pixels, as on Windows and X11.
+    pub fn move_to(&mut self, position: DesktopPoint) {
         let ui = &mut *self.ui;
         ui.runner
             .move_window(&mut ui.adapter, self.window, position);
         ui.run_until_idle();
+    }
+
+    /// Give the window decorations: its content area then starts `offset`
+    /// desktop units from its outer corner, as
+    /// [`WindowPlacement::client_offset`] reports. None by default.
+    pub fn set_client_offset(&mut self, offset: DesktopPoint) {
+        self.ui.runner.set_client_offset(self.window, offset);
     }
 
     /// Put the window on `monitor`, as [`WindowPlacement::monitor`] then

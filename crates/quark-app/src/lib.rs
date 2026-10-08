@@ -245,8 +245,10 @@ pub use input::{PointerButton, UiInput};
 pub use quark_ui;
 #[cfg(feature = "clipboard-image")]
 pub use runner::ClipboardImage;
+#[cfg(target_os = "linux")]
+pub use runner::WaylandSurface;
 pub use runner::{
-    App, AppEvent, AppText, CloseReason, EventContext, FrameContext, MonitorInfo,
+    App, AppEvent, AppText, CloseReason, DesktopPoint, EventContext, FrameContext, MonitorInfo,
     PlatformCapabilities, RunError, TrafficLights, Waker, WindowChrome, WindowHandle,
     WindowOptions, WindowPlacement, run, scene_to_physical,
 };

@@ -86,6 +86,10 @@ pub(super) struct Flags {
     pub(super) keep_running_without_windows: bool,
     /// Windows to close once the current callback returns, and why.
     pub(super) close: Vec<(WindowHandle, CloseReason)>,
+    /// Virtual windows the app moved, for the headless runner to report as
+    /// a platform would.
+    #[cfg(feature = "test-support")]
+    pub(super) moved: Vec<WindowHandle>,
     #[cfg(feature = "dialogs")]
     pub(super) next_dialog: u64,
 }
@@ -329,24 +333,6 @@ impl EventContext<'_> {
     /// Stale handles are ignored.
     pub fn close_window(&mut self, window: WindowHandle) {
         self.flags.close.push((window, CloseReason::Program));
-    }
-
-    /// Where `window` is on the desktop and how big, read now. `None` for a
-    /// window not open yet, or a stale handle.
-    pub fn placement(&self, window: WindowHandle) -> Option<WindowPlacement> {
-        match self.windows.get(window)? {
-            WindowEntry::Open(state) => Some(state.placement()),
-            #[cfg(feature = "test-support")]
-            WindowEntry::Virtual(virtual_window) => {
-                Some(virtual_window.placement(self.capabilities))
-            }
-            WindowEntry::Pending(_) => None,
-        }
-    }
-
-    /// What the windowing system lets the app do with window positions.
-    pub fn capabilities(&self) -> PlatformCapabilities {
-        self.capabilities
     }
 
     /// Ask the desktop for an activation token for the context's window,
