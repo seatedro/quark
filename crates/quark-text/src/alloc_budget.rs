@@ -85,7 +85,7 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 /// Allocations `f` makes on this thread.
-fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
+pub(crate) fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
     let before = ALLOCATIONS.with(Cell::get);
     let result = f();
     (result, ALLOCATIONS.with(Cell::get) - before)
@@ -402,4 +402,41 @@ fn block_edits_within_warmed_capacity_copy_no_text() {
         shown = Some(layout);
     }
     drop(shown);
+}
+
+// A block whose every layout is still held (a terminal row's first change,
+// its last revision still on screen) lays the next one out into storage
+// another block released, rather than allocating a layout and a source.
+#[test]
+fn a_block_lays_out_into_storage_another_block_gave() {
+    let mut system = test_system();
+    let style = TextStyle::new(14.0);
+    let layout = |block: &mut crate::block::TextBlock, system: &mut TextSystem, text: &str| {
+        block.set_text(text);
+        block.layout(system, style, None, 1.0).expect("layout")
+    };
+    // The donor releases the layout of an earlier revision, an anagram of
+    // the measured text so the fonts' lookups are warm too.
+    let mut donor = crate::block::TextBlock::new();
+    let shown = layout(&mut donor, &mut system, "eagle brisk");
+    layout(&mut donor, &mut system, "plump");
+    drop(shown);
+    // The block grows the lists it keeps storage in, then ends with every
+    // layout held, as scenes hold them.
+    let mut block = crate::block::TextBlock::new();
+    let mut held: Vec<_> = (0..6)
+        .map(|i| layout(&mut block, &mut system, &format!("heron {i} plump")))
+        .collect();
+    held.clear();
+    while held.is_empty() || block.keeps_spare() {
+        let text = format!("heron {} plump", held.len());
+        held.push(layout(&mut block, &mut system, &text));
+    }
+
+    let (shown, sites) = profile(|| {
+        assert!(donor.give_spare(&mut block));
+        layout(&mut block, &mut system, "brisk eagle")
+    });
+    assert!(sites.is_empty(), "{sites:#?}");
+    assert_eq!(shown.text(), "brisk eagle");
 }

@@ -615,6 +615,42 @@ fn rebuilding_while_a_weak_handle_observes_the_recording() {
     drop(observer);
 }
 
+// Catches a replaced recording keeping its text alive in the spare chunk
+// once no frame draws it: until the boundary recorded again, the layout in
+// it could not be laid out into again.
+#[test]
+fn a_replaced_recording_lets_go_of_its_text_once_no_frame_draws_it() {
+    let mut window = Window::new();
+    let label = |hash: u64, layout: &Arc<String>| {
+        let layout = layout.clone();
+        cached(0u64, hash, move || {
+            canvas(move |bounds, scene, _| {
+                scene.rich_text(quark_render::RichTextPrimitive {
+                    rect: bounds,
+                    layout: quark_render::ShapedText::new(layout.clone()),
+                    default_color: BUTTON,
+                    span_colors: Arc::from(Vec::new()),
+                });
+            })
+            .w(100.0)
+            .h(30.0)
+        })
+        .w(100.0)
+        .h(30.0)
+        .into_any()
+    };
+    let (old, new) = (Arc::new("old".to_owned()), Arc::new("new".to_owned()));
+    window.paint(label(1, &old));
+    let replayed = window.paint(label(1, &old));
+    // Recorded while the replayed frame still draws the old recording.
+    let rebuilt = window.paint(label(2, &new));
+    drop((replayed, rebuilt));
+
+    window.paint(label(2, &new));
+
+    assert_eq!(Arc::strong_count(&old), 1);
+}
+
 // Catches per-rebuild bookkeeping allocations: the recorded handler
 // columns, the boundary's live state, and the canvas closure.
 #[test]

@@ -2,6 +2,7 @@ use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::epoch::FontEpoch;
 use crate::layout::{TextError, TextLayout, TextQuery, TextSpan, TextStyle};
 use crate::source::TextSource;
 use crate::system::TextSystem;
@@ -17,7 +18,8 @@ use crate::system::TextSystem;
 /// already grown allocate no copy of the text. Layouts and sources someone
 /// still holds (a scene, a selection region) keep their revision unchanged;
 /// the block keeps a few of them to reuse once released, and allocates when
-/// it has none to spare.
+/// it has none to spare. A font change lays the text out again, into the
+/// same storage: no layout shaped with other fonts is returned.
 ///
 /// For text with no owner to keep across frames, such as labels, use
 /// [`LayoutCache`](crate::LayoutCache) instead.
@@ -28,6 +30,8 @@ pub struct TextBlock {
     source: TextSource,
     /// Layouts of this revision, oldest first.
     layouts: Vec<Arc<TextLayout>>,
+    /// The fonts `layouts` were shaped with.
+    fonts: Option<FontEpoch>,
     /// Layouts nothing else holds, their sources let go, to lay out into.
     spare_layouts: Vec<Arc<TextLayout>>,
     /// Layouts of earlier revisions something else held when they were
@@ -52,6 +56,7 @@ impl TextBlock {
             revision: 0,
             source: TextSource::empty(),
             layouts: Vec::new(),
+            fonts: None,
             spare_layouts: Vec::new(),
             retired_layouts: Vec::new(),
             spare_sources: Vec::new(),
@@ -101,12 +106,7 @@ impl TextBlock {
             return;
         }
         self.revision += 1;
-        let mut layouts = mem::take(&mut self.layouts);
-        for layout in layouts.drain(..) {
-            self.retire(layout);
-        }
-        self.layouts = layouts;
-        self.collect_released();
+        self.retire_layouts();
         if self.source.overwrite(text, spans) {
             return;
         }
@@ -127,7 +127,8 @@ impl TextBlock {
 
     /// This revision laid out with `style`, wrapped at `wrap_width` logical
     /// pixels (`None` for no wrapping), shaped at `scale_factor`. Returns
-    /// the same layout until the text, spans, or settings change.
+    /// the same layout until the text, spans, settings, or `system`'s fonts
+    /// change.
     pub fn layout(
         &mut self,
         system: &mut TextSystem,
@@ -140,7 +141,12 @@ impl TextBlock {
                 && layout.wrap_width().map(f32::to_bits) == wrap_width.map(f32::to_bits)
                 && layout.scale_factor().to_bits() == scale_factor.to_bits()
         };
-        if let Some(layout) = self.layouts.iter().find(|layout| same(layout)) {
+        let fonts = system.font_epoch();
+        if self.fonts != Some(fonts) {
+            // Shaped with other fonts: never returned again, only refilled.
+            self.retire_layouts();
+            self.fonts = Some(fonts);
+        } else if let Some(layout) = self.layouts.iter().find(|layout| same(layout)) {
             return Ok(layout.clone());
         }
         self.collect_released();
@@ -163,6 +169,59 @@ impl TextBlock {
         }
         self.layouts.push(layout.clone());
         Ok(layout)
+    }
+
+    /// Whether this block keeps a layout its next revision can be laid out
+    /// into: one released by its holders, or one of this revision nothing
+    /// else holds.
+    pub fn keeps_spare(&mut self) -> bool {
+        self.collect_released();
+        !self.spare_layouts.is_empty()
+            || (self.layouts.iter_mut()).any(|layout| Arc::get_mut(layout).is_some())
+    }
+
+    /// Moves a released layout this block keeps to `to`, with a released
+    /// source when `to` keeps none, returning whether it did. For a set of
+    /// blocks whose text changes unevenly (rows of a terminal): a block
+    /// whose earlier layouts are all still held lays its next revision out
+    /// into storage another block has released, rather than allocating.
+    pub fn give_spare(&mut self, to: &mut TextBlock) -> bool {
+        if to.spare_layouts.len() == MAX_SPARE {
+            return false;
+        }
+        let layout = match self.spare_layouts.pop() {
+            Some(layout) => layout,
+            None => {
+                let released = (self.retired_layouts.iter_mut())
+                    .position(|layout| Arc::get_mut(layout).is_some());
+                let Some(i) = released else {
+                    return false;
+                };
+                let mut layout = self.retired_layouts.remove(i);
+                if let Some(own) = Arc::get_mut(&mut layout) {
+                    own.detach_source();
+                }
+                layout
+            }
+        };
+        to.spare_layouts.push(layout);
+        if !to.spare_sources.iter_mut().any(TextSource::is_unshared)
+            && let Some(i) =
+                (0..self.spare_sources.len()).find(|&i| self.spare_sources[i].is_unshared())
+        {
+            to.spare_sources.push(self.spare_sources.remove(i));
+        }
+        true
+    }
+
+    /// Retires every layout of this revision.
+    fn retire_layouts(&mut self) {
+        let mut layouts = mem::take(&mut self.layouts);
+        for layout in layouts.drain(..) {
+            self.retire(layout);
+        }
+        self.layouts = layouts;
+        self.collect_released();
     }
 
     /// Keeps a layout this block no longer returns: to lay out into when
@@ -278,6 +337,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    // A font change must reach a block's layouts, which it otherwise
+    // returns until the text or settings change: the next layout is shaped
+    // with the new fonts.
+    #[test]
+    fn a_font_change_lays_the_text_out_again() {
+        // Names a family only the loaded font has, so until then the
+        // default one stands in. Its own system: changing fonts on the
+        // shared one would race other tests.
+        let mut system = TextSystem::vendored_only(&crate::FontSettings {
+            ui_family: crate::system::RENAMED_INTER.into(),
+            ..crate::FontSettings::default()
+        });
+        let mut block = TextBlock::new();
+        block.set_text("iiiiMMMM");
+        let before = block.layout(&mut system, STYLE, None, 1.0).expect("layout");
+        let before = dump(&before);
+        system.load_font_data(Arc::new(crate::system::renamed_inter()));
+
+        let after = block.layout(&mut system, STYLE, None, 1.0).expect("layout");
+        let fresh = system
+            .layout(&TextParams::new("iiiiMMMM", STYLE))
+            .expect("layout");
+        assert_ne!(before, dump(&fresh), "the loaded font changes the text");
+        assert_eq!(dump(&after), dump(&fresh));
     }
 
     // A selection region or a scene keeps the layout it was painted with

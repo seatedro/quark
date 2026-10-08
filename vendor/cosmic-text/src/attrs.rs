@@ -432,12 +432,19 @@ pub struct AttrsList {
 }
 
 impl AttrsList {
-    /// Heap bytes the list keeps: its span map entries (at their size, not
-    /// the map's node layout) and every attribute set's features.
+    /// Heap bytes the list keeps: its span map entries, and every
+    /// attribute set's features and family name (a name too long to store
+    /// inline). Approximate: map entries count at their size rather than
+    /// the map's node layout, allocator and reference count headers are
+    /// left out, and a family name several sets share counts once for each.
     pub fn storage_bytes(&self) -> usize {
         let entry = mem::size_of::<(Range<usize>, AttrsOwned)>();
         let features = |attrs: &AttrsOwned| {
-            attrs.font_features.features.capacity() * mem::size_of::<Feature>()
+            let name = match &attrs.family_owned {
+                FamilyOwned::Name(name) if name.is_heap_allocated() => name.len(),
+                _ => 0,
+            };
+            attrs.font_features.features.capacity() * mem::size_of::<Feature>() + name
         };
         features(&self.defaults)
             + self
@@ -549,5 +556,20 @@ impl AttrsList {
         self.defaults = AttrsOwned::new(default);
         self.spans.clear();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A layout cache bounds its memory by these bytes, so a family name
+    // kept on the heap must count: a long one reported nothing.
+    #[test]
+    fn storage_bytes_count_a_family_name_kept_on_the_heap() {
+        let name = "f".repeat(1000);
+        let named = AttrsList::new(&Attrs::new().family(Family::Name(&name)));
+        let generic = AttrsList::new(&Attrs::new().family(Family::Monospace));
+        assert_eq!(named.storage_bytes(), generic.storage_bytes() + name.len());
     }
 }

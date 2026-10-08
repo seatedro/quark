@@ -99,6 +99,11 @@ impl<K: Hash + Eq, V> HalfLoadMap<K, V> {
     }
 
     fn insert(&mut self, key: K, value: V) {
+        if let Some(slot) = self.map.get_mut(&key) {
+            // Replacing adds no entry, so it is no reason to grow.
+            *slot = value;
+            return;
+        }
         let len = self.map.len() + 1;
         if len > self.built_capacity / 2 {
             let old = mem::replace(&mut self.map, HashMap::with_capacity(2 * len));
@@ -262,12 +267,15 @@ impl LayoutCache {
         self
     }
 
-    /// Sets the memory limits; layouts already kept past them go at the
-    /// next miss.
+    /// Sets the memory limits. Layouts already kept past them go now, as
+    /// a miss would evict them, so a cache whose limits were lowered stays
+    /// within them.
     pub fn with_limits(mut self, limits: LayoutCacheLimits) -> Self {
         self.limits = limits;
         self.evict_at = limits.history_bytes;
-        self.pool.max_free_bytes = limits.spare_bytes;
+        self.pool.set_max_free_bytes(limits.spare_bytes);
+        self.evict_past_limits();
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
         self
     }
 
@@ -653,6 +661,18 @@ impl LayoutPool {
         debug_assert_eq!(self.verify_integrity(), Ok(()));
     }
 
+    /// Lowers or raises the free bytes kept, dropping free layouts, the
+    /// most recently freed first, past a lower limit.
+    fn set_max_free_bytes(&mut self, max_free_bytes: usize) {
+        self.max_free_bytes = max_free_bytes;
+        while self.free_bytes > max_free_bytes {
+            let Some(spare) = self.free.pop() else {
+                break;
+            };
+            self.free_bytes -= spare.bytes;
+        }
+    }
+
     /// Keeps unshared `spare` if it fits the caps, and drops it otherwise.
     fn free(&mut self, spare: Spare) {
         let fits = self.free_bytes + spare.bytes <= self.max_free_bytes;
@@ -951,6 +971,49 @@ mod tests {
             assert_eq!(layout.text(), row.as_str());
             assert_eq!(&format!("{:?}", layout.glyphs()), glyphs);
         }
+    }
+
+    // Replacing a key's value adds no entry, so it must not grow the map:
+    // a map that grew on replacement allocated where its length said it
+    // would not.
+    #[test]
+    fn half_load_map_replacing_a_key_allocates_nothing() {
+        let mut map = HalfLoadMap::default();
+        map.insert(1u64, 0u64);
+        let ((), allocations) = crate::alloc_budget::count(|| {
+            for value in 1..8 {
+                map.insert(1, value);
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(map.get(&1), Some(&7));
+    }
+
+    // A cache whose limits are lowered once it keeps layouts must come
+    // within them at once: storage kept past the new limits outlived them,
+    // and the pool's own bookkeeping assumed it never would.
+    #[test]
+    fn lowered_limits_apply_to_layouts_already_kept() {
+        let mut sys = test_system();
+        let mut cache = LayoutCache::new(2);
+        cache.begin_frame();
+        for wrap in [100.0, 150.0, 200.0] {
+            cache.layout(&mut sys, &params(wrap)).expect("layout");
+        }
+        // Two layouts pooled, one cached.
+        cache.clear();
+        cache.layout(&mut sys, &params(250.0)).expect("layout");
+        let none = LayoutCacheLimits {
+            history_bytes: 0,
+            spare_bytes: 0,
+        };
+
+        let mut cache = cache.with_limits(none);
+        assert_eq!(cache.memory(), LayoutCacheMemory::default());
+        let held = cache.layout(&mut sys, &params(300.0)).expect("layout");
+        let memory = cache.memory();
+        assert_eq!((memory.free_bytes, memory.resident_bytes), (0, 0));
+        drop(held);
     }
 
     // Every way the fonts change must reach the cache, or it hands out

@@ -592,24 +592,26 @@ mod tests {
     /// above, and again after idling past the layout cache's 240-frame
     /// horizon, when the runner's periodic trim has evicted the warmup's
     /// layouts. Rows lay out into text blocks of their own, so idling
-    /// changes nothing. A typed character and a new line each lay out one
-    /// row whose block has no released layout yet (the prompt's earlier
-    /// one is still held by the recording it replaced); thirty new lines
-    /// lay out into released ones and allocate only the redrawn rows'
-    /// scene chunks. The budgets are the counts measured plus a little
-    /// slack; lower them as reuse improves.
+    /// changes nothing. A typed character and a new line each change a row
+    /// whose earlier layout the last frame still draws; its block lays out
+    /// into storage another row's block released, and what is left is the
+    /// block's lists growing, shaping into longer text than the storage
+    /// held, and the new row's scene chunk. Thirty
+    /// new lines lay out into the rows' own released layouts and allocate
+    /// only the redrawn rows' scene chunks. The budgets are the counts
+    /// measured plus a little slack; lower them as reuse improves.
     #[test]
     fn a_changed_frame_stays_within_its_allocation_budget() {
         // (case, input, text it shows, budget warm, budget after idling)
-        // Measured: 30/30, 35/35, 42/42, 0/0.
+        // Measured: 3/3, 7/7, 42/42, 0/0.
         let cases: &[(&str, String, &str, u64, u64)] = &[
-            ("a typed character", "o".into(), "$ echo", 32, 32),
+            ("a typed character", "o".into(), "$ echo", 5, 5),
             (
                 "one new line",
                 "\r\nfresh output line".into(),
                 "fresh output line",
-                37,
-                37,
+                9,
+                9,
             ),
             (
                 "thirty new lines",
