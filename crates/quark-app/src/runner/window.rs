@@ -47,8 +47,8 @@ pub(super) struct WindowState {
     pub(super) scale_factor: f64,
     pub(super) surface_size: PhysicalSize<u32>,
     pub(super) frame_clock: FrameClock,
-    /// The last frame's renderer stats, for the devtools HUD.
-    #[cfg(feature = "devtools")]
+    /// The last frame's renderer stats, for the devtools HUD and apps
+    /// exporting frame timings.
     pub(super) last_render: quark_render::FrameStats,
     pub(super) traffic_lights: Option<TrafficLights>,
     pub(super) persist_key: Option<String>,

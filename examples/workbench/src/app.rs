@@ -22,7 +22,7 @@ use crate::contracts::{
 };
 use crate::design::tokens;
 use crate::model::Model;
-use crate::perf::Marks;
+use crate::perf::{Marks, Recorder};
 use crate::scenario::{DemoClock, Event, EventKind, SCENARIO_TIME, Scenario};
 use crate::{composer, design, dock, fixtures, overlays, settings, shell, timeline};
 
@@ -56,6 +56,8 @@ pub enum Message {
     Flush,
     /// A watched theme file changed (`QUARK_WORKBENCH_THEME_DIR`).
     ThemeFiles,
+    /// `--perf`: start the scripted run, or write the recording and exit.
+    Perf,
 }
 
 pub struct Workbench {
@@ -70,6 +72,7 @@ pub struct Workbench {
     pub overlays: overlays::State,
     pub settings: settings::State,
     pub marks: Marks,
+    pub recorder: Recorder,
     fx: Effects,
     events: Vec<Event>,
     sender: Option<UiSender<Message>>,
@@ -113,6 +116,7 @@ impl Workbench {
             overlays: overlays::new_state(),
             settings: settings::new_state(),
             marks: Marks::new(options.perf_out.is_some()),
+            recorder: Recorder::new(options.perf_out.clone()),
             fx: Effects::default(),
             events: Vec::new(),
             sender: None,
@@ -174,6 +178,30 @@ impl Workbench {
             sender.send(Message::Flush);
         }
         changed
+    }
+
+    /// `--perf`: sample this frame, start the run on the first frame, and
+    /// finish once the run and the history are done (a few frames later,
+    /// so the last sample gets its render stats).
+    fn record_perf(&mut self, vcx: &mut ViewContext, build_us: u64) {
+        let thread = self.model.selected;
+        let rows = self.model.thread(thread).map_or(0, |t| t.transcript.len());
+        let running = self.model.run(thread).is_some();
+        let stats = vcx.frame.last_render_stats();
+        let previous = (stats.cpu_us, stats.acquire_us, stats.present_us);
+        self.recorder
+            .record(self.runner_ms, build_us, previous, rows, running);
+        let done = self.recorder.started
+            && !running
+            && self.scenario.is_idle()
+            && self.model.history_pending() == 0;
+        if (!self.recorder.started || done)
+            && let Some(sender) = &self.sender
+        {
+            sender.send(Message::Perf);
+        }
+        // Keep frames coming so every sample gets a successor.
+        vcx.frame.request_frame();
     }
 
     /// Ask for the frame that plays the next due event, and for the next
@@ -407,6 +435,7 @@ impl UiApp for Workbench {
             return div().w(size.0).h(size.1).into_any();
         };
         let main = host == HostId::MAIN;
+        let build_started = std::time::Instant::now();
         if main {
             self.pump();
             self.schedule(vcx);
@@ -508,6 +537,9 @@ impl UiApp for Workbench {
         .into_any();
         if main {
             self.marks.first_frame(self.runner_ms);
+            if self.recorder.is_active() {
+                self.record_perf(vcx, build_started.elapsed().as_micros() as u64);
+            }
         }
         element
     }
@@ -545,6 +577,22 @@ impl UiApp for Workbench {
             Message::Flush => {
                 for text in self.announcements.drain(..) {
                     cx.announce(text, Politeness::Polite);
+                }
+            }
+            Message::Perf => {
+                if !self.recorder.started {
+                    self.recorder.started = true;
+                    let thread = self.model.selected;
+                    self.send_prompt(thread, "Make the shortcuts layout independent.", cx);
+                    cx.window.request_redraw_all();
+                } else if !self.recorder.finished {
+                    match self.recorder.write(&self.marks) {
+                        Ok(path) => {
+                            eprintln!("workbench: wrote {}", path.unwrap_or_default().display())
+                        }
+                        Err(e) => eprintln!("workbench: could not write the perf recording: {e}"),
+                    }
+                    cx.window.exit();
                 }
             }
             Message::ThemeFiles => {
