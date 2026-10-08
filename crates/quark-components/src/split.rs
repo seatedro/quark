@@ -815,7 +815,13 @@ mod verification {
         kani::assume(extent >= mins + (N - 1) as f32 * DIVIDER_THICKNESS);
         let target = f32::from(kani::any::<u8>());
         let before = state.sizes.clone();
-        let far: Vec<usize> = state.push_order(pane).collect();
+        // The panes `pane` may push, from the spec rather than from
+        // `push_order`: the expanded fixed panes on the flex pane's side.
+        let beyond = |i: usize| if pane < flex { i > pane } else { i < pane };
+        let mut far = [false; N];
+        for (i, far) in far.iter_mut().enumerate() {
+            *far = i != pane && i != flex && !state.collapsed[i] && beyond(i);
+        }
 
         state.resize_to(pane, target, extent, false);
 
@@ -831,7 +837,7 @@ mod verification {
             if i == pane || i == flex {
                 continue;
             }
-            if far.contains(&i) {
+            if far[i] {
                 // A pushed pane only shrinks, and never below its minimum.
                 assert!(state.sizes[i] <= before[i]);
             } else {
@@ -844,8 +850,10 @@ mod verification {
         let p = state.panes[pane];
         if state.sizes[pane] < target.clamp(p.min, p.max) {
             assert!(r[flex] == state.panes[flex].min);
-            for &i in &far {
-                assert!(r[i] == state.panes[i].min);
+            for i in 0..N {
+                if far[i] {
+                    assert!(r[i] == state.panes[i].min);
+                }
             }
         }
     }
