@@ -63,6 +63,11 @@ impl TextSource {
             + self.0.spans.capacity() * size_of::<TextSpan>()
     }
 
+    /// Whether nothing else holds this storage.
+    pub(crate) fn is_unshared(&mut self) -> bool {
+        Arc::get_mut(&mut self.0).is_some()
+    }
+
     /// Writes `text` and `spans` over this storage when nothing else holds
     /// it, returning whether it did.
     pub(crate) fn overwrite(&mut self, text: &str, spans: &[TextSpan]) -> bool {

@@ -171,6 +171,49 @@ impl TextBlock {
         Ok(layout)
     }
 
+    /// Whether this block keeps a layout its next revision can be laid out
+    /// into: one released by its holders, or one of this revision nothing
+    /// else holds.
+    pub fn keeps_spare(&mut self) -> bool {
+        self.collect_released();
+        !self.spare_layouts.is_empty()
+            || (self.layouts.iter_mut()).any(|layout| Arc::get_mut(layout).is_some())
+    }
+
+    /// Moves a released layout this block keeps to `to`, with a released
+    /// source when `to` keeps none, returning whether it did. For a set of
+    /// blocks whose text changes unevenly (rows of a terminal): a block
+    /// whose earlier layouts are all still held lays its next revision out
+    /// into storage another block has released, rather than allocating.
+    pub fn give_spare(&mut self, to: &mut TextBlock) -> bool {
+        if to.spare_layouts.len() == MAX_SPARE {
+            return false;
+        }
+        let layout = match self.spare_layouts.pop() {
+            Some(layout) => layout,
+            None => {
+                let released = (self.retired_layouts.iter_mut())
+                    .position(|layout| Arc::get_mut(layout).is_some());
+                let Some(i) = released else {
+                    return false;
+                };
+                let mut layout = self.retired_layouts.remove(i);
+                if let Some(own) = Arc::get_mut(&mut layout) {
+                    own.detach_source();
+                }
+                layout
+            }
+        };
+        to.spare_layouts.push(layout);
+        if !to.spare_sources.iter_mut().any(TextSource::is_unshared)
+            && let Some(i) =
+                (0..self.spare_sources.len()).find(|&i| self.spare_sources[i].is_unshared())
+        {
+            to.spare_sources.push(self.spare_sources.remove(i));
+        }
+        true
+    }
+
     /// Retires every layout of this revision.
     fn retire_layouts(&mut self) {
         let mut layouts = mem::take(&mut self.layouts);

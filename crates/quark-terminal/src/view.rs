@@ -183,10 +183,10 @@ struct Screen {
 /// The text blocks each row lays its runs out with, by row id (see
 /// [`GridRow::id`]), so a redrawn row lays out into storage it already
 /// grew rather than into the shared layout cache, and nothing a row no
-/// longer shows stays alive there. A block's earlier layouts are still
-/// held for a frame or two after the row redraws (by the recording it
-/// replaced and that recording's spare scene chunk), so a row's blocks stop
-/// allocating from its third content on.
+/// longer shows stays alive there. A block's layouts are still held for a
+/// frame or two after its row redraws (by the scenes and recordings that
+/// drew them), so a block with none released yet (a row's first change)
+/// borrows released storage from another row's block.
 #[derive(Default)]
 pub(crate) struct RowText {
     rows: Vec<(u64, Vec<TextBlock>)>,
@@ -199,16 +199,48 @@ impl RowText {
             .retain(|(id, _)| grid.rows.iter().any(|row| row.id == *id));
     }
 
-    /// The blocks of row `id`.
-    fn blocks(&mut self, id: u64) -> &mut Vec<TextBlock> {
-        let i = match self.rows.iter().position(|(row, _)| *row == id) {
+    /// The index of row `id`'s blocks.
+    fn row(&mut self, id: u64) -> usize {
+        match self.rows.iter().position(|(row, _)| *row == id) {
             Some(i) => i,
             None => {
                 self.rows.push((id, Vec::new()));
                 self.rows.len() - 1
             }
-        };
-        &mut self.rows[i].1
+        }
+    }
+
+    /// Block `index` of row `row`, set to `text` and `spans`. When that
+    /// changes them and every layout the block has is still held, it takes
+    /// released storage from another block. A block's first text is laid
+    /// out into new storage: a row that shows text needs storage of its
+    /// own, and borrowing it would only move the allocation to the donor's
+    /// next change.
+    fn block(
+        &mut self,
+        row: usize,
+        index: usize,
+        text: &str,
+        spans: &[TextSpan],
+    ) -> &mut TextBlock {
+        let blocks = &mut self.rows[row].1;
+        if index == blocks.len() {
+            blocks.push(TextBlock::new());
+        }
+        let block = &mut blocks[index];
+        let changed = block.text() != text || block.spans() != spans;
+        if changed && block.revision() > 0 && !block.keeps_spare() {
+            let mut block = std::mem::take(block);
+            for donor in self.rows.iter_mut().flat_map(|(_, blocks)| blocks) {
+                if donor.give_spare(&mut block) {
+                    break;
+                }
+            }
+            self.rows[row].1[index] = block;
+        }
+        let block = &mut self.rows[row].1[index];
+        block.set(text, spans);
+        block
     }
 }
 
@@ -250,8 +282,7 @@ fn build(
                 canvas(move |bounds, scene, cx| {
                     let row = &grid.rows[i];
                     let mut row_text = row_text.borrow_mut();
-                    let blocks = row_text.blocks(row.id);
-                    paint_row(bounds, scene, cx, row, blocks, &m, palette);
+                    paint_row(bounds, scene, cx, row, &mut row_text, &m, palette);
                 })
                 .w(grid_w)
                 .h(m.cell_h)
@@ -331,7 +362,7 @@ fn paint_row(
     scene: &mut Scene,
     cx: &mut ElementContext,
     row: &GridRow,
-    blocks: &mut Vec<TextBlock>,
+    row_text: &mut RowText,
     m: &Metrics,
     palette: Palette,
 ) {
@@ -360,19 +391,16 @@ fn paint_row(
             color: palette.selection,
         });
     }
+    let at = row_text.row(row.id);
     let mut drawn = 0;
     for run in &row.runs {
         let text = row.run_text(run);
         if text.trim().is_empty() {
             continue;
         }
-        if drawn == blocks.len() {
-            blocks.push(TextBlock::new());
-        }
-        let block = &mut blocks[drawn];
-        drawn += 1;
         let (style, italic) = text_style(m, run.style, text.len());
-        block.set(text, italic.as_slice());
+        let block = row_text.block(at, drawn, text, italic.as_slice());
+        drawn += 1;
         let Ok(layout) = block.layout(cx.text, style, None, cx.scale_factor) else {
             continue;
         };
