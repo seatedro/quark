@@ -419,6 +419,64 @@ pub(crate) fn push_divider(sizes: &mut [f32], min: f32, divider: usize, delta: f
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const N: usize = 4;
+
+    /// Every divider of four children at their minimum or above, moved by
+    /// any whole amount. `divider` is concrete: a symbolic one gives
+    /// `push_divider`'s donor list a symbolic length, which CBMC cannot
+    /// handle in memory.
+    fn check(divider: usize) {
+        // Whole points below 64, so every difference is exact in `f32`.
+        let min = f32::from(kani::any::<u8>() % 64);
+        let mut sizes = [0.0f32; N];
+        for size in &mut sizes {
+            *size = f32::from(kani::any::<u8>() % 64);
+            kani::assume(*size >= min);
+        }
+        let delta = f32::from(kani::any::<i8>());
+        let before = sizes;
+
+        push_divider(&mut sizes, min, divider, delta);
+
+        let (grow, donors): (usize, &[usize]) = match delta > 0.0 {
+            true => (divider, &[1, 2, 3][divider..]),
+            false => (divider + 1, &[2, 1, 0][N - 2 - divider..]),
+        };
+        // The child behind the divider grows by at most the motion.
+        // (Conservation of the total is left to the unit test: proving
+        // float sums equal runs CBMC out of memory.)
+        assert!(sizes[grow] >= before[grow] && sizes[grow] - before[grow] <= delta.abs());
+        let mut earlier_at_min = true;
+        for i in 0..N {
+            assert!(sizes[i] >= min);
+            if i != grow && !donors.contains(&i) {
+                assert!(sizes[i] == before[i]);
+            }
+        }
+        for &i in donors {
+            assert!(sizes[i] <= before[i]);
+            // A child gives only once every child nearer the divider is at
+            // its minimum.
+            if sizes[i] < before[i] {
+                assert!(earlier_at_min);
+            }
+            earlier_at_min &= sizes[i] == min;
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn push_divider_keeps_minimums_and_drains_nearest_first() {
+        check(0);
+        check(1);
+        check(2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
