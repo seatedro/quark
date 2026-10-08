@@ -101,16 +101,39 @@ pub fn limit_field(
     focused: bool,
     error: Option<&str>,
     on_click: quark_app::quark_ui::Action,
+    theme: &Theme,
 ) -> AnyElement {
     let label = "Tool output limit";
+    let colors = &theme.colors;
+    // Bare, in a box of its own: a labelled text input paints its label
+    // inside the field, and the FormField already shows it above.
     let input = text_input(label, "")
         .field(field)
         .focus_target(LIMIT)
         .focused(focused)
-        .on_click(on_click)
+        .on_click(on_click.clone())
+        .bare()
+        .w_full()
+        // Inside the box's 1-point border, so the value centers in it.
+        .h(tokens::PRIMARY_CONTROL - 2.0);
+    let border = if error.is_some() {
+        colors.status_error
+    } else {
+        colors.control_border
+    };
+    let control = div()
+        .flex_row()
+        .items_center()
         .w(240.0)
-        .h(tokens::PRIMARY_CONTROL);
-    FormField::new("settings.output-limit", label, input)
+        .h(tokens::PRIMARY_CONTROL)
+        .px(tokens::SPACE_8)
+        .rounded(tokens::RADIUS_ROW)
+        .border(border)
+        .bg(colors.surface)
+        .focus_ring(LIMIT)
+        .on_click(on_click)
+        .child(input);
+    FormField::new("settings.output-limit", label, control)
         .help("Lines of tool output shown before a card collapses the rest.")
         .error(error)
         .required(true)

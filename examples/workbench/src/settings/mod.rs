@@ -108,6 +108,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> Option
         vcx.is_focused(LIMIT),
         open.limit_error.as_deref(),
         Action::FocusLimit.into(),
+        theme,
     );
     let (meta, _) = tokens::TYPE_META;
     let about = view! {
