@@ -32,7 +32,7 @@ use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, ElementHandle,
-    ElementHandles, InputRouter, LayoutSnapshot, Mods, ScrollbarTrack, TextInputHitArea,
+    ElementHandles, InputRouter, LayoutSnapshot, Mods, TextInputHitArea,
     TooltipRegion, WheelEvent, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
@@ -431,7 +431,6 @@ pub struct UiAdapter<U: UiApp> {
     spare_input: quark_ui::element::InputFrame,
     spare_text_areas: Vec<TextInputHitArea>,
     /// Last frame's scrollbar track buffer, reused by the next frame.
-    spare_scrollbar_tracks: Vec<ScrollbarTrack>,
     spare_tooltip_regions: Vec<TooltipRegion>,
     sender: UiSender<U::Message>,
     messages: Receiver<U::Message>,
@@ -481,7 +480,6 @@ impl<U: UiApp> UiAdapter<U> {
             spare_accessibility: AccessibilityFrame::default(),
             spare_input: Default::default(),
             spare_text_areas: Vec::new(),
-            spare_scrollbar_tracks: Vec::new(),
             spare_tooltip_regions: Vec::new(),
             sender: UiSender {
                 sender,
@@ -1046,15 +1044,12 @@ impl<U: UiApp> App for UiAdapter<U> {
         ecx.text_input_hit_areas = std::mem::take(&mut self.spare_text_areas);
         ecx.text_input_hit_areas.clear();
         ecx.accessibility = std::mem::take(&mut self.spare_accessibility);
-        ecx.scrollbar_tracks = std::mem::take(&mut self.spare_scrollbar_tracks);
-        ecx.scrollbar_tracks.clear();
         ecx.tooltip_regions = std::mem::take(&mut self.spare_tooltip_regions);
         ecx.tooltip_regions.clear();
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let scene = std::mem::take(&mut self.spare_scene);
         let painted = paint(&mut root, &mut ecx, scene, width, height);
-        self.spare_scrollbar_tracks = std::mem::take(&mut ecx.scrollbar_tracks);
         self.spare_tooltip_regions = std::mem::take(&mut ecx.tooltip_regions);
         #[cfg(feature = "devtools")]
         let phases = self.devtools.end_frame(&mut ecx.devtools);

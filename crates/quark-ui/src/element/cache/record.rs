@@ -75,7 +75,6 @@ pub(super) struct PaintRecord {
     a11y_ids: Vec<NodeId>,
     tooltips: Vec<TooltipRegion>,
     selectable: Vec<SelectableTextRegion>,
-    scrollbars: Vec<ScrollbarTrack>,
     /// Geometry rows: names, layout boxes, and boundary-relative clips.
     geometry: Vec<GeometryKey>,
     geometry_layout: Vec<Rect>,
@@ -105,7 +104,6 @@ impl PaintRecord {
         self.a11y_ids.clear();
         self.tooltips.clear();
         self.selectable.clear();
-        self.scrollbars.clear();
         self.geometry.clear();
         self.geometry_layout.clear();
         self.geometry_clip.clear();
@@ -137,7 +135,6 @@ struct PaintMarks {
     handlers: HandlerMarks,
     tooltips: usize,
     selectable: usize,
-    scrollbars: usize,
     text_inputs: usize,
     geometry: usize,
     semantic_parent: Option<usize>,
@@ -253,7 +250,6 @@ impl Recording {
             handlers: cx.handlers.marks(),
             tooltips: cx.tooltip_regions.len(),
             selectable: cx.selectable_text_runs.len(),
-            scrollbars: cx.scrollbar_tracks.len(),
             text_inputs: cx.text_input_hit_areas.len(),
             geometry,
             semantic_parent: cx.current_semantic_parent(),
@@ -358,11 +354,6 @@ impl Recording {
                 .iter()
                 .map(|r| offset_selectable(r, -ox, -oy)),
         );
-        record.scrollbars.extend(
-            cx.scrollbar_tracks[marks.scrollbars..]
-                .iter()
-                .map(|t| offset_scrollbar(t, -ox, -oy)),
-        );
         for row in marks.geometry..cx.geometry.len() {
             let (key, layout, clip) = cx.geometry.recorded(row);
             record.geometry.push(key);
@@ -420,14 +411,6 @@ fn replay_selectable(
     SelectableTextRegion {
         transform,
         ..offset_selectable(region, dx, dy)
-    }
-}
-
-fn offset_scrollbar(track: &ScrollbarTrack, dx: f32, dy: f32) -> ScrollbarTrack {
-    ScrollbarTrack {
-        track_rect: track.track_rect.offset(dx, dy),
-        thumb_top: track.thumb_top + dy,
-        ..track.clone()
     }
 }
 
@@ -557,12 +540,6 @@ pub(super) fn replay_paint(
             .selectable
             .iter()
             .map(|r| replay_selectable(r, (ox, oy), transform)),
-    );
-    cx.scrollbar_tracks.extend(
-        record
-            .scrollbars
-            .iter()
-            .map(|t| offset_scrollbar(t, ox, oy)),
     );
     cx.keep_transition_keys(&record.transitions);
 
