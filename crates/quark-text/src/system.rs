@@ -172,6 +172,7 @@ impl TextSystem {
     fn fonts_changed(&mut self) {
         self.synthetic_italic = SyntheticItalic::new(&self.font_system);
         self.emoji_family = emoji_family(self.font_system.db(), self.settings.bundled_fallback);
+        self.scratch.text_faces.clear();
         self.generation = self.generation.wrapping_add(1);
     }
 

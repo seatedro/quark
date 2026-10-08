@@ -496,6 +496,8 @@ pub(crate) struct LayoutScratch {
     line_paragraph: Vec<usize>,
     /// The font features every span gets.
     features: cosmic_text::FontFeatures,
+    /// Faces for text-presentation characters, kept across builds.
+    pub(crate) text_faces: crate::fonts::TextFaces,
 }
 
 impl TextLayout {
@@ -693,6 +695,23 @@ impl TextLayout {
             let paragraph = text.get(range.clone()).unwrap_or_default();
             if let Some(emoji) = emoji {
                 emoji_spans(&mut attrs, paragraph, emoji);
+                if !paragraph.is_ascii() {
+                    let key = (
+                        style.family,
+                        style.font_kind == FontKind::Mono,
+                        weight_value(style.font_kind, style.font_weight),
+                    );
+                    let faces = scratch
+                        .text_faces
+                        .faces(fs.db(), key, style_family(&style), emoji);
+                    text_spans(
+                        &mut attrs,
+                        paragraph,
+                        fs.db(),
+                        &mut scratch.text_faces,
+                        faces,
+                    );
+                }
             }
             let reused = match buffer.lines.get_mut(line_i) {
                 Some(line) => Some(line),
@@ -1533,6 +1552,45 @@ fn emoji_spans(attrs: &mut AttrsList, paragraph: &str, emoji: &'static str) {
             .style(cosmic_text::Style::Normal)
             .cache_key_flags(CacheKeyFlags::empty());
         attrs.add_span(start..start + grapheme.len(), &emoji_attrs);
+    }
+}
+
+/// Points clusters that should draw as text at a face without color
+/// glyphs when the text's own face lacks them and the color emoji face
+/// has them (see [`crate::fonts::TextFaces`]).
+fn text_spans(
+    attrs: &mut AttrsList,
+    paragraph: &str,
+    db: &fontdb::Database,
+    faces: &mut crate::fonts::TextFaces,
+    faces_of_text: crate::fonts::Faces,
+) {
+    for (start, grapheme) in paragraph.grapheme_indices(true) {
+        let Some(c) = grapheme.chars().next().filter(|c| !c.is_ascii()) else {
+            continue;
+        };
+        if crate::fonts::is_emoji_presentation(grapheme) {
+            continue;
+        }
+        let Some(family) = faces.text_family(db, c, faces_of_text) else {
+            continue;
+        };
+        let owned = AttrsOwned::new(&attrs.get_span(start));
+        // cosmic-text takes a named family only at a weight it has, so ask
+        // for the face nearest the text's weight.
+        let weight = db
+            .query(&fontdb::Query {
+                families: &[Family::Name(&family)],
+                weight: owned.weight,
+                ..fontdb::Query::default()
+            })
+            .and_then(|id| db.face(id))
+            .map_or(owned.weight, |face| face.weight);
+        let text_attrs = owned
+            .as_attrs()
+            .family(Family::Name(&family))
+            .weight(weight);
+        attrs.add_span(start..start + grapheme.len(), &text_attrs);
     }
 }
 

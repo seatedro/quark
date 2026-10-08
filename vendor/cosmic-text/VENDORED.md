@@ -198,3 +198,9 @@ allocations they remove):
    `set_shape_plan_capacity` call at upstream's equivalent, then run
    `cargo test -p quark-text`: the allocation budgets in
    `src/alloc_budget.rs` show which patch upstream lacks.
+- Thickening (`src/glyph_cache.rs`, `src/swash.rs`): a `THICKEN` cache key
+  flag rasterizes outlines with swash's embolden at a fiftieth of the
+  font size, half a pixel at 26 pixels per em. quark-text sets it for
+  `TextStyle::thicken`, which a terminal uses for Ghostty's
+  `font-thicken`. Upstream has no equivalent; it could go up as a
+  general faux-bold strength option.

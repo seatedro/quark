@@ -292,6 +292,155 @@ pub(crate) fn emoji_family(db: &fontdb::Database, order: BundledFallback) -> Opt
     }
 }
 
+/// Families searched first for a character that should draw as text but is
+/// missing from the text's own font, before any other face without color
+/// glyphs: symbol and wide-coverage fonts on each platform, monospaced
+/// ones first.
+const TEXT_SYMBOL_FAMILIES: [&str; 12] = [
+    "Menlo",
+    "Apple Symbols",
+    "STIX Two Math",
+    "Segoe UI Symbol",
+    "Cambria Math",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "DejaVu Sans",
+    "Noto Sans Symbols 2",
+    "Noto Sans Symbols",
+    "Noto Sans Math",
+    "Symbola",
+];
+
+/// Faces for characters that should draw as text (default text
+/// presentation, or VS15) but that the text's own font lacks and a color
+/// emoji face has. cosmic-text's fallback takes the first face that has a
+/// character, color or not, so without this ⏺ or ✔ would draw as a color
+/// emoji. Like Ghostty, a fallback must match the presentation: the first
+/// face without color glyphs that has the character, the color face only
+/// when there is none. Answers are kept per character and per face, and
+/// dropped when the fonts change.
+/// A text's named family, whether its generic family is the monospace
+/// one, and its weight.
+pub(crate) type FacesKey = (Option<&'static str>, bool, u16);
+
+/// A text's own face and the color emoji face.
+pub(crate) type Faces = (Option<fontdb::ID>, Option<fontdb::ID>);
+
+#[derive(Debug, Default)]
+pub(crate) struct TextFaces {
+    /// The family a character draws in, `None` when no text face has it.
+    families: HashMap<char, Option<Arc<str>>>,
+    /// Whether a face has a character.
+    coverage: HashMap<(fontdb::ID, char), bool>,
+    /// Whether a face has color glyphs (COLR, CBDT, sbix, or SVG tables).
+    color: HashMap<fontdb::ID, bool>,
+    /// The face text shapes with and the color emoji face, by the text's
+    /// family (named, else generic) and weight. Font queries allocate, so
+    /// layouts reuse the answers.
+    faces: HashMap<FacesKey, Faces>,
+}
+
+impl TextFaces {
+    pub(crate) fn clear(&mut self) {
+        self.families.clear();
+        self.coverage.clear();
+        self.color.clear();
+        self.faces.clear();
+    }
+
+    /// The face of the first family in `families` at `weight` (the text's
+    /// own face), and the face of `emoji`.
+    pub(crate) fn faces(
+        &mut self,
+        db: &fontdb::Database,
+        key: FacesKey,
+        family: fontdb::Family,
+        emoji: &str,
+    ) -> Faces {
+        *self.faces.entry(key).or_insert_with(|| {
+            let query = |family: fontdb::Family, weight: u16| {
+                db.query(&fontdb::Query {
+                    families: &[family],
+                    weight: fontdb::Weight(weight),
+                    ..fontdb::Query::default()
+                })
+            };
+            (
+                query(family, key.2),
+                query(fontdb::Family::Name(emoji), 400),
+            )
+        })
+    }
+
+    fn covers(&mut self, db: &fontdb::Database, id: fontdb::ID, c: char) -> bool {
+        *self.coverage.entry((id, c)).or_insert_with(|| {
+            db.with_face_data(id, |data, index| {
+                cosmic_text::skrifa::FontRef::from_index(data, index).is_ok_and(|font| {
+                    use cosmic_text::skrifa::MetadataProvider as _;
+                    font.charmap().map(c).is_some()
+                })
+            })
+            .unwrap_or(false)
+        })
+    }
+
+    fn is_color(&mut self, db: &fontdb::Database, id: fontdb::ID) -> bool {
+        *self.color.entry(id).or_insert_with(|| {
+            db.with_face_data(id, |data, index| {
+                use cosmic_text::skrifa::raw::{TableProvider as _, types::Tag};
+                let Ok(font) = cosmic_text::skrifa::FontRef::from_index(data, index) else {
+                    return false;
+                };
+                [b"COLR", b"CBDT", b"sbix", b"SVG "]
+                    .iter()
+                    .any(|tag| font.data_for_tag(Tag::new(tag)).is_some())
+            })
+            .unwrap_or(false)
+        })
+    }
+
+    /// The family `c` should draw in instead of the fallback cosmic-text
+    /// would pick, for text whose own face is `primary`; `None` to leave
+    /// it to the fallback. Only characters `emoji` (the color emoji
+    /// face) has are looked at: elsewhere the fallback cannot land on
+    /// color.
+    pub(crate) fn text_family(
+        &mut self,
+        db: &fontdb::Database,
+        c: char,
+        (primary, emoji): Faces,
+    ) -> Option<Arc<str>> {
+        let emoji = emoji?;
+        if !self.covers(db, emoji, c) || primary.is_some_and(|id| self.covers(db, id, c)) {
+            return None;
+        }
+        if let Some(found) = self.families.get(&c) {
+            return found.clone();
+        }
+        let named = TEXT_SYMBOL_FAMILIES.iter().filter_map(|family| {
+            db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                ..fontdb::Query::default()
+            })
+        });
+        let candidates: Vec<fontdb::ID> = named
+            .chain(
+                db.faces()
+                    .filter(|f| f.style == fontdb::Style::Normal)
+                    .map(|f| f.id),
+            )
+            .collect();
+        let found = candidates
+            .into_iter()
+            .find(|&id| self.covers(db, id, c) && !self.is_color(db, id))
+            .and_then(|id| db.face(id))
+            .and_then(|face| face.families.first())
+            .map(|(name, _)| Arc::from(name.as_str()));
+        self.families.insert(c, found.clone());
+        found
+    }
+}
+
 /// Whether a grapheme cluster should draw as a color emoji: an emoji
 /// presentation selector, a keycap, a skin tone, a flag, or a first
 /// character that defaults to emoji presentation. Without this, a text font
@@ -623,6 +772,44 @@ mod tests {
                 assert_ne!(*glyph, 0, "{kind:?} {name} is .notdef");
                 assert_eq!(bytes, text, "{kind:?} {name}: cluster");
                 assert_eq!(*advance, width, "{kind:?} {name}: advance");
+            }
+        }
+    }
+
+    // Ghostty's presentation rules: a character that defaults to text
+    // presentation, or asks for it with VS15, draws from a face without
+    // color glyphs when one has it, even though the color emoji face comes
+    // first in the fallback chain; VS16 and emoji-presentation characters
+    // draw in color; and a character no text face has falls back to color
+    // whatever it asked for.
+    #[cfg(feature = "emoji-font")]
+    #[test]
+    fn presentation_picks_a_text_or_color_face() {
+        const TABLE: &[(&str, &str, bool)] = &[
+            ("check mark", "\u{2714}", false),
+            ("check mark, VS15", "\u{2714}\u{fe0e}", false),
+            ("check mark, VS16", "\u{2714}\u{fe0f}", true),
+            ("heart", "\u{2764}", false),
+            ("warning sign", "\u{26a0}", false),
+            ("warning sign, VS16", "\u{26a0}\u{fe0f}", true),
+            ("grinning face", "\u{1f600}", true),
+            (
+                "grinning face, VS15 with no text face",
+                "\u{1f600}\u{fe0e}",
+                true,
+            ),
+        ];
+        let mut system = test_system();
+        for kind in [FontKind::Ui, FontKind::Mono] {
+            let style = TextStyle::new(20.0).kind(kind);
+            for &(name, text, color) in TABLE {
+                let layout = system
+                    .layout(&TextParams::new(text, style))
+                    .expect("layout");
+                let table = glyph_table(&system, &layout);
+                let (family, glyph, ..) = &table[0];
+                assert_ne!(*glyph, 0, "{kind:?} {name} is .notdef");
+                assert_eq!(family == EMOJI_FAMILY, color, "{kind:?} {name}: {family}");
             }
         }
     }
