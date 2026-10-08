@@ -116,9 +116,11 @@ own pull request.
   `src/buffer_line.rs`): `BufferLine::storage_bytes`,
   `ShapeLine::storage_bytes`, and `AttrsList::storage_bytes` report the
   heap bytes a line keeps at capacity, including shaping and layout kept
-  unused for reuse. quark-text's layout cache bounds its memory in bytes
-  and cannot see those capacities otherwise. Remove once upstream reports
-  retained storage; the cache's byte-limit tests in
+  unused for reuse, and attribute sets' features and heap family names
+  (approximate; `AttrsList::storage_bytes` documents what it leaves out).
+  quark-text's layout cache bounds its memory in bytes and cannot see
+  those capacities otherwise. Remove once upstream reports retained
+  storage; the cache's byte-limit tests in
   `quark-text/src/cache.rs` use it.
 
 ## Not patched: bidi analysis
