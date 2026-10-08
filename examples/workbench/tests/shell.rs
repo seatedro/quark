@@ -118,3 +118,30 @@ fn shell_arrow_keys_move_the_selection_from_the_focused_list() {
     assert_eq!(selected_rows(&ui), ["Empty library onboarding"]);
     assert!(ui.find(By::role(Role::List)).focused);
 }
+
+// Catches the width policy resetting the layout: a sidebar the user
+// widened keeps its width after a narrow window hid it and a wide one
+// brought it back.
+#[test]
+fn shell_widening_restores_the_users_sidebar_width() {
+    let mut ui = harness(ScenarioKind::Review);
+    let divider = By::role_name(Role::Splitter, "Resize Sidebar");
+    ui.click_node(divider.clone());
+    ui.key("right");
+    ui.key("right");
+    let widened = ui.find(divider.clone()).value;
+    ui.resize(1000.0, 700.0);
+    let narrow = ui.try_find(divider.clone()).is_some();
+    ui.resize(WIDE.0, WIDE.1);
+
+    assert_ne!(
+        widened.as_deref(),
+        Some("232"),
+        "the keys moved the divider"
+    );
+    assert!(
+        !narrow,
+        "no sidebar divider while the sidebar is an overlay"
+    );
+    assert_eq!(ui.find(divider).value, widened);
+}
