@@ -261,13 +261,13 @@ impl Workbench {
             }
             Effect::ApplyDiff => self.apply_diff(),
             Effect::UndoDiff => {
-                let text = if self.model.files.undo() {
-                    "Changes undone"
+                let (kind, text) = if self.model.files.undo() {
+                    (ToastKind::Success, "Changes undone")
                 } else {
-                    "Nothing to undo"
+                    (ToastKind::Info, "Nothing to undo")
                 };
                 self.fx.push(Effect::Toast(Toast {
-                    kind: ToastKind::Info,
+                    kind,
                     text: text.to_owned(),
                     undo: None,
                 }));

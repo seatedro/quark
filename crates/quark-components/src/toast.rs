@@ -146,6 +146,9 @@ impl Toast {
 pub enum ToastKind {
     #[default]
     Info,
+    /// Something the user asked for is done: a check in the success
+    /// (added-line) color.
+    Success,
     Error,
 }
 
@@ -308,6 +311,7 @@ fn line_height(font_size: f32) -> f32 {
 fn severity_color(kind: ToastKind, tc: &ThemeColors) -> Color {
     match kind {
         ToastKind::Info => tc.status_info,
+        ToastKind::Success => tc.line_add_text,
         ToastKind::Error => tc.status_error,
     }
 }
@@ -315,6 +319,7 @@ fn severity_color(kind: ToastKind, tc: &ThemeColors) -> Color {
 fn severity_icon(kind: ToastKind) -> &'static str {
     match kind {
         ToastKind::Info => lucide::INFO,
+        ToastKind::Success => lucide::CHECK,
         ToastKind::Error => lucide::ALERT_CIRCLE,
     }
 }
@@ -372,7 +377,7 @@ impl RenderOnce for ToastVisuals {
         // A live region: screen readers speak the message when the toast
         // appears, interrupting for errors.
         let (role, politeness) = match self.kind {
-            ToastKind::Info => (accesskit::Role::Status, Politeness::Polite),
+            ToastKind::Info | ToastKind::Success => (accesskit::Role::Status, Politeness::Polite),
             ToastKind::Error => (accesskit::Role::Alert, Politeness::Assertive),
         };
         let toast_id = self.id;

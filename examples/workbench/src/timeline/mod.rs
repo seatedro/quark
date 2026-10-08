@@ -409,7 +409,7 @@ pub fn update(state: &mut State, action: Action, scx: &SurfaceCx, fx: &mut Effec
         Action::CopyCode(text) => {
             fx.push(Effect::CopyText(text));
             fx.push(Effect::Toast(Toast {
-                kind: ToastKind::Info,
+                kind: ToastKind::Success,
                 text: "Copied code".to_owned(),
                 undo: None,
             }));
