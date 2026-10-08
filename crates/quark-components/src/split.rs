@@ -20,10 +20,11 @@ use accesskit::Role;
 use quark::view;
 use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
 use quark_ui::element::{
-    AnyElement, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement, div,
+    AnyElement, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement,
+    cached, div,
 };
 use quark_ui::style::Styled;
-use quark_ui::theme::Theme;
+use quark_ui::theme::{Theme, ThemeColors};
 use quark_ui::{Action, FocusId};
 use serde::{Deserialize, Serialize};
 
@@ -664,6 +665,9 @@ impl<'a> Split<'a> {
     }
 }
 
+/// A divider, replayed from the element cache while nothing it shows or
+/// does changes: its handlers capture only these values and the event map,
+/// which must be pure.
 fn divider(
     id: &'static str,
     state: &SplitState,
@@ -672,98 +676,158 @@ fn divider(
     map: &EventMap,
     theme: &Theme,
 ) -> AnyElement {
-    let colors = &theme.colors;
+    use std::hash::{Hash, Hasher};
     let horizontal = state.axis == Axis::Horizontal;
     let pane = state.divider_pane(index);
     let p = state.panes[pane];
     let collapsed = state.collapsed[pane];
     let size = if collapsed { 0.0 } else { state.sizes[pane] };
-    let cursor = if horizontal {
-        CursorHint::ResizeCol
-    } else {
-        CursorHint::ResizeRow
-    };
-    let (back, forward) = if horizontal {
-        ("left", "right")
-    } else {
-        ("up", "down")
-    };
-    let nudge = |delta: f32| {
-        map(SplitEvent::Nudge {
-            divider: index,
-            delta,
-            extent,
-        })
-    };
-    // Assistive tech sets and steps the pane's size; nudges move the
-    // divider on screen, which grows the pane one way or the other.
     let grow = state.grow_sign(index);
-    let set_map = map.clone();
-    let numeric_actions = NumericActions::new(move |value| {
-        set_map(SplitEvent::Nudge {
-            divider: index,
-            delta: (value as f32 - size) * grow,
+    let mut hasher = std::hash::DefaultHasher::new();
+    (id, index, horizontal, collapsed, p.label, p.collapsible).hash(&mut hasher);
+    for v in [extent, size, grow, p.min, p.max] {
+        v.to_bits().hash(&mut hasher);
+    }
+    let view = DividerView {
+        id,
+        index,
+        extent,
+        horizontal,
+        pane: p,
+        collapsed,
+        size,
+        grow,
+        map: map.clone(),
+        colors: theme.colors,
+    };
+    let element = cached(
+        CacheKey(quark_ui::element::inputs_hash(&(id, "divider", index))),
+        hasher.finish(),
+        move || view.build(),
+    )
+    .flex_shrink_0();
+    if horizontal {
+        element.w(DIVIDER_THICKNESS).h_full().into_any()
+    } else {
+        element.h(DIVIDER_THICKNESS).w_full().into_any()
+    }
+}
+
+struct DividerView {
+    id: &'static str,
+    index: usize,
+    extent: f32,
+    horizontal: bool,
+    pane: Pane,
+    collapsed: bool,
+    size: f32,
+    grow: f32,
+    map: EventMap,
+    colors: ThemeColors,
+}
+
+impl DividerView {
+    fn build(self) -> AnyElement {
+        let Self {
+            id,
+            index,
             extent,
+            horizontal,
+            pane: p,
+            collapsed,
+            size,
+            grow,
+            map,
+            colors,
+        } = self;
+        let colors = &colors;
+        let map = &map;
+        let cursor = if horizontal {
+            CursorHint::ResizeCol
+        } else {
+            CursorHint::ResizeRow
+        };
+        let (back, forward) = if horizontal {
+            ("left", "right")
+        } else {
+            ("up", "down")
+        };
+        let nudge = |delta: f32| {
+            map(SplitEvent::Nudge {
+                divider: index,
+                delta,
+                extent,
+            })
+        };
+        // Assistive tech sets and steps the pane's size; nudges move the
+        // divider on screen, which grows the pane one way or the other.
+        let set_map = map.clone();
+        let numeric_actions = NumericActions::new(move |value| {
+            set_map(SplitEvent::Nudge {
+                divider: index,
+                delta: (value as f32 - size) * grow,
+                extent,
+            })
         })
-    })
-    .steps(nudge(-NUDGE_STEP * grow), nudge(NUDGE_STEP * grow));
-    let drag_map = map.clone();
-    let offset = -(DIVIDER_HIT - DIVIDER_THICKNESS) / 2.0;
-    view! {
-        <div class="flex-none relative" bg={colors.border_variant}
-             @when {horizontal} { w={DIVIDER_THICKNESS} class="h-full" }
-             @when {!horizontal} { h={DIVIDER_THICKNESS} class="w-full" }>
-            <div class="absolute" z_index={1} accessibility_id={format!("{id}:divider:{index}")}
-                 accessibility_role={Role::Splitter} role="separator"
-                 aria-label={quark_ui::i18n::tr_args(
-                     "quark-resize-named",
-                     [("name", p.label.into())],
-                 )}
-                 aria-valuetext={format!("{size:.0}")}
-                 accessibility_numeric={NumericValue {
-                     value: f64::from(size),
-                     // Collapsing is Enter's job; a size is never below min.
-                     min: f64::from(p.min),
-                     max: f64::from(p.max.min(extent)),
-                     step: Some(f64::from(NUDGE_STEP)),
-                 }}
-                 accessibility_numeric_actions={numeric_actions}
-                 accessibility_orientation={if horizontal {
-                     Orientation::Vertical
-                 } else {
-                     Orientation::Horizontal
-                 }}
-                 test_id="split-divider" focus_ring={Split::divider_focus(id, index)}
-                 cursor={cursor} hover_bg={colors.accent}
-                 on_key={(back, nudge(-NUDGE_STEP))}
-                 on_key={(forward, nudge(NUDGE_STEP))}
-                 on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
-                 on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
-                 // Home and End give the pane its smallest and largest size
-                 // (the window splitter pattern); the state clamps to what fits.
-                 on_key={("home", nudge((p.min - size) * grow))}
-                 on_key={("end", nudge((p.max.min(extent) - size) * grow))}
-                 on:drag={move |press: ClickEvent| {
-                     Box::new(DividerDrag {
-                         map: drag_map.clone(),
-                         divider: index,
-                         horizontal,
-                         origin: if horizontal { press.x } else { press.y },
-                         extent,
-                         cursor,
-                     }) as Box<dyn DragHandler>
-                 }}
-                 @when {p.collapsible} {
-                     aria-expanded={!collapsed}
-                     on_key={("enter", map(SplitEvent::Toggle { divider: index }))}
-                 }
-                 @when {horizontal} {
-                     class="top-0 bottom-0" left={offset} w={DIVIDER_HIT}
-                 }
-                 @when {!horizontal} {
-                     class="left-0 right-0" top={offset} h={DIVIDER_HIT}
-                 } />
-        </div>
+        .steps(nudge(-NUDGE_STEP * grow), nudge(NUDGE_STEP * grow));
+        let drag_map = map.clone();
+        let offset = -(DIVIDER_HIT - DIVIDER_THICKNESS) / 2.0;
+        view! {
+            <div class="flex-none relative" bg={colors.border_variant}
+                 @when {horizontal} { w={DIVIDER_THICKNESS} class="h-full" }
+                 @when {!horizontal} { h={DIVIDER_THICKNESS} class="w-full" }>
+                <div class="absolute" z_index={1} accessibility_id={format!("{id}:divider:{index}")}
+                     accessibility_role={Role::Splitter} role="separator"
+                     aria-label={quark_ui::i18n::tr_args(
+                         "quark-resize-named",
+                         [("name", p.label.into())],
+                     )}
+                     aria-valuetext={format!("{size:.0}")}
+                     accessibility_numeric={NumericValue {
+                         value: f64::from(size),
+                         // Collapsing is Enter's job; a size is never below min.
+                         min: f64::from(p.min),
+                         max: f64::from(p.max.min(extent)),
+                         step: Some(f64::from(NUDGE_STEP)),
+                     }}
+                     accessibility_numeric_actions={numeric_actions}
+                     accessibility_orientation={if horizontal {
+                         Orientation::Vertical
+                     } else {
+                         Orientation::Horizontal
+                     }}
+                     test_id="split-divider" focus_ring={Split::divider_focus(id, index)}
+                     cursor={cursor} hover_bg={colors.accent}
+                     on_key={(back, nudge(-NUDGE_STEP))}
+                     on_key={(forward, nudge(NUDGE_STEP))}
+                     on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
+                     on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
+                     // Home and End give the pane its smallest and largest size
+                     // (the window splitter pattern); the state clamps to what fits.
+                     on_key={("home", nudge((p.min - size) * grow))}
+                     on_key={("end", nudge((p.max.min(extent) - size) * grow))}
+                     on:drag={move |press: ClickEvent| {
+                         Box::new(DividerDrag {
+                             map: drag_map.clone(),
+                             divider: index,
+                             horizontal,
+                             origin: if horizontal { press.x } else { press.y },
+                             extent,
+                             cursor,
+                         }) as Box<dyn DragHandler>
+                     }}
+                     @when {p.collapsible} {
+                         aria-expanded={!collapsed}
+                         on_key={("enter", map(SplitEvent::Toggle { divider: index }))}
+                     }
+                     @when {horizontal} {
+                         class="top-0 bottom-0" left={offset} w={DIVIDER_HIT}
+                     }
+                     @when {!horizontal} {
+                         class="left-0 right-0" top={offset} h={DIVIDER_HIT}
+                     } />
+            </div>
+        }
     }
 }
 
