@@ -80,6 +80,11 @@ struct Entry {
 ///
 /// Past `max_entries` the least recently used entries are evicted even when
 /// they are within the idle horizon.
+///
+/// Evicted layouts nothing else holds are kept, up to 256 of them and about
+/// 8 MiB, and a miss rebuilds one in place, so fresh text reuses their
+/// storage instead of allocating its own. A layout still held when evicted
+/// is left untouched until its last holder drops it.
 #[derive(Debug)]
 pub struct LayoutCache {
     entries: HashMap<LayoutKey, Entry>,
@@ -96,6 +101,10 @@ pub struct LayoutCache {
     max_entries: usize,
     font_generation: u64,
     stats: LayoutCacheStats,
+    /// Evicted layouts, refilled by later misses.
+    pool: LayoutPool,
+    /// Recency stamps, kept for [`Self::evict_least_recent`].
+    stamps: Vec<u64>,
 }
 
 /// Lifetime lookup counters. A miss is a lookup that shaped a new layout.
@@ -120,6 +129,8 @@ impl LayoutCache {
             max_entries: DEFAULT_MAX_ENTRIES,
             font_generation: 0,
             stats: LayoutCacheStats::default(),
+            pool: LayoutPool::default(),
+            stamps: Vec::new(),
         }
     }
 
@@ -155,14 +166,17 @@ impl LayoutCache {
 
     /// Returns the number of evicted entries.
     pub fn trim(&mut self) -> usize {
-        let before = self.entries.len();
         let (scopes, max_idle) = (&self.scopes, self.max_idle_frames);
-        self.entries.retain(|_, entry| {
-            scopes
+        let idle = self.entries.extract_if(|_, entry| {
+            !scopes
                 .get(&entry.scope)
                 .is_some_and(|frame| frame.wrapping_sub(entry.last_used) <= max_idle)
         });
-        let evicted = before - self.entries.len();
+        let mut evicted = 0;
+        for (_, entry) in idle {
+            self.pool.recycle(entry.layout);
+            evicted += 1;
+        }
         if evicted > 0 {
             self.reindex();
         }
@@ -170,7 +184,9 @@ impl LayoutCache {
     }
 
     pub fn clear(&mut self) {
-        self.entries.clear();
+        for (_, entry) in self.entries.drain() {
+            self.pool.recycle(entry.layout);
+        }
         self.content_hashes.clear();
     }
 
@@ -191,7 +207,7 @@ impl LayoutCache {
         system: &mut TextSystem,
         params: &TextParams,
     ) -> Result<Arc<TextLayout>, TextError> {
-        self.lookup(system, &params.query(), || params.clone())
+        self.lookup(system, &params.query(), Some(params))
     }
 
     /// [`Self::layout`] for borrowed params: a hit allocates nothing, a
@@ -201,14 +217,16 @@ impl LayoutCache {
         system: &mut TextSystem,
         query: &TextQuery,
     ) -> Result<Arc<TextLayout>, TextError> {
-        self.lookup(system, query, || query.to_params())
+        self.lookup(system, query, None)
     }
 
+    /// Looks `params` up, laying them out on a miss. The layout shares
+    /// `shared`'s text and spans when given, and copies them otherwise.
     fn lookup(
         &mut self,
         system: &mut TextSystem,
         params: &TextQuery,
-        owned: impl FnOnce() -> TextParams,
+        shared: Option<&TextParams>,
     ) -> Result<Arc<TextLayout>, TextError> {
         if system.generation() != self.font_generation {
             self.clear();
@@ -232,7 +250,17 @@ impl LayoutCache {
             }
         }
         self.stats.misses += 1;
-        let layout = Arc::new(system.layout(&owned())?);
+        params.validate()?;
+        let mut layout = self
+            .pool
+            .take(params.text)
+            .unwrap_or_else(|| Arc::new(TextLayout::empty()));
+        let own = Arc::get_mut(&mut layout).expect("pooled layouts are unshared");
+        match shared {
+            Some(shared) => own.share_inputs(shared),
+            None => own.copy_inputs(params),
+        }
+        system.rebuild(own);
         self.content_hashes
             .insert(text_id(layout.text()), key.content);
         let replaced = self.entries.insert(
@@ -244,7 +272,8 @@ impl LayoutCache {
                 touched,
             },
         );
-        if replaced.is_some() {
+        if let Some(replaced) = replaced {
+            self.pool.recycle(replaced.layout);
             // A colliding entry may have held the only reference to its text.
             self.reindex();
         }
@@ -258,10 +287,17 @@ impl LayoutCache {
     /// cap, so a working set at the cap does not evict on every miss.
     fn evict_least_recent(&mut self) {
         let keep = self.max_entries / 4 * 3;
-        let mut touched: Vec<u64> = self.entries.values().map(|e| e.touched).collect();
+        let touched = &mut self.stamps;
+        touched.clear();
+        touched.extend(self.entries.values().map(|e| e.touched));
         let cut = touched.len() - keep.max(1);
         let (_, &mut threshold, _) = touched.select_nth_unstable(cut - 1);
-        self.entries.retain(|_, entry| entry.touched > threshold);
+        for (_, entry) in self
+            .entries
+            .extract_if(|_, entry| entry.touched <= threshold)
+        {
+            self.pool.recycle(entry.layout);
+        }
         self.reindex();
     }
 
@@ -274,6 +310,118 @@ impl LayoutCache {
                 .insert(text_id(entry.layout.text()), key.content);
         }
     }
+}
+
+/// Layouts the cache evicted, kept so a miss refills one instead of
+/// allocating its storage and `Arc`. `free` layouts are held by nothing
+/// else. `retired` ones were still held elsewhere (by a scene, say) when
+/// evicted; they stay unchanged for those holders and become free once the
+/// last holder drops them.
+#[derive(Debug, Default)]
+struct LayoutPool {
+    free: Vec<Arc<TextLayout>>,
+    retired: Vec<Arc<TextLayout>>,
+    /// [`spare_bytes`] of the `free` layouts.
+    free_bytes: usize,
+}
+
+/// Most layouts `free` and `retired` each keep.
+const POOL_CAP: usize = 256;
+
+/// Most storage the free layouts keep, by [`spare_bytes`].
+const MAX_FREE_BYTES: usize = 8 << 20;
+
+/// Storage a pooled layout keeps: its glyph capacity at a rough 256 bytes a
+/// glyph (its own columns plus cosmic-text's shaped and laid-out glyphs),
+/// and its text.
+fn spare_bytes(layout: &TextLayout) -> usize {
+    layout.glyph_capacity() * 256 + layout.text().len()
+}
+
+/// A [`LayoutPool`] invariant broken.
+#[derive(Debug, PartialEq)]
+enum PoolError {
+    SharedFree { index: usize },
+    Overfull { free: usize, retired: usize },
+    FreeBytes { counted: usize, actual: usize },
+}
+
+impl LayoutPool {
+    fn recycle(&mut self, layout: Arc<TextLayout>) {
+        if unshared(&layout) {
+            self.free(layout);
+        } else {
+            // A holder that never lets go must not block later ones, so
+            // the oldest retiree gives way.
+            if self.retired.len() == POOL_CAP {
+                self.retired.swap_remove(0);
+            }
+            self.retired.push(layout);
+        }
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
+    }
+
+    /// Keeps unshared `layout` if it fits the caps, and drops it otherwise.
+    fn free(&mut self, layout: Arc<TextLayout>) {
+        let bytes = spare_bytes(&layout);
+        if self.free.len() < POOL_CAP && self.free_bytes + bytes <= MAX_FREE_BYTES {
+            self.free_bytes += bytes;
+            self.free.push(layout);
+        }
+    }
+
+    /// An unshared layout to rebuild for `text`: preferably one with room
+    /// for its glyphs (one per char, roughly), the least room among those,
+    /// and text of the same length so the copy can overwrite it.
+    fn take(&mut self, text: &str) -> Option<Arc<TextLayout>> {
+        let mut i = 0;
+        while i < self.retired.len() {
+            if unshared(&self.retired[i]) {
+                let layout = self.retired.swap_remove(i);
+                self.free(layout);
+            } else {
+                i += 1;
+            }
+        }
+        let chars = text.chars().count();
+        let i = (0..self.free.len()).max_by_key(|&i| {
+            let layout = &self.free[i];
+            let room = layout.glyph_capacity();
+            let fits = room >= chars;
+            let snug = if fits { usize::MAX - room } else { room };
+            (fits, layout.text().len() == text.len(), snug)
+        })?;
+        let layout = self.free.swap_remove(i);
+        self.free_bytes -= spare_bytes(&layout);
+        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        Some(layout)
+    }
+
+    fn verify_integrity(&self) -> Result<(), PoolError> {
+        if self.free.len() > POOL_CAP || self.retired.len() > POOL_CAP {
+            return Err(PoolError::Overfull {
+                free: self.free.len(),
+                retired: self.retired.len(),
+            });
+        }
+        if let Some(index) = self.free.iter().position(|layout| !unshared(layout)) {
+            return Err(PoolError::SharedFree { index });
+        }
+        let actual = self.free.iter().map(|layout| spare_bytes(layout)).sum();
+        if self.free_bytes != actual || actual > MAX_FREE_BYTES {
+            return Err(PoolError::FreeBytes {
+                counted: self.free_bytes,
+                actual,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Whether `layout` is the only reference, so it can be rebuilt without
+/// any holder seeing it change.
+fn unshared(layout: &Arc<TextLayout>) -> bool {
+    Arc::strong_count(layout) == 1 && Arc::weak_count(layout) == 0
 }
 
 impl Default for LayoutCache {
@@ -388,6 +536,27 @@ mod tests {
         assert_eq!(cache.len(), 3);
         let again = cache.layout(&mut sys, &params(100.0)).expect("layout");
         assert!(Arc::ptr_eq(&recent, &again));
+    }
+
+    // Misses refill evicted layouts, so one still held when evicted (by a
+    // scene, say) must not be among them.
+    #[test]
+    fn layout_cache_eviction_leaves_held_layout_unchanged() {
+        let mut sys = test_system();
+        let mut cache = LayoutCache::new(0);
+        let query = |text| TextQuery::new(text, TextStyle::new(14.0)).wrap_width(Some(150.0));
+        cache.begin_frame();
+        let held = cache.layout_query(&mut sys, &query(TEXT)).expect("layout");
+        let glyphs = format!("{:?}", held.glyphs());
+        cache.begin_frame();
+        cache.trim();
+        // The same length, so it could be copied over the held text.
+        let other: String = TEXT.chars().rev().collect();
+        cache
+            .layout_query(&mut sys, &query(&other))
+            .expect("layout");
+        assert_eq!(held.text().as_ref(), TEXT);
+        assert_eq!(format!("{:?}", held.glyphs()), glyphs);
     }
 
     #[test]

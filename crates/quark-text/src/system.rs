@@ -3,7 +3,7 @@ use cosmic_text::{FontSystem, fontdb};
 use crate::fonts::{
     FontSettings, QuarkFallback, configure_generic_families, emoji_family, vendored_font_sources,
 };
-use crate::layout::{SyntheticItalic, TextError, TextLayout, TextParams};
+use crate::layout::{LayoutScratch, SyntheticItalic, TextError, TextLayout, TextParams};
 
 /// Owns the cosmic-text [`FontSystem`]: vendored fonts, system fonts (for
 /// fallback), and the generic sans/mono family mapping.
@@ -20,6 +20,7 @@ pub struct TextSystem {
     /// Built by [`Self::vendored_only`]; another thread builds its twin the
     /// same way.
     vendored_only: bool,
+    scratch: LayoutScratch,
 }
 
 /// How a [`TextSystem`] was built: enough for another thread to build one
@@ -80,6 +81,7 @@ impl TextSystem {
             settings: settings.normalized(),
             generation: 0,
             vendored_only,
+            scratch: LayoutScratch::default(),
         }
     }
 
@@ -140,11 +142,25 @@ impl TextSystem {
         profile_scope!("text_shape");
         TextLayout::build(
             &mut self.font_system,
+            &mut self.scratch,
             params,
             self.synthetic_italic,
             self.emoji_family,
             self.settings.ligatures,
         )
+    }
+
+    /// Shapes and lays out `layout`'s inputs again in its own storage; see
+    /// [`TextLayout::rebuild`].
+    pub(crate) fn rebuild(&mut self, layout: &mut TextLayout) {
+        profile_scope!("text_shape");
+        layout.rebuild(
+            &mut self.font_system,
+            &mut self.scratch,
+            self.synthetic_italic,
+            self.emoji_family,
+            self.settings.ligatures,
+        );
     }
 }
 

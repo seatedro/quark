@@ -25,6 +25,8 @@ macro_rules! profile_scope {
     };
 }
 
+#[cfg(test)]
+mod alloc_budget;
 mod cache;
 pub mod fonts;
 mod layout;
