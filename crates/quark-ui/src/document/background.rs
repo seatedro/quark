@@ -650,36 +650,46 @@ mod tests {
         assert_eq!(ui.heights(), expected);
     }
 
-    // Catches the worker reusing layouts its previous fonts shaped. Rows
-    // added after the fonts change hold the text the worker measured
-    // before, so each one looks up text the old system shaped.
+    // Catches rows measured before a font change keeping their old heights,
+    // on screen or off, and the worker reusing layouts its previous fonts
+    // shaped: rows added after the change hold text it measured before.
     #[test]
-    fn rows_measured_after_a_font_change_get_heights_in_the_new_fonts() {
-        let text = "iiiiMMMM ".repeat(16);
-        let rows = |keys: std::ops::Range<u64>| keys.map(|i| entry(i, text.clone())).collect();
-        let mut ui = Ui::new(rows(0..10), (300.0, 1.0));
-        ui.md.finish_measures();
-        let before = ui.heights();
-
-        ui.text.set_font_settings(&quark_text::FontSettings {
+    fn every_row_gets_its_height_in_the_new_fonts() {
+        let inter = quark_text::FontSettings {
             ui_family: "Inter".into(),
             ..Default::default()
-        });
-        ui.md.extend(rows(10..20)).unwrap();
-        ui.frame();
-        ui.md.finish_measures();
+        };
+        type Change = fn(&mut Ui, &quark_text::FontSettings);
+        let changes: [(&str, Change); 2] = [
+            ("font settings", |ui, settings| {
+                ui.text.set_font_settings(settings)
+            }),
+            ("replaced text system", |ui, settings| {
+                ui.text = TextSystem::vendored_only(settings)
+            }),
+        ];
+        let text = "iiiiMMMM ".repeat(16);
+        let rows = |keys: std::ops::Range<u64>| keys.map(|i| entry(i, text.clone())).collect();
+        for (name, change) in changes {
+            // A few rows on screen, the rest measured by the worker.
+            let mut ui = Ui::new(rows(0..10), (300.0, 150.0));
+            ui.md.finish_measures();
+            let before = ui.heights();
 
-        // Rows measured before the change keep their heights; compare the
-        // added ones.
-        let added = |heights: String| heights.split(' ').skip(10).collect::<Vec<_>>().join(" ");
-        let expected = added(ui.synchronous_heights());
-        let height = |heights: &str| heights.split([' ', ':']).nth(1).unwrap_or("").to_owned();
-        assert_ne!(
-            height(&before),
-            height(&expected),
-            "the fonts wrap the text differently"
-        );
-        assert_eq!(added(ui.heights()), expected);
+            change(&mut ui, &inter);
+            ui.md.extend(rows(10..20)).unwrap();
+            ui.frame();
+            ui.md.finish_measures();
+
+            let expected = ui.synchronous_heights();
+            let height = |heights: &str| heights.split([' ', ':']).nth(1).unwrap_or("").to_owned();
+            assert_ne!(
+                height(&before),
+                height(&expected),
+                "the fonts wrap the text differently"
+            );
+            assert_eq!(ui.heights(), expected, "{name}");
+        }
     }
 
     proptest! {

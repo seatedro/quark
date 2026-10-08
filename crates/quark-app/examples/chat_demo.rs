@@ -41,8 +41,8 @@ use quark_app::quark_ui::accessibility::Politeness;
 use quark_app::quark_ui::design::Alpha;
 use quark_app::quark_ui::document::{
     Block, BlockMeasurer, DocumentCommand, DocumentEvent, DocumentStyle, FindBarActions,
-    LoadedImage, MarkdownDocument, MarkdownEntry, RowChrome, RowDecorator, TextGeometry,
-    TextMeasurer, find_bar, key_command,
+    LoadedImage, MarkdownDocument, MarkdownEntry, MeasureKey, RowChrome, RowDecorator,
+    TextGeometry, TextMeasurer, find_bar, key_command,
 };
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
@@ -342,7 +342,7 @@ impl BlockMeasurer for WindowOnly<'_> {
         self.0.measure(block, width)
     }
 
-    fn settings_key(&self) -> u64 {
+    fn settings_key(&self) -> MeasureKey {
         self.0.settings_key()
     }
 }

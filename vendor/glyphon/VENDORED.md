@@ -36,6 +36,9 @@ against that commit shows the whole patch.
   rasterized or uploaded again. Upstream's re-rasterizing loop remains as
   the fallback for an old texture without `COPY_SRC`, which no atlas
   made here lacks.
+- `TextAtlas::clear` (`src/text_atlas.rs`): drops every cached glyph
+  and frees its space, keeping the textures. quark-render calls it when
+  the text system changes, since a new font database reuses face ids.
 - `AtlasStats` and `TextAtlas::stats` (`src/text_atlas.rs`, counted in
   `src/text_render.rs`): glyph misses, evictions, growths, glyphs
   re-rasterized by a growth, and glyph bytes uploaded, for tests and
