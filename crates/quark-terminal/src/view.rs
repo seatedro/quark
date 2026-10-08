@@ -609,6 +609,10 @@ impl DragHandler for SelectDrag {
         }
     }
 
+    fn on_cancel(&mut self) -> Vec<Action> {
+        vec![(self.on_event)(TerminalEvent::Cancel)]
+    }
+
     fn cursor(&self) -> CursorHint {
         CursorHint::Text
     }

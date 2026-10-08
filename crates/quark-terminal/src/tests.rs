@@ -386,6 +386,28 @@ fn modified_click_on_a_hyperlink_opens_it() {
     );
 }
 
+// Regression: a cancelled drag fell back to its release, so focus loss
+// during a Ctrl+click (Cmd+click) on a link opened it.
+#[test]
+fn a_cancelled_modified_click_opens_no_link() {
+    let mut t = term(30, 2);
+    t.feed(b"see \x1b]8;;https://example.com/\x1b\\docs\x1b]8;;\x1b\\ here");
+    t.set_modifiers(if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    });
+    press(&mut t, (5, 0), 0);
+    assert_eq!(
+        t.handle(TerminalEvent::Cancel, 10),
+        TerminalOutcome::Handled
+    );
+    assert_eq!(
+        t.handle(TerminalEvent::Release, 20),
+        TerminalOutcome::Ignored
+    );
+}
+
 #[test]
 fn query_replies_go_back_to_the_program() {
     let mut t = term(20, 4);

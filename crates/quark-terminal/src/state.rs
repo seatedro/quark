@@ -49,9 +49,18 @@ impl Default for TerminalStyle {
 /// Input from [`crate::terminal_view`], in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TerminalEvent {
-    Press { x: f32, y: f32 },
-    Drag { x: f32, y: f32 },
+    Press {
+        x: f32,
+        y: f32,
+    },
+    Drag {
+        x: f32,
+        y: f32,
+    },
     Release,
+    /// The drag ended without a release (focus loss, Escape): the
+    /// selection stays, and a modified click opens no link.
+    Cancel,
 }
 
 /// What handling input asks of the app.
@@ -844,6 +853,10 @@ impl TerminalState {
                 }
                 TerminalOutcome::Handled
             }
+            TerminalEvent::Cancel => match self.drag.take() {
+                Some(_) => TerminalOutcome::Handled,
+                None => TerminalOutcome::Ignored,
+            },
         }
     }
 
