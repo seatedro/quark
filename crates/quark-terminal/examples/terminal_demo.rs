@@ -208,6 +208,10 @@ mod app {
                     cx.window.request_redraw();
                     true
                 }
+                InputEvent::ImePreedit(text, cursor) if focused => {
+                    self.term.set_preedit(text, *cursor);
+                    true
+                }
                 InputEvent::PointerMoved { x, y } => {
                     self.term.pointer(PointerInput::Moved { x: *x, y: *y })
                 }
@@ -415,6 +419,89 @@ mod tests {
             "no wheel report"
         );
         assert!(!scrollbar_shown(&ui));
+    }
+
+    /// The top-left corner of cell `(col, row)` in the window.
+    fn cell_origin(ui: &UiTestHarness<Demo>, col: u16, row: u16) -> (f32, f32) {
+        let (x, y) = cell(ui, col, row);
+        let (cx, cy) = cell(ui, col + 1, row + 1);
+        (x - (cx - x) / 2.0, y - (cy - y) / 2.0)
+    }
+
+    #[track_caller]
+    fn assert_at(actual: (f32, f32), expected: (f32, f32), what: &str) {
+        let near = (actual.0 - expected.0).abs() < 0.5 && (actual.1 - expected.1).abs() < 0.5;
+        assert!(near, "{what}: at {actual:?}, expected {expected:?}");
+    }
+
+    /// While the terminal has focus IME is on, and its candidate window
+    /// follows the cursor, then the composition's caret, at any scale.
+    #[test]
+    fn the_ime_candidate_window_follows_the_cursor_and_the_caret() {
+        for scale in [1.0, 2.0] {
+            let mut ui = UiTestHarness::new(Demo::new(None), SIZE, scale);
+            let area = |ui: &UiTestHarness<Demo>| {
+                let ime = ui.ime();
+                assert!(ime.allowed, "IME off at scale {scale}");
+                let area = ime.cursor_area.expect("candidate area");
+                (area.x, area.y)
+            };
+            ui.app_mut().term.feed(b"$ ");
+            ui.frame();
+            assert_at(area(&ui), cell_origin(&ui, 2, 0), "at the cursor");
+
+            ui.ime_preedit("ab", Some((2, 2)));
+            assert_at(area(&ui), cell_origin(&ui, 4, 0), "after the composition");
+            ui.ime_preedit("ab", Some((1, 1)));
+            assert_at(area(&ui), cell_origin(&ui, 3, 0), "inside it");
+
+            ui.app_mut().term.feed(b"\r\n$ ");
+            ui.frame();
+            assert_at(
+                area(&ui),
+                cell_origin(&ui, 3, 1),
+                "after output moved the cursor",
+            );
+        }
+    }
+
+    /// A composition paints over the grid at the cursor without reaching
+    /// the program; its commit replaces it and is sent once.
+    #[test]
+    fn a_composition_paints_at_the_cursor_and_only_its_commit_is_sent() {
+        let mut ui = harness(None);
+        ui.app_mut().term.feed(b"$ ");
+        ui.frame();
+        let composition = |ui: &UiTestHarness<Demo>| {
+            ui.painted_texts()
+                .into_iter()
+                .find(|run| run.text == "\u{65e5}\u{672c}")
+                .map(|run| (run.bounds.x, run.bounds.y))
+        };
+
+        ui.ime_preedit("\u{65e5}\u{672c}", Some((0, 6)));
+        let at = composition(&ui).expect("composition painted");
+        assert_at(at, cell_origin(&ui, 2, 0), "composition");
+        assert_eq!(ui.app_mut().term.take_input(), b"");
+
+        ui.ime_commit("\u{65e5}\u{672c}");
+        assert_eq!(composition(&ui), None, "still painted after the commit");
+        assert_eq!(
+            ui.app_mut().term.take_input(),
+            "\u{65e5}\u{672c}".as_bytes()
+        );
+    }
+
+    /// A screen reader finds the composition as marked text inside the
+    /// focused terminal, which keeps its role.
+    #[test]
+    fn a_composition_is_exposed_inside_the_focused_terminal() {
+        let mut ui = harness(None);
+        ui.app_mut().term.feed(b"$ ");
+        ui.frame();
+        ui.ime_preedit("\u{65e5}\u{672c}", Some((6, 6)));
+        let expected = "Window \"Test\"\n  Terminal \"Terminal\" [focused]\n    TextRun = \"$\"\n    Mark \"Composition\" = \"\u{65e5}\u{672c}\"";
+        assert_eq!(ui.accessibility_tree().trim_end(), expected);
     }
 
     /// With no screen reader, preparing a changed frame allocates nothing

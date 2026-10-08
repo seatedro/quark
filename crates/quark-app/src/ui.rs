@@ -32,7 +32,7 @@ use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, DragPreviewLayer, ElementCache, ElementContext,
-    ElementHandle, ElementHandles, InputRouter, LayoutSnapshot, Mods, TextInputHitArea,
+    ElementHandle, ElementHandles, ImeTarget, InputRouter, LayoutSnapshot, Mods, TextInputHitArea,
     TooltipRegion, WheelEvent, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
@@ -438,6 +438,9 @@ pub struct UiAdapter<U: UiApp> {
     /// IME state last sent to the window.
     ime_allowed: bool,
     ime_area: Option<Rect>,
+    /// The element focused when the IME last showed a composition, until
+    /// the composition ends.
+    ime_composing: Option<FocusId>,
     /// Scale factor of the last painted frame, for accessibility bounds.
     scale_factor: f32,
     animations: AnimationTable,
@@ -445,11 +448,12 @@ pub struct UiAdapter<U: UiApp> {
     element_cache: ElementCache,
     /// Buffers of the frame before last, reused by the next frame: the
     /// scene the runner handed back, the input frame routing let go of,
-    /// the text input areas, and the accessibility frame.
+    /// the text input areas, the IME targets, and the accessibility frame.
     spare_scene: Scene,
     spare_accessibility: AccessibilityFrame,
     spare_input: quark_ui::element::InputFrame,
     spare_text_areas: Vec<TextInputHitArea>,
+    spare_ime_targets: Vec<ImeTarget>,
     /// Last frame's scrollbar track buffer, reused by the next frame.
     spare_tooltip_regions: Vec<TooltipRegion>,
     sender: UiSender<U::Message>,
@@ -494,6 +498,7 @@ impl<U: UiApp> UiAdapter<U> {
             edit_focus: None,
             ime_allowed: false,
             ime_area: None,
+            ime_composing: None,
             scale_factor: 1.0,
             animations: AnimationTable::new(),
             element_cache: ElementCache::new(),
@@ -501,6 +506,7 @@ impl<U: UiApp> UiAdapter<U> {
             spare_accessibility: AccessibilityFrame::default(),
             spare_input: Default::default(),
             spare_text_areas: Vec::new(),
+            spare_ime_targets: Vec::new(),
             spare_tooltip_regions: Vec::new(),
             sender: UiSender {
                 sender,
@@ -820,15 +826,23 @@ impl<U: UiApp> UiAdapter<U> {
         }
     }
 
-    /// IME follows focus: allowed while a text field has focus, with the
-    /// candidate window at the caret `areas` (this frame's fields) painted.
-    fn ime_request(&mut self, areas: &[TextInputHitArea]) -> ImeRequest {
+    /// IME follows focus: allowed while an IME target (a text field, a
+    /// terminal) has focus, with the candidate window at the caret
+    /// `targets` (this frame's) painted. Focus that left the element
+    /// composing resets the IME, so the rest of that composition cannot
+    /// land in the element focused now.
+    fn ime_request(&mut self, targets: &[ImeTarget]) -> ImeRequest {
         let target = self
             .focus
-            .and_then(|focus| areas.iter().find(|area| area.focus_target == focus));
+            .and_then(|focus| targets.iter().find(|t| t.focus_target == focus));
         let mut request = ImeRequest::default();
         let allowed = target.is_some();
-        if allowed != self.ime_allowed {
+        if self.ime_composing.is_some_and(|c| Some(c) != self.focus) {
+            self.ime_composing = None;
+            // Turning IME off drops the composition by itself.
+            request.reset = self.ime_allowed && allowed;
+        }
+        if allowed != self.ime_allowed || request.reset {
             request.allowed = Some(allowed);
             self.ime_allowed = allowed;
             self.ime_area = None;
@@ -896,6 +910,7 @@ impl<U: UiApp> UiAdapter<U> {
 struct ImeRequest {
     allowed: Option<bool>,
     cursor_area: Option<Rect>,
+    reset: bool,
 }
 
 /// One painted frame, with the scene still in logical points.
@@ -905,6 +920,7 @@ struct Painted {
     accessibility: AccessibilityFrame,
     next_frame_ms: Option<u64>,
     text_areas: Vec<TextInputHitArea>,
+    ime_targets: Vec<ImeTarget>,
 }
 
 /// Lay out and paint `root` into a `width` x `height` point viewport, in
@@ -927,6 +943,7 @@ fn paint(
         accessibility: std::mem::take(&mut ecx.accessibility),
         next_frame_ms: ecx.next_frame_ms(),
         text_areas: std::mem::take(&mut ecx.text_input_hit_areas),
+        ime_targets: std::mem::take(&mut ecx.ime_targets),
     }
 }
 
@@ -1079,6 +1096,8 @@ impl<U: UiApp> App for UiAdapter<U> {
         .with_input_frame(std::mem::take(&mut self.spare_input));
         ecx.text_input_hit_areas = std::mem::take(&mut self.spare_text_areas);
         ecx.text_input_hit_areas.clear();
+        ecx.ime_targets = std::mem::take(&mut self.spare_ime_targets);
+        ecx.ime_targets.clear();
         ecx.accessibility = std::mem::take(&mut self.spare_accessibility);
         ecx.tooltip_regions = std::mem::take(&mut self.spare_tooltip_regions);
         ecx.tooltip_regions.clear();
@@ -1101,6 +1120,9 @@ impl<U: UiApp> App for UiAdapter<U> {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
         let (scene, ime) = self.finish_frame(painted);
+        if ime.reset {
+            cx.reset_ime();
+        }
         if let Some(allowed) = ime.allowed {
             cx.set_ime_allowed(allowed);
         }
@@ -1124,6 +1146,15 @@ impl<U: UiApp> App for UiAdapter<U> {
     }
 
     fn event(&mut self, event: InputEvent, cx: &mut EventContext) {
+        // Seen before the app's own hook, which may take IME events for an
+        // element it drives itself (a terminal).
+        match &event {
+            InputEvent::ImePreedit(text, _) => {
+                self.ime_composing = self.focus.filter(|_| !text.is_empty());
+            }
+            InputEvent::Focused(false) => self.ime_composing = None,
+            _ => {}
+        }
         let input = UiInput::from_event(&event);
         let window_blurred = input == Some(UiInput::WindowFocus(false));
         self.handle_event(&event, input, cx);
@@ -1226,8 +1257,9 @@ impl<U: UiApp> UiAdapter<U> {
         }
         self.spare_accessibility =
             std::mem::replace(&mut self.accessibility, painted.accessibility);
-        let ime = self.ime_request(&painted.text_areas);
+        let ime = self.ime_request(&painted.ime_targets);
         self.spare_text_areas = std::mem::replace(&mut self.text_areas, painted.text_areas);
+        self.spare_ime_targets = painted.ime_targets;
         (painted.scene, ime)
     }
 
@@ -1458,6 +1490,75 @@ mod tests {
             let preedit = adapter.app.field.preedit().map(|p| p.text.as_str());
             assert_eq!(preedit, expected, "{name}");
         }
+    }
+
+    const OTHER_FIELD: FocusId = FocusId::from_key("other field");
+
+    /// Two text fields, `FIELD` above `OTHER_FIELD`.
+    struct TwoFields {
+        fields: [TextField; 2],
+    }
+
+    impl TwoFields {
+        fn field(&mut self, target: FocusId) -> &mut TextField {
+            &mut self.fields[usize::from(target == OTHER_FIELD)]
+        }
+    }
+
+    impl UiApp for TwoFields {
+        type Action = ();
+        type Message = ();
+
+        fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+            let field = |target, field: &TextField| {
+                text_input("Field", "")
+                    .field(field)
+                    .focus_target(target)
+                    .focused(cx.is_focused(target))
+                    .w(200.0)
+                    .h(40.0)
+            };
+            div()
+                .w(400.0)
+                .h(300.0)
+                .flex_col()
+                .child(field(FIELD, &self.fields[0]))
+                .child(field(OTHER_FIELD, &self.fields[1]))
+                .into_any()
+        }
+
+        fn update(&mut self, (): (), _cx: &mut UiContext) {}
+
+        fn edit_text(&mut self, target: FocusId, command: TextEditCommand) -> TextEditOutcome {
+            self.field(target).apply(command)
+        }
+
+        fn set_preedit(&mut self, target: FocusId, text: String, cursor: Option<(usize, usize)>) {
+            self.field(target).set_preedit(&text, cursor);
+        }
+    }
+
+    // Regression: focus moving between fields mid-composition left the
+    // platform IME composing, so its next preedit or commit landed in the
+    // field focused next.
+    #[test]
+    fn focus_leaving_a_composing_field_for_another_resets_the_ime() {
+        let app = TwoFields {
+            fields: [TextField::new(""), TextField::new("")],
+        };
+        let mut ui = UiTestHarness::new(app, (400.0, 300.0), 1.0);
+        ui.click((10.0, 20.0));
+        ui.key("tab");
+        ui.key("shift+tab");
+        assert_eq!(ui.ime().resets, 0, "moving focus while not composing");
+
+        ui.ime_preedit("にほ", None);
+        ui.key("tab");
+
+        assert_eq!(ui.focus(), Some(OTHER_FIELD));
+        let ime = ui.ime();
+        assert_eq!((ime.resets, ime.allowed), (1, true));
+        assert_eq!(ui.app().fields[0].preedit(), None);
     }
 
     const MARK: quark::Color = quark::Color::rgba(1, 2, 3, 255);

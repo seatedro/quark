@@ -144,9 +144,11 @@ pub struct FrameContext<'a> {
 /// the frame's window once [`App::frame`] returns, so they use the caret
 /// that frame painted.
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct FrameIme {
-    pub(super) allowed: Option<bool>,
-    pub(super) cursor_area: Option<(f32, f32, f32, f32)>,
+pub(crate) struct FrameIme {
+    pub(crate) allowed: Option<bool>,
+    pub(crate) cursor_area: Option<(f32, f32, f32, f32)>,
+    /// Drop the platform's composition: IME off, then on again.
+    pub(crate) reset: bool,
 }
 
 impl FrameContext<'_> {
@@ -167,6 +169,15 @@ impl FrameContext<'_> {
     /// [`EventContext::set_ime_allowed`].
     pub fn set_ime_allowed(&mut self, allowed: bool) {
         self.ime.allowed = Some(allowed);
+    }
+
+    /// Make the platform IME drop any composition it holds (it is turned
+    /// off and on again) once the frame is built, before
+    /// [`Self::set_ime_allowed`] applies: for focus that moved off the
+    /// element composing, so the rest of its composition cannot land in
+    /// the next one.
+    pub fn reset_ime(&mut self) {
+        self.ime.reset = true;
     }
 
     /// Place this window's IME candidate window, in logical points, once

@@ -49,6 +49,8 @@ pub(crate) struct HeadlessRunner {
     /// Window size in logical points.
     size: (f32, f32),
     pub(crate) input: HeadlessWindow,
+    /// The window's IME as frames left it.
+    pub(crate) ime: crate::testing::ImeState,
     frames_drawn: u64,
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
@@ -87,6 +89,7 @@ impl HeadlessRunner {
                 modifiers: ModifiersState::empty(),
                 scale_factor,
             },
+            ime: Default::default(),
             frames_drawn: 0,
             #[cfg(feature = "tray")]
             tray: None,
@@ -237,6 +240,7 @@ impl HeadlessRunner {
             last_render: Default::default(),
         };
         let scene = app.frame(&mut cx);
+        self.ime.apply(cx.ime);
         self.text.end_frame();
         self.frames_drawn += 1;
         self.queue_requested_frames(true);
