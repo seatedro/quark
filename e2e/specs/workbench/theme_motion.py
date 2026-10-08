@@ -29,10 +29,11 @@ MIN_SHARE = 0.08
 
 
 def share(cua, rgb, path):
-    """The fraction of the screen within 2 of `rgb` per channel."""
+    """The fraction of the screen within 2 of `rgb` per channel, sampled
+    on a coarse grid so a probe stays fast."""
     assert cua.screenshot(path), "no screenshot"
     image = Image.open(path).convert("RGB")
-    pixels = image.getdata()
+    pixels = image.resize((image.width // 8, image.height // 8), Image.NEAREST).getdata()
     near = sum(1 for p in pixels if all(abs(a - b) <= 2 for a, b in zip(p, rgb)))
     return near / len(pixels)
 
@@ -80,10 +81,22 @@ def spec(cua: Cua):
     with open(target, "w") as f:
         f.write(edited)
     probe = os.path.join(scratch, "edited.png")
-    wait_for("the edited canvas", lambda: share(cua, EDITED, probe) >= MIN_SHARE, timeout=5.0, interval=0.02)
-    elapsed_ms = (time.monotonic() - started) * 1000
-    print(f"theme edit visible after {elapsed_ms:.0f} ms (includes screenshot time)")
-    assert elapsed_ms < 1000, f"theme edit took {elapsed_ms:.0f} ms to show"
+    captured = []
+
+    def edited_on_screen():
+        # The repaint happened before the capture that first shows it.
+        captured.append(time.monotonic())
+        return share(cua, EDITED, probe) >= MIN_SHARE
+
+    wait_for("the edited canvas", edited_on_screen, timeout=5.0, interval=0.0)
+    shown_ms = (captured[-1] - started) * 1000
+    probe_ms = (time.monotonic() - captured[-1]) * 1000
+    timing = f"theme edit on screen within {shown_ms:.0f} ms of the save (one probe: {probe_ms:.0f} ms)"
+    print(timing)
+    if os.environ.get("QUARK_E2E_SHOTS"):
+        with open(os.path.join(os.environ["QUARK_E2E_SHOTS"], "timings.txt"), "a") as f:
+            f.write(timing + "\n")
+    assert shown_ms < 1000, f"theme edit took {shown_ms:.0f} ms to show"
     shots(cua, f"{mode}-edited", frame)
 
     # A half-written file: the window keeps the edited colors.
