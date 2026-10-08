@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use accesskit::Role;
 use quark::view;
-use quark_ui::accessibility::NumericValue;
+use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
 use quark_ui::element::{
     AnyElement, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement, div,
 };
@@ -42,8 +42,8 @@ const DIVIDER_HIT: f32 = 8.0;
 const DOUBLE_PRESS_MS: u64 = 500;
 
 /// Arrow key step, and the step with Shift held.
-const NUDGE_STEP: f32 = 10.0;
-const NUDGE_STEP_LARGE: f32 = 50.0;
+pub(crate) const NUDGE_STEP: f32 = 10.0;
+pub(crate) const NUDGE_STEP_LARGE: f32 = 50.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
@@ -679,6 +679,18 @@ fn divider(
             extent,
         })
     };
+    // Assistive tech sets and steps the pane's size; nudges move the
+    // divider on screen, which grows the pane one way or the other.
+    let grow = state.grow_sign(index);
+    let set_map = map.clone();
+    let numeric_actions = NumericActions::new(move |value| {
+        set_map(SplitEvent::Nudge {
+            divider: index,
+            delta: (value as f32 - size) * grow,
+            extent,
+        })
+    })
+    .steps(nudge(-NUDGE_STEP * grow), nudge(NUDGE_STEP * grow));
     let drag_map = map.clone();
     let offset = -(DIVIDER_HIT - DIVIDER_THICKNESS) / 2.0;
     view! {
@@ -697,6 +709,12 @@ fn divider(
                      min: if p.collapsible { 0.0 } else { f64::from(p.min) },
                      max: f64::from(p.max.min(extent)),
                      step: Some(f64::from(NUDGE_STEP)),
+                 }}
+                 accessibility_numeric_actions={numeric_actions}
+                 accessibility_orientation={if horizontal {
+                     Orientation::Vertical
+                 } else {
+                     Orientation::Horizontal
                  }}
                  test_id="split-divider" focus_ring={Split::divider_focus(id, index)}
                  cursor={cursor} hover_bg={colors.accent}

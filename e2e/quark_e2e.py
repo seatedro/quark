@@ -9,7 +9,9 @@ Two clients, both talking to the real desktop session run.sh set up:
   accesskit_unix serves (vendor/accesskit_unix/VENDORED.md).
 - `atspi_tree` reads the raw AT-SPI tree over D-Bus, for what cua does not
   report: states other than checked (focused, pressed), object attributes
-  (`id`, `posinset`, `setsize`), the Text interface, and SetSelection.
+  (`id`, `posinset`, `setsize`), the Text interface, and SetSelection;
+  `grab_focus`, `value_of`, and `set_value` reach nodes cua does not index
+  (a splitter has no Click).
 
 cua indexes only nodes with an AT-SPI action. Every control quark
 publishes has one (text entries take Click to focus), so specs click by
@@ -189,6 +191,32 @@ def set_text_selection(node, start, end):
     name, path = node.path
     iface = dbus.Interface(_a11y_bus().get_object(name, path), "org.a11y.atspi.Text")
     return bool(iface.SetSelection(0, start, end))
+
+
+def _iface(node, interface):
+    name, path = node.path
+    return dbus.Interface(_a11y_bus().get_object(name, path), interface)
+
+
+def grab_focus(node):
+    """Move keyboard focus to `node` through AT-SPI, as a screen reader's
+    focus command does."""
+    return bool(_iface(node, "org.a11y.atspi.Component").GrabFocus())
+
+
+def value_of(node):
+    """`(current, minimum, maximum)` of a node with AT-SPI's Value interface."""
+    props = _iface(node, "org.freedesktop.DBus.Properties")
+    return tuple(
+        float(props.Get("org.a11y.atspi.Value", name))
+        for name in ("CurrentValue", "MinimumValue", "MaximumValue")
+    )
+
+
+def set_value(node, value):
+    """Set a range value through AT-SPI's Value interface."""
+    props = _iface(node, "org.freedesktop.DBus.Properties")
+    props.Set("org.a11y.atspi.Value", "CurrentValue", dbus.Double(value))
 
 
 class Announcements:

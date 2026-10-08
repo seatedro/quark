@@ -394,6 +394,25 @@ pub(crate) fn child_sizes(weights: &[f32], extent: f32) -> Vec<f32> {
     sizes
 }
 
+/// Smallest a child gets when a divider of a split moves: `nominal`, or
+/// an equal share of `avail` among `count` children when they cannot all
+/// have that much.
+pub(crate) fn divider_min(nominal: f32, avail: f32, count: usize) -> f32 {
+    nominal.min(avail / count.max(1) as f32)
+}
+
+/// Where divider `divider` of children `sizes` is, in points from the
+/// split's start (dividers before it included), and the least and most it
+/// can be: what [`push_divider`] reaches by shrinking every child on one
+/// side to `min`, or leaving one already below it where it is.
+pub(crate) fn divider_span(sizes: &[f32], min: f32, divider: usize) -> (f32, f32, f32) {
+    let split = (divider + 1).min(sizes.len());
+    let (before, after) = sizes.split_at(split);
+    let slack = |sizes: &[f32]| sizes.iter().map(|s| (s - min).max(0.0)).sum::<f32>();
+    let at = before.iter().sum::<f32>() + divider as f32 * DIVIDER_THICKNESS;
+    (at, at - slack(before), at + slack(after))
+}
+
 /// Move divider `divider` (between children `divider` and `divider + 1`)
 /// by `delta` points. The child in front of the motion shrinks first; once
 /// it is at `min`, the next one beyond it does, and so on. The child behind
@@ -498,6 +517,31 @@ mod tests {
         ];
         for ((x, y), zone) in cases {
             assert_eq!(DropZone::in_body(300.0, 200.0, x, y), zone, "({x}, {y})");
+        }
+    }
+
+    // Catches a divider announcing a range it cannot reach: nominal
+    // minimums where children already sit below them, or slack counted
+    // from children on the wrong side.
+    #[test]
+    fn a_divider_spans_what_pushing_its_neighbors_can_reach() {
+        // (sizes, divider, (position, least, most)), min 100, 1 point
+        // dividers.
+        type Case = (&'static [f32], usize, (f32, f32, f32));
+        let cases: &[Case] = &[
+            (&[200.0, 200.0, 200.0], 0, (200.0, 100.0, 400.0)),
+            (&[200.0, 200.0, 200.0], 1, (401.0, 201.0, 501.0)),
+            // A child below the minimum gives nothing and takes its share.
+            (&[150.0, 60.0], 0, (150.0, 100.0, 150.0)),
+            // Too small for anyone to give: the divider cannot move.
+            (&[60.0, 60.0, 60.0], 1, (121.0, 121.0, 121.0)),
+        ];
+        for &(sizes, divider, expected) in cases {
+            assert_eq!(
+                divider_span(sizes, 100.0, divider),
+                expected,
+                "{sizes:?} divider {divider}"
+            );
         }
     }
 

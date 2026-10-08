@@ -71,6 +71,20 @@ pub trait DragHandler {
     }
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action>;
     fn on_release(&mut self) -> DragReleaseResult;
+    /// The drag ended without a release: the window lost focus, the app
+    /// cancelled it (Escape), or the platform took the pointer for a
+    /// native drag. Defaults to [`Self::on_release`], so handlers that act
+    /// while the button is held (selection autoscroll) stop; a handler
+    /// whose release commits something, such as a drop, overrides it to
+    /// back out instead.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        self.on_release().actions
+    }
+    /// A picture to show under the pointer while the drag lasts; see
+    /// [`DragPreview`].
+    fn preview(&self) -> Option<&DragPreview> {
+        None
+    }
     /// The geometry of the frame the drag routes through: before
     /// [`Self::on_press`], and again each time a newly painted frame
     /// replaces it mid-drag. A handler that maps the pointer onto other

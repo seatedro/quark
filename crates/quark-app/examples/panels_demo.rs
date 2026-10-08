@@ -8,13 +8,15 @@
 //! reorder inside it but never leave, and other tabs cannot enter. Middle
 //! click a tab to close it.
 //! On a focused tab, Mod+Shift+Page Up and Page Down move it into the
-//! previous or next group that takes it, and Shift+F10 opens a "Move to
-//! group" menu of every such group. The terminal drawer's sessions are a
-//! `TabBar` whose tabs close by their close button, a middle click, or
-//! Delete.
+//! previous or next group that takes it, and Shift+F10 opens a menu under
+//! it to move it to any such group or split its group with it. The
+//! dividers between split groups move with the arrow keys too. The
+//! terminal drawer's sessions are a `TabBar` whose tabs close by their
+//! close button, a middle click, or Delete.
 //! Mod+B toggles the sidebar, Mod+Alt+B the right panel, Mod+J the drawer.
 //! The layout is saved to the system temp directory and restored on the
-//! next launch. Escape closes the menu, else quits.
+//! next launch. Escape cancels a tab drag, else closes the menu, else
+//! quits.
 
 use std::path::PathBuf;
 
@@ -28,7 +30,8 @@ use quark_app::winit::keyboard::NamedKey;
 use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
 use quark_components::{
     ContextMenuEntry, ContextMenuOutcome, ContextMenuState, Dock, DockEvent, DockLayout,
-    DockRegion, DockSnapshot, DockState, Pane, PaneId, PanelId, TabItem, TabPolicy, tab_bar,
+    DockRegion, DockSnapshot, DockState, DropZone, Pane, PaneDrop, PaneId, PanelId, TabItem,
+    TabPolicy, tab_bar,
 };
 
 const THREADS: PanelId = PanelId(1);
@@ -65,9 +68,15 @@ fn session_key(id: u32) -> String {
     format!("session:{id}")
 }
 
+/// Space between a tab and the menu opened under it.
+const MENU_GAP: f32 = 4.0;
+
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
     Dock(DockEvent),
+    /// Split the panel's group, putting the panel in a new group on
+    /// this side: a drop on the group's edge, from the keyboard.
+    SplitTab(PanelId, DropZone),
     SelectSession(u32),
     CloseSession(u32),
 }
@@ -137,9 +146,10 @@ impl PanelsDemo {
             .unwrap_or_default()
     }
 
-    /// Open the "Move to group" menu for `panel`, listing every group the
-    /// dock lets it move into.
-    fn open_move_menu(&mut self, panel: PanelId) {
+    /// Open the "Move to group" menu for `panel` under its tab, listing
+    /// every group the dock lets it move into and the splits of its own
+    /// group it can make.
+    fn open_move_menu(&mut self, panel: PanelId, cx: &UiContext) {
         let mut entries: Vec<ContextMenuEntry> = self
             .dock
             .move_targets(panel)
@@ -156,13 +166,47 @@ impl PanelsDemo {
                 )
             })
             .collect();
+        if let Some((_, pane, _)) = self.dock.locate(panel) {
+            for (zone, label) in [
+                (DropZone::Right, "Split right"),
+                (DropZone::Bottom, "Split down"),
+            ] {
+                if self.dock.can_drop(panel, PaneDrop { pane, zone }) {
+                    entries.push(ContextMenuEntry::item(label, Msg::SplitTab(panel, zone)));
+                }
+            }
+        }
         if entries.is_empty() {
             entries.push(ContextMenuEntry::item("No group takes this tab", NoopAction).disabled());
         }
-        // Nothing reports the tab's bounds yet, so the menu opens near the
-        // top of the window, centered.
-        let x = (self.size.0 / 2.0 - 110.0).max(0.0);
-        self.menu.open(entries, x, self.size.1 / 4.0);
+        // Under the tab, wherever the last frame put it; before any frame,
+        // near the top of the window.
+        let (x, y) = cx.geometry().by_id(&Dock::tab_id(panel)).map_or(
+            ((self.size.0 / 2.0 - 110.0).max(0.0), self.size.1 / 4.0),
+            |tab| (tab.bounds.x, tab.bounds.bottom() + MENU_GAP),
+        );
+        self.menu.open(entries, x, y);
+    }
+
+    fn split_tab(&mut self, panel: PanelId, zone: DropZone, cx: &mut UiContext) {
+        self.menu.close();
+        let Some((_, pane, _)) = self.dock.locate(panel) else {
+            return;
+        };
+        if self.dock.drop_panel(panel, PaneDrop { pane, zone }) {
+            // The tab's new group, the region's most recent.
+            let pane = self.dock.locate(panel).map(|(_, pane, _)| pane);
+            cx.set_focus(pane.map(Dock::tab_focus));
+            self.save();
+        }
+    }
+
+    fn save(&self) {
+        if let Some(path) = &self.save_to
+            && let Ok(json) = serde_json::to_string(&self.dock.snapshot())
+        {
+            let _ = std::fs::write(path, json);
+        }
     }
 
     fn close_session(&mut self, id: u32, cx: &mut UiContext) {
@@ -286,6 +330,10 @@ impl UiApp for PanelsDemo {
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
         let event = match msg {
             Msg::Dock(event) => event,
+            Msg::SplitTab(panel, zone) => {
+                self.split_tab(panel, zone, cx);
+                return;
+            }
             Msg::SelectSession(id) => {
                 self.session = id;
                 return;
@@ -300,19 +348,18 @@ impl UiApp for PanelsDemo {
         self.menu.close();
         let now_ms = cx.window.elapsed().as_millis() as u64;
         let outcome = self.dock.apply_event(event, now_ms);
+        if let Some(focus) = outcome.focus() {
+            cx.set_focus(Some(focus));
+        }
         if let Some(moved) = outcome.moved {
-            cx.set_focus(outcome.focus());
             let to = self.group_name(moved.pane);
             cx.announce(
                 format!("Moved {} to {to}", title(moved.panel)),
                 Politeness::Polite,
             );
         }
-        if outcome.settled
-            && let Some(path) = &self.save_to
-            && let Ok(json) = serde_json::to_string(&self.dock.snapshot())
-        {
-            let _ = std::fs::write(path, json);
+        if outcome.settled {
+            self.save();
         }
     }
 
@@ -320,6 +367,11 @@ impl UiApp for PanelsDemo {
         let InputEvent::KeyPress(chord) = event else {
             return false;
         };
+        // A tab dragged over the dock goes back where it was.
+        if chord.named() == Some(NamedKey::Escape) && cx.is_dragging() {
+            cx.cancel_drag();
+            return true;
+        }
         if let Some(pressed) = chord.binding() {
             if let Some(outcome) = self.menu.handle_key(&pressed) {
                 if let ContextMenuOutcome::Activate(action) = outcome {
@@ -332,7 +384,7 @@ impl UiApp for PanelsDemo {
             if menu_key.matches(&pressed)
                 && let Some(panel) = self.dock.focused_panel(cx.focus())
             {
-                self.open_move_menu(panel);
+                self.open_move_menu(panel, cx);
                 cx.window.request_redraw();
                 return true;
             }
@@ -370,7 +422,8 @@ fn main() -> Result<(), quark_app::RunError> {
 #[cfg(test)]
 mod tests {
     use accesskit::Role;
-    use quark_app::testing::{By, UiTestHarness};
+    use quark::Rect;
+    use quark_app::testing::{By, Node, UiTestHarness};
 
     use super::*;
 
@@ -767,6 +820,284 @@ mod tests {
             "{states}"
         );
         assert_eq!(focused_name(&ui).as_deref(), Some("cargo watch"));
+    }
+
+    #[test]
+    fn clicking_an_inactive_tab_focuses_it() {
+        let mut ui = harness();
+        ui.click_node(By::role_name(Role::Tab, "Diff"));
+        assert_eq!(focused_name(&ui).as_deref(), Some("Diff"));
+        // Focus is the group's, so the arrow keys move on from it.
+        ui.key("right");
+        assert_eq!(focused_name(&ui).as_deref(), Some("Files"));
+    }
+
+    /// The published node with accessibility id `id`.
+    fn ax_node(ui: &UiTestHarness<PanelsDemo>, id: &str) -> (accesskit::NodeId, accesskit::Node) {
+        ui.accessibility_update()
+            .nodes
+            .into_iter()
+            .find(|(_, node)| node.author_id() == Some(id))
+            .unwrap_or_else(|| panic!("no node {id:?}:\n{}", ui.accessibility_tree()))
+    }
+
+    /// Deliver `action` from assistive tech to the node `id`.
+    fn ax_action(
+        ui: &mut UiTestHarness<PanelsDemo>,
+        id: &str,
+        action: accesskit::Action,
+        data: Option<accesskit::ActionData>,
+    ) {
+        let (target_node, _) = ax_node(ui, id);
+        ui.accessibility_action(accesskit::ActionRequest {
+            action,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node,
+            data,
+        });
+    }
+
+    #[test]
+    fn assistive_tech_clicks_a_tab_to_select_and_focus_it() {
+        let mut ui = harness();
+        ax_action(
+            &mut ui,
+            &Dock::tab_id(FILES),
+            accesskit::Action::Click,
+            None,
+        );
+        ui.find(By::role_name(Role::TabPanel, "Files"));
+        assert_eq!(focused_name(&ui).as_deref(), Some("Files"));
+    }
+
+    #[test]
+    fn the_move_menu_opens_under_the_focused_tab() {
+        let mut ui = harness();
+        ui.click_node(By::role_name(Role::Tab, "Diff"));
+        ui.key("shift+f10");
+        let tab = ui.find(By::role_name(Role::Tab, "Diff")).bounds;
+        let menu = ui.find(By::role(Role::Menu)).bounds;
+        assert_eq!((menu.x, menu.y), (tab.x, tab.y + tab.height + MENU_GAP));
+    }
+
+    /// Split the right panel from the keyboard: Preview into a new group
+    /// right of the other four tabs.
+    fn split_right_panel(ui: &mut UiTestHarness<PanelsDemo>) {
+        ui.click_node(By::role_name(Role::Tab, "Preview"));
+        ui.key("shift+f10");
+        ui.click_node(By::role_name(Role::MenuItem, "Split right"));
+    }
+
+    fn pane_divider(ui: &UiTestHarness<PanelsDemo>) -> Node {
+        ui.find(By::test_id("dock-pane-divider"))
+    }
+
+    /// The pane divider's (value, min, max) and value text.
+    fn divider_value(ui: &UiTestHarness<PanelsDemo>) -> ((f64, f64, f64), Option<String>) {
+        let id = pane_divider(ui)
+            .id
+            .expect("divider has an accessibility id");
+        let (_, node) = ax_node(ui, &id);
+        let numeric = (
+            node.numeric_value().unwrap_or(f64::NAN),
+            node.min_numeric_value().unwrap_or(f64::NAN),
+            node.max_numeric_value().unwrap_or(f64::NAN),
+        );
+        (numeric, node.value().map(str::to_owned))
+    }
+
+    fn panel_width(ui: &UiTestHarness<PanelsDemo>, name: &str) -> f32 {
+        ui.find(By::role_name(Role::TabPanel, name)).bounds.width
+    }
+
+    #[test]
+    fn arrow_keys_move_a_divider_between_groups() {
+        let mut ui = harness();
+        split_right_panel(&mut ui);
+        // The 420 point panel: 210 and 209 points either side of a 1 point
+        // line, each group at least 100.
+        assert_eq!(
+            divider_value(&ui),
+            ((210.0, 100.0, 319.0), Some("50%".into()))
+        );
+        ui.click_node(By::test_id("dock-pane-divider"));
+        // (key, divider position, Terminal's group width)
+        let steps = [
+            ("right", 220.0, 220.0),
+            ("shift+right", 270.0, 270.0),
+            ("left", 260.0, 260.0),
+        ];
+        for (key, at, width) in steps {
+            ui.key(key);
+            assert_eq!(divider_value(&ui).0.0, at, "{key}");
+            assert_eq!(panel_width(&ui, "Terminal"), width, "{key}");
+            assert_eq!(panel_width(&ui, "Preview"), 419.0 - width, "{key}");
+        }
+        // The line stands upright though it moves sideways.
+        let id = pane_divider(&ui).id.unwrap();
+        assert_eq!(
+            ax_node(&ui, &id).1.orientation(),
+            Some(accesskit::Orientation::Vertical)
+        );
+    }
+
+    #[test]
+    fn assistive_tech_sets_and_steps_a_divider_within_its_range() {
+        use accesskit::{Action, ActionData};
+        // (action, value, divider position after), each from the split.
+        let cases = [
+            (
+                Action::SetValue,
+                Some(ActionData::NumericValue(150.0)),
+                150.0,
+            ),
+            // Past either end, the groups stop at their minimums.
+            (
+                Action::SetValue,
+                Some(ActionData::NumericValue(1000.0)),
+                319.0,
+            ),
+            (Action::SetValue, Some(ActionData::NumericValue(0.0)), 100.0),
+            (Action::Increment, None, 220.0),
+            (Action::Decrement, None, 200.0),
+        ];
+        for (action, data, at) in cases {
+            let mut ui = harness();
+            split_right_panel(&mut ui);
+            let id = pane_divider(&ui).id.unwrap();
+            ax_action(&mut ui, &id, action, data.clone());
+            assert_eq!(divider_value(&ui).0.0, at, "{action:?} {data:?}");
+            assert_eq!(
+                panel_width(&ui, "Terminal"),
+                at as f32,
+                "{action:?} {data:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn assistive_tech_sets_a_split_pane_size() {
+        let mut ui = harness();
+        ax_action(
+            &mut ui,
+            "dock:columns:divider:0",
+            accesskit::Action::SetValue,
+            Some(accesskit::ActionData::NumericValue(300.0)),
+        );
+        assert_eq!(announced(&ui, "Sidebar").as_deref(), Some("300"));
+        // The right panel's divider grows its pane leftward all the same.
+        ax_action(
+            &mut ui,
+            "dock:columns:divider:1",
+            accesskit::Action::Increment,
+            None,
+        );
+        assert_eq!(announced(&ui, "Right panel").as_deref(), Some("430"));
+    }
+
+    /// The painted runs of `text`, in paint order: a drag's preview last.
+    fn runs_of(ui: &UiTestHarness<PanelsDemo>, text: &str) -> Vec<Rect> {
+        ui.painted_texts()
+            .into_iter()
+            .filter(|run| run.text == text)
+            .map(|run| run.bounds)
+            .collect()
+    }
+
+    #[test]
+    fn a_dragged_tab_shows_only_past_the_drag_threshold() {
+        let mut ui = harness();
+        let (x, y) = tab_center(&ui, "Threads");
+        // The tab's label and its panel's heading.
+        let resting = runs_of(&ui, "Threads").len();
+        ui.pointer_down((x, y));
+        ui.pointer_move((x + 2.0, y));
+        assert_eq!(runs_of(&ui, "Threads").len(), resting);
+        ui.pointer_move((x + 40.0, y));
+        assert_eq!(runs_of(&ui, "Threads").len(), resting + 1);
+    }
+
+    #[test]
+    fn a_dragged_tab_follows_the_pointer_while_its_target_stays() {
+        let mut ui = harness();
+        let (x, y) = tab_center(&ui, "Threads");
+        let label = runs_of(&ui, "Threads")[0];
+        let chat = ui.find(By::role_name(Role::TabPanel, "Chat")).center();
+        ui.pointer_down((x, y));
+        ui.pointer_move(chat);
+        let target = ui.find(By::test_id("dock-drop-preview")).bounds;
+        let first = *runs_of(&ui, "Threads").last().unwrap();
+        // Held where it was pressed: the label sits as far from the
+        // pointer as it did from the press.
+        assert_eq!(
+            (first.x - chat.0, first.y - chat.1),
+            (label.x - x, label.y - y)
+        );
+
+        ui.pointer_move((chat.0 + 30.0, chat.1 + 20.0));
+        let second = *runs_of(&ui, "Threads").last().unwrap();
+        assert_eq!((second.x - first.x, second.y - first.y), (30.0, 20.0));
+        assert_eq!(ui.find(By::test_id("dock-drop-preview")).bounds, target);
+    }
+
+    #[test]
+    fn a_dragged_tab_is_paint_only() {
+        let mut ui = harness();
+        let (x, y) = tab_center(&ui, "Threads");
+        // Over the Diff tab, which the sealed right panel keeps from being
+        // a target.
+        let diff = tab_center(&ui, "Diff");
+        let under = ui.hit_test(diff).and_then(|n| n.name);
+        assert_eq!(under.as_deref(), Some("Diff"));
+        ui.pointer_down((x, y));
+        ui.pointer_move(diff);
+        assert_eq!(runs_of(&ui, "Threads").len(), 3, "the picture shows");
+        // No second tab for assistive tech, and the pointer still reaches
+        // what is under the picture.
+        assert_eq!(ui.find_all(By::role_name(Role::Tab, "Threads")).len(), 1);
+        assert_eq!(ui.hit_test(diff).and_then(|n| n.name), under);
+    }
+
+    #[test]
+    fn a_dragged_tab_closed_mid_drag_stops_showing() {
+        let mut ui = harness();
+        let chat = ui.find(By::role_name(Role::TabPanel, "Chat")).center();
+        ui.pointer_down(tab_center(&ui, "Diff"));
+        ui.pointer_move(chat);
+        assert_eq!(
+            runs_of(&ui, "Diff").len(),
+            3,
+            "the tab, its heading, its picture"
+        );
+        // The press focused it; Delete closes it under the pointer.
+        ui.key("delete");
+        assert_eq!(runs_of(&ui, "Diff"), []);
+    }
+
+    #[test]
+    fn a_cancelled_tab_drag_leaves_the_tab_where_it_was() {
+        type Cancel = fn(&mut UiTestHarness<PanelsDemo>);
+        let cancels: [(&str, Cancel); 2] = [
+            ("escape", |ui| ui.key("escape")),
+            ("focus loss", |ui| ui.focus_loss()),
+        ];
+        for (name, cancel) in cancels {
+            let mut ui = harness();
+            let resting = runs_of(&ui, "Threads").len();
+            let chat = ui.find(By::role_name(Role::TabPanel, "Chat")).center();
+            ui.pointer_down(tab_center(&ui, "Threads"));
+            ui.pointer_move(chat);
+            cancel(&mut ui);
+            assert!(!ui.exit_requested(), "{name}");
+            assert!(
+                ui.try_find(By::test_id("dock-drop-preview")).is_none(),
+                "{name}"
+            );
+            assert_eq!(runs_of(&ui, "Threads").len(), resting, "{name}");
+            ui.pointer_up(chat);
+            assert_eq!(strip(&ui, "Sidebar"), ["Threads"], "{name}");
+            assert_eq!(strip(&ui, "Chat"), ["Chat"], "{name}");
+        }
     }
 
     #[test]

@@ -31,9 +31,9 @@ use quark::scene::Scene;
 use quark_ui::accessibility::{AccessibilityAction, AccessibilityFrame, Announcer, Politeness};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
-    AnyElement, Binding, CursorHint, Delivery, ElementCache, ElementContext, ElementHandle,
-    ElementHandles, InputRouter, LayoutSnapshot, Mods, TextInputHitArea, TooltipRegion, WheelEvent,
-    render_element,
+    AnyElement, Binding, CursorHint, Delivery, DragPreviewLayer, ElementCache, ElementContext,
+    ElementHandle, ElementHandles, InputRouter, LayoutSnapshot, Mods, TextInputHitArea,
+    TooltipRegion, WheelEvent, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
@@ -217,8 +217,10 @@ pub struct UiContext<'a, 'w> {
     pub window: &'a mut EventContext<'w>,
     focus: &'a mut Option<FocusId>,
     key_bindings: &'a mut KeyBindings,
-    /// Set when a drag out took the pointer from the adapter.
+    /// Set when the adapter must end its pointer capture: a drag out took
+    /// the pointer, or the app cancelled the drag.
     pointer_taken: &'a mut bool,
+    dragging: bool,
     announcer: &'a mut Announcer,
     theme: &'a mut Theme,
     theme_choice: &'a mut ThemeChoice,
@@ -278,6 +280,21 @@ impl UiContext<'_, '_> {
         self.window.start_drag_out_with_options(paths, options)?;
         *self.pointer_taken = true;
         Ok(())
+    }
+
+    /// Whether a pointer drag holds the pointer: a dragged tab, divider,
+    /// or text selection.
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// End the pointer drag, if any, without its release, as Escape does in
+    /// most apps: its handler backs out (`DragHandler::on_cancel`), so a
+    /// dragged tab drops nowhere.
+    pub fn cancel_drag(&mut self) {
+        if self.dragging {
+            *self.pointer_taken = true;
+        }
     }
 
     pub fn set_focus(&mut self, focus: Option<FocusId>) {
@@ -405,8 +422,11 @@ pub struct UiAdapter<U: UiApp> {
     /// Handles the app names elements with.
     element_handles: ElementHandles,
     key_bindings: KeyBindings,
-    /// A drag out took the pointer during the last dispatch.
+    /// A drag out took the pointer, or the app cancelled the drag, during
+    /// the last call into the app.
     pointer_taken: bool,
+    /// Paints the preview of the drag holding the pointer.
+    drag_preview: DragPreviewLayer,
     accessibility: AccessibilityFrame,
     announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
@@ -466,6 +486,7 @@ impl<U: UiApp> UiAdapter<U> {
             element_handles: ElementHandles::default(),
             key_bindings: KeyBindings::new(),
             pointer_taken: false,
+            drag_preview: DragPreviewLayer::default(),
             accessibility: AccessibilityFrame::default(),
             announcer: Announcer::default(),
             text_areas: Vec::new(),
@@ -546,6 +567,7 @@ impl<U: UiApp> UiAdapter<U> {
             focus: &mut self.focus,
             key_bindings: &mut self.key_bindings,
             pointer_taken: &mut self.pointer_taken,
+            dragging: self.router.is_capturing(),
             announcer: &mut self.announcer,
             theme: &mut self.theme,
             theme_choice: &mut self.theme_choice,
@@ -582,8 +604,12 @@ impl<U: UiApp> UiAdapter<U> {
             self.with_app(cx, |app, ucx| app.update(action, ucx));
         }
         redraw(Redraw::Action, cx);
-        // The platform's drag loop gets the release, so the drag the app
-        // was tracking ends here instead.
+        self.end_taken_pointer(cx);
+    }
+
+    /// Cancel the pointer capture the app gave up: the platform's drag loop
+    /// gets the release of a drag out, and a cancelled drag gets none.
+    fn end_taken_pointer(&mut self, cx: &mut EventContext) {
         if std::mem::take(&mut self.pointer_taken) {
             let delivery = self.router.cancel_pointer();
             self.deliver(delivery, cx);
@@ -964,6 +990,16 @@ fn route_accessibility(frame: &AccessibilityFrame, request: &ActionRequest) -> O
             Some(ActionData::Value(value)) => Some(Routed::SetValue(*focus, value.to_string())),
             _ => None,
         },
+        (AxAction::SetValue, AccessibilityAction::Numeric(numeric)) => match &request.data {
+            Some(ActionData::NumericValue(value)) => Some(Routed::Dispatch(numeric.set(*value))),
+            _ => None,
+        },
+        (AxAction::Increment, AccessibilityAction::Numeric(numeric)) => {
+            numeric.increment().cloned().map(Routed::Dispatch)
+        }
+        (AxAction::Decrement, AccessibilityAction::Numeric(numeric)) => {
+            numeric.decrement().cloned().map(Routed::Dispatch)
+        }
         (
             AxAction::ReplaceSelectedText,
             AccessibilityAction::TextValue(focus)
@@ -1049,7 +1085,14 @@ impl<U: UiApp> App for UiAdapter<U> {
         #[cfg(feature = "devtools")]
         self.devtools.begin_frame(&mut ecx.devtools);
         let scene = std::mem::take(&mut self.spare_scene);
-        let painted = paint(&mut root, &mut ecx, scene, width, height);
+        let mut painted = paint(&mut root, &mut ecx, scene, width, height);
+        // After the root, outside its clips; checked against this frame so
+        // a removed source shows no preview.
+        self.drag_preview.paint(
+            self.router.drag_preview(&painted.input),
+            &mut painted.scene,
+            &mut ecx,
+        );
         self.spare_tooltip_regions = std::mem::take(&mut ecx.tooltip_regions);
         #[cfg(feature = "devtools")]
         let phases = self.devtools.end_frame(&mut ecx.devtools);
@@ -1195,7 +1238,9 @@ impl<U: UiApp> UiAdapter<U> {
         {
             return;
         }
-        if self.with_app(cx, |app, ucx| app.event(event, ucx)) {
+        let handled = self.with_app(cx, |app, ucx| app.event(event, ucx));
+        self.end_taken_pointer(cx);
+        if handled {
             return;
         }
         if let Some(input) = input {

@@ -14,7 +14,8 @@
 //! accesskit_atspi_common 0.19. Served: roles, names, descriptions, the
 //! states above except invalid and expanded, the Text interface (text,
 //! caret, selection, set selection, word and line boundaries), the Value
-//! interface for range values, focus, and `Announcement` events. Not
+//! interface for range values (set too, for nodes with
+//! [`NumericActions`]), focus, and `Announcement` events. Not
 //! served: EditableText (so AT-SPI clients cannot replace or set text,
 //! though macOS and Windows clients can), the invalid and expanded states,
 //! and character extents, since runs publish no glyph positions.
@@ -29,8 +30,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
+pub use accesskit::Orientation;
 pub use accesskit::Role as AccessibilityRole;
 pub use accesskit::SortDirection;
 use accesskit::{
@@ -90,6 +93,51 @@ pub struct NumericValue {
     pub min: f64,
     pub max: f64,
     pub step: Option<f64>,
+}
+
+/// What assistive tech can do to a [`NumericValue`]: set it (AT-SPI's
+/// `Value.SetCurrentValue`, a slider's "set value"), and, when the control
+/// gives them, step it up and down. The control clamps what it is given.
+#[derive(Clone)]
+pub struct NumericActions {
+    set: Rc<dyn Fn(f64) -> Action>,
+    steps: Option<(Action, Action)>,
+}
+
+impl NumericActions {
+    /// `set` builds the action that sets the value to its argument.
+    pub fn new(set: impl Fn(f64) -> Action + 'static) -> Self {
+        Self {
+            set: Rc::new(set),
+            steps: None,
+        }
+    }
+
+    /// Actions for one step down and one step up.
+    pub fn steps(mut self, decrement: impl Into<Action>, increment: impl Into<Action>) -> Self {
+        self.steps = Some((decrement.into(), increment.into()));
+        self
+    }
+
+    pub fn set(&self, value: f64) -> Action {
+        (self.set)(value)
+    }
+
+    pub fn increment(&self) -> Option<&Action> {
+        self.steps.as_ref().map(|(_, up)| up)
+    }
+
+    pub fn decrement(&self) -> Option<&Action> {
+        self.steps.as_ref().map(|(down, _)| down)
+    }
+}
+
+impl std::fmt::Debug for NumericActions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NumericActions")
+            .field("steps", &self.steps)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Text that assistive tech reads by character, word, and line (AT-SPI's
@@ -365,6 +413,8 @@ pub enum AccessibilityAction {
         focus: FocusId,
         scroll: ScrollActionBuilder,
     },
+    /// Set or step a range value.
+    Numeric(NumericActions),
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +439,7 @@ pub struct AccessibilityNode {
     modal: bool,
     live: Option<Politeness>,
     numeric: Option<NumericValue>,
+    orientation: Option<Orientation>,
     text: Option<AccessibleText>,
     /// Keyboard focus target the node represents, when its action does
     /// not name one (a focusable button).
@@ -434,6 +485,7 @@ impl AccessibilityNode {
             modal: false,
             live: None,
             numeric: None,
+            orientation: None,
             text: None,
             focus: None,
             position_in_set: None,
@@ -522,6 +574,13 @@ impl AccessibilityNode {
 
     pub fn numeric(mut self, value: NumericValue) -> Self {
         self.numeric = Some(value);
+        self
+    }
+
+    /// Which way the control lies: a splitter between side by side panes
+    /// is vertical, though it moves horizontally.
+    pub fn orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = Some(orientation);
         self
     }
 
@@ -648,6 +707,9 @@ impl AccessibilityNode {
         if let Some(expanded) = self.expanded {
             node.set_expanded(expanded);
         }
+        if let Some(orientation) = self.orientation {
+            node.set_orientation(orientation);
+        }
         if let Some((position, size)) = self.position_in_set {
             // AccessKit stores a 0-based index; its adapters add 1.
             node.set_position_in_set(position.saturating_sub(1));
@@ -702,6 +764,13 @@ impl AccessibilityNode {
                 node.add_action(AxAction::ScrollDown);
                 node.add_action(AxAction::ReplaceSelectedText);
                 node.add_action(AxAction::SetTextSelection);
+            }
+            Some(AccessibilityAction::Numeric(actions)) => {
+                node.add_action(AxAction::SetValue);
+                if actions.steps.is_some() {
+                    node.add_action(AxAction::Increment);
+                    node.add_action(AxAction::Decrement);
+                }
             }
             None => {}
         }
@@ -785,6 +854,8 @@ pub(crate) struct AccessibilityExtra {
     read_only: bool,
     live: Option<Politeness>,
     numeric: Option<NumericValue>,
+    numeric_actions: Option<NumericActions>,
+    orientation: Option<Orientation>,
     position_in_set: Option<(usize, usize)>,
     collection: CollectionInfo,
 }
@@ -811,6 +882,13 @@ impl AccessibilityExtra {
         }
         if let Some(numeric) = self.numeric {
             node = node.numeric(numeric);
+        }
+        // A click or scroll action the div sets afterwards replaces this.
+        if let Some(actions) = &self.numeric_actions {
+            node = node.action(AccessibilityAction::Numeric(actions.clone()));
+        }
+        if let Some(orientation) = self.orientation {
+            node = node.orientation(orientation);
         }
         if let Some((position, size)) = self.position_in_set {
             node = node.position_in_set(position, size);
@@ -855,6 +933,20 @@ impl Div {
     /// The range value of a slider, progress bar, or spin button.
     pub fn accessibility_numeric(mut self, value: NumericValue) -> Self {
         self.accessibility_extra.numeric = Some(value);
+        self
+    }
+
+    /// Let assistive tech set and step the
+    /// [`accessibility_numeric`](Div::accessibility_numeric) value. A
+    /// click action on the div takes precedence.
+    pub fn accessibility_numeric_actions(mut self, actions: NumericActions) -> Self {
+        self.accessibility_extra.numeric_actions = Some(actions);
+        self
+    }
+
+    /// Which way the control lies; see [`AccessibilityNode::orientation`].
+    pub fn accessibility_orientation(mut self, orientation: Orientation) -> Self {
+        self.accessibility_extra.orientation = Some(orientation);
         self
     }
 
