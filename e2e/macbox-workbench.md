@@ -60,8 +60,9 @@ ssh macbox 'pkill -x workbench'
 
 - The window asks for 1440x900 and macOS shrinks it to the 1024x768
   display, but the first frames keep the 1440-point layout, scaled down,
-  until a real resize arrives (the `zoom` step forces one). The traffic
-  lights sit inside the top bar's reserved leading zone in both states.
+  until a real resize arrives (the `zoom` step forces one). In the
+  windowed state the traffic lights sit inside the top bar's reserved
+  leading zone; full screen hides them.
 - After `zoom` the window fills the display at 1024x768: the sidebar
   leaves the dock and the right dock collapses, per the width policy.
 - `key:cmd+b` reports the key as pressed, but the sidebar overlay did not
