@@ -47,10 +47,10 @@ pub(crate) use differential_tests::use_upstream;
 pub use leaf::compute_leaf_layout;
 
 #[cfg(feature = "block_layout")]
-pub use self::block::compute_block_layout;
+pub use self::block::{compute_block_layout, BlockScratch};
 
 #[cfg(feature = "flexbox")]
-pub use self::flexbox::compute_flexbox_layout;
+pub use self::flexbox::{compute_flexbox_layout, FlexboxScratch};
 
 #[cfg(feature = "grid")]
 pub use self::grid::compute_grid_layout;

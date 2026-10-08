@@ -10,10 +10,11 @@ use crate::style_helpers::{TaffyMaxContent, TaffyMinContent};
 use crate::tree::{Layout, LayoutInput, LayoutOutput, RunMode, SizingMode};
 use crate::tree::{LayoutFlexboxContainer, LayoutPartialTreeExt, NodeId};
 use crate::util::debug::debug_log;
-use crate::util::sys::{f32_max, new_vec_with_capacity, Vec};
+use crate::util::sys::{f32_max, Vec};
 use crate::util::MaybeMath;
 use crate::util::{MaybeResolve, ResolveOrZero};
 use crate::{BoxGenerationMode, BoxSizing};
+use core::ops::Range;
 
 use super::common::alignment::apply_alignment_fallback;
 #[cfg(feature = "content_size")]
@@ -105,9 +106,9 @@ impl FlexItem {
 }
 
 /// A line of [`FlexItem`] used for intermediate computation
-struct FlexLine<'a> {
-    /// The slice of items to iterate over during computation of this line
-    items: &'a mut [FlexItem],
+struct FlexLine {
+    /// The range of the container's flex items that this line holds
+    items: Range<usize>,
     /// The dimensions of the cross-axis
     cross_size: f32,
     /// The relative offset of the cross-axis
@@ -158,6 +159,49 @@ struct AlgoConstants {
     container_size: Size<f32>,
     /// The size of the internal container
     inner_container_size: Size<f32>,
+}
+
+/// The flex items and lines of one flexbox computation
+#[derive(Default)]
+struct FlexFrame {
+    /// The container's in-flow children, in order
+    items: Vec<FlexItem>,
+    /// The lines the items are collected into
+    lines: Vec<FlexLine>,
+}
+
+/// Storage that [`compute_flexbox_layout`] reuses across calls, so that laying out a container does not allocate
+/// its flex items and lines anew.
+///
+/// A container's items stay in use while its children are laid out, so each level of nested flex containers
+/// takes its own frame of storage: the storage keeps a frame for each level of the deepest nesting laid out so
+/// far. A tree provides it to the algorithm through [`LayoutFlexboxContainer::flexbox_scratch`].
+#[derive(Default)]
+pub struct FlexboxScratch {
+    /// Frames not in use. A computation takes one from the end and pushes it back when done, so the
+    /// computations nested inside it take and return theirs in between.
+    frames: Vec<FlexFrame>,
+}
+
+impl FlexboxScratch {
+    /// Creates empty storage
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Clone for FlexboxScratch {
+    /// Storage holds no results between computations, so a clone starts empty
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl core::fmt::Debug for FlexboxScratch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FlexboxScratch").field("frames", &self.frames.len()).finish()
+    }
 }
 
 /// Computes the layout of a box according to the flexbox algorithm
@@ -224,6 +268,23 @@ pub fn compute_flexbox_layout(
 
 /// Compute a preliminary size for an item
 fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inputs: LayoutInput) -> LayoutOutput {
+    // Lay out in a frame from the tree's scratch storage, if it keeps any, and give the frame back afterwards.
+    let mut frame = tree.flexbox_scratch().and_then(|scratch| scratch.frames.pop()).unwrap_or_default();
+    let output = compute_preliminary_in(tree, node, inputs, &mut frame);
+    if let Some(scratch) = tree.flexbox_scratch() {
+        scratch.frames.push(frame);
+    }
+    output
+}
+
+/// Compute a preliminary size for an item, keeping the flex items and lines in `frame`
+fn compute_preliminary_in(
+    tree: &mut impl LayoutFlexboxContainer,
+    node: NodeId,
+    inputs: LayoutInput,
+    frame: &mut FlexFrame,
+) -> LayoutOutput {
+    let FlexFrame { items: flex_items, lines: flex_lines } = frame;
     let LayoutInput { known_dimensions, parent_size, available_space, run_mode, .. } = inputs;
 
     // Define some general constants we will need for the remainder of the algorithm.
@@ -235,7 +296,7 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // 1. Generate anonymous flex items as described in §4 Flex Items.
     debug_log!("generate_anonymous_flex_items");
-    let mut flex_items = generate_anonymous_flex_items(tree, node, &constants);
+    generate_anonymous_flex_items(tree, node, &constants, flex_items);
 
     // 9.2. Line Length Determination
 
@@ -245,7 +306,7 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // 3. Determine the flex base size and hypothetical main size of each item.
     debug_log!("determine_flex_base_size");
-    determine_flex_base_size(tree, &constants, available_space, &mut flex_items);
+    determine_flex_base_size(tree, &constants, available_space, flex_items);
 
     #[cfg(feature = "debug")]
     for item in flex_items.iter() {
@@ -263,7 +324,7 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // 5. Collect flex items into flex lines.
     debug_log!("collect_flex_lines");
-    let mut flex_lines = collect_flex_lines(&constants, available_space, &mut flex_items);
+    collect_flex_lines(&constants, available_space, flex_items, flex_lines);
 
     // If container size is undefined, determine the container's main size
     // and then re-resolve gaps based on newly determined size
@@ -274,7 +335,7 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
         constants.container_size.set_main(constants.dir, outer_main_size);
     } else {
         // Sets constants.container_size and constants.outer_container_size
-        determine_container_main_size(tree, available_space, &mut flex_lines, &mut constants);
+        determine_container_main_size(tree, available_space, flex_lines, flex_items, &mut constants);
         constants.node_inner_size.set_main(constants.dir, Some(constants.inner_container_size.main(constants.dir)));
         constants.node_outer_size.set_main(constants.dir, Some(constants.container_size.main(constants.dir)));
 
@@ -294,30 +355,30 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // 6. Resolve the flexible lengths of all the flex items to find their used main size.
     debug_log!("resolve_flexible_lengths");
-    for line in &mut flex_lines {
-        resolve_flexible_lengths(line, &constants);
+    for line in flex_lines.iter() {
+        resolve_flexible_lengths(&mut flex_items[line.items.clone()], &constants);
     }
 
     // 9.4. Cross Size Determination
 
     // 7. Determine the hypothetical cross size of each item.
     debug_log!("determine_hypothetical_cross_size");
-    for line in &mut flex_lines {
-        determine_hypothetical_cross_size(tree, line, &constants, available_space);
+    for line in flex_lines.iter() {
+        determine_hypothetical_cross_size(tree, &mut flex_items[line.items.clone()], &constants, available_space);
     }
 
     // Calculate child baselines. This function is internally smart and only computes child baselines
     // if they are necessary.
     debug_log!("calculate_children_base_lines");
-    calculate_children_base_lines(tree, known_dimensions, available_space, &mut flex_lines, &constants);
+    calculate_children_base_lines(tree, known_dimensions, available_space, flex_lines, flex_items, &constants);
 
     // 8. Calculate the cross size of each flex line.
     debug_log!("calculate_cross_size");
-    calculate_cross_size(&mut flex_lines, known_dimensions, &constants);
+    calculate_cross_size(flex_lines, flex_items, known_dimensions, &constants);
 
     // 9. Handle 'align-content: stretch'.
     debug_log!("handle_align_content_stretch");
-    handle_align_content_stretch(&mut flex_lines, known_dimensions, &constants);
+    handle_align_content_stretch(flex_lines, known_dimensions, &constants);
 
     // 10. Collapse visibility:collapse items. If any flex items have visibility: collapse,
     //     note the cross size of the line they’re in as the item’s strut size, and restart
@@ -336,23 +397,23 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // 11. Determine the used cross size of each flex item.
     debug_log!("determine_used_cross_size");
-    determine_used_cross_size(tree, &mut flex_lines, &constants);
+    determine_used_cross_size(tree, flex_lines, flex_items, &constants);
 
     // 9.5. Main-Axis Alignment
 
     // 12. Distribute any remaining free space.
     debug_log!("distribute_remaining_free_space");
-    distribute_remaining_free_space(&mut flex_lines, &constants);
+    distribute_remaining_free_space(flex_lines, flex_items, &constants);
 
     // 9.6. Cross-Axis Alignment
 
     // 13. Resolve cross-axis auto margins (also includes 14).
     debug_log!("resolve_cross_axis_auto_margins");
-    resolve_cross_axis_auto_margins(&mut flex_lines, &constants);
+    resolve_cross_axis_auto_margins(flex_lines, flex_items, &constants);
 
     // 15. Determine the flex container’s used cross size.
     debug_log!("determine_container_cross_size");
-    let total_line_cross_size = determine_container_cross_size(&flex_lines, known_dimensions, &mut constants);
+    let total_line_cross_size = determine_container_cross_size(flex_lines, known_dimensions, &mut constants);
 
     // We have the container size.
     // If our caller does not care about performing layout we are done now.
@@ -362,11 +423,11 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // 16. Align all flex lines per align-content.
     debug_log!("align_flex_lines_per_align_content");
-    align_flex_lines_per_align_content(&mut flex_lines, &constants, total_line_cross_size);
+    align_flex_lines_per_align_content(flex_lines, &constants, total_line_cross_size);
 
     // Do a final layout pass and gather the resulting layouts
     debug_log!("final_layout_pass");
-    let inflow_content_size = final_layout_pass(tree, &mut flex_lines, &constants);
+    let inflow_content_size = final_layout_pass(tree, flex_lines, flex_items, &constants);
 
     // Before returning we perform absolute layout on all absolutely positioned children
     debug_log!("perform_absolute_layout_on_absolute_children");
@@ -394,11 +455,11 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
     let first_vertical_baseline = if flex_lines.is_empty() {
         None
     } else {
-        flex_lines[0]
-            .items
+        let first_line = &flex_items[flex_lines[0].items.clone()];
+        first_line
             .iter()
             .find(|item| constants.is_column || item.align_self == AlignSelf::Baseline)
-            .or_else(|| flex_lines[0].items.iter().next())
+            .or_else(|| first_line.iter().next())
             .map(|child| {
                 let offset_vertical = if constants.is_row { child.offset_cross } else { child.offset_main };
                 offset_vertical + child.baseline
@@ -498,8 +559,10 @@ fn generate_anonymous_flex_items(
     tree: &impl LayoutFlexboxContainer,
     node: NodeId,
     constants: &AlgoConstants,
-) -> Vec<FlexItem> {
-    tree.child_ids(node)
+    flex_items: &mut Vec<FlexItem>,
+) {
+    let items = tree
+        .child_ids(node)
         .enumerate()
         .map(|(index, child)| (index, child, tree.get_flexbox_child_style(child)))
         .filter(|(_, _, style)| style.position() != Position::Absolute)
@@ -569,8 +632,9 @@ fn generate_anonymous_flex_items(
                 offset_main: 0.0,
                 offset_cross: 0.0,
             }
-        })
-        .collect()
+        });
+    flex_items.clear();
+    flex_items.extend(items);
 }
 
 /// Determine the available main and cross space for the flex items.
@@ -847,15 +911,15 @@ fn determine_flex_base_size(
 ///
 ///       **Note that the "collect as many" line will collect zero-sized flex items onto the end of the previous line even if the last non-zero item exactly "filled up" the line**.
 #[inline]
-fn collect_flex_lines<'a>(
+fn collect_flex_lines(
     constants: &AlgoConstants,
     available_space: Size<AvailableSpace>,
-    flex_items: &'a mut Vec<FlexItem>,
-) -> Vec<FlexLine<'a>> {
+    flex_items: &[FlexItem],
+    lines: &mut Vec<FlexLine>,
+) {
+    lines.clear();
     if !constants.is_wrap {
-        let mut lines = new_vec_with_capacity(1);
-        lines.push(FlexLine { items: flex_items.as_mut_slice(), cross_size: 0.0, offset_cross: 0.0 });
-        lines
+        lines.push(FlexLine { items: 0..flex_items.len(), cross_size: 0.0, offset_cross: 0.0 });
     } else {
         let main_axis_available_space = match constants.max_size.main(constants.dir) {
             Some(max_size) => AvailableSpace::Definite(
@@ -872,32 +936,24 @@ fn collect_flex_lines<'a>(
             // If we're sizing under a max-content constraint then the flex items will never wrap
             // (at least for now - future extensions to the CSS spec may add provisions for forced wrap points)
             AvailableSpace::MaxContent => {
-                let mut lines = new_vec_with_capacity(1);
-                lines.push(FlexLine { items: flex_items.as_mut_slice(), cross_size: 0.0, offset_cross: 0.0 });
-                lines
+                lines.push(FlexLine { items: 0..flex_items.len(), cross_size: 0.0, offset_cross: 0.0 });
             }
             // If flex-wrap is Wrap and we're sizing under a min-content constraint, then we take every possible wrapping opportunity
             // and place each item in it's own line
             AvailableSpace::MinContent => {
-                let mut lines = new_vec_with_capacity(flex_items.len());
-                let mut items = &mut flex_items[..];
-                while !items.is_empty() {
-                    let (line_items, rest) = items.split_at_mut(1);
-                    lines.push(FlexLine { items: line_items, cross_size: 0.0, offset_cross: 0.0 });
-                    items = rest;
+                for index in 0..flex_items.len() {
+                    lines.push(FlexLine { items: index..index + 1, cross_size: 0.0, offset_cross: 0.0 });
                 }
-                lines
             }
             AvailableSpace::Definite(main_axis_available_space) => {
-                let mut lines = new_vec_with_capacity(1);
-                let mut flex_items = &mut flex_items[..];
+                let mut start = 0;
                 let main_axis_gap = constants.gap.main(constants.dir);
 
-                while !flex_items.is_empty() {
+                while start < flex_items.len() {
                     // Find index of the first item in the next line
                     // (or the last item if all remaining items are in the current line)
                     let mut line_length = 0.0;
-                    let index = flex_items
+                    let index = flex_items[start..]
                         .iter()
                         .enumerate()
                         .find(|&(idx, child)| {
@@ -908,13 +964,11 @@ fn collect_flex_lines<'a>(
                             line_length > main_axis_available_space && idx != 0
                         })
                         .map(|(idx, _)| idx)
-                        .unwrap_or(flex_items.len());
+                        .unwrap_or(flex_items.len() - start);
 
-                    let (items, rest) = flex_items.split_at_mut(index);
-                    lines.push(FlexLine { items, cross_size: 0.0, offset_cross: 0.0 });
-                    flex_items = rest;
+                    lines.push(FlexLine { items: start..start + index, cross_size: 0.0, offset_cross: 0.0 });
+                    start += index;
                 }
-                lines
             }
         }
     }
@@ -924,7 +978,8 @@ fn collect_flex_lines<'a>(
 fn determine_container_main_size(
     tree: &mut impl LayoutFlexboxContainer,
     available_space: Size<AvailableSpace>,
-    lines: &mut [FlexLine<'_>],
+    lines: &[FlexLine],
+    flex_items: &mut [FlexItem],
     constants: &mut AlgoConstants,
 ) {
     let dir = constants.dir;
@@ -937,8 +992,7 @@ fn determine_container_main_size(
                     .iter()
                     .map(|line| {
                         let line_main_axis_gap = sum_axis_gaps(constants.gap.main(constants.dir), line.items.len());
-                        let total_target_size = line
-                            .items
+                        let total_target_size = flex_items[line.items.clone()]
                             .iter()
                             .map(|child| {
                                 let padding_border_sum = (child.padding + child.border).main_axis_sum(constants.dir);
@@ -963,8 +1017,7 @@ fn determine_container_main_size(
                     .iter()
                     .map(|line| {
                         let line_main_axis_gap = sum_axis_gaps(constants.gap.main(constants.dir), line.items.len());
-                        let total_target_size = line
-                            .items
+                        let total_target_size = flex_items[line.items.clone()]
                             .iter()
                             .map(|child| {
                                 let padding_border_sum = (child.padding + child.border).main_axis_sum(constants.dir);
@@ -985,8 +1038,8 @@ fn determine_container_main_size(
                 //   "The flex container’s max-content size is the largest sum of the afore-calculated sizes of all items within a single line."
                 let mut main_size = 0.0;
 
-                for line in lines.iter_mut() {
-                    for item in line.items.iter_mut() {
+                for line in lines.iter() {
+                    for item in flex_items[line.items.clone()].iter_mut() {
                         let style_min = item.min_size.main(constants.dir);
                         let style_preferred = item.size.main(constants.dir);
                         let style_max = item.max_size.main(constants.dir);
@@ -1118,8 +1171,7 @@ fn determine_container_main_size(
                     // then clamp that result by the max main size floored by the min main size.
                     //
                     // The flex container’s max-content size is the largest sum of the afore-calculated sizes of all items within a single line.
-                    let item_main_size_sum = line
-                        .items
+                    let item_main_size_sum = flex_items[line.items.clone()]
                         .iter_mut()
                         .map(|item| {
                             let flex_fraction = item.content_flex_fraction;
@@ -1165,8 +1217,8 @@ fn determine_container_main_size(
 ///
 /// # [9.7. Resolving Flexible Lengths](https://www.w3.org/TR/css-flexbox-1/#resolve-flexible-lengths)
 #[inline]
-fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
-    let total_main_axis_gap = sum_axis_gaps(constants.gap.main(constants.dir), line.items.len());
+fn resolve_flexible_lengths(line_items: &mut [FlexItem], constants: &AlgoConstants) {
+    let total_main_axis_gap = sum_axis_gaps(constants.gap.main(constants.dir), line_items.len());
 
     // 1. Determine the used flex factor. Sum the outer hypothetical main sizes of all
     //    items on the line. If the sum is less than the flex container’s inner main size,
@@ -1174,7 +1226,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
     //    flex shrink factor.
 
     let total_hypothetical_outer_main_size =
-        line.items.iter().map(|child| child.hypothetical_outer_size.main(constants.dir)).sum::<f32>();
+        line_items.iter().map(|child| child.hypothetical_outer_size.main(constants.dir)).sum::<f32>();
     let used_flex_factor: f32 = total_main_axis_gap + total_hypothetical_outer_main_size;
     let growing = used_flex_factor < constants.node_inner_size.main(constants.dir).unwrap_or(0.0);
     let shrinking = used_flex_factor > constants.node_inner_size.main(constants.dir).unwrap_or(0.0);
@@ -1187,7 +1239,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
     //    - If using the flex shrink factor: any item that has a flex base size
     //      smaller than its hypothetical main size
 
-    for child in line.items.iter_mut() {
+    for child in line_items.iter_mut() {
         let inner_target_size = child.hypothetical_inner_size.main(constants.dir);
         child.target_size.set_main(constants.dir, inner_target_size);
 
@@ -1211,8 +1263,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
     //    use their outer target main size; for other items, use their outer flex base size.
 
     let used_space: f32 = total_main_axis_gap
-        + line
-            .items
+        + line_items
             .iter()
             .map(|child| {
                 if child.frozen {
@@ -1231,7 +1282,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
         // a. Check for flexible items. If all the flex items on the line are frozen,
         //    free space has been distributed; exit this loop.
 
-        if line.items.iter().all(|child| child.frozen) {
+        if line_items.iter().all(|child| child.frozen) {
             break;
         }
 
@@ -1242,8 +1293,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
         //    as the remaining free space.
 
         let used_space: f32 = total_main_axis_gap
-            + line
-                .items
+            + line_items
                 .iter()
                 .map(|child| {
                     if child.frozen {
@@ -1258,7 +1308,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
         // frozen state, and step e changes an item's only after visiting it. Filtering again for every pass,
         // rather than collecting the unfrozen items once, keeps the loop from allocating.
 
-        let (sum_flex_grow, sum_flex_shrink): (f32, f32) = unfrozen(line.items)
+        let (sum_flex_grow, sum_flex_shrink): (f32, f32) = unfrozen(line_items)
             .fold((0.0, 0.0), |(flex_grow, flex_shrink), item| {
                 (flex_grow + item.flex_grow, flex_shrink + item.flex_shrink)
             });
@@ -1295,17 +1345,17 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
 
         if free_space.is_normal() {
             if growing && sum_flex_grow > 0.0 {
-                for child in unfrozen(line.items) {
+                for child in unfrozen(line_items) {
                     child
                         .target_size
                         .set_main(constants.dir, child.flex_basis + free_space * (child.flex_grow / sum_flex_grow));
                 }
             } else if shrinking && sum_flex_shrink > 0.0 {
                 let sum_scaled_shrink_factor: f32 =
-                    unfrozen(line.items).map(|child| child.inner_flex_basis * child.flex_shrink).sum();
+                    unfrozen(line_items).map(|child| child.inner_flex_basis * child.flex_shrink).sum();
 
                 if sum_scaled_shrink_factor > 0.0 {
-                    for child in unfrozen(line.items) {
+                    for child in unfrozen(line_items) {
                         let scaled_shrink_factor = child.inner_flex_basis * child.flex_shrink;
                         child.target_size.set_main(
                             constants.dir,
@@ -1321,7 +1371,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
         //    item’s target main size was made smaller by this, it’s a max violation.
         //    If the item’s target main size was made larger by this, it’s a min violation.
 
-        let total_violation = unfrozen(line.items).fold(0.0, |acc, child| -> f32 {
+        let total_violation = unfrozen(line_items).fold(0.0, |acc, child| -> f32 {
             let resolved_min_main: Option<f32> = child.resolved_minimum_main_size.into();
             let max_main = child.max_size.main(constants.dir);
             let clamped = child.target_size.main(constants.dir).maybe_clamp(resolved_min_main, max_main).max(0.0);
@@ -1344,7 +1394,7 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
         //    - Negative
         //        Freeze all the items with max violations.
 
-        for child in unfrozen(line.items) {
+        for child in unfrozen(line_items) {
             match total_violation {
                 v if v > 0.0 => child.frozen = child.violation > 0.0,
                 v if v < 0.0 => child.frozen = child.violation < 0.0,
@@ -1370,11 +1420,11 @@ fn unfrozen(items: &mut [FlexItem]) -> impl Iterator<Item = &mut FlexItem> {
 #[inline]
 fn determine_hypothetical_cross_size(
     tree: &mut impl LayoutFlexboxContainer,
-    line: &mut FlexLine,
+    line_items: &mut [FlexItem],
     constants: &AlgoConstants,
     available_space: Size<AvailableSpace>,
 ) {
-    for child in line.items.iter_mut() {
+    for child in line_items.iter_mut() {
         let padding_border_sum = (child.padding + child.border).cross_axis_sum(constants.dir);
 
         let child_known_main = constants.container_size.main(constants.dir).into();
@@ -1423,6 +1473,7 @@ fn calculate_children_base_lines(
     node_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     flex_lines: &mut [FlexLine],
+    flex_items: &mut [FlexItem],
     constants: &AlgoConstants,
 ) {
     // Only compute baselines for flex rows because we only support baseline alignment in the cross axis
@@ -1433,14 +1484,15 @@ fn calculate_children_base_lines(
     }
 
     for line in flex_lines {
+        let line_items = &mut flex_items[line.items.clone()];
         // If a flex line has one or zero items participating in baseline alignment then baseline alignment is a no-op so we skip
         let line_baseline_child_count =
-            line.items.iter().filter(|child| child.align_self == AlignSelf::Baseline).count();
+            line_items.iter().filter(|child| child.align_self == AlignSelf::Baseline).count();
         if line_baseline_child_count <= 1 {
             continue;
         }
 
-        for child in line.items.iter_mut() {
+        for child in line_items.iter_mut() {
             // Only calculate baselines for children participating in baseline alignment
             if child.align_self != AlignSelf::Baseline {
                 continue;
@@ -1491,7 +1543,12 @@ fn calculate_children_base_lines(
 ///
 /// - [**Calculate the cross size of each flex line**](https://www.w3.org/TR/css-flexbox-1/#algo-cross-line).
 #[inline]
-fn calculate_cross_size(flex_lines: &mut [FlexLine], node_size: Size<Option<f32>>, constants: &AlgoConstants) {
+fn calculate_cross_size(
+    flex_lines: &mut [FlexLine],
+    flex_items: &[FlexItem],
+    node_size: Size<Option<f32>>,
+    constants: &AlgoConstants,
+) {
     // If the flex container is single-line and has a definite cross size,
     // the cross size of the flex line is the flex container’s inner cross size.
     if !constants.is_wrap && node_size.cross(constants.dir).is_some() {
@@ -1519,9 +1576,9 @@ fn calculate_cross_size(flex_lines: &mut [FlexLine], node_size: Size<Option<f32>
         //    3. The used cross-size of the flex line is the largest of the numbers found in the
         //       previous two steps and zero.
         for line in flex_lines.iter_mut() {
-            let max_baseline: f32 = line.items.iter().map(|child| child.baseline).fold(0.0, |acc, x| acc.max(x));
-            line.cross_size = line
-                .items
+            let line_items = &flex_items[line.items.clone()];
+            let max_baseline: f32 = line_items.iter().map(|child| child.baseline).fold(0.0, |acc, x| acc.max(x));
+            line.cross_size = line_items
                 .iter()
                 .map(|child| {
                     if child.align_self == AlignSelf::Baseline
@@ -1597,12 +1654,14 @@ fn handle_align_content_stretch(flex_lines: &mut [FlexLine], node_size: Size<Opt
 fn determine_used_cross_size(
     tree: &impl LayoutFlexboxContainer,
     flex_lines: &mut [FlexLine],
+    flex_items: &mut [FlexItem],
     constants: &AlgoConstants,
 ) {
     for line in flex_lines {
+        let line_items = &mut flex_items[line.items.clone()];
         let line_cross_size = line.cross_size;
 
-        for child in line.items.iter_mut() {
+        for child in line_items.iter_mut() {
             let child_style = tree.get_flexbox_child_style(child.node);
             child.target_size.set_cross(
                 constants.dir,
@@ -1657,15 +1716,20 @@ fn determine_used_cross_size(
 ///
 ///   2. Align the items along the main-axis per `justify-content`.
 #[inline]
-fn distribute_remaining_free_space(flex_lines: &mut [FlexLine], constants: &AlgoConstants) {
+fn distribute_remaining_free_space(
+    flex_lines: &mut [FlexLine],
+    flex_items: &mut [FlexItem],
+    constants: &AlgoConstants,
+) {
     for line in flex_lines {
-        let total_main_axis_gap = sum_axis_gaps(constants.gap.main(constants.dir), line.items.len());
+        let line_items = &mut flex_items[line.items.clone()];
+        let total_main_axis_gap = sum_axis_gaps(constants.gap.main(constants.dir), line_items.len());
         let used_space: f32 = total_main_axis_gap
-            + line.items.iter().map(|child| child.outer_target_size.main(constants.dir)).sum::<f32>();
+            + line_items.iter().map(|child| child.outer_target_size.main(constants.dir)).sum::<f32>();
         let free_space = constants.inner_container_size.main(constants.dir) - used_space;
         let mut num_auto_margins = 0;
 
-        for child in line.items.iter_mut() {
+        for child in line_items.iter_mut() {
             if child.margin_is_auto.main_start(constants.dir) {
                 num_auto_margins += 1;
             }
@@ -1677,7 +1741,7 @@ fn distribute_remaining_free_space(flex_lines: &mut [FlexLine], constants: &Algo
         if free_space > 0.0 && num_auto_margins > 0 {
             let margin = free_space / num_auto_margins as f32;
 
-            for child in line.items.iter_mut() {
+            for child in line_items.iter_mut() {
                 if child.margin_is_auto.main_start(constants.dir) {
                     if constants.is_row {
                         child.margin.left = margin;
@@ -1694,7 +1758,7 @@ fn distribute_remaining_free_space(flex_lines: &mut [FlexLine], constants: &Algo
                 }
             }
         } else {
-            let num_items = line.items.len();
+            let num_items = line_items.len();
             let layout_reverse = constants.dir.is_reverse();
             let gap = constants.gap.main(constants.dir);
             let is_safe = false; // TODO: Implement safe alignment
@@ -1708,9 +1772,9 @@ fn distribute_remaining_free_space(flex_lines: &mut [FlexLine], constants: &Algo
             };
 
             if layout_reverse {
-                line.items.iter_mut().rev().enumerate().for_each(justify_item);
+                line_items.iter_mut().rev().enumerate().for_each(justify_item);
             } else {
-                line.items.iter_mut().enumerate().for_each(justify_item);
+                line_items.iter_mut().enumerate().for_each(justify_item);
             }
         }
     }
@@ -1729,12 +1793,17 @@ fn distribute_remaining_free_space(flex_lines: &mut [FlexLine], constants: &Algo
 ///   - Otherwise, if the block-start or inline-start margin (whichever is in the cross axis) is auto, set it to zero.
 ///     Set the opposite margin so that the outer cross size of the item equals the cross size of its flex line.
 #[inline]
-fn resolve_cross_axis_auto_margins(flex_lines: &mut [FlexLine], constants: &AlgoConstants) {
+fn resolve_cross_axis_auto_margins(
+    flex_lines: &mut [FlexLine],
+    flex_items: &mut [FlexItem],
+    constants: &AlgoConstants,
+) {
     for line in flex_lines {
+        let line_items = &mut flex_items[line.items.clone()];
         let line_cross_size = line.cross_size;
-        let max_baseline: f32 = line.items.iter_mut().map(|child| child.baseline).fold(0.0, |acc, x| acc.max(x));
+        let max_baseline: f32 = line_items.iter_mut().map(|child| child.baseline).fold(0.0, |acc, x| acc.max(x));
 
-        for child in line.items.iter_mut() {
+        for child in line_items.iter_mut() {
             let free_space = line_cross_size - child.outer_target_size.cross(constants.dir);
 
             if child.margin_is_auto.cross_start(constants.dir) && child.margin_is_auto.cross_end(constants.dir) {
@@ -1969,6 +2038,7 @@ fn calculate_flex_item(
 fn calculate_layout_line(
     tree: &mut impl LayoutFlexboxContainer,
     line: &mut FlexLine,
+    line_items: &mut [FlexItem],
     total_offset_cross: &mut f32,
     #[cfg(feature = "content_size")] content_size: &mut Size<f32>,
     container_size: Size<f32>,
@@ -1980,7 +2050,7 @@ fn calculate_layout_line(
     let line_offset_cross = line.offset_cross;
 
     if direction.is_reverse() {
-        for item in line.items.iter_mut().rev() {
+        for item in line_items.iter_mut().rev() {
             calculate_flex_item(
                 tree,
                 item,
@@ -1995,7 +2065,7 @@ fn calculate_layout_line(
             );
         }
     } else {
-        for item in line.items.iter_mut() {
+        for item in line_items.iter_mut() {
             calculate_flex_item(
                 tree,
                 item,
@@ -2019,6 +2089,7 @@ fn calculate_layout_line(
 fn final_layout_pass(
     tree: &mut impl LayoutFlexboxContainer,
     flex_lines: &mut [FlexLine],
+    flex_items: &mut [FlexItem],
     constants: &AlgoConstants,
 ) -> Size<f32> {
     let mut total_offset_cross = constants.content_box_inset.cross_start(constants.dir);
@@ -2031,6 +2102,7 @@ fn final_layout_pass(
             calculate_layout_line(
                 tree,
                 line,
+                &mut flex_items[line.items.clone()],
                 &mut total_offset_cross,
                 #[cfg(feature = "content_size")]
                 &mut content_size,
@@ -2045,6 +2117,7 @@ fn final_layout_pass(
             calculate_layout_line(
                 tree,
                 line,
+                &mut flex_items[line.items.clone()],
                 &mut total_offset_cross,
                 #[cfg(feature = "content_size")]
                 &mut content_size,

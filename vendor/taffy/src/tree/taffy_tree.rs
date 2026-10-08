@@ -20,9 +20,9 @@ use crate::compute::{
 };
 use crate::CacheTree;
 #[cfg(feature = "block_layout")]
-use crate::{compute::compute_block_layout, LayoutBlockContainer};
+use crate::{compute::compute_block_layout, BlockScratch, LayoutBlockContainer};
 #[cfg(feature = "flexbox")]
-use crate::{compute::compute_flexbox_layout, LayoutFlexboxContainer};
+use crate::{compute::compute_flexbox_layout, FlexboxScratch, LayoutFlexboxContainer};
 #[cfg(feature = "grid")]
 use crate::{compute::compute_grid_layout, LayoutGridContainer};
 
@@ -160,6 +160,14 @@ pub struct TaffyTree<NodeContext = ()> {
 
     /// Layout mode configuration
     config: TaffyConfig,
+
+    /// Storage the block algorithm reuses between containers and layouts
+    #[cfg(feature = "block_layout")]
+    block_scratch: BlockScratch,
+
+    /// Storage the flexbox algorithm reuses between containers and layouts
+    #[cfg(feature = "flexbox")]
+    flexbox_scratch: FlexboxScratch,
 }
 
 impl Default for TaffyTree {
@@ -460,6 +468,11 @@ where
     fn get_block_child_style(&self, child_node_id: NodeId) -> Self::BlockItemStyle<'_> {
         self.get_core_container_style(child_node_id)
     }
+
+    #[inline(always)]
+    fn block_scratch(&mut self) -> Option<&mut BlockScratch> {
+        Some(&mut self.taffy.block_scratch)
+    }
 }
 
 #[cfg(feature = "flexbox")]
@@ -485,6 +498,11 @@ where
     #[inline(always)]
     fn get_flexbox_child_style(&self, child_node_id: NodeId) -> Self::FlexboxItemStyle<'_> {
         &self.taffy.nodes[child_node_id.into()].style
+    }
+
+    #[inline(always)]
+    fn flexbox_scratch(&mut self) -> Option<&mut FlexboxScratch> {
+        Some(&mut self.taffy.flexbox_scratch)
     }
 }
 
@@ -558,6 +576,10 @@ impl<NodeContext> TaffyTree<NodeContext> {
             parents: SlotMap::with_capacity(capacity),
             node_context_data: SecondaryMap::with_capacity(capacity),
             config: TaffyConfig::default(),
+            #[cfg(feature = "block_layout")]
+            block_scratch: BlockScratch::new(),
+            #[cfg(feature = "flexbox")]
+            flexbox_scratch: FlexboxScratch::new(),
         }
     }
 

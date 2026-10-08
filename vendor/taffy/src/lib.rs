@@ -97,21 +97,21 @@ mod readme_doctest {
     #![doc = include_str!("../README.md")]
 }
 
-#[cfg(feature = "block_layout")]
-#[doc(inline)]
-pub use crate::compute::compute_block_layout;
-#[cfg(feature = "flexbox")]
-#[doc(inline)]
-pub use crate::compute::compute_flexbox_layout;
 #[cfg(feature = "grid")]
 #[doc(inline)]
 pub use crate::compute::compute_grid_layout;
 #[cfg(feature = "detailed_layout_info")]
 pub use crate::compute::detailed_info::*;
+#[cfg(feature = "block_layout")]
+#[doc(inline)]
+pub use crate::compute::{compute_block_layout, BlockScratch};
 #[doc(inline)]
 pub use crate::compute::{
     compute_cached_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout, round_layout,
 };
+#[cfg(feature = "flexbox")]
+#[doc(inline)]
+pub use crate::compute::{compute_flexbox_layout, FlexboxScratch};
 #[doc(inline)]
 pub use crate::style::Style;
 #[doc(inline)]

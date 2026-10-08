@@ -127,6 +127,8 @@
 //! ```
 //!
 use super::{Layout, LayoutInput, LayoutOutput, NodeId, RequestedAxis, RunMode, SizingMode};
+#[cfg(feature = "flexbox")]
+use crate::compute::FlexboxScratch;
 #[cfg(feature = "detailed_layout_info")]
 use crate::debug::debug_log;
 use crate::geometry::{AbsoluteAxis, Line, Size};
@@ -137,7 +139,7 @@ use crate::style::{FlexboxContainerStyle, FlexboxItemStyle};
 use crate::style::{GridContainerStyle, GridItemStyle};
 use crate::CheapCloneStr;
 #[cfg(feature = "block_layout")]
-use crate::{BlockContainerStyle, BlockItemStyle};
+use crate::{BlockContainerStyle, BlockItemStyle, BlockScratch};
 
 #[cfg(all(feature = "grid", feature = "detailed_layout_info"))]
 use crate::compute::grid::DetailedGridInfo;
@@ -265,6 +267,13 @@ pub trait LayoutFlexboxContainer: LayoutPartialTree {
 
     /// Get the child's styles
     fn get_flexbox_child_style(&self, child_node_id: NodeId) -> Self::FlexboxItemStyle<'_>;
+
+    /// Storage the flexbox algorithm can reuse from one container to the next instead of allocating.
+    /// The default keeps none, and each container allocates its own.
+    #[inline(always)]
+    fn flexbox_scratch(&mut self) -> Option<&mut FlexboxScratch> {
+        None
+    }
 }
 
 #[cfg(feature = "grid")]
@@ -313,6 +322,13 @@ pub trait LayoutBlockContainer: LayoutPartialTree {
 
     /// Get the child's styles
     fn get_block_child_style(&self, child_node_id: NodeId) -> Self::BlockItemStyle<'_>;
+
+    /// Storage the block algorithm can reuse from one container to the next instead of allocating.
+    /// The default keeps none, and each container allocates its own.
+    #[inline(always)]
+    fn block_scratch(&mut self) -> Option<&mut BlockScratch> {
+        None
+    }
 }
 
 // --- PRIVATE TRAITS

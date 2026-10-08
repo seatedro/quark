@@ -60,6 +60,40 @@ struct BlockItem {
     can_be_collapsed_through: bool,
 }
 
+/// Storage that [`compute_block_layout`] reuses across calls, so that laying out a container does not allocate
+/// its items anew.
+///
+/// A container's items stay in use while its children are laid out, so each level of nested block containers
+/// takes its own list of items: the storage keeps a list for each level of the deepest nesting laid out so far.
+/// A tree provides it to the algorithm through [`LayoutBlockContainer::block_scratch`].
+#[derive(Default)]
+pub struct BlockScratch {
+    /// Item lists not in use. A computation takes one from the end and pushes it back when done, so the
+    /// computations nested inside it take and return theirs in between.
+    frames: Vec<Vec<BlockItem>>,
+}
+
+impl BlockScratch {
+    /// Creates empty storage
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Clone for BlockScratch {
+    /// Storage holds no results between computations, so a clone starts empty
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl core::fmt::Debug for BlockScratch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BlockScratch").field("frames", &self.frames.len()).finish()
+    }
+}
+
 /// Computes the layout of [`LayoutPartialTree`] according to the block layout algorithm
 pub fn compute_block_layout(
     tree: &mut impl LayoutBlockContainer,
@@ -123,6 +157,23 @@ pub fn compute_block_layout(
 
 /// Computes the layout of [`LayoutBlockContainer`] according to the block layout algorithm
 fn compute_inner(tree: &mut impl LayoutBlockContainer, node_id: NodeId, inputs: LayoutInput) -> LayoutOutput {
+    // Lay out with an item list from the tree's scratch storage, if it keeps any, and give the list back afterwards.
+    let mut items = tree.block_scratch().and_then(|scratch| scratch.frames.pop()).unwrap_or_default();
+    let output = compute_inner_with(tree, node_id, inputs, &mut items);
+    if let Some(scratch) = tree.block_scratch() {
+        scratch.frames.push(items);
+    }
+    output
+}
+
+/// Computes the layout of [`LayoutBlockContainer`] according to the block layout algorithm, keeping the items in
+/// `items`
+fn compute_inner_with(
+    tree: &mut impl LayoutBlockContainer,
+    node_id: NodeId,
+    inputs: LayoutInput,
+    items: &mut Vec<BlockItem>,
+) -> LayoutOutput {
     let LayoutInput {
         known_dimensions, parent_size, available_space, run_mode, vertical_margins_are_collapsible, ..
     } = inputs;
@@ -201,12 +252,12 @@ fn compute_inner(tree: &mut impl LayoutBlockContainer, node_id: NodeId, inputs: 
     drop(style);
 
     // 1. Generate items
-    let mut items = generate_item_list(tree, node_id, container_content_box_size);
+    generate_item_list(tree, node_id, container_content_box_size, items);
 
     // 2. Compute container width
     let container_outer_width = known_dimensions.width.unwrap_or_else(|| {
         let available_width = available_space.width.maybe_sub(content_box_inset.horizontal_axis_sum());
-        let intrinsic_width = determine_content_based_container_width(tree, &items, available_width)
+        let intrinsic_width = determine_content_based_container_width(tree, items, available_width)
             + content_box_inset.horizontal_axis_sum();
         intrinsic_width.maybe_clamp(min_size.width, max_size.width).maybe_max(Some(padding_border_size.width))
     });
@@ -223,7 +274,7 @@ fn compute_inner(tree: &mut impl LayoutBlockContainer, node_id: NodeId, inputs: 
     let (inflow_content_size, intrinsic_outer_height, first_child_top_margin_set, last_child_bottom_margin_set) =
         perform_final_layout_on_in_flow_children(
             tree,
-            &mut items,
+            items,
             container_outer_width,
             content_box_inset,
             resolved_content_box_inset,
@@ -246,7 +297,7 @@ fn compute_inner(tree: &mut impl LayoutBlockContainer, node_id: NodeId, inputs: 
     let absolute_position_area = final_outer_size - absolute_position_inset.sum_axes();
     let absolute_position_offset = Point { x: absolute_position_inset.left, y: absolute_position_inset.top };
     let absolute_content_size =
-        perform_absolute_layout_on_absolute_children(tree, &items, absolute_position_area, absolute_position_offset);
+        perform_absolute_layout_on_absolute_children(tree, items, absolute_position_area, absolute_position_offset);
 
     // 5. Perform hidden layout on hidden children
     let len = tree.child_count(node_id);
@@ -296,14 +347,16 @@ fn compute_inner(tree: &mut impl LayoutBlockContainer, node_id: NodeId, inputs: 
     }
 }
 
-/// Create a `Vec` of `BlockItem` structs where each item in the `Vec` represents a child of the current node
+/// Fill `items` with `BlockItem` structs where each item represents a child of the current node
 #[inline]
 fn generate_item_list(
     tree: &impl LayoutBlockContainer,
     node: NodeId,
     node_inner_size: Size<Option<f32>>,
-) -> Vec<BlockItem> {
-    tree.child_ids(node)
+    items: &mut Vec<BlockItem>,
+) {
+    let new_items = tree
+        .child_ids(node)
         .map(|child_node_id| (child_node_id, tree.get_block_child_style(child_node_id)))
         .filter(|(_, style)| style.box_generation_mode() != BoxGenerationMode::None)
         .enumerate()
@@ -347,8 +400,9 @@ fn generate_item_list(
                 static_position: Point::zero(),
                 can_be_collapsed_through: false,
             }
-        })
-        .collect()
+        });
+    items.clear();
+    items.extend(new_items);
 }
 
 /// Compute the content-based width in the case that the width of the container is not known
