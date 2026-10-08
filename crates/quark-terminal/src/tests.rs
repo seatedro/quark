@@ -877,3 +877,176 @@ fn ansi_colors_color_the_cells_programs_pick_by_number() {
         format!("0+2\"go\" fg={}", crate::state::LIGHT_ANSI[2])
     );
 }
+
+// ---- Rendering -----------------------------------------------------------
+
+/// A terminal app for the headless harness, drawing `state`.
+struct Probe(TerminalState);
+
+impl quark_app::UiApp for Probe {
+    type Action = TerminalEvent;
+    type Message = ();
+
+    fn view(&mut self, cx: &mut quark_app::ViewContext) -> quark_ui::element::AnyElement {
+        let (width, height) = cx.frame.size();
+        self.0.set_viewport(width, height);
+        let scale = cx.frame.scale_factor();
+        let text = cx.frame.text();
+        self.0
+            .prepare(&mut text.system, &mut text.layouts, scale, cx.theme);
+        let env = crate::TerminalEnv {
+            focused: false,
+            accessible: false,
+        };
+        crate::terminal_view(&mut self.0, cx.theme, env, quark_ui::Action::new)
+    }
+
+    fn update(&mut self, _event: TerminalEvent, _cx: &mut quark_app::UiContext) {}
+}
+
+/// White on black, so a probe tells ink from background by brightness.
+fn white_on_black() -> crate::TerminalStyle {
+    crate::TerminalStyle {
+        colors: crate::TerminalColors {
+            foreground: Some(Rgb::new(255, 255, 255)),
+            background: Some(Rgb::new(0, 0, 0)),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// `output` drawn at `scale` on a GPU, with the cell size in device
+/// pixels and the grid's top-left device pixel; `None` without a GPU.
+fn render(output: &str, scale: f32) -> Option<(quark_app::testing::Pixels, (u32, u32), u32)> {
+    let mut t = TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal"))
+        .with_style(white_on_black());
+    t.feed(output.as_bytes());
+    let mut ui = quark_app::testing::UiTestHarness::new(Probe(t), (320.0, 200.0), scale);
+    ui.frame();
+    let pixels = match ui.render_rgba() {
+        Ok(pixels) => pixels,
+        Err(err) => {
+            assert!(
+                std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                "QUARK_REQUIRE_GPU is set but no wgpu adapter is available: {err}"
+            );
+            return None;
+        }
+    };
+    let m = ui.app().0.metrics();
+    let origin = (m.pad * scale).round() as u32;
+    Some((pixels, (m.cell.cell_width, m.cell.cell_height), origin))
+}
+
+fn ink(pixels: &quark_app::testing::Pixels, x: u32, y: u32) -> bool {
+    pixels.pixel(x, y)[0] > 200
+}
+
+/// Block elements and box-drawing lines fill their cells exactly, so a
+/// run of them is one unbroken shape across cells and rows at every
+/// scale: no seam between `█`s, and `─` and `│` join their neighbors.
+#[test]
+fn blocks_and_box_lines_tile_without_gaps() {
+    for scale in [1.0, 1.5, 2.0] {
+        let screen = "████████\r\n████████\r\n████████\r\n────────\r\n│\r\n│\r\n│";
+        let Some((pixels, (cw, ch), o)) = render(screen, scale) else {
+            return;
+        };
+        let cells = 8 * cw;
+        // Across three rows of blocks, every pixel is ink.
+        for y in o..o + 3 * ch {
+            for x in o..o + cells {
+                assert!(
+                    ink(&pixels, x, y),
+                    "scale {scale}: gap in blocks at ({x}, {y})"
+                );
+            }
+        }
+        // The rule: one row of ink running the full width.
+        let rule = (o + 3 * ch..o + 4 * ch)
+            .find(|&y| ink(&pixels, o + cw / 2, y))
+            .expect("the rule is drawn");
+        for x in o..o + cells {
+            assert!(ink(&pixels, x, rule), "scale {scale}: gap in ─ at x {x}");
+        }
+        // The vertical line: one column of ink through three rows.
+        let line = (o..o + cw)
+            .find(|&x| ink(&pixels, x, o + 4 * ch + ch / 2))
+            .expect("the line is drawn");
+        for y in o + 4 * ch..o + 7 * ch {
+            assert!(ink(&pixels, line, y), "scale {scale}: gap in │ at y {y}");
+        }
+    }
+}
+
+/// The cell is the font's advance by its line height in whole device
+/// pixels, and programs asking for the cell size (CSI 16 t) get it.
+/// JetBrains Mono has a 600-unit advance and a 1320-unit line height (1020
+/// ascent, 300 descent, no gap) per 1000: at 13 points that is 7.8 by
+/// 17.16 pixels at 1x and 15.6 by 34.32 at 2x, and at 30 points 18 by
+/// 39.6, rounded; `adjust-cell-height` applies on top.
+#[test]
+fn cell_metrics_come_from_the_font() {
+    use quark_text::{FontSettings, LayoutCache, TextSystem};
+
+    let theme = quark_ui::theme::Theme::default_dark();
+    let mut text = TextSystem::vendored_only(&FontSettings::default());
+    let mut layouts = LayoutCache::new(1);
+    let table = [
+        (13.0, 1.0, None, "\x1b[6;17;8t"),
+        (13.0, 2.0, None, "\x1b[6;34;16t"),
+        (30.0, 1.0, None, "\x1b[6;40;18t"),
+        (13.0, 2.0, Some("-4"), "\x1b[6;30;16t"),
+    ];
+    for (size, scale, adjust, reply) in table {
+        let style = crate::TerminalStyle {
+            font_size: size,
+            adjust_cell_height: adjust.map(|a: &str| a.parse().unwrap()),
+            ..crate::TerminalStyle::ghostty()
+        };
+        let mut t = TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal"))
+            .with_style(style);
+        t.set_viewport(400.0, 300.0);
+        t.prepare(&mut text, &mut layouts, scale, &theme);
+        t.feed(b"\x1b[16t");
+        let sent = String::from_utf8(t.take_input()).unwrap();
+        assert_eq!(sent, reply, "{size}pt at {scale}x, adjust {adjust:?}");
+    }
+}
+
+/// The style's colors replace the theme's: default foreground and
+/// background, and palette entries programs pick by number.
+#[test]
+fn style_colors_reach_the_cells() {
+    use quark_text::{FontSettings, LayoutCache, TextSystem};
+
+    let theme = quark_ui::theme::Theme::default_dark();
+    let mut text = TextSystem::vendored_only(&FontSettings::default());
+    let mut layouts = LayoutCache::new(1);
+    let (red, fg, bg) = (
+        Rgb::new(0xe7, 0x82, 0x84),
+        Rgb::new(0xc6, 0xd0, 0xf5),
+        Rgb::new(0x30, 0x34, 0x46),
+    );
+    let style = crate::TerminalStyle {
+        colors: crate::TerminalColors {
+            foreground: Some(fg),
+            background: Some(bg),
+            palette: vec![(1, red), (196, Rgb::new(1, 2, 3))],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut t =
+        TerminalState::new("test", quark_ui::FocusId::from_key("test.terminal")).with_style(style);
+    t.set_viewport(400.0, 300.0);
+    t.prepare(&mut text, &mut layouts, 1.0, &theme);
+    t.feed(b"\x1b[31mred\x1b[0m \x1b[38;5;196mx\x1b[0m plain");
+    let grid = t.refresh();
+    assert_eq!(grid.colors.background, bg);
+    assert_eq!(
+        runs(&grid.rows[0]),
+        format!("0+3\"red\" fg={red} 3+1\" \" fg={fg} 4+1\"x\" fg=#010203 5+6\" plain\" fg={fg}")
+    );
+}
