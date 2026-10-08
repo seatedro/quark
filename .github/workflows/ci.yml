@@ -263,15 +263,23 @@ jobs:
       matrix:
         include:
           - name: quark
-            args: -p quark
+            args: "-p quark --harness fenwick:: --harness geometry::"
+          - name: quark hit
+            args: "-p quark --harness hit::"
+          - name: quark reactive
+            args: "-p quark --harness reactive::"
           - name: quark-ui
-            args: -p quark-ui
+            args: "-p quark-ui --harness virtual_list:: --harness styles::"
+          - name: quark-ui scroll
+            args: "-p quark-ui --harness scroll::"
           - name: quark-app
             args: -p quark-app
           - name: quark-components
-            args: "-p quark-components --harness list_nav:: --harness pane_tree::"
+            args: "-p quark-components --harness list_nav:: --harness pane_tree:: --harness slider::"
           - name: quark-components split
             args: "-p quark-components --harness split::"
+          - name: quark-diff
+            args: -p quark-diff
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
