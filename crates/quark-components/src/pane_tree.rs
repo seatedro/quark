@@ -513,13 +513,27 @@ mod verification {
         }
     }
 
+    // One harness per divider, each with fresh symbolic inputs, so CI can
+    // prove them in parallel. Kissat took 607 s where the default CaDiCaL
+    // took 1133 s for all three dividers in one harness.
     #[kani::proof]
     #[kani::unwind(6)]
-    // Kissat took 607 s where the default CaDiCaL took 1133 s.
     #[kani::solver(kissat)]
-    fn push_divider_keeps_minimums_and_drains_nearest_first() {
+    fn push_divider_0() {
         check(0);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(kissat)]
+    fn push_divider_1() {
         check(1);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    #[kani::solver(kissat)]
+    fn push_divider_2() {
         check(2);
     }
 }

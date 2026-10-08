@@ -486,8 +486,14 @@ jobs:
             args: -p quark-app
           - name: quark-components
             args: "-p quark-components --harness list_nav:: --harness slider::"
-          - name: quark-components pane_tree
-            args: "-p quark-components --harness pane_tree::"
+          # pane_tree's dividers are separate harnesses so they prove in
+          # parallel.
+          - name: quark-components pane_tree 0
+            args: "-p quark-components --harness pane_tree::verification::push_divider_0"
+          - name: quark-components pane_tree 1
+            args: "-p quark-components --harness pane_tree::verification::push_divider_1"
+          - name: quark-components pane_tree 2
+            args: "-p quark-components --harness pane_tree::verification::push_divider_2"
           - name: quark-components split 0/1
             args: "-p quark-components --harness split_resize_pane0_flex1"
           - name: quark-components split 0/2
