@@ -1,17 +1,37 @@
 name: Syntax packs
 
 # Builds quark-syntax grammar packs from the pinned sources in
-# tools/syntax-pack/grammars.toml for each target, signs a per-target
-# index, and uploads both as workflow artifacts. Nothing is published:
-# copying an artifact's directory to the index host is a separate,
-# deliberate step (see docs/guide/syntax-packs.md).
+# tools/syntax-pack/grammars.toml, and optionally publishes them to the
+# pack host (see docs/guide/syntax-packs.md, "Publishing packs").
+#
+# - build: one native runner per target, with no secrets. Compiles every
+#   pack, loads each library on that runner, and checks its sample's
+#   captures and injections. Grammar code is untrusted here.
+# - sign (full builds only): signs one index per target in a protected
+#   environment holding QUARK_SYNTAX_SIGNING_KEY. It reads the build
+#   artifacts as data (hashes and manifests, never loading a library) and
+#   restores no cache an untrusted job could have written.
+# - publish (full builds on master with `publish` set): uploads every pack
+#   file to its immutable URL, checks each is served, then replaces the
+#   indexes last.
+# - smoke: after publishing, each target downloads its packs through the
+#   public index with quark-syntax's own downloader and highlights them.
+#
+# A dispatch naming languages only builds and tests: it is never signed,
+# and `syntax-pack index` refuses an incomplete language set anyway, so it
+# cannot replace a complete public index.
 on:
   workflow_dispatch:
     inputs:
       languages:
-        description: Space-separated languages to build (empty builds every pinned one)
+        description: Space-separated languages to build and test (empty builds every pinned one; only full builds are signed and published)
         required: false
         default: ""
+      publish:
+        description: Publish the signed packs and indexes to the pack host (full builds on master only)
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -22,10 +42,22 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Apps fetch <base>/<target>/index.json; pack files live under
+  # <base>/<target>/<language>/<sha256>/.
+  PACK_BASE_URL: https://quark.seated.ro/v1
+  # The index public key apps compile in (the chat and diff demos). The
+  # sign job fails when QUARK_SYNTAX_SIGNING_KEY does not match it.
+  PACK_INDEX_KEY: 2194429b3227f613ac19401deddbb0bdc2b4b283e1ecec0d0d38892c28d63955
+  # Every target the build matrix covers; signing and publishing require
+  # all of them.
+  TARGETS: >-
+    x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin
+    x86_64-apple-darwin x86_64-pc-windows-msvc
 
 # Actions are pinned to commit SHAs; the comment names the release.
 jobs:
-  packs:
+  build:
+    name: Build and test ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -35,12 +67,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
-            os: macos-latest
-          # Cross-compiled on Apple silicon with clang -arch x86_64, so the
-          # tool cannot load these to check them; the arm64 job checks the
-          # same sources.
+            os: macos-15
+          # Built and loaded on an Intel runner, as release.yml does. Should
+          # GitHub retire it, build on macos-15 with an x86_64 syntax-pack,
+          # which runs and loads the packs under Rosetta (see the docs).
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15-intel
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -50,16 +82,27 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
+      # syntax-pack loads and checks only packs for the target it runs on,
+      # so a runner whose host differs would silently skip the check.
+      - name: Require a native runner
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [ "$host" != "${{ matrix.target }}" ]; then
+            echo "::error::runner host $host cannot load ${{ matrix.target }} packs"
+            exit 1
+          fi
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Fetches each grammar at its pinned commit, checks the source hash,
-      # compiles, and (for the runner's own target) loads the pack and
-      # compiles its query.
-      - name: Build packs
+      # compiles, then loads every pack and checks its sample (`check`).
+      - name: Build and check packs
         env:
           LANGUAGES: ${{ inputs.languages }}
         run: |
@@ -67,21 +110,156 @@ jobs:
           # shellcheck disable=SC2086
           cargo run --release -p syntax-pack -- build --target "${{ matrix.target }}" $LANGUAGES
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: syntax-packs-unsigned-${{ matrix.target }}
+          path: target/syntax-packs/${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  sign:
+    needs: build
+    if: inputs.languages == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Holds QUARK_SYNTAX_SIGNING_KEY as an environment secret; protect it
+    # with required reviewers and a master-only branch rule.
+    environment: syntax-packs-signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # No rust-cache: build jobs ran grammar code and may have saved one.
+      - name: Build syntax-pack
+        run: cargo build --release -p syntax-pack
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: syntax-packs-unsigned-*
+          path: artifacts
+
+      - name: Arrange packs by target
+        run: |
+          mkdir packs
+          for target in $TARGETS; do
+            mv "artifacts/syntax-packs-unsigned-$target" "packs/$target"
+          done
+
       # The private key never leaves this step; the index carries only the
       # signature. Without the secret the job fails rather than produce an
-      # unsigned index.
-      - name: Sign index
+      # unsigned index. verify then checks the signature against the key
+      # apps ship, every pinned language, and every URL.
+      - name: Sign indexes
         env:
           QUARK_SYNTAX_SIGNING_KEY: ${{ secrets.QUARK_SYNTAX_SIGNING_KEY }}
         run: |
           if [ -z "$QUARK_SYNTAX_SIGNING_KEY" ]; then
-            echo "::error::QUARK_SYNTAX_SIGNING_KEY is not set; add the index signing seed as a repository secret"
+            echo "::error::QUARK_SYNTAX_SIGNING_KEY is not set; add the index signing seed to the syntax-packs-signing environment"
             exit 1
           fi
-          cargo run --release -p syntax-pack -- index --target "${{ matrix.target }}"
+          for target in $TARGETS; do
+            target/release/syntax-pack index --out packs --target "$target" --base-url "$PACK_BASE_URL"
+            target/release/syntax-pack verify --out packs --target "$target" \
+              --key "$PACK_INDEX_KEY" --base-url "$PACK_BASE_URL" >/dev/null
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: syntax-packs-${{ matrix.target }}
-          path: target/syntax-packs/${{ matrix.target }}/
+          name: syntax-packs-signed
+          path: packs/
           if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: sign
+    if: inputs.publish && inputs.languages == '' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Holds the pack host's SSH credentials; protect it like signing.
+    environment: syntax-packs-publish
+    # One publication at a time across every ref, so two runs cannot
+    # interleave their index replacements.
+    concurrency:
+      group: syntax-packs-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Build syntax-pack
+        run: cargo build --release -p syntax-pack
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: syntax-packs-signed
+          path: packs
+
+      - name: Publish packs, then indexes
+        env:
+          SSH_KEY: ${{ secrets.QUARK_PACKS_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.QUARK_PACKS_SSH_KNOWN_HOSTS }}
+          PACK_SSH_DEST: ${{ secrets.QUARK_PACKS_SSH_DEST }}
+          PACK_REMOTE_DIR: ${{ secrets.QUARK_PACKS_REMOTE_DIR }}
+        run: |
+          for name in SSH_KEY SSH_KNOWN_HOSTS PACK_SSH_DEST PACK_REMOTE_DIR; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is empty; set the QUARK_PACKS_* secrets in the syntax-packs-publish environment"
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s\n' "$SSH_KEY" >"$RUNNER_TEMP/pack-host-key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >"$RUNNER_TEMP/pack-host-known-hosts"
+          SYNTAX_PACK=target/release/syntax-pack \
+          PACK_SSH_KEY_FILE="$RUNNER_TEMP/pack-host-key" \
+          PACK_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/pack-host-known-hosts" \
+            tools/syntax-pack/publish.sh packs
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/pack-host-key"
+
+  smoke:
+    needs: publish
+    name: Download and highlight ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Download and highlight every pack
+        run: |
+          cargo run --release -p syntax-pack -- remote-check \
+            --index "$PACK_BASE_URL/{target}/index.json" --key "$PACK_INDEX_KEY"

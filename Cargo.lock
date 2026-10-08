@@ -3917,12 +3917,16 @@ name = "syntax-pack"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "libloading",
  "quark-syntax",
  "quark-update",
  "ring",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
+ "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]
