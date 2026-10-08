@@ -1651,7 +1651,8 @@ impl<'a> Dock<'a> {
                      bg={colors.background} focus_ring={Self::tab_focus(pane)}
                      on_key={("left", select(prev))} on_key={("right", select(next))}
                      on_key={("home", select(0))} on_key={("end", select(count - 1))}
-                     on_key={("delete", close.clone())}
+                     // Mac keyboards label Backspace "Delete".
+                     on_key={("delete", close.clone())} on_key={("backspace", close.clone())}
                  }
                  @for (key, action) in &moves {
                      on_key={(key.clone(), action.clone())}

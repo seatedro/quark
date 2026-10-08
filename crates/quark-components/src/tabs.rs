@@ -155,7 +155,9 @@ impl TabBar {
                  // Dock's does) and Delete then closes it.
                  focus_ring={FocusId::from_key(&key)}
                  @when {let Some(close) = &item.on_close} {
+                     // Mac keyboards label Backspace "Delete".
                      on:middle_click={close.clone()} on_key={("delete", close.clone())}
+                     on_key={("backspace", close.clone())}
                  }
                  @when {!item.active} { hover_bg={tc.ghost_element_hover} }
                  @when {fill} { flex_1 }>

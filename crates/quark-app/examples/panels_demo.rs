@@ -837,6 +837,14 @@ mod tests {
     }
 
     #[test]
+    fn backspace_closes_the_focused_dock_tab() {
+        let mut ui = harness();
+        ui.click_node(By::role_name(Role::Tab, "Diff"));
+        ui.key("backspace");
+        assert!(ui.try_find(By::role_name(Role::Tab, "Diff")).is_none());
+    }
+
+    #[test]
     fn closing_the_focused_session_focuses_the_next_one() {
         let mut ui = harness();
         ui.key("mod+j");

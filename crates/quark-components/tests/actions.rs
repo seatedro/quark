@@ -224,13 +224,17 @@ fn a_middle_click_closes_an_inactive_tab_without_selecting_it() {
     );
 }
 
+// Forward delete, and Backspace, which Mac keyboards label Delete.
 #[test]
 fn delete_closes_the_focused_tab() {
     let router = closable_tabs();
-    let delete: Binding = "delete".parse().unwrap();
     let focus = Some(TabItem::focus_id("files"));
-    assert_eq!(
-        router.key_down(&delete, focus).actions,
-        [Action::from(Demo::Close("files"))]
-    );
+    for key in ["delete", "backspace"] {
+        let binding: Binding = key.parse().unwrap();
+        assert_eq!(
+            router.key_down(&binding, focus).actions,
+            [Action::from(Demo::Close("files"))],
+            "{key}"
+        );
+    }
 }
