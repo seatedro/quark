@@ -185,6 +185,12 @@ fn character_binding_key(text: &str) -> Option<(&'static str, bool)> {
         '&' => ("7", true),
         '*' => ("8", true),
         '(' => ("9", true),
+        '<' => (",", true),
+        '>' => (".", true),
+        ':' => (";", true),
+        '"' => ("'", true),
+        '|' => ("\\", true),
+        '~' => ("`", true),
         ',' => (",", false),
         '.' => (".", false),
         '/' => ("/", false),
@@ -450,6 +456,12 @@ mod tests {
     fn binding_string_infers_shift_from_shifted_characters() {
         let question = chord(KeyKind::Character("?".into()), ModifiersState::SHIFT);
         assert_eq!(question.binding_string().as_deref(), Some("shift+/"));
+
+        let greater = chord(
+            KeyKind::Character(">".into()),
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+        );
+        assert_eq!(greater.binding_string().as_deref(), Some("ctrl+shift+."));
 
         let upper = chord(KeyKind::Character("N".into()), ModifiersState::empty());
         assert_eq!(upper.binding_string().as_deref(), Some("shift+n"));
