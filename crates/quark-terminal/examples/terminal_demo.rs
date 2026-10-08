@@ -7,21 +7,18 @@
 //! selects while a program has mouse reporting on.
 //!
 //! Needs Zig 0.16 to build libghostty-vt (see quark-terminal's build.rs).
-//! On Windows the terminal is not available yet and the demo exits.
 
 use quark_app::quark_ui::element::AnyElement;
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::{UiApp, UiContext, ViewContext, WindowOptions};
 use quark_terminal::PtyCommand;
 
-#[cfg(not(windows))]
 use quark_terminal::{TerminalEvent, TerminalState};
 
 const TERM_FOCUS: FocusId = FocusId::from_key("demo.terminal");
 
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
-    #[cfg(not(windows))]
     Term(TerminalEvent),
 }
 
@@ -32,35 +29,32 @@ impl From<Msg> for Action {
 }
 
 struct Demo {
-    #[cfg(not(windows))]
     term: TerminalState,
     /// What to run once the window opens; `None` runs nothing (tests feed
     /// the terminal directly).
     command: Option<PtyCommand>,
     /// Called on the PTY thread after each wake, so tests can wait for
     /// output without polling.
-    #[cfg(all(test, not(windows)))]
+    #[cfg(test)]
     on_pty: Option<std::sync::mpsc::Sender<()>>,
     /// Allocations the last frame's `TerminalState::prepare` made.
-    #[cfg(all(test, not(windows)))]
+    #[cfg(test)]
     prepare_allocations: u64,
 }
 
 impl Demo {
     fn new(command: Option<PtyCommand>) -> Self {
         Self {
-            #[cfg(not(windows))]
             term: TerminalState::new("demo.terminal", TERM_FOCUS),
             command,
-            #[cfg(all(test, not(windows)))]
+            #[cfg(test)]
             on_pty: None,
-            #[cfg(all(test, not(windows)))]
+            #[cfg(test)]
             prepare_allocations: 0,
         }
     }
 }
 
-#[cfg(not(windows))]
 mod app {
     use quark_app::InputEvent;
     use quark_app::KeyKind;
@@ -108,6 +102,8 @@ mod app {
     fn open(uri: &str) {
         let opener = if cfg!(target_os = "macos") {
             "open"
+        } else if cfg!(windows) {
+            "explorer"
         } else {
             "xdg-open"
         };
@@ -238,28 +234,6 @@ mod app {
     }
 }
 
-/// Without libghostty-vt (Windows) the demo has nothing to show.
-#[cfg(windows)]
-impl UiApp for Demo {
-    type Action = Msg;
-    type Message = ();
-
-    fn init(&mut self, cx: &mut UiContext) {
-        let _ = (&self.command, TERM_FOCUS);
-        eprintln!("quark-terminal is not available on Windows yet");
-        cx.window.exit();
-    }
-
-    fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
-        use quark_app::quark_ui::element::{IntoAnyElement, div};
-        quark::view! { <div /> }
-    }
-
-    fn update(&mut self, msg: Msg, _cx: &mut UiContext) {
-        match msg {}
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     let command = match args.next() {
@@ -277,7 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(test)]
 mod tests {
     use accesskit::Role;
     use quark_app::quark_ui::test_alloc::{self, Counting};
@@ -308,6 +282,8 @@ mod tests {
         )
     }
 
+    // Runs `sh`; ConPTY's own coverage is in pty.rs.
+    #[cfg(unix)]
     #[test]
     fn typed_input_reaches_the_program_and_its_output_shows() {
         let (tx, rx) = std::sync::mpsc::channel();

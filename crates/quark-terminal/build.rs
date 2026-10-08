@@ -17,8 +17,19 @@
 //! folded in; it needs only libc at link time.
 //!
 //! The archive is cached in the target directory per commit, Zig target,
-//! and optimize mode, so feature changes that move `OUT_DIR` do not
-//! rebuild it. Downloads are kept in `<target>/<profile>/ghostty-vt/downloads`.
+//! optimize mode, Zig version, and (for MSVC) C runtime, so feature changes
+//! that move `OUT_DIR` do not rebuild it. Each build installs into a
+//! temporary prefix that is renamed into place, so an interrupted build
+//! never leaves a partial cache entry. Downloads are kept in
+//! `<target>/<profile>/ghostty-vt/downloads`.
+//!
+//! The archive is `libghostty-vt.a` on Unix. On Windows (x86-64 MSVC only)
+//! it is the COFF archive `ghostty-vt-static.lib`, named apart from the DLL
+//! import library `ghostty-vt.lib` that the same build installs; Zig's
+//! standard library in it also needs ntdll and kernel32. Zig emits no
+//! `/DEFAULTLIB` directives and compiles without `_DLL`, so its objects
+//! call the C runtime directly and link against either the DLL or the
+//! static CRT.
 //!
 //! Environment:
 //! - `ZIG`: the Zig binary (default `zig` on PATH). Ghostty needs 0.16.
@@ -28,14 +39,15 @@
 //!   is a file or directory named either by its Zig package hash or by its
 //!   URL's last path segment (a `downloads` directory from another build
 //!   works). Hashes are still checked.
-//! - `QUARK_GHOSTTY_VT_LIB_DIR`: a directory holding a prebuilt
-//!   `libghostty-vt.a`, used instead of building (required when the
-//!   `zig-build` feature is off).
+//! - `QUARK_GHOSTTY_VT_LIB_DIR`: a directory holding a prebuilt archive
+//!   (`libghostty-vt.a`, or `ghostty-vt-static.lib` on Windows), used
+//!   instead of building (required when the `zig-build` feature is off).
 //! - `QUARK_GHOSTTY_VT_OPTIMIZE`: Zig optimize mode (default ReleaseFast).
 //!
-//! Windows is not built yet: Zig's MSVC target needs the Windows SDK and the
-//! combined archive has not been verified against the MSVC linker, so the
-//! crate compiles without the VT there (see lib.rs).
+//! There is no build without the VT: a target this script cannot build for
+//! (Windows other than x86-64 MSVC) fails here unless
+//! `QUARK_GHOSTTY_VT_LIB_DIR` supplies the archive. On Windows, Zig finds
+//! the MSVC headers and Windows SDK through the Visual Studio installation.
 
 #[path = "build/ghostty_deps.rs"]
 mod ghostty_deps;
@@ -57,7 +69,8 @@ const GHOSTTY_HASH: &str = "ghostty-1.3.2-dev-5UdBC4gaYwVruUDKYxdTyGQF6L_6LjdKdJ
 /// What to tell a user whose build failed.
 const HELP: &str = "To build without network access, set QUARK_GHOSTTY_VT_SOURCE_DIR to a \
 directory of pre-fetched packages, or QUARK_GHOSTTY_VT_LIB_DIR to a directory holding a \
-prebuilt libghostty-vt.a (see crates/quark-terminal/build.rs)";
+prebuilt archive (see crates/quark-terminal/build.rs)";
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build/ghostty_deps.rs");
@@ -70,36 +83,43 @@ fn main() {
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
-    println!("cargo:rustc-check-cfg=cfg(ghostty_vt)");
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if os == "windows" {
-        return;
-    }
+    let windows = os == "windows";
+    let (archive, link_name) = if windows {
+        ("ghostty-vt-static.lib", "ghostty-vt-static")
+    } else {
+        ("libghostty-vt.a", "ghostty-vt")
+    };
 
     let lib_dir = match env::var_os("QUARK_GHOSTTY_VT_LIB_DIR") {
         Some(dir) => PathBuf::from(dir),
-        None if cfg!(feature = "zig-build") => build_with_zig(&os),
+        None if cfg!(feature = "zig-build") => build_with_zig(&os, archive),
         None => panic!(
             "quark-terminal: the zig-build feature is off; set QUARK_GHOSTTY_VT_LIB_DIR \
-             to a directory holding libghostty-vt.a"
+             to a directory holding {archive}"
         ),
     };
     assert!(
-        lib_dir.join("libghostty-vt.a").is_file(),
-        "quark-terminal: no libghostty-vt.a in {}",
+        lib_dir.join(archive).is_file(),
+        "quark-terminal: no {archive} in {}",
         lib_dir.display()
     );
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     // `static=` so the shared library installed next to it is never picked.
-    println!("cargo:rustc-link-lib=static=ghostty-vt");
-    println!("cargo:rustc-cfg=ghostty_vt");
+    println!("cargo:rustc-link-lib=static={link_name}");
+    if windows {
+        for lib in ["ntdll", "kernel32"] {
+            println!("cargo:rustc-link-lib=dylib={lib}");
+        }
+    }
 }
 
 /// Builds (or reuses) the archive and returns the directory holding it.
-fn build_with_zig(os: &str) -> PathBuf {
+fn build_with_zig(os: &str, archive: &str) -> PathBuf {
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".to_owned());
     let optimize = env::var("QUARK_GHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
     let target = zig_target(os);
+    let zig_version = zig_version(&zig);
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     // OUT_DIR is <target>/<profile>/build/<pkg>-<hash>/out.
     let cache_root = out
@@ -108,9 +128,22 @@ fn build_with_zig(os: &str) -> PathBuf {
         .map_or_else(|| out.clone(), Path::to_path_buf)
         .join("ghostty-vt");
     let short = &GHOSTTY_COMMIT[..12];
-    let prefix = cache_root.join(format!("{short}-{target}-{optimize}"));
+    let mut key = format!("{short}-{target}-{optimize}-zig{zig_version}");
+    if target.ends_with("-msvc") {
+        // Rust picks the C runtime per build (`+crt-static`). The archive
+        // does not depend on it today (see the top of this file), but an
+        // archive built for one CRT is never reused for the other.
+        let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        let crt_static = features.split(',').any(|f| f == "crt-static");
+        key.push_str(if crt_static {
+            "-crt-static"
+        } else {
+            "-crt-dll"
+        });
+    }
+    let prefix = cache_root.join(&key);
     let lib_dir = prefix.join("lib");
-    if lib_dir.join("libghostty-vt.a").is_file() {
+    if lib_dir.join(archive).is_file() {
         return lib_dir;
     }
 
@@ -121,6 +154,11 @@ fn build_with_zig(os: &str) -> PathBuf {
     );
     fetcher.dependencies_of(&source, os);
 
+    // Install beside the cache entry, then rename it into place. The
+    // installed pkg-config files name this temporary prefix; nothing here
+    // reads them.
+    let staging = cache_root.join(format!("{key}.partial-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
     let mut build = Command::new(&zig);
     build
         .arg("build")
@@ -129,7 +167,7 @@ fn build_with_zig(os: &str) -> PathBuf {
         .arg("--cache-dir")
         .arg(cache_root.join("zig-cache"))
         .arg("--prefix")
-        .arg(&prefix)
+        .arg(&staging)
         // Packages come only from this directory; Zig never downloads.
         // --system also turns on Ghostty's system library integrations by
         // default, so keep the SIMD libraries bundled.
@@ -147,7 +185,42 @@ fn build_with_zig(os: &str) -> PathBuf {
         "If Zig reports a missing package, the lazy dependency lists in \
          crates/quark-terminal/build/ghostty_deps.rs need it added.",
     );
+    assert!(
+        staging.join("lib").join(archive).is_file(),
+        "quark-terminal: zig build installed no lib/{archive} in {}",
+        staging.display()
+    );
+    // A leftover entry without the archive (from before installs were
+    // atomic) would block the rename.
+    if !lib_dir.join(archive).is_file() {
+        let _ = std::fs::remove_dir_all(&prefix);
+    }
+    if let Err(e) = std::fs::rename(&staging, &prefix) {
+        // Another build finished the same entry first; use theirs.
+        assert!(
+            lib_dir.join(archive).is_file(),
+            "quark-terminal: rename {} to {}: {e}",
+            staging.display(),
+            prefix.display()
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
     lib_dir
+}
+
+/// `zig version`'s output, for the cache key.
+fn zig_version(zig: &str) -> String {
+    let mut command = Command::new(zig);
+    command.arg("version");
+    let output = command
+        .output()
+        .unwrap_or_else(|e| missing_tool(&command, &e));
+    assert!(
+        output.status.success(),
+        "quark-terminal: {command:?} failed: {}",
+        output.status
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 /// Downloads and verifies Zig packages into one package directory.
@@ -289,6 +362,14 @@ fn zig_target(os: &str) -> String {
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("target arch");
     let abi = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     match (os, abi.as_str()) {
+        // Only x86-64 MSVC has been built and linked; ARM64 and the GNU
+        // ABI need their own verification first.
+        ("windows", "msvc") if arch == "x86_64" => "x86_64-windows-msvc".to_owned(),
+        ("windows", _) => panic!(
+            "quark-terminal: libghostty-vt is built only for x86_64-pc-windows-msvc on \
+             Windows, not {arch}-{abi}. Set QUARK_GHOSTTY_VT_LIB_DIR to a directory holding \
+             a ghostty-vt-static.lib built for this target to use it anyway."
+        ),
         ("macos", _) => format!("{arch}-macos"),
         ("linux", "musl") => format!("{arch}-linux-musl"),
         ("linux", _) => format!("{arch}-linux-gnu"),

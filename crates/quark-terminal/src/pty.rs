@@ -248,7 +248,8 @@ impl Inbox {
 
 /// A running child on a PTY. Dropping it kills the child.
 pub struct Pty {
-    master: Box<dyn MasterPty + Send>,
+    /// `None` once the child exited on Windows (see [`Pty::spawn`]).
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     geometry: PtyGeometry,
@@ -288,14 +289,29 @@ impl Pty {
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
         let inbox = Arc::new(Inbox::new(on_ready));
         let shared = Arc::clone(&inbox);
+        let master = Arc::new(Mutex::new(Some(pair.master)));
+        #[cfg(windows)]
+        let console = Arc::clone(&master);
+        let waiter = std::thread::Builder::new()
+            .name("quark-terminal-wait".into())
+            .spawn(move || {
+                let code = exit_code(child.as_mut());
+                // ConPTY keeps its output pipe open after the child exits,
+                // until the pseudoconsole closes, so the reader would never
+                // see end of file. Closing it flushes what the console has
+                // not written yet, then ends the pipe.
+                #[cfg(windows)]
+                drop(console.lock().unwrap_or_else(|e| e.into_inner()).take());
+                code
+            })?;
         std::thread::Builder::new()
             .name("quark-terminal-pty".into())
             .spawn(move || {
                 shared.pump(&mut reader);
-                shared.finish(exit_code(child.as_mut()));
+                shared.finish(waiter.join().ok().flatten());
             })?;
         Ok(Self {
-            master: pair.master,
+            master,
             writer,
             killer,
             geometry,
@@ -309,7 +325,6 @@ impl Pty {
         self.inbox.drain(f);
     }
 
-    #[cfg_attr(not(ghostty_vt), allow(dead_code))]
     pub(crate) fn inbox(&self) -> Arc<Inbox> {
         Arc::clone(&self.inbox)
     }
@@ -329,9 +344,10 @@ impl Pty {
             return Ok(());
         }
         self.geometry = geometry;
-        self.master
-            .resize(geometry.size())
-            .map_err(io::Error::other)
+        match &*self.master.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(master) => master.resize(geometry.size()).map_err(io::Error::other),
+            None => Ok(()),
+        }
     }
 
     pub fn geometry(&self) -> PtyGeometry {
@@ -453,6 +469,60 @@ mod tests {
         });
         assert_eq!(seen, len);
         assert_eq!((reader, drained), (0, 0));
+    }
+
+    /// A real program on the platform's PTY (ConPTY on Windows) sees a
+    /// resize made while it runs, its output arrives, and its exit follows.
+    #[test]
+    fn a_program_sees_the_resize_and_its_exit_follows_its_output() {
+        // Each waits for a line, then prints the size its terminal has.
+        let command = if cfg!(windows) {
+            PtyCommand::new("cmd")
+                .arg("/d")
+                .arg("/c")
+                .arg("pause >nul & mode con")
+        } else {
+            PtyCommand::new("sh").arg("-c").arg("read x; stty size")
+        };
+        let size = |cols, rows| PtyGeometry {
+            cols,
+            rows,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let ui = thread::current();
+        let mut pty = Pty::spawn(&command, size(80, 24), move || ui.unpark()).unwrap();
+        pty.resize(size(100, 30)).unwrap();
+        pty.write(b"\r").unwrap();
+
+        let mut term = crate::TerminalState::headless(100, 30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut exit = None;
+        while exit.is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no exit before the deadline; screen:\n{}",
+                term.refresh().text()
+            );
+            thread::park_timeout(Duration::from_millis(200));
+            pty.read(|event| match event {
+                PtyEvent::Output(bytes) => term.feed(bytes),
+                PtyEvent::Exited(code) => exit = Some(code),
+            });
+        }
+        let words = term
+            .refresh()
+            .text()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let expected = if cfg!(windows) {
+            "Lines: 30 Columns: 100"
+        } else {
+            "30 100"
+        };
+        assert!(words.contains(expected), "{words}");
+        assert_eq!(exit, Some(Some(0)));
     }
 
     /// A reader waiting for a buffer the UI never returns stops when the

@@ -125,10 +125,10 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup component add clippy
 
-      # quark-terminal builds libghostty-vt with Zig on macOS; on Windows it
-      # builds without the terminal and needs no Zig.
+      # quark-terminal builds libghostty-vt with Zig: for x86_64 MSVC on
+      # Windows, where Zig finds the MSVC headers and Windows SDK through
+      # the runner's Visual Studio.
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        if: runner.os != 'Windows'
         with:
           version: 0.16.0
 
