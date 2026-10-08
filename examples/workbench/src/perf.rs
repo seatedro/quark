@@ -1,10 +1,31 @@
 //! Timing marks for the launch and history budgets (design section 5).
 //!
-//! The app records runner-relative milliseconds for its first main-window
-//! frame and for the moment queued stress history finished loading. With
+//! The app records milliseconds since process start for its first
+//! main-window frame and for the moment queued stress history finished
+//! loading. With
 //! `QUARK_WORKBENCH_MARKS=1` (or `--perf`) each mark is printed once to
 //! stderr as a JSON line, `{"mark":"first-frame","ms":412}`, which
 //! `e2e/specs/workbench/performance_smoke.py` reads.
+
+use std::sync::OnceLock;
+use std::time::Instant;
+
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+/// Note the process start; `main` calls this first, so launch marks count
+/// fixture loading and runner setup, not only time since the runner
+/// started.
+pub fn mark_process_start() {
+    PROCESS_START.get_or_init(Instant::now);
+}
+
+/// Milliseconds since [`mark_process_start`], or `fallback` (runner time)
+/// when it was not called, as in tests.
+fn since_start(fallback: u64) -> u64 {
+    PROCESS_START
+        .get()
+        .map_or(fallback, |t| t.elapsed().as_millis() as u64)
+}
 
 #[derive(Debug, Default)]
 pub struct Marks {
@@ -31,12 +52,21 @@ impl Marks {
         }
     }
 
-    pub fn first_frame(&mut self, ms: u64) {
-        Self::emit(self.print, &mut self.first_frame_ms, "first-frame", ms);
+    /// The main window's first frame was built (`runner_ms` is used only
+    /// without a process start).
+    pub fn first_frame(&mut self, runner_ms: u64) {
+        if self.first_frame_ms.is_none() {
+            let ms = since_start(runner_ms);
+            Self::emit(self.print, &mut self.first_frame_ms, "first-frame", ms);
+        }
     }
 
-    pub fn history_ready(&mut self, ms: u64) {
-        Self::emit(self.print, &mut self.history_ready_ms, "history-ready", ms);
+    /// The last queued history batch was adopted.
+    pub fn history_ready(&mut self, runner_ms: u64) {
+        if self.history_ready_ms.is_none() {
+            let ms = since_start(runner_ms);
+            Self::emit(self.print, &mut self.history_ready_ms, "history-ready", ms);
+        }
     }
 }
 
