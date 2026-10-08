@@ -490,7 +490,12 @@ impl<F: FnOnce() -> AnyElement + 'static> Cached<F> {
         };
         let mut child = self.build();
         let content = child.request_layout(&mut engine, cx);
-        engine.layout_boundary(content, bounds.width, bounds.height);
+        engine.layout_boundary(
+            content,
+            bounds.width,
+            bounds.height,
+            &mut cx.measure_context(),
+        );
         Live {
             child,
             layout: LiveLayout::Own(engine),

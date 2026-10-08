@@ -2,7 +2,7 @@ use super::*;
 use taffy::{AvailableSpace, TraversePartialTree};
 
 // ---------------------------------------------------------------------------
-// MeasureFunc — stored per-node for intrinsic sizing (text)
+// MeasureFunc — stored per-node for intrinsic sizing
 // ---------------------------------------------------------------------------
 
 pub(super) type MeasureFn = Box<
@@ -12,14 +12,117 @@ pub(super) type MeasureFn = Box<
 >;
 
 pub(super) enum NodeMeasure {
-    /// Leaf with an intrinsic measure function (e.g. text).
+    /// Leaf with an intrinsic measure function.
     Measure(MeasureFn),
+    /// Text that wraps to the width layout gives it.
+    Text(TextMeasure),
     /// A cache boundary whose content is laid out in `subtrees[index]`.
     Subtree(usize),
     /// A cache boundary replayed from the cache: it answers the measure
     /// queries recorded with it, `memo[range]`, and flags `slot` stale on
     /// any other query.
     Replay { memo: Range<usize>, slot: u32 },
+}
+
+/// What measured text borrows while layout computes: the window's text
+/// system and layout cache, so wrapped sizes are shaped (and cached) by the
+/// same system paint uses.
+pub struct MeasureContext<'a> {
+    pub text: &'a mut TextSystem,
+    pub layouts: &'a mut LayoutCache,
+}
+
+impl ElementContext<'_> {
+    /// The context's text state, for computing a layout.
+    pub fn measure_context(&mut self) -> MeasureContext<'_> {
+        MeasureContext {
+            text: self.text,
+            layouts: self.layouts,
+        }
+    }
+}
+
+impl MeasureContext<'_> {
+    fn layout(&mut self, query: &TextQuery) -> Option<Arc<TextLayout>> {
+        self.layouts.layout_query(self.text, query).ok()
+    }
+}
+
+/// A text leaf that wraps automatically. Its node keeps the descriptor
+/// across frames while the unwrapped layout is the same one, so an
+/// unchanged frame neither dirties nor measures it.
+pub(super) struct TextMeasure {
+    /// The text shaped without wrapping, at the frame's scale: its inputs
+    /// are what a wrapped probe shapes, its width the max-content width.
+    unwrapped: Arc<TextLayout>,
+    /// Height of one line; the element is never shorter.
+    line_height: f32,
+    /// Min-content width, once asked for.
+    min_content: Option<f32>,
+}
+
+impl TextMeasure {
+    pub(super) fn new(unwrapped: Arc<TextLayout>, line_height: f32) -> Self {
+        Self {
+            unwrapped,
+            line_height,
+            min_content: None,
+        }
+    }
+
+    fn max_content(&self) -> f32 {
+        self.unwrapped.size().0.ceil()
+    }
+
+    fn min_content(&mut self) -> f32 {
+        let max = self.max_content();
+        *self
+            .min_content
+            .get_or_insert_with(|| self.unwrapped.min_content_width().ceil().min(max))
+    }
+
+    /// A known width as given, otherwise the width offered up to the
+    /// max-content width; the height of the text wrapped at that width.
+    ///
+    /// An offered width is not raised to the min-content width: a leaf's
+    /// final query offers its resolved width as available space without
+    /// marking it known, and the height must be the one paint wraps to at
+    /// that width. Flex items still stop shrinking at the min-content width
+    /// through taffy's automatic minimum size.
+    fn measure(
+        &mut self,
+        known: taffy::Size<Option<f32>>,
+        available: taffy::Size<AvailableSpace>,
+        cx: &mut MeasureContext,
+    ) -> taffy::Size<f32> {
+        let width = known.width.unwrap_or_else(|| match available.width {
+            AvailableSpace::MinContent => self.min_content(),
+            AvailableSpace::MaxContent => self.max_content(),
+            AvailableSpace::Definite(offered) => offered.min(self.max_content()),
+        });
+        let height = known.height.unwrap_or_else(|| {
+            let height = match auto_wrap_width(width, self.max_content()) {
+                None => self.unwrapped.size().1,
+                Some(wrap) => cx
+                    .layout(&self.unwrapped.query().wrap_width(Some(wrap)))
+                    .map_or(self.unwrapped.size().1, |layout| layout.size().1),
+            };
+            height.max(self.line_height).ceil()
+        });
+        taffy::Size { width, height }
+    }
+}
+
+/// The wrap width automatically wrapped text of max-content width
+/// `max_content` is shaped at in a box `width` wide: `None` when it fits
+/// unwrapped. Measurement and paint both use it, so the painted lines are
+/// the measured ones.
+///
+/// The width is floored: taffy rounds a box to whole pixels after
+/// measuring it, and the rounded width is never below the floor of the
+/// measured one, so paint never wraps narrower than measurement did.
+pub(super) fn auto_wrap_width(width: f32, max_content: f32) -> Option<f32> {
+    (width < max_content).then(|| width.floor().max(1.0))
 }
 
 /// One measure query a cache boundary answered: what the parent offered
@@ -71,6 +174,7 @@ impl Subtree {
         &mut self,
         known: taffy::Size<Option<f32>>,
         available: taffy::Size<AvailableSpace>,
+        cx: &mut MeasureContext,
     ) -> taffy::Size<f32> {
         let Some(root) = self.root else {
             return taffy::Size::ZERO;
@@ -84,7 +188,7 @@ impl Subtree {
                     .height
                     .map_or(available.height, AvailableSpace::Definite),
             };
-            self.engine.compute(root, available);
+            self.engine.compute(root, available, cx);
             self.laid_out_at = Some(known);
         }
         let size = self.engine.tree.unrounded_layout(root).size;
@@ -98,11 +202,12 @@ impl Subtree {
         &mut self,
         known: taffy::Size<Option<f32>>,
         available: taffy::Size<AvailableSpace>,
+        cx: &mut MeasureContext,
     ) -> taffy::Size<f32> {
         if let Some(hit) = find_memo(&self.memo, known, available) {
             return hit;
         }
-        let size = self.layout(known, available);
+        let size = self.layout(known, available, cx);
         // Both dimensions known is the final placement, answered without a
         // memo on replay; only sizing queries need recording.
         if known.width.is_none() || known.height.is_none() {
@@ -243,6 +348,11 @@ impl LayoutEngine {
                     slot: old_slot,
                 }),
             ) if *old_slot == slot => *old = memo,
+            // The same shaped text measures the same; keeping the node
+            // context keeps taffy's cached sizes for it.
+            (Context::Measure(NodeMeasure::Text(text)), Some(NodeMeasure::Text(old)))
+                if Arc::ptr_eq(&text.unwrapped, &old.unwrapped)
+                    && text.line_height == old.line_height => {}
             (context, _) => {
                 tree.set_node_context(node, context.into_measure())
                     .expect("valid node");
@@ -283,6 +393,17 @@ impl LayoutEngine {
     ) -> LayoutId {
         let measure = NodeMeasure::Measure(Box::new(measure));
         self.node(&style, Children::Slice(&[]), Context::Measure(measure))
+    }
+
+    /// Create a leaf for text that wraps to the width layout gives it; see
+    /// [`TextMeasure`].
+    pub(super) fn request_text_layout(
+        &mut self,
+        style: &taffy::Style,
+        text: TextMeasure,
+    ) -> LayoutId {
+        let measure = NodeMeasure::Text(text);
+        self.node(style, Children::Slice(&[]), Context::Measure(measure))
     }
 
     /// Claim a cleared subtree for a cache boundary's content. Lay the
@@ -342,9 +463,15 @@ impl LayoutEngine {
 
     /// Lay out a detached boundary root (a rebuilt cached subtree) at its
     /// final size.
-    pub(super) fn layout_boundary(&mut self, content: LayoutId, width: f32, height: f32) {
+    pub(super) fn layout_boundary(
+        &mut self,
+        content: LayoutId,
+        width: f32,
+        height: f32,
+        cx: &mut MeasureContext,
+    ) {
         let root = self.request_layout(boundary_root_style(), &[content]);
-        self.compute_layout(root, width, height);
+        self.compute_layout(root, width, height, cx);
     }
 
     /// Move the cache slots whose replayed measures went stale into `out`,
@@ -356,19 +483,32 @@ impl LayoutEngine {
         }
     }
 
-    /// Compute layout for the entire tree rooted at `root`.
-    pub fn compute_layout(&mut self, root: LayoutId, width: f32, height: f32) {
+    /// Compute layout for the entire tree rooted at `root`, shaping wrapped
+    /// text with `cx`.
+    pub fn compute_layout(
+        &mut self,
+        root: LayoutId,
+        width: f32,
+        height: f32,
+        cx: &mut MeasureContext,
+    ) {
         self.compute(
             root,
             taffy::Size {
                 width: AvailableSpace::Definite(width),
                 height: AvailableSpace::Definite(height),
             },
+            cx,
         );
-        self.finish(root);
+        self.finish(root, cx);
     }
 
-    fn compute(&mut self, root: LayoutId, available: taffy::Size<AvailableSpace>) {
+    fn compute(
+        &mut self,
+        root: LayoutId,
+        available: taffy::Size<AvailableSpace>,
+        cx: &mut MeasureContext,
+    ) {
         let Self {
             tree,
             subtrees,
@@ -381,7 +521,8 @@ impl LayoutEngine {
             available,
             |known, available, _node_id, context, _style| match context {
                 Some(NodeMeasure::Measure(f)) => f(known, available),
-                Some(NodeMeasure::Subtree(index)) => subtrees[*index].measure(known, available),
+                Some(NodeMeasure::Text(text)) => text.measure(known, available, cx),
+                Some(NodeMeasure::Subtree(index)) => subtrees[*index].measure(known, available, cx),
                 Some(NodeMeasure::Replay { memo, slot }) => {
                     find_memo(&replay_memo[memo.clone()], known, available).unwrap_or_else(|| {
                         stale.push(*slot);
@@ -396,7 +537,7 @@ impl LayoutEngine {
 
     /// After the pass: lay every subtree out at its host's final size, and
     /// record absolute origins so [`Self::layout_bounds`] is a lookup.
-    fn finish(&mut self, root: LayoutId) {
+    fn finish(&mut self, root: LayoutId, cx: &mut MeasureContext) {
         // Nodes past the cursor belong to a larger earlier frame.
         for node in self.nodes.drain(self.cursor..) {
             self.tree.remove(node).expect("valid node");
@@ -415,8 +556,9 @@ impl LayoutEngine {
                     width: AvailableSpace::Definite(size.width),
                     height: AvailableSpace::Definite(size.height),
                 },
+                cx,
             );
-            sub.engine.finish(sub_root);
+            sub.engine.finish(sub_root, cx);
         }
 
         self.origins.fill((f32::NAN, f32::NAN));

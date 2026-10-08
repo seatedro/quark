@@ -99,7 +99,7 @@ fn nested_divs_resolve_absolute_positions() {
         .child(div().w(inner_w).h(inner_w));
 
     let (root_id, _) = outer.request_layout(&mut engine, &mut cx);
-    engine.compute_layout(root_id, 200.0, 100.0);
+    engine.compute_layout(root_id, 200.0, 100.0, &mut cx.measure_context());
 
     // The inner div should be offset by the padding.
     // Get child layout id — it's the first child of root.
@@ -177,7 +177,7 @@ fn text_element_has_intrinsic_width() {
     let mut engine = LayoutEngine::new();
     let mut txt = text("ABCDE").size(10.0);
     let (id, _) = txt.request_layout(&mut engine, &mut cx);
-    engine.compute_layout(id, 999.0, 999.0);
+    engine.compute_layout(id, 999.0, 999.0, &mut cx.measure_context());
 
     let bounds = engine.layout_bounds(id);
     // 5 chars * 10.0 * 0.55 = 27.5
