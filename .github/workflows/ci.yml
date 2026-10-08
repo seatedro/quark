@@ -269,9 +269,9 @@ jobs:
           - name: quark-app
             args: -p quark-app
           - name: quark-components
-            args: -p quark-components --harness list_nav:: --harness pane_tree::
+            args: "-p quark-components --harness list_nav:: --harness pane_tree::"
           - name: quark-components split
-            args: -p quark-components --harness split::
+            args: "-p quark-components --harness split::"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
