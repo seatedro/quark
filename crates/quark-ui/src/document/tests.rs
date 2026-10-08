@@ -2620,3 +2620,27 @@ fn code_toolbar_buttons_offer_assistive_tech_a_click() {
         (true, true)
     );
 }
+
+// Catches an image hinted before any row showed it never loading: the hint
+// made the store think the load had started.
+#[test]
+fn an_image_hinted_before_its_row_arrives_still_loads() {
+    let mut md = MarkdownDocument::new(DocumentStyle::for_font_size(14.0));
+    md.set_image_loader(sized_loader());
+    md.hint_image_size("200x100.png", 200, 100);
+    md.push(MarkdownEntry {
+        row: RowKey(0),
+        chrome: RowChrome::default(),
+        markdown: "![chart](200x100.png)".to_owned(),
+    })
+    .unwrap();
+    let (mut text, mut layouts) = (
+        TextSystem::vendored_only(&Default::default()),
+        LayoutCache::default(),
+    );
+
+    md.finish_images();
+    prepare_markdown(&mut md, &mut text, &mut layouts);
+
+    assert_eq!(image_block(&md), (100.0, true));
+}

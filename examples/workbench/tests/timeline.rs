@@ -267,4 +267,40 @@ fn timeline_jump_to_latest_appears_without_moving_the_view() {
     );
 }
 
+// Catches the transcript image showing its alt text, or a placeholder that
+// changes height when the pixels land: the bundled preview must load and
+// keep the 960x600 aspect ratio it reserved.
+#[test]
+fn timeline_image_loads_at_its_reserved_aspect_ratio() {
+    let mut ui = harness(ScenarioKind::Review);
+    let image = scroll_up_to(&mut ui, By::role(Role::Image));
+    let reserved = image.bounds;
 
+    ui.app_mut().timeline.finish_measures();
+    ui.frame();
+
+    let loaded = ui.find(By::role(Role::Image)).bounds;
+    let wb: &Workbench = ui.app();
+    let ready = wb
+        .timeline
+        .thread_view(ThreadId(1))
+        .expect("shown")
+        .document()
+        .rows()
+        .values()
+        .flat_map(|row| &row.blocks)
+        .any(|b| {
+            matches!(
+                &b.content,
+                quark_app::quark_ui::document::BlockContent::Image {
+                    state: quark_app::quark_ui::document::ImageState::Ready(_),
+                    ..
+                }
+            )
+        });
+    let ratio = (loaded.height / loaded.width * 1000.0).round();
+    assert_eq!(
+        (ready, loaded.height, ratio),
+        (true, reserved.height, 625.0)
+    );
+}
