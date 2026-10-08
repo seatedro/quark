@@ -9,10 +9,6 @@ stable identity. Subtrees inside cache boundaries replay their layout and
 paint, and tests hold a repeated frame of a cached list to zero
 allocations.
 
-Quark targets apps with long, live documents: chat transcripts, diffs,
-trees and tables, editors. The workspace is at version 0.1.0 and is not
-published to crates.io; see [docs/publish-readiness.md](docs/publish-readiness.md).
-
 ## Crates
 
 | Crate | Contents | Quark crates it uses |
@@ -32,11 +28,12 @@ published to crates.io; see [docs/publish-readiness.md](docs/publish-readiness.m
 
 ## A minimal app
 
-An app implements `UiApp`: `view` builds the element tree, and `update`
-handles the actions its elements emit.
+An app implements `UiApp`: `view` builds the element tree, written with
+the `view!` macro ([docs/guide/writing-views.md](docs/guide/writing-views.md)),
+and `update` handles the actions its elements emit.
 
 ```rust
-use quark_app::quark_ui::accessibility::AccessibilityRole;
+use quark::view;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::Action;
@@ -64,29 +61,17 @@ impl UiApp for Counter {
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
         let (width, height) = cx.frame.size();
-        div()
-            .w(width)
-            .h(height)
-            .items_center()
-            .justify_center()
-            .gap(12.0)
-            .bg(colors.background)
-            .child(text(format!("Clicked {} times", self.count)).color(colors.text))
-            .child(
-                div()
-                    .accessibility_role(AccessibilityRole::Button)
-                    .accessibility_label("Increment")
-                    .test_id("counter.increment")
-                    .on_click(Msg::Increment)
-                    .px(16.0)
-                    .h(36.0)
-                    .items_center()
-                    .rounded(8.0)
-                    .bg(colors.accent)
-                    .hover_bg(colors.accent_strong)
-                    .child(text("Increment").color(colors.text_strong)),
-            )
-            .into_any()
+        view! {
+            <div w={width} h={height} class="items-center justify-center gap-3 bg-[colors.background]">
+                <text color={colors.text}>"Clicked {self.count} times"</text>
+                <div role="button" aria-label="Increment" test_id="counter.increment"
+                     on:click={Msg::Increment}
+                     class="px-4 h-9 items-center rounded-[8] bg-[colors.accent]
+                            hover:bg-[colors.accent_strong]">
+                    <text color={colors.text_strong}>"Increment"</text>
+                </div>
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut UiContext) {
@@ -164,39 +149,14 @@ next to its definition in the crate's `Cargo.toml`.
 
 ## Building
 
-- **Toolchain.** [rust-toolchain.toml](rust-toolchain.toml) pins
-  `nightly-2026-06-09`, and rustup installs it on first use. The pin exists
-  for Miri, the fuzzing sanitizers, and `-Zcrate-attr` in CI; the crates
-  declare `rust-version = "1.92"`, which CI does not test.
-- **Linux packages.** CI installs `libxkbcommon-dev libwayland-dev
-  libx11-dev libxcursor-dev libxi-dev libxrandr-dev libdbus-1-dev
-  libgl1-mesa-dev`, plus `mesa-vulkan-drivers libegl1 libgl1-mesa-dri` to
-  run on lavapipe. Notifications, the tray, the badge, the desktop theme,
-  and file dialogs talk to D-Bus through zbus, so no GTK is needed.
-- **GPU.** A Vulkan driver, or OpenGL ES through EGL, on Linux; Metal on
-  macOS; DX12 on Windows. `WGPU_BACKEND` overrides the choice.
-- **Zig and curl, for `quark-terminal` only.** Its build script builds
-  libghostty-vt with Zig 0.16 (`ZIG` names the binary) from Ghostty
-  sources it downloads with `curl`, so the system CA bundle,
-  `SSL_CERT_FILE`, and proxy variables apply. Offline, set
-  `QUARK_GHOSTTY_VT_SOURCE_DIR` to a directory of the downloaded tarballs
-  (a previous build leaves them in `target/<profile>/ghostty-vt/downloads`),
-  or `QUARK_GHOSTTY_VT_LIB_DIR` to a directory holding a prebuilt
-  `libghostty-vt.a`. [build.rs](crates/quark-terminal/build.rs) has the
-  details. Nothing else in the workspace needs Zig: the terminal demo is
-  `cargo run -p quark-terminal --example terminal_demo`.
-- **Nix.** [flake.nix](flake.nix) has a dev shell with the pinned Rust
-  toolchain, Zig, curl, and pkg-config, and puts the libraries winit, wgpu,
-  and AccessKit load at run time (Wayland, xkbcommon, the Vulkan loader,
-  libGL, X11, D-Bus) on `LD_LIBRARY_PATH`. GPU drivers still come from the
-  system (`hardware.graphics.enable` on NixOS). Enter the shell with
-  `nix develop`, or run `direnv allow` once to load it on `cd` through
-  [.envrc](.envrc).
-
 ```bash
-cargo build --workspace
 cargo run -p quark-app --example hello_ui
 ```
+
+- Rust: rustup installs the pinned nightly from [rust-toolchain.toml](rust-toolchain.toml).
+- Linux: `libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev` and a Vulkan or GL driver. No GTK.
+- Nix: `nix develop`, or `direnv allow` once.
+- `quark-terminal` also needs Zig 0.16 and curl; see its [build.rs](crates/quark-terminal/build.rs) for offline builds.
 
 ## Testing
 

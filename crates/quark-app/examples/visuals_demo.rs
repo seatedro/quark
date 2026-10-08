@@ -6,12 +6,12 @@
 use std::f32::consts::{FRAC_PI_4, TAU};
 
 use accesskit::Role;
-use quark::{FillRule, LineCap, LineJoin, Path, StrokeStyle};
+use quark::{FillRule, LineCap, LineJoin, Path, StrokeStyle, view};
 use quark_app::quark_ui::Action;
 use quark_app::quark_ui::animation::{Curve, Motion, Prop};
 use quark_app::quark_ui::element::{
-    AnimatedImage, AnyElement, ImageFrames, IntoAnyElement, animated_image, div, path_canvas,
-    sparkline_path, text,
+    AnimatedImage, AnyElement, CanvasPainter, ImageFrames, IntoAnyElement, animated_image, div,
+    path_canvas, sparkline_path, text,
 };
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Color;
@@ -79,14 +79,6 @@ fn spinner_frames() -> ImageFrames {
     ImageFrames::from_rgba(SIDE, SIDE, frames, 0x5eed)
 }
 
-fn button(id: &str, label: &str, msg: Msg) -> quark_app::quark_ui::element::Div {
-    div()
-        .accessibility_id(id)
-        .accessibility_role(Role::Button)
-        .accessibility_label(label)
-        .on_click(msg)
-}
-
 /// A five-pointed star; even-odd leaves its pentagon center empty.
 fn star(cx: f32, cy: f32, r: f32) -> Path {
     let mut builder = Path::builder();
@@ -110,72 +102,9 @@ impl UiApp for Visuals {
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
         let colors = cx.theme.colors;
-        let card = button("visuals.fade", "Fade", Msg::ToggleFade)
-            .key("visuals.fade")
-            .w(180.0)
-            .h(120.0)
-            .p(16.0)
-            .gap(8.0)
-            .flex_col()
-            .rounded(12.0)
-            .bg(colors.surface)
-            .border(colors.border)
-            .opacity(if self.faded { 0.35 } else { 1.0 })
-            .transition(Prop::Opacity, Motion::tween(220, Curve::EaseOutCubic))
-            .child(text("Group opacity").semibold())
-            .child(
-                div()
-                    .test_id("visuals.swatch")
-                    .w(60.0)
-                    .h(24.0)
-                    .rounded(6.0)
-                    .bg(colors.accent),
-            )
-            .child(text("click to fade").color(colors.text_muted));
-
-        let tile = button("visuals.turn", "Turn", Msg::Turn)
-            .key("visuals.turn")
-            .w(90.0)
-            .h(90.0)
-            .items_center()
-            .justify_center()
-            .rounded(10.0)
-            .bg(colors.accent)
-            .rotate(self.turns as f32 * FRAC_PI_4)
-            .transition(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))
-            .child(text("Turn").color(colors.text_strong).semibold());
-
-        let stripes = (0..6).map(|i| {
-            let shade = if i % 2 == 0 {
-                colors.accent
-            } else {
-                colors.surface
-            };
-            div().w(30.0).h_full().bg(shade).into_any()
-        });
-        let frosted = div()
-            .relative()
-            .w(180.0)
-            .h(120.0)
-            .flex_row()
-            .children(stripes)
-            .child(
-                div()
-                    .absolute()
-                    .top(20.0)
-                    .left(20.0)
-                    .w(140.0)
-                    .h(80.0)
-                    .rounded_corners([28.0, 4.0, 28.0, 4.0])
-                    .blur(10.0)
-                    .items_center()
-                    .justify_center()
-                    .child(text("Frosted").color(colors.text_strong)),
-            );
-
         let series = self.series.clone();
         let (accent, strong) = (colors.accent, colors.text_strong);
-        let chart = path_canvas(move |painter| {
+        let chart = move |painter: &mut CanvasPainter<'_>| {
             let (w, h) = painter.size();
             let line = sparkline_path(&series, w, h - 4.0);
             let mut area = Path::builder();
@@ -197,12 +126,8 @@ impl UiApp for Visuals {
                     .join(LineJoin::Round)
                     .cap(LineCap::Round),
             );
-        })
-        .w(260.0)
-        .h(110.0)
-        .clip();
-
-        let shapes = path_canvas(move |painter| {
+        };
+        let shapes = move |painter: &mut CanvasPainter<'_>| {
             painter.fill_with_rule(star(55.0, 55.0, 48.0), accent, FillRule::EvenOdd);
             let mut ring = Path::builder();
             ring.arc(150.0, 55.0, 36.0, 0.0, TAU * 0.8);
@@ -211,31 +136,47 @@ impl UiApp for Visuals {
                 strong,
                 StrokeStyle::new(8.0).cap(LineCap::Round),
             );
-        })
-        .w(200.0)
-        .h(110.0);
-
-        let row = |children: Vec<AnyElement>| {
-            div().flex_row().gap(24.0).items_center().children(children)
         };
-        div()
-            .w(width)
-            .h(height)
-            .p(24.0)
-            .gap(24.0)
-            .flex_col()
-            .bg(colors.background)
-            .child(row(vec![
-                card.into_any(),
-                tile.into_any(),
-                frosted.into_any(),
-            ]))
-            .child(row(vec![
-                chart.into_any(),
-                shapes.into_any(),
-                animated_image(&self.spinner).size(48.0, 48.0).into_any(),
-            ]))
-            .into_any()
+
+        view! {
+            <div w={width} h={height} class="p-6 gap-6 flex-col bg-[colors.background]">
+                <div class="flex-row gap-6 items-center">
+                    <div accessibility_id="visuals.fade" accessibility_role={Role::Button}
+                         aria-label="Fade" on:click={Msg::ToggleFade} key="visuals.fade"
+                         class="w-[180] h-[120] p-4 gap-2 flex-col rounded-[12]
+                                bg-[colors.surface] border-[colors.border]"
+                         opacity={if self.faded { 0.35 } else { 1.0 }}
+                         transition={(Prop::Opacity, Motion::tween(220, Curve::EaseOutCubic))}>
+                        <text class="font-semibold">"Group opacity"</text>
+                        <div test_id="visuals.swatch" class="w-[60] h-6 rounded-[6] bg-[colors.accent]" />
+                        <text color={colors.text_muted}>"click to fade"</text>
+                    </div>
+                    <div accessibility_id="visuals.turn" accessibility_role={Role::Button}
+                         aria-label="Turn" on:click={Msg::Turn} key="visuals.turn"
+                         class="w-[90] h-[90] items-center justify-center rounded-[10] bg-[colors.accent]"
+                         rotate={self.turns as f32 * FRAC_PI_4}
+                         transition={(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))}>
+                        <text color={colors.text_strong} class="font-semibold">"Turn"</text>
+                    </div>
+                    <div class="relative w-[180] h-[120] flex-row">
+                        for i in 0..6 {
+                            <div w={30.0} class="h-full"
+                                 bg={if i % 2 == 0 { colors.accent } else { colors.surface }} />
+                        }
+                        <div class="absolute top-5 left-5 w-[140] h-20"
+                             rounded_corners={[28.0, 4.0, 28.0, 4.0]} blur={10.0}
+                             class="items-center justify-center">
+                            <text color={colors.text_strong}>"Frosted"</text>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex-row gap-6 items-center">
+                    <path_canvas(chart) class="w-[260] h-[110] overflow-clip" />
+                    <path_canvas(shapes) class="w-[200] h-[110]" />
+                    <animated_image(&self.spinner) size={(48.0, 48.0)} />
+                </div>
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut UiContext) {

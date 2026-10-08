@@ -13,18 +13,20 @@
 //! - The menu bar is drawn where the platform has none (Linux), or
 //!   everywhere with `QUARK_DRAWN_MENU=1`; F10 or a lone Alt opens it.
 
+use quark::view;
 use quark_app::platform::drag_out::{self, DragOutError};
 use quark_app::platform::drawn_menu::{DrawnMenuBar, MenuPick};
 use quark_app::platform::menu::{Menu, MenuAction, MenuItem, MenuRole, native_menu_bar};
 use quark_app::quark_ui::design::Ico;
 use quark_app::quark_ui::element::{
-    AnyElement, CursorHint, Div, DragHandler, DragReleaseResult, IntoAnyElement, ScrollHandle, div,
-    sticky_section, svg_icon, text,
+    AnyElement, DragHandler, DragReleaseResult, IntoAnyElement, ScrollHandle, div, sticky_section,
+    svg_icon, text,
 };
 use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::key_context::KeyBindings;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::style::track::{fr, minmax, px, repeat_fill};
+use quark_app::quark_ui::theme::Theme;
 use quark_app::quark_ui::virtual_list::{
     KEY_MOVE_DOWN, KEY_MOVE_UP, Reorder, ReorderMsg, UniformRows,
 };
@@ -137,7 +139,7 @@ impl Demo {
             .position(|task| FocusId::from_key(task) == focus)
     }
 
-    fn task_list(&mut self, now_ms: u64, cx: &mut ViewContext) -> Div {
+    fn task_list(&mut self, now_ms: u64, cx: &mut ViewContext) -> AnyElement {
         let theme = cx.theme;
         let rows = self.task_rows();
         let viewport = 7.0 * TASK_ROW;
@@ -150,130 +152,92 @@ impl Demo {
         }
         let dragged = self.reorder.dragged();
         let shift = self.reorder.dragged_shift().unwrap_or(0.0);
-        let mut list = div()
-            .h(viewport)
-            .flex_col()
-            .track_scroll(&self.task_scroll)
-            .overflow_y_scroll()
-            .key_context("task-list")
-            .children_from(self.tasks.iter().enumerate().map(|(i, task)| {
-                let handle = div()
-                    .w(18.0)
-                    .h(TASK_ROW)
-                    .flex_shrink_0()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .cursor(CursorHint::Grab)
-                    .tooltip("Drag to reorder")
-                    .child(svg_icon(lucide::GRIP_VERTICAL, Ico::SM).color(theme.colors.text_muted))
-                    .on_drag(Reorder::drag_start(i, Msg::Reorder));
-                div()
-                    .key(task.as_str())
-                    .flex_row()
-                    .items_center()
-                    .gap(6.0)
-                    .px(8.0)
-                    .h(TASK_ROW)
-                    .flex_shrink_0()
-                    .bg(theme.colors.surface)
-                    .border_b(theme.colors.border_variant)
-                    .focus_ring(FocusId::from_key(task))
-                    .accessibility_role(accesskit::Role::ListItem)
-                    .accessibility_label(task.as_str())
-                    .on_key(
-                        KEY_MOVE_UP,
-                        Msg::Reorder(ReorderMsg::Step {
-                            index: i,
-                            delta: -1,
-                        }),
-                    )
-                    .on_key(
-                        KEY_MOVE_DOWN,
-                        Msg::Reorder(ReorderMsg::Step { index: i, delta: 1 }),
-                    )
-                    .when(dragged == Some(i), |row| {
-                        row.translate(0.0, shift).z_index(1).opacity(0.9)
-                    })
-                    .child(handle)
-                    .child(text(task.as_str()).text_sm())
-            }));
-        if let Some(y) = self.reorder.drop_indicator(&rows) {
-            list = list.child(
-                div()
-                    .absolute()
-                    .top(y - 1.0)
-                    .left(0.0)
-                    .right(0.0)
-                    .h(2.0)
-                    .bg(theme.colors.text_accent),
-            );
+        view! {
+            <div h={viewport} class="flex-col" track_scroll={&self.task_scroll}
+                 class="overflow-y-scroll" key_context="task-list">
+                for (i, task) in self.tasks.iter().enumerate() {
+                    <div key={task.as_str()}
+                         class="flex-row items-center gap-[6] px-2 h-[TASK_ROW] shrink-0
+                                bg-[theme.colors.surface] border-b-[theme.colors.border_variant]"
+                         focus_ring={FocusId::from_key(task)}
+                         accessibility_role={accesskit::Role::ListItem} aria-label={task.as_str()}
+                         on_key={(KEY_MOVE_UP, Msg::Reorder(ReorderMsg::Step { index: i, delta: -1 }))}
+                         on_key={(KEY_MOVE_DOWN, Msg::Reorder(ReorderMsg::Step { index: i, delta: 1 }))}
+                         @when {dragged == Some(i)} {
+                             translate={(0.0, shift)} z_index={1} opacity={0.9}
+                         }>
+                        <div class="w-[18] h-[TASK_ROW] shrink-0 flex-row items-center justify-center
+                                    cursor-grab"
+                             tooltip="Drag to reorder"
+                             on:drag={Reorder::drag_start(i, Msg::Reorder)}>
+                            <icon svg={lucide::GRIP_VERTICAL} size={Ico::SM}
+                                  color={theme.colors.text_muted} />
+                        </div>
+                        <text class="text-sm">{task.as_str()}</text>
+                    </div>
+                }
+                if let Some(y) = self.reorder.drop_indicator(&rows) {
+                    <div class="absolute left-0 right-0 h-0.5 bg-[theme.colors.text_accent]"
+                         top={y - 1.0} />
+                }
+            </div>
         }
-        list
     }
 
-    fn gallery(&self, cx: &ViewContext) -> Div {
+    fn gallery(&self, cx: &ViewContext) -> AnyElement {
         let theme = cx.theme;
         let gap = if self.dense { 4.0 } else { 12.0 };
-        div()
-            .grid_cols([repeat_fill([px(120.0)])])
-            .gap(gap)
-            .children_from((0..14).map(|i| {
-                let wide = i % 5 == 0;
-                div()
-                    .flex_col()
-                    .gap(4.0)
-                    .p(6.0)
-                    .rounded(6.0)
-                    .bg(theme.colors.elevated_surface)
-                    .when(wide, |card| card.col_span(2))
-                    .child(
-                        div()
-                            .w_full()
-                            .aspect_ratio(if wide { 2.0 } else { 1.0 })
-                            .rounded(4.0)
-                            .bg(theme.colors.border),
-                    )
-                    .child(text(format!("Card {i}")).text_xs())
-            }))
+        view! {
+            <div grid_cols={[repeat_fill([px(120.0)])]} gap={gap}>
+                for i in 0..14 {
+                    <div class="flex-col gap-1 p-[6] rounded-[6] bg-[theme.colors.elevated_surface]"
+                         @when {i % 5 == 0} { col_span={2} }>
+                        <div class="w-full rounded-[4] bg-[theme.colors.border]"
+                             aspect_ratio={if i % 5 == 0 { 2.0 } else { 1.0 }} />
+                        <text class="text-xs">"Card {i}"</text>
+                    </div>
+                }
+            </div>
+        }
     }
 
-    fn files(&self, cx: &ViewContext) -> Div {
+    /// The file list, filling the rest of its column.
+    fn files(&self, cx: &ViewContext) -> AnyElement {
         let theme = cx.theme;
-        div()
-            .h_full()
-            .flex_col()
-            .track_scroll(&self.files_scroll)
-            .overflow_y_scroll()
-            .children_from(FOLDERS.iter().map(|(folder, files)| {
-                let header = div()
-                    .h(28.0)
-                    .px(8.0)
-                    .flex_row()
-                    .items_center()
-                    .bg(theme.colors.title_bar_background)
-                    .border_b(theme.colors.border)
-                    .child(text(*folder).text_sm());
-                let body = div().flex_col().children_from(files.iter().map(|file| {
-                    let row = div()
-                        .h(44.0)
-                        .px(16.0)
-                        .flex_row()
-                        .items_center()
-                        .border_b(theme.colors.border_variant)
-                        .child(text(*file).text_sm());
-                    // Where there is no drag source (the BSDs, see
-                    // `drag_out`), rows are plain.
-                    if drag_out::supported() {
-                        row.cursor(CursorHint::Grab)
-                            .tooltip("Drag onto the desktop or a file manager")
-                            .on_drag(move |_| Box::new(DragOutRow::new(file)))
-                    } else {
-                        row
-                    }
-                }));
-                sticky_section(header, body).flex_shrink_0()
-            }))
+        view! {
+            <div class="h-full flex-col" track_scroll={&self.files_scroll}
+                 class="overflow-y-scroll flex-1">
+                for (folder, files) in FOLDERS {
+                    {Self::folder(folder, files, theme)}
+                }
+            </div>
+        }
+    }
+
+    fn folder(folder: &str, files: &[&'static str], theme: &Theme) -> AnyElement {
+        let header = view! {
+            <div class="h-7 px-2 flex-row items-center bg-[theme.colors.title_bar_background]
+                        border-b-[theme.colors.border]">
+                <text class="text-sm">{folder}</text>
+            </div>
+        };
+        let body = view! {
+            <div class="flex-col">
+                for &file in files {
+                    <div class="h-11 px-4 flex-row items-center border-b-[theme.colors.border_variant]"
+                         // Where there is no drag source (the BSDs, see
+                         // `drag_out`), rows are plain.
+                         @when {drag_out::supported()} {
+                             class="cursor-grab"
+                             tooltip="Drag onto the desktop or a file manager"
+                             on:drag={move |_| Box::new(DragOutRow::new(file))}
+                         }>
+                        <text class="text-sm">{file}</text>
+                    </div>
+                }
+            </div>
+        };
+        view! { <sticky_section(header, body) class="shrink-0" /> }
     }
 
     fn handle_menu(&mut self, pick: MenuPick, cx: &mut UiContext) {
@@ -325,45 +289,35 @@ impl UiApp for Demo {
         let now_ms = cx.frame.elapsed().as_millis() as u64;
         let size = cx.frame.logical_size();
         let theme = cx.theme;
-        let mut root = div().size_full().flex_col().bg(theme.colors.background);
-        if let Some(menu) = &mut self.menu {
-            root = root.child(menu.bar.render(size, theme, |i| Msg::MenuTitle(i).into()));
-        }
-        let column = |title: &str, body: Div| {
-            div()
-                .flex_col()
-                .gap(8.0)
-                .min_h(0.0)
-                .child(
-                    text(title.to_owned())
-                        .text_sm()
-                        .color(theme.colors.text_muted),
-                )
-                .child(body)
+        let menu = self
+            .menu
+            .as_mut()
+            .map(|menu| menu.bar.render(size, theme, |i| Msg::MenuTitle(i).into()));
+        let column = |title: &str, body: AnyElement| {
+            view! {
+                <div class="flex-col gap-2 min-h-0">
+                    <text class="text-sm" color={theme.colors.text_muted}>{title.to_owned()}</text>
+                    {body}
+                </div>
+            }
         };
         let tasks = self.task_list(now_ms, cx);
         let theme = cx.theme;
-        let body = div()
-            .flex_1()
-            .min_h(0.0)
-            .p(12.0)
-            .grid_cols([px(260.0), fr(1.0), minmax(px(220.0), fr(1.0))])
-            .grid_rows([fr(1.0)])
-            .gap(12.0)
-            .child(column("Tasks", tasks))
-            .child(column("Gallery", self.gallery(cx)))
-            .child(column("Files", self.files(cx).flex_1()));
-        root.child(body)
-            .child(
-                div()
-                    .h(24.0)
-                    .px(12.0)
-                    .flex_row()
-                    .items_center()
-                    .border_t(theme.colors.border)
-                    .child(text(self.status.clone()).text_xs()),
-            )
-            .into_any()
+        view! {
+            <div class="size-full flex-col bg-[theme.colors.background]">
+                {?menu}
+                <div class="flex-1 min-h-0 p-3"
+                     grid_cols={[px(260.0), fr(1.0), minmax(px(220.0), fr(1.0))]}
+                     grid_rows={[fr(1.0)]} class="gap-3">
+                    {column("Tasks", tasks)}
+                    {column("Gallery", self.gallery(cx))}
+                    {column("Files", self.files(cx))}
+                </div>
+                <div class="h-6 px-3 flex-row items-center border-t-[theme.colors.border]">
+                    <text class="text-xs">{self.status.clone()}</text>
+                </div>
+            </div>
+        }
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {

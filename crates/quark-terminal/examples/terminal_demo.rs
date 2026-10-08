@@ -39,7 +39,7 @@ struct Demo {
     command: Option<PtyCommand>,
     /// Called on the PTY thread after each event is sent, so tests can
     /// wait for output without polling.
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     on_pty: Option<std::sync::mpsc::Sender<()>>,
 }
 
@@ -49,7 +49,7 @@ impl Demo {
             #[cfg(not(windows))]
             term: TerminalState::new("demo.terminal", TERM_FOCUS),
             command,
-            #[cfg(test)]
+            #[cfg(all(test, not(windows)))]
             on_pty: None,
         }
     }
@@ -235,8 +235,8 @@ impl UiApp for Demo {
     }
 
     fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
-        use quark_app::quark_ui::element::IntoAnyElement;
-        quark_app::quark_ui::element::div().into_any()
+        use quark_app::quark_ui::element::{IntoAnyElement, div};
+        quark::view! { <div /> }
     }
 
     fn update(&mut self, msg: Msg, _cx: &mut UiContext) {

@@ -13,9 +13,9 @@
 
 use std::rc::Rc;
 
-use quark::TabStop;
+use quark::{TabStop, view};
 use quark_ui::design::Sp;
-use quark_ui::element::{AnyElement, CursorHint, Div, IntoAnyElement, svg_icon, text};
+use quark_ui::element::{AnyElement, IntoAnyElement, svg_icon, text};
 use quark_ui::element::{ElementContext, RenderOnce, div};
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -303,113 +303,78 @@ impl RenderOnce for Select {
         let shown = chosen.map_or(self.placeholder.as_str(), |o| o.label.as_str());
         let open = self.open && !self.disabled;
 
-        let mut root = div().relative().flex_col().w(width);
-        if !self.disabled {
-            root = list_keys(root, open, msg);
-            if open || cx.focus == Some(self.focus) {
-                for key in TYPE_AHEAD_KEYS {
-                    let ch = key.chars().next().unwrap_or_default();
-                    root = root.on_key(key, msg(SelectMsg::TypeAhead(ch)));
-                }
-            }
-        }
-
-        let mut trigger = div()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .gap(m.spacing_sm)
-            .px(m.spacing_md)
-            .py(m.spacing_xs + (Sp::XXS * scale).round())
-            .rounded(m.control_radius)
-            .bg(tc.element_background)
-            .border(if open {
-                tc.focus_border
-            } else {
-                tc.border_variant
-            })
-            .accessibility_id(&*self.id)
-            .test_id("select-trigger")
-            .focus_ring(self.focus)
-            .accessibility_role(accesskit::Role::ComboBox)
-            .accessibility_label(self.label.clone())
-            .accessibility_value(shown.to_owned())
-            .accessibility_expanded(open)
-            .accessibility_disabled(self.disabled)
-            .child(
-                div()
-                    .flex_1()
-                    .child(text(shown.to_owned()).text_sm().truncate().color(
-                        if chosen.is_some() && !self.disabled {
-                            tc.text
-                        } else {
-                            tc.text_muted
+        let closed_keys = ["enter", "space", "arrowdown", "arrowup", "alt+arrowdown"];
+        view! {
+            <div class="relative flex-col" w={width}
+                 @when {!self.disabled && !open} {
+                     @for key in closed_keys { on_key={(key, msg(SelectMsg::Open))} }
+                 }
+                 @when {!self.disabled && open} {
+                     on_key={("arrowdown", msg(SelectMsg::Move(1)))}
+                     on_key={("arrowup", msg(SelectMsg::Move(-1)))}
+                     on_key={("pagedown", msg(SelectMsg::Move(10)))}
+                     on_key={("pageup", msg(SelectMsg::Move(-10)))}
+                     on_key={("home", msg(SelectMsg::First))}
+                     on_key={("end", msg(SelectMsg::Last))}
+                     on_key={("enter", msg(SelectMsg::CommitHighlighted))}
+                     on_key={("space", msg(SelectMsg::CommitHighlighted))}
+                     on_key={("alt+arrowup", msg(SelectMsg::CommitHighlighted))}
+                     on_key={("escape", msg(SelectMsg::Close))}
+                     on_key={("tab", msg(SelectMsg::Close))}
+                     on_key={("shift+tab", msg(SelectMsg::Close))}
+                 }
+                 @when {!self.disabled && (open || cx.focus == Some(self.focus))} {
+                     @for key in TYPE_AHEAD_KEYS {
+                         on_key={(key, msg(SelectMsg::TypeAhead(key.chars().next().unwrap_or_default())))}
+                     }
+                 }>
+                <div class="flex-row items-center w-full" gap={m.spacing_sm} px={m.spacing_md}
+                     py={m.spacing_xs + (Sp::XXS * scale).round()} rounded={m.control_radius}
+                     bg={tc.element_background}
+                     border={if open { tc.focus_border } else { tc.border_variant }}
+                     accessibility_id={&*self.id} test_id="select-trigger" focus_ring={self.focus}
+                     accessibility_role={accesskit::Role::ComboBox} aria-label={self.label.clone()}
+                     aria-valuetext={shown.to_owned()} aria-expanded={open}
+                     aria-disabled={self.disabled}
+                     @when {!self.disabled} {
+                         hover_bg={tc.element_hover} class="cursor-pointer"
+                         on:click={msg(SelectMsg::Toggle)}
+                     }>
+                    <div class="flex-1">
+                        <text class="text-sm truncate"
+                              color={if chosen.is_some() && !self.disabled { tc.text } else { tc.text_muted }}>
+                            {shown.to_owned()}
+                        </text>
+                    </div>
+                    <icon svg={if open { lucide::CHEVRON_UP } else { lucide::CHEVRON_DOWN }}
+                          size={m.ui_small_font_size} color={tc.text_muted} />
+                </div>
+                if open {
+                    <anchored(
+                        view! {
+                            <popover_panel(theme) w={width} py={m.spacing_xs}
+                                accessibility_id={format!("{}-listbox", self.id)}
+                                test_id="select-listbox"
+                                accessibility_role={accesskit::Role::ListBox}
+                                aria-label={self.label.clone()}>
+                                {...option_rows(
+                                    &self.id,
+                                    &self.options,
+                                    self.selected,
+                                    self.highlighted,
+                                    |i| list_nav::item_focus(self.focus, i),
+                                    |i| msg(SelectMsg::Commit(i)),
+                                    theme,
+                                )}
+                            </popover_panel>
                         },
-                    )),
-            )
-            .child(
-                svg_icon(
-                    if open {
-                        lucide::CHEVRON_UP
-                    } else {
-                        lucide::CHEVRON_DOWN
-                    },
-                    m.ui_small_font_size,
-                )
-                .color(tc.text_muted),
-            );
-        if !self.disabled {
-            trigger = trigger
-                .hover_bg(tc.element_hover)
-                .cursor(CursorHint::Pointer)
-                .on_click(msg(SelectMsg::Toggle));
+                        PopoverSide::Bottom,
+                        self.viewport,
+                    ) />
+                }
+            </div>
         }
-        root = root.child(trigger);
-
-        if open {
-            let focus = self.focus;
-            let list = popover_panel(theme)
-                .w(width)
-                .py(m.spacing_xs)
-                .accessibility_id(format!("{}-listbox", self.id))
-                .test_id("select-listbox")
-                .accessibility_role(accesskit::Role::ListBox)
-                .accessibility_label(self.label.clone())
-                .children(option_rows(
-                    &self.id,
-                    &self.options,
-                    self.selected,
-                    self.highlighted,
-                    |i| list_nav::item_focus(focus, i),
-                    |i| msg(SelectMsg::Commit(i)),
-                    theme,
-                ));
-            root = root.child(anchored(list, PopoverSide::Bottom, self.viewport));
-        }
-        root.into_any()
     }
-}
-
-/// Key bindings of a select's root: open keys while closed, list keys
-/// while open.
-fn list_keys(root: Div, open: bool, msg: &dyn Fn(SelectMsg) -> Action) -> Div {
-    if !open {
-        return ["enter", "space", "arrowdown", "arrowup", "alt+arrowdown"]
-            .into_iter()
-            .fold(root, |root, key| root.on_key(key, msg(SelectMsg::Open)));
-    }
-    root.on_key("arrowdown", msg(SelectMsg::Move(1)))
-        .on_key("arrowup", msg(SelectMsg::Move(-1)))
-        .on_key("pagedown", msg(SelectMsg::Move(10)))
-        .on_key("pageup", msg(SelectMsg::Move(-10)))
-        .on_key("home", msg(SelectMsg::First))
-        .on_key("end", msg(SelectMsg::Last))
-        .on_key("enter", msg(SelectMsg::CommitHighlighted))
-        .on_key("space", msg(SelectMsg::CommitHighlighted))
-        .on_key("alt+arrowup", msg(SelectMsg::CommitHighlighted))
-        .on_key("escape", msg(SelectMsg::Close))
-        .on_key("tab", msg(SelectMsg::Close))
-        .on_key("shift+tab", msg(SelectMsg::Close))
 }
 
 /// The option rows of a list popover, with a heading per group. Options
@@ -460,26 +425,17 @@ fn group_box(
     theme: &Theme,
 ) -> AnyElement {
     let m = &theme.metrics;
-    div()
-        .flex_col()
-        .w_full()
-        .accessibility_id(format!("{id}-group-{first}"))
-        .accessibility_role(accesskit::Role::Group)
-        .accessibility_label(name.to_owned())
-        .child(
-            div()
-                .px(m.spacing_md)
-                .pt(m.spacing_xs)
-                .pb((Sp::XXS * m.ui_scale()).round())
-                .child(
-                    text(name.to_owned())
-                        .text_xs()
-                        .semibold()
-                        .color(theme.colors.text_muted),
-                ),
-        )
-        .children(items)
-        .into_any()
+    view! {
+        <div class="flex-col w-full" accessibility_id={format!("{id}-group-{first}")}
+             accessibility_role={accesskit::Role::Group} aria-label={name.to_owned()}>
+            <div px={m.spacing_md} pt={m.spacing_xs} pb={(Sp::XXS * m.ui_scale()).round()}>
+                <text class="text-xs font-semibold" color={theme.colors.text_muted}>
+                    {name.to_owned()}
+                </text>
+            </div>
+            {...items}
+        </div>
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -496,48 +452,33 @@ fn option_row(
     let tc = &theme.colors;
     let m = &theme.metrics;
     let scale = m.ui_scale();
-    let mut row =
-        div()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .gap(m.spacing_sm)
-            .px(m.spacing_md)
-            .py(m.spacing_xs + (Sp::XXS * scale).round())
-            .accessibility_id(format!("{id}-option-{index}"))
-            .test_id("select-option")
-            .accessibility_role(accesskit::Role::ListBoxOption)
-            .accessibility_label(option.label.clone())
-            .accessibility_selected(selected)
-            .accessibility_disabled(option.disabled)
-            .bg(if highlighted {
-                tc.ghost_element_selected
-            } else {
-                Color::TRANSPARENT
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .child(text(option.label.clone()).text_sm().truncate().color(
-                        if option.disabled {
-                            tc.text_muted
-                        } else if selected {
-                            tc.text_strong
-                        } else {
-                            tc.text
-                        },
-                    )),
-            );
-    if !option.disabled {
-        row = row
-            .focus_ring(focus)
-            .tab_stop(TabStop::disabled(0))
-            .hover_bg(tc.ghost_element_hover)
-            .cursor(CursorHint::Pointer)
-            .on_click(commit);
+    view! {
+        <div class="flex-row items-center w-full" gap={m.spacing_sm} px={m.spacing_md}
+             py={m.spacing_xs + (Sp::XXS * scale).round()}
+             accessibility_id={format!("{id}-option-{index}")} test_id="select-option"
+             accessibility_role={accesskit::Role::ListBoxOption}
+             aria-label={option.label.clone()} aria-selected={selected}
+             aria-disabled={option.disabled}
+             bg={if highlighted { tc.ghost_element_selected } else { Color::TRANSPARENT }}
+             @when {!option.disabled} {
+                 focus_ring={focus} tab_stop={TabStop::disabled(0)}
+                 hover_bg={tc.ghost_element_hover} class="cursor-pointer" on:click={commit}
+             }>
+            <div class="flex-1">
+                <text class="text-sm truncate"
+                      color={if option.disabled {
+                          tc.text_muted
+                      } else if selected {
+                          tc.text_strong
+                      } else {
+                          tc.text
+                      }}>
+                    {option.label.clone()}
+                </text>
+            </div>
+            if selected {
+                <icon svg={lucide::CHECK} size={m.ui_small_font_size} color={tc.accent} />
+            }
+        </div>
     }
-    if selected {
-        row = row.child(svg_icon(lucide::CHECK, m.ui_small_font_size).color(tc.accent));
-    }
-    row.into_any()
 }

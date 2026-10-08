@@ -1,0 +1,5 @@
+error: <div> is a built-in tag and takes no arguments; use attributes
+ --> tests/ui/builtin_args.rs:4:22
+  |
+4 |     let _ = view! { <div(1) /> };
+  |                      ^^^

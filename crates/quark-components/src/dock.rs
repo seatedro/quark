@@ -23,9 +23,9 @@
 use std::rc::Rc;
 
 use accesskit::Role;
-use quark::SemanticRole;
+use quark::view;
 use quark_ui::element::{
-    AnyElement, ClickEvent, CursorHint, Div, DragHandler, DragReleaseResult, IntoAnyElement, div,
+    AnyElement, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement, div,
     svg_icon, text,
 };
 use quark_ui::icons::lucide;
@@ -1028,11 +1028,14 @@ impl<'a> Dock<'a> {
         .child(right)
         .build(theme);
 
-        let mut root = div().w(width).h(height).bg(theme.colors.background);
-        for (r, binding) in &self.toggle_keys {
-            root = root.on_key(binding.clone(), (self.map)(DockEvent::Toggle(*r)));
+        view! {
+            <div w={width} h={height} bg={theme.colors.background}
+                 @for (r, binding) in &self.toggle_keys {
+                     on_key={(binding.clone(), (self.map)(DockEvent::Toggle(*r)))}
+                 }>
+                {body}
+            </div>
         }
-        root.child(body).into_any()
     }
 
     fn region(
@@ -1045,11 +1048,7 @@ impl<'a> Dock<'a> {
         content: &mut impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
         if region != DockRegion::Center && !self.state.is_visible(region) {
-            return div()
-                .w(size.0)
-                .h(size.1)
-                .bg(theme.colors.surface)
-                .into_any();
+            return view! { <div w={size.0} h={size.1} bg={theme.colors.surface} /> };
         }
         self.node(
             theme,
@@ -1081,31 +1080,29 @@ impl<'a> Dock<'a> {
         };
         let horizontal = split.axis == Axis::Horizontal;
         let extent = if horizontal { width } else { height };
-        let mut root = if horizontal {
-            div().flex_row().w(width).h(height)
-        } else {
-            div().flex_col().w(width).h(height)
-        };
         let sizes = child_sizes(&split.weights, extent);
-        for (i, (child, size)) in split.children.iter().zip(sizes).enumerate() {
-            if i > 0 {
-                root = root.child(self.pane_divider(theme, region, split, i - 1, extent));
-            }
-            let child_size = if horizontal {
-                (size, height)
-            } else {
-                (width, size)
-            };
-            root = root.child(
-                div()
-                    .flex_none()
-                    .clip()
-                    .w(child_size.0)
-                    .h(child_size.1)
-                    .child(self.node(theme, region, child, child_size, drag, title, content)),
-            );
+        view! {
+            <div @when {horizontal} { class="flex-row" } @when {!horizontal} { class="flex-col" }
+                 w={width} h={height}>
+                for (i, (child, size)) in split.children.iter().zip(sizes).enumerate() {
+                    if i > 0 {
+                        {self.pane_divider(theme, region, split, i - 1, extent)}
+                    }
+                    <div class="flex-none overflow-clip" w={if horizontal { size } else { width }}
+                         h={if horizontal { height } else { size }}>
+                        {self.node(
+                            theme,
+                            region,
+                            child,
+                            if horizontal { (size, height) } else { (width, size) },
+                            drag,
+                            title,
+                            content,
+                        )}
+                    </div>
+                }
+            </div>
         }
-        root.into_any()
     }
 
     fn pane_divider(
@@ -1115,7 +1112,7 @@ impl<'a> Dock<'a> {
         split: &PaneSplit,
         divider: usize,
         extent: f32,
-    ) -> Div {
+    ) -> AnyElement {
         let colors = &theme.colors;
         let horizontal = split.axis == Axis::Horizontal;
         let cursor = if horizontal {
@@ -1128,42 +1125,33 @@ impl<'a> Dock<'a> {
         // The same wide invisible grip as a `Split` divider.
         let grip = 8.0;
         let offset = -(grip - DIVIDER_THICKNESS) / 2.0;
-        let mut hit = div()
-            .absolute()
-            .z_index(1)
-            .accessibility_id(format!("dock:split:{}:{divider}", id.0))
-            .accessibility_role(Role::Splitter)
-            .semantic_role(SemanticRole::Separator)
-            .accessibility_label(quark_ui::i18n::tr_args(
-                "quark-resize-named",
-                [("name", self.state.label(region).into())],
-            ))
-            .test_id("dock-pane-divider")
-            .cursor(cursor)
-            .hover_bg(colors.accent)
-            .on_drag(move |press: ClickEvent| {
-                Box::new(PaneDividerDrag {
-                    map: map.clone(),
-                    split: id,
-                    divider,
-                    horizontal,
-                    origin: if horizontal { press.x } else { press.y },
-                    extent,
-                    cursor,
-                }) as Box<dyn DragHandler>
-            });
-        hit = if horizontal {
-            hit.top(0.0).bottom(0.0).left(offset).w(grip)
-        } else {
-            hit.left(0.0).right(0.0).top(offset).h(grip)
-        };
-        let line = div().flex_none().relative().bg(colors.border_variant);
-        let line = if horizontal {
-            line.w(DIVIDER_THICKNESS).h_full()
-        } else {
-            line.h(DIVIDER_THICKNESS).w_full()
-        };
-        line.child(hit)
+        view! {
+            <div class="flex-none relative" bg={colors.border_variant}
+                 @when {horizontal} { w={DIVIDER_THICKNESS} class="h-full" }
+                 @when {!horizontal} { h={DIVIDER_THICKNESS} class="w-full" }>
+                <div class="absolute" z_index={1}
+                     accessibility_id={format!("dock:split:{}:{divider}", id.0)}
+                     accessibility_role={Role::Splitter} role="separator"
+                     aria-label={quark_ui::i18n::tr_args(
+                         "quark-resize-named",
+                         [("name", self.state.label(region).into())],
+                     )}
+                     test_id="dock-pane-divider" cursor={cursor} hover_bg={colors.accent}
+                     on:drag={move |press: ClickEvent| {
+                         Box::new(PaneDividerDrag {
+                             map: map.clone(),
+                             split: id,
+                             divider,
+                             horizontal,
+                             origin: if horizontal { press.x } else { press.y },
+                             extent,
+                             cursor,
+                         }) as Box<dyn DragHandler>
+                     }}
+                     @when {horizontal} { class="top-0 bottom-0" left={offset} w={grip} }
+                     @when {!horizontal} { class="left-0 right-0" top={offset} h={grip} } />
+            </div>
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1178,12 +1166,6 @@ impl<'a> Dock<'a> {
         content: &mut impl FnMut(PanelId, (f32, f32)) -> AnyElement,
     ) -> AnyElement {
         let colors = &theme.colors;
-        let mut root = div()
-            .relative()
-            .flex_col()
-            .w(width)
-            .h(height)
-            .bg(colors.surface);
         let show_tabs = self.shows_tabs(region, group);
         let strip_height = if show_tabs {
             Self::strip_height(theme)
@@ -1191,34 +1173,12 @@ impl<'a> Dock<'a> {
             0.0
         };
         let body_height = (height - strip_height).max(0.0);
-        if show_tabs && !group.panels.is_empty() {
-            root = root.child(self.tab_strip(
-                theme,
-                region,
-                group,
-                (width, strip_height),
-                drag,
-                title,
-            ));
-        }
-        if let Some(active) = group.active_panel() {
-            root = root.child(
-                div()
-                    .w(width)
-                    .h(body_height)
-                    .clip()
-                    .accessibility_id(format!("dock:pane:{}:panel", group.id.0))
-                    .accessibility_role(Role::TabPanel)
-                    .semantic_role(SemanticRole::TabPanel)
-                    .accessibility_label(title(active))
-                    .child(content(active, (width, body_height))),
-            );
-        }
-        if let Some((_, target)) = self.state.drop_preview()
-            && target.pane == group.id
-        {
-            let accent = colors.accent;
-            let (x, y, w, h) = match target.zone {
+        // Where a dragged tab would land in this group.
+        let preview = self
+            .state
+            .drop_preview()
+            .filter(|(_, target)| target.pane == group.id)
+            .map(|(_, target)| match target.zone {
                 DropZone::Tabs(i) => {
                     let tab = self.tab_width_for(width, group.panels.len());
                     let x = (i.min(group.panels.len()) as f32 * tab - 1.0).max(0.0);
@@ -1228,20 +1188,27 @@ impl<'a> Dock<'a> {
                     let (x, y, w, h) = zone.preview(width, body_height);
                     (x, y + strip_height, w, h)
                 }
-            };
-            root = root.child(
-                div()
-                    .absolute()
-                    .z_index(10)
-                    .left(x)
-                    .top(y)
-                    .w(w)
-                    .h(h)
-                    .bg(accent.with_alpha(if w > 2.0 { 56 } else { 255 }))
-                    .test_id("dock-drop-preview"),
-            );
+            });
+        view! {
+            <div class="relative flex-col" w={width} h={height} bg={colors.surface}>
+                if show_tabs && !group.panels.is_empty() {
+                    {self.tab_strip(theme, region, group, (width, strip_height), drag, title)}
+                }
+                if let Some(active) = group.active_panel() {
+                    <div w={width} h={body_height} class="overflow-clip"
+                         accessibility_id={format!("dock:pane:{}:panel", group.id.0)}
+                         accessibility_role={Role::TabPanel} role="tabpanel"
+                         aria-label={title(active)}>
+                        {content(active, (width, body_height))}
+                    </div>
+                }
+                if let Some((x, y, w, h)) = preview {
+                    <div class="absolute" z_index={10} left={x} top={y} w={w} h={h}
+                         bg={colors.accent.with_alpha(if w > 2.0 { 56 } else { 255 })}
+                         test_id="dock-drop-preview" />
+                }
+            </div>
         }
-        root.into_any()
     }
 
     fn tab_strip(
@@ -1254,114 +1221,99 @@ impl<'a> Dock<'a> {
         title: &impl Fn(PanelId) -> String,
     ) -> AnyElement {
         let colors = &theme.colors;
+        let tab_width = self.tab_width_for(width, group.panels.len());
+        view! {
+            <div class="flex-row w-full" h={height} class="flex-none overflow-clip"
+                 border_b={colors.border_variant}
+                 accessibility_id={format!("dock:pane:{}:tabs", group.id.0)}
+                 accessibility_role={Role::TabList} role="tablist"
+                 aria-label={self.state.label(region)} test_id="dock-tabs">
+                for (index, &panel) in group.panels.iter().enumerate() {
+                    {self.tab(theme, region, group, index, panel, tab_width, drag, title)}
+                }
+                <div class="flex-1 h-full" bg={Color::TRANSPARENT} />
+            </div>
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tab(
+        &self,
+        theme: &Theme,
+        region: DockRegion,
+        group: &TabGroup,
+        index: usize,
+        panel: PanelId,
+        tab_width: f32,
+        drag: &Rc<DragContext>,
+        title: &impl Fn(PanelId) -> String,
+    ) -> AnyElement {
+        let colors = &theme.colors;
         let m = &theme.metrics;
         let pane = group.id;
         let count = group.panels.len();
-        let tab_width = self.tab_width_for(width, count);
-        let mut strip = div()
-            .flex_row()
-            .w_full()
-            .h(height)
-            .flex_none()
-            .clip()
-            .border_b(colors.border_variant)
-            .accessibility_id(format!("dock:pane:{}:tabs", pane.0))
-            .accessibility_role(Role::TabList)
-            .semantic_role(SemanticRole::TabList)
-            .accessibility_label(self.state.label(region))
-            .test_id("dock-tabs");
-        for (index, &panel) in group.panels.iter().enumerate() {
-            let selected = index == group.active;
-            let name = title(panel);
-            let map = self.map.clone();
-            let ctx = drag.clone();
-            let confined = self.state.confined.contains(&panel);
-            let close = (self.map)(DockEvent::Close { pane, index });
-            let mut tab = div()
-                .flex_row()
-                .flex_none()
-                .items_center()
-                .gap(m.spacing_xs)
-                .px(m.spacing_sm)
-                .w(tab_width)
-                .h_full()
-                .border_r(colors.border_variant)
-                .accessibility_id(format!("dock:tab:{}", panel.0))
-                .accessibility_role(Role::Tab)
-                .semantic_role(SemanticRole::Tab)
-                .accessibility_label(name.clone())
-                .accessibility_selected(selected)
-                .test_id("dock-tab")
-                .on_middle_click(close.clone())
-                .on_drag(move |_: ClickEvent| {
-                    Box::new(TabDrag {
-                        map: map.clone(),
-                        ctx: ctx.clone(),
-                        panel,
-                        confined,
-                        from: Origin {
-                            region,
-                            pane,
-                            index,
-                            count,
-                        },
-                        target: None,
-                        allowed: true,
-                    }) as Box<dyn DragHandler>
-                });
-            if selected {
-                // Roving focus: only the active tab is a focus target, so
-                // selecting a neighbor by arrow key moves focus with it.
-                let prev = index.checked_sub(1).unwrap_or(count - 1);
-                let next = (index + 1) % count;
-                let select = |index| (self.map)(DockEvent::Select { pane, index });
-                tab = tab
-                    .bg(colors.background)
-                    .focus_ring(Self::tab_focus(pane))
-                    .on_key("left", select(prev))
-                    .on_key("right", select(next))
-                    .on_key("home", select(0))
-                    .on_key("end", select(count - 1))
-                    .on_key("delete", close.clone());
-            } else {
-                tab = tab.hover_bg(colors.ghost_element_hover);
-            }
-            let label_color = if selected {
-                colors.text_strong
-            } else {
-                colors.text_muted
-            };
-            let close_button = div()
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .rounded(m.control_radius * 0.5)
-                .p(2.0)
-                .hover_bg(colors.ghost_element_hover)
-                .accessibility_id(format!("dock:close:{}", panel.0))
-                .accessibility_role(Role::Button)
-                .accessibility_label(quark_ui::i18n::tr_args(
-                    "quark-close-named",
-                    [("name", quark_ui::i18n::Arg::Text(&name))],
-                ))
-                .on_click(close)
-                .child(svg_icon(lucide::X, m.ui_small_font_size).color(colors.text_muted));
-            tab = tab
-                .child(
-                    div()
-                        .flex_1()
-                        // Let a long title shrink and truncate instead of
-                        // pushing the close button out of the tab.
-                        .min_w(0.0)
-                        .clip()
-                        .child(text(name).text_sm().color(label_color).truncate()),
-                )
-                .child(close_button);
-            strip = strip.child(tab);
+        let selected = index == group.active;
+        let name = title(panel);
+        let map = self.map.clone();
+        let ctx = drag.clone();
+        let confined = self.state.confined.contains(&panel);
+        let close = (self.map)(DockEvent::Close { pane, index });
+        // Roving focus: only the active tab is a focus target, so selecting
+        // a neighbor by arrow key moves focus with it.
+        let prev = index.checked_sub(1).unwrap_or(count - 1);
+        let next = (index + 1) % count;
+        let select = |index| (self.map)(DockEvent::Select { pane, index });
+        let label_color = if selected {
+            colors.text_strong
+        } else {
+            colors.text_muted
+        };
+        let close_label = quark_ui::i18n::tr_args(
+            "quark-close-named",
+            [("name", quark_ui::i18n::Arg::Text(&name))],
+        );
+        view! {
+            <div class="flex-row flex-none items-center" gap={m.spacing_xs} px={m.spacing_sm}
+                 w={tab_width} class="h-full" border_r={colors.border_variant}
+                 accessibility_id={format!("dock:tab:{}", panel.0)} accessibility_role={Role::Tab}
+                 role="tab" aria-label={name.clone()} aria-selected={selected} test_id="dock-tab"
+                 on:middle_click={close.clone()}
+                 on:drag={move |_: ClickEvent| {
+                     Box::new(TabDrag {
+                         map: map.clone(),
+                         ctx: ctx.clone(),
+                         panel,
+                         confined,
+                         from: Origin {
+                             region,
+                             pane,
+                             index,
+                             count,
+                         },
+                         target: None,
+                         allowed: true,
+                     }) as Box<dyn DragHandler>
+                 }}
+                 @when {selected} {
+                     bg={colors.background} focus_ring={Self::tab_focus(pane)}
+                     on_key={("left", select(prev))} on_key={("right", select(next))}
+                     on_key={("home", select(0))} on_key={("end", select(count - 1))}
+                     on_key={("delete", close.clone())}
+                 }
+                 @when {!selected} { hover_bg={colors.ghost_element_hover} }>
+                // Let a long title shrink and truncate instead of pushing the
+                // close button out of the tab.
+                <div class="flex-1 min-w-0 overflow-clip">
+                    <text class="text-sm" color={label_color} class="truncate">{name}</text>
+                </div>
+                <div class="flex-none items-center justify-center" rounded={m.control_radius * 0.5}
+                     p={2.0} hover_bg={colors.ghost_element_hover}
+                     accessibility_id={format!("dock:close:{}", panel.0)}
+                     accessibility_role={Role::Button} aria-label={close_label} on:click={close}>
+                    <icon svg={lucide::X} size={m.ui_small_font_size} color={colors.text_muted} />
+                </div>
+            </div>
         }
-        strip
-            .child(div().flex_1().h_full().bg(Color::TRANSPARENT))
-            .into_any()
     }
 }
 

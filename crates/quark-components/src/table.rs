@@ -28,6 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use accesskit::Role;
+use quark::view;
 use quark_ui::accessibility::SortDirection;
 use quark_ui::element::{
     AnyElement, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement,
@@ -64,11 +65,11 @@ pub trait TableData: 'static {
 
     /// The element drawn in a cell. Defaults to the cell text.
     fn render_cell(&self, row: usize, column: usize, style: &CellStyle) -> AnyElement {
-        text(self.cell_text(row, column).into_owned())
-            .text_sm()
-            .color(style.text)
-            .truncate()
-            .into_any()
+        view! {
+            <text class="text-sm" color={style.text} class="truncate">
+                {self.cell_text(row, column).into_owned()}
+            </text>
+        }
     }
 
     /// Changes whenever any cell does, so cached rows rebuild and the
@@ -917,12 +918,10 @@ pub fn table_view<D: TableData>(
     let colors = TableColors::of(theme);
     let (width, height) = inner.viewport;
     let hash = inputs_hash(&(inner.revision, data.revision(), env, on_event as usize));
-    cached(inner.id, hash, move || {
-        build_table(&inner, &data, colors, env, on_event)
-    })
-    .w(width)
-    .h(height)
-    .into_any()
+    view! {
+        <cached(inner.id, hash, move || build_table(&inner, &data, colors, env, on_event))
+                w={width} h={height} />
+    }
 }
 
 fn build_table<D: TableData>(
@@ -935,83 +934,45 @@ fn build_table<D: TableData>(
     let (width, height) = t.viewport;
     let window = t.row_window();
     let columns = t.column_window();
-    let mut table = div()
-        .w(width)
-        .h(height)
-        .flex_col()
-        .clip()
-        .track_focus(t.focus);
-    if env.accessible {
-        table = table
-            .accessibility_id(t.id)
-            .accessibility_role(Role::Table)
-            .accessibility_label(t.label)
-            .accessibility_table_size(t.view.len() + 1, t.order.len())
-            .accessibility_multiselectable(true);
-    }
-    for &(binding, key) in KEYS {
-        table = table.on_key(binding, on_event(TableEvent::Key(key)));
-    }
-
-    // The header stays put vertically and follows the body horizontally.
-    let mut header = div()
-        .w(t.total_width())
-        .h(t.header_height)
-        .flex_row()
-        .flex_shrink_0()
-        .translate(-t.scroll_x, 0.0)
-        .bg(colors.header)
-        .border_b(colors.border);
-    if env.accessible {
-        header = header
-            .accessibility_id(format!("{}.header", t.id))
-            .accessibility_role(Role::Row)
-            .accessibility_row_index(0);
-    }
-    header = header.child(div().w(t.column_left(columns.start)).flex_shrink_0());
     let reorder_target = t.header.and_then(|h| h.target.map(|to| (h.column, to)));
-    for pos in columns.clone() {
-        header = header.child(header_cell(t, pos, reorder_target, colors, env, on_event));
+    view! {
+        <div w={width} h={height} class="flex-col overflow-clip" track_focus={t.focus}
+             @when {env.accessible} {
+                 accessibility_id={t.id} accessibility_role={Role::Table} aria-label={t.label}
+                 accessibility_table_size={(t.view.len() + 1, t.order.len())}
+                 aria-multiselectable={true}
+             }
+             @for &(binding, key) in KEYS { on_key={(binding, on_event(TableEvent::Key(key)))} }>
+            <div class="w-full" h={t.header_height} class="shrink-0 overflow-clip">
+                // The header stays put vertically and follows the body
+                // horizontally.
+                <div w={t.total_width()} h={t.header_height} class="flex-row shrink-0"
+                     translate={(-t.scroll_x, 0.0)} bg={colors.header} border_b={colors.border}
+                     @when {env.accessible} {
+                         accessibility_id={format!("{}.header", t.id)}
+                         accessibility_role={Role::Row} aria-rowindex={0}
+                     }>
+                    <div w={t.column_left(columns.start)} class="shrink-0" />
+                    for pos in columns.clone() {
+                        {header_cell(t, pos, reorder_target, colors, env, on_event)}
+                    }
+                </div>
+            </div>
+            <div class="w-full" h={t.body_height()} class="flex-col" scroll_y={t.scroll_y}
+                 scroll_total={window.total_extent}
+                 on:scroll={ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))
+                     .with_to_px(move |px| on_event(TableEvent::ScrollTo(px as f32)))}
+                 scroll_x={t.scroll_x} scroll_total_x={t.total_width()}
+                 on:scroll_x={ScrollActionBuilder::new(move |lines| on_event(TableEvent::ScrollX(lines)))
+                     .with_to_px(move |px| on_event(TableEvent::ScrollXTo(px as f32)))}>
+                <div class="w-full shrink-0" h={window.top_spacer} />
+                for display in window.range {
+                    {table_row(t, data, display, columns.clone(), colors, env, on_event)}
+                }
+                <div class="w-full shrink-0" h={window.bottom_spacer} />
+            </div>
+        </div>
     }
-    table = table.child(
-        div()
-            .w_full()
-            .h(t.header_height)
-            .flex_shrink_0()
-            .clip()
-            .child(header),
-    );
-
-    let mut body = div()
-        .w_full()
-        .h(t.body_height())
-        .flex_col()
-        .scroll_y(t.scroll_y)
-        .scroll_total(window.total_extent)
-        .on_scroll(
-            ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))
-                .with_to_px(move |px| on_event(TableEvent::ScrollTo(px as f32))),
-        )
-        .scroll_x(t.scroll_x)
-        .scroll_total_x(t.total_width())
-        .on_scroll_x(
-            ScrollActionBuilder::new(move |lines| on_event(TableEvent::ScrollX(lines)))
-                .with_to_px(move |px| on_event(TableEvent::ScrollXTo(px as f32))),
-        );
-    body = body.child(div().w_full().h(window.top_spacer).flex_shrink_0());
-    for display in window.range {
-        body = body.child(table_row(
-            t,
-            data,
-            display,
-            columns.clone(),
-            colors,
-            env,
-            on_event,
-        ));
-    }
-    body = body.child(div().w_full().h(window.bottom_spacer).flex_shrink_0());
-    table.child(body).into_any()
 }
 
 fn header_cell(
@@ -1026,87 +987,55 @@ fn header_cell(
     let c = column as usize;
     let width = t.widths[c];
     let sort = t.sort.filter(|(s, _)| *s == column).map(|(_, d)| d);
-    let mut cell = div()
-        .w(width)
-        .h(t.header_height)
-        .flex_shrink_0()
-        .relative()
-        .flex_row()
-        .items_center()
-        .gap(4.0)
-        .px(CELL_PAD_PX)
-        .border_r(colors.border)
-        .cursor(CursorHint::Pointer)
-        .on_drag(move |press: ClickEvent| {
-            Box::new(HeaderDrag {
-                column,
-                press_x: press.x,
-                on_event,
-            }) as Box<dyn DragHandler>
-        })
-        .child(
-            text(&*t.titles[c])
-                .text_sm()
-                .semibold()
-                .color(colors.text)
-                .truncate(),
-        );
-    if let Some(direction) = sort {
-        let svg = if direction == SortDirection::Descending {
-            lucide::ARROW_DOWN
-        } else {
-            lucide::ARROW_UP
-        };
-        cell = cell.child(svg_icon(svg, 12.0).color(colors.muted));
-    }
-    // Where a dragged column would land.
-    if let Some((dragged, to)) = reorder_target
-        && to == pos
-        && dragged != column
-    {
-        let from = t.position_of(dragged);
-        let bar = div()
-            .absolute()
-            .top(0.0)
-            .w(2.0)
-            .h(t.header_height)
-            .bg(colors.accent);
-        cell = cell.child(if from < to {
-            bar.right(0.0)
-        } else {
-            bar.left(0.0)
-        });
-    }
     let start_width = width;
-    cell = cell.child(
-        div()
-            .absolute()
-            .top(0.0)
-            .right(0.0)
-            .w(RESIZE_HANDLE_PX)
-            .h(t.header_height)
-            .cursor(CursorHint::ResizeCol)
-            .on_drag(move |press: ClickEvent| {
-                Box::new(ResizeDrag {
-                    column,
-                    press_x: press.x,
-                    start_width,
-                    on_event,
-                }) as Box<dyn DragHandler>
-            }),
-    );
-    if env.accessible {
-        cell = cell
-            .accessibility_id(format!("{}.col.{column}", t.id))
-            .accessibility_role(Role::ColumnHeader)
-            .accessibility_label(&*t.titles[c])
-            .accessibility_column_index(pos)
-            .accessibility_row_index(0);
-        if let Some(direction) = sort {
-            cell = cell.accessibility_sort(direction);
-        }
+    view! {
+        <div w={width} h={t.header_height} class="shrink-0 relative flex-row items-center"
+             gap={4.0} px={CELL_PAD_PX} border_r={colors.border} class="cursor-pointer"
+             on:drag={move |press: ClickEvent| {
+                 Box::new(HeaderDrag {
+                     column,
+                     press_x: press.x,
+                     on_event,
+                 }) as Box<dyn DragHandler>
+             }}
+             @when {env.accessible} {
+                 accessibility_id={format!("{}.col.{column}", t.id)}
+                 accessibility_role={Role::ColumnHeader} aria-label={&*t.titles[c]}
+                 aria-colindex={pos} aria-rowindex={0}
+                 @when {let Some(direction) = sort} { aria-sort={direction} }
+             }>
+            <text class="text-sm font-semibold" color={colors.text} class="truncate">
+                {&*t.titles[c]}
+            </text>
+            if let Some(direction) = sort {
+                <icon svg={if direction == SortDirection::Descending {
+                          lucide::ARROW_DOWN
+                      } else {
+                          lucide::ARROW_UP
+                      }}
+                      size={12.0} color={colors.muted} />
+            }
+            // Where a dragged column would land.
+            if let Some((dragged, to)) = reorder_target
+                && to == pos
+                && dragged != column
+            {
+                <div class="absolute top-0" w={2.0} h={t.header_height} bg={colors.accent}
+                     @when {t.position_of(dragged) < to} { class="right-0" }
+                     @when {t.position_of(dragged) >= to} { class="left-0" } />
+            }
+            <div class="absolute top-0 right-0" w={RESIZE_HANDLE_PX} h={t.header_height}
+                 class="cursor-col-resize"
+                 on:drag={move |press: ClickEvent| {
+                     Box::new(ResizeDrag {
+                         column,
+                         press_x: press.x,
+                         start_width,
+                         on_event,
+                     }) as Box<dyn DragHandler>
+                 }} />
+        </div>
     }
-    cell.into_any()
 }
 
 fn table_row<D: TableData>(
@@ -1134,61 +1063,41 @@ fn table_row<D: TableData>(
     let t = t.clone();
     let data = data.clone();
     let height = t.row_height;
-    cached(CacheKey(key), hash, move || {
-        let mut el = div()
-            .w(t.total_width())
-            .h(t.row_height)
-            .flex_shrink_0()
-            .flex_row()
-            .border_b(colors.border)
-            .on_click(on_event(TableEvent::PressRow(row)));
-        el = if selected {
-            el.bg(colors.selected)
-        } else {
-            el.hover_bg(colors.hover)
-        };
-        if env.accessible {
-            el = el
-                .accessibility_id(format!("{}.row.{row}", t.id))
-                .accessibility_role(Role::Row)
-                .accessibility_row_index(display + 1)
-                .accessibility_selected(selected);
-        }
-        el = el.child(div().w(t.column_left(columns.start)).flex_shrink_0());
+    let build = move || {
         let style = CellStyle {
             text: colors.text,
             muted: colors.muted,
             accent: colors.accent,
             selected,
         };
-        for pos in columns {
-            let column = t.order[pos] as usize;
-            let mut cell = div()
-                .w(t.widths[column])
-                .h(t.row_height)
-                .flex_shrink_0()
-                .flex_row()
-                .items_center()
-                .px(CELL_PAD_PX)
-                .child(data.render_cell(row, column, &style));
-            if cursor_col == Some(pos as u32) {
-                cell = cell.border(colors.focus);
-            }
-            if env.accessible {
-                cell = cell
-                    .accessibility_id(format!("{}.cell.{row}.{column}", t.id))
-                    .accessibility_role(Role::Cell)
-                    .accessibility_label(data.cell_text(row, column).into_owned())
-                    .accessibility_row_index(display + 1)
-                    .accessibility_column_index(pos);
-            }
-            el = el.child(cell);
+        view! {
+            <div w={t.total_width()} h={t.row_height} class="shrink-0 flex-row"
+                 border_b={colors.border} on:click={on_event(TableEvent::PressRow(row))}
+                 @when {selected} { bg={colors.selected} }
+                 @when {!selected} { hover_bg={colors.hover} }
+                 @when {env.accessible} {
+                     accessibility_id={format!("{}.row.{row}", t.id)}
+                     accessibility_role={Role::Row} aria-rowindex={display + 1}
+                     aria-selected={selected}
+                 }>
+                <div w={t.column_left(columns.start)} class="shrink-0" />
+                for pos in columns {
+                    <div w={t.widths[t.order[pos] as usize]} h={t.row_height}
+                         class="shrink-0 flex-row items-center" px={CELL_PAD_PX}
+                         @when {cursor_col == Some(pos as u32)} { border={colors.focus} }
+                         @when {env.accessible} {
+                             accessibility_id={format!("{}.cell.{row}.{}", t.id, t.order[pos])}
+                             accessibility_role={Role::Cell}
+                             aria-label={data.cell_text(row, t.order[pos] as usize).into_owned()}
+                             aria-rowindex={display + 1} aria-colindex={pos}
+                         }>
+                        {data.render_cell(row, t.order[pos] as usize, &style)}
+                    </div>
+                }
+            </div>
         }
-        el
-    })
-    .w_full()
-    .h(height)
-    .into_any()
+    };
+    view! { <cached(CacheKey(key), hash, build) class="w-full" h={height} /> }
 }
 
 /// A press on a header cell: a click sorts, a drag moves the column.

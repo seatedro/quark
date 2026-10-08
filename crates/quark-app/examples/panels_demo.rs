@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 
+use quark::view;
 use quark_app::quark_ui::Action;
 use quark_app::quark_ui::element::{AnyElement, IntoAnyElement, div, text};
 use quark_app::quark_ui::style::Styled;
@@ -109,18 +110,14 @@ impl PanelsDemo {
             PULL_REQUESTS => "#42 Add panels demo",
             _ => "$ ",
         };
-        div()
-            .w(width)
-            .h(height)
-            .p(12.0)
-            .gap(6.0)
-            .flex_col()
-            .child(text(title(id)).semibold().color(colors.text_strong))
-            .children_from(
-                body.lines()
-                    .map(|line| text(line).text_sm().color(colors.text_muted)),
-            )
-            .into_any()
+        view! {
+            <div w={width} h={height} class="p-3 gap-[6] flex-col">
+                <text class="font-semibold" color={colors.text_strong}>{title(id)}</text>
+                for line in body.lines() {
+                    <text class="text-sm" color={colors.text_muted}>{line}</text>
+                }
+            </div>
+        }
     }
 }
 

@@ -22,7 +22,7 @@
 //!
 //! [`UiApp::event`]: https://docs.rs/quark-app
 
-use quark::SemanticRole;
+use quark::view;
 use quark_ui::design::{Ico, Rad, Shadow, Sp, Sz};
 use quark_ui::element::*;
 use quark_ui::style::Styled;
@@ -832,126 +832,77 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let shown = self.rows.len().clamp(1, PALETTE_VISIBLE_ROWS);
         let list_h = shown as f32 * row_h;
 
-        let input = text_input(quark_ui::i18n::tr("quark-command-palette"), "")
-            .field(&self.query)
-            .placeholder(self.placeholder.clone())
-            .focus_target(PALETTE_INPUT)
-            .focused(focused)
-            .search(true)
-            .bare()
-            .w_full()
-            .h((Sz::INPUT * scale).round());
-
-        let mut list = div()
-            .flex_col()
-            .w_full()
-            .h(list_h)
-            .overflow_hidden()
-            .id("palette-results")
-            .test_id("palette-results")
-            .semantic_role(SemanticRole::ScrollArea)
-            .accessibility_role(accesskit::Role::ListBox)
-            .accessibility_id("palette-results")
-            .accessibility_label(quark_ui::i18n::tr("quark-results"))
-            .on_scroll(ScrollActionBuilder::new({
-                let scroll = on_event(PaletteEvent::Scroll(1));
-                let up = on_event(PaletteEvent::Scroll(-1));
-                // The callback must be 'static, so the two actions are built
-                // up front; a multi-line delta moves one row.
-                move |lines| {
-                    if lines < 0 {
-                        up.clone()
-                    } else {
-                        scroll.clone()
-                    }
-                }
-            }));
-        if self.rows.is_empty() {
-            list = list.child(
-                div()
-                    .h(row_h)
-                    .px((Sp::MD * scale).round())
-                    .items_center()
-                    .flex_row()
-                    .child(
-                        text(quark_ui::i18n::tr("quark-no-results"))
-                            .text_sm()
-                            .color(tc.text_muted),
-                    ),
-            );
-        }
         let end = (self.scroll_top + PALETTE_VISIBLE_ROWS).min(self.rows.len());
-        for row in self.scroll_top..end {
-            let element = match self.rows[row] {
-                Row::Header(section) => {
-                    let title = match section {
-                        Some(s) => self.sections[s as usize].title.as_str(),
-                        None => "Recent",
-                    };
-                    div()
-                        .flex_row()
-                        .items_center()
-                        .flex_shrink_0()
-                        .h(row_h)
-                        .px((Sp::MD * scale).round())
-                        .child(text(title).text_xs().medium().color(tc.text_muted))
-                        .into_any()
-                }
-                Row::Item(m) => {
-                    self.item_row(row, self.matches[m as usize], row_h, theme, &on_event)
-                }
-            };
-            list = list.child(element);
-        }
-
-        let panel = div()
-            .flex_col()
-            .w(panel_w)
-            .bg(tc.elevated_surface)
-            .border(tc.border)
-            .rounded(Rad::XL)
-            .shadow_preset(Shadow::MODAL)
-            .overflow_hidden()
-            .on_click(NoopAction)
-            .id("palette")
-            .test_id("palette")
-            .semantic_role(SemanticRole::Dialog)
-            .focus_scope("quark.palette")
-            .trap_focus(true)
-            .accessibility_role(accesskit::Role::Dialog)
-            .accessibility_id("palette")
-            .accessibility_label(quark_ui::i18n::tr("quark-command-palette"))
-            .child(
-                div()
-                    .flex_row()
-                    .items_center()
-                    .gap((Sp::SM * scale).round())
-                    .px((Sp::MD * scale).round())
-                    .border_b(tc.border_variant)
-                    .child(svg_icon(quark_ui::icons::lucide::SEARCH, Ico::SM).color(tc.icon))
-                    .child(div().flex_1().min_w(0.0).child(input)),
-            )
-            .child(div().p((Sp::XS * scale).round()).child(list));
-
-        Some(
-            div()
-                .absolute()
-                .top(0.0)
-                .left(0.0)
-                .w(width)
-                .h(height)
-                .z_index(400)
-                .flex_col()
-                .items_center()
-                .pt((Sz::MODAL_TOP_OFFSET * scale).round())
-                .bg(tc.overlay_scrim)
-                .id("palette.backdrop")
-                .test_id("palette-backdrop")
-                .on_click(on_event(PaletteEvent::Dismiss))
-                .block_mouse()
-                .child(panel)
-                .into_any(),
-        )
+        Some(view! {
+            <div class="absolute top-0 left-0" w={width} h={height} z_index={400}
+                 class="flex-col items-center" pt={(Sz::MODAL_TOP_OFFSET * scale).round()}
+                 bg={tc.overlay_scrim} id="palette.backdrop" test_id="palette-backdrop"
+                 on:click={on_event(PaletteEvent::Dismiss)} block_mouse>
+                <div class="flex-col" w={panel_w} bg={tc.elevated_surface} border={tc.border}
+                     rounded={Rad::XL} shadow_preset={Shadow::MODAL} class="overflow-hidden"
+                     on:click={NoopAction} id="palette" test_id="palette" role="dialog"
+                     focus_scope="quark.palette" trap_focus={true}
+                     accessibility_role={accesskit::Role::Dialog} accessibility_id="palette"
+                     aria-label={quark_ui::i18n::tr("quark-command-palette")}>
+                    <div class="flex-row items-center" gap={(Sp::SM * scale).round()}
+                         px={(Sp::MD * scale).round()} border_b={tc.border_variant}>
+                        <icon svg={quark_ui::icons::lucide::SEARCH} size={Ico::SM} color={tc.icon} />
+                        <div class="flex-1 min-w-0">
+                            <text_input(quark_ui::i18n::tr("quark-command-palette"), "")
+                                field={&self.query} placeholder={self.placeholder.clone()}
+                                focus_target={PALETTE_INPUT} focused={focused} search={true} bare
+                                class="w-full" h={(Sz::INPUT * scale).round()} />
+                        </div>
+                    </div>
+                    <div p={(Sp::XS * scale).round()}>
+                        <div class="flex-col w-full" h={list_h} class="overflow-hidden"
+                             id="palette-results" test_id="palette-results" role="scrollarea"
+                             accessibility_role={accesskit::Role::ListBox}
+                             accessibility_id="palette-results"
+                             aria-label={quark_ui::i18n::tr("quark-results")}
+                             on:scroll={ScrollActionBuilder::new({
+                                 let scroll = on_event(PaletteEvent::Scroll(1));
+                                 let up = on_event(PaletteEvent::Scroll(-1));
+                                 // The callback must be 'static, so the two actions are
+                                 // built up front; a multi-line delta moves one row.
+                                 move |lines| {
+                                     if lines < 0 {
+                                         up.clone()
+                                     } else {
+                                         scroll.clone()
+                                     }
+                                 }
+                             })}>
+                            if self.rows.is_empty() {
+                                <div h={row_h} px={(Sp::MD * scale).round()} class="items-center flex-row">
+                                    <text class="text-sm" color={tc.text_muted}>
+                                        {quark_ui::i18n::tr("quark-no-results")}
+                                    </text>
+                                </div>
+                            }
+                            for row in self.scroll_top..end {
+                                match self.rows[row] {
+                                    Row::Header(section) => {
+                                        <div class="flex-row items-center shrink-0" h={row_h}
+                                             px={(Sp::MD * scale).round()}>
+                                            <text class="text-xs font-medium" color={tc.text_muted}>
+                                                {match section {
+                                                    Some(s) => self.sections[s as usize].title.as_str(),
+                                                    None => "Recent",
+                                                }}
+                                            </text>
+                                        </div>
+                                    }
+                                    Row::Item(m) => {
+                                        {self.item_row(row, self.matches[m as usize], row_h, theme, &on_event)}
+                                    }
+                                }
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        })
     }
 
     fn item_row(
@@ -973,80 +924,100 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let hint = self.hints[found.item as usize].as_deref();
         let base = if selected { tc.text_strong } else { tc.text };
 
-        let mut el = div()
-            .flex_row()
-            .items_center()
-            .flex_shrink_0()
-            .w_full()
-            .h(row_h)
-            .gap((Sp::SM * scale).round())
-            .px((Sp::MD * scale).round())
-            .rounded(Rad::MD)
-            .bg(if selected {
-                tc.sidebar_row_selected
-            } else {
-                Color::TRANSPARENT
-            })
-            .on_click(on_event(PaletteEvent::Activate(row)))
-            .cursor(CursorHint::Pointer)
-            .key(item.key.to_string())
-            .test_id("palette-item")
-            .semantic_role(SemanticRole::ListBoxOption)
-            .accessibility_role(accesskit::Role::ListBoxOption)
-            .accessibility_label(item.title.clone())
-            .accessibility_selected(selected);
-        if !selected {
-            el = el.hover_bg(tc.sidebar_row_hover);
+        view! {
+            <div class="flex-row items-center shrink-0 w-full" h={row_h}
+                 gap={(Sp::SM * scale).round()} px={(Sp::MD * scale).round()} rounded={Rad::MD}
+                 bg={if selected { tc.sidebar_row_selected } else { Color::TRANSPARENT }}
+                 on:click={on_event(PaletteEvent::Activate(row))} class="cursor-pointer"
+                 key={item.key.to_string()} test_id="palette-item" role="option"
+                 accessibility_role={accesskit::Role::ListBoxOption}
+                 aria-label={item.title.clone()} aria-selected={selected}
+                 @when {!selected} { hover_bg={tc.sidebar_row_hover} }>
+                if let Some(svg) = item.icon {
+                    <icon svg={svg} size={Ico::SM} color={tc.icon} />
+                }
+                {highlighted_title(&item.title, highlights, base, tc.accent)}
+                if let Some(subtitle) = &item.subtitle {
+                    <text class="text-xs truncate" color={tc.text_muted}>{subtitle.as_str()}</text>
+                }
+                if let Some(hint) = hint {
+                    <text class="text-xs font-mono" color={tc.text_muted}>{hint}</text>
+                }
+            </div>
         }
-        if let Some(svg) = item.icon {
-            el = el.child(svg_icon(svg, Ico::SM).color(tc.icon));
-        }
-        el = el.child(highlighted_title(&item.title, highlights, base, tc.accent));
-        if let Some(subtitle) = &item.subtitle {
-            el = el.child(
-                text(subtitle.as_str())
-                    .text_xs()
-                    .truncate()
-                    .color(tc.text_muted),
-            );
-        }
-        if let Some(hint) = hint {
-            el = el.child(text(hint).text_xs().mono().color(tc.text_muted));
-        }
-        el.into_any()
     }
 }
 
 /// `title` as a row of text runs with the characters at byte offsets
 /// `highlights` (ascending) in `accent`.
 fn highlighted_title(title: &str, highlights: &[u32], base: Color, accent: Color) -> AnyElement {
-    let mut row = div().flex_row().flex_1().min_w(0.0).overflow_hidden();
     if highlights.is_empty() {
-        return row
-            .child(text(title).text_sm().truncate().color(base))
-            .into_any();
+        return view! {
+            <div class="flex-row flex-1 min-w-0 overflow-hidden">
+                <text class="text-sm truncate" color={base}>{title}</text>
+            </div>
+        };
     }
+    view! {
+        <div class="flex-row flex-1 min-w-0 overflow-hidden">
+            for (run, range) in title_runs(title, highlights) {
+                match run {
+                    Run::Plain => <text class="text-sm" color={base}>{&title[range]}</text>
+                    Run::Match => {
+                        <text class="text-sm font-semibold" color={accent}>{&title[range]}</text>
+                    }
+                    Run::Tail => <text class="text-sm truncate" color={base}>{&title[range]}</text>
+                }
+            }
+        </div>
+    }
+}
+
+/// A run of [`highlighted_title`]: matched characters, the plain text
+/// between matches, or the plain text after the last match.
+#[derive(Clone, Copy)]
+enum Run {
+    Plain,
+    Match,
+    Tail,
+}
+
+/// The runs of `title` in order. Adjacent matched characters merge into
+/// one run.
+fn title_runs<'a>(
+    title: &'a str,
+    highlights: &'a [u32],
+) -> impl Iterator<Item = (Run, std::ops::Range<usize>)> + 'a {
     let mut cursor = 0;
     let mut i = 0;
-    while i < highlights.len() {
-        let start = highlights[i] as usize;
-        let mut end = start + title[start..].chars().next().map_or(0, char::len_utf8);
-        // Merge adjacent matched characters into one run.
-        while i + 1 < highlights.len() && highlights[i + 1] as usize == end {
+    let mut pending = None;
+    std::iter::from_fn(move || {
+        if let Some(run) = pending.take() {
+            return Some(run);
+        }
+        if i < highlights.len() {
+            let start = highlights[i] as usize;
+            let mut end = start + title[start..].chars().next().map_or(0, char::len_utf8);
+            while i + 1 < highlights.len() && highlights[i + 1] as usize == end {
+                i += 1;
+                end += title[end..].chars().next().map_or(0, char::len_utf8);
+            }
             i += 1;
-            end += title[end..].chars().next().map_or(0, char::len_utf8);
+            let before = std::mem::replace(&mut cursor, end);
+            let matched = (Run::Match, start..end);
+            if before < start {
+                pending = Some(matched);
+                return Some((Run::Plain, before..start));
+            }
+            return Some(matched);
         }
-        if cursor < start {
-            row = row.child(text(&title[cursor..start]).text_sm().color(base));
+        if cursor < title.len() {
+            let tail = (Run::Tail, cursor..title.len());
+            cursor = title.len();
+            return Some(tail);
         }
-        row = row.child(text(&title[start..end]).text_sm().semibold().color(accent));
-        cursor = end;
-        i += 1;
-    }
-    if cursor < title.len() {
-        row = row.child(text(&title[cursor..]).text_sm().truncate().color(base));
-    }
-    row.into_any()
+        None
+    })
 }
 
 #[cfg(test)]

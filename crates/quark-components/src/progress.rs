@@ -56,31 +56,20 @@ impl RenderOnce for ProgressBar {
         let h = self.height;
         let v = self.value.clamp(0.0, 1.0);
 
-        let fill = div()
-            .h_full()
-            .bg(fill_color)
-            .rounded(h / 2.0)
-            .flex_grow_val(if v > 0.001 { v } else { 0.001 });
-
-        let remainder = (1.0 - v).max(0.001);
-        let empty = div().h_full().flex_grow_val(remainder);
-
-        let track = div()
-            .w_full()
-            .h(h)
-            .flex_row()
-            .bg(bg_color)
-            .rounded(h / 2.0)
-            .overflow_hidden()
-            .accessibility_role(accesskit::Role::ProgressIndicator)
-            .accessibility_numeric(NumericValue {
-                value: f64::from((v * 100.0).round()),
-                min: 0.0,
-                max: 100.0,
-                step: None,
-            })
-            .child(fill)
-            .child(empty);
+        let track = view! {
+            <div class="w-full" h={h} class="flex-row" bg={bg_color} rounded={h / 2.0}
+                 class="overflow-hidden" accessibility_role={accesskit::Role::ProgressIndicator}
+                 accessibility_numeric={NumericValue {
+                     value: f64::from((v * 100.0).round()),
+                     min: 0.0,
+                     max: 100.0,
+                     step: None,
+                 }}>
+                <div class="h-full" bg={fill_color} rounded={h / 2.0}
+                     flex_grow_val={if v > 0.001 { v } else { 0.001 }} />
+                <div class="h-full" flex_grow_val={(1.0 - v).max(0.001)} />
+            </div>
+        };
 
         if self.show_label {
             let pct = (v * 100.0).round() as u32;
@@ -93,7 +82,7 @@ impl RenderOnce for ProgressBar {
                 </div>
             }
         } else {
-            track.into_any()
+            track
         }
     }
 }
@@ -141,27 +130,18 @@ impl SegmentBar {
 impl RenderOnce for SegmentBar {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let h = self.height;
-        let mut track = div()
-            .flex_row()
-            .h(h)
-            .gap(Sz::SEPARATOR_W)
-            .overflow_hidden()
-            .rounded(h / 2.0)
-            .bg(self
-                .track_color
-                .unwrap_or(cx.theme.colors.element_background));
-        track = match self.width {
-            Some(w) => track.w(w),
-            None => track.w_full(),
-        };
-        // Flex grow splits the width left after the gaps by weight.
-        track
-            .children(
-                self.segments.into_iter().map(|(weight, color)| {
-                    div().h_full().bg(color).flex_grow_val(weight).into_any()
-                }),
-            )
-            .into_any()
+        view! {
+            <div class="flex-row" h={h} gap={Sz::SEPARATOR_W} class="overflow-hidden"
+                 rounded={h / 2.0}
+                 bg={self.track_color.unwrap_or(cx.theme.colors.element_background)}
+                 w={if let Some(w) = self.width { w }}
+                 @when {self.width.is_none()} { class="w-full" }>
+                // Flex grow splits the width left after the gaps by weight.
+                for (weight, color) in self.segments {
+                    <div class="h-full" bg={color} flex_grow_val={weight} />
+                }
+            </div>
+        }
     }
 }
 

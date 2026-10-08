@@ -6,11 +6,10 @@
 //! emits the app's action for the new choice; the app moves focus with it,
 //! to [`radio_focus_id`], so screen readers follow.
 
-use quark::TabStop;
+use quark::{TabStop, view};
 use quark_ui::element::text;
-use quark_ui::element::{AnyElement, CursorHint, ElementContext, IntoAnyElement, RenderOnce, div};
+use quark_ui::element::{AnyElement, ElementContext, IntoAnyElement, RenderOnce, div};
 use quark_ui::style::Styled;
-use quark_ui::theme::Color;
 use quark_ui::{Action, FocusId};
 
 use crate::list_nav;
@@ -94,81 +93,53 @@ impl RenderOnce for RadioGroup {
             .filter(|&i| i < options.len() && !disabled(i))
             .or_else(|| list_nav::step(options.len(), None, 1, false, disabled));
 
-        let mut group = div()
-            .flex_col()
-            .gap(m.spacing_sm)
-            .accessibility_id(self.id.clone())
-            .test_id("radio-group")
-            .accessibility_role(accesskit::Role::RadioGroup)
-            .accessibility_label(self.label.clone());
-        if self.horizontal {
-            group = group.flex_row().gap(m.spacing_lg);
-        }
-        if let Some(next) = list_nav::step(options.len(), current, 1, true, disabled) {
-            let action = (self.on_select)(next);
-            group = group
-                .on_key("arrowdown", action.clone())
-                .on_key("arrowright", action);
-        }
-        if let Some(previous) = list_nav::step(options.len(), current, -1, true, disabled) {
-            let action = (self.on_select)(previous);
-            group = group
-                .on_key("arrowup", action.clone())
-                .on_key("arrowleft", action);
-        }
-
         let size = (m.ui_font_size * 1.125).round();
         let dot = (size * 0.45).round();
-        for (i, option) in options.iter().enumerate() {
-            let checked = self.selected == Some(i);
-            let (ring, fill) = match (option.disabled, checked) {
-                (true, _) => (tc.border_variant, tc.text_muted),
-                (false, true) => (tc.accent, tc.accent),
-                (false, false) => (tc.border, Color::TRANSPARENT),
-            };
-            let circle = div()
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .w(size)
-                .h(size)
-                .rounded(size / 2.0)
-                .border(ring)
-                .when(checked, |c| {
-                    c.child(div().w(dot).h(dot).rounded(dot / 2.0).bg(fill))
-                });
-            let mut item = div()
-                .flex_row()
-                .items_center()
-                .gap(m.spacing_sm)
-                .rounded(m.control_radius)
-                .accessibility_id(format!("{}-{i}", self.id))
-                .test_id("radio")
-                .accessibility_role(accesskit::Role::RadioButton)
-                .accessibility_label(option.label.clone())
-                .accessibility_toggled(checked)
-                .accessibility_disabled(option.disabled)
-                .child(circle)
-                .child(
-                    text(option.label.clone())
-                        .text_sm()
-                        .color(if option.disabled {
-                            tc.text_muted
-                        } else {
-                            tc.text
-                        }),
-                );
-            if !option.disabled {
-                item = item
-                    .focus_ring(list_nav::item_focus(base, i))
-                    .cursor(CursorHint::Pointer)
-                    .on_click((self.on_select)(i));
-                if tab_stop != Some(i) {
-                    item = item.tab_stop(TabStop::disabled(0));
+        view! {
+            <div class="flex-col" gap={m.spacing_sm} accessibility_id={self.id.clone()}
+                 test_id="radio-group" accessibility_role={accesskit::Role::RadioGroup}
+                 aria-label={self.label.clone()}
+                 @when {self.horizontal} { class="flex-row" gap={m.spacing_lg} }
+                 @when {let Some(action) =
+                     list_nav::step(options.len(), current, 1, true, disabled).map(&self.on_select)}
+                 {
+                     on_key={("arrowdown", action.clone())} on_key={("arrowright", action)}
+                 }
+                 @when {let Some(action) =
+                     list_nav::step(options.len(), current, -1, true, disabled).map(&self.on_select)}
+                 {
+                     on_key={("arrowup", action.clone())} on_key={("arrowleft", action)}
+                 }>
+                for (i, option) in options.iter().enumerate() {
+                    <div class="flex-row items-center" gap={m.spacing_sm} rounded={m.control_radius}
+                         accessibility_id={format!("{}-{i}", self.id)} test_id="radio"
+                         accessibility_role={accesskit::Role::RadioButton}
+                         aria-label={option.label.clone()} aria-checked={self.selected == Some(i)}
+                         aria-disabled={option.disabled}
+                         @when {!option.disabled} {
+                             focus_ring={list_nav::item_focus(base, i)} class="cursor-pointer"
+                             on:click={(self.on_select)(i)}
+                             @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
+                         }>
+                        <div class="shrink-0 items-center justify-center" w={size} h={size}
+                             rounded={size / 2.0}
+                             border={match (option.disabled, self.selected == Some(i)) {
+                                 (true, _) => tc.border_variant,
+                                 (false, true) => tc.accent,
+                                 (false, false) => tc.border,
+                             }}>
+                            if self.selected == Some(i) {
+                                <div w={dot} h={dot} rounded={dot / 2.0}
+                                     bg={if option.disabled { tc.text_muted } else { tc.accent }} />
+                            }
+                        </div>
+                        <text class="text-sm"
+                              color={if option.disabled { tc.text_muted } else { tc.text }}>
+                            {option.label.clone()}
+                        </text>
+                    </div>
                 }
-            }
-            group = group.child(item);
+            </div>
         }
-        group.into_any()
     }
 }

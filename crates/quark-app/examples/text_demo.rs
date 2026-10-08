@@ -17,6 +17,7 @@
 use std::path::PathBuf;
 
 use accesskit::Role;
+use quark::view;
 use quark_app::quark_ui::element::{
     AnyElement, Binding, IntoAnyElement, ScrollActionBuilder, div, text,
 };
@@ -260,37 +261,22 @@ impl TextDemo {
     fn button(label: impl Into<String>, msg: Msg, on: bool, theme: &Theme) -> AnyElement {
         let label = label.into();
         let colors = &theme.colors;
-        div()
-            .accessibility_role(Role::Button)
-            .accessibility_label(label.clone())
-            .on_click(msg)
-            .px(10.0)
-            .h(ROW_H)
-            .items_center()
-            .justify_center()
-            .rounded(6.0)
-            .bg(if on {
-                colors.accent
-            } else {
-                colors.element_background
-            })
-            .hover_bg(colors.element_hover)
-            .child(
-                text(label)
-                    .text_sm()
-                    .color(if on { colors.text_strong } else { colors.text }),
-            )
-            .into_any()
+        view! {
+            <div accessibility_role={Role::Button} aria-label={label.clone()} on:click={msg}
+                 class="px-[10] h-[ROW_H] items-center justify-center rounded-[6]"
+                 bg={if on { colors.accent } else { colors.element_background }}
+                 hover_bg={colors.element_hover}>
+                <text class="text-sm" color={if on { colors.text_strong } else { colors.text }}>
+                    {label}
+                </text>
+            </div>
+        }
     }
 
     fn row(children: Vec<AnyElement>) -> AnyElement {
-        div()
-            .flex_row()
-            .items_center()
-            .gap(GAP)
-            .h(ROW_H)
-            .children(children)
-            .into_any()
+        view! {
+            <div class="flex-row items-center gap-[GAP] h-[ROW_H]">{...children}</div>
+        }
     }
 
     fn toolbar(&self, theme: &Theme) -> Vec<AnyElement> {
@@ -369,9 +355,9 @@ impl TextDemo {
                 ),
                 Self::button(spelling, Msg::Spelling, false, theme),
             ]),
-            Self::row(vec![
-                text(sample).text_sm().color(colors.text_muted).into_any(),
-            ]),
+            Self::row(vec![view! {
+                <text class="text-sm" color={colors.text_muted}>{sample}</text>
+            }]),
         ]
     }
 }
@@ -397,30 +383,27 @@ impl UiApp for TextDemo {
         self.editor.sync_size(editor_w, editor_h);
         self.editor.flush(&mut cx.frame.text().system);
 
-        let editor = text_editor_element(
-            INPUT,
-            ScrollActionBuilder::new(|lines| Msg::Scroll(lines).into()),
-        )
-        .editor_snapshot(&self.editor)
-        .placeholder("Write something")
-        .focused(cx.is_focused(INPUT))
-        .text_color(colors.text)
-        .font_size(self.font_size)
-        .w(editor_w)
-        .h(editor_h);
-        let mut root = div()
-            .w(width)
-            .h(height)
-            .flex_col()
-            .p(PAD)
-            .gap(GAP)
-            .bg(colors.background)
-            .children(self.toolbar(theme))
-            .child(div().bg(colors.editor_surface).rounded(8.0).child(editor));
-        if let Some(menu) = self.menu.render((width, height), theme) {
-            root = root.child(menu);
+        view! {
+            <div w={width} h={height} class="flex-col p-[PAD] gap-[GAP] bg-[colors.background]">
+                {...self.toolbar(theme)}
+                <div class="bg-[colors.editor_surface] rounded-[8]">
+                    <text_editor_element(
+                        INPUT,
+                        ScrollActionBuilder::new(|lines| Msg::Scroll(lines).into()),
+                    )
+                        editor_snapshot={&self.editor}
+                        placeholder="Write something"
+                        focused={cx.is_focused(INPUT)}
+                        text_color={colors.text}
+                        font_size={self.font_size}
+                        w={editor_w}
+                        h={editor_h} />
+                </div>
+                if let Some(menu) = self.menu.render((width, height), theme) {
+                    {menu}
+                }
+            </div>
         }
-        root.into_any()
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {

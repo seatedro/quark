@@ -21,9 +21,11 @@
 //! - [`accessibility`]: the AccessKit tree elements publish each frame.
 //! - [`animation`]: style transitions on the window's animation table.
 //!
-//! Elements are plain values styled through [`style::Styled`]:
+//! Elements are plain values styled through [`style::Styled`]. Views write
+//! them with `quark::view!`, which lowers markup to the same builder calls:
 //!
 //! ```
+//! use quark::view;
 //! use quark_ui::Action;
 //! use quark_ui::design::{Rad, Sp};
 //! use quark_ui::element::{AnyElement, IntoAnyElement, div, text};
@@ -35,22 +37,14 @@
 //!
 //! fn toolbar(theme: &Theme) -> AnyElement {
 //!     let colors = &theme.colors;
-//!     div()
-//!         .flex_row()
-//!         .gap(Sp::SM)
-//!         .p(Sp::MD)
-//!         .bg(colors.surface)
-//!         .child(
-//!             div()
-//!                 .test_id("toolbar.save")
-//!                 .on_click(Action::new(Save))
-//!                 .px(Sp::LG)
-//!                 .rounded(Rad::XL)
-//!                 .bg(colors.accent)
-//!                 .hover_bg(colors.accent_strong)
-//!                 .child(text("Save").color(colors.text_strong).semibold()),
-//!         )
-//!         .into_any()
+//!     view! {
+//!         <div class="flex-row" gap={Sp::SM} p={Sp::MD} bg={colors.surface}>
+//!             <div test_id="toolbar.save" on:click={Action::new(Save)} px={Sp::LG}
+//!                  rounded={Rad::XL} bg={colors.accent} hover_bg={colors.accent_strong}>
+//!                 <text color={colors.text_strong} class="font-semibold">"Save"</text>
+//!             </div>
+//!         </div>
+//!     }
 //! }
 //!
 //! let _toolbar = toolbar(&Theme::default_dark());
@@ -77,6 +71,7 @@
 //! building:
 //!
 //! ```
+//! use quark::view;
 //! use quark_ui::element::{AnyElement, IntoAnyElement, cached, div, inputs_hash, text};
 //! use quark_ui::style::Styled;
 //!
@@ -87,19 +82,22 @@
 //! }
 //!
 //! fn rows(rows: &[Row], selected: Option<u64>) -> AnyElement {
-//!     div()
-//!         .flex_col()
-//!         .children(rows.iter().map(|row| {
-//!             let is_selected = selected == Some(row.id);
-//!             let label = row.label.clone();
-//!             // The hash covers everything the closure reads.
-//!             cached(row.id, inputs_hash(&(row.revision, is_selected)), move || {
-//!                 let line = text(label);
-//!                 if is_selected { line.semibold() } else { line }
-//!             })
-//!             .into_any()
-//!         }))
-//!         .into_any()
+//!     view! {
+//!         <div class="flex-col">
+//!             for row in rows {
+//!                 {row_view(row, selected == Some(row.id))}
+//!             }
+//!         </div>
+//!     }
+//! }
+//!
+//! fn row_view(row: &Row, is_selected: bool) -> AnyElement {
+//!     let label = row.label.clone();
+//!     // The hash covers everything the closure reads.
+//!     let build = move || view! {
+//!         <text @when {is_selected} { class="font-semibold" }>{label}</text>
+//!     };
+//!     view! { <cached(row.id, inputs_hash(&(row.revision, is_selected)), build) /> }
 //! }
 //!
 //! let _list = rows(&[Row { id: 1, revision: 0, label: "first".into() }], Some(1));

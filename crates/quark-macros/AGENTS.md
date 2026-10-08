@@ -48,6 +48,12 @@ the `quark` crate and quark-ui's element builders must provide.
   E0277 with the `on_unimplemented` message.
 - Multi-child `if`/`match` branches and fragments spread children into the
   parent, never into a wrapper `div()`: wrapping changes layout.
+- Control flow among an element's children lowers to statements that call
+  `.child(..)` on the parent builder in place (`Sink` in `emit.rs`). Do not
+  collect branches or loop bodies into a `Vec`: views run every frame and
+  the frame budget tests count allocations.
+- `<name(args)>` (lowercase, with arguments) calls the function `name` in
+  scope and lowers like a builder component.
 - Reactive attributes use `name={@signal}` and lower to `cx.read(signal)`.
 - Input the macro cannot lower faithfully is a spanned compile error, and
   any error replaces the whole expansion.

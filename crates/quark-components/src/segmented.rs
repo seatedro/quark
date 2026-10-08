@@ -4,7 +4,7 @@
 //! and Right move the selection (wrapping), emitting the new segment's
 //! action. The app moves focus to [`segmented_focus_id`] with it.
 
-use quark::{SemanticRole, TabStop};
+use quark::{TabStop, view};
 use quark_ui::Action;
 use quark_ui::FocusId;
 use quark_ui::design::{Rad, Sp};
@@ -76,67 +76,41 @@ impl RenderOnce for SegmentedControl {
         let current = focused.or(selected);
         let tab_stop = selected.or((len > 0).then_some(0));
 
-        let mut row = div()
-            .flex_row()
-            .flex_shrink_0()
-            .items_center()
-            .overflow_hidden()
-            .id(self.id.clone())
-            .test_id("segmented-control")
-            .semantic_role(SemanticRole::RadioGroup)
-            .accessibility_role(accesskit::Role::RadioGroup)
-            .accessibility_id(self.id.clone())
-            .bg(tc.element_background)
-            .rounded(Rad::XL * scale)
-            .p(Sp::XXS * scale)
-            .gap(Sp::XXS * scale);
-        for (key, delta) in [("arrowright", 1), ("arrowleft", -1)] {
-            if let Some(to) = list_nav::step(len, current, delta, true, |_| false) {
-                row = row.on_key(key, self.items[to].action.clone());
-            }
+        view! {
+            <div class="flex-row shrink-0 items-center overflow-hidden" id={self.id.clone()}
+                 test_id="segmented-control" role="radiogroup"
+                 accessibility_role={accesskit::Role::RadioGroup}
+                 accessibility_id={self.id.clone()} bg={tc.element_background}
+                 rounded={Rad::XL * scale} p={Sp::XXS * scale} gap={Sp::XXS * scale}
+                 @when {let Some(to) = list_nav::step(len, current, 1, true, |_| false)} {
+                     on_key={("arrowright", self.items[to].action.clone())}
+                 }
+                 @when {let Some(to) = list_nav::step(len, current, -1, true, |_| false)} {
+                     on_key={("arrowleft", self.items[to].action.clone())}
+                 }>
+                for (i, item) in self.items.into_iter().enumerate() {
+                    <div class="flex-1 items-center justify-center"
+                         id={format!("segmented:{:?}:{}", item.action, item.label)}
+                         key={item.label.clone()} test_id="segmented-item" role="radio"
+                         px={Sp::MD * scale} py={Sp::XXS * scale} rounded={Rad::LG * scale}
+                         focus_ring={list_nav::item_focus(base, i)}
+                         accessibility_role={accesskit::Role::RadioButton}
+                         accessibility_id={format!("segmented:{:?}:{}", item.action, item.label)}
+                         aria-label={item.label.clone()} aria-selected={item.selected}
+                         aria-checked={item.selected} class="cursor-pointer" on:click={item.action}
+                         @when {item.selected} { bg={tc.ghost_element_hover} }
+                         @when {!item.selected} {
+                             hover_bg={tc.ghost_element_hover} hover_text_color={tc.text}
+                         }
+                         @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
+                         @when {let Some(tip) = item.tooltip_text} { tooltip={tip} }>
+                        <text class="text-sm font-medium"
+                              color={if item.selected { tc.text } else { tc.text_muted }}>
+                            {item.label}
+                        </text>
+                    </div>
+                }
+            </div>
         }
-
-        for (i, item) in self.items.into_iter().enumerate() {
-            let mut segment = div()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .id(format!("segmented:{:?}:{}", item.action, item.label))
-                .key(item.label.clone())
-                .test_id("segmented-item")
-                .semantic_role(SemanticRole::RadioButton)
-                .px(Sp::MD * scale)
-                .py(Sp::XXS * scale)
-                .rounded(Rad::LG * scale)
-                .focus_ring(list_nav::item_focus(base, i))
-                .accessibility_role(accesskit::Role::RadioButton)
-                .accessibility_id(format!("segmented:{:?}:{}", item.action, item.label))
-                .accessibility_label(item.label.clone())
-                .accessibility_selected(item.selected)
-                .accessibility_toggled(item.selected)
-                .cursor(CursorHint::Pointer)
-                .on_click(item.action);
-            if item.selected {
-                segment = segment.bg(tc.ghost_element_hover);
-            } else {
-                segment = segment
-                    .hover_bg(tc.ghost_element_hover)
-                    .hover_text_color(tc.text);
-            }
-            if tab_stop != Some(i) {
-                segment = segment.tab_stop(TabStop::disabled(0));
-            }
-            if let Some(tip) = item.tooltip_text {
-                segment = segment.tooltip(tip);
-            }
-            row = row.child(segment.child(text(item.label).text_sm().medium().color(
-                if item.selected {
-                    tc.text
-                } else {
-                    tc.text_muted
-                },
-            )));
-        }
-        row.into_any()
     }
 }

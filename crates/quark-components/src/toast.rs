@@ -352,32 +352,7 @@ impl RenderOnce for ToastVisuals {
         let badge_bg = accent.with_alpha(Alpha::TINT);
         let track_bg = tc.border.with_alpha(Alpha::SOFT);
 
-        let title_children: Vec<AnyElement> = self
-            .title_lines
-            .into_iter()
-            .map(|line| {
-                text(line)
-                    .text_sm()
-                    .medium()
-                    .truncate()
-                    .color(tc.text_strong)
-                    .into_any()
-            })
-            .collect();
-
-        let desc_children: Vec<AnyElement> = self
-            .description_lines
-            .into_iter()
-            .map(|line| {
-                text(line)
-                    .text_xs()
-                    .truncate()
-                    .color(tc.text_muted)
-                    .into_any()
-            })
-            .collect();
-
-        let has_description = !desc_children.is_empty();
+        let has_description = !self.description_lines.is_empty();
         // A live region: screen readers speak the message when the toast
         // appears, interrupting for errors.
         let (role, politeness) = match self.kind {
@@ -385,29 +360,6 @@ impl RenderOnce for ToastVisuals {
             ToastKind::Error => (accesskit::Role::Alert, Politeness::Assertive),
         };
         let toast_id = self.id;
-        let action_buttons: Vec<AnyElement> = self
-            .actions
-            .into_iter()
-            .map(|(label, action)| {
-                div()
-                    .flex_row()
-                    .items_center()
-                    .flex_shrink_0()
-                    .h(ACTION_H)
-                    .px(Sp::SM)
-                    .rounded(Rad::MD)
-                    .border(tc.border)
-                    .hover_bg(tc.ghost_element_hover)
-                    .on_click(action)
-                    .cursor(CursorHint::Pointer)
-                    .accessibility_id(format!("toast-action:{toast_id}:{label}"))
-                    .accessibility_role(accesskit::Role::Button)
-                    .accessibility_label(label.clone())
-                    .child(text(label).text_xs().medium().color(tc.text_strong))
-                    .into_any()
-            })
-            .collect();
-
         view! { scale,
             <div class="absolute"
                 h={self.height}
@@ -444,15 +396,33 @@ impl RenderOnce for ToastVisuals {
                     </div>
 
                     <div class="flex-1 flex-col" min-w={0.0}>
-                        {...title_children}
+                        for line in self.title_lines {
+                            <text class="text-sm font-medium truncate" color={tc.text_strong}>
+                                {line}
+                            </text>
+                        }
                         if has_description {
                             <div class="flex-col" pt={DESC_GAP} min-w={0.0}>
-                                {...desc_children}
+                                for line in self.description_lines {
+                                    <text class="text-xs truncate" color={tc.text_muted}>{line}</text>
+                                }
                             </div>
                         }
                     </div>
 
-                    {...action_buttons}
+                    for (label, action) in self.actions {
+                        // Classes, not `px`/`rounded` attributes: this view scales
+                        // spatial attributes, and the action buttons are unscaled.
+                        <div class="flex-row items-center shrink-0" h={ACTION_H}
+                             class="px-[Sp::SM] rounded-[Rad::MD]" border={tc.border}
+                             hover_bg={tc.ghost_element_hover}
+                             on:click={action} cursor={CursorHint::Pointer}
+                             accessibility_id={format!("toast-action:{toast_id}:{label}")}
+                             accessibility_role={accesskit::Role::Button}
+                             aria-label={label.clone()}>
+                            <text class="text-xs font-medium" color={tc.text_strong}>{label}</text>
+                        </div>
+                    }
 
                     <div class="flex-row items-center justify-center shrink-0"
                         w={CLOSE_SIZE} h={CLOSE_SIZE}

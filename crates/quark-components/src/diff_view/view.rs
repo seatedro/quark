@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use accesskit::Role;
+use quark::view;
 use quark_diff::{GapId, Mode, Reveal, RowKind, Side};
 use quark_render::scene::{Rect, RichTextPrimitive, ShapedText};
 use quark_render::{FontKind, RoundedRectPrimitive, Scene};
@@ -145,16 +146,16 @@ pub fn diff_view(
 ) -> AnyElement {
     let (width, height) = state.viewport;
     let Some(frame) = state.frame.clone() else {
-        return div().w(width).h(height).into_any();
+        return view! { <div w={width} h={height} /> };
     };
     let colors = DiffColors::of(theme);
     // The cache watches the sideways scroll handles itself.
     let hash = inputs_hash(&(state.frame_id, env, on_event as usize));
     BoundsProbe {
-        child: cached(state.id, hash, move || build(&frame, colors, env, on_event))
-            .w(width)
-            .h(height)
-            .into_any(),
+        child: view! {
+            <cached(state.id, hash, move || build(&frame, colors, env, on_event))
+                    w={width} h={height} />
+        },
         bounds: state.bounds.clone(),
         autoscrolling: state.wants_frame(),
     }
@@ -168,98 +169,70 @@ fn build(
     on_event: fn(DiffEvent) -> Action,
 ) -> AnyElement {
     let (width, height) = frame.viewport;
-    let mut root = div()
-        .w(width)
-        .h(height)
-        .bg(colors.surface)
-        .track_focus(frame.focus)
-        // The body below is moved back by the offset, so this only feeds
-        // the wheel and the scrollbar.
-        .scroll_y(frame.scroll)
-        .scroll_total(frame.total)
-        .on_scroll(
-            ScrollActionBuilder::new(move |lines| on_event(DiffEvent::Scroll(lines)))
-                .with_to_px(move |px| on_event(DiffEvent::ScrollTo(px as f32))),
-        );
-    for &(binding, key) in KEYS {
-        root = root.on_key(binding, on_event(DiffEvent::Key(key)));
-    }
-    if env.accessible {
-        root = root
-            .accessibility_id(frame.id)
-            .accessibility_role(Role::List)
-            .accessibility_label(frame.label);
-    }
-
-    let mut body = div()
-        .w(width)
-        .h(height)
-        .relative()
-        .translate(0.0, frame.scroll)
-        .cursor(CursorHint::Text)
-        .on_drag(move |press: ClickEvent| {
-            Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
-        });
     let first_top = frame.rows.first().map_or(0.0, |r| r.top);
-    for (slot, column) in frame.columns.sides.iter().enumerate() {
-        let Some(column) = column else {
-            continue;
-        };
-        let side = if slot == 0 { Side::Old } else { Side::New };
-        let mut gutter = div()
-            .w(column.gutter_w)
-            .flex_col()
-            .translate(0.0, first_top);
-        let content_w = if frame.wrap {
-            column.text_w
-        } else {
-            frame.content_w[slot].max(column.text_w)
-        };
-        let mut lines = div().w(content_w).flex_col().translate(0.0, first_top);
-        for row in &frame.rows {
-            gutter = gutter.child(gutter_cell(frame, row, side, column.gutter_w, colors));
-            lines = lines.child(text_cell(frame, row, side, content_w, colors, env));
-        }
-        body = body.child(
-            div()
-                .absolute()
-                .left(column.gutter_x)
-                .top(0.0)
-                .w(column.gutter_w)
-                .h(height)
-                .clip()
-                .bg(colors.gutter)
-                .child(gutter),
-        );
-        let mut text_column = div()
-            .absolute()
-            .left(column.text_x)
-            .top(0.0)
-            .w(column.text_w)
-            .h(height);
-        text_column = if frame.wrap {
-            text_column.clip()
-        } else {
-            text_column
-                .track_scroll(&frame.hscroll[slot])
-                .overflow_x_scroll()
-                .scroll_total_x(content_w)
-                .scrollbar_auto_hide()
-        };
-        body = body.child(text_column.child(lines));
+    let columns = frame
+        .columns
+        .sides
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, column)| {
+            let column = column.as_ref()?;
+            let side = if slot == 0 { Side::Old } else { Side::New };
+            let content_w = if frame.wrap {
+                column.text_w
+            } else {
+                frame.content_w[slot].max(column.text_w)
+            };
+            Some((slot, column, side, content_w))
+        });
+    view! {
+        <div w={width} h={height} bg={colors.surface} track_focus={frame.focus}
+             // The body below is moved back by the offset, so this only
+             // feeds the wheel and the scrollbar.
+             scroll_y={frame.scroll} scroll_total={frame.total}
+             on:scroll={ScrollActionBuilder::new(move |lines| on_event(DiffEvent::Scroll(lines)))
+                 .with_to_px(move |px| on_event(DiffEvent::ScrollTo(px as f32)))}
+             @for &(binding, key) in KEYS { on_key={(binding, on_event(DiffEvent::Key(key)))} }
+             @when {env.accessible} {
+                 accessibility_id={frame.id} accessibility_role={Role::List}
+                 aria-label={frame.label}
+             }>
+            <div w={width} h={height} class="relative" translate={(0.0, frame.scroll)}
+                 class="cursor-text"
+                 on:drag={move |press: ClickEvent| {
+                     Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
+                 }}>
+                for (slot, column, side, content_w) in columns {
+                    <div class="absolute" left={column.gutter_x} class="top-0" w={column.gutter_w}
+                         h={height} class="overflow-clip" bg={colors.gutter}>
+                        <div w={column.gutter_w} class="flex-col" translate={(0.0, first_top)}>
+                            for row in &frame.rows {
+                                {gutter_cell(frame, row, side, column.gutter_w, colors)}
+                            }
+                        </div>
+                    </div>
+                    <div class="absolute" left={column.text_x} class="top-0" w={column.text_w}
+                         h={height}
+                         @when {frame.wrap} { class="overflow-clip" }
+                         @when {!frame.wrap} {
+                             track_scroll={&frame.hscroll[slot]} class="overflow-x-scroll"
+                             scroll_total_x={content_w} class="scrollbar-auto-hide"
+                         }>
+                        <div w={content_w} class="flex-col" translate={(0.0, first_top)}>
+                            for row in &frame.rows {
+                                {text_cell(frame, row, side, content_w, colors, env)}
+                            }
+                        </div>
+                    </div>
+                }
+                for row in frame.rows.iter().filter(|r| !r.paint.kind.is_line()) {
+                    <div class="absolute left-0" top={row.top} w={width} h={row.height}>
+                        {band(frame, row, colors, env, on_event)}
+                    </div>
+                }
+            </div>
+        </div>
     }
-    for row in frame.rows.iter().filter(|r| !r.paint.kind.is_line()) {
-        body = body.child(
-            div()
-                .absolute()
-                .left(0.0)
-                .top(row.top)
-                .w(width)
-                .h(row.height)
-                .child(band(frame, row, colors, env, on_event)),
-        );
-    }
-    root.child(body).into_any()
 }
 
 /// Cache key of one part of a row.
@@ -286,7 +259,7 @@ fn gutter_cell(
 ) -> AnyElement {
     let (height, kind) = (row.height, row.paint.kind);
     if !kind.is_line() {
-        return div().w(width).h(height).flex_shrink_0().into_any();
+        return view! { <div w={width} h={height} class="shrink-0" /> };
     }
     let mode = frame.columns.mode;
     let numbers = match mode {
@@ -296,12 +269,7 @@ fn gutter_cell(
     };
     let shown = shown_side(mode, kind, side);
     if mode == Mode::Split && numbers[side as usize] == 0 {
-        return div()
-            .w(width)
-            .h(height)
-            .flex_shrink_0()
-            .bg(colors.filler)
-            .into_any();
+        return view! { <div w={width} h={height} class="shrink-0" bg={colors.filler} /> };
     }
     let m = frame.metrics;
     let hash = inputs_hash(&(
@@ -311,22 +279,18 @@ fn gutter_cell(
         height.to_bits(),
         width.to_bits(),
     ));
-    cached(part_key(row.key, side as u64), hash, move || {
-        let mut cell = div().w(width).h(height).flex_shrink_0();
-        if let Some(bg) = colors.line(kind, shown) {
-            cell = cell.bg(bg);
+    let build = move || {
+        view! {
+            <div w={width} h={height} class="shrink-0"
+                 @when {let Some(bg) = colors.line(kind, shown)} { bg={bg} }>
+                <canvas(move |bounds, scene, cx| {
+                    paint_numbers(bounds, scene, cx, &m, mode, numbers, kind, shown, colors);
+                })
+                    w={width} h={height} />
+            </div>
         }
-        cell.child(
-            canvas(move |bounds, scene, cx| {
-                paint_numbers(bounds, scene, cx, &m, mode, numbers, kind, shown, colors);
-            })
-            .w(width)
-            .h(height),
-        )
-    })
-    .w(width)
-    .h(height)
-    .into_any()
+    };
+    view! { <cached(part_key(row.key, side as u64), hash, build) w={width} h={height} /> }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -410,15 +374,10 @@ fn text_cell(
     let mode = frame.columns.mode;
     let shown = shown_side(mode, kind, side);
     if !kind.is_line() {
-        return div().w(width).h(height).flex_shrink_0().into_any();
+        return view! { <div w={width} h={height} class="shrink-0" /> };
     }
     if row.paint.sides[shown as usize].is_none() {
-        return div()
-            .w(width)
-            .h(height)
-            .flex_shrink_0()
-            .bg(colors.filler)
-            .into_any();
+        return view! { <div w={width} h={height} class="shrink-0" bg={colors.filler} /> };
     }
     let paint = row.paint.clone();
     let selected = row.selected[shown as usize];
@@ -434,39 +393,34 @@ fn text_cell(
         mode,
         position,
     ));
-    cached(part_key(row.key, 2 + side as u64), hash, move || {
+    let build = move || {
         let line = paint.sides[shown as usize].as_ref().expect("shown line");
-        let mut cell = div().w(width).h(height).flex_shrink_0();
-        if let Some(bg) = colors.line(kind, shown) {
-            cell = cell.bg(bg);
+        let canvas_paint = paint.clone();
+        view! {
+            <div w={width} h={height} class="shrink-0"
+                 @when {let Some(bg) = colors.line(kind, shown)} { bg={bg} }
+                 @when {env.accessible} {
+                     accessibility_role={Role::ListItem}
+                     aria-label={line.layout.text().to_string()}
+                     aria-description={kind.description()}
+                     aria-valuetext={match (mode, paint.numbers) {
+                         (Mode::Unified, [o, n]) if o != 0 && n != 0 => {
+                             format!("old line {o}, new line {n}")
+                         }
+                         (_, [o, _]) if shown == Side::Old => format!("old line {o}"),
+                         (_, [_, n]) => format!("new line {n}"),
+                     }}
+                 }>
+                <canvas(move |bounds, scene, _cx| {
+                    if let Some(line) = &canvas_paint.sides[shown as usize] {
+                        paint_line(bounds, scene, line, shown, selected, pad, font_size, colors);
+                    }
+                })
+                    w={width} h={height} />
+            </div>
         }
-        if env.accessible {
-            let [old, new] = paint.numbers;
-            let numbers = match (mode, old, new) {
-                (Mode::Unified, o, n) if o != 0 && n != 0 => format!("old line {o}, new line {n}"),
-                (_, o, _) if shown == Side::Old => format!("old line {o}"),
-                (_, _, n) => format!("new line {n}"),
-            };
-            cell = cell
-                .accessibility_role(Role::ListItem)
-                .accessibility_label(line.layout.text().to_string())
-                .accessibility_description(kind.description())
-                .accessibility_value(numbers);
-        }
-        let paint = paint.clone();
-        cell.child(
-            canvas(move |bounds, scene, _cx| {
-                if let Some(line) = &paint.sides[shown as usize] {
-                    paint_line(bounds, scene, line, shown, selected, pad, font_size, colors);
-                }
-            })
-            .w(width)
-            .h(height),
-        )
-    })
-    .w(width)
-    .h(height)
-    .into_any()
+    };
+    view! { <cached(part_key(row.key, 2 + side as u64), hash, build) w={width} h={height} /> }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -542,80 +496,45 @@ fn band(
         env,
         on_event as usize,
     ));
-    cached(part_key(row.key, 4), hash, move || {
-        let base = div()
-            .w(width)
-            .h(height)
-            .flex_row()
-            .items_center()
-            .gap(pad * 0.5)
-            .px(pad)
-            .border_b(colors.border);
-        match paint.kind {
-            RowKind::FileHeader => {
-                let (adds, dels) = paint.stats;
-                let status = paint.status.name();
-                let mut el = base
-                    .bg(colors.file_header)
-                    .child(text(status).size(font_size * 0.85).color(colors.muted))
-                    .child(
-                        text(&*paint.title)
-                            .size(font_size)
-                            .semibold()
-                            .color(colors.text),
-                    )
-                    .child(div().flex_1());
-                if paint.binary {
-                    el = el.child(text("binary").size(font_size * 0.85).color(colors.muted));
+    let build = move || {
+        let (adds, dels) = paint.stats;
+        let status = paint.status.name();
+        let gap = (paint.kind == RowKind::Gap).then(|| paint.gap.expect("gap row"));
+        let header = paint.kind == RowKind::FileHeader;
+        view! {
+            <div w={width} h={height} class="flex-row items-center" gap={pad * 0.5} px={pad}
+                 border_b={colors.border}
+                 bg={if header { colors.file_header } else { colors.hunk_header }}
+                 @when {header && env.accessible} {
+                     accessibility_id={format!("{id}.file.{}", paint.file)}
+                     accessibility_role={Role::Heading}
+                     aria-label={format!("{}, {status}, {adds} added, {dels} removed", paint.title)}
+                 }>
+                if header {
+                    <text size={font_size * 0.85} color={colors.muted}>{status}</text>
+                    <text size={font_size} class="font-semibold" color={colors.text}>
+                        {&*paint.title}
+                    </text>
+                    <div class="flex-1" />
+                    if paint.binary {
+                        <text size={font_size * 0.85} color={colors.muted}>"binary"</text>
+                    }
+                    <text size={font_size} color={colors.add_text}>"+{adds}"</text>
+                    <text size={font_size} color={colors.del_text}>"-{dels}"</text>
+                } else {
+                    if let Some(gap) = gap {
+                        for (reveal, icon, label) in gap_controls(gap) {
+                            {expand_button(gap, reveal, icon, label, height, colors, env, on_event)}
+                        }
+                    }
+                    <text size={font_size * 0.9} class="font-mono" color={colors.muted}>
+                        {&*paint.title}
+                    </text>
                 }
-                el = el
-                    .child(
-                        text(format!("+{adds}"))
-                            .size(font_size)
-                            .color(colors.add_text),
-                    )
-                    .child(
-                        text(format!("-{dels}"))
-                            .size(font_size)
-                            .color(colors.del_text),
-                    );
-                if env.accessible {
-                    el = el
-                        .accessibility_id(format!("{id}.file.{}", paint.file))
-                        .accessibility_role(Role::Heading)
-                        .accessibility_label(format!(
-                            "{}, {status}, {adds} added, {dels} removed",
-                            paint.title
-                        ));
-                }
-                el
-            }
-            RowKind::Gap => {
-                let gap = paint.gap.expect("gap row");
-                let mut el = base.bg(colors.hunk_header);
-                for (reveal, icon, label) in gap_controls(gap) {
-                    el = el.child(expand_button(
-                        gap, reveal, icon, label, height, colors, env, on_event,
-                    ));
-                }
-                el.child(
-                    text(&*paint.title)
-                        .size(font_size * 0.9)
-                        .mono()
-                        .color(colors.muted),
-                )
-            }
-            _ => base.bg(colors.hunk_header).child(
-                text(&*paint.title)
-                    .size(font_size * 0.9)
-                    .mono()
-                    .color(colors.muted),
-            ),
+            </div>
         }
-    })
-    .w(width)
-    .h(height)
-    .into_any()
+    };
+    view! { <cached(part_key(row.key, 4), hash, build) w={width} h={height} /> }
 }
 
 /// The expand controls of a gap: up and down between hunks, down only
@@ -654,22 +573,13 @@ fn expand_button(
     on_event: fn(DiffEvent) -> Action,
 ) -> AnyElement {
     let size = (height - 6.0).max(12.0);
-    let mut button = div()
-        .w(size)
-        .h(size)
-        .rounded(4.0)
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .hover_bg(colors.hover)
-        .on_click(on_event(DiffEvent::Expand(gap, reveal)))
-        .child(svg_icon(icon, (size * 0.7).round()).color(colors.muted));
-    if env.accessible {
-        button = button
-            .accessibility_role(Role::Button)
-            .accessibility_label(label);
+    view! {
+        <div w={size} h={size} rounded={4.0} class="flex-row items-center justify-center"
+             hover_bg={colors.hover} on:click={on_event(DiffEvent::Expand(gap, reveal))}
+             @when {env.accessible} { accessibility_role={Role::Button} aria-label={label} }>
+            <icon svg={icon} size={(size * 0.7).round()} color={colors.muted} />
+        </div>
     }
-    button.into_any()
 }
 
 /// A drag that selects text. The press is reported at press time so the

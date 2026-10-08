@@ -12,16 +12,17 @@ A div publishes a node when it has an accessibility role; text elements
 publish label nodes on their own:
 
 ```rust
-div()
-    .accessibility_id("hello.greet")
-    .accessibility_role(AccessibilityRole::Button)
-    .accessibility_label("Greet")
-    .on_click(Msg::Greet)
+view! {
+    <div accessibility_id={id} role="button" aria-label={label} on:click={msg}>
+        <text>{label}</text>
+    </div>
+}
 ```
 
 This fragment is from [hello_ui.rs](../../crates/quark-app/examples/hello_ui.rs).
-Nodes take any `accesskit::Role` (re-exported as
-`quark_ui::accessibility::AccessibilityRole`) and publish name,
+`role` takes ARIA role names; `accessibility_role={..}` takes any
+`accesskit::Role` (re-exported as
+`quark_ui::accessibility::AccessibilityRole`). Nodes publish name,
 description, disabled, selected, checked (including mixed), expanded,
 invalid, required, read-only, modal, range values, live politeness, and
 focus. Text fields, the editor, and selectable text publish their text as

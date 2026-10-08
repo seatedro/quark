@@ -208,12 +208,27 @@ fn parse_braced_children(input: ParseStream) -> Result<Vec<Node>> {
 impl Parse for Element {
     fn parse(input: ParseStream) -> Result<Self> {
         input.parse::<Token![<]>()?;
-        let (tag, span) = parse_tag(input)?;
+        let (mut tag, span) = parse_tag(input)?;
 
         let ctor_args = if input.peek(syn::token::Paren) {
-            if !matches!(tag, Tag::Component(_)) {
-                return Err(input.error("only component tags take constructor arguments"));
-            }
+            // A lowercase name with arguments is a function call:
+            // `<canvas(paint)>`, `<widgets::panel(theme)>`.
+            tag = match tag {
+                Tag::Builtin(name) => Tag::Function(syn::Path::from(name)),
+                Tag::Component(path)
+                    if path.segments.last().is_some_and(|s| {
+                        s.ident
+                            .to_string()
+                            .starts_with(|c: char| c.is_ascii_lowercase())
+                    }) =>
+                {
+                    Tag::Function(path)
+                }
+                Tag::Slot(_) => {
+                    return Err(input.error("slot tags take no arguments"));
+                }
+                other => other,
+            };
             let content;
             parenthesized!(content in input);
             Some(content.parse_terminated(Expr::parse, Token![,])?)
@@ -268,6 +283,12 @@ impl Parse for Element {
 }
 
 fn parse_tag(input: ParseStream) -> Result<(Tag, proc_macro2::Span)> {
+    if input.peek(syn::token::Brace) {
+        let content;
+        let brace = braced!(content in input);
+        let expr: Expr = content.parse()?;
+        return Ok((Tag::Value(Box::new(expr)), brace.span.join()));
+    }
     if input.peek(Token![.]) {
         input.parse::<Token![.]>()?;
         let name = input.call(Ident::parse_any)?;
@@ -295,13 +316,14 @@ fn parse_tag(input: ParseStream) -> Result<(Tag, proc_macro2::Span)> {
 pub(crate) fn tag_name(tag: &Tag) -> String {
     match tag {
         Tag::Builtin(name) => name.to_string(),
-        Tag::Component(path) => path
+        Tag::Component(path) | Tag::Function(path) => path
             .segments
             .iter()
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::"),
         Tag::Slot(name) => format!(".{name}"),
+        Tag::Value(_) => "{..}".to_owned(),
     }
 }
 
@@ -313,6 +335,13 @@ fn parse_closing_tag(input: ParseStream, open: &Tag) -> Result<()> {
     input.parse::<Token![<]>()?;
     input.parse::<Token![/]>()?;
     let expected = tag_name(open);
+    if matches!(open, Tag::Value(_)) {
+        if !input.peek(Token![>]) {
+            return Err(input.error("an expression tag `<{..}>` closes with `</>`"));
+        }
+        input.parse::<Token![>]>()?;
+        return Ok(());
+    }
     if input.peek(Token![>]) {
         return Err(input.error(format!("expected closing tag `</{expected}>`, found `</>`")));
     }
@@ -331,7 +360,7 @@ fn parse_closing_tag(input: ParseStream, open: &Tag) -> Result<()> {
     // `</Button>` closes `<widgets::Button>`: JSX compares the whole name,
     // but repeating a module path in the closing tag is noise.
     let matches = found == expected
-        || matches!(open, Tag::Component(p) if p.segments.last().is_some_and(|s| s.ident == found));
+        || matches!(open, Tag::Component(p) | Tag::Function(p) if p.segments.last().is_some_and(|s| s.ident == found));
     if !matches {
         return Err(syn::Error::new(
             start,
@@ -345,11 +374,28 @@ fn parse_closing_tag(input: ParseStream, open: &Tag) -> Result<()> {
 impl Parse for Attr {
     fn parse(input: ParseStream) -> Result<Self> {
         // @when {condition} { attr1 attr2=val ... }
+        // @for pat in iter { attr1 attr2=val ... }
         if input.peek(Token![@]) {
             input.parse::<Token![@]>()?;
+            if input.peek(Token![for]) {
+                input.parse::<Token![for]>()?;
+                let pat = Pat::parse_multi_with_leading_vert(input)?;
+                input.parse::<Token![in]>()?;
+                let iter = Expr::parse_without_eager_brace(input)?;
+                let attrs_content;
+                braced!(attrs_content in input);
+                let mut attrs = Vec::new();
+                while !attrs_content.is_empty() {
+                    attrs.push(attrs_content.parse()?);
+                }
+                return Ok(Attr::For(Box::new(pat), iter, attrs));
+            }
             let kw: Ident = input.parse()?;
             if kw != "when" {
-                return Err(syn::Error::new(kw.span(), "expected `when` after `@`"));
+                return Err(syn::Error::new(
+                    kw.span(),
+                    "expected `when` or `for` after `@`",
+                ));
             }
             let cond_content;
             braced!(cond_content in input);

@@ -7,7 +7,7 @@
 //! opens it), and renders it with [`ContextMenuState::render`]. Clicking an
 //! item emits its action; the app closes the menu when it handles one.
 
-use quark::SemanticRole;
+use quark::view;
 
 use quark_render::Rect;
 use quark_ui::Action;
@@ -214,27 +214,6 @@ fn menu_panel(
     } else {
         format!("context-menu:{level}")
     };
-    let mut panel = div()
-        .absolute()
-        .flex_col()
-        .left(rect.x)
-        .top(rect.y)
-        .w(rect.width)
-        .z_index(250 + level as i32)
-        .py(metrics.pad_y)
-        .px(metrics.pad_y)
-        .bg(tc.elevated_surface)
-        .border(tc.border)
-        .rounded(m.panel_radius)
-        .shadow_preset(Shadow::CONTEXT_MENU)
-        .on_click(NoopAction)
-        .id(id.clone())
-        .test_id("context-menu")
-        .semantic_role(SemanticRole::Menu)
-        .accessibility_role(accesskit::Role::Menu)
-        .accessibility_id(id.clone())
-        .focus_scope(id.clone())
-        .key_context("context-menu");
     // A leading column only when some row fills it, so a menu of plain
     // items does not indent every label past an empty slot.
     let leading = entries.iter().any(|entry| match entry {
@@ -242,26 +221,25 @@ fn menu_panel(
         ContextMenuEntry::Submenu { icon, .. } => icon.is_some(),
         ContextMenuEntry::Separator => false,
     });
-    for (index, entry) in entries.iter().enumerate() {
-        let row = match entry {
-            ContextMenuEntry::Separator => div()
-                .h(metrics.separator_h)
-                .py(m.spacing_xs)
-                .px(m.spacing_sm)
-                .child(div().w_full().h(Sz::SEPARATOR_W).bg(tc.border_variant))
-                .into_any(),
-            _ => menu_row(
-                entry,
-                &id,
-                highlighted == Some(index),
-                leading,
-                metrics,
-                theme,
-            ),
-        };
-        panel = panel.child(row);
+    view! {
+        <div class="absolute flex-col" left={rect.x} top={rect.y} w={rect.width}
+             z_index={250 + level as i32} py={metrics.pad_y} px={metrics.pad_y}
+             bg={tc.elevated_surface} border={tc.border} rounded={m.panel_radius}
+             shadow_preset={Shadow::CONTEXT_MENU} on:click={NoopAction} id={id.clone()}
+             test_id="context-menu" role="menu" accessibility_role={accesskit::Role::Menu}
+             accessibility_id={id.clone()} focus_scope={id.clone()} key_context="context-menu">
+            for (index, entry) in entries.iter().enumerate() {
+                match entry {
+                    ContextMenuEntry::Separator => {
+                        <div h={metrics.separator_h} py={m.spacing_xs} px={m.spacing_sm}>
+                            <div class="w-full" h={Sz::SEPARATOR_W} bg={tc.border_variant} />
+                        </div>
+                    }
+                    _ => menu_row(entry, &id, highlighted == Some(index), leading, metrics, theme),
+                }
+            }
+        </div>
     }
-    panel.into_any()
 }
 
 fn menu_row(
@@ -312,27 +290,6 @@ fn menu_row(
         tc.icon
     };
     let accessibility_id = format!("{menu_id}:{label}");
-    let mut row = div()
-        .flex_row()
-        .items_center()
-        .flex_shrink_0()
-        .h(metrics.item_h)
-        .gap(m.spacing_sm)
-        .px(m.spacing_sm)
-        .rounded(m.spacing_xs)
-        .bg(if highlighted {
-            tc.sidebar_row_hover
-        } else {
-            Color::TRANSPARENT
-        })
-        .id(accessibility_id.clone())
-        .key(label)
-        .test_id("context-menu-item")
-        .accessibility_id(accessibility_id)
-        .accessibility_label(label)
-        .accessibility_disabled(disabled)
-        .accessibility_selected(highlighted);
-
     // The leading slot: a check mark for checkable items, else the icon.
     // An empty slot keeps labels aligned; SvgIcon scales its base size, so
     // the placeholder is the base size times the scale.
@@ -347,49 +304,47 @@ fn menu_row(
         } => None,
         _ => icon,
     };
-    row = match leading {
-        Some(svg) => row.child(svg_icon(svg, Ico::SM).color(icon_color)),
-        None if leading_slot => {
-            row.child(div().flex_shrink_0().w(Ico::SM * scale).h(Ico::SM * scale))
-        }
-        None => row,
-    };
-    row = row.child(div().flex_1().child(text(label).text_sm().color(fg)));
-
-    match entry {
+    let checkable = matches!(
+        entry,
         ContextMenuEntry::Item {
-            action,
-            shortcut,
-            checked,
+            checked: Some(_),
             ..
-        } => {
-            row = match checked {
-                Some(on) => row
-                    .semantic_role(SemanticRole::MenuItem)
-                    .accessibility_role(accesskit::Role::MenuItemCheckBox)
-                    .accessibility_toggled(*on),
-                None => row
-                    .semantic_role(SemanticRole::MenuItem)
-                    .accessibility_role(accesskit::Role::MenuItem),
-            };
-            if let Some(key) = shortcut {
-                row = row.child(text(key.as_str()).text_xs().color(tc.text_muted));
-            }
-            if !disabled {
-                row = row.on_click(action.clone()).hover_bg(tc.sidebar_row_hover);
-            }
         }
-        ContextMenuEntry::Submenu { .. } => {
-            row = row
-                .semantic_role(SemanticRole::MenuItem)
-                .accessibility_role(accesskit::Role::MenuItem)
-                .accessibility_expanded(highlighted)
-                .on_click(NoopAction)
-                .child(svg_icon(lucide::CHEVRON_RIGHT, Ico::XS).color(tc.text_muted));
-        }
-        ContextMenuEntry::Separator => {}
+    );
+    view! {
+        <div class="flex-row items-center shrink-0" h={metrics.item_h} gap={m.spacing_sm}
+             px={m.spacing_sm} rounded={m.spacing_xs}
+             bg={if highlighted { tc.sidebar_row_hover } else { Color::TRANSPARENT }}
+             id={accessibility_id.clone()} key={label} test_id="context-menu-item"
+             accessibility_id={accessibility_id} aria-label={label} aria-disabled={disabled}
+             aria-selected={highlighted} role="menuitem"
+             @when {checkable} { accessibility_role={accesskit::Role::MenuItemCheckBox} }
+             @when {!checkable} { accessibility_role={accesskit::Role::MenuItem} }
+             @when {let ContextMenuEntry::Item { checked: Some(on), .. } = entry} {
+                 aria-checked={*on}
+             }
+             @when {let ContextMenuEntry::Item { action, .. } = entry && !disabled} {
+                 on:click={action.clone()} hover_bg={tc.sidebar_row_hover}
+             }
+             @when {matches!(entry, ContextMenuEntry::Submenu { .. })} {
+                 aria-expanded={highlighted} on:click={NoopAction}
+             }>
+            match leading {
+                Some(svg) => <icon svg={svg} size={Ico::SM} color={icon_color} />
+                None if leading_slot => <div class="shrink-0" w={Ico::SM * scale} h={Ico::SM * scale} />
+                None => {}
+            }
+            <div class="flex-1">
+                <text class="text-sm" color={fg}>{label}</text>
+            </div>
+            if let ContextMenuEntry::Item { shortcut: Some(key), .. } = entry {
+                <text class="text-xs" color={tc.text_muted}>{key.as_str()}</text>
+            }
+            if let ContextMenuEntry::Submenu { .. } = entry {
+                <icon svg={lucide::CHEVRON_RIGHT} size={Ico::XS} color={tc.text_muted} />
+            }
+        </div>
     }
-    row.into_any()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -603,7 +558,6 @@ impl ContextMenuState {
         self.metrics = Metrics::new(theme, self.width);
         let metrics = self.metrics;
         let margin = theme.metrics.spacing_xs;
-        let mut layer = div().absolute().top(0.0).left(0.0);
         let mut anchor = Rect {
             x: self.x,
             y: self.y,
@@ -615,18 +569,9 @@ impl ContextMenuState {
             let entries = self.entries_at(level);
             let size = (metrics.width, metrics.panel_h(entries));
             let rect = place_anchored(anchor, size, side, 0.0, viewport, margin);
-            let highlighted = self.levels[level].highlighted;
-            layer = layer.child(menu_panel(
-                entries,
-                level,
-                rect,
-                highlighted,
-                &metrics,
-                theme,
-            ));
             // A submenu opens beside its row, with its first row level with
             // the row.
-            if let Some(row) = highlighted {
+            if let Some(row) = self.levels[level].highlighted {
                 anchor = Rect {
                     x: rect.x,
                     y: rect.y + metrics.row_top(entries, row) - metrics.pad_y,
@@ -638,7 +583,20 @@ impl ContextMenuState {
             self.levels[level].rect = rect;
         }
         self.bounds = Some(self.levels[0].rect);
-        Some(layer.into_any())
+        Some(view! {
+            <div class="absolute top-0 left-0">
+                for (level, open) in self.levels.iter().enumerate() {
+                    {menu_panel(
+                        self.entries_at(level),
+                        level,
+                        open.rect,
+                        open.highlighted,
+                        &metrics,
+                        theme,
+                    )}
+                }
+            </div>
+        })
     }
 
     /// Whether `(x, y)` is on any open panel.
