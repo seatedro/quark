@@ -46,6 +46,9 @@ points whatever the container's width, and can overflow it. Before
 automatic wrapping, text kept its natural width unless given a wrap
 width; code that relied on that needs `.no_wrap()`.
 
+`selectable_text(s)`, `selectable_rich_text(spans)`, and `<p>` wrap the same
+way and take `.no_wrap()`; their `.width(w)` is the explicit wrap width.
+
 ## Styling
 
 `quark_ui::style::Styled` gives every element the same builder methods:
