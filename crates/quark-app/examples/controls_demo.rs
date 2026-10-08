@@ -1,7 +1,8 @@
 //! Form controls from quark-components: a select with grouped and
 //! disabled options, a combobox whose options load asynchronously, a radio
-//! group, a segmented control, a switch, a slider, and a select at the
-//! bottom of the window whose list opens upward. Tab moves between
+//! group, a segmented control, a switch, a slider, and a theme select at
+//! the bottom of the window whose list opens upward; its High contrast
+//! choice follows the desktop's light or dark preference. Tab moves between
 //! controls; inside a radio group or segmented control the arrow keys move
 //! the choice. Escape closes an open list, or quits when none is open.
 //! The layout and the controls are written with `view!`.
@@ -96,7 +97,7 @@ impl ControlsDemo {
                 .disabled(label == "Quince")
         })
         .collect();
-        let themes: Rc<[SelectOption]> = ["System", "Light", "Dark"]
+        let themes: Rc<[SelectOption]> = ["System", "Light", "Dark", "High contrast"]
             .into_iter()
             .map(SelectOption::new)
             .collect();
@@ -228,6 +229,9 @@ impl UiApp for ControlsDemo {
                     match self.theme.selected() {
                         Some(1) => cx.set_theme(Theme::default_light()),
                         Some(2) => cx.set_theme(Theme::default_dark()),
+                        Some(3) => {
+                            cx.set_themes(Theme::high_contrast_light(), Theme::high_contrast_dark())
+                        }
                         _ => cx.set_themes(Theme::default_light(), Theme::default_dark()),
                     }
                 }
@@ -315,7 +319,8 @@ mod tests {
     use quark_app::quark_ui::accessibility::dump_accessibility_states;
     use quark_app::testing::{By, Node, UiTestHarness};
 
-    use quark_app::quark_ui::theme::ThemeMode;
+    use quark_app::quark_ui::theme::{Color, ThemeContrast, ThemeMode, contrast_ratio};
+    use quark_app::testing::Pixels;
 
     use super::*;
 
@@ -430,14 +435,88 @@ mod tests {
         );
     }
 
+    fn choose_theme(ui: &mut UiTestHarness<ControlsDemo>, name: &str) {
+        ui.click_node(By::role_name(Role::ComboBox, "Theme"));
+        ui.click_node(By::role_name(Role::ListBoxOption, name));
+    }
+
     #[test]
     fn choosing_a_theme_repaints_in_it() {
         let mut ui = demo();
-        for (name, mode) in [("Light", ThemeMode::Light), ("Dark", ThemeMode::Dark)] {
-            ui.click_node(By::role_name(Role::ComboBox, "Theme"));
-            ui.click_node(By::role_name(Role::ListBoxOption, name));
-            assert_eq!(ui.theme().mode, mode, "after choosing {name}");
+        let cases = [
+            ("Light", ThemeMode::Light, ThemeContrast::Standard),
+            ("Dark", ThemeMode::Dark, ThemeContrast::Standard),
+            // The harness's desktop has no preference, which reads as dark.
+            ("High contrast", ThemeMode::Dark, ThemeContrast::High),
+        ];
+        for (name, mode, contrast) in cases {
+            choose_theme(&mut ui, name);
+            let theme = ui.theme();
+            assert_eq!(
+                (theme.mode, theme.contrast),
+                (mode, contrast),
+                "after {name}"
+            );
         }
+    }
+
+    /// The physical pixel under point `(x, y)` at the harness's scale 2.
+    fn pixel_at(pixels: &Pixels, (x, y): (f32, f32)) -> Color {
+        let [r, g, b, _] = pixels.pixel((x * 2.0) as u32, (y * 2.0) as u32);
+        Color::rgba(r, g, b, 255)
+    }
+
+    // Catches a switch to high contrast leaving cached controls in the old
+    // colors, or a focus ring or highlighted option fading into what is
+    // behind it. Measured on rendered pixels: the ring two points outside
+    // the focused control against the page or list just beyond it, and the
+    // highlighted option's fill against an unhighlighted one's.
+    #[test]
+    fn high_contrast_focus_rings_and_highlighted_options_stay_visible() {
+        let mut ui = UiTestHarness::new(ControlsDemo::new(), (640.0, 560.0), 2.0);
+        choose_theme(&mut ui, "High contrast");
+        let theme = ui.theme().clone();
+        assert_eq!(focused_name(&ui).as_deref(), Some("Theme"));
+        let render = |ui: &mut UiTestHarness<ControlsDemo>| match ui.render_rgba() {
+            Ok(pixels) => Some(pixels),
+            Err(quark_render::RenderError::NoAdapter) => {
+                assert!(
+                    std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                    "QUARK_REQUIRE_GPU is set but no wgpu adapter is available"
+                );
+                eprintln!("skipping: no wgpu adapter available");
+                None
+            }
+            Err(error) => panic!("headless render failed: {error}"),
+        };
+        let Some(pixels) = render(&mut ui) else {
+            return;
+        };
+        let trigger = ui.find(By::role_name(Role::ComboBox, "Theme")).bounds;
+        let mid = trigger.x + trigger.width / 2.0;
+        let ring = pixel_at(&pixels, (mid, trigger.y - 1.0));
+        let page = pixel_at(&pixels, (mid, trigger.y - 4.0));
+        assert_eq!(ring, theme.colors.focus_border, "the trigger's ring");
+        assert!(contrast_ratio(ring, page) >= 3.0, "{ring:?} on {page:?}");
+
+        // Opening Fruit highlights and focuses its chosen option, Apple.
+        ui.click_node(By::role_name(Role::ComboBox, "Fruit"));
+        let Some(pixels) = render(&mut ui) else {
+            return;
+        };
+        let apple = ui.find(By::role_name(Role::ListBoxOption, "Apple")).bounds;
+        let pear = ui.find(By::role_name(Role::ListBoxOption, "Pear")).bounds;
+        let ring = pixel_at(&pixels, (apple.x - 1.0, apple.y + apple.height / 2.0));
+        let list = pixel_at(&pixels, (apple.x - 4.0, apple.y + apple.height / 2.0));
+        assert_eq!(ring, theme.colors.focus_border, "the option's ring");
+        assert!(contrast_ratio(ring, list) >= 3.0, "{ring:?} on {list:?}");
+        let fill = |b: quark::Rect| pixel_at(&pixels, (b.x + 3.0, b.y + b.height / 2.0));
+        let (highlighted, plain) = (fill(apple), fill(pear));
+        assert_eq!(highlighted, theme.colors.ghost_element_selected);
+        assert!(
+            contrast_ratio(highlighted, plain) >= 1.3,
+            "{highlighted:?} beside {plain:?}"
+        );
     }
 
     #[test]
