@@ -381,21 +381,27 @@ fn move_options_list_groups_in_every_host_then_a_new_window() {
     };
     let floating = group(C);
     let (left, center, right) = (group(LEFT), group(CHAT), group(A));
+    // The hidden, empty bottom region takes moves too: a tab arriving
+    // reveals it.
+    let bottom = MoveTarget::Group {
+        host: HostId::MAIN,
+        pane: dock.roots[DockRegion::Bottom.index()].groups()[0].id,
+    };
     // (payload, options)
     let cases = [
         (
             MovePayload::Panel(B),
-            vec![left, center, floating, MoveTarget::NewHost],
+            vec![left, center, bottom, floating, MoveTarget::NewHost],
         ),
         // Alone in its window: a new one would change nothing.
-        (MovePayload::Panel(C), vec![left, center, right]),
+        (MovePayload::Panel(C), vec![left, center, bottom, right]),
         (
             MovePayload::Group(pane_of(&dock, A)),
-            vec![left, center, floating, MoveTarget::NewHost],
+            vec![left, center, bottom, floating, MoveTarget::NewHost],
         ),
         (
             MovePayload::Group(pane_of(&dock, C)),
-            vec![left, center, right],
+            vec![left, center, bottom, right],
         ),
     ];
     for (payload, expected) in cases {
