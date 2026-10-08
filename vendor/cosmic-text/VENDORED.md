@@ -123,6 +123,14 @@ own pull request.
   storage; the cache's byte-limit tests in
   `quark-text/src/cache.rs` use it.
 
+- ASCII table skips (`src/shape.rs`): `shape_run`'s script scan returns at
+  once for an ASCII run (ASCII is all Common or Latin, which it skips),
+  and the left-to-right bidi check classes ASCII chars without the table
+  (only the paragraph separators among them send a line through the full
+  pass). Each table search cost about as much as shaping the char: 17% of
+  a terminal row. Remove once upstream skips them;
+  `shape::tests::ascii_runs_collect_the_scripts_a_full_scan_does` and
+  `bidi_fast_path_matches_full_pass` check every ASCII char.
 ## Not patched: bidi analysis
 
 For lines the fast path above does not take, `ShapeLine::build` runs

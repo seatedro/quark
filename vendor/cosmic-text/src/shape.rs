@@ -334,6 +334,26 @@ fn shape_fallback(
     scratch.rb_font_features = rb_font_features;
 }
 
+/// Adds the scripts of `run`'s chars to `scripts`, but for Common,
+/// Inherited, Latin, and Unknown.
+pub(crate) fn collect_scripts(run: &str, scripts: &mut Vec<Script>) {
+    // ASCII is all Common or Latin, so adds nothing; the table search per
+    // char would cost about as much as shaping it.
+    if run.is_ascii() {
+        return;
+    }
+    for c in run.chars() {
+        match c.script() {
+            Script::Common | Script::Inherited | Script::Latin | Script::Unknown => (),
+            script => {
+                if !scripts.contains(&script) {
+                    scripts.push(script);
+                }
+            }
+        }
+    }
+}
+
 fn shape_run(
     glyphs: &mut Vec<ShapeGlyph>,
     font_system: &mut FontSystem,
@@ -353,16 +373,7 @@ fn shape_run(
     let mut missing = mem::take(&mut font_system.shape_buffer.missing);
     let mut fb_missing = mem::take(&mut font_system.shape_buffer.fb_missing);
     let mut fb_glyphs = mem::take(&mut font_system.shape_buffer.fb_glyphs);
-    for c in line[start_run..end_run].chars() {
-        match c.script() {
-            Script::Common | Script::Inherited | Script::Latin | Script::Unknown => (),
-            script => {
-                if !scripts.contains(&script) {
-                    scripts.push(script);
-                }
-            }
-        }
-    }
+    collect_scripts(&line[start_run..end_run], &mut scripts);
 
     log::trace!("      Run {:?}: '{}'", &scripts, &line[start_run..end_run],);
 
@@ -813,6 +824,12 @@ fn bidi_levels_all_ltr(line: &str) -> bool {
     use unicode_bidi::BidiClass::{AL, AN, B, FSI, LRE, LRI, LRO, R, RLE, RLI, RLO};
     !line.is_empty()
         && line.chars().all(|c| {
+            // The only ASCII among those classes are the paragraph
+            // separators (B), and the table search costs more than the
+            // rest of shaping an ASCII char.
+            if c.is_ascii() {
+                return !matches!(c, '\n' | '\r' | '\x1c'..='\x1e');
+            }
             !matches!(
                 unicode_bidi::bidi_class(c),
                 AL | AN | B | FSI | LRE | LRI | LRO | R | RLE | RLI | RLO
@@ -1877,7 +1894,8 @@ impl ShapeLine {
 
 #[cfg(test)]
 mod tests {
-    use super::{bidi_levels_all_ltr, ShapeLine};
+    use super::{bidi_levels_all_ltr, collect_scripts, ShapeLine};
+    use alloc::string::String;
     use alloc::vec::Vec;
     use core::ops::Range;
     use unicode_bidi::{BidiInfo, Level, Paragraph};
@@ -1931,7 +1949,17 @@ mod tests {
             ("file 12 \u{5e9}\u{5dc} (34) end", false),
             ("ab\u{2029}cd", false),
         ];
-        for &(line, fast) in cases {
+        // Every ASCII char, which the fast path classes without the table.
+        let ascii: Vec<String> = (0u8..0x80)
+            .map(|b| alloc::format!("ab{}cd", char::from(b)))
+            .collect();
+        let ascii = ascii.iter().map(|line| {
+            let (paragraphs, levels) = full_pass(line);
+            let fast = paragraphs == [(0..line.len(), Level::ltr())]
+                && levels.iter().all(|&level| level == Level::ltr());
+            (line.as_str(), fast)
+        });
+        for (line, fast) in cases.iter().copied().chain(ascii) {
             assert_eq!(bidi_levels_all_ltr(line), fast, "{line:?}");
             let (paragraphs, levels) = full_pass(line);
             let one_ltr_paragraph = paragraphs == [(0..line.len(), Level::ltr())]
@@ -1944,5 +1972,29 @@ mod tests {
                 "{line:?}: {paragraphs:?} {levels:?}"
             );
         }
+    }
+
+    // `collect_scripts` skips ASCII runs; scanning each of their chars must
+    // have found nothing either.
+    #[test]
+    fn ascii_runs_collect_the_scripts_a_full_scan_does() {
+        use unicode_script::{Script, UnicodeScript};
+        let ascii: String = (0u8..0x80).map(char::from).collect();
+        let mut scripts = Vec::new();
+        collect_scripts(&ascii, &mut scripts);
+        let scanned: Vec<Script> = ascii
+            .chars()
+            .map(|c| c.script())
+            .filter(|s| {
+                !matches!(
+                    s,
+                    Script::Common | Script::Inherited | Script::Latin | Script::Unknown
+                )
+            })
+            .collect();
+        assert_eq!(scripts, scanned);
+        // A non-ASCII char still makes it scan.
+        collect_scripts("ab\u{416}", &mut scripts);
+        assert_eq!(scripts, [Script::Cyrillic]);
     }
 }
