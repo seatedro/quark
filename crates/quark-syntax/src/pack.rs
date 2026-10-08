@@ -393,8 +393,10 @@ mod signed {
             return None;
         }
         let nibble = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-        text.chunks_exact(2)
-            .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        text.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[hi, lo]| Some((nibble(hi)? << 4) | nibble(lo)?))
             .collect()
     }
 

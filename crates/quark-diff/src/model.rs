@@ -392,11 +392,11 @@ impl DiffDocument {
             return Err(IntegrityError::HunkRange { file: n as u32 });
         }
         let mut next_block = 0;
-        for hunk in 0..self.hunk_count() as usize {
-            if h.blocks[hunk].start != next_block {
+        for (hunk, blocks) in h.blocks[..self.hunk_count() as usize].iter().enumerate() {
+            if blocks.start != next_block {
                 return Err(IntegrityError::BlockRange { hunk: hunk as u32 });
             }
-            next_block = h.blocks[hunk].end;
+            next_block = blocks.end;
         }
         if next_block as usize != b.kind.len() {
             return Err(IntegrityError::BlockRange {

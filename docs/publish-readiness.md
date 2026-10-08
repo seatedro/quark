@@ -118,7 +118,7 @@ how crates.io renders them before publishing.
   `compile_error!`. A `[package.metadata.docs.rs]` table with an explicit
   feature list would fix it.
 - **Toolchain.** Every crate declares `rust-version = "1.92"`, but CI
-  builds only with the pinned `nightly-2026-06-09`. A stable 1.92 build is
+  builds only with the pinned `nightly-2026-10-07`. A stable 1.92 build is
   untested.
 - **Rustdoc warnings.** `cargo doc --workspace --no-deps` reports seven
   warnings outside the crate root files: an unresolved link to

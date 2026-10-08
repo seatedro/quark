@@ -17,8 +17,10 @@ pub(crate) fn decode(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }
-    text.chunks_exact(2)
-        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+    text.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[hi, lo]| Some((nibble(hi)? << 4) | nibble(lo)?))
         .collect()
 }
 

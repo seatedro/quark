@@ -35,7 +35,7 @@ impl Default for Fenwick {
 }
 
 fn lowbit(i: usize) -> usize {
-    i & i.wrapping_neg()
+    i.isolate_lowest_one()
 }
 
 impl Fenwick {

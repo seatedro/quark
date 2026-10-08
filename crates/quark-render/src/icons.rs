@@ -134,11 +134,10 @@ fn render(svg: &str, size: u32, color: Color) -> Option<(Arc<[u8]>, u32, u32)> {
     let mut rgba = pixmap.take();
     if color.a < 255 {
         let mult = color.a as u16;
-        for px in rgba.chunks_exact_mut(4) {
-            px[0] = ((px[0] as u16 * mult) / 255) as u8;
-            px[1] = ((px[1] as u16 * mult) / 255) as u8;
-            px[2] = ((px[2] as u16 * mult) / 255) as u8;
-            px[3] = ((px[3] as u16 * mult) / 255) as u8;
+        for px in rgba.as_chunks_mut::<4>().0 {
+            for channel in px {
+                *channel = ((*channel as u16 * mult) / 255) as u8;
+            }
         }
     }
     Some((rgba.into(), w, h))

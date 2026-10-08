@@ -1,5 +1,5 @@
 [toolchain]
 # Dated so CI and local builds agree; bump deliberately. Miri, sanitizers for
 # cargo-fuzz, and -Zcrate-attr in the Miri job need nightly.
-channel = "nightly-2026-06-09"
+channel = "nightly-2026-10-07"
 profile = "default"

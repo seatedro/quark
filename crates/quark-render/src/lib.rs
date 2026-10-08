@@ -10,6 +10,10 @@
 //!
 //! Apps normally reach this crate through `quark-app`, which owns the
 //! renderers.
+
+// wgpu's Send chain (GpuShared -> wgpu::BindGroup -> wgpu_core::Global)
+// nests past the default 128 the trait solver allows.
+#![recursion_limit = "256"]
 pub mod icons;
 mod path;
 pub mod renderer;

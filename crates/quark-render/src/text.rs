@@ -459,7 +459,9 @@ mod tests {
             .render_to_rgba(&scene, &mut text, 64, 64)
             .expect("offscreen render");
         let red = pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[0] > 160 && p[1] < 90 && p[2] < 90)
             .count();
         assert!(
