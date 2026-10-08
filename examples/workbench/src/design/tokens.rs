@@ -47,6 +47,9 @@ pub const TRAFFIC_LIGHT_ZONE: f32 = 80.0;
 pub const DIVIDER: f32 = 1.0;
 pub const FOCUS_RING: f32 = 2.0;
 pub const FOCUS_RING_OFFSET: f32 = 2.0;
+/// Room a clipping (scrolling) container keeps around its content so a
+/// focused control's ring, drawn outside the control, is not cut off.
+pub const RING_ROOM: f32 = FOCUS_RING + FOCUS_RING_OFFSET;
 
 /// A shadow: vertical offset, blur, and black alpha in light and dark.
 #[derive(Debug, Clone, Copy, PartialEq)]

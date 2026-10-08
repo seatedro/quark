@@ -124,6 +124,12 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> Option
         .flex_1()
         .min_h(0.0)
         .gap(tokens::SPACE_24)
+        // The body clips; inset its content by the focus ring's reach, and
+        // pull the box out as far on the left so fields still line up
+        // with the title.
+        .margin_left(-tokens::RING_ROOM)
+        .px(tokens::RING_ROOM)
+        .py(tokens::RING_ROOM)
         .track_scroll(&open.scroll)
         .overflow_y_scroll()
         .scrollbar_auto_hide()

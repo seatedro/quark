@@ -272,6 +272,23 @@ pub fn view(state: &mut super::State, scx: &SurfaceCx, _vcx: &mut ViewContext) -
     } else {
         list(sidebar, scx, width, list_h)
     };
+    // The bare input draws no ring of its own: ring the field's box while
+    // it has focus, in the 8-point inset around it. Drawn by hand, since a
+    // second focus target for SEARCH would trap Tab.
+    let reach = tokens::RING_ROOM;
+    let ring = scx.is_focused(SEARCH).then(|| {
+        let mut ring = div()
+            .absolute()
+            .left(-reach)
+            .top(-reach)
+            .right(-reach)
+            .bottom(-reach)
+            .rounded(scx.theme.metrics.control_radius + reach)
+            .border(scx.theme.colors.focus_border);
+        ring.element_style_mut().border_widths = [tokens::FOCUS_RING; 4];
+        ring.into_any()
+    });
+    let search = div().relative().w_full().child(search).children(ring);
     view! {
         <div w={width} h={height} class="flex-col" bg={colors.sidebar_background}
              test_id="sidebar">
@@ -401,7 +418,8 @@ impl ListView {
             <div w={self.width} h={self.list_h} class="flex-col px-2" scroll_y={self.scroll}
                  scroll_total={self.total} on:scroll={scroll} track_focus={LIST}
                  scrollbar_visibility={&self.scrollbar} scrollbar_auto_hide
-                 focus_ring={LIST}
+                 // The list fills the panel, which clips: ring it inside.
+                 focus_ring={LIST} focus_ring_offset={-tokens::FOCUS_RING}
                  on_key={("up", QAction::from(Action::Step(-1)))}
                  on_key={("down", QAction::from(Action::Step(1)))}
                  on_key={("home", QAction::from(Action::Step(i32::MIN)))}
