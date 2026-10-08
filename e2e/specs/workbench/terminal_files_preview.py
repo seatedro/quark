@@ -35,6 +35,14 @@ def by_role(role):
     return next((n for n in app_tree().walk() if n.role == role), None)
 
 
+def snapshot():
+    """The preview's image; the transcript has images of its own."""
+    return next(
+        (n for n in app_tree().walk() if n.role == ROLE_IMAGE and n.attributes.get("id") == "preview.image"),
+        None,
+    )
+
+
 def terminal_text():
     term = by_role(ROLE_TERMINAL)
     return term.text.text if term is not None and term.text else ""
@@ -79,12 +87,12 @@ def spec(cua: Cua):
     cua.press(pid, "page tab", "Snapshot preview")
     wait_for("the snapshot label", lambda: named("Snapshot preview"))
     panel = next(n for n in app_tree().walk() if n.name == "Snapshot preview" and n.attributes.get("id", "").endswith(":panel"))
-    image = wait_for("the snapshot", lambda: by_role(ROLE_IMAGE))
+    image = wait_for("the snapshot", snapshot)
     px, py, pw, ph = panel.extents
     x, y, w, h = image.extents
     assert px <= x and x + w <= px + pw and py <= y and y + h <= py + ph, f"fit image {image.extents} outside {panel.extents}"
     cua.press(pid, "radio button", "100%")
-    wait_for("the snapshot at 100%", lambda: by_role(ROLE_IMAGE).extents[2] == 960)
+    wait_for("the snapshot at 100%", lambda: snapshot().extents[2] == 960)
     save_screenshot(cua, "preview-actual")
 
 
