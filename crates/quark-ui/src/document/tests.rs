@@ -1173,6 +1173,30 @@ fn dead_highlight_worker_is_replaced_and_does_not_hang() {
     );
 }
 
+// Catches a batch with a repeated row key being half adopted, or the
+// error naming another key: history loads must be all or nothing.
+#[test]
+fn a_batch_repeating_a_row_key_is_rejected_whole() {
+    let entry = |row: u64| MarkdownEntry {
+        row: RowKey(row),
+        chrome: RowChrome::default(),
+        markdown: format!("row {row}"),
+    };
+    // (batch, error) against a document already holding row 0.
+    let cases: [(&[u64], u64); 2] = [(&[1, 2, 3, 2, 4], 2), (&[5, 0, 6], 0)];
+    for (batch, repeated) in cases {
+        let mut md = markdown_document("row 0");
+
+        let result = md.extend(batch.iter().map(|&row| entry(row)));
+
+        assert_eq!(
+            (result, md.len()),
+            (Err(RowError::DuplicateKey(RowKey(repeated))), 1),
+            "{batch:?}"
+        );
+    }
+}
+
 #[test]
 fn facade_streams_markdown_into_selectable_blocks() {
     let mut md = markdown_document("# Answer\n\nfirst");

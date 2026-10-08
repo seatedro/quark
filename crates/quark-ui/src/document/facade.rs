@@ -8,7 +8,7 @@
 //! also measures the rows outside the window on a background thread, so
 //! their heights become exact while the app idles.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use quark::selection::BlockKey;
@@ -364,9 +364,11 @@ impl MarkdownDocument {
         entries: impl IntoIterator<Item = MarkdownEntry>,
     ) -> Result<Vec<DocumentRow>, RowError> {
         let entries: Vec<MarkdownEntry> = entries.into_iter().collect();
-        for (i, entry) in entries.iter().enumerate() {
-            let repeated = entries[..i].iter().any(|e| e.row == entry.row);
-            if repeated || self.entries.contains_key(&entry.row) {
+        // A whole history arrives as one batch, so repeats are found with a
+        // set; the first repeated key is reported, and nothing is adopted.
+        let mut seen = HashSet::with_capacity(entries.len());
+        for entry in &entries {
+            if !seen.insert(entry.row) || self.entries.contains_key(&entry.row) {
                 return Err(RowError::DuplicateKey(entry.row));
             }
         }
