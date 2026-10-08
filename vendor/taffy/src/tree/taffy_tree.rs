@@ -375,6 +375,14 @@ where
             // Dispatch to a layout algorithm based on the node's display style and whether the node has children or not.
             match (display_mode, has_children) {
                 (Display::None, _) => compute_hidden_layout(tree, node),
+                #[cfg(all(test, feature = "flexbox", feature = "block_layout"))]
+                (Display::Block, true) if crate::compute::use_upstream() => {
+                    crate::compute::upstream_block::compute_block_layout(tree, node, inputs)
+                }
+                #[cfg(all(test, feature = "flexbox", feature = "block_layout"))]
+                (Display::Flex, true) if crate::compute::use_upstream() => {
+                    crate::compute::upstream_flexbox::compute_flexbox_layout(tree, node, inputs)
+                }
                 #[cfg(feature = "block_layout")]
                 (Display::Block, true) => compute_block_layout(tree, node, inputs),
                 #[cfg(feature = "flexbox")]

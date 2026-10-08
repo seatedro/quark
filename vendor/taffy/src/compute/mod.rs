@@ -33,6 +33,17 @@ pub(crate) mod flexbox;
 #[cfg(feature = "grid")]
 pub(crate) mod grid;
 
+// Copies of the flexbox and block algorithms as taffy 0.9.2 published them, which the differential test lays
+// out with to check that the vendored patches leave every layout unchanged.
+#[cfg(all(test, feature = "taffy_tree", feature = "flexbox", feature = "block_layout"))]
+mod differential_tests;
+#[cfg(all(test, feature = "taffy_tree", feature = "flexbox", feature = "block_layout"))]
+pub(crate) mod upstream_block;
+#[cfg(all(test, feature = "taffy_tree", feature = "flexbox", feature = "block_layout"))]
+pub(crate) mod upstream_flexbox;
+#[cfg(all(test, feature = "taffy_tree", feature = "flexbox", feature = "block_layout"))]
+pub(crate) use differential_tests::use_upstream;
+
 pub use leaf::compute_leaf_layout;
 
 #[cfg(feature = "block_layout")]
