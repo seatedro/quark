@@ -1,12 +1,22 @@
 name: CI
 
 on:
+  # Every branch push runs CI, and so do pull requests from forks. A pull
+  # request from a branch of this repository would repeat that branch's push
+  # run for the same commit, so its jobs skip (the `if`s below).
   push:
   pull_request:
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
 
+# Master pushes, merge groups and manual runs are full verification: each
+# gets a group of its own, so a later master push never cancels or replaces
+# an earlier one's. Other runs share a group per ref and cancel superseded
+# runs.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && format('full-{0}', github.run_id) || github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +24,7 @@ env:
 # Actions are pinned to commit SHAs; the comment names the release.
 jobs:
   check:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -105,6 +116,7 @@ jobs:
   # a smoke launch of hello_ui. Formatting and feature combinations are
   # platform independent and stay on Linux.
   platform:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     strategy:
       fail-fast: false
       matrix:
@@ -215,6 +227,7 @@ jobs:
           if-no-files-found: ignore
 
   fuzz:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     env:
       # ASan does not instrument libghostty-vt, so the terminal targets link
@@ -276,6 +289,7 @@ jobs:
           cargo fuzz run --target x86_64-unknown-linux-gnu markdown "$dir/corpus" -- -runs=0
 
   miri:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -304,6 +318,7 @@ jobs:
         run: cargo miri test -p quark
 
   kani:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     name: kani (${{ matrix.name }})
     runs-on: ubuntu-latest
     # Harnesses cover HashMap-free cores only: std's SipHash makes Kani's

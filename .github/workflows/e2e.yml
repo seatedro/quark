@@ -1,12 +1,16 @@
 name: E2E
 
+# The same events and grouping as ci.yml; see the comments there.
 on:
   push:
   pull_request:
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
 
 concurrency:
-  group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  group: e2e-${{ (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) && format('full-{0}', github.run_id) || github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')) }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,6 +19,8 @@ jobs:
   # Drives real example apps through the AT-SPI tree with the cua driver on
   # Xvfb + openbox. See e2e/run.sh.
   e2e:
+    # A pull request from a branch here repeats that branch's push run.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
