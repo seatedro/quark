@@ -20,7 +20,7 @@ use quark_app::{InputEvent, UiApp, UiContext, ViewContext, WindowOptions};
 use quark_components::{
     CommandPalette, ContextMenuEntry, ContextMenuOutcome, ContextMenuState, HoverCardState,
     PALETTE_INPUT, PaletteEvent, PaletteItem, PaletteOutcome, PaletteProvider, Side, Toast,
-    ToastQueue,
+    ToastQueue, binding_label,
 };
 use quark_render::Rect;
 
@@ -317,12 +317,18 @@ impl UiApp for PaletteDemo {
             </div>
         };
         let focused = cx.is_focused(PALETTE_INPUT);
+        // In the platform's terms: Cmd on macOS, Ctrl elsewhere.
+        let hint = format!(
+            "{} opens the command palette. Delete note shows an undo toast. \
+             Options (or {}) opens a menu with a submenu. Rest the pointer on \
+             Hover me for a hover card.",
+            binding_label(&binding("mod+k")),
+            binding_label(&binding("mod+shift+o")),
+        );
         view! {
             <div w={window.0} h={window.1} class="bg-[colors.background] flex-col p-10 gap-3">
                 <text class="text-sm" wrap_width={window.0 - 80.0} color={colors.text_muted}>
-                    "Ctrl+K opens the command palette. Delete note shows an undo toast. \
-                     Options (or Ctrl+Shift+O) opens a menu with a submenu. Rest the \
-                     pointer on Hover me for a hover card."
+                    {hint}
                 </text>
                 <text_input("Notes", "") field={&self.notes} placeholder="Type a note"
                             focus_target={NOTES_FIELD} focused={cx.is_focused(NOTES_FIELD)}
