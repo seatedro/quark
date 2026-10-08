@@ -30,6 +30,13 @@ pub trait WindowStack {
     fn primary_held(&mut self) -> Option<bool> {
         None
     }
+
+    /// Where the pointer is on the desktop now, if the platform can say
+    /// without a window's help: for motion reported against a window
+    /// that is itself moving with the pointer.
+    fn pointer(&mut self) -> Option<DesktopPoint> {
+        None
+    }
 }
 
 /// The platform's stack for the display `window` is on.
@@ -73,6 +80,7 @@ struct Script {
     /// Bottom to top.
     layers: Vec<Layer>,
     held: Option<bool>,
+    pointer: Option<DesktopPoint>,
     broken: bool,
 }
 
@@ -113,6 +121,13 @@ impl ScriptedStack {
     /// when the platform cannot say.
     pub fn set_primary_held(&self, held: Option<bool>) -> &Self {
         self.0.borrow_mut().held = held;
+        self
+    }
+
+    /// What [`WindowStack::pointer`] answers; `None` (the default) when
+    /// the platform cannot say.
+    pub fn set_pointer(&self, pointer: Option<DesktopPoint>) -> &Self {
+        self.0.borrow_mut().pointer = pointer;
         self
     }
 
@@ -171,5 +186,9 @@ impl WindowStack for ScriptedStack {
 
     fn primary_held(&mut self) -> Option<bool> {
         self.0.borrow().held
+    }
+
+    fn pointer(&mut self) -> Option<DesktopPoint> {
+        self.0.borrow().pointer
     }
 }

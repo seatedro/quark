@@ -139,4 +139,9 @@ impl WindowStack for X11Stack {
         let reply = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
         Some(reply.mask.contains(KeyButMask::BUTTON1))
     }
+
+    fn pointer(&mut self) -> Option<DesktopPoint> {
+        let reply = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
+        Some((f64::from(reply.root_x), f64::from(reply.root_y)))
+    }
 }

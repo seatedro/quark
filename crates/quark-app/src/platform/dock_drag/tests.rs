@@ -208,6 +208,31 @@ fn a_following_window_keeps_its_hotspot_under_the_pointer_and_is_looked_through(
     );
 }
 
+// X11 reports motion over the torn-off window against that window, whose
+// position lags the moves asked of it; converting it through that position
+// moved the window by twice the pointer's motion. The window system's own
+// pointer position wins, and without one the motion is skipped.
+#[test]
+fn motion_reported_by_the_following_window_is_placed_by_the_window_system() {
+    let (mut runner, mut app, main, _) = desktop((500.0, 0.0));
+    press_and_start(&mut runner, &mut app, main, (50.0, 50.0));
+    app.follow_next = Some((10.0, 5.0));
+    let float = open(&mut runner, &mut app, "float", (40.0, 45.0), (120.0, 80.0));
+    // The window system has the pointer at 300,200; the window's stale
+    // position would put this motion at 40+70, 45+60.
+    let moved = InputEvent::PointerMoved { x: 70.0, y: 60.0 };
+    let outer = |runner: &mut HeadlessRunner, app: &mut Docking| {
+        runner.callback(app, |_, cx| cx.placement(float).unwrap().outer_position)
+    };
+
+    runner.input(&mut app, float, moved.clone());
+    assert_eq!(outer(&mut runner, &mut app), Some((40.0, 45.0)), "skipped");
+
+    app.stack.set_pointer(Some((300.0, 200.0)));
+    runner.input(&mut app, float, moved);
+    assert_eq!(outer(&mut runner, &mut app), Some((290.0, 195.0)));
+}
+
 // Every way a drag ends must end it exactly once with its reason, and
 // focus loss alone must not: only a focus loss with the button already up
 // means another client took the pointer.

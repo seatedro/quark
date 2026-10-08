@@ -393,7 +393,15 @@ impl DockDrag {
         let window = cx.window_handle()?;
         let event = match event {
             InputEvent::PointerMoved { x, y } => {
-                let at = cx.to_desktop(window, (*x, *y))?;
+                // X11 reports motion over the window following the pointer
+                // against that window, whose position is in flux while the
+                // server catches up with the moves asked of it: ask the
+                // window system where the pointer is instead, or skip it.
+                let at = if self.follow.is_some_and(|f| f.window == window) {
+                    stack.pointer()?
+                } else {
+                    cx.to_desktop(window, (*x, *y))?
+                };
                 *pointer = Some(at);
                 if let Some(follow) = self.follow {
                     cx.align_window(follow.window, follow.hotspot, at);
