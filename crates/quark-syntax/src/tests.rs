@@ -34,6 +34,324 @@ fn rust_pack_built_by_the_tool_highlights_keywords_and_strings() {
     assert_eq!(dumped, RUST_DUMP);
 }
 
+/// Packs named `name` that reuse `base`'s grammar and highlight query
+/// with `injections` as their injection query, in a temporary root.
+fn fixture_packs(fixtures: &[(&str, &str, &str)]) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    for (name, base, injections) in fixtures {
+        let from = testing::pack_root().join(pack::TARGET).join(base);
+        let to = root.path().join(pack::TARGET).join(name);
+        std::fs::create_dir_all(&to).unwrap();
+        let mut manifest: pack::PackManifest =
+            serde_json::from_slice(&std::fs::read(from.join(pack::MANIFEST)).unwrap()).unwrap();
+        for file in [&manifest.library, &manifest.highlights] {
+            std::fs::copy(from.join(&file.path), to.join(&file.path)).unwrap();
+        }
+        std::fs::write(to.join("injections.scm"), injections).unwrap();
+        manifest.language = (*name).to_owned();
+        manifest.aliases.clear();
+        manifest.extensions.clear();
+        manifest.injections = Some(pack::PackFile {
+            path: "injections.scm".to_owned(),
+            sha256: pack::sha256_file(&to.join("injections.scm")).unwrap(),
+            size: injections.len() as u64,
+            url: None,
+        });
+        std::fs::write(
+            to.join(pack::MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+    root
+}
+
+/// A store over `fixtures` (see [`fixture_packs`]) and then the test
+/// packs, or `None` (the test skips) without the `packs` it needs.
+fn fixture_store(
+    packs: &[&str],
+    fixtures: &[(&str, &str, &str)],
+) -> Option<(tempfile::TempDir, GrammarStore)> {
+    testing::store_with_all(packs)?;
+    let root = fixture_packs(fixtures);
+    let config = StoreConfig::new()
+        .local_packs(root.path())
+        .local_packs(testing::pack_root());
+    Some((root, GrammarStore::new(config)))
+}
+
+// Catches embedded regions staying plain: a script and a style element
+// are parsed as JavaScript and CSS inside the HTML host.
+#[test]
+fn html_script_and_style_take_javascript_and_css_colors() {
+    let Some(store) = testing::store_with_all(&["html", "javascript", "css"]) else {
+        return;
+    };
+    let source = "<script>let x = f(1);</script>\n<style>p { color: red; }</style>\n";
+
+    let dumped = dump(
+        &highlight(&store, &language("html"), source),
+        source,
+        &[
+            HighlightKind::Keyword,
+            HighlightKind::Function,
+            HighlightKind::Property,
+        ],
+    );
+
+    assert_eq!(dumped, "keyword:let function:f property:color");
+}
+
+// Catches a fence's language name skipping the store's aliases, so a block
+// tagged `rs` would stay plain inside a Markdown source.
+#[test]
+fn markdown_fence_tag_resolves_through_aliases() {
+    let Some(store) = testing::store_with_all(&["markdown", "markdown_inline", "rust"]) else {
+        return;
+    };
+    let source = "# Notes\n\n```rs\nfn main() { run(); }\n```\n";
+
+    let dumped = dump(
+        &highlight(&store, &language("md"), source),
+        source,
+        &[HighlightKind::Keyword, HighlightKind::Function],
+    );
+
+    assert_eq!(
+        dumped,
+        "keyword:Notes keyword:fn function:main function:run"
+    );
+}
+
+// Catches the text of a content node's children leaking into the embedded
+// document: a fence inside a block quote must parse without its `> `
+// markers, so the string spanning two lines stays one string literal.
+#[test]
+fn quoted_fence_parses_without_its_continuation_markers() {
+    let Some(store) = testing::store_with_all(&["markdown", "markdown_inline", "rust"]) else {
+        return;
+    };
+    let source = "> ```rust\n> let s = \"a\n> b\";\n> ```\n";
+
+    let dumped = dump(
+        &highlight(&store, &language("md"), source),
+        source,
+        &[HighlightKind::Keyword, HighlightKind::String],
+    );
+
+    // The info string and the fence's line end are the block's literal.
+    assert_eq!(
+        dumped,
+        "string:rust\n keyword:let string:\"a\n string:b\" string:\n"
+    );
+}
+
+// Catches injections not recursing: a macro's token tree is Rust again,
+// and so is the token tree of a macro inside it.
+#[test]
+fn macro_inside_a_macro_is_parsed_at_each_depth() {
+    let Some(store) = testing::store_with("rust") else {
+        return;
+    };
+    let source = "fn main() { vec![foo(bar!(baz(1)))]; }\n";
+
+    let dumped = dump(
+        &highlight(&store, &language("rust"), source),
+        source,
+        &[HighlightKind::Function],
+    );
+
+    assert_eq!(
+        dumped,
+        "function:main function:vec function:! function:foo function:bar function:! function:baz"
+    );
+}
+
+// Catches byte offsets drifting around multibyte text: embedded spans
+// must land on the original source's bytes.
+#[test]
+fn embedded_spans_keep_byte_offsets_after_multibyte_text() {
+    let Some(store) = testing::store_with_all(&["html", "javascript"]) else {
+        return;
+    };
+    let source = "<p>\u{65e5}\u{672c}\u{8a9e}</p>\n<script>let \u{e9} = \"\u{43a}\u{43b}\u{44e}\u{447}\"; f(1);</script>\n";
+
+    let dumped = dump(
+        &highlight(&store, &language("html"), source),
+        source,
+        &[HighlightKind::String, HighlightKind::Function],
+    );
+
+    assert_eq!(dumped, "string:\"\u{43a}\u{43b}\u{44e}\u{447}\" function:f");
+}
+
+// Catches Markdown prose staying plain: its `text.*` captures map to
+// kinds, and `@none` keeps a fenced block's code from all taking the
+// block's literal color.
+#[test]
+fn markdown_markup_takes_colors() {
+    let Some(store) = testing::store_with_all(&["markdown", "markdown_inline"]) else {
+        return;
+    };
+    let source = "# Title\n\nSome **bold**, *em*, `code`, <https://x.io>.\n\n```text\nplain\n```\n";
+
+    let spans = highlight(&store, &language("md"), source);
+    let dumped = dump(
+        &spans,
+        source,
+        &[
+            HighlightKind::Keyword,
+            HighlightKind::Type,
+            HighlightKind::Attribute,
+            HighlightKind::String,
+            HighlightKind::Label,
+        ],
+    );
+
+    // `plain` is the fenced block's content, which `@none` clears.
+    assert_eq!(
+        dumped,
+        "keyword:Title type:bold attribute:em string:code label:<https://x.io> string:text\n string:\n"
+    );
+}
+
+// Catches combined injections parsed piece by piece: consecutive doc
+// comments are one embedded document, so a string can span two of them.
+#[test]
+fn combined_injection_parses_every_match_as_one_document() {
+    const DOCS: &str = "((doc_comment) @injection.content
+ (#set! injection.language \"rust\")
+ (#set! injection.combined))";
+    let Some((_root, store)) = fixture_store(&["rust"], &[("rustdoc", "rust", DOCS)]) else {
+        return;
+    };
+    let source = "/// let s = \"a\n/// b\";\nfn f() {}\n";
+
+    let dumped = dump(
+        &highlight(&store, &language("rustdoc"), source),
+        source,
+        &[HighlightKind::Keyword, HighlightKind::String],
+    );
+
+    assert_eq!(dumped, "keyword:let string:\"a\n string: b\" keyword:fn");
+}
+
+// Catches `injection.self` and `injection.parent` resolving to the wrong
+// grammar: a macro's token tree parses as the macro's own language, or as
+// the language that embedded the Rust (JavaScript, where `function` is a
+// keyword).
+#[test]
+fn self_and_parent_injections_table() {
+    const SELF: &str = "((macro_invocation (token_tree) @injection.content)
+ (#set! injection.self)
+ (#set! injection.include-children))";
+    const PARENT: &str = "((macro_invocation (token_tree) @injection.content)
+ (#set! injection.parent)
+ (#set! injection.include-children))";
+    let Some((_root, store)) = fixture_store(
+        &["rust", "javascript"],
+        &[("rust_self", "rust", SELF), ("rust_parent", "rust", PARENT)],
+    ) else {
+        return;
+    };
+    let kinds = [HighlightKind::Keyword, HighlightKind::Function];
+    let cases = [
+        ("self", "rust_self", "m!(f(1));"),
+        ("parent", "javascript", "rust_parent`m!(function f() {})`;"),
+    ];
+    let mut dumps = Vec::new();
+    for (name, tag, source) in cases {
+        let dumped = dump(&highlight(&store, &language(tag), source), source, &kinds);
+        dumps.push(format!("{name}: {dumped}"));
+    }
+
+    assert_eq!(
+        dumps,
+        [
+            "self: function:m function:! function:f",
+            "parent: function:rust_parent function:m function:! keyword:function function:f",
+        ]
+    );
+}
+
+// Catches a self-injection over the text it came from looping until a
+// limit cuts it off: the repeat is recognized and nothing is truncated.
+#[test]
+fn self_injection_of_the_same_text_stops_without_truncating() {
+    const LOOP: &str = "((source_file) @injection.content
+ (#set! injection.self)
+ (#set! injection.include-children))";
+    let Some((_root, store)) = fixture_store(&["rust"], &[("rust-loop", "rust", LOOP)]) else {
+        return;
+    };
+    let source = "fn f() {}\n";
+
+    let outcome = store.highlight(&language("rust-loop"), source);
+
+    assert_eq!(
+        (
+            dump(&outcome.spans, source, &[HighlightKind::Keyword]),
+            outcome.truncated
+        ),
+        ("keyword:fn".to_owned(), false)
+    );
+}
+
+// Catches unbounded embedding: past each limit the innermost macro stays
+// unparsed and the outcome says it was truncated.
+#[test]
+fn injection_limits_table() {
+    let Some(store) = testing::store_with("rust") else {
+        return;
+    };
+    let source = "fn main() { a!(b!(c(1))); }\n";
+    let rust = language("rust");
+    let defaults = engine::Limits::for_source(source.len());
+    let cases = [
+        ("defaults", defaults),
+        (
+            "depth",
+            engine::Limits {
+                depth: 1,
+                ..defaults
+            },
+        ),
+        (
+            "layers",
+            engine::Limits {
+                layers: 1,
+                ..defaults
+            },
+        ),
+        (
+            "bytes",
+            engine::Limits {
+                bytes: 8,
+                ..defaults
+            },
+        ),
+    ];
+    let mut results = Vec::new();
+    for (name, limits) in cases {
+        let outcome = store.highlight_within(&rust, source, limits);
+        let colored = outcome
+            .spans
+            .iter()
+            .any(|span| span.kind == HighlightKind::Function && &source[span.range()] == "c");
+        results.push((name, colored, outcome.truncated));
+    }
+
+    assert_eq!(
+        results,
+        [
+            ("defaults", true, false),
+            ("depth", false, true),
+            ("layers", false, true),
+            ("bytes", false, true),
+        ]
+    );
+}
+
 #[cfg(feature = "download")]
 mod download {
     use std::collections::HashMap;
@@ -179,11 +497,15 @@ mod download {
 
     /// Serves `files` by path over HTTP/1.1 on localhost, one request per
     /// connection, and logs each request's path. Responses wait while a
-    /// test holds `hold`.
+    /// test holds `hold`, or the [`Server::gate`] of their path. Range
+    /// requests get the rest of the file from their offset, and a path in
+    /// `cut` sends only that many bytes before closing the connection.
     struct Server {
         url: String,
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        cut: Arc<Mutex<HashMap<String, usize>>>,
         hold: Arc<Mutex<()>>,
+        gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
         log: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
@@ -196,9 +518,13 @@ mod download {
             let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
             let log: Arc<Mutex<Vec<String>>> = Arc::default();
             let hold: Arc<Mutex<()>> = Arc::default();
+            let gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> = Arc::default();
             let stop = Arc::new(AtomicBool::new(false));
             let (thread_files, thread_log, thread_hold, thread_stop) =
                 (files.clone(), log.clone(), hold.clone(), stop.clone());
+            let thread_gates = gates.clone();
+            let cut: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+            let thread_cut = cut.clone();
             let thread = std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     if thread_stop.load(Ordering::Relaxed) {
@@ -208,33 +534,61 @@ mod download {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut request = String::new();
                     reader.read_line(&mut request).unwrap();
+                    let mut range = None;
                     loop {
                         let mut line = String::new();
                         reader.read_line(&mut line).unwrap();
                         if line == "\r\n" || line.is_empty() {
                             break;
                         }
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(offset) = lower
+                            .strip_prefix("range: bytes=")
+                            .and_then(|rest| rest.trim().strip_suffix('-'))
+                        {
+                            range = offset.parse::<usize>().ok();
+                        }
                     }
                     let path = request.split(' ').nth(1).unwrap_or("").to_owned();
                     thread_log.lock().unwrap().push(path.clone());
                     drop(thread_hold.lock().unwrap());
+                    let gate = thread_gates.lock().unwrap().get(&path).cloned();
+                    if let Some(gate) = gate {
+                        drop(gate.lock().unwrap());
+                    }
                     let body = thread_files.lock().unwrap().get(&path).cloned();
-                    let (status, body) = match body {
-                        Some(body) => ("200 OK", body),
-                        None => ("404 Not Found", Vec::new()),
+                    let (status, body, extra) = match (body, range) {
+                        (Some(body), Some(offset)) if offset < body.len() => (
+                            "206 Partial Content",
+                            body[offset..].to_vec(),
+                            format!(
+                                "Content-Range: bytes {offset}-{}/{}\r\n",
+                                body.len() - 1,
+                                body.len()
+                            ),
+                        ),
+                        (Some(body), _) => ("200 OK", body, String::new()),
+                        (None, _) => ("404 Not Found", Vec::new(), String::new()),
                     };
                     let head = format!(
-                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
                         body.len()
                     );
+                    let sent = thread_cut
+                        .lock()
+                        .unwrap()
+                        .get(&path)
+                        .map_or(body.len(), |&cut| cut.min(body.len()));
                     let _ = stream.write_all(head.as_bytes());
-                    let _ = stream.write_all(&body);
+                    let _ = stream.write_all(&body[..sent]);
                 }
             });
             Self {
                 url,
                 files,
+                cut,
                 hold,
+                gates,
                 log,
                 stop,
                 thread: Some(thread),
@@ -243,6 +597,16 @@ mod download {
 
         fn serve(&self, path: &str, bytes: Vec<u8>) {
             self.files.lock().unwrap().insert(path.to_owned(), bytes);
+        }
+
+        /// A lock that holds responses for `path` while a test holds it.
+        fn gate(&self, path: &str) -> Arc<Mutex<()>> {
+            self.gates
+                .lock()
+                .unwrap()
+                .entry(path.to_owned())
+                .or_default()
+                .clone()
         }
 
         fn log(&self) -> Vec<String> {
@@ -263,13 +627,22 @@ mod download {
     /// A store downloading from `server`'s `/packs/{target}/index.json`
     /// into `cache`, and a channel that hears each resolution.
     fn downloading_store(server: &Server, cache: &Path) -> (GrammarStore, Receiver<()>) {
+        downloading_store_over(server, cache, StoreConfig::new())
+    }
+
+    /// [`downloading_store`] after the local packs in `config`.
+    fn downloading_store_over(
+        server: &Server,
+        cache: &Path,
+        config: StoreConfig,
+    ) -> (GrammarStore, Receiver<()>) {
         let downloads = Downloads::new(
             "dev.quark.test",
             format!("{}/packs/{{target}}/index.json", server.url),
             &[key(&SEED)],
         )
         .cache_dir(cache);
-        let store = GrammarStore::new(StoreConfig::new().downloads(downloads));
+        let store = GrammarStore::new(config.downloads(downloads));
         let (sender, receiver) = channel();
         store.subscribe(move || sender.send(()).is_ok());
         (store, receiver)
@@ -334,12 +707,11 @@ mod download {
 
         store.status(&language("rust"));
         wait(&resolved);
-        let installed = cache
-            .path()
-            .join(pack::TARGET)
-            .join("rust/1.0.0")
-            .join(&library)
-            .exists();
+        // In whichever version directory the pack would have gone.
+        let installed = std::fs::read_dir(cache.path().join(pack::TARGET).join("rust"))
+            .into_iter()
+            .flatten()
+            .any(|dir| dir.unwrap().path().join(&library).exists());
 
         assert_eq!(
             (store.status(&language("rust")), installed),
@@ -369,19 +741,23 @@ mod download {
         assert_eq!(during, LanguageStatus::Pending);
     }
 
-    /// The tool-built pack in the test root, served under `/packs`.
-    fn serve_pack(server: &Server, root: &Path) {
-        let dir = root.join(pack::TARGET).join("rust");
-        let manifest: PackManifest =
-            serde_json::from_slice(&std::fs::read(dir.join(pack::MANIFEST)).unwrap()).unwrap();
-        for file in manifest.files() {
-            server.serve(
-                &format!("/packs/{}/rust/{}", pack::TARGET, file.path),
-                std::fs::read(dir.join(&file.path)).unwrap(),
-            );
+    /// The tool-built packs for `languages` in the test root, served
+    /// under `/packs`.
+    fn serve_packs(server: &Server, root: &Path, languages: &[&str]) {
+        let mut manifests = Vec::new();
+        for language in languages {
+            let dir = root.join(pack::TARGET).join(language);
+            let manifest: PackManifest =
+                serde_json::from_slice(&std::fs::read(dir.join(pack::MANIFEST)).unwrap()).unwrap();
+            for file in manifest.files() {
+                server.serve(
+                    &format!("/packs/{}/{language}/{}", pack::TARGET, file.path),
+                    std::fs::read(dir.join(&file.path)).unwrap(),
+                );
+            }
+            manifests.push(serde_json::to_value(&manifest).unwrap());
         }
-        let payload = index(vec![serde_json::to_value(&manifest).unwrap()]);
-        server.serve(&index_path(), sign(&payload).into_bytes());
+        server.serve(&index_path(), sign(&index(manifests)).into_bytes());
     }
 
     // Catches a downloaded grammar never reaching blocks that asked for it
@@ -393,7 +769,7 @@ mod download {
             return;
         }
         let server = Server::start();
-        serve_pack(&server, &testing::pack_root());
+        serve_packs(&server, &testing::pack_root(), &["rust"]);
         let cache = tempfile::tempdir().unwrap();
         let (store, _) = downloading_store(&server, cache.path());
         let worker = HighlightWorker::new(store);
@@ -418,5 +794,122 @@ mod download {
             ],
             [(1, true, String::new()), (1, false, RUST_DUMP.to_owned())]
         );
+    }
+
+    // Catches embedded grammars that arrive after the first highlight never
+    // reaching it: a request is answered with the host's colors at once,
+    // then again as each embedded pack lands, while a request whose
+    // grammars did not change hears nothing new.
+    #[test]
+    fn embedded_grammars_recolor_a_request_as_they_arrive() {
+        if testing::store_with_all(&["html", "javascript", "css"]).is_none() {
+            return;
+        }
+        let server = Server::start();
+        let root = testing::pack_root();
+        serve_packs(&server, &root, &["javascript", "css"]);
+        let css: PackManifest = serde_json::from_slice(
+            &std::fs::read(root.join(pack::TARGET).join("css").join(pack::MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        let css_gate = server.gate(&format!("/packs/{}/css/{}", pack::TARGET, css.library.path));
+        let held = css_gate.lock().unwrap();
+        // HTML is local; JavaScript and CSS download.
+        let local = tempfile::tempdir().unwrap();
+        let html = local.path().join(pack::TARGET).join("html");
+        std::fs::create_dir_all(&html).unwrap();
+        for entry in std::fs::read_dir(root.join(pack::TARGET).join("html")).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), html.join(entry.file_name())).unwrap();
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let config = StoreConfig::new().local_packs(local.path());
+        let (store, _) = downloading_store_over(&server, cache.path(), config);
+        let worker = HighlightWorker::new(store);
+        const BOTH: &str = "<script>f(1)</script>\n<style>p { color: red; }</style>\n";
+        const STYLE: &str = "<style>p { color: red; }</style>\n";
+
+        worker.request(1, 1, language("html"), Arc::from(BOTH));
+        worker.request(2, 1, language("html"), Arc::from(STYLE));
+        let mut results: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut take = |result: Highlighted| {
+            let source = if result.slot == 1 { BOTH } else { STYLE };
+            let kinds = [HighlightKind::Function, HighlightKind::Property];
+            let unresolved: Vec<&str> = result.unresolved.iter().map(LanguageId::as_str).collect();
+            results.entry(result.slot).or_default().push(format!(
+                "{} {} [{}]",
+                result.revision,
+                dump(&result.spans, source, &kinds),
+                unresolved.join(",")
+            ));
+        };
+        // Both first answers, then the first request's once JavaScript lands.
+        for _ in 0..3 {
+            take(worker.recv().unwrap());
+        }
+        drop(held);
+        for _ in 0..2 {
+            take(worker.recv().unwrap());
+        }
+
+        assert_eq!(
+            (&results[&1], &results[&2]),
+            (
+                &vec![
+                    "0  [javascript,css]".to_owned(),
+                    "1 function:f [css]".to_owned(),
+                    "2 function:f property:color []".to_owned(),
+                ],
+                &vec!["0  [css]".to_owned(), "1 property:color []".to_owned()]
+            )
+        );
+    }
+
+    // Catches a partial file of an older pack being resumed into a newer
+    // one: published files change with their content while a pack keeps
+    // its version, and appending the new file's tail to the old file's
+    // head would fail its SHA-256 and leave the language plain.
+    #[test]
+    fn changed_pack_downloads_afresh_over_an_old_partial_file() {
+        if testing::store_with("css").is_none() {
+            return;
+        }
+        let server = Server::start();
+        let root = testing::pack_root();
+        serve_packs(&server, &root, &["css"]);
+        let new_index = server.files.lock().unwrap()[&index_path()].clone();
+        // The old pack: the same version and size, other library bytes.
+        let mut manifest: PackManifest = serde_json::from_slice(
+            &std::fs::read(root.join(pack::TARGET).join("css").join(pack::MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        let library_path = format!("/packs/{}/css/{}", pack::TARGET, manifest.library.path);
+        let new_library = server.files.lock().unwrap()[&library_path].clone();
+        let old_library: Vec<u8> = new_library.iter().rev().copied().collect();
+        manifest.library.sha256 = sha(&old_library);
+        let old_index = index(vec![serde_json::to_value(&manifest).unwrap()]);
+        server.serve(&index_path(), sign(&old_index).into_bytes());
+        server.serve(&library_path, old_library);
+        server
+            .cut
+            .lock()
+            .unwrap()
+            .insert(library_path.clone(), new_library.len() / 2);
+        let cache = tempfile::tempdir().unwrap();
+        // The first session's download of the old library breaks off.
+        {
+            let (store, resolved) = downloading_store(&server, cache.path());
+            store.status(&language("css"));
+            wait(&resolved);
+        }
+        server.cut.lock().unwrap().clear();
+        server.serve(&index_path(), new_index);
+        server.serve(&library_path, new_library);
+
+        let (store, resolved) = downloading_store(&server, cache.path());
+        store.status(&language("css"));
+        wait(&resolved);
+
+        assert_eq!(store.status(&language("css")), LanguageStatus::Ready);
     }
 }

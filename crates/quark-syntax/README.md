@@ -12,7 +12,9 @@ the crate has no dependencies and every lookup falls back to plain text.
 
 `highlight` runs synchronously; `HighlightWorker` runs on a background
 thread and drops requests a newer generation superseded, which suits code
-that is still streaming.
+that is still streaming. Embedded languages (scripts in HTML, fenced blocks
+in Markdown) use their own grammars when the host pack has an injection
+query; the worker sends a newer revision as their packs arrive.
 
 Build packs with `cargo run -p syntax-pack -- build`. The
 [guide](../../docs/guide/syntax-packs.md) covers configuration, the pack

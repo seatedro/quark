@@ -135,6 +135,8 @@ pub enum PackError {
     Library(String),
     #[error("the highlight query does not compile: {0}")]
     Query(String),
+    #[error("the injection query does not compile: {0}")]
+    InjectionQuery(String),
 }
 
 impl PackManifest {
@@ -302,8 +304,8 @@ pub fn read_manifest(dir: &Path) -> Result<PackManifest, PackError> {
     Ok(manifest)
 }
 
-/// Loads the pack in `dir` and compiles its highlight query, as the store
-/// does before first use. For build tooling that smoke-tests packs.
+/// Loads the pack in `dir` and compiles its highlight and injection
+/// queries, as the store does before first use. For build tooling that smoke-tests packs.
 pub fn check_pack_dir(dir: &Path) -> Result<PackManifest, PackError> {
     let manifest = read_manifest(dir)?;
     crate::engine::Grammar::load(dir, &manifest)?;
