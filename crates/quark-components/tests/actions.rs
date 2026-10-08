@@ -2,12 +2,15 @@
 
 use quark::StyleState;
 use quark::reactive::SignalStore;
-use quark_components::{Modal, PickerItem, Toast, ToastKind, ToastStack, picker_list};
+use quark_components::{
+    Modal, PickerItem, TabItem, Toast, ToastKind, ToastStack, picker_list, tab_bar,
+};
 use quark_render::Scene;
 use quark_ui::Action;
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
-    AnyElement, ElementContext, InputRouter, IntoAnyElement, ScrollActionBuilder, render_element,
+    AnyElement, Binding, ElementContext, InputRouter, IntoAnyElement, ScrollActionBuilder,
+    render_element,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -19,6 +22,7 @@ enum Demo {
     Select(usize),
     Scroll(i32),
     DismissToast(usize),
+    Close(&'static str),
 }
 
 impl From<Demo> for Action {
@@ -160,4 +164,73 @@ fn toast_emits_on_dismiss_with_index() {
     });
     let (clicks, _) = hit_actions(stack.build().into_any());
     assert!(clicks.contains(&Demo::DismissToast(0).into()));
+}
+
+/// Files (active) and Logs, both closable.
+fn closable_tabs() -> InputRouter {
+    let tab = |id: &'static str, label: &'static str| {
+        TabItem::new(label, Demo::Select(0))
+            .id(id)
+            .on_close(Demo::Close(id))
+    };
+    let bar = tab_bar(vec![
+        tab("files", "Files").active(true),
+        tab("logs", "Logs"),
+    ]);
+    paint(bar.into_any(), None).0
+}
+
+/// The center of the node with this test id and label.
+fn center_of(router: &InputRouter, test_id: &str, label: &str) -> (f32, f32) {
+    let node = router
+        .frame()
+        .semantic
+        .nodes()
+        .iter()
+        .find(|n| {
+            n.test_id.as_ref().map(|t| t.as_str()) == Some(test_id)
+                && n.label.as_deref() == Some(label)
+        })
+        .expect("node is painted");
+    let b = node.bounds;
+    (b.x + b.width / 2.0, b.y + b.height / 2.0)
+}
+
+#[test]
+fn a_tab_close_button_closes_without_selecting() {
+    let mut router = closable_tabs();
+    let (x, y) = center_of(&router, "tab-close", "Close Logs");
+    let actions = router.pointer_down(x, y, &mut None).actions;
+    assert_eq!(actions, [Action::from(Demo::Close("logs"))]);
+}
+
+#[test]
+fn a_middle_click_closes_an_inactive_tab_without_selecting_it() {
+    let mut router = closable_tabs();
+    let tab = router
+        .frame()
+        .semantic
+        .nodes()
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Logs"))
+        .expect("Logs tab")
+        .bounds;
+    // Over the label, away from the close button.
+    let (x, y) = (tab.x + 12.0, tab.y + tab.height / 2.0);
+    router.middle_down(x, y);
+    assert_eq!(
+        router.middle_up(x, y).actions,
+        [Action::from(Demo::Close("logs"))]
+    );
+}
+
+#[test]
+fn delete_closes_the_focused_tab() {
+    let router = closable_tabs();
+    let delete: Binding = "delete".parse().unwrap();
+    let focus = Some(TabItem::focus_id("files"));
+    assert_eq!(
+        router.key_down(&delete, focus).actions,
+        [Action::from(Demo::Close("files"))]
+    );
 }

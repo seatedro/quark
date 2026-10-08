@@ -146,6 +146,40 @@ pub enum DockEvent {
         panel: PanelId,
         target: Option<PaneDrop>,
     },
+    /// Move `panel` into the group `destination`, before tab `index`, or
+    /// at the end for `None`. Checked again when applied, under the same
+    /// rules as a drop; see [`DockState::move_tab`].
+    MoveTab {
+        panel: PanelId,
+        destination: PaneId,
+        index: Option<usize>,
+    },
+}
+
+/// What [`DockState::apply_event`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DockOutcome {
+    /// The change is settled and worth persisting.
+    pub settled: bool,
+    /// Where a [`DockEvent::MoveTab`] put its tab; `None` when it was
+    /// refused or the event was another kind.
+    pub moved: Option<TabMove>,
+}
+
+impl DockOutcome {
+    /// Where keyboard focus belongs after the event: on a moved tab, in its
+    /// new group. Pass it to the app's focus.
+    pub fn focus(&self) -> Option<FocusId> {
+        self.moved.map(|m| Dock::tab_focus(m.pane))
+    }
+}
+
+/// A tab [`DockEvent::MoveTab`] moved, and the group it is now active in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabMove {
+    pub panel: PanelId,
+    pub region: DockRegion,
+    pub pane: PaneId,
 }
 
 /// Sizes of the three side regions and the center's minimum. Labels name
@@ -202,6 +236,18 @@ pub enum DockIntegrityError {
 /// Smallest a group gets when a divider between groups is dragged.
 const MIN_GROUP: f32 = 100.0;
 
+/// The regions in the dock's tree order: its columns split holds the left
+/// region, the middle (center over bottom), and the right region.
+const TREE_ORDER: [DockRegion; 4] = [
+    DockRegion::Left,
+    DockRegion::Center,
+    DockRegion::Bottom,
+    DockRegion::Right,
+];
+
+/// Default [`Dock::move_tab_keys`].
+const MOVE_TAB_KEYS: (&str, &str) = ("mod+shift+pageup", "mod+shift+pagedown");
+
 /// Where a tab being dragged came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Origin {
@@ -233,6 +279,14 @@ fn drop_allowed(
         DropZone::Tabs(i) => i.min(from.count - 1) != from.index,
         // Splitting a group off its only tab would leave it empty.
         _ => from.count > 1,
+    }
+}
+
+/// The drop a [`DockEvent::MoveTab`] makes.
+fn move_drop(pane: PaneId, index: Option<usize>) -> PaneDrop {
+    PaneDrop {
+        pane,
+        zone: index.map_or(DropZone::Center, DropZone::Tabs),
     }
 }
 
@@ -550,6 +604,66 @@ impl DockState {
         true
     }
 
+    /// Every group of the shown regions, in tree order: left, center,
+    /// bottom, right, and within a region its groups in reading order.
+    fn shown_groups(&self) -> Vec<PaneId> {
+        TREE_ORDER
+            .into_iter()
+            .filter(|r| self.is_visible(*r))
+            .flat_map(|r| self.roots[r.index()].groups().into_iter().map(|g| g.id))
+            .collect()
+    }
+
+    /// Whether [`Self::move_tab`] would move `panel`: `destination` is in
+    /// a shown region and [`Self::can_drop`] allows it.
+    pub fn can_move(&self, panel: PanelId, destination: PaneId, index: Option<usize>) -> bool {
+        self.region_of(destination)
+            .is_some_and(|r| self.is_visible(r))
+            && self.can_drop(panel, move_drop(destination, index))
+    }
+
+    /// The groups `panel` can move into whole, in tree order: every shown
+    /// group but its own that takes it. What a "Move to group" menu lists.
+    pub fn move_targets(&self, panel: PanelId) -> Vec<PaneId> {
+        self.shown_groups()
+            .into_iter()
+            .filter(|&pane| self.can_move(panel, pane, None))
+            .collect()
+    }
+
+    /// The nearest group before (or with `forward`, after) `panel`'s own
+    /// in tree order that it can move into. Does not wrap around.
+    pub fn move_target(&self, panel: PanelId, forward: bool) -> Option<PaneId> {
+        let own = self.locate(panel)?.1;
+        let groups = self.shown_groups();
+        let at = groups.iter().position(|g| *g == own)?;
+        let eligible = |pane: &&PaneId| self.can_move(panel, **pane, None);
+        if forward {
+            groups[at + 1..].iter().find(eligible).copied()
+        } else {
+            groups[..at].iter().rev().find(eligible).copied()
+        }
+    }
+
+    /// Move `panel` into the group `destination`, before tab `index` or at
+    /// its end, and make it active there. Returns false, changing nothing,
+    /// when [`Self::can_move`] refuses.
+    pub fn move_tab(&mut self, panel: PanelId, destination: PaneId, index: Option<usize>) -> bool {
+        self.can_move(panel, destination, index)
+            && self.drop_panel(panel, move_drop(destination, index))
+    }
+
+    /// The panel whose tab has `focus`, a [`Dock::tab_focus`] target: the
+    /// active panel of that group.
+    pub fn focused_panel(&self, focus: Option<FocusId>) -> Option<PanelId> {
+        let focus = focus?;
+        self.roots
+            .iter()
+            .flat_map(PaneNode::groups)
+            .find(|g| Dock::tab_focus(g.id) == focus)?
+            .active_panel()
+    }
+
     /// The tab being dragged and where it would land, while a drag is over
     /// a target it may drop on.
     pub fn drop_preview(&self) -> Option<(PanelId, PaneDrop)> {
@@ -588,8 +702,17 @@ impl DockState {
 
     /// Apply an event from the dock's element. `now_ms` dates divider
     /// presses for double click. Returns true when the change is settled
-    /// and worth persisting.
+    /// and worth persisting. [`Self::apply_event`] also reports where a
+    /// moved tab went.
     pub fn apply(&mut self, event: DockEvent, now_ms: u64) -> bool {
+        self.apply_event(event, now_ms).settled
+    }
+
+    /// Apply an event from the dock's element, like [`Self::apply`]. After
+    /// a [`DockEvent::MoveTab`], focus [`DockOutcome::focus`] and announce
+    /// the destination.
+    pub fn apply_event(&mut self, event: DockEvent, now_ms: u64) -> DockOutcome {
+        let mut moved = None;
         let settled = match event {
             DockEvent::Split(which, event) => self.split_mut(which).apply(event, now_ms),
             DockEvent::PaneDivider {
@@ -617,9 +740,24 @@ impl DockState {
                 self.tab_drag = None;
                 target.is_some_and(|t| self.drop_panel(panel, t))
             }
+            DockEvent::MoveTab {
+                panel,
+                destination,
+                index,
+            } => {
+                let ok = self.move_tab(panel, destination, index);
+                if ok && let Some((region, pane, _)) = self.locate(panel) {
+                    moved = Some(TabMove {
+                        panel,
+                        region,
+                        pane,
+                    });
+                }
+                ok
+            }
         };
         self.debug_verify();
-        settled
+        DockOutcome { settled, moved }
     }
 
     pub fn snapshot(&self) -> DockSnapshot {
@@ -853,6 +991,7 @@ pub struct Dock<'a> {
     size: (f32, f32),
     map: EventMap,
     toggle_keys: Vec<(DockRegion, String)>,
+    move_keys: Option<(String, String)>,
     always_tabs: [bool; 4],
     tab_width: f32,
 }
@@ -871,6 +1010,7 @@ impl<'a> Dock<'a> {
             size,
             map: Rc::new(on_event),
             toggle_keys: Vec::new(),
+            move_keys: Some((MOVE_TAB_KEYS.0.into(), MOVE_TAB_KEYS.1.into())),
             always_tabs: [false; 4],
             tab_width: 120.0,
         }
@@ -888,6 +1028,14 @@ impl<'a> Dock<'a> {
     /// focused.
     pub fn toggle_key(mut self, region: DockRegion, binding: impl Into<String>) -> Self {
         self.toggle_keys.push((region, binding.into()));
+        self
+    }
+
+    /// Keys (keymap format) that move the focused tab into the previous and
+    /// next group that takes it, in tree order ([`DockState::move_target`]);
+    /// `None` binds none. Defaults to Mod+Shift+Page Up and Page Down.
+    pub fn move_tab_keys(mut self, keys: Option<(&str, &str)>) -> Self {
+        self.move_keys = keys.map(|(previous, next)| (previous.into(), next.into()));
         self
     }
 
@@ -1263,6 +1411,24 @@ impl<'a> Dock<'a> {
         let prev = index.checked_sub(1).unwrap_or(count - 1);
         let next = (index + 1) % count;
         let select = |index| (self.map)(DockEvent::Select { pane, index });
+        // Only the focusable active tab takes the move keys, bound only
+        // toward a group that takes it, so a refused move leaves the key
+        // to the app.
+        let moves: Vec<(String, Action)> = match (&self.move_keys, selected) {
+            (Some((previous, next)), true) => [(previous, false), (next, true)]
+                .into_iter()
+                .filter_map(|(key, forward)| {
+                    let destination = self.state.move_target(panel, forward)?;
+                    let event = DockEvent::MoveTab {
+                        panel,
+                        destination,
+                        index: None,
+                    };
+                    Some((key.clone(), (self.map)(event)))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         let label_color = if selected {
             colors.text_strong
         } else {
@@ -1299,6 +1465,9 @@ impl<'a> Dock<'a> {
                      on_key={("left", select(prev))} on_key={("right", select(next))}
                      on_key={("home", select(0))} on_key={("end", select(count - 1))}
                      on_key={("delete", close.clone())}
+                 }
+                 @for (key, action) in &moves {
+                     on_key={(key.clone(), action.clone())}
                  }
                  @when {!selected} { hover_bg={colors.ghost_element_hover} }>
                 // Let a long title shrink and truncate instead of pushing the
@@ -1591,6 +1760,105 @@ mod tests {
             dock.dump(),
             "left: [1*]\nright: row([11 12*] | [10*])\ncenter: [2*]\n"
         );
+    }
+
+    /// Apply a [`DockEvent::MoveTab`] of `panel` to the end of the group
+    /// holding `onto`.
+    fn move_onto(dock: &mut DockState, panel: PanelId, onto: PanelId) -> DockOutcome {
+        let destination = pane_of(dock, onto);
+        dock.apply_event(
+            DockEvent::MoveTab {
+                panel,
+                destination,
+                index: None,
+            },
+            0,
+        )
+    }
+
+    #[test]
+    fn move_targets_follow_tree_order_and_skip_hidden_regions() {
+        let mut dock = dock();
+        // The right region split in two: [A] beside [B C].
+        drop(&mut dock, A, B, DropZone::Left);
+        const D: PanelId = PanelId(30);
+        dock.open(DockRegion::Bottom, D);
+        // (panel, forward, target holding)
+        let cases: &[(PanelId, bool, Option<PanelId>)] = &[
+            (LEFT, false, None),
+            (LEFT, true, Some(CHAT)),
+            (CHAT, false, Some(LEFT)),
+            (CHAT, true, Some(D)),
+            (D, true, Some(A)),
+            (A, true, Some(B)),
+            (B, false, Some(A)),
+            (B, true, None),
+        ];
+        for &(panel, forward, expected) in cases {
+            assert_eq!(
+                dock.move_target(panel, forward),
+                expected.map(|p| pane_of(&dock, p)),
+                "{panel:?} forward {forward}"
+            );
+        }
+        dock.set_visible(DockRegion::Bottom, false);
+        assert_eq!(dock.move_target(CHAT, true), Some(pane_of(&dock, A)));
+    }
+
+    #[test]
+    fn move_targets_skip_groups_policy_refuses() {
+        let mut dock = dock();
+        dock.set_policy(DockRegion::Center, TabPolicy::SEALED);
+        // Past the sealed center, to the right region.
+        assert_eq!(dock.move_target(LEFT, true), Some(pane_of(&dock, A)));
+        dock.confine(LEFT, true);
+        assert_eq!(dock.move_target(LEFT, true), None);
+        assert_eq!(dock.move_targets(LEFT), []);
+    }
+
+    #[test]
+    fn a_refused_move_changes_nothing() {
+        let mut dock = dock();
+        dock.set_policy(DockRegion::Right, TabPolicy::SEALED);
+        let before = dock.dump();
+        assert_eq!(move_onto(&mut dock, A, CHAT), DockOutcome::default());
+        // Its own group is no destination either.
+        assert_eq!(move_onto(&mut dock, A, B), DockOutcome::default());
+        assert_eq!(dock.dump(), before);
+    }
+
+    #[test]
+    fn a_moved_tab_lands_at_the_end_of_its_destination_and_is_active() {
+        let mut dock = dock();
+        let outcome = move_onto(&mut dock, B, CHAT);
+        assert_eq!(
+            dock.dump(),
+            "left: [1*]\nright: [10 12*]\ncenter: [2 11*]\n"
+        );
+        assert_eq!(
+            outcome.moved,
+            Some(TabMove {
+                panel: B,
+                region: DockRegion::Center,
+                pane: pane_of(&dock, CHAT),
+            })
+        );
+        assert!(outcome.settled);
+    }
+
+    #[test]
+    fn moving_a_groups_last_tab_prunes_the_group_and_keeps_the_destination() {
+        let mut dock = dock();
+        drop(&mut dock, A, CHAT, DropZone::Right);
+        let destination = pane_of(&dock, CHAT);
+        let outcome = move_onto(&mut dock, A, CHAT);
+        assert_eq!(
+            dock.dump(),
+            "left: [1*]\nright: [11 12*]\ncenter: [2 10*]\n"
+        );
+        // The destination group keeps its identity, so focus can follow.
+        assert_eq!(outcome.moved.map(|m| m.pane), Some(destination));
+        assert_eq!(dock.focused_panel(outcome.focus()), Some(A));
     }
 
     #[test]
