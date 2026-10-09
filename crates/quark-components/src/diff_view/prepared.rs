@@ -250,22 +250,20 @@ impl RowPaint {
             .map(|line| line.map_or(0, |l| l.saturating_add(1)))
     }
 
-    pub(crate) fn height(&self, m: &Metrics) -> f32 {
+    pub(crate) fn height(&self, m: &Metrics, presentation: &DiffPresentation) -> f32 {
         let lines = self.sides.iter().flatten();
         lines.map(|l| l.layout.size().1.ceil()).fold(
-            self.kind.diff().map_or(m.line_h, |k| row_height(k, m)),
+            self.kind
+                .diff()
+                .map_or(m.line_h, |k| row_height(k, m, presentation)),
             f32::max,
         )
     }
 }
 
 /// Height of a row of `kind` before its text is measured.
-pub(crate) fn row_height(kind: RowKind, m: &Metrics) -> f32 {
-    match kind {
-        RowKind::FileHeader => (m.line_h * 2.0).round(),
-        RowKind::HunkHeader | RowKind::Gap => (m.line_h * 1.4).round(),
-        _ => m.line_h,
-    }
+pub(crate) fn row_height(kind: RowKind, m: &Metrics, presentation: &DiffPresentation) -> f32 {
+    super::presentation::band_height(kind, m, presentation)
 }
 
 /// A search match on one side of a row.

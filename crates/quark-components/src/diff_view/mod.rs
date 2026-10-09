@@ -366,7 +366,13 @@ impl DiffViewState {
         }
         let columns_moved = (presentation.numbers, presentation.markers)
             != (self.presentation.numbers, self.presentation.markers);
+        let heights_moved = (presentation.separators, presentation.headers)
+            != (self.presentation.separators, self.presentation.headers);
         self.presentation = presentation;
+        if heights_moved {
+            let anchor = self.anchor();
+            self.rebuild_rows(anchor);
+        }
         match presentation.layout {
             DiffLayout::Unified => self.set_mode(Mode::Unified),
             DiffLayout::Split => self.set_mode(Mode::Split),
@@ -879,6 +885,19 @@ impl DiffViewState {
             self.measure_font(text, layouts, scale);
         }
         let m = self.metrics();
+        // An automatic layout follows the width; explicit ones stay put.
+        if let Some(mode) = presentation::auto_mode(
+            self.presentation.layout,
+            self.projection.mode,
+            self.viewport.0,
+            &m,
+            &self.presentation,
+        ) && mode != self.projection.mode
+        {
+            let anchor = self.anchor();
+            self.projection.rebuild(&self.doc, mode, &self.expansion);
+            self.rebuild_rows(anchor);
+        }
         let columns = Columns::new(
             self.projection.mode,
             self.viewport.0,
@@ -982,10 +1001,10 @@ impl DiffViewState {
             };
             let stamp = this.stamp(row, columns, scale);
             match painted.get(&key) {
-                Some(p) if p.stamp == stamp => p.height(&m),
+                Some(p) if p.stamp == stamp => p.height(&m, &this.presentation),
                 _ => {
                     let p = this.build_row(row, stamp, text, layouts, scale, columns);
-                    let height = p.height(&m);
+                    let height = p.height(&m, &this.presentation);
                     painted.insert(key, Rc::new(p));
                     height
                 }
@@ -1189,7 +1208,7 @@ impl DiffViewState {
         for (row, key) in keys.iter().enumerate() {
             let kind = self.projection.kind[row];
             if !kind.is_line() {
-                let _ = list.set_height(*key, row_height(kind, &m));
+                let _ = list.set_height(*key, row_height(kind, &m, &self.presentation));
             }
         }
         let offset = anchor
