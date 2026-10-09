@@ -26,6 +26,8 @@ use std::sync::Arc;
 
 use quark_diff::{FileStatus, GapId, Mode, RowKind, Side};
 use quark_syntax::HighlightKind;
+
+use super::syntax::SyntaxStatus;
 use quark_text::TextLayout;
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility};
@@ -234,6 +236,13 @@ pub struct RowPaint {
     pub status: FileStatus,
     pub stats: (u32, u32),
     pub binary: bool,
+    /// File headers: the file's syntax status, when highlighting is on.
+    /// Paint its label while it is not [`SyntaxStatus::Ready`].
+    pub syntax: Option<SyntaxStatus>,
+    /// File headers: the file's rows are folded under the header.
+    pub collapsed: bool,
+    /// File headers: annotations anchored in the file, shown or not.
+    pub annotations: u32,
 }
 
 impl RowPaint {
@@ -313,6 +322,9 @@ pub struct ViewFrame {
     pub appearance: DiffAppearance,
     pub wrap: bool,
     pub rows: Vec<FrameRow>,
+    /// With sticky headers on: the header of the file the top row belongs
+    /// to, once its own row has scrolled above the viewport.
+    pub sticky_header: Option<FrameRow>,
     /// Width of each side's widest line seen, padding included.
     pub content_w: [f32; 2],
     pub scroll: f32,

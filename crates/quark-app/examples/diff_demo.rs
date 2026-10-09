@@ -359,7 +359,15 @@ mod tests {
     use accesskit::Role;
     use quark_app::quark_ui::test_alloc::{self, Counting};
     use quark_app::testing::{By, UiTestHarness};
-    use quark_diff::RowKind;
+    use quark_components::CopySide;
+    use quark_components::diff_view::prepared::{PreparedKind, SearchMark};
+    use quark_components::diff_view::presentation::{DiffLayout, DiffPresentation};
+    use quark_components::diff_view::{
+        AnnotationId, CopyContent, DiffAnchor, DiffAnnotation, DiffPreviewLimit, DiffTarget,
+        FileId, FindOptions, RevealAlign, Revision, SearchCoverage, SearchDirection, SearchSides,
+        SourcePoint,
+    };
+    use quark_diff::{RowKind, Side};
 
     use super::*;
 
@@ -641,5 +649,408 @@ mod tests {
             ui.frame();
         });
         assert!(sites.is_empty(), "{sites:#?}");
+    }
+
+    fn names(ui: &UiTestHarness<Demo>, role: Role) -> Vec<String> {
+        ui.find_all(By::role(role))
+            .into_iter()
+            .filter_map(|n| n.name)
+            .collect()
+    }
+
+    fn has_label(ui: &UiTestHarness<Demo>, label: &str) -> bool {
+        names(ui, Role::Label).iter().any(|n| n == label)
+    }
+
+    const FILE: FileId = FileId(0);
+
+    // Catches exact copy losing line endings or the final-newline state,
+    // or claiming a whole file the view holds only as patch lines.
+    #[test]
+    fn whole_file_copy_is_exact_and_refused_for_patch_lines() {
+        let (old, new) = ("a\r\nb\r\nc", "a\r\nB\r\nc");
+        let ui = harness(diff_texts(Some("f"), Some("f"), Some(old), Some(new), 3));
+        let copy = |ui: &UiTestHarness<Demo>, side| {
+            ui.app()
+                .diff
+                .copy(CopyContent::WholeFile { file: FILE, side })
+        };
+        assert_eq!(copy(&ui, Side::Old).as_deref(), Some(old));
+        assert_eq!(copy(&ui, Side::New).as_deref(), Some(new));
+        let patch = harness(parse_unified("--- a/f\n+++ b/f\n@@ -2 +2 @@\n-b\n+B\n").unwrap());
+        assert_eq!(copy(&patch, Side::New), None);
+    }
+
+    // Catches a split selection's byte offsets being applied to the other
+    // side's different text: an endpoint inside a changed line takes that
+    // line whole when the other side is copied.
+    #[test]
+    fn copying_the_other_side_of_a_partial_selection_takes_whole_lines() {
+        let doc = diff_texts(
+            Some("f"),
+            Some("f"),
+            Some("keep\nold alpha\nold beta\nend\n"),
+            Some("keep\nnew alpha one\nnew beta two\nend\n"),
+            3,
+        );
+        let mut ui = harness(doc);
+        ui.app_mut().diff.set_mode(Mode::Split);
+        ui.frame();
+        let from = ui.find(line("new alpha one")).bounds;
+        let to = ui.find(line("new beta two")).bounds;
+        ui.drag((from.x + 40.0, from.y + 5.0), (to.x + 40.0, to.y + 5.0));
+        let copy = |side| ui.app().diff.copy(CopyContent::Selection(side)).unwrap();
+
+        assert_eq!(copy(CopySide::Old), "old alpha\nold beta");
+        assert!(copy(CopySide::New).len() < "new alpha one\nnew beta two".len());
+    }
+
+    // Catches a megabyte line reaching shaping whole, a selection copying
+    // more than it shows, or whole-line copy reading the shown prefix.
+    #[test]
+    fn a_huge_line_shapes_a_prefix_and_copies_whole_on_request() {
+        let long = "x".repeat(1 << 20);
+        let doc = diff_texts(None, Some("f"), None, Some(&format!("short\n{long}\n")), 3);
+        let mut ui = harness(doc);
+        let shown = names(&ui, Role::ListItem)
+            .into_iter()
+            .find(|n| n.starts_with('x'))
+            .unwrap();
+        assert_eq!(shown.len(), 4096);
+        ui.click_node(line("short"));
+        ui.key("ctrl+a");
+        ui.key("ctrl+c");
+        let selected = ui.clipboard_text().unwrap();
+        assert_eq!(selected.len(), "short\n".len() + 4096);
+        let full = ui.app().diff.copy(CopyContent::Line {
+            file: FILE,
+            side: Side::New,
+            line: 1,
+        });
+        assert_eq!(full.map(|l| l.len()), Some(1 << 20));
+    }
+
+    // Catches mode, binary, rename-only, and final-newline changes showing
+    // as an empty file with nothing but `+0 -0`.
+    #[test]
+    fn metadata_only_changes_show_a_fact_row() {
+        let patch = "diff --git a/run.sh b/run.sh
+old mode 100644
+new mode 100755
+diff --git a/logo.png b/logo.png
+Binary files a/logo.png and b/logo.png differ
+diff --git a/old.txt b/new.txt
+similarity index 100%
+rename from old.txt
+rename to new.txt
+diff --git a/f.txt b/f.txt
+--- a/f.txt
++++ b/f.txt
+@@ -1 +1 @@
+-a
++b
+\\ No newline at end of file
+";
+        let ui = harness(parse_unified(patch).unwrap());
+        for fact in [
+            "File mode changed from 100644 to 100755",
+            "Binary file not shown",
+            "Renamed without changes",
+            "No newline at end of the new file",
+        ] {
+            assert!(
+                has_label(&ui, fact),
+                "{fact}: {:?}",
+                names(&ui, Role::Label)
+            );
+        }
+    }
+
+    /// Lines 0..200 with lines 10, 100, and 190 changed, one line of
+    /// context: gaps between the three hunks.
+    fn three_hunks() -> DiffDocument {
+        let old = numbered(0..200);
+        let mut new = old.clone();
+        for n in [10, 100, 190] {
+            new = new.replace(&format!("line {n}\n"), &format!("changed {n}\n"));
+        }
+        diff_texts(Some("f"), Some("f"), Some(&old), Some(&new), 1)
+    }
+
+    // Catches revealing a hidden line scrolling to nothing, or expanding
+    // more collapsed context than the target needs.
+    #[test]
+    fn revealing_a_hidden_line_expands_only_its_gap() {
+        let mut ui = harness(three_hunks());
+        let target = DiffTarget::Source(SourcePoint {
+            file: FILE,
+            side: Side::New,
+            line: 50,
+            byte: 0,
+        });
+        assert!(ui.app_mut().diff.reveal_target(target, RevealAlign::Center));
+        ui.frame();
+        assert!(ui.try_find(line("line 50")).is_some());
+        ui.key("end");
+        assert!(has_label(&ui, "87 unchanged lines    @@ -190,3 +190,3 @@"));
+    }
+
+    // Catches search reading only rendered rows, or moving to a match
+    // without exposing it inside collapsed context.
+    #[test]
+    fn search_finds_and_reveals_a_match_in_collapsed_context() {
+        let mut ui = harness(two_hunks());
+        ui.app_mut()
+            .diff
+            .set_find_query("LINE 25", FindOptions::default());
+        assert_eq!(ui.app().diff.search_summary().matches, 1);
+        let at = ui.app_mut().diff.next_match(SearchDirection::Forward);
+        ui.frame();
+
+        assert_eq!(at.map(|p| (p.line, p.byte)), Some((25, 0)));
+        assert!(ui.try_find(line("line 25")).is_some());
+        let frame = ui.app().diff.frame().unwrap().clone();
+        let row = frame
+            .rows
+            .iter()
+            .find(|r| r.paint.source_lines[1] == Some(25))
+            .unwrap();
+        assert_eq!(
+            row.search[1],
+            [SearchMark {
+                range: 0..7,
+                active: true
+            }]
+        );
+    }
+
+    // Catches side scope, case, or the unchanged-line option counting the
+    // wrong lines, and a patch's partial coverage going unreported.
+    #[test]
+    fn search_options_scope_the_matches() {
+        let doc = || {
+            diff_texts(
+                Some("f"),
+                Some("f"),
+                Some("Alpha\nbeta\nalpha\n"),
+                Some("Alpha\nBETA two\nalpha\n"),
+                3,
+            )
+        };
+        let mut ui = harness(doc());
+        let opts = |sides, case_sensitive, include_unchanged| FindOptions {
+            sides,
+            case_sensitive,
+            include_unchanged,
+            ..FindOptions::default()
+        };
+        // query, options, (old matches, new matches)
+        let cases = [
+            ("alpha", opts(SearchSides::New, false, true), (0, 2)),
+            ("alpha", opts(SearchSides::New, true, true), (0, 1)),
+            ("alpha", opts(SearchSides::Both, false, true), (2, 2)),
+            ("alpha", opts(SearchSides::Both, false, false), (0, 0)),
+            ("beta", opts(SearchSides::Both, false, false), (1, 1)),
+            ("beta", opts(SearchSides::Old, true, true), (1, 0)),
+        ];
+        for (query, options, expected) in cases {
+            ui.app_mut().diff.set_find_query(query, options);
+            let s = ui.app().diff.search_summary();
+            assert_eq!(
+                (s.old_matches, s.new_matches),
+                expected,
+                "{query} {options:?}"
+            );
+            assert_eq!(s.coverage, SearchCoverage::Full);
+        }
+        let mut patch = harness(parse_unified("--- a/f\n+++ b/f\n@@ -2 +2 @@\n-b\n+B\n").unwrap());
+        patch
+            .app_mut()
+            .diff
+            .set_find_query("b", FindOptions::default());
+        assert_eq!(
+            patch.app().diff.search_summary().coverage,
+            SearchCoverage::PatchOnly
+        );
+    }
+
+    // Catches a compact preview materializing the whole diff, or its open
+    // action losing the first row it left out.
+    #[test]
+    fn a_preview_shows_twelve_rows_and_opens_at_the_first_hidden_line() {
+        let lines = numbered(0..100);
+        let mut ui = harness(diff_texts(None, Some("big.txt"), None, Some(&lines), 3));
+        ui.app_mut()
+            .diff
+            .set_preview_limit(Some(DiffPreviewLimit::default()));
+        ui.frame();
+        // The file header and eleven lines.
+        assert_eq!(names(&ui, Role::ListItem).len(), 11);
+        assert!(
+            has_label(&ui, "89 more rows"),
+            "{:?}",
+            names(&ui, Role::Label)
+        );
+        assert!(ui.app().diff.content_height() < SIZE.1 - TOOLBAR_H);
+        let outcome = ui.app_mut().diff.handle(DiffEvent::OpenFull);
+        let target = DiffTarget::Source(SourcePoint {
+            file: FILE,
+            side: Side::New,
+            line: 11,
+            byte: 0,
+        });
+        assert_eq!(outcome, DiffOutcome::OpenFull { target });
+    }
+
+    /// The frame's rows in order: line rows as their text, annotation
+    /// rows as `note <side> <first line number>`.
+    fn frame_rows(ui: &UiTestHarness<Demo>) -> Vec<String> {
+        let frame = ui.app().diff.frame().unwrap().clone();
+        frame
+            .rows
+            .iter()
+            .filter_map(|r| match &r.paint.kind {
+                PreparedKind::Annotation(slot) => {
+                    let side = if slot.side == Side::Old { "old" } else { "new" };
+                    Some(format!("note {side} {}", slot.lines.start + 1))
+                }
+                _ => r
+                    .paint
+                    .sides
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map(|l| l.layout.text().to_owned()),
+            })
+            .collect()
+    }
+
+    fn note(id: u64, side: Side, line: u32) -> DiffAnnotation {
+        DiffAnnotation {
+            id: AnnotationId(id),
+            anchor: DiffAnchor {
+                file: FILE,
+                revision: Revision(0),
+                side,
+                lines: line..line + 1,
+            },
+            revision: 0,
+        }
+    }
+
+    // Catches an annotation's measured height moving the code above it or
+    // the top of the viewport.
+    #[test]
+    fn a_measured_annotation_grows_without_moving_the_code_above() {
+        let lines = numbered(0..100);
+        let mut ui = harness(diff_texts(None, Some("f"), None, Some(&lines), 3));
+        ui.app_mut()
+            .diff
+            .set_annotations(vec![note(1, Side::New, 8)]);
+        ui.app_mut().diff.scroll_to_row(3);
+        ui.frame();
+        let y = |ui: &UiTestHarness<Demo>, name| ui.find(line(name)).bounds.y;
+        let (top, anchor, below) = (y(&ui, "line 3"), y(&ui, "line 8"), y(&ui, "line 9"));
+        ui.app_mut().diff.handle(DiffEvent::AnnotationMeasured {
+            id: AnnotationId(1),
+            revision: 0,
+            height: 140.0,
+        });
+        ui.frame();
+
+        assert_eq!((y(&ui, "line 3"), y(&ui, "line 8")), (top, anchor));
+        assert_eq!(y(&ui, "line 9") - below, 140.0 - 60.0);
+    }
+
+    // Catches annotations attaching to the wrong side's line: each sits
+    // below its own side's row and names its side.
+    #[test]
+    fn annotation_rows_sit_below_their_sides_line() {
+        let mut ui = harness(two_hunks());
+        ui.app_mut()
+            .diff
+            .set_annotations(vec![note(1, Side::Old, 10), note(2, Side::New, 10)]);
+        ui.frame();
+        let rows = frame_rows(&ui);
+        let at = |name: &str| rows.iter().position(|r| r == name).unwrap();
+        assert_eq!(at("note old 11"), at("line 10") + 1);
+        assert_eq!(at("note new 11"), at("line ten") + 1);
+    }
+
+    // Catches an annotation inside collapsed context vanishing: the fold
+    // counts it, and revealing its line opens it.
+    #[test]
+    fn an_annotation_in_collapsed_context_is_counted_and_revealed() {
+        let mut ui = harness(two_hunks());
+        ui.app_mut()
+            .diff
+            .set_annotations(vec![note(1, Side::New, 25)]);
+        ui.frame();
+        assert!(has_label(
+            &ui,
+            "27 unchanged lines, 1 annotation    @@ -40,3 +40,3 @@"
+        ));
+        let target = DiffTarget::Source(SourcePoint {
+            file: FILE,
+            side: Side::New,
+            line: 25,
+            byte: 0,
+        });
+        ui.app_mut().diff.reveal_target(target, RevealAlign::Center);
+        ui.frame();
+        let rows = frame_rows(&ui);
+        let at = |name: &str| rows.iter().position(|r| r == name);
+        assert_eq!(at("note new 26"), at("line 25").map(|i| i + 1));
+    }
+
+    // Catches a folded file keeping its rows (or losing its header), and
+    // navigation into it leaving it folded.
+    #[test]
+    fn a_collapsed_file_keeps_only_its_header_until_revealed() {
+        let mut ui = harness(two_hunks());
+        ui.app_mut().diff.set_file_collapsed(FILE, true);
+        ui.frame();
+        assert!(names(&ui, Role::ListItem).is_empty());
+        assert!(ui.try_find(By::role(Role::Heading)).is_some());
+        let target = DiffTarget::Hunk {
+            file: FILE,
+            hunk: 1,
+        };
+        ui.app_mut().diff.reveal_target(target, RevealAlign::Top);
+        ui.frame();
+        assert!(ui.try_find(line("line forty")).is_some());
+    }
+
+    // Catches the automatic layout flipping without hysteresis or losing
+    // the reader's line when it switches.
+    #[test]
+    fn automatic_layout_follows_the_width_and_keeps_the_top_line() {
+        let mut ui = harness(three_hunks());
+        let presentation = DiffPresentation {
+            layout: DiffLayout::AUTO,
+            ..DiffPresentation::default()
+        };
+        ui.app_mut().diff.set_presentation(presentation);
+        ui.app_mut().diff.scroll_to_row(5);
+        ui.frame();
+        let before = names(&ui, Role::ListItem)[0].clone();
+        let mut seen = Vec::new();
+        // 1020 points leaves each side between the 40 columns split keeps
+        // and the 44 it needs to start.
+        for width in [600.0, 1020.0, 1200.0, 1020.0, 600.0] {
+            ui.resize(width, SIZE.1);
+            seen.push(ui.app().diff.mode());
+            assert_eq!(names(&ui, Role::ListItem)[0], before, "at {width}");
+        }
+        assert_eq!(
+            seen,
+            [
+                Mode::Unified,
+                Mode::Unified,
+                Mode::Split,
+                Mode::Split,
+                Mode::Unified
+            ]
+        );
     }
 }

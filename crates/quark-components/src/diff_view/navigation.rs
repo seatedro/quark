@@ -238,7 +238,9 @@ impl DiffViewState {
                 Some(segment.list_rows[row as usize]).filter(|&i| i != NONE)
             }
             DiffTarget::Hunk { file, hunk } => {
-                let (seg, file) = self.locate(self.unit_of(file)?)?;
+                let unit = self.unit_of(file)?;
+                self.unfold(unit);
+                let (seg, file) = self.locate(unit)?;
                 let segment = &self.segments[seg];
                 let hunks = segment.doc.files().hunks[file as usize].clone();
                 let global = hunks
@@ -250,11 +252,20 @@ impl DiffViewState {
             }
             DiffTarget::Source(point) => {
                 let unit = self.unit_of(point.file)?;
+                self.unfold(unit);
                 let (seg, file) = self.locate(unit)?;
                 let index = store_index(&self.segments[seg].doc, file, point.side, point.line)?;
                 self.reveal_line(seg, file, point.side, index);
                 self.list_index_of_line(unit, point.side, index)
             }
+        }
+    }
+
+    /// Unfolds a collapsed file, so a target inside it has rows.
+    pub(crate) fn unfold(&mut self, unit: u32) {
+        if self.collapsed.remove(&unit) {
+            let anchor = self.anchor();
+            self.rebuild_rows(anchor);
         }
     }
 

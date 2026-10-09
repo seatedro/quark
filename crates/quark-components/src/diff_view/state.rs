@@ -175,8 +175,8 @@ pub(crate) fn fact_title(fact: &FileFact) -> String {
         FileFact::ModeChange { old, new } => format!("File mode changed from {old} to {new}"),
         FileFact::RenameOnly => "Renamed without changes".to_owned(),
         FileFact::CopyOnly => "Copied without changes".to_owned(),
-        FileFact::NoNewlineAtEof(Side::Old) => "No newline at end of file (old)".to_owned(),
-        FileFact::NoNewlineAtEof(Side::New) => "No newline at end of file (new)".to_owned(),
+        FileFact::NoNewlineAtEof(Side::Old) => "No newline at end of the old file".to_owned(),
+        FileFact::NoNewlineAtEof(Side::New) => "No newline at end of the new file".to_owned(),
     }
 }
 
@@ -386,6 +386,7 @@ impl DiffViewState {
         let m = self.metrics();
         let placed = self.annotation_placement();
         let limit = self.preview.map(|p| p.max_rows);
+        let collapsed = &self.collapsed;
         let mut refs = Vec::with_capacity(self.refs.len());
         let mut hidden = 0u32;
         for (si, segment) in self.segments.iter_mut().enumerate() {
@@ -394,15 +395,18 @@ impl DiffViewState {
             segment.list_rows.clear();
             segment.list_rows.resize(p.len() as usize, NONE);
             for row in 0..p.len() {
+                let (kind, file) = (p.kind[row as usize], p.file[row as usize]);
+                if kind != RowKind::FileHeader && collapsed.contains(&(segment.slot + file)) {
+                    continue;
+                }
                 if limit.is_some_and(|max| refs.len() as u32 >= max) {
                     hidden += 1;
                     continue;
                 }
                 segment.list_rows[row as usize] = refs.len() as u32;
                 refs.push(RowRef::Line { seg, row });
-                let (kind, file) = (p.kind[row as usize], p.file[row as usize]);
                 let unit = segment.slot + file;
-                if kind == RowKind::FileHeader {
+                if kind == RowKind::FileHeader && !collapsed.contains(&unit) {
                     let facts = file_facts(&segment.doc, file).len() as u32;
                     refs.extend((0..facts).map(|fact| RowRef::Fact { seg, file, fact }));
                     if let Some(outdated) = placed.outdated.get(&unit) {
@@ -526,6 +530,21 @@ impl DiffViewState {
         }
         self.prepared = Some(key);
         self.frame_id += 1;
+        if self.files.is_static() {
+            let file_of = |r: &RowRef| match *r {
+                RowRef::Line { seg, row } => {
+                    Some(self.segments[seg as usize].projection.file[row as usize])
+                }
+                RowRef::Fact { file, .. } => Some(file),
+                _ => None,
+            };
+            let refs = &self.refs[window.clone()];
+            let first = refs.iter().find_map(file_of);
+            let last = refs.iter().rev().find_map(file_of);
+            if let (Some(first), Some(last)) = (first, last) {
+                self.syntax.set_visible_files(first..last + 1);
+            }
+        }
 
         let scroll = self.list.scroll_offset();
         let ordered = self.ordered_selection();
@@ -571,6 +590,8 @@ impl DiffViewState {
             });
             kept.insert(key, paint);
         }
+        let sticky_header =
+            self.sticky_header(scroll, &columns, scale, text, layouts, &mut kept, &m);
         self.painted = kept;
         self.frame = Some(Rc::new(ViewFrame {
             id: self.id,
@@ -583,6 +604,7 @@ impl DiffViewState {
             appearance: self.appearance,
             wrap: self.style.wrap,
             rows,
+            sticky_header,
             content_w: self.content_w,
             scroll,
             total: self.list.rows().total_extent(),
@@ -591,6 +613,59 @@ impl DiffViewState {
             scrollbar_auto_hide: self.scrollbar_auto_hide,
             scrollbar: self.scrollbar.clone(),
         }));
+    }
+
+    /// The header to pin at the top: with sticky headers on, the file
+    /// header of the top row's file when that header is above the
+    /// viewport. Its paint is kept with the window's.
+    #[allow(clippy::too_many_arguments)]
+    fn sticky_header(
+        &mut self,
+        scroll: f32,
+        columns: &Columns,
+        scale: f32,
+        text: &mut TextSystem,
+        layouts: &mut LayoutCache,
+        kept: &mut HashMap<u64, Rc<RowPaint>>,
+        m: &Metrics,
+    ) -> Option<FrameRow> {
+        if !self.presentation.sticky_headers {
+            return None;
+        }
+        let top = self.list.rows().row_at(scroll)?;
+        let (seg, file) = match self.refs[top] {
+            RowRef::Line { seg, row } => (
+                seg,
+                self.segments[seg as usize].projection.file[row as usize],
+            ),
+            RowRef::Fact { seg, file, .. } => (seg, file),
+            _ => return None,
+        };
+        let segment = &self.segments[seg as usize];
+        let header = *segment.projection.file_rows.get(file as usize)?;
+        let index = *segment.list_rows.get(header as usize)?;
+        if index == NONE || index as usize >= top {
+            return None;
+        }
+        let r = RowRef::Line { seg, row: header };
+        let key = self.ref_key(r);
+        let stamp = self.stamp(r, columns, scale);
+        let paint = match kept.get(&key).or_else(|| self.painted.get(&key)) {
+            Some(p) if p.stamp == stamp => p.clone(),
+            _ => Rc::new(self.build_row(r, stamp, text, layouts, scale, columns)),
+        };
+        kept.insert(key, paint.clone());
+        let height = self.list.rows().height_of(RowKey(key)).unwrap_or(m.line_h);
+        Some(FrameRow {
+            key,
+            index,
+            top: 0.0,
+            height,
+            paint,
+            selected: [None, None],
+            search: Default::default(),
+            focused: self.focused == Some(key),
+        })
     }
 
     /// Heights of rows entering the window, from their wrapped layouts.
@@ -654,6 +729,10 @@ impl DiffViewState {
                     for side in [Side::Old, Side::New] {
                         columns.wrap_width(side, &m).to_bits().hash(&mut h);
                     }
+                }
+                if p.kind[row as usize] == RowKind::FileHeader {
+                    let unit = segment.unit(file);
+                    (self.collapsed.contains(&unit), self.file_annotations(unit)).hash(&mut h);
                 }
                 if let Some(gap) = p.gap(row) {
                     // Its count changes as lines are revealed.
@@ -721,6 +800,9 @@ impl DiffViewState {
             status: FileStatus::Modified,
             stats: (0, 0),
             binary: false,
+            syntax: None,
+            collapsed: false,
+            annotations: 0,
         };
         match r {
             RowRef::Line { seg, row } => {
@@ -787,9 +869,18 @@ impl DiffViewState {
                 doc.files().deletions[file as usize],
             ),
             binary: meta.binary,
+            syntax: None,
+            collapsed: false,
+            annotations: 0,
         };
         match kind {
             RowKind::FileHeader => {
+                let unit = segment.unit(file);
+                if self.files.is_static() {
+                    paint.syntax = self.syntax.file_status(file);
+                }
+                paint.collapsed = self.collapsed.contains(&unit);
+                paint.annotations = self.file_annotations(unit);
                 paint.title = match (&meta.old_path, &meta.new_path) {
                     (Some(old), Some(new)) if old != new => format!("{old} \u{2192} {new}").into(),
                     _ => doc.path(file).into(),

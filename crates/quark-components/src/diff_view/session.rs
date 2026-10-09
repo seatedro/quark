@@ -118,6 +118,7 @@ impl DiffSessionViewState {
         fn search_summary() -> SearchSummary;
         fn focused_target() -> Option<DiffTarget>;
         fn point_at(x: f32, y: f32) -> Option<SelectionPoint>;
+        fn is_file_collapsed(file: FileId) -> bool;
     }
 
     forward! { mut
@@ -140,6 +141,7 @@ impl DiffSessionViewState {
         fn set_annotations(annotations: Vec<DiffAnnotation>) -> ();
         fn set_annotation_height(id: AnnotationId, revision: u64, height: f32) -> bool;
         fn handle(event: DiffEvent) -> DiffOutcome;
+        fn set_file_collapsed(file: FileId, collapsed: bool) -> bool;
     }
 
     /// Each annotation with whether it is outdated, in the order given.

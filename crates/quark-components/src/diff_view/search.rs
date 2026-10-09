@@ -294,8 +294,9 @@ impl DiffViewState {
         self.revision += 1;
         let hit = self.search.hits[next].clone();
         let seg = hit.seg as usize;
-        self.reveal_line(seg, hit.file, hit.side, hit.index);
         let unit = self.segments[seg].unit(hit.file);
+        self.unfold(unit);
+        self.reveal_line(seg, hit.file, hit.side, hit.index);
         if let Some(index) = self.list_index_of_line(unit, hit.side, hit.index) {
             self.reveal_list_row(index);
         }

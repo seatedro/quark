@@ -251,6 +251,19 @@ impl DiffViewState {
         placement
     }
 
+    /// Annotations anchored in `unit`'s file.
+    pub(crate) fn file_annotations(&self, unit: u32) -> u32 {
+        if self.annotations.entries.is_empty() {
+            return 0;
+        }
+        let file = self.file_id(unit);
+        self.annotations
+            .entries
+            .iter()
+            .filter(|e| e.annotation.anchor.file == file)
+            .count() as u32
+    }
+
     /// Current annotations whose anchor's last line a gap hides.
     pub(crate) fn gap_annotations(&self, segment: &Segment, gap: quark_diff::GapRow) -> u32 {
         if self.annotations.entries.is_empty() {

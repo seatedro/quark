@@ -46,7 +46,7 @@ pub mod syntax;
 mod view;
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ use std::sync::Arc;
 use quark::selection::Selection;
 use quark_diff::{ContextPolicy, DiffDocument, DiffLimits, GapId, Mode, Projection, Reveal, Side};
 use quark_render::scene::Rect;
-use quark_syntax::GrammarStore;
+use quark_syntax::{GrammarStore, HighlightWorker};
 use quark_text::{FontEpoch, LayoutCache, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX};
@@ -73,7 +73,7 @@ use prepared::{Metrics, RowPaint, ViewFrame};
 use presentation::{DiffAppearance, DiffLayout, DiffPresentation};
 use search::SearchState;
 use state::{FileMap, RowRef, Segment};
-use syntax::DiffSyntax;
+use syntax::{DiffSyntax, SyntaxBudget};
 
 /// Lines one click on an expand control reveals by default.
 pub const REVEAL_STEP: u32 = quark_diff::REVEAL_STEP;
@@ -148,6 +148,11 @@ pub enum DiffEvent {
         file: u32,
         side: Side,
         line: u32,
+    },
+    /// The collapse control of a file header: the header's
+    /// [`prepared::RowPaint::file`].
+    ToggleFile {
+        file: u32,
     },
     /// An annotation row measured its content at the row's width.
     AnnotationMeasured {
@@ -256,6 +261,8 @@ pub struct DiffViewState {
     limits: DiffLimits,
     search: SearchState,
     annotations: AnnotationTable,
+    /// Units of files folded under their headers.
+    collapsed: HashSet<u32>,
     /// Key of the row the last navigation moved the keyboard focus to.
     focused: Option<u64>,
     /// Source of segment generations, so a stamp never matches a row of a
@@ -281,6 +288,9 @@ impl DiffViewState {
         state
             .syntax
             .reset(state.segments[0].doc.file_count() as usize);
+        state.syntax.set_budget(SyntaxBudget {
+            side_bytes: state.limits.syntax_file_bytes,
+        });
         state.rebuild_rows(None);
         state
     }
@@ -320,6 +330,7 @@ impl DiffViewState {
             search: SearchState::default(),
             annotations: AnnotationTable::default(),
             focused: None,
+            collapsed: HashSet::new(),
             generations: 0,
             revision: 0,
             frame_id: 0,
@@ -568,6 +579,9 @@ impl DiffViewState {
     pub fn set_limits(&mut self, limits: DiffLimits) {
         if limits != self.limits {
             self.limits = limits;
+            self.syntax.set_budget(SyntaxBudget {
+                side_bytes: limits.syntax_file_bytes,
+            });
             self.painted.clear();
             self.content_w = [0.0; 2];
             self.rerun_search();
@@ -598,6 +612,46 @@ impl DiffViewState {
         self.syntax.enable(store);
         self.syntax
             .request(&self.segments[0].doc, self.segments[0].generation);
+    }
+
+    /// [`Self::enable_syntax`] on a worker shared with other views, so many
+    /// diffs need one parsing thread.
+    pub fn enable_syntax_shared(&mut self, worker: &HighlightWorker, store: GrammarStore) {
+        if !self.files.is_static() {
+            return;
+        }
+        self.syntax.enable_shared(worker, store);
+        self.syntax
+            .request(&self.segments[0].doc, self.segments[0].generation);
+    }
+
+    /// Calls `wake` from the syntax worker when results are ready, so an
+    /// idle app can ask for a frame instead of polling.
+    pub fn set_syntax_wake(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        self.syntax.set_wake(wake);
+    }
+
+    /// Folds a file's rows under its header, or unfolds them. Returns
+    /// whether that changed anything.
+    pub fn set_file_collapsed(&mut self, file: FileId, collapsed: bool) -> bool {
+        let Some(unit) = self.unit_of(file).filter(|&u| self.locate(u).is_some()) else {
+            return false;
+        };
+        let changed = if collapsed {
+            self.collapsed.insert(unit)
+        } else {
+            self.collapsed.remove(&unit)
+        };
+        if changed {
+            let anchor = self.anchor();
+            self.rebuild_rows(anchor);
+        }
+        changed
+    }
+
+    pub fn is_file_collapsed(&self, file: FileId) -> bool {
+        self.unit_of(file)
+            .is_some_and(|unit| self.collapsed.contains(&unit))
     }
 
     pub fn set_selection(&mut self, selection: Option<Selection>, side: Side) {
@@ -691,6 +745,11 @@ impl DiffViewState {
                     Some(anchor) => DiffOutcome::Annotate { anchor },
                     None => DiffOutcome::Unchanged,
                 };
+            }
+            DiffEvent::ToggleFile { file } => {
+                let collapsed = self.collapsed.contains(&file);
+                let id = self.file_id(file);
+                self.set_file_collapsed(id, !collapsed)
             }
             DiffEvent::AnnotationMeasured {
                 id,
