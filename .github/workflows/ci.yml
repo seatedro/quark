@@ -119,6 +119,9 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      - name: Format views
+        run: cargo run --locked -p quark-fmt --bin quark-fmt -- --all --view-only --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
