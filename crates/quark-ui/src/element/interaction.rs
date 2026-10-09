@@ -110,6 +110,18 @@ impl InteractionFrame {
         self.open_slots.clear();
     }
 
+    /// Groups and slots registered so far.
+    pub(super) fn mark(&self) -> (usize, usize) {
+        (self.groups.len(), self.slots.len())
+    }
+
+    /// Drop groups and slots registered since `mark`; none of them may be
+    /// open.
+    pub(super) fn rewind(&mut self, (groups, slots): (usize, usize)) {
+        self.groups.truncate(groups);
+        self.slots.truncate(slots);
+    }
+
     fn is_open(&self) -> bool {
         !self.open_groups.is_empty() || !self.open_slots.is_empty()
     }

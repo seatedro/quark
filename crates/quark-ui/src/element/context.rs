@@ -803,6 +803,28 @@ impl<'a> ElementContext<'a> {
         }
     }
 
+    /// Where this frame's prepaint output stands, for
+    /// [`Self::rewind_prepaint`].
+    pub(super) fn prepaint_mark(&self) -> PrepaintMark {
+        PrepaintMark {
+            hits: self.hit_table.len(),
+            local_hits: self.local_hit_ids.len(),
+            scroll_watches: self.scroll_watches.len(),
+            interaction: self.interaction.mark(),
+        }
+    }
+
+    /// Forget what prepaint registered since `mark` (hit rows, and the
+    /// recordings and groups of the elements that inserted them), so a
+    /// subtree can be prepainted again at another offset.
+    pub(super) fn rewind_prepaint(&mut self, mark: PrepaintMark) {
+        self.hit_table.truncate(mark.hits);
+        self.local_hit_ids.truncate(mark.local_hits);
+        self.local_hit_clips.truncate(mark.local_hits);
+        self.scroll_watches.truncate(mark.scroll_watches);
+        self.interaction.rewind(mark.interaction);
+    }
+
     /// First hit row of the innermost cache boundary recording now.
     pub(super) fn innermost_hit_recording(&self) -> Option<usize> {
         self.hit_recording_starts.last().copied()
@@ -857,6 +879,15 @@ impl<'a> ElementContext<'a> {
             drop_targets: std::mem::take(&mut self.drop_targets),
         }
     }
+}
+
+/// See [`ElementContext::prepaint_mark`].
+#[derive(Clone, Copy)]
+pub(super) struct PrepaintMark {
+    hits: usize,
+    local_hits: usize,
+    scroll_watches: usize,
+    interaction: (usize, usize),
 }
 
 /// One level of the paint space stack.

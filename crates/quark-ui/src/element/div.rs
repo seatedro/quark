@@ -690,6 +690,25 @@ impl Div {
 
     // -- Internal: scrolling --
 
+    fn prepaint_children(
+        &mut self,
+        engine: &LayoutEngine,
+        cx: &mut ElementContext,
+        translate: (f32, f32),
+        scroll: (f32, f32),
+    ) {
+        let (dx, dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
+        if (dx, dy) != (0.0, 0.0) {
+            for child in self.children.iter_mut() {
+                child.prepaint_with_offset(engine, cx, dx, dy);
+            }
+        } else {
+            for child in self.children.iter_mut() {
+                child.prepaint(engine, cx);
+            }
+        }
+    }
+
     fn scrolls(&self) -> bool {
         self.on_scroll.is_some() || self.on_scroll_x.is_some() || self.scroll_handle.is_some()
     }
@@ -857,11 +876,10 @@ impl Element for Div {
             cx.record_scroll_item(key, bounds);
         }
         let content = self.scroll_content(engine, *layout_id);
-        let scroll = match &self.scroll_handle {
+        let mut scroll = match &self.scroll_handle {
             Some(handle) => handle.begin_frame(bounds, content, self.scroll_axes, cx),
             None => (self.scroll_x, self.scroll_y),
         };
-        let (child_dx, child_dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
         let z = self.base_style.z_index;
         if z != 0 {
             cx.push_z_index(z);
@@ -915,19 +933,23 @@ impl Element for Div {
             cx.push_scroll_handle(handle);
         }
 
-        if (child_dx, child_dy) != (0.0, 0.0) {
-            for child in self.children.iter_mut() {
-                child.prepaint_with_offset(engine, cx, child_dx, child_dy);
-            }
-        } else {
-            for child in self.children.iter_mut() {
-                child.prepaint(engine, cx);
-            }
-        }
-
-        if let Some(handle) = &self.scroll_handle {
+        let mark = cx.prepaint_mark();
+        self.prepaint_children(engine, cx, translate, scroll);
+        if let Some(handle) = self.scroll_handle.clone() {
             cx.pop_scroll_handle();
-            handle.end_frame(cx);
+            if let Some(corrected) = handle.end_frame(self.scroll_axes, cx) {
+                // A jump to an item lands where this frame's layout put
+                // it, not where the children were just prepainted: do it
+                // again there, so the first frame showing the item shows
+                // it in place.
+                cx.rewind_prepaint(mark);
+                scroll = corrected;
+                handle.restart_items();
+                cx.push_scroll_handle(&handle);
+                self.prepaint_children(engine, cx, translate, scroll);
+                cx.pop_scroll_handle();
+                handle.end_frame(self.scroll_axes, cx);
+            }
         }
         let scrollbars = self.prepaint_scrollbars(bounds, content, scroll, cx);
         if let Some(group) = group {

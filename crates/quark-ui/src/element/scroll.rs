@@ -345,6 +345,10 @@ struct ScrollState {
     /// The same, being collected this frame.
     recording: Vec<(u64, Rect)>,
     request: Option<Request>,
+    /// An item request taken this frame, with the offset the frame started
+    /// at: [`ScrollHandle::end_frame`] resolves it against the item's
+    /// bounds in this frame.
+    item_request: Option<(Request, [f32; 2])>,
     /// Target of the smooth scroll in progress.
     smooth: Option<[f32; 2]>,
     fling: Option<Fling>,
@@ -391,6 +395,7 @@ impl ScrollHandle {
             items: Vec::new(),
             recording: Vec::new(),
             request: None,
+            item_request: None,
             smooth: None,
             fling: None,
             samples: Samples::default(),
@@ -627,32 +632,26 @@ impl ScrollHandle {
         let clamp =
             |to: [f32; 2], max: [f32; 2]| [to[0].clamp(0.0, max[0]), to[1].clamp(0.0, max[1])];
 
-        if let Some(request) = s.request {
-            let resolved = match request {
-                Request::Offset { to, smooth } => Some((to, smooth)),
-                Request::Item {
-                    key, align, smooth, ..
-                } => item_offset(&s.items, key, align, s.offset, viewport, axes)
-                    .map(|to| (to, smooth)),
-            };
-            if let Some((to, smooth)) = resolved {
-                s.request = None;
+        s.item_request = None;
+        match s.request.take() {
+            Some(Request::Offset { to, smooth }) => {
                 s.fling = None;
                 let to = clamp(to, s.max);
-                match cx.animations_mut() {
-                    Some(table) if smooth && !reduced_motion && to != s.offset => {
-                        for (prop, i) in [(PROP_X, 0), (PROP_Y, 1)] {
-                            table.set(s.key, prop, s.offset[i], now);
-                            table.animate_to(s.key, prop, to[i], SMOOTH_SCROLL, now);
-                        }
-                        s.smooth = Some(to);
-                    }
-                    _ => {
-                        s.offset = to;
-                        s.smooth = None;
-                    }
-                }
+                s.start_scroll(to, smooth && !reduced_motion, now, cx);
             }
+            Some(request @ Request::Item { smooth, .. }) => {
+                // Jump to where the item was last frame now, so a still
+                // item costs no second prepaint; `end_frame` corrects the
+                // offset when this frame moved it.
+                s.fling = None;
+                let from = s.offset;
+                if !smooth && let Some(to) = request.item_offset(&s.items, from, viewport, axes) {
+                    let to = clamp(to, s.max);
+                    s.start_scroll(to, false, now, cx);
+                }
+                s.item_request = Some((request, from));
+            }
+            None => {}
         }
 
         if let Some(target) = s.smooth {
@@ -719,20 +718,47 @@ impl ScrollHandle {
         s.recording.push((key, rect));
     }
 
-    /// End the frame [`Self::begin_frame`] started. An item request that
-    /// only this frame's items can satisfy is kept for the next frame,
-    /// which it asks for; one no frame painted the item for is dropped.
-    pub(crate) fn end_frame(&self, cx: &mut ElementContext) {
+    /// End the frame [`Self::begin_frame`] started, resolving an item
+    /// request against the item's bounds in this frame (a request for an
+    /// item the frame did not paint is dropped). Returns the offset to
+    /// prepaint the children at again when a jump has to land elsewhere
+    /// than where they were just prepainted; the caller prepaints them
+    /// again between [`Self::restart_items`] and another `end_frame`.
+    pub(crate) fn end_frame(
+        &self,
+        axes: ScrollAxes,
+        cx: &mut ElementContext,
+    ) -> Option<(f32, f32)> {
+        let reduced_motion = cx.theme.reduced_motion;
+        let now = cx.clock_ms;
         let mut s = self.0.borrow_mut();
         let s = &mut *s;
         std::mem::swap(&mut s.items, &mut s.recording);
-        if let Some(Request::Item { key, .. }) = s.request {
-            if s.items.iter().any(|(k, _)| *k == key) {
-                cx.request_frame_at_ms(cx.clock_ms);
-            } else {
-                s.request = None;
-            }
+        let (request, from) = s.item_request.take()?;
+        let Request::Item { smooth, .. } = request else {
+            return None;
+        };
+        let to = request.item_offset(&s.items, from, s.viewport, axes)?;
+        let to = [to[0].clamp(0.0, s.max[0]), to[1].clamp(0.0, s.max[1])];
+        if smooth && !reduced_motion {
+            // This frame paints the smooth scroll's first step, the offset
+            // it starts from, wherever the item turned out to be.
+            s.start_scroll(to, true, now, cx);
+            cx.request_frame_at_ms(now);
+            return None;
         }
+        if to == s.offset {
+            return None;
+        }
+        s.offset = to;
+        s.smooth = None;
+        Some((to[0], to[1]))
+    }
+
+    /// Collect keyed descendants afresh, for prepainting the children
+    /// again after [`Self::end_frame`] moved the offset.
+    pub(crate) fn restart_items(&self) {
+        self.0.borrow_mut().recording.clear();
     }
 }
 
@@ -777,34 +803,86 @@ impl ScrollWatch {
     }
 }
 
-/// The offset that puts item `key` at `align`, on the scrolling axes.
-fn item_offset(
-    items: &[(u64, Rect)],
-    key: u64,
-    align: ScrollAlign,
-    offset: [f32; 2],
-    viewport: Rect,
-    axes: ScrollAxes,
-) -> Option<[f32; 2]> {
-    let item = items.iter().find(|(k, _)| *k == key)?.1;
-    let mut to = offset;
-    for axis in Axis::BOTH {
-        if !axes.has(axis) {
-            continue;
+impl ScrollState {
+    /// Move to `to` (already clamped): a smooth scroll from the current
+    /// offset when `smooth` and the context has an animation table, else
+    /// at once.
+    fn start_scroll(&mut self, to: [f32; 2], smooth: bool, now: u64, cx: &mut ElementContext) {
+        match cx.animations_mut() {
+            Some(table) if smooth && to != self.offset => {
+                for (prop, i) in [(PROP_X, 0), (PROP_Y, 1)] {
+                    table.set(self.key, prop, self.offset[i], now);
+                    table.animate_to(self.key, prop, to[i], SMOOTH_SCROLL, now);
+                }
+                self.smooth = Some(to);
+            }
+            _ => {
+                self.offset = to;
+                self.smooth = None;
+            }
         }
-        let i = axis.index();
-        let (start, len) = axis.span(item);
-        let view = axis.span(viewport).1;
-        to[i] = match align {
-            ScrollAlign::Start => start,
-            ScrollAlign::End => start + len - view,
-            ScrollAlign::Center => start + len / 2.0 - view / 2.0,
-            ScrollAlign::Nearest if start < offset[i] || len > view => start,
-            ScrollAlign::Nearest if start + len > offset[i] + view => start + len - view,
-            ScrollAlign::Nearest => offset[i],
-        };
     }
-    Some(to)
+}
+
+impl Request {
+    /// The unclamped offset an item request asks for, from `offset`, on
+    /// the scrolling axes; `None` when `items` lack the item.
+    fn item_offset(
+        &self,
+        items: &[(u64, Rect)],
+        offset: [f32; 2],
+        viewport: Rect,
+        axes: ScrollAxes,
+    ) -> Option<[f32; 2]> {
+        let Request::Item {
+            key, align, inset, ..
+        } = *self
+        else {
+            return None;
+        };
+        let item = items.iter().find(|(k, _)| *k == key)?.1;
+        let mut to = offset;
+        for axis in Axis::BOTH {
+            if axes.has(axis) {
+                let i = axis.index();
+                let (start, len) = axis.span(item);
+                let view = axis.span(viewport).1;
+                to[i] = align_offset(align, start, len, view, inset[i], offset[i]);
+            }
+        }
+        Some(to)
+    }
+}
+
+/// The offset that puts an item spanning `start..start + len` of the
+/// content at `align` in a `view`-long viewport scrolled to `offset`, with
+/// `inset` as [`ScrollIntoView`] defines it. An item longer than the space
+/// its alignment gives it starts at the start of that space.
+fn align_offset(
+    align: ScrollAlign,
+    start: f32,
+    len: f32,
+    view: f32,
+    inset: f32,
+    offset: f32,
+) -> f32 {
+    match align {
+        ScrollAlign::Start => start - inset,
+        ScrollAlign::End if len > view - inset => start,
+        ScrollAlign::End => start + len - view + inset,
+        ScrollAlign::Center if len > view => start,
+        ScrollAlign::Center => start + len / 2.0 - view / 2.0 - inset,
+        ScrollAlign::Nearest => {
+            let (low, high) = (offset + inset, offset + view - inset);
+            if start < low || len > high - low {
+                start - inset
+            } else if start + len > high {
+                start + len - view + inset
+            } else {
+                offset
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,6 +1428,210 @@ mod tests {
         ];
         for (now, expected) in cases {
             assert_eq!(samples.velocity(now), expected, "lift at {now}");
+        }
+    }
+
+    mod items {
+        use super::super::*;
+        use crate::animation::AnimationTable;
+        use crate::style::Styled;
+        use crate::theme::Theme;
+
+        /// What [`list`] holds.
+        #[derive(Clone, Copy)]
+        struct Rows {
+            /// Unnamed 40-point rows before `row-0`.
+            before: usize,
+            /// The last `row-{i}`.
+            last: usize,
+            /// A 150-point `tall` row after the others.
+            tall: bool,
+        }
+
+        const TEN: Rows = Rows {
+            before: 0,
+            last: 9,
+            tall: false,
+        };
+
+        /// A 200x100 list scrolling both ways over 400x40 rows `row-0`
+        /// ..= `row-{last}` (content y = 40 * i without rows before them);
+        /// `row-3` holds a 50-point `cell` at x=250.
+        fn list(handle: &ScrollHandle, rows: Rows) -> Div {
+            let row = |name: &str| div().w(400.0).h(40.0).flex_shrink_0().flex_row().key(name);
+            let named = |i: usize| {
+                let name = format!("row-{i}");
+                row(&name)
+                    .test_id(name.as_str())
+                    .on_click(NoopAction)
+                    .when(i == 3, |row| {
+                        row.child(div().w(250.0).h(40.0))
+                            .child(div().w(50.0).h(40.0).key("cell").test_id("cell"))
+                    })
+            };
+            let before = (0..rows.before).map(|i| row(&format!("before-{i}")).into_any());
+            let named = (0..=rows.last).map(|i| named(i).into_any());
+            div()
+                .w(200.0)
+                .h(100.0)
+                .flex_col()
+                .track_scroll(handle)
+                .overflow_scroll()
+                .children(before.chain(named))
+                .when(rows.tall, |list| {
+                    list.child(
+                        div()
+                            .w(400.0)
+                            .h(150.0)
+                            .flex_shrink_0()
+                            .key("tall")
+                            .test_id("tall"),
+                    )
+                })
+        }
+
+        struct Harness {
+            text: TextSystem,
+            layouts: LayoutCache,
+            theme: Theme,
+            signals: SignalStore,
+            animations: AnimationTable,
+            handle: ScrollHandle,
+        }
+
+        impl Harness {
+            fn new() -> Self {
+                Self {
+                    text: TextSystem::vendored_only(&Default::default()),
+                    layouts: LayoutCache::default(),
+                    theme: Theme::default_dark(),
+                    signals: SignalStore::new(),
+                    animations: AnimationTable::new(),
+                    handle: ScrollHandle::new(),
+                }
+            }
+
+            /// Paint [`list`] of `rows` at clock `now_ms`.
+            fn frame(&mut self, rows: Rows, now_ms: u64) -> InputRouter {
+                self.animations.tick(now_ms);
+                let mut cx = ElementContext::new(
+                    &self.theme,
+                    1.0,
+                    &mut self.text,
+                    &mut self.layouts,
+                    None,
+                    &self.signals,
+                )
+                .with_clock(now_ms)
+                .with_animations(&mut self.animations);
+                cx.semantic = SemanticFrame::new(200.0, 100.0);
+                let mut root = list(&self.handle, rows).into_any();
+                render_element(&mut root, &mut Scene::default(), &mut cx, 200.0, 100.0);
+                cx.finish_frame();
+                let mut router = InputRouter::default();
+                router.set_frame(cx.take_input_frame());
+                router
+            }
+        }
+
+        /// `(x, y)` of `test_id` as painted, in the viewport.
+        fn at(router: &InputRouter, test_id: &str) -> (f32, f32) {
+            let rect = router.frame().geometry.by_test_id(test_id).unwrap().bounds;
+            (rect.x, rect.y)
+        }
+
+        fn start(inset: f32) -> ScrollIntoView {
+            ScrollIntoView::new(ScrollAlign::Start).inset(0.0, inset)
+        }
+
+        // The item is where the previous frame painted it; one frame after
+        // the request it sits where the request puts it.
+        #[test]
+        fn item_lands_at_its_alignment_and_inset() {
+            let with = |align, x, y| ScrollIntoView::new(align).inset(x, y);
+            let tall = Rows { tall: true, ..TEN };
+            // Without `tall` the content is 400 high; offsets reach 300.
+            let cases = [
+                ("row-5", start(12.0), TEN, (0.0, 12.0)),
+                ("row-5", with(ScrollAlign::End, 0.0, 12.0), TEN, (0.0, 48.0)),
+                (
+                    "row-5",
+                    with(ScrollAlign::Center, 0.0, 10.0),
+                    TEN,
+                    (0.0, 40.0),
+                ),
+                (
+                    "row-1",
+                    with(ScrollAlign::Nearest, 0.0, 12.0),
+                    TEN,
+                    (0.0, 40.0),
+                ),
+                (
+                    "row-2",
+                    with(ScrollAlign::Nearest, 0.0, 12.0),
+                    TEN,
+                    (0.0, 48.0),
+                ),
+                ("row-0", start(12.0), TEN, (0.0, 0.0)),
+                ("row-9", start(12.0), TEN, (0.0, 60.0)),
+                (
+                    "cell",
+                    with(ScrollAlign::Start, 8.0, 12.0),
+                    TEN,
+                    (50.0, 12.0),
+                ),
+                ("tall", with(ScrollAlign::End, 0.0, 0.0), tall, (0.0, 0.0)),
+            ];
+            for (key, options, rows, expected) in cases {
+                let mut h = Harness::new();
+                h.frame(rows, 0);
+                h.handle.scroll_to_item_with(key, options);
+                let router = h.frame(rows, 0);
+                assert_eq!(at(&router, key), expected, "{key} {options:?}");
+            }
+        }
+
+        // A prompt appended in the same update that asks to scroll to it:
+        // the first frame painting it shows it at the inset.
+        #[test]
+        fn new_item_reaches_its_inset_in_the_frame_that_adds_it() {
+            let mut h = Harness::new();
+            h.frame(Rows { last: 5, ..TEN }, 0);
+            h.handle.scroll_to_item_with("row-6", start(12.0));
+            let router = h.frame(TEN, 0);
+
+            assert_eq!(at(&router, "row-6"), (0.0, 12.0));
+        }
+
+        // Rows inserted above move the item in the frame that resolves the
+        // request: it lands by its new position, and the pointer finds it
+        // where it is painted.
+        #[test]
+        fn item_moved_by_this_frame_lands_by_its_new_position() {
+            let mut h = Harness::new();
+            h.frame(TEN, 0);
+            h.handle.scroll_to_item_with("row-5", start(0.0));
+            let router = h.frame(Rows { before: 2, ..TEN }, 0);
+
+            assert_eq!(at(&router, "row-5"), (0.0, 0.0));
+            let node = router.target_at(100.0, 20.0).unwrap();
+            let name = router.frame().semantic.nodes()[node].test_id.clone();
+            assert_eq!(name.as_ref().map(TestId::as_str), Some("row-5"));
+        }
+
+        #[test]
+        fn smooth_item_scroll_ends_at_the_inset() {
+            let mut h = Harness::new();
+            h.frame(TEN, 0);
+            h.handle.scroll_to_item_with("row-5", start(12.0).smooth());
+            let first = h.frame(TEN, 0);
+            let midway = h.frame(TEN, 100);
+            let landed = h.frame(TEN, 400);
+
+            assert_eq!(at(&first, "row-5"), (0.0, 200.0), "starts where it was");
+            let y = at(&midway, "row-5").1;
+            assert!(y < 200.0 && y > 12.0, "midway at {y}");
+            assert_eq!(at(&landed, "row-5"), (0.0, 12.0));
         }
     }
 }
