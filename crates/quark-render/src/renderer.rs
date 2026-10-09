@@ -1204,11 +1204,49 @@ impl Renderer {
     }
 
     /// Show `background` where the scene paints nothing, returning the
-    /// background in effect: `Opaque` when a transparent one was asked for
-    /// but the surface offers no alpha mode that composites it.
+    /// background in effect. A transparent background picks a surface alpha
+    /// mode that composites premultiplied output with the window system's
+    /// (see [`transparent_alpha_mode`]) and keeps it across resizes; with no
+    /// such mode it falls back to an opaque black background and says so.
+    /// Headless renderers keep alpha in their readback either way.
     pub fn set_surface_background(&mut self, background: SurfaceBackground) -> SurfaceBackground {
-        self.background = background;
-        background
+        let effective = match (background, &self.surface) {
+            (SurfaceBackground::Transparent, Some(surface)) => {
+                let modes = surface
+                    .get_capabilities(&self.gpu.inner.adapter)
+                    .alpha_modes;
+                match transparent_alpha_mode(&modes) {
+                    Some(mode) => {
+                        self.set_alpha_mode(mode);
+                        SurfaceBackground::Transparent
+                    }
+                    None => {
+                        self.set_alpha_mode(wgpu::CompositeAlphaMode::Opaque);
+                        SurfaceBackground::default()
+                    }
+                }
+            }
+            (SurfaceBackground::Opaque(_), Some(_)) => {
+                self.set_alpha_mode(wgpu::CompositeAlphaMode::Opaque);
+                background
+            }
+            (_, None) => background,
+        };
+        self.background = effective;
+        effective
+    }
+
+    fn set_alpha_mode(&mut self, mode: wgpu::CompositeAlphaMode) {
+        if self.surface_config.alpha_mode == mode {
+            return;
+        }
+        self.surface_config.alpha_mode = mode;
+        if let Some(surface) = &self.surface
+            && self.size.width > 0
+            && self.size.height > 0
+        {
+            surface.configure(&self.device, &self.surface_config);
+        }
     }
 
     /// Adopt a new window size. A zero dimension (a minimized window) leaves
@@ -2453,6 +2491,21 @@ struct BlurTargets {
     scene_bind: wgpu::BindGroup,
     h_bind: wgpu::BindGroup,
     v_bind: wgpu::BindGroup,
+}
+
+/// The alpha mode a transparent window surface uses, from those the
+/// surface offers: premultiplied, which matches the renderer's output;
+/// else post-multiplied (Metal's non-opaque layer), exact for fully
+/// transparent and opaque pixels and slightly dark on antialiased edges
+/// over the desktop; else inherit (the window system's choice). `None`
+/// when the surface can only be opaque (an X11 visual without alpha).
+fn transparent_alpha_mode(
+    offered: &[wgpu::CompositeAlphaMode],
+) -> Option<wgpu::CompositeAlphaMode> {
+    use wgpu::CompositeAlphaMode::{Inherit, PostMultiplied, PreMultiplied};
+    [PreMultiplied, PostMultiplied, Inherit]
+        .into_iter()
+        .find(|mode| offered.contains(mode))
 }
 
 /// How far, in pixels, a blur pass of `sigma` samples from the pixel it
@@ -4898,6 +4951,29 @@ mod tests {
     use crate::scene::ShapedText;
     use crate::text::test_text;
     use quark_text::{TextParams, TextStyle};
+
+    // A transparent window must take the alpha mode matching premultiplied
+    // output when offered, and report an opaque fallback when only opaque
+    // composition exists.
+    #[test]
+    fn transparent_surfaces_prefer_premultiplied_alpha() {
+        use wgpu::CompositeAlphaMode::{Inherit, Opaque, PostMultiplied, PreMultiplied};
+        let table: [(
+            &[wgpu::CompositeAlphaMode],
+            Option<wgpu::CompositeAlphaMode>,
+        ); 4] = [
+            (
+                &[Opaque, Inherit, PostMultiplied, PreMultiplied],
+                Some(PreMultiplied),
+            ),
+            (&[Opaque, PostMultiplied], Some(PostMultiplied)),
+            (&[Inherit, Opaque], Some(Inherit)),
+            (&[Opaque], None),
+        ];
+        for (offered, expected) in table {
+            assert_eq!(transparent_alpha_mode(offered), expected, "{offered:?}");
+        }
+    }
 
     #[test]
     fn scissor_rect_clamps_to_target_and_rejects_degenerate_clips() {
