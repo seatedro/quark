@@ -45,6 +45,9 @@ pub struct ElementContext<'a> {
     pub geometry: LayoutSnapshot,
     /// Drop targets added so far; becomes the frame's [`DropTargets`].
     pub drop_targets: DropTargets,
+    /// Native material regions painted so far; see
+    /// [`Self::add_material_region`].
+    pub material_regions: Vec<MaterialRegionRequest>,
     /// Inspector recording, style overrides, and phase timings.
     #[cfg(feature = "devtools")]
     pub devtools: crate::inspector::FrameProbe,
@@ -130,6 +133,7 @@ impl<'a> ElementContext<'a> {
                 geometry
             },
             drop_targets: DropTargets::default(),
+            material_regions: Vec::new(),
             #[cfg(feature = "devtools")]
             devtools: Default::default(),
             hovered: Vec::new(),
@@ -284,6 +288,8 @@ impl<'a> ElementContext<'a> {
         frame.semantic.clear();
         frame.geometry.reset();
         frame.drop_targets.clear();
+        frame.material_regions.clear();
+        self.material_regions = frame.material_regions;
         self.hit_table = frame.hits;
         self.handlers = frame.handlers;
         self.semantic = frame.semantic;
@@ -700,6 +706,17 @@ impl<'a> ElementContext<'a> {
         self.volatile_reads += 1;
     }
 
+    /// `rect` (layout coordinates) in window coordinates within the current
+    /// clips, when no rotation or scale applies; `None` under one or when
+    /// the clips hide it.
+    pub(super) fn window_rect_if_untransformed(&self, rect: Rect) -> Option<Rect> {
+        let space = self.current_paint_space();
+        if !space.transform.is_identity() {
+            return None;
+        }
+        rect.intersection(space.window_clip)
+    }
+
     /// Push a geometry row clipped to `clip` (layout coordinates) within
     /// the current clips: how a replayed cache boundary republishes its
     /// rows under the current transform.
@@ -877,6 +894,7 @@ impl<'a> ElementContext<'a> {
             semantic: std::mem::take(&mut self.semantic),
             geometry: std::mem::take(&mut self.geometry),
             drop_targets: std::mem::take(&mut self.drop_targets),
+            material_regions: std::mem::take(&mut self.material_regions),
         }
     }
 }

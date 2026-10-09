@@ -20,6 +20,7 @@ pub struct Div {
     /// Fade lengths at the top, right, bottom, and left edges; zero is no
     /// fade.
     fades: [f32; 4],
+    material: Option<MaterialKind>,
     children: pool::ChildList,
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
@@ -80,6 +81,7 @@ pub fn div() -> Div {
         bg_effect: None,
         blur_radius: None,
         fades: [0.0; 4],
+        material: None,
         children: pool::ChildList::new(),
         on_click: None,
         on_click_handler: None,
@@ -633,6 +635,16 @@ impl Div {
         self
     }
 
+    /// Ask the platform for material `kind` behind this div (G3): painting
+    /// it records a [`MaterialRegionRequest`] for the host to place a native
+    /// effect view there. The div still paints whatever it paints; keep its
+    /// background transparent where the material should show. Rotated or
+    /// scaled divs ask for nothing.
+    pub fn material(mut self, kind: MaterialKind) -> Self {
+        self.material = Some(kind);
+        self
+    }
+
     fn fades(&self) -> bool {
         self.fades.iter().any(|&length| length > 0.0)
     }
@@ -1062,6 +1074,17 @@ impl Element for Div {
             cx.push_paint_transform(matrix);
         }
         self.record_geometry(bounds, cx);
+        if let Some(kind) = self.material {
+            let id = self
+                .semantic_id
+                .as_ref()
+                .map(UiNodeId::as_str)
+                .or(self.accessibility_id.as_deref())
+                .or(self.test_id.as_ref().map(TestId::as_str))
+                .or(self.semantic_key.as_ref().map(UiKey::as_str))
+                .map(quark::stable_hash);
+            cx.add_material_region(kind, bounds, r, id);
+        }
 
         // Shadows
         for s in &style.shadows {

@@ -512,6 +512,8 @@ pub struct InputFrame {
     pub geometry: LayoutSnapshot,
     /// Where the frame takes drops.
     pub drop_targets: DropTargets,
+    /// Native material regions the frame asks for, in paint order.
+    pub material_regions: Vec<MaterialRegionRequest>,
 }
 
 /// The outcome of routing one event: the semantic node that handled it
