@@ -27,6 +27,8 @@
 
 mod compare;
 mod compute;
+#[doc(hidden)]
+pub mod fixtures;
 mod inline;
 mod limits;
 mod model;
