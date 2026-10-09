@@ -114,3 +114,28 @@ suffix: }
                  on:scroll={
                      ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))
                  }
+=== an arm block rustfmt would drop keeps its braces and comma
+context: expr
+prefix: color={
+suffix: }
+--- input
+            color={match tone { Tone::Muted => { p.muted }, Tone::Plain => p.text }}
+--- expected
+            color={match tone {
+                Tone::Muted => {
+                    p.muted
+                },
+                Tone::Plain => p.text
+            }}
+=== diff_view.rs on:drag: a closure block rustfmt would drop keeps its braces
+context: expr
+prefix: on:drag={
+suffix: }
+--- input
+                 on:drag={move |press: ClickEvent| {
+                     Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
+                 }}
+--- expected
+                 on:drag={move |press: ClickEvent| {
+                     Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
+                 }}

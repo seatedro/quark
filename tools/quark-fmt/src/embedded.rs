@@ -136,12 +136,35 @@ impl RustfmtProvider {
         })
     }
 
+    /// A fragment's cache key. Without nested views the text is keyed
+    /// with its line breaks re-based to column zero, so a fragment that
+    /// only moved, as between the formatter's two passes, is a hit.
     fn key(&self, fragment: &RustFragment<'_>, place: Place) -> Key {
-        Key {
-            context: fragment.context,
-            text: fragment.source().to_owned(),
-            original_indent: fragment.original_indent(place.tab_spaces),
-            place,
+        let original_indent = fragment.original_indent(place.tab_spaces);
+        let text = fragment.source();
+        match lex(text) {
+            Ok(toks) if fragment.nested.is_empty() => {
+                let mut normal = String::with_capacity(text.len());
+                for (n, t) in toks.iter().enumerate() {
+                    if n > 0 {
+                        let gap = &text[toks[n - 1].end..t.start];
+                        normal.push_str(&rebase_gap(gap, original_indent, "", place.tab_spaces));
+                    }
+                    normal.push_str(&text[t.start..t.end]);
+                }
+                Key {
+                    context: fragment.context,
+                    text: normal,
+                    original_indent: 0,
+                    place,
+                }
+            }
+            _ => Key {
+                context: fragment.context,
+                text: text.to_owned(),
+                original_indent,
+                place,
+            },
         }
     }
 
@@ -437,7 +460,20 @@ fn batch(
             let aligned = align_batch(&input, &spans, &parts, &text, marker, tab_spaces);
             members.iter().copied().zip(aligned).collect()
         }
-        Err(RustfmtError::Rejected(_)) if members.len() > 1 => {
+        Err(RustfmtError::Rejected(m)) if members.len() > 1 => {
+            // rustfmt names the line it stopped at: fail that wrapper and
+            // run the rest again. Without a usable line, halve the batch.
+            if let Some(slot) = rejected_slot(&m, &input, &spans) {
+                let rest: Vec<usize> = members
+                    .iter()
+                    .enumerate()
+                    .filter(|&(n, _)| n != slot)
+                    .map(|(_, &m)| m)
+                    .collect();
+                let mut out = batch(command, prepared, &rest, (width, tab_spaces), marker, calls);
+                out.push((members[slot], Err(RustfmtError::Rejected(m).to_string())));
+                return out;
+            }
             let (a, b) = members.split_at(members.len() / 2);
             let mut out = batch(command, prepared, a, (width, tab_spaces), marker, calls);
             out.extend(batch(
@@ -454,20 +490,46 @@ fn batch(
     }
 }
 
+/// The wrapper holding the line a rustfmt error points at
+/// (`--> <stdin>:LINE:COL`).
+fn rejected_slot(message: &str, input: &str, spans: &[WrapSpan]) -> Option<usize> {
+    let at = message.find("<stdin>:")? + "<stdin>:".len();
+    let line: usize = message[at..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    let offset = input
+        .split_inclusive('\n')
+        .take(line.checked_sub(1)?)
+        .map(str::len)
+        .sum::<usize>();
+    spans.iter().position(|s| s.whole.contains(&offset))
+}
+
 /// Where a fragment sits in its source, which is where the printer puts
-/// it in an already formatted file: its line's indentation, and whatever
-/// precedes it on that line as the prefix. Constructor arguments start a
-/// line of their own one level in.
+/// it in an already formatted file. Constructor arguments start a line of
+/// their own one level in.
 fn seed_place(fragment: &RustFragment<'_>, probe: Place) -> Place {
-    let tab = probe.tab_spaces;
-    let indent = fragment.original_indent(tab);
+    let tab = probe.tab_spaces.max(1);
+    // Template indentation comes in whole levels; continuation lines
+    // aligned under a tag name round down to the attribute level.
+    let indent = fragment.original_indent(tab) / tab * tab;
     let line_start = fragment.file[..fragment.range.start]
         .rfind('\n')
         .map_or(0, |n| n + 1);
     let before = fragment.file[line_start..fragment.range.start].trim_start_matches([' ', '\t']);
+    // A keyword lead-in (`if `, `} else if `) is the whole prefix; after an
+    // attribute (`bg={`) only the attribute counts, as a broken tag puts
+    // each attribute on a line of its own.
+    let head = if before.ends_with([' ', '\t']) {
+        before
+    } else {
+        before.rsplit([' ', '\t']).next().unwrap_or(before)
+    };
     let (indent, prefix) = match fragment.context {
         RustContext::Args => (indent + tab, 0),
-        _ => (indent, columns(before, tab)),
+        _ => (indent, columns(head, tab)),
     };
     Place {
         indent,
@@ -668,9 +730,8 @@ fn prepare(job: &Job<'_>, marker: &str) -> Result<Prepared, String> {
             src: tok.start..tok.end,
         });
         if pinned[i] {
-            // rustfmt drops a trailing comma when it joins a list onto one
-            // line, and the comma must stay. A line comment after it keeps
-            // the list broken; the comment is left out again.
+            // A line comment after the comma keeps the item's line
+            // break through rustfmt; the comment is left out again.
             let start = body.len() + 1;
             body.push_str(&format!(" //{marker}k"));
             parts.push(Part::Pin {
@@ -685,7 +746,7 @@ fn prepare(job: &Job<'_>, marker: &str) -> Result<Prepared, String> {
         return Err("a nested view is not inside its fragment".to_owned());
     }
     Ok(Prepared {
-        context: key.context,
+        context: wrapper_context(key.context, text, &toks),
         prefix,
         body,
         parts,
@@ -693,6 +754,25 @@ fn prepare(job: &Job<'_>, marker: &str) -> Result<Prepared, String> {
         width,
         tab_spaces: tab,
     })
+}
+
+/// The wrapper for a fragment: an expression with a `let` outside any
+/// brackets (`@when {let Some(x) = y}`, a let chain) is only valid as a
+/// condition.
+fn wrapper_context(context: RustContext, text: &str, toks: &[Tok]) -> RustContext {
+    if context != RustContext::Expr {
+        return context;
+    }
+    let mut depth = 0i32;
+    for t in toks {
+        match &text[t.start..t.end] {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth -= 1,
+            "let" if depth == 0 => return RustContext::Condition,
+            _ => {}
+        }
+    }
+    context
 }
 
 /// Where one wrapper sits in a batch's input.
@@ -772,8 +852,8 @@ struct Piece {
     gap: String,
     /// Index into `Prepared::parts`.
     part: usize,
-    /// rustfmt dropped a comma that followed this part; put it back.
-    comma_after: bool,
+    /// Tokens rustfmt dropped after this part, to put back in order.
+    after: Vec<After>,
 }
 
 /// Builds the fragment's lines from rustfmt's whitespace and the original
@@ -820,8 +900,12 @@ fn assemble(
                 }
             }
         }
-        if piece.comma_after {
-            b.token(",");
+        for a in &piece.after {
+            match a {
+                After::Comma => b.token(","),
+                After::Open => b.open_block(),
+                After::Close => b.close_block(),
+            }
         }
     }
     if p.context == RustContext::Args {
@@ -833,27 +917,33 @@ fn assemble(
     Ok(b.finish())
 }
 
-/// Commas directly before a closing delimiter, except the one of a
-/// one-element tuple, which rustfmt keeps anyway.
+/// Commas of lists written with a trailing comma, which therefore stay
+/// one item per line (the "magic trailing comma" of Black and dart
+/// format). rustfmt would join a short list and drop the comma, which must
+/// stay. A one-element tuple's comma is required and pins nothing. Commas
+/// already followed by a comment are left alone.
 fn pinned_commas(text: &str, toks: &[Tok]) -> Vec<bool> {
     let mut pinned = vec![false; toks.len()];
     // (opening token, commas directly inside it)
-    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut stack: Vec<(usize, Vec<usize>)> = Vec::new();
     for (n, t) in toks.iter().enumerate() {
         match &text[t.start..t.end] {
-            "(" | "[" | "{" => stack.push((n, 0)),
+            "(" | "[" | "{" => stack.push((n, Vec::new())),
             ")" | "]" | "}" => {
-                let open = stack.pop();
-                if n > 0 && toks[n - 1].kind == Kind::Comma {
-                    let one_tuple = open.is_some_and(|(o, commas)| {
-                        &text[toks[o].start..toks[o].end] == "(" && commas == 1
-                    });
-                    pinned[n - 1] = !one_tuple;
+                let Some((open, commas)) = stack.pop() else {
+                    continue;
+                };
+                let trailing = n > 0 && toks[n - 1].kind == Kind::Comma;
+                let one_tuple = &text[toks[open].start..toks[open].end] == "(" && commas.len() == 1;
+                if trailing && !one_tuple {
+                    for c in commas {
+                        pinned[c] = toks[c + 1].kind != Kind::Comment;
+                    }
                 }
             }
             "," => {
                 if let Some(top) = stack.last_mut() {
-                    top.1 += 1;
+                    top.1.push(n);
                 }
             }
             _ => {}
@@ -937,7 +1027,7 @@ fn align_batch(
     let mut pairs: Vec<Option<usize>> = vec![None; ins.len()];
     let mut out_in: Vec<Option<usize>> = vec![None; outs.len()];
     let mut dropped = vec![Dropped::No; outs.len()];
-    let mut comma_after = vec![false; outs.len()];
+    let mut restore: Vec<Vec<After>> = vec![Vec::new(); outs.len()];
     let mut failed: Vec<Option<String>> = vec![None; spans.len()];
     let (mut i, mut j) = (0, 0);
     let mut last_paired: Option<usize> = None;
@@ -945,6 +1035,9 @@ fn align_batch(
     // opened a block of its own.
     let mut depth = 0usize;
     let mut inserted: Vec<usize> = Vec::new();
+    // The same for the input, and the blocks rustfmt removed.
+    let mut in_depth = 0usize;
+    let mut removed: Vec<usize> = Vec::new();
     while i < ins.len() {
         let s = origins[i].slot;
         if failed[s].is_none() && j >= outs.len() {
@@ -961,6 +1054,8 @@ fn align_batch(
                         j = k - 1;
                         depth = 0;
                         inserted.clear();
+                        in_depth = 0;
+                        removed.clear();
                     }
                     _ => {
                         for f in failed.iter_mut().skip(next) {
@@ -973,8 +1068,22 @@ fn align_batch(
             continue;
         }
         let (a, b) = (&ins[i], &outs[j]);
+        let a_text = &input[a.start..a.end];
         let b_text = &output[b.start..b.end];
-        if b_text == "}" && inserted.last() == Some(&depth) {
+        let in_fragment = origins[i].part.is_some();
+        let after_head = |p: Option<usize>| {
+            p.is_some_and(|p| matches!(&output[outs[p].start..outs[p].end], "|" | ">"))
+        };
+        if a_text == "}" && in_fragment && removed.last() == Some(&in_depth) {
+            // The end of a block rustfmt took away; put it back.
+            removed.pop();
+            in_depth -= 1;
+            match last_paired {
+                Some(p) => restore[p].push(After::Close),
+                None => failed[s] = Some("rustfmt removed a leading block".to_owned()),
+            }
+            i += 1;
+        } else if b_text == "}" && inserted.last() == Some(&depth) {
             // Blocks nest, so this closes the block rustfmt added, even
             // when the input has a `}` here too.
             inserted.pop();
@@ -986,8 +1095,14 @@ fn align_batch(
             out_in[j] = Some(i);
             last_paired = Some(j);
             match b_text {
-                "{" => depth += 1,
-                "}" => depth = depth.saturating_sub(1),
+                "{" => {
+                    depth += 1;
+                    in_depth += 1;
+                }
+                "}" => {
+                    depth = depth.saturating_sub(1);
+                    in_depth = in_depth.saturating_sub(1);
+                }
                 _ => {}
             }
             i += 1;
@@ -995,10 +1110,24 @@ fn align_batch(
         } else if b.kind == Kind::Comma {
             dropped[j] = Dropped::Comma;
             j += 1;
-        } else if b_text == "{"
-            && origins[i].part.is_some()
-            && last_paired.is_some_and(|p| matches!(&output[outs[p].start..outs[p].end], "|" | ">"))
+        } else if b_text == ";"
+            && in_fragment
+            && outs
+                .get(j + 1)
+                .is_some_and(|t| &output[t.start..t.end] == "}")
         {
+            // rustfmt ends `continue`, `break`, and `return` with a
+            // semicolon at the end of a block.
+            dropped[j] = Dropped::Comma;
+            j += 1;
+        } else if a_text == "{" && in_fragment && after_head(last_paired) {
+            // rustfmt took the block off a closure or arm body that fits
+            // on one line; the braces come back around it.
+            in_depth += 1;
+            removed.push(in_depth);
+            restore[last_paired.expect("checked")].push(After::Open);
+            i += 1;
+        } else if b_text == "{" && in_fragment && after_head(last_paired) {
             // rustfmt wraps a closure body or a match arm body that spans
             // lines in a block of its own; the braces go and the lines
             // inside move back out.
@@ -1006,9 +1135,9 @@ fn align_batch(
             inserted.push(depth);
             dropped[j] = Dropped::Open;
             j += 1;
-        } else if a.kind == Kind::Comma && origins[i].part.is_some() {
+        } else if a.kind == Kind::Comma && in_fragment {
             match last_paired {
-                Some(p) => comma_after[p] = true,
+                Some(p) => restore[p].push(After::Comma),
                 None => failed[s] = Some("rustfmt removed a leading comma".to_owned()),
             }
             i += 1;
@@ -1113,13 +1242,13 @@ fn align_batch(
                     pieces.push(Piece {
                         gap: String::new(),
                         part,
-                        comma_after: comma_after[k],
+                        after: restore[k].clone(),
                     });
                 } else {
                     pieces.push(Piece {
                         gap: g,
                         part,
-                        comma_after: comma_after[k],
+                        after: restore[k].clone(),
                     });
                 }
             }
@@ -1136,11 +1265,21 @@ fn align_batch(
         .collect()
 }
 
+/// An input token rustfmt dropped, restored after the output token before
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum After {
+    Comma,
+    /// The braces of a closure or arm body block.
+    Open,
+    Close,
+}
+
 /// An output token that has no counterpart in the input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Dropped {
     No,
-    /// A comma rustfmt added to a list.
+    /// A comma rustfmt added to a list, or a semicolon before `}`.
     Comma,
     /// The braces of a block rustfmt added.
     Open,
@@ -1161,6 +1300,10 @@ fn dedent(ws: &str, cols: usize, tab_spaces: usize) -> String {
 /// Accumulates [`LayoutLine`]s.
 struct LineBuilder {
     lines: Vec<LayoutLine>,
+    /// Indentation of the lines that opened restored blocks.
+    blocks: Vec<usize>,
+    /// The next token starts a restored block's first line.
+    block_start: bool,
     /// Columns of the wrapper depth, which stand for the template indent.
     base: usize,
     tab_spaces: usize,
@@ -1174,6 +1317,8 @@ impl LineBuilder {
                 text: String::new(),
                 verbatim: false,
             }],
+            blocks: Vec::new(),
+            block_start: false,
             base,
             tab_spaces,
         }
@@ -1200,17 +1345,37 @@ impl LineBuilder {
     /// rustfmt's whitespace: spaces stay, a line break starts a line
     /// indented relative to the wrapper depth. At most one blank line.
     fn gap(&mut self, gap: &str) {
+        let extra = self.blocks.len() * self.tab_spaces;
+        if std::mem::take(&mut self.block_start) {
+            let host = *self.blocks.last().expect("inside a block");
+            self.newline(host + self.tab_spaces, false, String::new());
+            return;
+        }
         let newlines = gap.matches('\n').count();
         if newlines == 0 {
             self.cur().text.push_str(gap);
             return;
         }
         let last = &gap[gap.rfind('\n').expect("has a newline") + 1..];
-        let indent = columns(last, self.tab_spaces).saturating_sub(self.base);
+        let indent = columns(last, self.tab_spaces).saturating_sub(self.base) + extra;
         if newlines > 1 {
             self.newline(0, false, String::new());
         }
         self.newline(indent, false, String::new());
+    }
+
+    /// ` {` of a restored block; its body starts on the next line, one
+    /// level in, and every line inside moves in one level.
+    fn open_block(&mut self) {
+        let host = self.current_indent();
+        self.token(" {");
+        self.blocks.push(host);
+        self.block_start = true;
+    }
+
+    fn close_block(&mut self) {
+        let host = self.blocks.pop().expect("a restored block is open");
+        self.newline(host, false, "}".to_owned());
     }
 
     /// Original token bytes; lines after a newline inside the token are
