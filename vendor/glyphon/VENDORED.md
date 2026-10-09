@@ -84,3 +84,18 @@ from its own atlas):
   does: it blends the foreground and background luminances in sRGB space
   and solves for the coverage that gives that luminance when the target
   blends linearly. A terminal uses it so text has Ghostty's weight.
+- Encoded targets (`src/viewport.rs`, `src/shader.wgsl`,
+  `src/text_render.rs`): `Viewport::set_encoded` marks a target that holds
+  sRGB-encoded values (quark's web-compatible compositing). Glyph colors
+  then stay encoded, color glyphs are encoded after sampling, and no
+  coverage correction applies. `TextRenderer::set_target_format` swaps the
+  renderer's pipeline for one targeting another format (the non-sRGB view
+  of the same texture).
+- Draw-time paint (`src/lib.rs`, `src/text_render.rs`, `src/cache.rs`,
+  `src/shader.wgsl`): `PositionedGlyph::backdrop` asks for perceptual
+  (linear-corrected) coverage over a backdrop known when drawing, overriding
+  the cache key's flag, so a hover background change needs no new raster or
+  layout. `PositionedGlyph::fill` points a monochrome glyph at one of its
+  renderer's `GlyphFill`s (`TextRenderer::set_fills`, a uniform at bind
+  group 2): a linear gradient or a shimmer band evaluated per pixel and
+  multiplied by coverage. Both travel in a new `paint` vertex attribute.

@@ -613,6 +613,7 @@ fn items_bounds(items: &[Item]) -> Option<Rect> {
                 Drawn::Image(image) => image.rect,
                 Drawn::Text(text) => text.rect,
                 Drawn::RichText(text) => text.rect,
+                Drawn::StyledText(text) => text.rect,
                 Drawn::Path { area, .. } => *area,
                 Drawn::Blur(blur) => blur.rect,
             },

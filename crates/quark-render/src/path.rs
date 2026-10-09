@@ -16,7 +16,12 @@
 
 use kurbo::{BezPath, PathEl, Point};
 
-use crate::scene::{FillRule, LineCap, LineJoin, Path, PathVerb, Rect, StrokeStyle};
+use kurbo::ParamCurveArclen;
+
+use crate::scene::{
+    FillRule, LineCap, LineJoin, MAX_PATTERN_SEGMENTS, Path, PathVerb, Rect, StrokePattern,
+    StrokeStyle,
+};
 
 /// Rows per band. Shorter bands give each pixel fewer segments to visit
 /// and repeat more segments across bands.
@@ -52,22 +57,54 @@ pub(crate) fn to_kurbo(path: &Path, scale: f32) -> BezPath {
     out
 }
 
-/// The fill outline of `style` stroked along `path` (already scaled).
+/// Length of the drawn part of a dot, in physical pixels: round caps make
+/// it a disc as wide as the stroke, and a nonzero length gives the cap a
+/// direction.
+const DOT_LENGTH: f64 = 0.01;
+
+/// The fill outline of `style` stroked along `path` (already scaled). A
+/// pattern dashes the path first, restarting on every subpath; one that
+/// is invalid for the width, or would cut the path into more than
+/// [`MAX_PATTERN_SEGMENTS`] pieces, strokes solid instead.
 pub(crate) fn stroke_outline(path: &BezPath, style: &StrokeStyle, scale: f32) -> BezPath {
     let join = match style.join {
         LineJoin::Miter => kurbo::Join::Miter,
         LineJoin::Round => kurbo::Join::Round,
         LineJoin::Bevel => kurbo::Join::Bevel,
     };
-    let cap = match style.cap {
+    let mut cap = match style.cap {
         LineCap::Butt => kurbo::Cap::Butt,
         LineCap::Round => kurbo::Cap::Round,
         LineCap::Square => kurbo::Cap::Square,
     };
-    let stroke = kurbo::Stroke::new(f64::from(style.width * scale))
+    let s = f64::from(scale);
+    let pattern = style.pattern.validated(style.width);
+    let dashes = match pattern {
+        StrokePattern::Solid => None,
+        StrokePattern::Dashed { dash, gap, offset } => Some((
+            f64::from(offset) * s,
+            [f64::from(dash) * s, f64::from(gap) * s],
+        )),
+        StrokePattern::Dotted { spacing, offset } => {
+            cap = kurbo::Cap::Round;
+            let spacing = f64::from(spacing) * s;
+            // The pattern starts a dot at phase zero; start it `offset`
+            // before, so the first dot is centered `offset` along the path.
+            let phase = (spacing - f64::from(offset) * s).rem_euclid(spacing);
+            Some((phase, [DOT_LENGTH, spacing - DOT_LENGTH]))
+        }
+    };
+    let mut stroke = kurbo::Stroke::new(f64::from(style.width * scale))
         .with_join(join)
         .with_caps(cap)
         .with_miter_limit(f64::from(style.miter_limit.max(1.0)));
+    if let Some((offset, pattern)) = dashes {
+        let period = pattern[0] + pattern[1];
+        let length: f64 = path.segments().map(|seg| seg.arclen(TOLERANCE)).sum();
+        if length / period <= MAX_PATTERN_SEGMENTS as f64 {
+            stroke = stroke.with_dashes(offset, pattern);
+        }
+    }
     kurbo::stroke(path, &stroke, &kurbo::StrokeOpts::default(), TOLERANCE)
 }
 

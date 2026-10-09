@@ -103,6 +103,23 @@ impl Viewport {
         }
     }
 
+    // quark patch: encoded targets.
+    /// Whether the target this viewport draws to holds sRGB-encoded values
+    /// (blended as browsers blend). Glyph colors then stay encoded, color
+    /// glyphs are encoded, and no coverage correction applies.
+    pub fn set_encoded(&mut self, queue: &Queue, encoded: bool) {
+        let flag = u32::from(encoded);
+        if self.params._pad[0] != flag {
+            self.params._pad[0] = flag;
+            queue.write_buffer(&self.params_buffer, 0, unsafe {
+                slice::from_raw_parts(
+                    &self.params as *const Params as *const u8,
+                    mem::size_of::<Params>(),
+                )
+            });
+        }
+    }
+
     /// Returns the current resolution of the `Viewport`.
     pub fn resolution(&self) -> Resolution {
         self.params.screen_resolution

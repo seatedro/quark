@@ -12,11 +12,41 @@ use wgpu::{
     TextureAspect, COPY_BUFFER_ALIGNMENT,
 };
 
+// quark patch: per-renderer glyph fills.
+/// Most [`GlyphFill`]s one renderer holds.
+pub const MAX_GLYPH_FILLS: usize = 64;
+
+/// A coordinate-dependent color for monochrome glyphs, evaluated per pixel
+/// in target pixels: `kind` 1 is a linear gradient from `color_a` at the
+/// axis start to `color_b` at its end, clamped; `kind` 2 is a highlight
+/// band of half width `params[1]` pixels centered `params[2]` pixels along
+/// the axis (from its start, in the axis direction), `color_b` at its center
+/// fading to `color_a`. Colors are straight-alpha sRGB-encoded channels in
+/// 0..1; a linear target decodes the result.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlyphFill {
+    /// Axis start and end: `[x0, y0, x1, y1]`.
+    pub axis: [f32; 4],
+    pub color_a: [f32; 4],
+    pub color_b: [f32; 4],
+    /// `[kind, band half width, band center, 0]`.
+    pub params: [f32; 4],
+}
+
 /// A text renderer that uses cached glyphs to render text into an existing render pass.
 pub struct TextRenderer {
     vertex_buffer: Buffer,
     vertex_buffer_size: u64,
     pipeline: RenderPipeline,
+    // quark patch: the target format `pipeline` draws to, and the fills.
+    format: wgpu::TextureFormat,
+    multisample: MultisampleState,
+    depth_stencil: Option<DepthStencilState>,
+    fills: Vec<GlyphFill>,
+    fills_dirty: bool,
+    fills_buffer: Buffer,
+    fills_bind_group: wgpu::BindGroup,
     glyph_vertices: Vec<GlyphToRender>,
 }
 
@@ -36,13 +66,73 @@ impl TextRenderer {
             mapped_at_creation: false,
         });
 
-        let pipeline = atlas.get_or_create_pipeline(device, multisample, depth_stencil);
+        let pipeline = atlas.get_or_create_pipeline(device, multisample, depth_stencil.clone());
+        let fills_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("glyphon fills"),
+            size: (MAX_GLYPH_FILLS * std::mem::size_of::<GlyphFill>()) as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fills_bind_group = atlas.create_fills_bind_group(device, &fills_buffer);
 
         Self {
             vertex_buffer,
             vertex_buffer_size,
             pipeline,
+            format: atlas.format,
+            multisample,
+            depth_stencil,
+            fills: Vec::new(),
+            fills_dirty: false,
+            fills_buffer,
+            fills_bind_group,
             glyph_vertices: Vec::new(),
+        }
+    }
+
+    // quark patch: drawing to targets of another format.
+    /// Draw later passes into targets of `format` (the atlas's format at
+    /// first), e.g. a non-sRGB view holding encoded colors.
+    pub fn set_target_format(
+        &mut self,
+        atlas: &TextAtlas,
+        device: &Device,
+        format: wgpu::TextureFormat,
+    ) {
+        if self.format != format {
+            self.pipeline = atlas.cache.get_or_create_pipeline(
+                device,
+                format,
+                self.multisample,
+                self.depth_stencil.clone(),
+            );
+            self.format = format;
+        }
+    }
+
+    // quark patch: per-renderer glyph fills.
+    /// Sets the fills glyphs prepared with a nonzero
+    /// [`PositionedGlyph::fill`] read; at most [`MAX_GLYPH_FILLS`] are kept.
+    /// [`Self::upload_fills`] copies them to the GPU when they changed, so
+    /// a moving shimmer costs one small write a frame and no preparing.
+    pub fn set_fills(&mut self, fills: &[GlyphFill]) {
+        let fills = &fills[..fills.len().min(MAX_GLYPH_FILLS)];
+        if self.fills != fills {
+            self.fills.clear();
+            self.fills.extend_from_slice(fills);
+            self.fills_dirty = true;
+        }
+    }
+
+    /// Writes the fills set since the last upload.
+    pub fn upload_fills(&mut self, queue: &Queue) {
+        if std::mem::take(&mut self.fills_dirty) && !self.fills.is_empty() {
+            queue.write_buffer(&self.fills_buffer, 0, unsafe {
+                slice::from_raw_parts(
+                    self.fills.as_ptr() as *const u8,
+                    std::mem::size_of_val(&self.fills[..]),
+                )
+            });
         }
     }
 
@@ -188,6 +278,7 @@ impl TextRenderer {
                         color,
                         metadata: glyph.metadata,
                         cache_key,
+                        paint: 0,
                     },
                     bounds,
                     |_system, rasterize_custom_glyph| -> Option<GetGlyphImageResult> {
@@ -259,6 +350,7 @@ impl TextRenderer {
                             metadata: glyph.metadata,
                             cache_key: GlyphonCacheKey::Text(physical_glyph.cache_key),
                             scale_factor: text_area.scale,
+                            paint: 0,
                         },
                         bounds,
                         |system, _rasterize_custom_glyph| {
@@ -314,6 +406,10 @@ impl TextRenderer {
                     color: glyph.color,
                     metadata: 0,
                     cache_key: GlyphonCacheKey::Text(glyph.cache_key),
+                    paint: u32::from(glyph.fill)
+                        | glyph
+                            .backdrop
+                            .map_or(0, |luminance| 0x100 | u32::from(luminance) << 16),
                 },
                 GlyphBounds::clipped(glyph.bounds, resolution),
                 |system, _rasterize_custom_glyph| text_glyph_image(system, glyph.cache_key),
@@ -390,6 +486,7 @@ impl TextRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &atlas.bind_group, &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
+        pass.set_bind_group(2, &self.fills_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         // The vertex shader reads the slot from the vertex index.
         pass.draw(slot * 4..slot * 4 + 4, 0..self.glyph_vertices.len() as u32);
@@ -468,6 +565,7 @@ struct GlyphMetadata {
     color: Color,
     metadata: usize,
     cache_key: GlyphonCacheKey,
+    paint: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -718,5 +816,6 @@ where
                 | linear_correction(&metadata.cache_key),
         ],
         depth,
+        paint: metadata.paint,
     }))
 }

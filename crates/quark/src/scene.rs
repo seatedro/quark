@@ -1165,13 +1165,19 @@ pub enum AlphaMask {
 
 impl AlphaMask {
     /// Opaque inside `bounds`, fading to transparent over the last `length`
-    /// points before `edge`. A non-finite or negative length is no fade.
+    /// points before `edge`. A zero, negative, or non-finite length is no
+    /// fade: opaque everywhere.
     pub fn fade_edge(bounds: Rect, edge: FadeEdge, length: f32) -> Self {
-        let length = if length.is_finite() {
-            length.max(0.0)
-        } else {
-            0.0
-        };
+        if !(length.is_finite() && length > 0.0) {
+            return Self::Linear {
+                start: [bounds.x, bounds.y],
+                end: [bounds.x, bounds.y],
+                stops: MaskStops::new(&[MaskStop {
+                    offset: 0.0,
+                    alpha: 1.0,
+                }]),
+            };
+        }
         let (x0, y0, x1, y1) = (bounds.x, bounds.y, bounds.right(), bounds.bottom());
         let (start, end) = match edge {
             FadeEdge::Right => ([x1 - length, y0], [x1, y0]),
@@ -1405,6 +1411,36 @@ pub struct EffectQuadPrimitive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hostile mask stops (NaN, out of order, out of range, too many) must
+    // sanitize to a bounded, monotonic ramp, so a renderer never reads an
+    // unbounded or unordered stop list.
+    #[test]
+    fn mask_stops_sanitize_hostile_input() {
+        let stop = |offset, alpha| MaskStop { offset, alpha };
+        let stops = MaskStops::new(&[
+            stop(0.5, f32::NAN),
+            stop(0.2, 2.0),
+            stop(f32::INFINITY, 0.5),
+            stop(0.9, 0.0),
+            stop(1.0, 1.0),
+        ]);
+        let got: Vec<(f32, f32)> = stops
+            .as_slice()
+            .iter()
+            .map(|s| (s.offset, s.alpha))
+            .collect();
+        assert_eq!(got, [(0.5, 0.0), (0.5, 1.0), (0.5, 0.5), (0.9, 0.0)]);
+        // Held beyond both ends, interpolated between.
+        let table = [(-1.0, 0.0), (0.5, 0.0), (0.7, 0.25), (2.0, 0.0)];
+        for (t, alpha) in table {
+            assert!(
+                (stops.alpha_at(t) - alpha).abs() < 1e-6,
+                "{t}: {}",
+                stops.alpha_at(t)
+            );
+        }
+    }
 
     // A chunk paints what its primitives pushed where it lands paint. It
     // snaps them around its own whole-pixel origin, so a rounding that
