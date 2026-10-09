@@ -21,6 +21,9 @@
 
 use std::ops::Range;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod coretext;
+
 use quark_text::cosmic_text::{CacheKey, CacheKeyFlags, SubpixelBin};
 pub(crate) use quark_text::fonts::{FontInstanceId, PreparedFont};
 
