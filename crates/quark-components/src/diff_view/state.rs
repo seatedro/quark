@@ -579,6 +579,7 @@ impl DiffViewState {
         let ordered = self.ordered_selection();
         let mut kept = HashMap::with_capacity(window.len());
         let mut rows = Vec::with_capacity(window.len());
+        let mut next_top: Option<f32> = None;
         for index in window {
             let r = self.refs[index];
             let key = self.ref_key(r);
@@ -613,11 +614,17 @@ impl DiffViewState {
                 _ => Default::default(),
             };
             let rows_table = self.list.rows();
+            let height = rows_table.height_of(RowKey(key)).unwrap_or(m.line_h);
+            // Rows stack from the first row's top: offsets tens of millions
+            // of points down lose whole points to f32 rounding, and each
+            // row rounding on its own would overlap or gap its neighbors.
+            let top = *next_top.get_or_insert_with(|| rows_table.offset_of_index(index) - scroll);
+            next_top = Some(top + height);
             rows.push(FrameRow {
                 key,
                 index: index as u32,
-                top: rows_table.offset_of_index(index) - scroll,
-                height: rows_table.height_of(RowKey(key)).unwrap_or(m.line_h),
+                top,
+                height,
                 paint: paint.clone(),
                 selected,
                 search,

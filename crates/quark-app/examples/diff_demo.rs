@@ -916,6 +916,29 @@ mod tests {
         );
     }
 
+    // Catches rows positioned from their own offsets 70 million points
+    // down, where f32 rounds to multiples of eight: after jumping to the
+    // end of 3.5 million lines, every row starts where the one above it
+    // ends.
+    #[test]
+    fn rows_far_down_a_long_diff_stack_without_gaps() {
+        let lines: String = (0..3_500_000).map(|i| format!("{i}\n")).collect();
+        let doc = diff_texts(None, Some("big.txt"), None, Some(&lines), 3);
+        let mut ui = harness(doc);
+        ui.click_node(line("3"));
+        ui.key("end");
+        let frame = ui.app().diff.frame().unwrap().clone();
+        let gaps: Vec<f32> = frame
+            .rows
+            .windows(2)
+            .map(|w| w[1].top - (w[0].top + w[0].height))
+            .filter(|gap| *gap != 0.0)
+            .collect();
+
+        assert!(frame.scroll > 67_108_864.0, "{}", frame.scroll);
+        assert_eq!(gaps, Vec::<f32>::new());
+    }
+
     // Catches select-all copying the shaped part of a huge line: it copies
     // the whole line, and whole-line copy reads it exactly.
     #[test]
