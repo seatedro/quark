@@ -17,8 +17,8 @@
 //! - `eval`: round trips of a trivial evaluation, back to back, idle and
 //!   busy.
 //!
-//! Then a real click (xdotool) on a `target=_blank` link, which must be
-//! reported as a blocked popup, and the focus handoff on close.
+//! Then real X input (xdotool) into a field of the page, and the focus
+//! handoff on close.
 
 use std::collections::VecDeque;
 use std::process::{Command, ExitCode};
@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 
 use quark::scene::Scene;
 use quark_app::platform::webview::{
-    AsyncScript, BlockReason, DocumentId, Origin, OriginGuard, Url, WebViewEvent, WebViewHandle,
-    WebViewOptions, WebWindowOptions,
+    AsyncScript, DocumentId, Origin, OriginGuard, Url, WebViewEvent, WebViewHandle, WebViewOptions,
+    WebWindowOptions,
 };
 use quark_app::{App, AppEvent, EventContext, FrameContext, WindowOptions};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -92,7 +92,9 @@ enum Phase {
     EvalIdle,
     Busy,
     EvalBusy,
-    Popup,
+    /// Keys typed with xdotool into a field of the page.
+    Typing,
+    Typed,
     Closing,
 }
 
@@ -241,53 +243,61 @@ impl Evidence {
                     if let Some(view) = self.view {
                         cx.webviews().close(view);
                     }
-                    self.phase = Phase::Popup;
+                    self.phase = Phase::Typing;
                 }
             }
             (Phase::Busy, WebViewEvent::EvaluationFinished { .. }) => {}
-            (Phase::Popup, WebViewEvent::Closed { .. }) if self.parent.is_some() => {
+            (Phase::Typing, WebViewEvent::Closed { .. }) if self.parent.is_some() => {
                 self.document = None;
-                self.open(cx, "/popup");
+                self.open(cx, "/getter");
             }
             // The click and focus checks drive X11; on Wayland the run
             // ends with the measurements.
-            (Phase::Popup, WebViewEvent::Closed { .. }) => cx.exit(),
-            (Phase::Popup, WebViewEvent::PageLoadFinished { document, .. }) => {
+            (Phase::Typing, WebViewEvent::Closed { .. }) => cx.exit(),
+            (Phase::Typing, WebViewEvent::PageLoadFinished { document, .. }) => {
                 self.document = Some(document);
-                self.shot("modal-popup-page");
                 self.evaluate(
                     cx,
-                    "const r = document.getElementById('popup').getBoundingClientRect(); \
+                    "document.body.insertAdjacentHTML('beforeend', '<input id=typed>'); \
+                     const r = document.getElementById('typed').getBoundingClientRect(); \
                      return [Math.round(r.x + 5), Math.round(r.y + r.height / 2)];",
                 );
             }
             (
-                Phase::Popup,
+                Phase::Typing,
                 WebViewEvent::EvaluationFinished {
                     result: Ok(value), ..
                 },
             ) => {
-                // The page's own `window.open` on load has no user gesture,
-                // so WebKit's blocker drops it before any policy call. A real
-                // click is a gesture: it must come back as a blocked popup.
+                // Real X input: activate the modal, click into the field,
+                // type, then read the field back from the page.
                 let point = value.into_json();
                 let (x, y) = (
                     point[0].as_i64().unwrap_or(0),
                     point[1].as_i64().unwrap_or(0),
                 );
-                let clicked = Command::new("sh")
-                    .arg("-c")
-                    .arg(format!(
-                        "w=$(xdotool search --name '^{TITLE}$' | head -1) && xdotool windowactivate --sync $w \
-                         && eval $(xdotool getwindowgeometry --shell $w) && xdotool mousemove $((X+{x})) $((Y+{y})) click 1"
-                    ))
-                    .status();
-                println!("measure: clicked the target=_blank link at ({x}, {y}): {clicked:?}");
+                // Off the UI thread: GTK has to keep handling the
+                // activation and keys while xdotool waits on them.
+                let script = format!(
+                    "w=$(xdotool search --name '^{TITLE}$' | head -1) && xdotool windowactivate --sync $w \
+                     && eval $(xdotool getwindowgeometry --shell $w) && xdotool mousemove $((X+{x})) $((Y+{y})) click 1 \
+                     && xdotool type --delay 30 'quark 1' && sleep 0.5"
+                );
+                let (done, waker) = (Arc::clone(&self.ticking), cx.waker().clone());
+                done.store(true, Ordering::Release);
+                std::thread::spawn(move || {
+                    let typed = Command::new("sh").arg("-c").arg(script).status();
+                    println!("measure: clicked the field and typed with xdotool: {typed:?}");
+                    done.store(false, Ordering::Release);
+                    waker.wake();
+                });
+                self.phase = Phase::Typed;
+                self.round_trip = None;
             }
-            (Phase::Popup, WebViewEvent::NavigationBlocked { reason, .. }) => {
+            (Phase::Typed, WebViewEvent::EvaluationFinished { result, .. }) => {
                 println!(
-                    "measure: popup click reported as blocked popup: {}",
-                    reason == BlockReason::Popup
+                    "measure: the field reads: {:?}",
+                    result.map(|v| v.into_json())
                 );
                 self.phase = Phase::Closing;
                 if let Some(view) = self.view {
@@ -360,6 +370,10 @@ impl App for Evidence {
                 self.round_trips.clear();
                 self.begin(Phase::EvalBusy, cx);
                 self.evaluate(cx, "return 1;");
+            }
+            Phase::Typed if !ticking && self.round_trip.is_none() => {
+                self.shot("modal-typed");
+                self.evaluate(cx, "return document.getElementById('typed').value;");
             }
             Phase::Closing if self.view.is_none() && !ticking => cx.exit(),
             _ => {}
