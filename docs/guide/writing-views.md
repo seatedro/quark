@@ -69,6 +69,11 @@ error that suggests the closest one. Components start with an uppercase letter o
 (`<widgets::Card>`). A closing tag must match its opening tag; `</Card>`
 may close `<widgets::Card>`.
 
+Built-in tags call whatever function of that name is in scope, so a local
+binding shadows it: inside `Step::Prose { text, .. } => ..`, `<text>`
+calls the bound `text` and fails to compile. Rename the binding
+(`text: body`) to use the tag there.
+
 ## Attributes
 
 Every builder method is an attribute. The method name carries the
