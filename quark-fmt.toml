@@ -1,0 +1,2 @@
+style_version = 1
+exclude = ["vendor/**", "crates/quark-macros/tests/ui/**", "tools/quark-fmt/tests/fixtures/**"]
