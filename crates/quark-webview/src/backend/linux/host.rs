@@ -651,7 +651,7 @@ fn load_failed(event: LoadEvent, error: &glib::Error, sink: &NativeSink, nav: &R
         (blocked, error.kind::<PolicyError>())
     {
         NavigationError::Policy(reason)
-    } else if error.matches(NetworkError::Cancelled) {
+    } else if error.matches(NetworkError::Cancelled) || error.matches(gio::IOErrorEnum::Cancelled) {
         NavigationError::Cancelled
     } else if error.kind::<NetworkError>().is_some() {
         NavigationError::Transport
