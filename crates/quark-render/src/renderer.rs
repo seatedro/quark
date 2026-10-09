@@ -5181,12 +5181,16 @@ mod tests {
                 weight: None,
                 style: None,
                 kind: None,
+                size: None,
+                letter_spacing: None,
             },
             quark_text::TextSpan {
                 range: 6..12,
                 weight: None,
                 style: None,
                 kind: None,
+                size: None,
+                letter_spacing: None,
             },
         ]);
         let layout = test_text().layout(&params).expect("layout");
@@ -5224,6 +5228,8 @@ mod tests {
             weight: None,
             style: None,
             kind: None,
+            size: None,
+            letter_spacing: None,
         }
     }
 
@@ -5515,6 +5521,8 @@ mod tests {
                 weight: None,
                 style: None,
                 kind: None,
+                size: None,
+                letter_spacing: None,
             })
             .collect::<Vec<_>>();
         let mut text = test_text();
