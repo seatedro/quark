@@ -398,9 +398,9 @@ impl<G: BlockGeometry> Document<G> {
 
         DocumentElement {
             size: self.size,
-            scroll: self.list.scroll_offset(),
-            max_scroll: self.list.max_scroll_offset(),
-            total_extent: self.list.rows().total_extent(),
+            scroll: self.list.scroll_offset() as f32,
+            max_scroll: self.list.max_scroll_offset() as f32,
+            total_extent: self.list.rows().total_extent() as f32,
             row_count,
             rows: placed,
             on_event,
@@ -1538,8 +1538,8 @@ impl Element for DocumentElement {
         let scrollbars = Scrollbars::prepaint(
             ScrollbarInput {
                 bounds,
-                content: (bounds.width, self.total_extent),
-                offset: (0.0, self.scroll),
+                content: (f64::from(bounds.width), f64::from(self.total_extent)),
+                offset: (0.0, f64::from(self.scroll)),
                 axes: ScrollAxes { x: false, y: true },
                 sinks: [None, Some(ScrollSink::Builder(builder.clone()))],
                 auto_hide: self.scrollbar_auto_hide,

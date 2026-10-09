@@ -181,11 +181,12 @@ pub struct LineWindow {
     pub start: usize,
     pub end: usize,
     /// Where the layout's text starts, from the start of the line's text,
-    /// in points: paint and hit-test the layout this far right.
-    pub x: f32,
+    /// in points: paint and hit-test the layout this far right. In `f64`,
+    /// as a 64 MiB line runs to hundreds of millions of points.
+    pub x: f64,
     /// Width of the whole shown line in points, estimated from column
     /// counts beyond the window.
-    pub width: f32,
+    pub width: f64,
 }
 
 /// An app annotation's identity, unique within a view.
@@ -362,9 +363,16 @@ pub struct ViewFrame {
     /// to, once its own row has scrolled above the viewport.
     pub sticky_header: Option<FrameRow>,
     /// Width of each side's widest line seen, padding included.
-    pub content_w: [f32; 2],
-    pub scroll: f32,
-    pub total: f32,
+    pub content_w: [f64; 2],
+    /// Where each side's sideways scrolling content is laid out from: near
+    /// its scroll, so long lines paint at exact `f32` positions; see
+    /// `Div::scroll_origin`.
+    pub content_origin: [f64; 2],
+    /// The vertical scroll offset and the height of every row, in `f64`
+    /// so offsets deep into millions of rows stay exact. Row tops are
+    /// already relative to `scroll`.
+    pub scroll: f64,
+    pub total: f64,
     pub row_count: u32,
     pub hscroll: [ScrollHandle; 2],
     pub scrollbar_auto_hide: bool,

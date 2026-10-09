@@ -1238,28 +1238,28 @@ impl<G: BlockGeometry> Document<G> {
     // -- Scrolling --
 
     pub fn scroll_offset(&self) -> f32 {
-        self.list.scroll_offset()
+        self.list.scroll_offset() as f32
     }
 
     pub fn max_scroll_offset(&self) -> f32 {
-        self.list.max_scroll_offset()
+        self.list.max_scroll_offset() as f32
     }
 
     /// A user scroll; landing at the bottom pins the view there. Cancels
     /// a [`Self::anchor_row`].
-    pub fn set_scroll_offset(&mut self, offset: f32) -> f32 {
+    pub fn set_scroll_offset(&mut self, offset: impl Into<f64>) -> f32 {
         self.anchor = None;
         self.adjust_scroll(offset)
     }
 
     /// Moves the view without cancelling an anchor: the document's own
     /// corrections.
-    fn adjust_scroll(&mut self, offset: f32) -> f32 {
+    fn adjust_scroll(&mut self, offset: impl Into<f64>) -> f32 {
         let offset = self.list.set_scroll_offset(offset);
         if self.list.is_stuck_to_bottom() {
             self.content_below = false;
         }
-        offset
+        offset as f32
     }
 
     /// Keeps `row`'s top `viewport_offset` points below the viewport's top,
@@ -1764,7 +1764,7 @@ impl<G: BlockGeometry> Document<G> {
                 return;
             };
             let before = self.list.scroll_offset();
-            let target = top - anchor.viewport_offset;
+            let target = top - f64::from(anchor.viewport_offset);
             if (target - before).abs() < 0.5 {
                 return;
             }
@@ -1857,7 +1857,7 @@ impl<G: BlockGeometry> Document<G> {
         let below = extra.filter(|index| *index >= window.range.end);
         for index in above.into_iter().chain(window.range).chain(below) {
             let key = rows.keys()[index];
-            let top = rows.offset_of_index(index) - scroll;
+            let top = (rows.offset_of_index(index) - scroll) as f32;
             let height = rows.height_of(key).unwrap_or(0.0);
             let first = self.blocks.len();
             let first_adornment = self.adornments.len();

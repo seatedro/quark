@@ -32,10 +32,13 @@ pub struct Div {
     key_bindings: Vec<(std::borrow::Cow<'static, str>, Action)>,
     on_scroll: Option<ScrollActionBuilder>,
     cursor: CursorHint,
-    scroll_y: f32,
-    scroll_total_height: f32,
-    scroll_x: f32,
-    scroll_total_width: f32,
+    scroll_y: f64,
+    scroll_total_height: f64,
+    scroll_x: f64,
+    scroll_total_width: f64,
+    /// Content position the children are laid out from; see
+    /// [`Self::scroll_origin`].
+    scroll_origin: (f64, f64),
     on_scroll_x: Option<ScrollActionBuilder>,
     scroll_handle: Option<ScrollHandle>,
     scroll_axes: ScrollAxes,
@@ -97,6 +100,7 @@ pub fn div() -> Div {
         scroll_total_height: 0.0,
         scroll_x: 0.0,
         scroll_total_width: 0.0,
+        scroll_origin: (0.0, 0.0),
         on_scroll_x: None,
         scroll_handle: None,
         scroll_axes: ScrollAxes::default(),
@@ -415,8 +419,8 @@ impl Div {
 
     // -- Scroll / clip --
 
-    pub fn scroll_y(mut self, offset: f32) -> Self {
-        self.scroll_y = offset;
+    pub fn scroll_y(mut self, offset: impl Into<f64>) -> Self {
+        self.scroll_y = offset.into();
         self.clips = true;
         // Tell taffy the element is a scroll container so it constrains to
         // the available space instead of expanding to fit all children.
@@ -424,15 +428,15 @@ impl Div {
         self
     }
 
-    pub fn scroll_total(mut self, total_height: f32) -> Self {
-        self.scroll_total_height = total_height;
+    pub fn scroll_total(mut self, total_height: impl Into<f64>) -> Self {
+        self.scroll_total_height = total_height.into();
         self
     }
 
     /// Horizontal [`Self::scroll_y`]: paint children `offset` points to the
     /// left, clipped, with the width constrained like a scroll container.
-    pub fn scroll_x(mut self, offset: f32) -> Self {
-        self.scroll_x = offset;
+    pub fn scroll_x(mut self, offset: impl Into<f64>) -> Self {
+        self.scroll_x = offset.into();
         self.clips = true;
         self.base_style.layout.overflow.x = taffy::Overflow::Hidden;
         self
@@ -440,8 +444,21 @@ impl Div {
 
     /// Content width for the horizontal scrollbar and wheel limit, like
     /// [`Self::scroll_total`].
-    pub fn scroll_total_x(mut self, total_width: f32) -> Self {
-        self.scroll_total_width = total_width;
+    pub fn scroll_total_x(mut self, total_width: impl Into<f64>) -> Self {
+        self.scroll_total_width = total_width.into();
+        self
+    }
+
+    /// Lays the children out from content position `(x, y)` instead of
+    /// the content's start: the container paints them at that position
+    /// less the scroll offset. Content hundreds of millions of points
+    /// long (a 64 MiB line, millions of rows) puts its origin near the
+    /// offset and its children relative to it, so they paint exactly
+    /// where `f32` positions from the content's start would round by
+    /// tens of points. The offset and `scroll_total` stay in content
+    /// coordinates; a measured content size counts from the origin.
+    pub fn scroll_origin(mut self, x: impl Into<f64>, y: impl Into<f64>) -> Self {
+        self.scroll_origin = (x.into(), y.into());
         self
     }
 
@@ -693,26 +710,28 @@ impl Div {
         if let Some(start) = self.on_drag.take() {
             cx.handlers.on_drag(node, start);
         }
+        // Wheel routing only asks whether the offset can move, which f32
+        // answers at any length.
         if let Some(builder) = self.on_scroll.clone() {
             let max = (self.scroll_total_height > 0.0)
-                .then(|| (self.scroll_total_height - bounds.height).max(0.0));
+                .then(|| (self.scroll_total_height - f64::from(bounds.height)).max(0.0) as f32);
             cx.handlers.on_scroll(
                 node,
                 ScrollTarget {
                     builder,
-                    offset: self.scroll_y,
+                    offset: self.scroll_y as f32,
                     max,
                 },
             );
         }
         if let Some(builder) = self.on_scroll_x.clone() {
             let max = (self.scroll_total_width > 0.0)
-                .then(|| (self.scroll_total_width - bounds.width).max(0.0));
+                .then(|| (self.scroll_total_width - f64::from(bounds.width)).max(0.0) as f32);
             cx.handlers.on_scroll_x(
                 node,
                 ScrollTarget {
                     builder,
-                    offset: self.scroll_x,
+                    offset: self.scroll_x as f32,
                     max,
                 },
             );
@@ -774,17 +793,32 @@ impl Div {
     }
 
     /// Size of what the div scrolls over: `scroll_total`/`scroll_total_x`
-    /// when given, else measured for a tracked container.
-    fn scroll_content(&self, engine: &LayoutEngine, id: LayoutId) -> (f32, f32) {
+    /// when given, else measured from the origin for a tracked container.
+    fn scroll_content(&self, engine: &LayoutEngine, id: LayoutId) -> (f64, f64) {
         let measured = match self.scroll_handle {
             Some(_) => engine.scroll_content_size(id),
             None => (0.0, 0.0),
         };
-        let given = |total: f32, measured: f32| if total > 0.0 { total } else { measured };
+        let given = |total: f64, measured: f32, origin: f64| {
+            if total > 0.0 {
+                total
+            } else {
+                origin + f64::from(measured)
+            }
+        };
         (
-            given(self.scroll_total_width, measured.0),
-            given(self.scroll_total_height, measured.1),
+            given(self.scroll_total_width, measured.0, self.scroll_origin.0),
+            given(self.scroll_total_height, measured.1, self.scroll_origin.1),
         )
+    }
+
+    /// The scroll offset this frame resolved (the handle's, or the app's),
+    /// in content coordinates.
+    fn content_offset(&self) -> (f64, f64) {
+        match &self.scroll_handle {
+            Some(handle) => handle.offset_f64(),
+            None => (self.scroll_x, self.scroll_y),
+        }
     }
 
     /// Lay out this frame's scrollbars (under the current clip, above the
@@ -792,8 +826,7 @@ impl Div {
     fn prepaint_scrollbars(
         &self,
         bounds: Bounds,
-        content: (f32, f32),
-        scroll: (f32, f32),
+        content: (f64, f64),
         cx: &mut ElementContext,
     ) -> Scrollbars {
         let axes = match self.scroll_handle {
@@ -811,7 +844,7 @@ impl Div {
             ScrollbarInput {
                 bounds,
                 content,
-                offset: scroll,
+                offset: self.content_offset(),
                 axes,
                 sinks: Axis::BOTH.map(|axis| self.scrollbar_sink(axis)),
                 auto_hide: self.scrollbar_auto_hide,
@@ -936,9 +969,13 @@ impl Element for Div {
             cx.record_scroll_item(key, bounds);
         }
         let content = self.scroll_content(engine, *layout_id);
+        let origin = self.scroll_origin;
         let mut scroll = match &self.scroll_handle {
-            Some(handle) => handle.begin_frame(bounds, content, self.scroll_axes, cx),
-            None => (self.scroll_x, self.scroll_y),
+            Some(handle) => handle.begin_frame(bounds, content, origin, self.scroll_axes, cx),
+            None => (
+                (self.scroll_x - origin.0) as f32,
+                (self.scroll_y - origin.1) as f32,
+            ),
         };
         let z = self.base_style.z_index;
         if z != 0 {
@@ -1012,7 +1049,7 @@ impl Element for Div {
                 handle.end_frame(self.scroll_axes, cx);
             }
         }
-        let scrollbars = self.prepaint_scrollbars(bounds, content, scroll, cx);
+        let scrollbars = self.prepaint_scrollbars(bounds, content, cx);
         if let Some(group) = group {
             cx.end_interaction_group(group);
         }

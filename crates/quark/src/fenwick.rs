@@ -18,7 +18,14 @@ pub fn px_to_units(px: f32) -> i64 {
 }
 
 pub fn units_to_px(units: i64) -> f32 {
-    (units as f64 / UNITS_PER_PX) as f32
+    units_to_offset(units) as f32
+}
+
+/// Units as points in `f64`, which holds every sum below 2^53 units (about
+/// 3.5e13 points) exactly: a position in tall content, where `f32` steps by
+/// whole points from 2^24.
+pub fn units_to_offset(units: i64) -> f64 {
+    units as f64 / UNITS_PER_PX
 }
 
 /// `tree[i]` (1-based) holds the sum of values in `(i - lowbit(i), i]`.

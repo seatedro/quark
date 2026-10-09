@@ -1,15 +1,19 @@
-//! Variable-height virtual list core for chat transcripts: a column-wise
-//! row table with Fenwick offsets, plus a scroll model that anchors the
-//! first visible row and pins to the bottom while the user is there.
+//! Variable-height virtual list core for chat transcripts and diffs: a
+//! column-wise row table with exact offsets (sparse around one height, or
+//! a Fenwick tree; see [`super::heights`]), plus a scroll model that
+//! anchors the first visible row and pins to the bottom while the user is
+//! there.
 //!
 //! No rendering here. An element measures rows through `measure_visible`
 //! (any `FnMut(u64, f32) -> f32`, which `quark_text::RowHeights` fits via a
 //! closure) and lays out `VariableList::window`.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 use super::VirtualListWindow;
-use quark::fenwick::{Fenwick, UNITS_PER_PX, px_to_units, units_to_px};
+use super::heights::Heights;
+use quark::fenwick::{UNITS_PER_PX, px_to_units, units_to_offset, units_to_px};
 use quark::selection::{FULL_INTEGRITY_CHECKS, count_integrity_steps};
 
 /// Stable identity of a row across inserts, removals, and remeasurement.
@@ -44,6 +48,11 @@ pub enum RowIntegrityError {
         height: f32,
     },
     FenwickMismatch,
+    /// A row listed apart from the common height of a sparse table is out
+    /// of order, out of range, or not apart from it after all.
+    SparseRow {
+        index: usize,
+    },
     MeasuredStats {
         count: usize,
         expected_count: usize,
@@ -60,16 +69,29 @@ fn sanitize_height(height: f32) -> f32 {
     }
 }
 
+/// How rows are keyed.
+#[derive(Debug, Clone)]
+enum Keys {
+    /// Row `i` is `RowKey(i)`: a table built whole by [`RowTable::indexed`]
+    /// stores nothing per row for its keys. Inserting or removing rows
+    /// turns it into [`Keys::Explicit`] first.
+    Indexed,
+    Explicit {
+        keys: Vec<RowKey>,
+        index: HashMap<RowKey, usize>,
+    },
+}
+
 /// Rows stored column-wise. Unmeasured rows hold an estimate; an
 /// invalidated row keeps its last height as its estimate so the layout does
 /// not jump before it is measured again.
 #[derive(Debug, Clone)]
 pub struct RowTable {
-    keys: Vec<RowKey>,
-    heights: Vec<f32>,
+    keys: Keys,
+    /// [`Self::keys`] of an indexed table, made on first call.
+    indexed_keys: OnceCell<Vec<RowKey>>,
+    heights: Heights,
     measured: Vec<bool>,
-    index: HashMap<RowKey, usize>,
-    tree: Fenwick,
     default_estimate: f32,
     estimate_override: Option<f32>,
     measured_count: usize,
@@ -81,11 +103,13 @@ impl RowTable {
     /// `default_estimate` is used until any row has been measured.
     pub fn new(default_estimate: f32) -> Self {
         Self {
-            keys: Vec::new(),
-            heights: Vec::new(),
+            keys: Keys::Explicit {
+                keys: Vec::new(),
+                index: HashMap::new(),
+            },
+            indexed_keys: OnceCell::new(),
+            heights: Heights::build(sanitize_height(default_estimate), []),
             measured: Vec::new(),
-            index: HashMap::new(),
-            tree: Fenwick::default(),
             default_estimate: sanitize_height(default_estimate),
             estimate_override: None,
             measured_count: 0,
@@ -93,24 +117,83 @@ impl RowTable {
         }
     }
 
+    /// A table of rows keyed by position (row `i` is `RowKey(i)`), for a
+    /// list its owner rebuilds whole and addresses by index. `heights`
+    /// gives each row's measured height, or `None` for a row estimated at
+    /// `default_estimate`. O(n) with no per-row key storage; rows at the
+    /// estimate cost nothing beyond a measured flag while few others
+    /// differ from it, so millions of rows build in milliseconds.
+    /// Inserting or removing rows later stores their keys, as
+    /// [`Self::new`] does.
+    pub fn indexed(default_estimate: f32, heights: impl IntoIterator<Item = Option<f32>>) -> Self {
+        let mut table = Self::new(default_estimate);
+        table.keys = Keys::Indexed;
+        let estimate = table.default_estimate;
+        let heights = heights.into_iter();
+        let mut measured = Vec::with_capacity(heights.size_hint().0);
+        let (mut count, mut units) = (0, 0);
+        let rows = heights.map(|height| {
+            measured.push(height.is_some());
+            let height = height.map_or(estimate, sanitize_height);
+            if measured[measured.len() - 1] {
+                count += 1;
+                units += px_to_units(height);
+            }
+            height
+        });
+        table.heights = Heights::build(estimate, rows);
+        table.measured = measured;
+        table.measured_count = count;
+        table.measured_units = units;
+        table.debug_check();
+        table
+    }
+
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.heights.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.len() == 0
     }
 
+    /// Every row's key in display order. An [`Self::indexed`] table makes
+    /// this list on the first call; prefer [`Self::key_at`] there.
     pub fn keys(&self) -> &[RowKey] {
-        &self.keys
+        match &self.keys {
+            Keys::Indexed => self
+                .indexed_keys
+                .get_or_init(|| (0..self.len() as u64).map(RowKey).collect()),
+            Keys::Explicit { keys, .. } => keys,
+        }
+    }
+
+    /// The key of the row at `index`. O(1).
+    pub fn key_at(&self, index: usize) -> RowKey {
+        match &self.keys {
+            Keys::Indexed => {
+                assert!(index < self.len(), "row {index} of {}", self.len());
+                RowKey(index as u64)
+            }
+            Keys::Explicit { keys, .. } => keys[index],
+        }
     }
 
     pub fn index_of(&self, key: RowKey) -> Option<usize> {
-        self.index.get(&key).copied()
+        match &self.keys {
+            Keys::Indexed => usize::try_from(key.0).ok().filter(|&i| i < self.len()),
+            Keys::Explicit { index, .. } => index.get(&key).copied(),
+        }
     }
 
     pub fn height_of(&self, key: RowKey) -> Option<f32> {
-        self.index_of(key).map(|i| self.heights[i])
+        self.index_of(key).map(|i| self.heights.height(i))
+    }
+
+    /// Height of the row at `index`. O(1), or O(log k) for k rows apart
+    /// from a sparse table's common height.
+    pub fn height_at(&self, index: usize) -> f32 {
+        self.heights.height(index)
     }
 
     pub fn is_measured(&self, key: RowKey) -> Option<bool> {
@@ -145,18 +228,35 @@ impl RowTable {
         self.estimate_override = estimate.map(sanitize_height);
     }
 
+    /// Stores the keys of an indexed table, before rows move. O(n).
+    fn explicit_keys(&mut self) -> (&mut Vec<RowKey>, &mut HashMap<RowKey, usize>) {
+        if matches!(self.keys, Keys::Indexed) {
+            let keys = self
+                .indexed_keys
+                .take()
+                .unwrap_or_else(|| (0..self.len() as u64).map(RowKey).collect());
+            let index = keys.iter().zip(0..).map(|(&k, i)| (k, i)).collect();
+            self.keys = Keys::Explicit { keys, index };
+        }
+        match &mut self.keys {
+            Keys::Explicit { keys, index } => (keys, index),
+            Keys::Indexed => unreachable!("keys were just stored"),
+        }
+    }
+
     /// O(log n) amortized.
     pub fn append(&mut self, key: RowKey) -> Result<(), RowError> {
-        if self.index.contains_key(&key) {
+        if self.index_of(key).is_some() {
             return Err(RowError::DuplicateKey(key));
         }
         let height = self.estimate();
-        self.index.insert(key, self.keys.len());
-        self.keys.push(key);
+        let len = self.len();
+        let (keys, index) = self.explicit_keys();
+        index.insert(key, len);
+        keys.push(key);
         self.heights.push(height);
         self.measured.push(false);
-        self.tree.push(px_to_units(height));
-        self.debug_check_row(self.keys.len() - 1);
+        self.debug_check_row(len);
         Ok(())
     }
 
@@ -182,19 +282,30 @@ impl RowTable {
         }
         let mut seen = HashSet::with_capacity(keys.len());
         for &key in keys {
-            if self.index.contains_key(&key) || !seen.insert(key) {
+            if self.index_of(key).is_some() || !seen.insert(key) {
                 return Err(RowError::DuplicateKey(key));
             }
         }
         let height = self.estimate();
         let count = keys.len();
-        self.keys.splice(index..index, keys.iter().copied());
-        self.heights
-            .splice(index..index, std::iter::repeat_n(height, count));
+        let (own, map) = self.explicit_keys();
+        own.splice(index..index, keys.iter().copied());
+        for (i, &key) in own.iter().enumerate().skip(index) {
+            map.insert(key, i);
+        }
         self.measured
             .splice(index..index, std::iter::repeat_n(false, count));
-        self.reindex_from(index);
-        self.rebuild_tree();
+        if index == len {
+            // Nothing moved: O(k log n) at most instead of a rebuild.
+            for _ in 0..count {
+                self.heights.push(height);
+            }
+        } else {
+            self.heights
+                .dense_mut()
+                .splice(index..index, std::iter::repeat_n(height, count));
+            self.heights.rebuild();
+        }
         self.debug_check();
         Ok(())
     }
@@ -204,14 +315,17 @@ impl RowTable {
         let index = self.index_of(key).ok_or(RowError::UnknownKey(key))?;
         if self.measured[index] {
             self.measured_count -= 1;
-            self.measured_units -= px_to_units(self.heights[index]);
+            self.measured_units -= px_to_units(self.heights.height(index));
         }
-        self.index.remove(&key);
-        self.keys.remove(index);
-        self.heights.remove(index);
+        let (keys, map) = self.explicit_keys();
+        map.remove(&key);
+        keys.remove(index);
+        for (i, &key) in keys.iter().enumerate().skip(index) {
+            map.insert(key, i);
+        }
+        self.heights.dense_mut().remove(index);
+        self.heights.rebuild();
         self.measured.remove(index);
-        self.reindex_from(index);
-        self.rebuild_tree();
         self.debug_check();
         Ok(())
     }
@@ -223,11 +337,12 @@ impl RowTable {
         Ok(())
     }
 
-    fn set_height_at(&mut self, index: usize, height: f32) {
+    /// Records a measured height for the row at `index`. O(log n).
+    pub fn set_height_at(&mut self, index: usize, height: f32) {
         let height = sanitize_height(height);
-        let old_units = px_to_units(self.heights[index]);
+        let old_units = px_to_units(self.heights.height(index));
         let new_units = px_to_units(height);
-        self.tree.add(index, new_units - old_units);
+        self.heights.set(index, height);
         if self.measured[index] {
             self.measured_units += new_units - old_units;
         } else {
@@ -235,7 +350,6 @@ impl RowTable {
             self.measured_count += 1;
             self.measured_units += new_units;
         }
-        self.heights[index] = height;
         self.debug_check_row(index);
     }
 
@@ -245,7 +359,7 @@ impl RowTable {
         if self.measured[index] {
             self.measured[index] = false;
             self.measured_count -= 1;
-            self.measured_units -= px_to_units(self.heights[index]);
+            self.measured_units -= px_to_units(self.heights.height(index));
         }
         self.debug_check_row(index);
         Ok(())
@@ -261,61 +375,66 @@ impl RowTable {
     }
 
     /// Top of the row at `index`; `offset_of_index(len())` is the total
-    /// extent. O(log n).
-    pub fn offset_of_index(&self, index: usize) -> f32 {
-        units_to_px(self.tree.prefix(index))
+    /// extent. O(log n). In `f64`, which holds every Fenwick unit exactly:
+    /// `f32` would round tops past 2^24 points to whole points and
+    /// coarser.
+    pub fn offset_of_index(&self, index: usize) -> f64 {
+        units_to_offset(self.heights.prefix(index))
     }
 
     /// O(log n).
-    pub fn offset_of(&self, key: RowKey) -> Option<f32> {
+    pub fn offset_of(&self, key: RowKey) -> Option<f64> {
         self.index_of(key).map(|i| self.offset_of_index(i))
     }
 
     /// Index of the row whose `[top, top + height)` contains `offset`, or
     /// `None` outside `[0, total_extent)`. O(log n).
-    pub fn row_at(&self, offset: f32) -> Option<usize> {
+    pub fn row_at(&self, offset: impl Into<f64>) -> Option<usize> {
+        let offset = offset.into();
         if !offset.is_finite() || offset < 0.0 {
             return None;
         }
-        let target = (f64::from(offset) * UNITS_PER_PX).floor() as i64;
-        let index = self.tree.search(target, false);
+        let target = (offset * UNITS_PER_PX).floor() as i64;
+        let index = self.heights.search(target, false);
         (index < self.len()).then_some(index)
     }
 
     /// O(log n).
-    pub fn total_extent(&self) -> f32 {
-        units_to_px(self.tree.total())
+    pub fn total_extent(&self) -> f64 {
+        units_to_offset(self.heights.total())
     }
 
     /// Rows intersecting `[scroll - overscan, scroll + viewport + overscan)`,
-    /// with spacer heights for the rows outside. O(log n).
+    /// with spacer heights for the rows outside. O(log n). The spacers and
+    /// total are `f32` layout sizes; position rows from
+    /// [`Self::offset_of_index`] instead where the list is tall.
     pub fn visible_range(
         &self,
-        scroll_offset: f32,
+        scroll_offset: impl Into<f64>,
         viewport_height: f32,
         overscan_px: f32,
     ) -> VirtualListWindow {
-        let total = self.tree.total();
+        let total = self.heights.total();
         let len = self.len();
-        let scroll = finite_or_zero(scroll_offset).max(0.0);
-        let overscan = finite_or_zero(overscan_px).max(0.0);
-        let viewport = finite_or_zero(viewport_height).max(0.0);
-        let top = (f64::from(scroll) - f64::from(overscan)).max(0.0) * UNITS_PER_PX;
-        let bottom = (f64::from(scroll) + f64::from(viewport) + f64::from(overscan)) * UNITS_PER_PX;
+        let scroll = finite_or_zero(scroll_offset.into()).max(0.0);
+        let overscan = finite_or_zero(f64::from(overscan_px)).max(0.0);
+        let viewport = finite_or_zero(f64::from(viewport_height)).max(0.0);
+        let top = (scroll - overscan).max(0.0) * UNITS_PER_PX;
+        let bottom = (scroll + viewport + overscan) * UNITS_PER_PX;
 
         // First row whose bottom lies below `top`.
-        let start = self.tree.search(top.floor() as i64, false).min(len);
+        let start = self.heights.search(top.floor() as i64, false).min(len);
         // One past the last row whose top lies above `bottom`.
         let bottom_units = bottom.ceil() as i64;
         let end = if bottom_units <= 0 {
             0
         } else {
-            (self.tree.search(bottom_units, true) + 1).min(len)
+            (self.heights.search(bottom_units, true) + 1).min(len)
         }
         .max(start);
 
-        let top_units = self.tree.prefix(start);
-        let end_units = self.tree.prefix(end);
+        let top_units = self.heights.prefix(start);
+        let end_units = self.heights.prefix(end);
         VirtualListWindow {
             range: start..end,
             top_spacer: units_to_px(top_units),
@@ -331,22 +450,18 @@ impl RowTable {
     pub fn verify_row(&self, index: usize) -> Result<(), RowIntegrityError> {
         count_integrity_steps(1);
         self.verify_lengths()?;
-        let key = self.keys[index];
-        let mapped = self.index.get(&key).copied();
-        if mapped != Some(index) {
-            return Err(RowIntegrityError::IndexMap { key, index, mapped });
+        if let Keys::Explicit { keys, index: map } = &self.keys {
+            let key = keys[index];
+            let mapped = map.get(&key).copied();
+            if mapped != Some(index) {
+                return Err(RowIntegrityError::IndexMap { key, index, mapped });
+            }
         }
-        let height = self.heights[index];
-        if sanitize_height(height) != height {
-            return Err(RowIntegrityError::InvalidHeight { index, height });
-        }
-        if self.tree.prefix(index + 1) - self.tree.prefix(index) != px_to_units(height) {
-            return Err(RowIntegrityError::FenwickMismatch);
-        }
-        if self.measured_count > self.keys.len() || self.measured_units < 0 {
+        self.heights.verify_row(index)?;
+        if self.measured_count > self.len() || self.measured_units < 0 {
             return Err(RowIntegrityError::MeasuredStats {
                 count: self.measured_count,
-                expected_count: self.measured_count.min(self.keys.len()),
+                expected_count: self.measured_count.min(self.len()),
                 units: self.measured_units,
                 expected_units: self.measured_units.max(0),
             });
@@ -355,12 +470,12 @@ impl RowTable {
     }
 
     fn verify_lengths(&self) -> Result<(), RowIntegrityError> {
-        let expected = self.keys.len();
-        for (column, len) in [
-            ("heights", self.heights.len()),
-            ("measured", self.measured.len()),
-            ("tree", self.tree.len()),
-        ] {
+        let expected = self.len();
+        let keys = match &self.keys {
+            Keys::Indexed => expected,
+            Keys::Explicit { keys, .. } => keys.len(),
+        };
+        for (column, len) in [("keys", keys), ("measured", self.measured.len())] {
             if len != expected {
                 return Err(RowIntegrityError::ColumnLength {
                     column,
@@ -369,9 +484,11 @@ impl RowTable {
                 });
             }
         }
-        if self.index.len() != expected {
+        if let Keys::Explicit { index, .. } = &self.keys
+            && index.len() != expected
+        {
             return Err(RowIntegrityError::IndexMapLength {
-                len: self.index.len(),
+                len: index.len(),
                 expected,
             });
         }
@@ -382,33 +499,23 @@ impl RowTable {
     /// the measured totals. O(n); batch mutations call it through
     /// `debug_assert!`, as do single-row ones with `integrity-checks`.
     pub fn verify_integrity(&self) -> Result<(), RowIntegrityError> {
-        count_integrity_steps(self.keys.len());
+        count_integrity_steps(self.len());
         self.verify_lengths()?;
         // Equal lengths plus every key mapping to its own row make the map a
         // bijection, which also rules out duplicate keys.
-        for (index, &key) in self.keys.iter().enumerate() {
-            let mapped = self.index.get(&key).copied();
-            if mapped != Some(index) {
-                return Err(RowIntegrityError::IndexMap { key, index, mapped });
+        if let Keys::Explicit { keys, index: map } = &self.keys {
+            for (index, &key) in keys.iter().enumerate() {
+                let mapped = map.get(&key).copied();
+                if mapped != Some(index) {
+                    return Err(RowIntegrityError::IndexMap { key, index, mapped });
+                }
             }
         }
-        for (index, &height) in self.heights.iter().enumerate() {
-            if sanitize_height(height) != height {
-                return Err(RowIntegrityError::InvalidHeight { index, height });
-            }
-        }
-        // Integer node sums depend only on the leaves, so a fresh O(n) build
-        // must equal the incrementally updated tree exactly.
-        if Fenwick::build(self.heights.iter().map(|&h| px_to_units(h))) != self.tree {
-            return Err(RowIntegrityError::FenwickMismatch);
-        }
-        let (expected_count, expected_units) = self
-            .heights
-            .iter()
-            .zip(&self.measured)
-            .filter(|(_, measured)| **measured)
-            .fold((0, 0), |(count, units), (&h, _)| {
-                (count + 1, units + px_to_units(h))
+        self.heights.verify()?;
+        let (expected_count, expected_units) = (0..self.len())
+            .filter(|&i| self.measured[i])
+            .fold((0, 0), |(count, units), i| {
+                (count + 1, units + px_to_units(self.heights.height(i)))
             });
         if expected_count != self.measured_count || expected_units != self.measured_units {
             return Err(RowIntegrityError::MeasuredStats {
@@ -419,16 +526,6 @@ impl RowTable {
             });
         }
         Ok(())
-    }
-
-    fn reindex_from(&mut self, start: usize) {
-        for (index, &key) in self.keys.iter().enumerate().skip(start) {
-            self.index.insert(key, index);
-        }
-    }
-
-    fn rebuild_tree(&mut self) {
-        self.tree = Fenwick::build(self.heights.iter().map(|&h| px_to_units(h)));
     }
 
     fn debug_check(&self) {
@@ -444,7 +541,7 @@ impl RowTable {
     }
 }
 
-fn finite_or_zero(value: f32) -> f32 {
+fn finite_or_zero(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
 }
 
@@ -472,10 +569,15 @@ struct Anchor {
 /// its scroll container. While pinned to the bottom the view follows the
 /// end of the content; otherwise the first visible row keeps its on-screen
 /// position.
+///
+/// Offsets into the content are `f64`: a list of millions of rows is
+/// hundreds of millions of points tall, where `f32` steps by 16 points or
+/// more. Subtract the scroll offset before converting a row's top to `f32`
+/// for painting.
 #[derive(Debug, Clone)]
 pub struct VariableList {
     rows: RowTable,
-    scroll_offset: f32,
+    scroll_offset: f64,
     viewport_height: f32,
     stick_to_bottom: bool,
     /// Width the measured heights belong to; a different width remeasures.
@@ -485,20 +587,28 @@ pub struct VariableList {
 impl VariableList {
     /// Starts pinned to the bottom, as a transcript opens at its newest row.
     pub fn new(default_estimate: f32, viewport_height: f32) -> Self {
-        Self {
-            rows: RowTable::new(default_estimate),
+        Self::with_rows(RowTable::new(default_estimate), viewport_height)
+    }
+
+    /// A list over `rows` (say, a [`RowTable::indexed`] built in bulk),
+    /// pinned to the bottom like [`Self::new`].
+    pub fn with_rows(rows: RowTable, viewport_height: f32) -> Self {
+        let mut list = Self {
+            rows,
             scroll_offset: 0.0,
-            viewport_height: finite_or_zero(viewport_height).max(0.0),
+            viewport_height: finite_or_zero(f64::from(viewport_height)).max(0.0) as f32,
             stick_to_bottom: true,
             measured_width: None,
-        }
+        };
+        list.scroll_offset = list.max_scroll_offset();
+        list
     }
 
     pub fn rows(&self) -> &RowTable {
         &self.rows
     }
 
-    pub fn scroll_offset(&self) -> f32 {
+    pub fn scroll_offset(&self) -> f64 {
         self.scroll_offset
     }
 
@@ -510,8 +620,8 @@ impl VariableList {
         self.stick_to_bottom
     }
 
-    pub fn max_scroll_offset(&self) -> f32 {
-        (self.rows.total_extent() - self.viewport_height).max(0.0)
+    pub fn max_scroll_offset(&self) -> f64 {
+        (self.rows.total_extent() - f64::from(self.viewport_height)).max(0.0)
     }
 
     pub fn window(&self, overscan_px: f32) -> VirtualListWindow {
@@ -521,18 +631,19 @@ impl VariableList {
 
     /// A user scroll. Pins when it lands within `STICK_EPSILON_PX` of the
     /// bottom and unpins otherwise. Returns the clamped offset.
-    pub fn set_scroll_offset(&mut self, offset: f32) -> f32 {
+    pub fn set_scroll_offset(&mut self, offset: impl Into<f64>) -> f64 {
+        let offset = offset.into();
         if offset.is_finite() {
             let max = self.max_scroll_offset();
             self.scroll_offset = offset.clamp(0.0, max);
-            self.stick_to_bottom = self.scroll_offset >= max - STICK_EPSILON_PX;
+            self.stick_to_bottom = self.scroll_offset >= max - f64::from(STICK_EPSILON_PX);
         }
         self.scroll_offset
     }
 
-    pub fn set_viewport_height(&mut self, height: f32) -> f32 {
+    pub fn set_viewport_height(&mut self, height: f32) -> f64 {
         let anchor = self.capture_anchor();
-        self.viewport_height = finite_or_zero(height).max(0.0);
+        self.viewport_height = finite_or_zero(f64::from(height)).max(0.0) as f32;
         self.restore(anchor)
     }
 
@@ -540,28 +651,28 @@ impl VariableList {
         self.rows.set_estimate(estimate);
     }
 
-    pub fn append(&mut self, key: RowKey) -> Result<f32, RowError> {
+    pub fn append(&mut self, key: RowKey) -> Result<f64, RowError> {
         self.anchored(|rows| rows.append(key))
     }
 
-    pub fn prepend(&mut self, keys: &[RowKey]) -> Result<f32, RowError> {
+    pub fn prepend(&mut self, keys: &[RowKey]) -> Result<f64, RowError> {
         self.anchored(|rows| rows.prepend(keys))
     }
 
     /// Appends a batch of rows, indexing and checking once.
-    pub fn extend(&mut self, keys: &[RowKey]) -> Result<f32, RowError> {
+    pub fn extend(&mut self, keys: &[RowKey]) -> Result<f64, RowError> {
         self.anchored(|rows| rows.insert_batch(rows.len(), keys))
     }
 
-    pub fn insert(&mut self, index: usize, key: RowKey) -> Result<f32, RowError> {
+    pub fn insert(&mut self, index: usize, key: RowKey) -> Result<f64, RowError> {
         self.anchored(|rows| rows.insert(index, key))
     }
 
-    pub fn remove(&mut self, key: RowKey) -> Result<f32, RowError> {
+    pub fn remove(&mut self, key: RowKey) -> Result<f64, RowError> {
         self.anchored(|rows| rows.remove(key))
     }
 
-    pub fn set_height(&mut self, key: RowKey, height: f32) -> Result<f32, RowError> {
+    pub fn set_height(&mut self, key: RowKey, height: f32) -> Result<f64, RowError> {
         self.anchored(|rows| rows.set_height(key, height))
     }
 
@@ -576,12 +687,14 @@ impl VariableList {
     /// Measures every unmeasured row in the overscanned window at `width`,
     /// repeating while new measurements pull more rows into the window.
     /// A width different from the last call invalidates all rows first.
+    /// `measure` gets the row's key; an [`RowTable::indexed`] table's key
+    /// is the row's index.
     pub fn measure_visible(
         &mut self,
         width: f32,
         overscan_px: f32,
         mut measure: impl FnMut(u64, f32) -> f32,
-    ) -> f32 {
+    ) -> f64 {
         if self.measured_width.map(f32::to_bits) != Some(width.to_bits()) {
             self.rows.invalidate_all();
             self.measured_width = Some(width);
@@ -594,7 +707,7 @@ impl VariableList {
             let mut measured_any = false;
             for index in range {
                 if !self.rows.measured[index] {
-                    let height = measure(self.rows.keys[index].0, width);
+                    let height = measure(self.rows.key_at(index).0, width);
                     self.rows.set_height_at(index, height);
                     measured_any = true;
                 }
@@ -609,14 +722,15 @@ impl VariableList {
 
     /// Scrolls so `key` sits at the top, center, or bottom of the viewport,
     /// clamped to the content. Landing at the bottom pins the view.
-    pub fn scroll_to(&mut self, key: RowKey, align: ScrollAlign) -> Result<f32, RowError> {
+    pub fn scroll_to(&mut self, key: RowKey, align: ScrollAlign) -> Result<f64, RowError> {
         let index = self.rows.index_of(key).ok_or(RowError::UnknownKey(key))?;
         let top = self.rows.offset_of_index(index);
-        let height = self.rows.heights[index];
+        let height = f64::from(self.rows.height_at(index));
+        let viewport = f64::from(self.viewport_height);
         let target = match align {
             ScrollAlign::Top => top,
-            ScrollAlign::Center => top + height * 0.5 - self.viewport_height * 0.5,
-            ScrollAlign::Bottom => top + height - self.viewport_height,
+            ScrollAlign::Center => top + height * 0.5 - viewport * 0.5,
+            ScrollAlign::Bottom => top + height - viewport,
         };
         let start = self.scroll_offset;
         Ok(self.set_scroll_offset(target) - start)
@@ -625,7 +739,7 @@ impl VariableList {
     fn anchored(
         &mut self,
         op: impl FnOnce(&mut RowTable) -> Result<(), RowError>,
-    ) -> Result<f32, RowError> {
+    ) -> Result<f64, RowError> {
         let anchor = self.capture_anchor();
         op(&mut self.rows)?;
         Ok(self.restore(anchor))
@@ -633,27 +747,24 @@ impl VariableList {
 
     fn capture_anchor(&self) -> Option<Anchor> {
         let index = self.rows.row_at(self.scroll_offset)?;
-        let top = f64::from(self.rows.offset_of_index(index));
+        let top = self.rows.offset_of_index(index);
         Some(Anchor {
-            key: self.rows.keys[index],
-            top_in_view: top - f64::from(self.scroll_offset),
+            key: self.rows.key_at(index),
+            top_in_view: top - self.scroll_offset,
         })
     }
 
     /// Moves the scroll offset to honor the pin or the anchor and returns
     /// the change. A removed anchor row leaves the offset where it was,
     /// which keeps the rows above it in place.
-    fn restore(&mut self, anchor: Option<Anchor>) -> f32 {
+    fn restore(&mut self, anchor: Option<Anchor>) -> f64 {
         let old = self.scroll_offset;
         let max = self.max_scroll_offset();
         let target = if self.stick_to_bottom {
             max
         } else {
             anchor
-                .and_then(|a| {
-                    let top = f64::from(self.rows.offset_of(a.key)?);
-                    Some((top - a.top_in_view) as f32)
-                })
+                .and_then(|a| Some(self.rows.offset_of(a.key)? - a.top_in_view))
                 .unwrap_or(old)
         };
         self.scroll_offset = target.clamp(0.0, max);
@@ -686,7 +797,7 @@ mod tests {
     }
 
     /// Where `key`'s top sits relative to the viewport top.
-    fn screen_top(list: &VariableList, key: u64) -> f32 {
+    fn screen_top(list: &VariableList, key: u64) -> f64 {
         list.rows().offset_of(RowKey(key)).unwrap() - list.scroll_offset()
     }
 
@@ -729,13 +840,24 @@ mod tests {
     proptest! {
         #[test]
         fn random_ops_keep_offsets_equal_to_naive_prefix_sums(
+            // Rows built in bulk first (`None` at the estimate), sparse or
+            // dense by how many differ, or none to start from `new`.
+            start in prop::collection::vec(prop::option::of(quarter_px(800)), 0..200),
             ops in prop::collection::vec(op(), 1..60)
         ) {
-            let mut rows = RowTable::new(1.0);
+            let mut rows = if start.is_empty() {
+                RowTable::new(1.0)
+            } else {
+                RowTable::indexed(ESTIMATE, start.iter().copied())
+            };
             rows.set_estimate(Some(ESTIMATE));
             // Model: (key, height) in display order.
-            let mut model: Vec<(u64, f32)> = Vec::new();
-            let mut next_key = 0u64;
+            let mut model: Vec<(u64, f32)> = start
+                .iter()
+                .zip(0..)
+                .map(|(h, key)| (key, h.unwrap_or(ESTIMATE)))
+                .collect();
+            let mut next_key = model.len() as u64;
             let mut fresh = || {
                 next_key += 1;
                 next_key
@@ -780,10 +902,10 @@ mod tests {
                 prop_assert_eq!(keys, model_keys);
                 let mut top = 0.0f64;
                 for &(key, height) in &model {
-                    prop_assert_eq!(rows.offset_of(RowKey(key)), Some(top as f32));
+                    prop_assert_eq!(rows.offset_of(RowKey(key)), Some(top));
                     top += f64::from(height);
                 }
-                prop_assert_eq!(rows.total_extent(), top as f32);
+                prop_assert_eq!(rows.total_extent(), top);
             }
         }
 
@@ -795,7 +917,7 @@ mod tests {
             for (i, &h) in heights.iter().enumerate() {
                 let top = rows.offset_of(RowKey(i as u64)).unwrap();
                 prop_assert_eq!(rows.row_at(top), Some(i));
-                prop_assert_eq!(rows.row_at(top + h - 0.25), Some(i));
+                prop_assert_eq!(rows.row_at(top + f64::from(h) - 0.25), Some(i));
             }
             prop_assert_eq!(rows.row_at(rows.total_extent()), None);
         }
@@ -836,7 +958,7 @@ mod tests {
             let mut list = list(&heights, 300.0);
             let max = list.max_scroll_offset();
             prop_assume!(max > 10.0);
-            list.set_scroll_offset(max * scroll_frac);
+            list.set_scroll_offset(max * f64::from(scroll_frac));
             let anchor = anchor_key(&list);
             let anchor_index = list.rows().index_of(RowKey(anchor)).unwrap();
             prop_assume!(anchor_index > 0);
@@ -914,6 +1036,29 @@ mod tests {
         list.set_height(RowKey(10), 300.0).unwrap();
 
         assert_eq!(list.scroll_offset(), list.max_scroll_offset());
+    }
+
+    // Catches offsets kept in f32: 7.8 million rows (a 64 MiB diff) run
+    // to 1.5e8 points, where f32 steps by 16, so rows near the end would
+    // overlap and gap instead of stacking.
+    #[test]
+    fn rows_millions_deep_stack_exactly() {
+        const ROWS: usize = 7_800_000;
+        // Diff-like: 19.5 point lines and a 28 point header every 1000.
+        let height = |i: usize| if i.is_multiple_of(1000) { 28.0 } else { 19.5 };
+        let rows = RowTable::indexed(19.5, (0..ROWS).map(|i| Some(height(i))));
+        let mut list = VariableList::with_rows(rows, 800.0);
+        list.set_scroll_offset(list.max_scroll_offset() - 1_234.25);
+
+        let window = list.window(0.0);
+        let scroll = list.scroll_offset();
+        let mut top = list.rows().offset_of_index(window.range.start) - scroll;
+        for i in window.range.clone() {
+            assert_eq!(list.rows().offset_of_index(i) - scroll, top, "row {i}");
+            top += f64::from(height(i));
+        }
+        assert!(window.range.len() > 40);
+        assert_eq!(list.rows().total_extent(), 152_166_300.0);
     }
 
     #[test]

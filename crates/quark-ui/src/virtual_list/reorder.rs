@@ -80,11 +80,11 @@ impl RowGeometry for RowTable {
     }
 
     fn row_top(&self, index: usize) -> f32 {
-        self.offset_of_index(index)
+        self.offset_of_index(index) as f32
     }
 
     fn row_extent(&self, index: usize) -> f32 {
-        self.offset_of_index(index + 1) - self.offset_of_index(index)
+        (self.offset_of_index(index + 1) - self.offset_of_index(index)) as f32
     }
 
     fn row_at(&self, offset: f32) -> usize {
@@ -93,7 +93,7 @@ impl RowGeometry for RowTable {
     }
 
     fn total_extent(&self) -> f32 {
-        RowTable::total_extent(self)
+        RowTable::total_extent(self) as f32
     }
 }
 

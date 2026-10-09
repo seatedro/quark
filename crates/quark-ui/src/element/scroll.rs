@@ -216,11 +216,11 @@ impl KeyScroll {
 
     /// The offset it moves `from` to, in a `viewport`-long container
     /// scrolling up to `max`.
-    pub fn target(self, from: f32, viewport: f32, max: f32) -> f32 {
+    pub fn target(self, from: f64, viewport: f32, max: f64) -> f64 {
         let to = match self {
-            Self::By(_, px) => from + px,
-            Self::Page(_, true) => from + page_px(viewport),
-            Self::Page(_, false) => from - page_px(viewport),
+            Self::By(_, px) => from + f64::from(px),
+            Self::Page(_, true) => from + f64::from(page_px(viewport)),
+            Self::Page(_, false) => from - f64::from(page_px(viewport)),
             Self::Edge(_, forward) => {
                 if forward {
                     max
@@ -301,20 +301,20 @@ impl Samples {
 /// in closed form, so the path does not depend on when frames land.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Fling {
-    from: [f32; 2],
+    from: [f64; 2],
     velocity: [f32; 2],
     start_ms: u64,
 }
 
 impl Fling {
     /// Offset and speed (points/ms) at `now_ms`.
-    fn at(&self, now_ms: u64) -> ([f32; 2], f32) {
+    fn at(&self, now_ms: u64) -> ([f64; 2], f32) {
         let t = now_ms.saturating_sub(self.start_ms) as f32;
         let decay = (-t / FLING_TAU_MS).exp();
         let travel = FLING_TAU_MS * (1.0 - decay);
         let offset = [
-            self.from[0] + self.velocity[0] * travel,
-            self.from[1] + self.velocity[1] * travel,
+            self.from[0] + f64::from(self.velocity[0] * travel),
+            self.from[1] + f64::from(self.velocity[1] * travel),
         ];
         let speed = self.velocity[0].hypot(self.velocity[1]) * decay;
         (offset, speed)
@@ -324,7 +324,7 @@ impl Fling {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Request {
     Offset {
-        to: [f32; 2],
+        to: [f64; 2],
         smooth: bool,
     },
     Item {
@@ -335,22 +335,31 @@ enum Request {
     },
 }
 
+/// Offsets and extents are `f64`: content hundreds of millions of points
+/// long (a long line, millions of rows) needs offsets `f32` cannot hold to
+/// the point. They become `f32` only relative to the container's origin
+/// (see [`Div::scroll_origin`]), for painting.
 #[derive(Debug)]
 struct ScrollState {
-    offset: [f32; 2],
-    max: [f32; 2],
+    offset: [f64; 2],
+    max: [f64; 2],
+    /// The content position the children are laid out from this frame.
+    origin: [f64; 2],
     viewport: Rect,
-    /// Keyed descendants painted last frame, relative to the content origin.
+    /// Keyed descendants painted last frame, relative to `items_origin`,
+    /// the origin of that frame.
     items: Vec<(u64, Rect)>,
+    items_origin: [f64; 2],
     /// The same, being collected this frame.
     recording: Vec<(u64, Rect)>,
     request: Option<Request>,
     /// An item request taken this frame, with the offset the frame started
     /// at: [`ScrollHandle::end_frame`] resolves it against the item's
     /// bounds in this frame.
-    item_request: Option<(Request, [f32; 2])>,
-    /// Target of the smooth scroll in progress.
-    smooth: Option<[f32; 2]>,
+    item_request: Option<(Request, [f64; 2])>,
+    /// Target of the smooth scroll in progress. The animation table runs
+    /// the distance left to it, which `f32` holds exactly near the end.
+    smooth: Option<[f64; 2]>,
     fling: Option<Fling>,
     samples: Samples,
     /// The axis whose thumb is held.
@@ -391,8 +400,10 @@ impl ScrollHandle {
         let state = Rc::new(RefCell::new(ScrollState {
             offset: [0.0; 2],
             max: [0.0; 2],
+            origin: [0.0; 2],
             viewport: Rect::default(),
             items: Vec::new(),
+            items_origin: [0.0; 2],
             recording: Vec::new(),
             request: None,
             item_request: None,
@@ -416,14 +427,27 @@ impl ScrollHandle {
     }
 
     /// Offset painted last frame (or set since): `(x, y)`, positive when the
-    /// content has moved left and up.
+    /// content has moved left and up. Rounded to `f32`: past 2^24 points
+    /// it steps by whole points or more; [`Self::offset_f64`] is exact.
     pub fn offset(&self) -> (f32, f32) {
+        let (x, y) = self.offset_f64();
+        (x as f32, y as f32)
+    }
+
+    /// [`Self::offset`] as the handle keeps it.
+    pub fn offset_f64(&self) -> (f64, f64) {
         let s = self.0.borrow();
         (s.offset[0], s.offset[1])
     }
 
     /// Largest offset on each axis as of the last frame.
     pub fn max_offset(&self) -> (f32, f32) {
+        let (x, y) = self.max_offset_f64();
+        (x as f32, y as f32)
+    }
+
+    /// [`Self::max_offset`] as the handle keeps it.
+    pub fn max_offset_f64(&self) -> (f64, f64) {
         let s = self.0.borrow();
         (s.max[0], s.max[1])
     }
@@ -434,18 +458,18 @@ impl ScrollHandle {
     }
 
     /// Jump to `(x, y)`, clamped to the content on the next frame.
-    pub fn set_offset(&self, x: f32, y: f32) {
+    pub fn set_offset(&self, x: impl Into<f64>, y: impl Into<f64>) {
         self.request(Request::Offset {
-            to: [x, y],
+            to: [x.into(), y.into()],
             smooth: false,
         });
     }
 
     /// Scroll smoothly to `(x, y)`; a jump under reduced motion or without
     /// an animation table.
-    pub fn animate_to(&self, x: f32, y: f32) {
+    pub fn animate_to(&self, x: impl Into<f64>, y: impl Into<f64>) {
         self.request(Request::Offset {
-            to: [x, y],
+            to: [x.into(), y.into()],
             smooth: true,
         });
     }
@@ -522,7 +546,7 @@ impl ScrollHandle {
         sample.delta[axis.index()] = delta;
         s.samples.push(sample);
         let i = axis.index();
-        let to = (s.offset[i] + delta).clamp(0.0, s.max[i]);
+        let to = (s.offset[i] + f64::from(delta)).clamp(0.0, s.max[i]);
         let moved = to != s.offset[i];
         s.offset[i] = to;
         if moved {
@@ -580,7 +604,7 @@ impl ScrollHandle {
     }
 
     /// Jump `axis` to `offset` now (scrollbar input).
-    pub(crate) fn set_axis(&self, axis: Axis, offset: f32) {
+    pub(crate) fn set_axis(&self, axis: Axis, offset: f64) {
         let mut s = self.0.borrow_mut();
         let i = axis.index();
         let to = offset.clamp(0.0, s.max[i]);
@@ -591,6 +615,17 @@ impl ScrollHandle {
             s.offset[i] = to;
             bump_epoch();
         }
+    }
+
+    /// Jump one page along `axis` now, toward the end when `forward` (a
+    /// press on a scrollbar's track).
+    pub(crate) fn page(&self, axis: Axis, forward: bool) {
+        let to = {
+            let s = self.0.borrow();
+            let i = axis.index();
+            KeyScroll::Page(axis, forward).target(s.offset[i], axis.span(s.viewport).1, s.max[i])
+        };
+        self.set_axis(axis, to);
     }
 
     pub(crate) fn set_dragging(&self, axis: Option<Axis>) {
@@ -605,14 +640,17 @@ impl ScrollHandle {
         self.0.borrow().dragging
     }
 
-    /// Start a frame: take the container's `viewport` and `content` size,
-    /// resolve requests, advance a smooth scroll or fling, and return the
-    /// offset to paint children at. Keyed descendants painted before
-    /// [`Self::end_frame`] are recorded for `scroll_to_item`.
+    /// Start a frame: take the container's `viewport`, its `content` size,
+    /// and the content position its children are laid out from, resolve
+    /// requests, advance a smooth scroll or fling, and return the offset
+    /// to paint children at: the scroll offset less `origin`. Keyed
+    /// descendants painted before [`Self::end_frame`] are recorded for
+    /// `scroll_to_item`.
     pub(crate) fn begin_frame(
         &self,
         viewport: Rect,
-        content: (f32, f32),
+        content: (f64, f64),
+        origin: (f64, f64),
         axes: ScrollAxes,
         cx: &mut ElementContext,
     ) -> (f32, f32) {
@@ -621,16 +659,21 @@ impl ScrollHandle {
         let mut s = self.0.borrow_mut();
         let s = &mut *s;
         s.viewport = viewport;
+        s.origin = [origin.0, origin.1];
         for axis in Axis::BOTH {
             let i = axis.index();
+            let content = match axis {
+                Axis::X => content.0,
+                Axis::Y => content.1,
+            };
             s.max[i] = if axes.has(axis) {
-                (axis.of(content) - axis.span(viewport).1).max(0.0)
+                (content - f64::from(axis.span(viewport).1)).max(0.0)
             } else {
                 0.0
             };
         }
         let clamp =
-            |to: [f32; 2], max: [f32; 2]| [to[0].clamp(0.0, max[0]), to[1].clamp(0.0, max[1])];
+            |to: [f64; 2], max: [f64; 2]| [to[0].clamp(0.0, max[0]), to[1].clamp(0.0, max[1])];
 
         s.item_request = None;
         match s.request.take() {
@@ -645,7 +688,8 @@ impl ScrollHandle {
                 // offset when this frame moved it.
                 s.fling = None;
                 let from = s.offset;
-                if !smooth && let Some(to) = request.item_offset(&s.items, from, viewport, axes) {
+                let found = request.item_offset(&s.items, s.items_origin, from, viewport, axes);
+                if !smooth && let Some(to) = found {
                     let to = clamp(to, s.max);
                     s.start_scroll(to, false, now, cx);
                 }
@@ -658,10 +702,8 @@ impl ScrollHandle {
             let key = s.key;
             let moving = match cx.animations_mut() {
                 Some(table) => {
-                    s.offset = [
-                        table.get(key, PROP_X).unwrap_or(target[0]),
-                        table.get(key, PROP_Y).unwrap_or(target[1]),
-                    ];
+                    let left = |prop| f64::from(table.get(key, prop).unwrap_or(0.0));
+                    s.offset = [target[0] + left(PROP_X), target[1] + left(PROP_Y)];
                     let moving = table.is_animating(key, PROP_X) || table.is_animating(key, PROP_Y);
                     if !moving {
                         table.remove(key, PROP_X);
@@ -703,16 +745,17 @@ impl ScrollHandle {
             dragging: s.dragging,
             viewport,
         });
-        (s.offset[0], s.offset[1])
+        s.paint_offset()
     }
 
     /// Record a keyed descendant painted at `bounds` (window points) this
     /// frame.
     pub(crate) fn record_item(&self, key: u64, bounds: Rect) {
         let mut s = self.0.borrow_mut();
+        let (dx, dy) = s.paint_offset();
         let rect = Rect {
-            x: bounds.x - s.viewport.x + s.offset[0],
-            y: bounds.y - s.viewport.y + s.offset[1],
+            x: bounds.x - s.viewport.x + dx,
+            y: bounds.y - s.viewport.y + dy,
             ..bounds
         };
         s.recording.push((key, rect));
@@ -734,11 +777,12 @@ impl ScrollHandle {
         let mut s = self.0.borrow_mut();
         let s = &mut *s;
         std::mem::swap(&mut s.items, &mut s.recording);
+        s.items_origin = s.origin;
         let (request, from) = s.item_request.take()?;
         let Request::Item { smooth, .. } = request else {
             return None;
         };
-        let to = request.item_offset(&s.items, from, s.viewport, axes)?;
+        let to = request.item_offset(&s.items, s.origin, from, s.viewport, axes)?;
         let to = [to[0].clamp(0.0, s.max[0]), to[1].clamp(0.0, s.max[1])];
         if smooth && !reduced_motion {
             // This frame paints the smooth scroll's first step, the offset
@@ -752,7 +796,7 @@ impl ScrollHandle {
         }
         s.offset = to;
         s.smooth = None;
-        Some((to[0], to[1]))
+        Some(s.paint_offset())
     }
 
     /// Collect keyed descendants afresh, for prepainting the children
@@ -769,7 +813,7 @@ impl ScrollHandle {
 #[derive(Clone)]
 pub(crate) struct ScrollWatch {
     handle: ScrollHandle,
-    offset: [f32; 2],
+    offset: [f64; 2],
     dragging: Option<Axis>,
     /// The container's bounds, in the coordinates of whoever holds the
     /// watch (window points, or relative to a boundary's origin).
@@ -804,15 +848,24 @@ impl ScrollWatch {
 }
 
 impl ScrollState {
+    /// The offset to paint the children at: the scroll offset from the
+    /// origin they are laid out at, small enough for `f32`.
+    fn paint_offset(&self) -> (f32, f32) {
+        (
+            (self.offset[0] - self.origin[0]) as f32,
+            (self.offset[1] - self.origin[1]) as f32,
+        )
+    }
+
     /// Move to `to` (already clamped): a smooth scroll from the current
     /// offset when `smooth` and the context has an animation table, else
     /// at once.
-    fn start_scroll(&mut self, to: [f32; 2], smooth: bool, now: u64, cx: &mut ElementContext) {
+    fn start_scroll(&mut self, to: [f64; 2], smooth: bool, now: u64, cx: &mut ElementContext) {
         match cx.animations_mut() {
             Some(table) if smooth && to != self.offset => {
                 for (prop, i) in [(PROP_X, 0), (PROP_Y, 1)] {
-                    table.set(self.key, prop, self.offset[i], now);
-                    table.animate_to(self.key, prop, to[i], SMOOTH_SCROLL, now);
+                    table.set(self.key, prop, (self.offset[i] - to[i]) as f32, now);
+                    table.animate_to(self.key, prop, 0.0, SMOOTH_SCROLL, now);
                 }
                 self.smooth = Some(to);
             }
@@ -826,14 +879,16 @@ impl ScrollState {
 
 impl Request {
     /// The unclamped offset an item request asks for, from `offset`, on
-    /// the scrolling axes; `None` when `items` lack the item.
+    /// the scrolling axes; `None` when `items` (relative to `origin`) lack
+    /// the item.
     fn item_offset(
         &self,
         items: &[(u64, Rect)],
-        offset: [f32; 2],
+        origin: [f64; 2],
+        offset: [f64; 2],
         viewport: Rect,
         axes: ScrollAxes,
-    ) -> Option<[f32; 2]> {
+    ) -> Option<[f64; 2]> {
         let Request::Item {
             key, align, inset, ..
         } = *self
@@ -847,7 +902,10 @@ impl Request {
                 let i = axis.index();
                 let (start, len) = axis.span(item);
                 let view = axis.span(viewport).1;
-                to[i] = align_offset(align, start, len, view, inset[i], offset[i]);
+                // Aligned relative to the origin, where it all fits `f32`.
+                let from = (offset[i] - origin[i]) as f32;
+                to[i] =
+                    origin[i] + f64::from(align_offset(align, start, len, view, inset[i], from));
             }
         }
         Some(to)
@@ -911,7 +969,7 @@ pub struct ScrollbarVisibility(Rc<Cell<Visibility>>);
 #[derive(Debug, Clone, Copy, Default)]
 struct Visibility {
     /// Offset and focus seen by the last frame; `None` before the first.
-    seen: Option<([f32; 2], bool)>,
+    seen: Option<([f64; 2], bool)>,
     /// When the offset last moved or focus last arrived.
     revealed_ms: Option<u64>,
 }
@@ -933,7 +991,7 @@ impl ScrollbarVisibility {
     /// Note the container's offset and focus at `now_ms`. A change from
     /// the last frame starts the linger; the first frame only sets the
     /// baseline, so a view does not flash its bars when it appears.
-    pub(crate) fn observe(&self, offset: [f32; 2], focused: bool, now_ms: u64) {
+    pub(crate) fn observe(&self, offset: [f64; 2], focused: bool, now_ms: u64) {
         let mut v = self.0.get();
         if let Some((was_offset, was_focused)) = v.seen
             && (offset != was_offset || (focused && !was_focused))
@@ -1001,8 +1059,9 @@ impl BarSlot {
 pub(crate) struct ScrollbarInput {
     /// The container, in window points.
     pub bounds: Rect,
-    pub content: (f32, f32),
-    pub offset: (f32, f32),
+    /// Content size and scroll offset, in content coordinates.
+    pub content: (f64, f64),
+    pub offset: (f64, f64),
     pub axes: ScrollAxes,
     /// Input target of each axis's bar: `[x, y]`.
     pub sinks: [Option<ScrollSink>; 2],
@@ -1037,7 +1096,13 @@ impl Scrollbars {
         if let Some(visibility) = &visibility {
             visibility.observe([offset.0, offset.1], focused, cx.clock_ms);
         }
-        let bars = scrollbars(bounds, content, offset, axes);
+        // The bars are a few hundred points long: f32 places the thumb.
+        let bars = scrollbars(
+            bounds,
+            (content.0 as f32, content.1 as f32),
+            (offset.0 as f32, offset.1 as f32),
+            axes,
+        );
         if bars.iter().all(Option::is_none) {
             return Self::default();
         }
@@ -1293,21 +1358,25 @@ impl DragHandler for ScrollbarDrag {
         }
         let (thumb_start, _) = bar.axis.span(bar.thumb);
         let forward = self.press > thumb_start;
-        let to = KeyScroll::Page(bar.axis, forward).target(bar.offset, bar.viewport, bar.max);
         match &self.sink {
             ScrollSink::Handle(handle) => {
-                handle.set_axis(bar.axis, to);
+                // From the handle's exact offset, not the bar's rounding.
+                handle.page(bar.axis, forward);
                 Vec::new()
             }
             // An absolute offset when the app takes one: its wheel lines
             // need not be `WHEEL_LINE_PX` long.
-            ScrollSink::Builder(builder) => match builder.build_to_px(to as u32) {
-                Some(action) => vec![action],
-                None => {
-                    let lines = (page_px(bar.viewport) / WHEEL_LINE_PX).round() as i32;
-                    vec![builder.build(if forward { lines } else { -lines })]
+            ScrollSink::Builder(builder) => {
+                let page = KeyScroll::Page(bar.axis, forward);
+                let to = page.target(f64::from(bar.offset), bar.viewport, f64::from(bar.max));
+                match builder.build_to_px(to as u32) {
+                    Some(action) => vec![action],
+                    None => {
+                        let lines = (page_px(bar.viewport) / WHEEL_LINE_PX).round() as i32;
+                        vec![builder.build(if forward { lines } else { -lines })]
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -1318,7 +1387,7 @@ impl DragHandler for ScrollbarDrag {
         let to = self.bar.offset_for_pointer(self.bar.axis.of((x, y)), grab);
         match &self.sink {
             ScrollSink::Handle(handle) => {
-                handle.set_axis(self.bar.axis, to);
+                handle.set_axis(self.bar.axis, f64::from(to));
                 Vec::new()
             }
             ScrollSink::Builder(builder) => builder.build_to_px(to as u32).into_iter().collect(),
@@ -1513,6 +1582,12 @@ mod tests {
 
             /// Paint [`list`] of `rows` at clock `now_ms`.
             fn frame(&mut self, rows: Rows, now_ms: u64) -> InputRouter {
+                let root = list(&self.handle, rows);
+                self.paint(root, now_ms)
+            }
+
+            /// Paint `root` in a 200x100 window at clock `now_ms`.
+            fn paint(&mut self, root: Div, now_ms: u64) -> InputRouter {
                 self.animations.tick(now_ms);
                 let mut cx = ElementContext::new(
                     &self.theme,
@@ -1525,7 +1600,7 @@ mod tests {
                 .with_clock(now_ms)
                 .with_animations(&mut self.animations);
                 cx.semantic = SemanticFrame::new(200.0, 100.0);
-                let mut root = list(&self.handle, rows).into_any();
+                let mut root = root.into_any();
                 render_element(&mut root, &mut Scene::default(), &mut cx, 200.0, 100.0);
                 cx.finish_frame();
                 let mut router = InputRouter::default();
@@ -1617,6 +1692,40 @@ mod tests {
             let node = router.target_at(100.0, 20.0).unwrap();
             let name = router.frame().semantic.nodes()[node].test_id.clone();
             assert_eq!(name.as_ref().map(TestId::as_str), Some("row-5"));
+        }
+
+        // Catches offsets kept in f32, which steps by 64 points at 1e9:
+        // content a billion points wide (a 64 MiB line is half that) must
+        // still scroll by half a point and paint where it scrolled to.
+        #[test]
+        fn content_a_billion_points_wide_scrolls_and_paints_exactly() {
+            const FAR: f64 = 1e9;
+            let mut h = Harness::new();
+            // Children laid out from just before `FAR`; the mark sits at
+            // content x = FAR + 37.
+            let line = |handle: &ScrollHandle| {
+                div()
+                    .w(200.0)
+                    .h(100.0)
+                    .track_scroll(handle)
+                    .overflow_x_scroll()
+                    .scroll_total_x(2.0 * FAR)
+                    .scroll_origin(FAR - 100.0, 0.0)
+                    .child(div().w(1000.0).h(40.0).flex_row().children([
+                        div().w(137.0).h(40.0).flex_shrink_0().into_any(),
+                        div().w(10.0).h(40.0).test_id("mark").into_any(),
+                    ]))
+            };
+            h.paint(line(&h.handle.clone()), 0);
+            h.handle.set_offset(FAR + 0.5, 0.0);
+            let router = h.paint(line(&h.handle.clone()), 0);
+
+            assert_eq!(h.handle.offset_f64(), (FAR + 0.5, 0.0));
+            assert_eq!(at(&router, "mark"), (36.5, 0.0));
+
+            h.handle.scroll_by(Axis::X, 0.25, 16);
+            let router = h.paint(line(&h.handle.clone()), 16);
+            assert_eq!(at(&router, "mark"), (36.25, 0.0));
         }
 
         #[test]

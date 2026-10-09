@@ -788,6 +788,11 @@ mod tests {
         ui.app().diff.frame().unwrap().metrics.char_w
     }
 
+    /// Where the new side's sideways content is laid out from.
+    fn origin(ui: &UiTestHarness<Demo>) -> f32 {
+        ui.app().diff.frame().unwrap().content_origin[Side::New as usize] as f32
+    }
+
     // Catches a huge line reaching shaping whole, or shaping only a prefix
     // that scrolling cannot get past: the layout holds the columns around
     // the view, at the start and 900,000 columns in.
@@ -829,8 +834,9 @@ mod tests {
         let line = ui.find(line("short")).bounds;
         let pad = ui.app().diff.frame().unwrap().metrics.text_pad;
 
-        // The cell's bounds are in the scrolled content.
-        let expected = line.x + pad + start as f32 * char_w(&ui);
+        // The cell's bounds are in the scrolled content, laid out from the
+        // column's origin.
+        let expected = line.x - origin(&ui) + pad + start as f32 * char_w(&ui);
         assert!(
             (run.bounds.x - expected).abs() < 1.0,
             "{} vs {expected}",
@@ -847,12 +853,14 @@ mod tests {
         let w = char_w(&ui);
         let cell = 100_000.0 * 8.0;
         scroll_sideways(&mut ui, (cell - 20.0) * w);
-        // Bounds in the scrolled content: the text starts one pad in.
+        // Bounds in the scrolled content, laid out from the column's
+        // origin: the text starts one pad in.
         let row = ui.find(line("short")).bounds;
         let long_y = row.y + row.height + 5.0;
         let pad = ui.app().diff.frame().unwrap().metrics.text_pad;
+        let start = row.x - origin(&ui);
         // Just right of where a column starts.
-        let x = |column: f32| row.x + pad + column * w + 1.0;
+        let x = |column: f32| start + pad + column * w + 1.0;
         ui.drag((x(cell), long_y), (x(cell + 16.0), long_y));
         ui.key("ctrl+c");
 

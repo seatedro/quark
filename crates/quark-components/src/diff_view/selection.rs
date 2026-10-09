@@ -130,7 +130,7 @@ impl DiffViewState {
                 segment.projection.len().saturating_sub(1)
             };
             for row in rows {
-                if segment.list_rows.get(row as usize) == Some(&super::state::NONE) {
+                if segment.list_rows.index(row).is_none() {
                     continue;
                 }
                 let Some((side, index)) = self.copied_line(seg as usize, row, side) else {
@@ -276,8 +276,8 @@ impl DiffViewState {
             let unit = segment.unit(segment.projection.file[row as usize]);
             Some(SelectionPoint::new(block_key(side, unit, index), byte))
         };
-        let first = self.refs.iter().find_map(|&r| point(r, 0));
-        let last = self.refs.iter().rev().find_map(|&r| point(r, usize::MAX));
+        let first = self.refs.iter().find_map(|r| point(r, 0));
+        let last = self.refs.iter().rev().find_map(|r| point(r, usize::MAX));
         if let (Some(first), Some(last)) = (first, last) {
             self.selection = Some(Selection::new(first, last));
             self.selection_side = side;
@@ -320,7 +320,7 @@ impl DiffViewState {
                 rows.len() - 1
             });
         let line_of = |r: &super::prepared::FrameRow| match self.refs.get(r.index as usize) {
-            Some(&RowRef::Line { seg, row }) => {
+            Some(RowRef::Line { seg, row }) => {
                 let (side, index) = self.shown_line(seg as usize, row, side)?;
                 Some((side, index, seg as usize, row))
             }
@@ -342,16 +342,18 @@ impl DiffViewState {
                 0.0
             } else {
                 self.hscroll[column_slot(frame.columns.mode, line_side)]
-                    .offset()
+                    .offset_f64()
                     .0
             };
-            let tx = x - column.text_x - frame.metrics.text_pad + scroll;
-            // A long line's layout holds only its window.
+            // A long line's layout holds only its window. Its x and the
+            // scroll can be hundreds of millions of points: subtract them
+            // in f64, before the layout's own f32 coordinates.
             let (start, window_x) = paint.window.map_or((0, 0.0), |w| (w.start, w.x));
+            let tx = f64::from(x - column.text_x - frame.metrics.text_pad) + scroll - window_x;
             let byte = if x < column.text_x {
                 0
             } else {
-                start + paint.layout.hit(tx - window_x, y - row.top).get()
+                start + paint.layout.hit(tx as f32, y - row.top).get()
             };
             return Some(SelectionPoint::new(key_of(seg, r, line_side, index), byte));
         }
