@@ -119,14 +119,12 @@ impl<'s> Builder<'s> {
     /// The whole body: headers, then the root, between the invocation's
     /// delimiters. `brace` puts spaces inside a one-line `{ .. }`.
     pub fn view(&mut self, brace: bool, suffix: usize) -> Doc {
-        let (open, line) = if brace {
-            (Sep::Space, Sep::Line)
-        } else {
-            (Sep::Tight, Sep::SoftLine)
-        };
+        let line = if brace { Sep::Line } else { Sep::SoftLine };
         let root = self.tree.root();
-        let mut parts = Vec::new();
-        let mut lead = open;
+        // Headers stay after the opening delimiter when they fit there and
+        // move to the body's indentation as a group otherwise.
+        let mut headers = Vec::new();
+        let mut lead = line;
         let mut root_doc = Doc::nil();
         for child in self.children(root) {
             let SyntaxElement::Node(id) = child else {
@@ -134,24 +132,26 @@ impl<'s> Builder<'s> {
             };
             match self.tree.node(id).kind {
                 NodeKind::ScaleHeader => {
-                    parts.push(self.token(lead, false));
-                    parts.push(self.token(Sep::Tight, false));
+                    headers.push(self.token(lead, false));
+                    headers.push(self.token(Sep::Tight, false));
                     lead = Sep::Space;
                 }
                 NodeKind::TypedHeader => {
-                    parts.push(self.token(lead, false));
-                    parts.push(self.embed(Sep::Space, false, 1, RustContext::Type));
-                    parts.push(self.token(Sep::Tight, false));
+                    headers.push(self.token(lead, false));
+                    headers.push(self.embed(Sep::Space, false, 1, RustContext::Type));
+                    headers.push(self.token(Sep::Tight, false));
                     lead = Sep::Space;
                 }
                 _ => root_doc = self.node(id, line, false),
             }
         }
         let trailing = self.comments_here(false);
-        parts.push(Doc::indent(Doc::concat([root_doc, trailing])));
-        parts.push(self.sep_doc(line, false, &Gap::default()));
-        parts.push(Doc::Phantom(suffix));
-        Doc::group(Doc::concat(parts))
+        Doc::group(Doc::concat([
+            Doc::group(Doc::indent(Doc::concat(headers))),
+            Doc::indent(Doc::concat([root_doc, trailing])),
+            self.sep_doc(line, false, &Gap::default()),
+            Doc::Phantom(suffix),
+        ]))
     }
 
     fn children(&self, id: NodeId) -> Vec<SyntaxElement> {

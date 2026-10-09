@@ -5,5 +5,6 @@ fn excerpt() {
     let c = ::quark::view! { scale, -> Div,
         <div/> };
     row.child(view! { <text>"short"</text> }).child(view! { <icon svg={icons::LOADER} size={13.0} /> });
+    let e = view! { -> Container<WithAVeryLongTypeArgument, AndAnotherOneThatPushesPastTheWidthLimit>, <div class="p-2" /> };
     let d = view! { <div class="flex-row items-center gap-2"><icon svg={icons::A} /><icon svg={icons::B} /></div> };
 }
