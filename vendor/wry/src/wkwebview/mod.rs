@@ -6,6 +6,10 @@ mod download;
 #[cfg(target_os = "macos")]
 mod drag_drop;
 mod navigation;
+#[cfg(target_os = "macos")]
+mod navigation_hooks;
+#[cfg(target_os = "macos")]
+pub use navigation_hooks::{AuthChallengeCompletion, NavigationHooks};
 #[cfg(feature = "mac-proxy")]
 mod proxy;
 #[cfg(target_os = "macos")]
@@ -590,6 +594,8 @@ impl InnerWebView {
         download_delegate.clone(),
         attributes.on_page_load_handler,
         pl_attrs.on_web_content_process_terminate_handler,
+        #[cfg(target_os = "macos")]
+        pl_attrs.navigation_hooks,
         mtm,
       );
 

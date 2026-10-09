@@ -387,6 +387,8 @@ pub(crate) mod wkwebview;
 use wkwebview::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use wkwebview::{PrintMargin, PrintOptions, WryWebView};
+#[cfg(target_os = "macos")]
+pub use wkwebview::{AuthChallengeCompletion, NavigationHooks};
 
 #[cfg(target_os = "windows")]
 pub(crate) mod webview2;
@@ -1588,6 +1590,8 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   limit_navigations_to_app_bound_domains: bool,
   #[cfg(target_os = "macos")]
   webview_configuration: Option<Retained<objc2_web_kit::WKWebViewConfiguration>>,
+  #[cfg(target_os = "macos")]
+  navigation_hooks: Option<Box<dyn NavigationHooks>>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -1605,6 +1609,8 @@ impl Default for PlatformSpecificWebViewAttributes {
       limit_navigations_to_app_bound_domains: false,
       #[cfg(target_os = "macos")]
       webview_configuration: None,
+      #[cfg(target_os = "macos")]
+      navigation_hooks: None,
     }
   }
 }
@@ -1666,6 +1672,8 @@ pub trait WebViewBuilderExtMacos {
     self,
     configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
   ) -> Self;
+  /// Add navigation observation and policy hooks to wry's navigation delegate.
+  fn with_navigation_hooks(self, hooks: Box<dyn NavigationHooks>) -> Self;
 }
 
 #[cfg(target_os = "macos")]
@@ -1678,6 +1686,11 @@ impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
       .platform_specific
       .webview_configuration
       .replace(configuration);
+    self
+  }
+
+  fn with_navigation_hooks(mut self, hooks: Box<dyn NavigationHooks>) -> Self {
+    self.platform_specific.navigation_hooks = Some(hooks);
     self
   }
 }

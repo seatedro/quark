@@ -17,7 +17,7 @@ use super::class::wry_navigation_delegate::WryNavigationDelegate;
 pub(crate) fn did_commit_navigation(
   this: &WryNavigationDelegate,
   webview: &WKWebView,
-  _navigation: &WKNavigation,
+  navigation: Option<&WKNavigation>,
 ) {
   unsafe {
     // Call on_load_handler
@@ -34,25 +34,48 @@ pub(crate) fn did_commit_navigation(
       *pending_scripts = None;
     }
   }
+
+  #[cfg(target_os = "macos")]
+  if let Some(hooks) = &this.ivars().navigation_hooks {
+    hooks.committed(webview, navigation);
+  }
+  #[cfg(not(target_os = "macos"))]
+  let _ = navigation;
 }
 
 pub(crate) fn did_finish_navigation(
   this: &WryNavigationDelegate,
-  _webview: &WKWebView,
-  _navigation: &WKNavigation,
+  webview: &WKWebView,
+  navigation: Option<&WKNavigation>,
 ) {
   if let Some(on_page_load) = &this.ivars().on_page_load_handler {
     on_page_load(PageLoadEvent::Finished);
   }
+
+  #[cfg(target_os = "macos")]
+  if let Some(hooks) = &this.ivars().navigation_hooks {
+    hooks.finished(webview, navigation);
+  }
+  #[cfg(not(target_os = "macos"))]
+  let _ = (webview, navigation);
 }
 
 // Navigation handler
 pub(crate) fn navigation_policy(
   this: &WryNavigationDelegate,
-  _webview: &WKWebView,
+  webview: &WKWebView,
   action: &WKNavigationAction,
   handler: &block2::Block<dyn Fn(WKNavigationActionPolicy)>,
 ) {
+  #[cfg(target_os = "macos")]
+  if let Some(hooks) = &this.ivars().navigation_hooks {
+    if !hooks.decide_action(webview, action) {
+      (*handler).call((WKNavigationActionPolicy::Cancel,));
+      return;
+    }
+  }
+  #[cfg(not(target_os = "macos"))]
+  let _ = webview;
   unsafe {
     // <https://developer.apple.com/documentation/webkit/wknavigationaction/shouldperformdownload>
     // Available: macOS 11.3+, iOS 14.5+
@@ -85,10 +108,19 @@ pub(crate) fn navigation_policy(
 // Navigation handler
 pub(crate) fn navigation_policy_response(
   this: &WryNavigationDelegate,
-  _webview: &WKWebView,
+  webview: &WKWebView,
   response: &WKNavigationResponse,
   handler: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>,
 ) {
+  #[cfg(target_os = "macos")]
+  if let Some(hooks) = &this.ivars().navigation_hooks {
+    if !hooks.decide_response(webview, response) {
+      (*handler).call((WKNavigationResponsePolicy::Cancel,));
+      return;
+    }
+  }
+  #[cfg(not(target_os = "macos"))]
+  let _ = webview;
   unsafe {
     let can_show_mime_type = response.canShowMIMEType();
 

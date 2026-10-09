@@ -375,6 +375,11 @@ features = [
     "NSValue",
     "NSRange",
     "NSRunLoop",
+    "NSError",
+    "NSURLAuthenticationChallenge",
+    "NSURLCredential",
+    "NSURLProtectionSpace",
+    "NSURLSession",
 ]
 default-features = false
 
@@ -421,6 +426,11 @@ features = [
     "NSProcessInfo",
 ]
 default-features = false
+
+[lints.rust]
+# Vendored for a patch, not maintained here: upstream's warnings under the
+# workspace's nightly are not ours to fix.
+warnings = "allow"
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
