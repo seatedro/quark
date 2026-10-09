@@ -199,7 +199,7 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, embed: &mut Embed) -> Di
                         <answer(p, blocks, column) key={key} />
                     }
                     Item::FileChange { file } => {
-                        <file_change(p, file, embed.stats) key={key} />
+                        <file_change(p, file, embed.stats, column) key={key} />
                     }
                 }
             }
@@ -640,33 +640,51 @@ fn answer(p: &Pal, blocks: &[Block], column: f32) -> Div {
     }
 }
 
-fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32)) -> Div {
+/// Below this card width Undo and View changes move under the title, as
+/// the web app's flex-wrap does, so neither is cut off.
+const CHANGE_CARD_ONE_ROW: f32 = 380.0;
+
+/// The file change card at the end of a turn, `w` wide: tile, title and
+/// counts, Undo, View changes. The title truncates before the buttons
+/// shrink.
+fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32), w: f32) -> Div {
     let light = p.mode == ThemeMode::Light;
+    let one_row = w >= CHANGE_CARD_ONE_ROW;
+    let title = view! {
+        <div class="flex-row items-center flex-1 min-w-0 gap-3">
+            <div class="w-10 h-10 shrink-0 rounded-[8] items-center justify-center" bg={p.tile}>
+                <icon svg={icons::REVIEW} size={17.0} color={p.text_soft} />
+            </div>
+            <div class="flex-col flex-1 min-w-0 gap-0.5">
+                <txt(format!("Edited {file}"), BODY, p.text) class="truncate" />
+                <div class="flex-row items-center gap-[5]">
+                    <txt(format!("+{adds}"), SMALL, p.success) />
+                    <txt(format!("-{dels}"), SMALL, p.error) />
+                </div>
+            </div>
+        </div>
+    };
+    let actions = view! {
+        <div class="flex-row items-center shrink-0 gap-3 justify-end">
+            <div class="flex-row items-center h-7 px-2 gap-1.5" role="button" aria-label="Undo">
+                <txt("Undo", SMALL, p.text_soft) />
+                <icon svg={icons::UNDO} size={13.0} color={p.text_soft} />
+            </div>
+            <div class="flex-row items-center h-7 px-[10] rounded-[8]"
+                 border={if light { p.change_border } else { p.shell_border }} role="button"
+                 aria-label="View changes" on:click={Msg::OpenTab(crate::Tab::Changes)}>
+                <txt("View changes", SMALL, p.text_soft) />
+            </div>
+        </div>
+    };
     view! { -> Div,
         <div class="w-full flex-col">
-            <div class="flex-row items-center w-full h-16 px-3 gap-3 rounded-[10]" bg={p.change_card}
-                 border={p.change_border} accessibility_role={Role::Group}
-                 aria-label={format!("Edited {file}")}>
-                <div class="w-10 h-10 rounded-[8] items-center justify-center" bg={p.tile}>
-                    <icon svg={icons::REVIEW} size={17.0} color={p.text_soft} />
-                </div>
-                <div class="flex-col gap-0.5">
-                    <txt(format!("Edited {file}"), BODY, p.text) />
-                    <div class="flex-row items-center gap-[5]">
-                        <txt(format!("+{adds}"), SMALL, p.success) />
-                        <txt(format!("-{dels}"), SMALL, p.error) />
-                    </div>
-                </div>
-                <div class="flex-1" />
-                <div class="flex-row items-center h-7 px-2 gap-1.5" role="button" aria-label="Undo">
-                    <txt("Undo", SMALL, p.text_soft) />
-                    <icon svg={icons::UNDO} size={13.0} color={p.text_soft} />
-                </div>
-                <div class="flex-row items-center h-7 px-[10] rounded-[8]"
-                     border={if light { p.change_border } else { p.shell_border }} role="button"
-                     aria-label="View changes" on:click={Msg::OpenTab(crate::Tab::Changes)}>
-                    <txt("View changes", SMALL, p.text_soft) />
-                </div>
+            <div class="w-full px-3 rounded-[10]" bg={p.change_card} border={p.change_border}
+                 accessibility_role={Role::Group} aria-label={format!("Edited {file}")}
+                 @when {one_row} { class="flex-row items-center h-16 gap-3" }
+                 @when {!one_row} { class="flex-col py-3 gap-2" }>
+                {title}
+                {actions}
             </div>
             <div class="h-4" />
         </div>

@@ -529,3 +529,27 @@ fn punctuation_never_wraps_away_from_the_word_it_ends() {
         }
     }
 }
+
+// Regression: in a narrow thread column the file change card ran its
+// buttons past its right edge, cutting "View changes" off. At every width
+// that leaves the thread its minimum, both buttons sit inside the card.
+#[test]
+fn the_file_change_card_keeps_its_buttons_inside() {
+    let mut ui = harness("file-panel");
+    for width in (700..=1400).step_by(25) {
+        ui.resize(width as f32, 738.0);
+        ui.frame();
+        let thread = ui.find(By::role_name(Role::Log, "Transcript")).bounds;
+        if thread.width < quark_codex::panel::THREAD_MIN {
+            continue; // The window is too narrow for sidebar, thread, and panel.
+        }
+        let card = ui.find(By::role_name(Role::Group, "Edited cart.js")).bounds;
+        for name in ["Undo", "View changes"] {
+            let b = ui.find(By::role_name(Role::Button, name)).bounds;
+            assert!(
+                b.x >= card.x && b.x + b.width <= card.x + card.width,
+                "at {width}pt {name} {b:?} leaves the card {card:?}"
+            );
+        }
+    }
+}
