@@ -8,7 +8,8 @@
 //! [`CopyContent`] names each copy policy. Selection copies represent the
 //! rows the user sees: hidden lines, headers, metadata, annotations, and
 //! the preview's count row never contribute, lines join with `\n`, and a
-//! line limited to a prefix contributes only the bytes it shows. Exact
+//! line limited to a prefix (`DiffLimits::shaped_line_bytes`, lowered by
+//! the app) contributes only the bytes it shows. Exact
 //! copies of a whole file, a whole line, or the patch are separate
 //! policies that read the source.
 

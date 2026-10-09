@@ -21,7 +21,7 @@ use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use quark_diff::{InlineOptions, LineDetail, line_detail, paired_inline_diff};
+use quark_diff::{InlineDetail, InlineOptions, LineDetail, line_detail, paired_inline_diff};
 
 use super::prepared::LineWindow;
 
@@ -45,8 +45,19 @@ const KEPT_DIFFS: usize = 64;
 /// A line's identity for caching: its text's address and where it starts.
 type LineKey = (usize, usize);
 
-/// Changed word ranges of a pair, old side then new, in line bytes.
-pub(crate) type Words = Arc<[Vec<Range<usize>>; 2]>;
+/// Changed word ranges of a pair, old side then new, in line bytes, and
+/// why they are what they are.
+pub(crate) type Words = Arc<([Vec<Range<usize>>; 2], InlineDetail)>;
+
+/// A pair's word diff as the view keeps it.
+fn words_of(d: quark_diff::PairedInlineDiff) -> Words {
+    let bytes = |v: Vec<Range<u32>>| -> Vec<Range<usize>> {
+        v.into_iter()
+            .map(|r| r.start as usize..r.end as usize)
+            .collect()
+    };
+    Arc::new(([bytes(d.old), bytes(d.new)], d.detail))
+}
 
 /// Where columns fall in a long line.
 enum ColumnMap {
@@ -272,12 +283,7 @@ impl LongLines {
     ) -> Option<Words> {
         if old.1.len() + new.1.len() <= SYNC_PAIR_BYTES {
             let d = paired_inline_diff(&old.0[old.1.clone()], &new.0[new.1.clone()], &options());
-            let bytes = |v: Vec<Range<u32>>| -> Vec<Range<usize>> {
-                v.into_iter()
-                    .map(|r| r.start as usize..r.end as usize)
-                    .collect()
-            };
-            return Some(Arc::new([bytes(d.old), bytes(d.new)]));
+            return Some(words_of(d));
         }
         let key = (
             (Arc::as_ptr(old.0) as *const u8 as usize, old.1.start),
@@ -340,13 +346,7 @@ fn spawn() -> Thread {
         .spawn(move || {
             for job in job_rx {
                 let (old, new) = (&job.old.0[job.old.1], &job.new.0[job.new.1]);
-                let d = paired_inline_diff(old, new, &options());
-                let bytes = |v: Vec<Range<u32>>| -> Vec<Range<usize>> {
-                    v.into_iter()
-                        .map(|r| r.start as usize..r.end as usize)
-                        .collect()
-                };
-                let words: Words = Arc::new([bytes(d.old), bytes(d.new)]);
+                let words = words_of(paired_inline_diff(old, new, &options()));
                 if done_tx.send((job.key, words)).is_err() {
                     return;
                 }

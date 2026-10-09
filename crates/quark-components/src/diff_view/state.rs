@@ -30,7 +30,7 @@ use quark_ui::virtual_list::{RowKey, VariableList};
 
 use super::prepared::{
     Columns, FileFact, FrameRow, LineDetail, LinePaint, LineWindow, Metrics, PreparedKind,
-    RowPaint, ViewFrame, row_height,
+    RowPaint, ViewFrame, WordDetail, row_height,
 };
 use super::{DiffViewState, PrepareKey};
 
@@ -961,7 +961,7 @@ impl DiffViewState {
             }
             _ => {
                 let m = self.metrics();
-                let words = self.word_ranges(segment, row);
+                let (words, word_detail) = self.word_ranges(segment, row);
                 for side in [Side::Old, Side::New] {
                     let Some(index) = p.line(row, side) else {
                         continue;
@@ -1010,6 +1010,7 @@ impl DiffViewState {
                         tones,
                         words,
                         detail,
+                        word_detail,
                         window,
                     });
                 }
@@ -1018,18 +1019,19 @@ impl DiffViewState {
         paint
     }
 
-    /// Changed words of `row`'s lines, by side.
-    fn word_ranges(&self, segment: &Segment, row: u32) -> [Vec<Range<usize>>; 2] {
+    /// Changed words of `row`'s lines, by side, and how complete they are.
+    fn word_ranges(&self, segment: &Segment, row: u32) -> ([Vec<Range<usize>>; 2], WordDetail) {
         let p = &segment.projection;
         let r = row as usize;
+        let unpaired = (Default::default(), WordDetail::Unpaired);
         let (old, new) = match p.kind[r] {
             RowKind::Modified => (p.old[r], p.new[r]),
             RowKind::Removed => (p.old[r], p.pair[r]),
             RowKind::Added => (p.pair[r], p.new[r]),
-            _ => return Default::default(),
+            _ => return unpaired,
         };
         if old == quark_diff::NONE || new == quark_diff::NONE {
-            return Default::default();
+            return unpaired;
         }
         let file = p.file[r];
         let line = |side, i| {
@@ -1038,12 +1040,15 @@ impl DiffViewState {
         };
         let (a, b) = (line(Side::Old, old), line(Side::New, new));
         if a.1.len().max(b.1.len()) > self.limits.inline_line_bytes {
-            return Default::default();
+            return (
+                Default::default(),
+                WordDetail::Done(quark_diff::InlineDetail::Limited),
+            );
         }
         // A long pair's words come from a thread; none until they land.
         match self.long_lines.words(a, b, self.syntax.wake()) {
-            Some(words) => [words[0].clone(), words[1].clone()],
-            None => Default::default(),
+            Some(words) => (words.0.clone(), WordDetail::Done(words.1)),
+            None => (Default::default(), WordDetail::Pending),
         }
     }
 

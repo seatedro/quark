@@ -363,7 +363,7 @@ mod tests {
     use quark_app::quark_ui::test_alloc::{self, Counting};
     use quark_app::testing::{By, UiTestHarness};
     use quark_components::CopySide;
-    use quark_components::diff_view::prepared::{PreparedKind, SearchMark};
+    use quark_components::diff_view::prepared::{PreparedKind, SearchMark, WordDetail};
     use quark_components::diff_view::presentation::{DiffLayout, DiffPresentation};
     use quark_components::diff_view::{
         AnnotationId, CopyContent, DiffAnchor, DiffAnnotation, DiffPreviewLimit, DiffTarget,
@@ -374,7 +374,8 @@ mod tests {
 
     use quark_components::diff_view::{DiffSessionViewState, diff_session_view};
     use quark_diff::{
-        DiffSession, DiffUpdate, FileDiffSnapshot, RowKind, Side, SourceRemap, UpdateError,
+        DiffSession, DiffUpdate, FileDiffSnapshot, InlineDetail, RowKind, Side, SourceRemap,
+        UpdateError,
     };
 
     use super::*;
@@ -863,13 +864,56 @@ mod tests {
                 })
                 .collect()
         };
-        let before = words(&ui);
+        let before = (words(&ui), word_details(&ui));
         wake.recv_timeout(std::time::Duration::from_secs(60))
             .expect("the word thread finishes");
         ui.frame();
 
-        assert_eq!(before, Vec::<String>::new());
-        assert_eq!(words(&ui), ["0000003", "changed"]);
+        assert_eq!(before, (vec![], vec![WordDetail::Pending; 2]));
+        assert_eq!(
+            (words(&ui), word_details(&ui)),
+            (
+                vec!["0000003".to_owned(), "changed".to_owned()],
+                vec![WordDetail::Done(InlineDetail::Exact); 2]
+            )
+        );
+    }
+
+    /// The word detail of each changed line in the frame, in order.
+    fn word_details(ui: &UiTestHarness<Demo>) -> Vec<WordDetail> {
+        let frame = ui.app().diff.frame().unwrap().clone();
+        frame
+            .rows
+            .iter()
+            .flat_map(|row| row.paint.sides.iter().flatten())
+            .map(|l| l.word_detail)
+            .filter(|d| *d != WordDetail::Unpaired)
+            .collect()
+    }
+
+    // Catches a lowered word limit dropping highlights silently: a pair
+    // past it says its detail is limited.
+    #[test]
+    fn a_lowered_word_limit_reports_limited_detail() {
+        let doc = diff_texts(
+            Some("f"),
+            Some("f"),
+            Some("one two\n"),
+            Some("one three\n"),
+            3,
+        );
+        let mut ui = harness(doc);
+        let limits = ui.app().diff.limits();
+        ui.app_mut().diff.set_limits(quark_diff::DiffLimits {
+            inline_line_bytes: 4,
+            ..limits
+        });
+        ui.frame();
+
+        assert_eq!(
+            word_details(&ui),
+            [WordDetail::Done(InlineDetail::Limited); 2]
+        );
     }
 
     // Catches select-all copying the shaped part of a huge line: it copies
