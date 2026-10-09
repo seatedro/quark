@@ -486,7 +486,11 @@ fn paragraph(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> An
             Span::Bold(t) => StyledSpan::plain(t)
                 .weight(FontWeight::Semibold)
                 .color(p.text),
-            Span::Code(c) => StyledSpan::plain(c).code().pill(p.chip).color(p.text),
+            Span::Code(c) => StyledSpan::plain(c)
+                .code()
+                .font_scale(CODE / BODY)
+                .pill(p.chip)
+                .color(p.text),
             Span::File(..) => return inline_flow(spans, p, color, pending),
         });
     }
