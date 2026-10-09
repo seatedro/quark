@@ -1246,7 +1246,12 @@ fn heading_weights_reach_the_glyphs() {
 
     let weights: Vec<(String, u16)> = regions
         .iter()
-        .map(|r| (r.text.to_string(), r.layout.glyphs().font_weight[0].0))
+        .map(|r| {
+            (
+                r.text.to_string(),
+                r.layout.glyph(0).expect("glyph").font_weight.0,
+            )
+        })
         .collect();
     let expected = [("Title", 700), ("Small", 600), ("plain", 450)];
     let expected: Vec<(String, u16)> = expected.iter().map(|(t, w)| (t.to_string(), *w)).collect();

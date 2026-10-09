@@ -2,6 +2,7 @@ use super::*;
 use quark_render::scene::{
     StyledDecoration, TextBackdrop, TextDecorationStyle, TextFill, TextRendering,
 };
+use quark_text::fonts::FontFamily;
 
 // ---------------------------------------------------------------------------
 // TextElement — text with intrinsic sizing
@@ -95,6 +96,8 @@ pub struct TextElement {
     color: Option<Color>,
     font_kind: FontKind,
     font_weight: FontWeight,
+    /// A family in place of `font_kind`'s generic one.
+    family: Option<FontFamily>,
     /// Extra advance after every glyph, in ems.
     letter_spacing: f32,
     underline: bool,
@@ -115,6 +118,7 @@ pub fn text(content: impl Into<String>) -> TextElement {
         color: None,
         font_kind: FontKind::Ui,
         font_weight: FontWeight::Normal,
+        family: None,
         letter_spacing: 0.0,
         underline: false,
         underline_style: None,
@@ -177,6 +181,14 @@ impl TextElement {
 
     pub fn weight(mut self, weight: FontWeight) -> Self {
         self.font_weight = weight;
+        self
+    }
+
+    /// Draws in `family`: the system UI or monospace font, or a named one
+    /// from [`TextSystem::family_id`]. Wins over [`Self::mono`]; a family
+    /// the system lacks draws in the generic one.
+    pub fn font_family(mut self, family: FontFamily) -> Self {
+        self.family = Some(family);
         self
     }
 
@@ -296,11 +308,14 @@ impl TextElement {
     }
 
     fn query<'s>(&self, content: &'s str, font_size: f32, wrap: Option<f32>) -> TextQuery<'s> {
-        let style = TextStyle::new(font_size)
+        let mut style = TextStyle::new(font_size)
             .kind(self.font_kind)
             .weight(self.font_weight)
             .letter_spacing(self.letter_spacing)
             .line_height(self.line_height.resolve(font_size));
+        if let Some(family) = self.family {
+            style = style.font_family(family);
+        }
         TextQuery::new(content, style).wrap_width(wrap)
     }
 
@@ -615,6 +630,8 @@ mod tests {
         signals: SignalStore,
         theme: Theme,
         cache: ElementCache,
+        /// The frame clock elements read.
+        clock_ms: u64,
     }
 
     /// What a frame painted: each text's (plain or rich) rect and lines,
@@ -626,6 +643,10 @@ mod tests {
         swatch: Option<Rect>,
         /// Solid quads in the `INK` color: text decorations.
         decorations: Vec<Rect>,
+        /// Family of each text's first glyph, in paint order.
+        families: Vec<String>,
+        /// Fill of each styled text, in paint order.
+        fills: Vec<TextFill>,
     }
 
     impl Frame {
@@ -648,11 +669,13 @@ mod tests {
                 signals: SignalStore::new(),
                 theme: Theme::default_dark(),
                 cache: ElementCache::new(),
+                clock_ms: 0,
             }
         }
 
         fn paint(&mut self, root: impl IntoAnyElement) -> Frame {
             self.layouts.begin_frame();
+            let fonts = self.text.font_snapshot();
             let mut cx = ElementContext::new(
                 &self.theme,
                 self.scale,
@@ -663,12 +686,15 @@ mod tests {
             )
             .with_accessibility(false)
             .with_element_cache(&mut self.cache);
+            cx.clock_ms = self.clock_ms;
             let mut scene = Scene::default();
             render_element(&mut root.into_any(), &mut scene, &mut cx, 400.0, 300.0);
             let mut frame = Frame {
                 texts: Vec::new(),
                 swatch: None,
                 decorations: Vec::new(),
+                families: Vec::new(),
+                fills: Vec::new(),
             };
             for primitive in &scene.primitives {
                 let (rect, shaped) = match primitive {
@@ -678,6 +704,10 @@ mod tests {
                     }
                     quark_render::Primitive::TextRun(run) => (run.rect, &run.layout),
                     quark_render::Primitive::RichTextRun(run) => (run.rect, &run.layout),
+                    quark_render::Primitive::StyledText(run) => {
+                        frame.fills.push(run.fill);
+                        (run.rect, &run.layout)
+                    }
                     quark_render::Primitive::RoundedRect(r) if r.color == SWATCH => {
                         frame.swatch = Some(r.rect);
                         continue;
@@ -690,6 +720,12 @@ mod tests {
                     .map(|line| layout.text()[line.byte_range].to_owned())
                     .collect();
                 frame.texts.push((rect, lines));
+                let family = layout
+                    .glyph(0)
+                    .and_then(|g| fonts.database().face(g.font_id))
+                    .and_then(|face| face.families.first())
+                    .map_or_else(String::new, |(name, _)| name.clone());
+                frame.families.push(family);
             }
             frame
         }
@@ -990,5 +1026,47 @@ mod tests {
             );
             assert!(quad.width > 0.0 && quad.x >= rect.x, "line {i}: {quad:?}");
         }
+    }
+
+    // Catches a family that stops at the builder: a named family reaches
+    // the painted glyphs of plain and selectable text alike.
+    #[test]
+    fn a_named_family_reaches_the_painted_glyphs() {
+        let mut window = Window::new();
+        let named = FontFamily::Named(window.text.family_id("JetBrains Mono"));
+        // Its one variable face is registered at a single weight until
+        // quark-text resolves weights on demand.
+        window.text.fill_family_weights("JetBrains Mono");
+        let frame = window.paint(
+            div()
+                .flex_col()
+                .child(text("Typography").size(14.0))
+                .child(text("Typography").size(14.0).font_family(named))
+                .child(selectable_text("Typography").size(14.0).font_family(named)),
+        );
+        assert_eq!(frame.families[1..], ["JetBrains Mono", "JetBrains Mono"]);
+        assert_ne!(frame.families[0], "JetBrains Mono");
+    }
+
+    // Catches a shimmer frozen at its authored phase, or animating under
+    // reduced motion: the painted phase follows the frame clock, and
+    // reduced motion paints the static base color.
+    #[test]
+    fn a_shimmer_follows_the_clock_and_rests_under_reduced_motion() {
+        use quark_render::scene::ShimmerSpec;
+        let spec = ShimmerSpec::new(SWATCH, INK).duration_ms(1000);
+        let shimmer = || text("Thinking").size(14.0).fill(TextFill::Shimmer(spec));
+        let mut window = Window::new();
+        window.clock_ms = 2250;
+        let moving = window.paint(shimmer());
+        window.theme.reduced_motion = true;
+        let still = window.paint(shimmer());
+        assert_eq!(
+            (moving.fills, still.fills),
+            (
+                vec![TextFill::Shimmer(spec.phase(0.25))],
+                vec![TextFill::Solid(SWATCH)]
+            )
+        );
     }
 }

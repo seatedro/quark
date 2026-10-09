@@ -8,6 +8,7 @@ use quark_render::scene::{
     LineCap, Path, PathPrimitive, StrokePattern, StrokeStyle, StyledDecoration,
     StyledTextPrimitive, TextBackdrop, TextDecorationStyle, TextFill, TextRendering,
 };
+use quark_text::fonts::FontFamily;
 use quark_text::{TextOffset, TextSource, ToTextOffset};
 
 /// Paint-only text options: glyph fill, coverage policy, and backdrop.
@@ -669,6 +670,9 @@ pub struct ParagraphStyle {
     pub font_weight: FontWeight,
     /// Extra advance after every glyph, in ems.
     pub letter_spacing: f32,
+    /// A family in place of `font_kind`'s generic one; spans that set
+    /// their own kind still use that kind's family.
+    pub family: Option<FontFamily>,
 }
 
 impl ParagraphStyle {
@@ -680,7 +684,13 @@ impl ParagraphStyle {
             font_kind: FontKind::Ui,
             font_weight: FontWeight::Normal,
             letter_spacing: 0.0,
+            family: None,
         }
+    }
+
+    pub fn font_family(mut self, family: FontFamily) -> Self {
+        self.family = Some(family);
+        self
     }
 
     /// Invalid line heights are ignored.
@@ -718,11 +728,15 @@ impl ParagraphStyle {
 
     /// The text style the paragraph shapes with.
     pub fn text_style(&self) -> TextStyle {
-        TextStyle::new(self.font_size)
+        let style = TextStyle::new(self.font_size)
             .kind(self.font_kind)
             .weight(self.font_weight)
             .letter_spacing(self.letter_spacing)
-            .line_height(self.line_height_points())
+            .line_height(self.line_height_points());
+        match self.family {
+            Some(family) => style.font_family(family),
+            None => style,
+        }
     }
 }
 
@@ -812,6 +826,12 @@ impl SelectableText {
     /// Base font kind of text outside spans that set their own.
     pub fn font_kind(mut self, kind: FontKind) -> Self {
         self.paragraph.font_kind = kind;
+        self
+    }
+    /// Draws in `family` (system UI, system monospace, or a named family)
+    /// in place of the base font kind's generic one.
+    pub fn font_family(mut self, family: FontFamily) -> Self {
+        self.paragraph = self.paragraph.font_family(family);
         self
     }
     /// Line height of every line ([`LineHeight::PARAGRAPH`] by default);
@@ -972,7 +992,7 @@ pub(crate) fn with_styled_query<R>(
         for span in spans {
             let start = text.len();
             text.push_str(&span.text);
-            text_spans.push(styled_span(span, start..text.len()));
+            text_spans.push(styled_span(span, start..text.len(), &style));
         }
         f(&TextQuery {
             text,
@@ -982,12 +1002,16 @@ pub(crate) fn with_styled_query<R>(
     })
 }
 
-fn styled_span(span: &StyledSpan, range: std::ops::Range<usize>) -> TextSpan {
+/// The text span of `span` over `range` in a paragraph of `base`. A font
+/// the span shares with the paragraph is left to the paragraph, so a
+/// paragraph's named family reaches its plain spans while a code span
+/// keeps the monospace family.
+fn styled_span(span: &StyledSpan, range: std::ops::Range<usize>, base: &TextStyle) -> TextSpan {
     TextSpan {
         range,
-        weight: Some(span.font_weight),
+        weight: (span.font_weight != base.font_weight).then_some(span.font_weight),
         style: span.italic.then_some(FontStyle::Italic),
-        kind: Some(span.font_kind),
+        kind: (span.font_kind != base.font_kind).then_some(span.font_kind),
     }
 }
 
@@ -1004,7 +1028,7 @@ pub(crate) fn styled_params(
     for span in spans {
         let start = text.len();
         text.push_str(&span.text);
-        text_spans.push(styled_span(span, start..text.len()));
+        text_spans.push(styled_span(span, start..text.len(), &style));
     }
     TextParams::new(text, style)
         .spans(text_spans)
@@ -1702,5 +1726,136 @@ mod tests {
             .collect();
         assert_eq!(opened, [Arc::from("https://quark.dev")]);
         assert_eq!(links, ["follow this wrapping link"]);
+    }
+
+    /// Solid quads and stroked paths in `color` the last frame painted:
+    /// `(rect, stroke width, pattern)`, paths at their bounds.
+    fn decoration_strokes(scene: &Scene, color: Color) -> Vec<(Rect, f32, StrokePattern)> {
+        scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                quark_render::Primitive::Path(path) => {
+                    let stroke = path.stroke.filter(|s| s.color == color)?;
+                    let b = path.path.bounds();
+                    Some((
+                        b.offset(path.origin[0], path.origin[1]),
+                        stroke.style.width,
+                        stroke.style.pattern,
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    const INK: Color = Color::rgba(200, 100, 50, 255);
+
+    /// A frame's scene, painted through the window.
+    fn scene_of(window: &mut Window, root: impl IntoAnyElement) -> Scene {
+        window.layouts.begin_frame();
+        let mut cx = ElementContext::new(
+            &window.theme,
+            1.0,
+            &mut window.text,
+            &mut window.layouts,
+            None,
+            &window.signals,
+        );
+        let mut scene = Scene::default();
+        render_element(&mut root.into_any(), &mut scene, &mut cx, 400.0, 300.0);
+        window.regions = std::mem::take(&mut cx.selectable_text_runs);
+        scene
+    }
+
+    // Catches a dotted link underline drawn per span, across the box, or
+    // continuing from one line into the next: a link split over two spans
+    // wraps and gets one dotted stroke per painted line, spanning exactly
+    // the link's glyphs on that line, under the baseline.
+    #[test]
+    fn a_dotted_link_underline_restarts_on_each_wrapped_line() {
+        let dotted = TextDecorationStyle::solid(INK).pattern(StrokePattern::Dotted {
+            spacing: 3.0,
+            offset: 0.0,
+        });
+        let link = |s: &str| {
+            StyledSpan::plain(s)
+                .link("https://quark.dev")
+                .underline_style(dotted)
+        };
+        let spans = vec![
+            StyledSpan::plain("see "),
+            link("the quick brown fox "),
+            link("jumps over"),
+            StyledSpan::plain(" the lazy dog"),
+        ];
+        let mut window = Window::new();
+        let scene = scene_of(&mut window, column(120.0, rich_text(spans).size(14.0)));
+
+        let region = &window.regions[0];
+        let start = "see ".len();
+        let end = start + "the quick brown fox jumps over".len();
+        let (ox, oy) = region.text_origin;
+        let expected: Vec<(f32, f32, f32)> = region
+            .layout
+            .lines()
+            .filter_map(|line| {
+                let text = &region.text.as_str()[line.byte_range.clone()];
+                let lo = start.max(line.byte_range.start);
+                let hi = end.min(line.byte_range.start + text.trim_end().len());
+                let r = region
+                    .layout
+                    .selection_rects(lo..hi)
+                    .next()
+                    .filter(|_| lo < hi)?;
+                Some((ox + r.x, ox + r.right(), oy + line.baseline))
+            })
+            .collect();
+        let strokes = decoration_strokes(&scene, INK);
+        assert!(expected.len() > 1, "link fits one line: {expected:?}");
+        assert_eq!(strokes.len(), expected.len(), "{strokes:?}");
+        for ((rect, _, pattern), (left, right, baseline)) in strokes.iter().zip(&expected) {
+            assert_eq!(*pattern, dotted.pattern);
+            assert!(
+                (rect.x - left).abs() < 0.01 && (rect.right() - right).abs() < 0.01,
+                "{rect:?}"
+            );
+            assert!(rect.y > *baseline, "{rect:?} above baseline {baseline}");
+        }
+    }
+
+    // Catches hostile decoration metrics reaching the renderer: a NaN
+    // thickness and an infinite offset fall back to the default one-point
+    // line just under the baseline.
+    #[test]
+    fn hostile_decoration_metrics_fall_back_to_defaults() {
+        let hostile = TextDecorationStyle::solid(INK)
+            .pattern(StrokePattern::Dashed {
+                dash: 0.0,
+                gap: f32::NAN,
+                offset: 0.0,
+            })
+            .thickness(f32::NAN)
+            .offset(f32::INFINITY);
+        let spans = vec![StyledSpan::plain("dashed").underline_style(hostile)];
+        let mut window = Window::new();
+        let scene = scene_of(&mut window, rich_text(spans).size(14.0));
+
+        let baseline = window.regions[0]
+            .layout
+            .lines()
+            .next()
+            .expect("line")
+            .baseline;
+        let [(rect, width, _)] = decoration_strokes(&scene, INK)[..] else {
+            panic!("one stroke");
+        };
+        assert_eq!(width, 1.0);
+        // 0.12 em below the baseline plus half the line.
+        assert!(
+            (rect.y - (window.regions[0].text_origin.1 + baseline + 14.0 * 0.12 + 0.5)).abs()
+                < 0.01,
+            "{rect:?}"
+        );
     }
 }
