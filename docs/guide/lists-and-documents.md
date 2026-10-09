@@ -48,7 +48,9 @@ above and below it. `scroll_to(key, align)` brings a row into view.
 `quark_ui::document` builds a virtualized block document on `VariableList`.
 Every heading, paragraph, list item, quote, table, code block, and rule of
 every row is its own block, so selection runs across rows. Apps draw
-per-row chrome (headers, backgrounds) through a `RowDecorator`.
+per-row chrome (headers, backgrounds, and with `leading_edge` a bar along
+the row's leading edge, such as an error row's accent) through a
+`RowDecorator`.
 
 - `Document` is the app-owned state: rows, block order, selection, and
   the geometry of the rows on screen. The text stays in the app's model,

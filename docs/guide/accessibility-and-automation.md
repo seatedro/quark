@@ -100,8 +100,33 @@ e2e/run.sh                              # every spec
 e2e/run.sh e2e/specs/hello_ui/*.py      # some specs
 ```
 
-A spec lives at `e2e/specs/<example>/<behavior>.py` and runs against that
-example. [e2e/quark_e2e.py](../../e2e/quark_e2e.py) gives it two clients:
+A spec lives at `e2e/specs/<example>/<behavior>.py` and runs against the
+binary of that name, from `QUARK_E2E_BIN_DIR` (default
+`target/debug/examples`) or else from `target/debug`, where package
+binaries such as `workbench` and `codex-demo` land:
+
+```bash
+cargo build -p quark-workbench --bin workbench
+e2e/run.sh e2e/specs/workbench/*.py
+```
+
+The Workbench and Codex demos link `quark-terminal`, so building them
+needs Zig 0.16 (see [Terminal](terminal.md#building)). The runner starts
+apps without arguments; a spec sets its app's environment with header
+lines, applied before launch:
+
+```python
+# quark-e2e-env: QUARK_WORKBENCH_SCENARIO=stress
+```
+
+It also exports `QUARK_SYNTAX_PACKS=target/syntax-packs` when that
+directory exists, so code shows highlighted once the
+[grammar packs](syntax-packs.md#building-packs) are built.
+[theme_motion.py](../../e2e/specs/workbench/theme_motion.py) reads
+screenshots with Pillow (`python3-pil`), which the runner does not check
+for.
+
+[e2e/quark_e2e.py](../../e2e/quark_e2e.py) gives a spec two clients:
 
 - `Cua` drives the app as a computer-use agent does: snapshots of the
   AT-SPI tree, clicks by element or id (`press`, `press_id`), keys, the
@@ -114,8 +139,10 @@ Specs wait by polling observable state against a deadline (`wait_for`),
 never by sleeping. Each starts with a docstring naming the regression it
 catches; [greet_click.py](../../e2e/specs/hello_ui/greet_click.py) is a
 short one. A failed spec leaves `screen.png`, `tree.txt`, `cua-tree.txt`,
-and every log under `target/e2e/artifacts/<example>-<behavior>/`, and CI
-uploads them.
+and every log under `target/e2e/artifacts/<example>-<behavior>/`, with
+`meta.txt` naming the spec, its environment, and the screen, and CI
+uploads them. `QUARK_E2E_KEEP=1` keeps the artifacts of passing specs
+too, for reviewing what the app looked like.
 
 The specs run on Linux only, in the `e2e` workflow
 ([.github/workflows/e2e.yml](../../.github/workflows/e2e.yml)).
