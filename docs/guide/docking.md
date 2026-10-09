@@ -143,23 +143,3 @@ inside the usable area ([placement](../../crates/quark-app/src/platform/placemen
 Windows outside a dock persist the same records through
 `WindowOptions::persist_key`
 ([window_state](../../crates/quark-app/src/platform/window_state.rs)).
-
-## Testing
-
-`UiTestHarness` drives several windows. `desktop_move`, `desktop_press`, and
-`desktop_release` move the pointer across the virtual desktop with the
-pressed window's grab, as X11, Windows, and macOS deliver a drag.
-`DockWindows::window_stack` locates drags with a `ScriptedStack`
-(`quark_app::platform::dock_drag`, feature `test-support`) instead of the
-window system's; `UiTestHarness::set_capabilities` simulates a desktop
-without window positions, and `UiTestHarness::with_monitor` starts on a
-display so placements restore.
-[crates/quark-app/src/dock_windows/tests.rs](../../crates/quark-app/src/dock_windows/tests.rs)
-has the tear-off, drop, cancel, close, and restore tests.
-
-The end-to-end specs `panels_demo/new_window` and `panels_demo/tear_off` in
-[e2e/specs](../../e2e/specs/panels_demo) run the demo under Xvfb and
-openbox: the first moves a tab to a new window from the keyboard and closes
-it again, the second tears a tab off with real pointer events from
-`xdotool` and docks it back. `quark_e2e.app_tree(window=...)` finds a window
-by its name, and `app_frames()` lists them all.

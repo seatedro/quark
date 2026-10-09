@@ -90,12 +90,3 @@ module docs have a startup snippet:
 - **Crashes.** `WindowOptions::panic_hook` (on by default) logs a panic's
   message, location, and backtrace through `tracing` and to a crash log in
   the platform state directory, then runs the previous hook.
-
-## Checks
-
-`crates/quark-app/tests/platform_smoke.rs` opens a real window on macOS
-and Windows CI runners and walks the native menu bar and accelerators, a
-menu pick, the badge, always on top, edit roles, and (macOS) a `kAEGetURL`
-deep link. Linux has no native menu bar and its CI test job no display, so
-it skips there; the `forward_url` end-to-end spec covers single instance
-handoff on Linux.

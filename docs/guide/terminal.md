@@ -86,22 +86,6 @@ pub fn view(&mut self, w: f32, h: f32, vcx: &mut ViewContext) -> AnyElement {
 - Dropping a `TerminalState` ends its program: SIGHUP on Unix,
   `TerminateProcess` on Windows.
 
-## Deterministic tests
-
-A real shell prints whatever the machine's profile prints. Without a PTY,
-`TerminalState::feed` writes bytes into the VT as program output, and
-`take_input` returns the bytes queued for the program (typed keys,
-pastes, replies to queries) while no PTY is attached. On those two, a
-test backend can replay a captured transcript (the Codex
-demo's `--terminal scripted`) or answer typed commands from fixtures (the
-Workbench's `Shell`, in [dock/terminal.rs](../../examples/workbench/src/dock/terminal.rs)),
-so tests and e2e specs see the same screen on every run. Both demos run
-a real login shell by default.
-
-The terminal_demo tests run a real shell on Linux and macOS. Its output arrives on the PTY
-thread, outside the harness's fake clock, so the spawn callback also
-signals a channel the test waits on.
-
 ## Appearance
 
 `TerminalStyle` carries Ghostty's options with Ghostty's meanings.
