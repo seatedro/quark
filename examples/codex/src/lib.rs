@@ -513,12 +513,21 @@ pub fn window_options() -> WindowOptions {
         // The app is Electron: match how CSS blends, and show the
         // platform's window material behind the frame and sidebar where
         // it has one (the frame's dark capture color elsewhere).
-        compositing: quark::UiCompositing::WebCompatible,
+        compositing: compositing(),
         background: WindowBackground::Material(MaterialOptions::new(
             quark::MaterialKind::WindowBackground,
             theme::DARK.frame,
         )),
         ..WindowOptions::default()
+    }
+}
+
+/// Web-compatible blending; `QUARK_CODEX_COMPOSITING=linear` keeps quark's
+/// linear-light default, to compare the two on the same scene.
+pub fn compositing() -> quark::UiCompositing {
+    match std::env::var("QUARK_CODEX_COMPOSITING").as_deref() {
+        Ok("linear") => quark::UiCompositing::Linear,
+        _ => quark::UiCompositing::WebCompatible,
     }
 }
 
