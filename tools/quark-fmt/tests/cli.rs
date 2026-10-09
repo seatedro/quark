@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -116,20 +117,30 @@ fn check_of_a_formatted_file_exits_0_silently() {
 }
 
 #[test]
-fn write_replaces_the_file_keeping_its_mode_and_leaving_no_temporaries() {
+fn write_replaces_the_file_leaving_no_temporaries() {
     let fx = Fixture::new();
-    let path = fx.write("a.rs", UNFORMATTED);
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    fx.write("a.rs", UNFORMATTED);
     let run = fx.run(&["a.rs"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(fx.read("a.rs"), FORMATTED);
+    assert_eq!(fx.listing(), ["a.rs"]);
+}
+
+// Unix permission bits; Windows files have no equivalent beyond read-only.
+#[cfg(unix)]
+#[test]
+fn write_keeps_the_file_mode() {
+    let fx = Fixture::new();
+    let path = fx.write("a.rs", UNFORMATTED);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    assert_eq!(fx.run(&["a.rs"]).code, 0);
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o640
     );
-    assert_eq!(fx.listing(), ["a.rs"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn an_already_formatted_file_is_not_rewritten() {
     let fx = Fixture::new();
@@ -304,6 +315,8 @@ fn cargo_quark_dispatches_fmt_and_rejects_other_subcommands() {
     assert_eq!(fx.read("a.rs"), FORMATTED);
 }
 
+// The fake backend is a shell script.
+#[cfg(unix)]
 #[test]
 fn a_backend_that_never_settles_leaves_the_file_unchanged() {
     let fx = Fixture::new();
