@@ -1,8 +1,10 @@
 use proptest::prelude::*;
 
 use crate::{
-    BlockKind, DiffDocument, Expansion, GapId, Mode, PatchError, Projection, Reveal, RowKind, Side,
-    apply, diff_texts, parse_unified, write_unified,
+    BlockKind, Comparison, ComparisonOptions, ContextLen, ContextPolicy, DiffDocument, Expansion,
+    FileSources, GapId, HydrationError, Mode, PairingMode, PatchError, Projection, Reveal, RowKind,
+    Side, SourceCoverage, TextStore, WhitespaceMode, apply, diff_texts, parse_unified,
+    write_unified,
 };
 
 /// Files, hunks, and lines of `doc` as text: a summary line per file, then
@@ -457,4 +459,420 @@ fn an_unchanged_file_expands_to_all_of_its_lines() {
         .filter(|&r| p.line(r, Side::New).is_some())
         .count();
     assert_eq!(shown, 2);
+}
+
+/// Rows of `old` -> `new` with change blocks aligned per `options`.
+fn compared(old: &str, new: &str, mode: Mode, options: ComparisonOptions) -> String {
+    let doc = diff_texts(Some("f"), Some("f"), Some(old), Some(new), 0);
+    let comparison = Comparison::new(&doc, options);
+    let p = Projection::with_comparison(&doc, mode, &Expansion::new(&doc), &comparison);
+    p.verify_integrity(&doc).unwrap();
+    rows(&doc, &p)
+}
+
+#[test]
+fn similarity_pairing_shifts_an_unequal_change_onto_the_lines_it_resembles() {
+    let similar = ComparisonOptions::default();
+    let positional = ComparisonOptions {
+        pairing: PairingMode::Positional,
+        ..similar
+    };
+    let cases = [
+        (
+            "a line inserted above an edited one",
+            "return total;\n",
+            "log(total);\nreturn total + tax;\n",
+            similar,
+            "file f\n+ - 1 log(total);\n~ 1 2 return total; | return total + tax;\n",
+        ),
+        (
+            "positional mode keeps the old pairing",
+            "return total;\n",
+            "log(total);\nreturn total + tax;\n",
+            positional,
+            "file f\n~ 1 1 return total; | log(total);\n+ - 2 return total + tax;\n",
+        ),
+        (
+            "an import removed above edited ones",
+            "use a::x;\nuse b::{y, z};\nuse c::w;\n",
+            "use b::{y};\nuse c::{w, v};\n",
+            similar,
+            "file f\n- 1 - use a::x;\n~ 2 1 use b::{y, z}; | use b::{y};\n~ 3 2 use c::w; | use c::{w, v};\n",
+        ),
+        (
+            "unrelated lines stay positional",
+            "alpha\n",
+            "one\ntwo\n",
+            similar,
+            "file f\n~ 1 1 alpha | one\n+ - 2 two\n",
+        ),
+        (
+            "an ambiguous shift stays positional",
+            "x = 1;\n",
+            "x = 2;\nx = 3;\n",
+            similar,
+            "file f\n~ 1 1 x = 1; | x = 2;\n+ - 2 x = 3;\n",
+        ),
+    ];
+    for (name, old, new, options, expected) in cases {
+        assert_eq!(compared(old, new, Mode::Split, options), expected, "{name}");
+    }
+}
+
+#[test]
+fn unified_rows_of_a_shifted_pair_point_at_their_partner() {
+    let doc = diff_texts(
+        Some("f"),
+        Some("f"),
+        Some("return total;\n"),
+        Some("log(total);\nreturn total + tax;\n"),
+        0,
+    );
+    let comparison = Comparison::new(&doc, ComparisonOptions::default());
+    let p = Projection::with_comparison(&doc, Mode::Unified, &Expansion::new(&doc), &comparison);
+    let pairs: Vec<_> = (0..p.len())
+        .map(|r| p.line_pair(r).map(|pair| (pair.old, pair.new)))
+        .collect();
+    // Header, the removed line, then the inserted and the edited line.
+    assert_eq!(pairs, [None, Some((0, 1)), None, Some((0, 1))]);
+}
+
+#[test]
+fn similarity_pairing_over_budget_stays_positional_and_says_so() {
+    // 1 old line against 5,000 new: 5,000 offsets to score.
+    let new: String = (0..5_000).map(|i| format!("n{i}\n")).collect();
+    let doc = diff_texts(Some("f"), Some("f"), Some("n4999 edited\n"), Some(&new), 0);
+    let comparison = Comparison::new(&doc, ComparisonOptions::default());
+    let p = Projection::with_comparison(&doc, Mode::Split, &Expansion::new(&doc), &comparison);
+    assert_eq!(p.kind[1], RowKind::Modified);
+    assert_eq!(p.line(1, Side::New), Some(0));
+    assert_eq!(comparison.limited_pairings(0), 1);
+}
+
+#[test]
+fn whitespace_policies_hide_only_space_and_tab_changes() {
+    use WhitespaceMode::*;
+    let modes = [Exact, IgnoreEdgeSpace, IgnoreSpaceChange, IgnoreAllSpace];
+    // Hidden line pairs under each mode, in the order above.
+    let cases: &[(&str, &str, &str, [u32; 4])] = &[
+        ("leading indentation", "  a\n", "a\n", [0, 1, 0, 1]),
+        ("trailing space", "a \t\n", "a\n", [0, 1, 1, 1]),
+        ("internal run of spaces", "a   b\n", "a b\n", [0, 0, 1, 1]),
+        ("tab for a space", "a\tb\n", "a b\n", [0, 0, 1, 1]),
+        ("space added inside", "ab\n", "a b\n", [0, 0, 0, 1]),
+        ("no-break space", "a\u{a0}b\n", "a b\n", [0, 0, 0, 0]),
+        ("crlf", "a\r\n", "a\n", [0, 0, 0, 0]),
+        ("missing final newline", "a", "a\n", [0, 0, 0, 0]),
+    ];
+    for (name, old, new, expected) in cases {
+        let doc = diff_texts(Some("f"), Some("f"), Some(old), Some(new), 3);
+        let hidden = modes.map(|whitespace| {
+            let options = ComparisonOptions {
+                whitespace,
+                ..ComparisonOptions::default()
+            };
+            Comparison::new(&doc, options).hidden_whitespace_changes(0)
+        });
+        assert_eq!(hidden, *expected, "{name}");
+    }
+}
+
+#[test]
+fn a_hidden_whitespace_change_shows_as_context_between_real_changes() {
+    let options = ComparisonOptions {
+        whitespace: WhitespaceMode::IgnoreAllSpace,
+        ..ComparisonOptions::default()
+    };
+    let (old, new) = ("x\n  a\ny\n", "X\na\nY\n");
+    assert_eq!(
+        compared(old, new, Mode::Unified, options),
+        "file f\n- 1 - x\n+ - 1 X\n  2 2   a | a\n- 3 - y\n+ - 3 Y\n"
+    );
+    assert_eq!(
+        compared(old, new, Mode::Split, options),
+        "file f\n~ 1 1 x | X\n  2 2   a | a\n~ 3 3 y | Y\n"
+    );
+}
+
+/// Pairs of texts as a patch of their diff, parsed back: a patch-only
+/// document of `old` -> `new`.
+fn patch_of(old: &str, new: &str, context: u32) -> DiffDocument {
+    let doc = diff_texts(Some("f"), Some("f"), Some(old), Some(new), context);
+    parse_unified(&write_unified(&doc)).unwrap()
+}
+
+fn sources(old: &str, new: &str) -> FileSources {
+    FileSources {
+        old: Some(TextStore::new(old)),
+        new: Some(TextStore::new(new)),
+    }
+}
+
+/// Up to three edits (replace, insert, or delete a line) of `lines`.
+fn edited(lines: Vec<String>) -> impl Strategy<Value = Vec<String>> {
+    prop::collection::vec((0u8..3, any::<prop::sample::Index>()), 0..3).prop_map(move |edits| {
+        let mut lines = lines.clone();
+        for (i, (kind, at)) in edits.into_iter().enumerate() {
+            let at = at.index(lines.len() + 1);
+            match kind {
+                0 if at < lines.len() => lines[at] = format!("x{i}"),
+                1 => lines.insert(at, format!("y{i}")),
+                _ if at < lines.len() => drop(lines.remove(at)),
+                _ => {}
+            }
+        }
+        lines
+    })
+}
+
+/// A file, an edit of it, and an edit of that (often none), with long
+/// unchanged runs between edits so patches have several hunks and gaps.
+fn revisions() -> impl Strategy<Value = (String, String, String)> {
+    // The last edit may also flip the final newline.
+    (
+        0usize..40,
+        any::<bool>(),
+        any::<bool>(),
+        prop::bool::weighted(0.2),
+    )
+        .prop_flat_map(|(n, crlf, eol, flip)| {
+            let old: Vec<String> = (0..n).map(|i| format!("l{i}")).collect();
+            (Just(old.clone()), edited(old), Just((crlf, eol, flip)))
+        })
+        .prop_flat_map(|(old, new, ends)| (Just(old), Just(new.clone()), edited(new), Just(ends)))
+        .prop_map(|(old, new, other, (crlf, eol, flip))| {
+            let join = |lines: Vec<String>, eol: bool| {
+                let sep = if crlf { "\r\n" } else { "\n" };
+                let mut text = lines.join(sep);
+                if eol && !text.is_empty() {
+                    text.push_str(sep);
+                }
+                text
+            };
+            (join(old, eol), join(new, eol), join(other, eol != flip))
+        })
+}
+
+proptest! {
+    // The patch and the old text determine the new text, so hydration
+    // must accept exactly the real new text and refuse every other.
+    #[test]
+    fn hydration_accepts_only_the_sources_the_patch_came_from(
+        (old, new, other) in revisions(),
+        context in 0u32..3,
+    ) {
+        let patch = patch_of(&old, &new, context);
+        let hydrated = patch.hydrate_file(0, sources(&old, &other));
+        prop_assert_eq!(hydrated.is_ok(), other == new, "{:?}", hydrated.err());
+    }
+
+    #[test]
+    fn a_hydrated_patch_expands_to_the_whole_file_and_exports_the_same_patch(
+        (old, new, _) in revisions(),
+    ) {
+        let patch = patch_of(&old, &new, 1);
+        let doc = patch.hydrate_file(0, sources(&old, &new)).unwrap();
+        prop_assert_eq!(doc.coverage(0), SourceCoverage::Full);
+        let mut expansion = Expansion::new(&doc);
+        expansion.reveal_all(&doc);
+        let p = Projection::new(&doc, Mode::Unified, &expansion);
+        let shown: String = (0..p.len())
+            .filter_map(|r| p.line(r, Side::New))
+            .map(|i| format!("{}\n", doc.text(0, Side::New).line(i).unwrap()))
+            .collect();
+        let store = TextStore::new(new.as_str());
+        let expected: String = (0..store.line_count())
+            .map(|i| format!("{}\n", store.line(i).unwrap()))
+            .collect();
+        prop_assert_eq!(shown, expected);
+        prop_assert_eq!(write_unified(&doc), write_unified(&patch));
+    }
+
+    #[test]
+    fn comparisons_cover_every_changed_line_once_in_order(
+        old in text(),
+        new in text(),
+        whitespace in prop::sample::select(vec![
+            WhitespaceMode::Exact,
+            WhitespaceMode::IgnoreEdgeSpace,
+            WhitespaceMode::IgnoreSpaceChange,
+            WhitespaceMode::IgnoreAllSpace,
+        ]),
+        similar in any::<bool>(),
+        split in any::<bool>(),
+    ) {
+        let doc = diff_texts(Some("f"), Some("f"), Some(&old), Some(&new), 1);
+        let pairing = if similar { PairingMode::Similarity } else { PairingMode::Positional };
+        let comparison = Comparison::new(&doc, ComparisonOptions { whitespace, pairing });
+        prop_assert_eq!(comparison.verify_integrity(&doc), Ok(()));
+        let mut expansion = Expansion::new(&doc);
+        expansion.reveal_all(&doc);
+        let mode = if split { Mode::Split } else { Mode::Unified };
+        let p = Projection::with_comparison(&doc, mode, &expansion, &comparison);
+        prop_assert_eq!(p.verify_integrity(&doc), Ok(()));
+        for side in [Side::Old, Side::New] {
+            let shown = (0..p.len()).filter(|&r| p.line(r, side).is_some()).count();
+            prop_assert_eq!(shown as u32, doc.text(0, side).line_count());
+        }
+    }
+}
+
+#[test]
+fn hydration_names_why_it_refuses_sources() {
+    let added = parse_unified("--- /dev/null\n+++ b/n\n@@ -0,0 +1 @@\n+hi\n").unwrap();
+    let binary =
+        parse_unified("diff --git a/p.png b/p.png\nBinary files a/p.png and b/p.png differ\n")
+            .unwrap();
+    let modified = patch_of("a\nb\n", "a\nc\n", 1);
+    let cases = [
+        (
+            &added,
+            sources("", "hi\n"),
+            HydrationError::UnexpectedSide(Side::Old),
+        ),
+        (
+            &modified,
+            FileSources {
+                old: Some(TextStore::new("a\nb\n")),
+                new: None,
+            },
+            HydrationError::MissingSide(Side::New),
+        ),
+        (&binary, sources("x", "y"), HydrationError::Binary),
+        (
+            &modified,
+            sources("a\nb\n", "a\nd\n"),
+            HydrationError::Mismatch {
+                side: Side::New,
+                line: 1,
+            },
+        ),
+        (
+            &modified,
+            sources("a\nb", "a\nc"),
+            HydrationError::Eof(Side::Old),
+        ),
+    ];
+    for (doc, sources, expected) in cases {
+        assert_eq!(doc.hydrate_file(0, sources).err(), Some(expected));
+    }
+    let hydrated = added
+        .hydrate_file(
+            0,
+            FileSources {
+                old: None,
+                new: Some(TextStore::new("hi\n")),
+            },
+        )
+        .unwrap();
+    assert_eq!(hydrated.coverage(0), SourceCoverage::Full);
+}
+
+#[test]
+fn patch_only_gaps_know_their_length_above_hunks_but_not_after_the_last() {
+    let old = numbered(1..31);
+    let new = old.replace("l5\n", "x5\n").replace("l20\n", "x20\n");
+    let patch = patch_of(&old, &new, 1);
+    let gap = |hunk| GapId { file: 0, hunk };
+    assert_eq!(patch.context_len(gap(Some(0))), ContextLen::Lines(3));
+    assert_eq!(patch.context_len(gap(Some(1))), ContextLen::Lines(12));
+    assert_eq!(patch.context_len(gap(None)), ContextLen::Unknown);
+    let full = patch.hydrate_file(0, sources(&old, &new)).unwrap();
+    assert_eq!(full.context_len(gap(None)), ContextLen::Lines(9));
+}
+
+#[test]
+fn a_zero_min_hidden_policy_keeps_a_one_line_gap_collapsed() {
+    let old = numbered(1..6);
+    let new = old.replace("l1\n", "x1\n").replace("l5\n", "x5\n");
+    let doc = diff_texts(Some("f"), Some("f"), Some(&old), Some(&new), 1);
+    let gaps = |policy| {
+        let p = Projection::new(&doc, Mode::Unified, &Expansion::with_policy(&doc, policy));
+        rows(&doc, &p)
+            .lines()
+            .filter(|l| l.starts_with("..."))
+            .count()
+    };
+    assert_eq!(gaps(ContextPolicy::default()), 0);
+    let keep = ContextPolicy {
+        min_hidden: 0,
+        ..ContextPolicy::default()
+    };
+    assert_eq!(gaps(keep), 1);
+}
+
+#[test]
+fn collapsing_a_gap_hides_its_revealed_lines_again() {
+    let old = numbered(1..31);
+    let new = old.replace("l2\n", "x2\n").replace("l20\n", "x20\n");
+    let doc = diff_texts(Some("f"), Some("f"), Some(&old), Some(&new), 1);
+    let mut expansion = Expansion::new(&doc);
+    let between = GapId {
+        file: 0,
+        hunk: Some(1),
+    };
+    let collapsed = Projection::new(&doc, Mode::Unified, &expansion).len();
+    expansion.reveal(&doc, between, Reveal::Down, 5);
+    assert!(expansion.collapse(between));
+    assert_eq!(
+        Projection::new(&doc, Mode::Unified, &expansion).len(),
+        collapsed
+    );
+    assert_eq!(expansion.hidden(&doc, between), 15);
+}
+
+#[test]
+fn file_facts_report_changes_that_have_no_lines() {
+    let patch = "diff --git a/run.sh b/run.sh\n\
+                 old mode 100644\n\
+                 new mode 100755\n\
+                 diff --git a/a.txt b/b.txt\n\
+                 similarity index 100%\n\
+                 rename from a.txt\n\
+                 rename to b.txt\n\
+                 diff --git a/c.txt b/d.txt\n\
+                 similarity index 100%\n\
+                 copy from c.txt\n\
+                 copy to d.txt\n\
+                 diff --git a/logo.png b/logo.png\n\
+                 Binary files a/logo.png and b/logo.png differ\n\
+                 diff --git a/e.txt b/e.txt\n\
+                 --- a/e.txt\n\
+                 +++ b/e.txt\n\
+                 @@ -1 +1 @@\n\
+                 -x\n\
+                 +x\n\
+                 \\ No newline at end of file\n";
+    let doc = parse_unified(patch).unwrap();
+    let facts: Vec<String> = (0..doc.file_count())
+        .map(|f| {
+            let facts = doc.facts(f);
+            format!(
+                "{} {}{}{}{}{}",
+                doc.path(f),
+                facts.status.name(),
+                if facts.binary { " binary" } else { "" },
+                facts
+                    .mode_change
+                    .map(|(o, n)| format!(" mode {o}->{n}"))
+                    .unwrap_or_default(),
+                if facts.has_hunks { " hunks" } else { "" },
+                match (facts.old_missing_newline, facts.new_missing_newline) {
+                    (false, true) => " newline removed",
+                    (true, false) => " newline added",
+                    _ => "",
+                },
+            )
+        })
+        .collect();
+    assert_eq!(
+        facts,
+        [
+            "run.sh modified mode 100644->100755",
+            "b.txt renamed",
+            "d.txt copied",
+            "logo.png modified binary",
+            "e.txt modified hunks newline removed",
+        ]
+    );
 }
