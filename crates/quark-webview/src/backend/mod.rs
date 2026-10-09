@@ -45,7 +45,9 @@ use crate::{
 mod linux;
 #[cfg(all(feature = "native", target_os = "macos"))]
 mod macos;
-#[cfg(all(feature = "native", windows))]
+// Built for tests everywhere: the WebView2 backend's CDP and navigation
+// bookkeeping has no COM, only its glue does.
+#[cfg(any(test, all(feature = "native", windows)))]
 mod windows;
 
 /// While any backend needs servicing, the runner waits at most this long
