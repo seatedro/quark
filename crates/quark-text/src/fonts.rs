@@ -14,8 +14,13 @@ use crate::epoch::FontEpoch;
 mod coretext;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
 mod fontconfig;
+mod identity;
 mod platform;
 
+pub use identity::{
+    FaceId, FontInstanceId, FontProvenance, FontRegistry, FontSource, FontSourceError,
+    FontSourceId, PreparedFont, Synthesis, Variation,
+};
 pub(crate) use platform::Candidate;
 
 pub const UI_FAMILY: &str = "Geist";
@@ -1214,6 +1219,39 @@ mod tests {
                 assert_eq!(glyph.font_weight.0, 400, "{kind:?}");
             }
         }
+    }
+
+    // Catches swash drawing a variable font's glyphs with another font's
+    // axis coordinates: its scale context keeps the last font's, and
+    // cosmic-text sets only `wght`, so Inter's `opsz` took JetBrains Mono's
+    // `wght` coordinate whenever a JetBrains Mono glyph was drawn first,
+    // and Inter glyphs drew at an optical size shaping never measured.
+    #[test]
+    fn drawing_another_variable_font_first_changes_no_glyph() {
+        let mut system = crate::TextSystem::vendored_only(&FontSettings::default());
+        let mut key = |family, weight| {
+            let style = crate::TextStyle::new(20.0)
+                .family(Some(family))
+                .weight(weight);
+            let layout = system
+                .layout(&crate::TextParams::new("W", style))
+                .expect("layout");
+            layout
+                .physical_glyph(0, (0.0, 0.0))
+                .expect("glyph")
+                .cache_key
+        };
+        let inter = key(INTER_FAMILY, quark::FontWeight::Normal);
+        let mono = key(JETBRAINS_MONO_FAMILY, quark::FontWeight::Bold);
+        let fs = system.raster_font_system();
+        let alone = cosmic_text::SwashCache::new()
+            .get_image_uncached(fs, inter)
+            .map(|image| image.data);
+        let mut cache = cosmic_text::SwashCache::new();
+        cache.get_image_uncached(fs, mono);
+        let after_mono = cache.get_image_uncached(fs, inter).map(|image| image.data);
+        assert!(alone.is_some());
+        assert_eq!(after_mono, alone);
     }
 
     /// The ink of `text` in `family` at `weight`, rasterized glyph by

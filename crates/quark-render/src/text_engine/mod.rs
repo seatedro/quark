@@ -14,6 +14,7 @@
 mod atlas;
 mod error;
 mod pipeline;
+pub(crate) mod raster;
 mod render;
 mod viewport;
 
