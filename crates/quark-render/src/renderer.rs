@@ -4828,6 +4828,9 @@ mod chunk_tests;
 #[path = "compositing_tests.rs"]
 mod compositing_tests;
 #[cfg(test)]
+#[path = "mask_tests.rs"]
+mod mask_tests;
+#[cfg(test)]
 #[path = "text_fill_tests.rs"]
 mod text_fill_tests;
 
