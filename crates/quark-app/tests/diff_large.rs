@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use quark_app::quark_ui::element::AnyElement;
-use quark_app::quark_ui::quark_syntax::testing;
+use quark_app::quark_ui::quark_syntax::{HighlightKind, testing};
 use quark_app::quark_ui::test_alloc::{self, Counting};
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::testing::UiTestHarness;
@@ -57,6 +57,17 @@ impl UiApp for Large {
     fn update(&mut self, event: DiffEvent, _: &mut UiContext) {
         let _ = matches!(self.diff.handle(event), DiffOutcome::Copy(_));
     }
+}
+
+/// Whether a line on screen has syntax colors.
+fn colored(ui: &UiTestHarness<Large>) -> bool {
+    ui.app().diff.frame().is_some_and(|frame| {
+        frame
+            .rows
+            .iter()
+            .flat_map(|row| row.paint.sides.iter().flatten())
+            .any(|line| line.tones.iter().any(|&k| k != HighlightKind::Normal))
+    })
 }
 
 /// The file header's syntax status, from the frame.
@@ -132,7 +143,9 @@ fn report_large_diffs() {
             (old, new)
         }),
     ];
-    for (name, make) in cases {
+    // `QUARK_DIFF_CASE` picks the cases whose names contain it.
+    let only = std::env::var("QUARK_DIFF_CASE").unwrap_or_default();
+    for (name, make) in cases.into_iter().filter(|(name, _)| name.contains(&*only)) {
         let (old, new) = make(size);
         reset_peak_rss();
         let inputs = peak_rss().unwrap_or(0);
@@ -140,7 +153,9 @@ fn report_large_diffs() {
         let doc = diff_texts(Some("f.js"), Some("f.js"), Some(&old), Some(&new), 3);
         let diffed = started.elapsed();
         drop((old, new));
+        let viewed = Instant::now();
         let mut diff = DiffViewState::new("large.diff", FOCUS, doc);
+        let state_built = viewed.elapsed();
         let (woke_tx, woke) = channel();
         diff.set_syntax_wake(move || {
             let _ = woke_tx.send(());
@@ -149,7 +164,8 @@ fn report_large_diffs() {
         let mut ui = UiTestHarness::new(Large { diff }, SIZE, 1.0);
         let first_paint = started.elapsed();
 
-        // Colors: the first part, then every part until both sides are done.
+        // Colors: the first on screen, then every part until both sides are
+        // done.
         let (mut first_colors, mut full) = (None, None);
         let deadline = Instant::now() + Duration::from_secs(600);
         while full.is_none() && Instant::now() < deadline {
@@ -158,17 +174,17 @@ fn report_large_diffs() {
             }
             while woke.try_recv().is_ok() {}
             ui.frame();
+            if colored(&ui) {
+                first_colors.get_or_insert(started.elapsed());
+            }
             match status(&ui) {
                 Some(SyntaxStatus::Ready) => full = Some(started.elapsed()),
-                // Its grammar is loading; plain until then.
-                Some(SyntaxStatus::Pending) | None => continue,
-                Some(SyntaxStatus::Streaming { .. }) => {}
+                Some(SyntaxStatus::Pending | SyntaxStatus::Streaming { .. }) | None => {}
                 Some(other) => {
                     eprintln!("  status {other:?}");
                     break;
                 }
             }
-            first_colors.get_or_insert(started.elapsed());
         }
 
         for _ in 0..3 {
@@ -217,7 +233,7 @@ fn report_large_diffs() {
         }
         let peak = peak_rss().unwrap_or(0);
         eprintln!(
-            "{name}: diff {diffed:.2?}, first paint {first_paint:.2?}, first colors \
+            "{name}: diff {diffed:.2?}, view state {state_built:.2?}, first paint {first_paint:.2?}, first colors \
              {first_colors:.2?}, full syntax {full:.2?}; scroll {avg:.2?} avg / {worst:.2?} worst \
              (to {wheeled:.0} pt), \
              jumps {jump_avg:.2?} / {jump_worst:.2?}{sideways}; settled frame {settled} \

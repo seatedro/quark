@@ -354,6 +354,7 @@ pub(crate) struct Outcome {
 /// Where a streamed highlight starts its exact pass, and when it should
 /// stop to let other work run: asked after each window it finishes, with
 /// how many it finished in this call.
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
 pub(crate) struct Slice<'a> {
     pub(crate) from: usize,
     /// The inexact window an earlier turn colored last.

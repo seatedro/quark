@@ -734,23 +734,23 @@ impl DiffViewState {
     /// move in or out of view.
     fn prioritize_syntax(&mut self, window: Range<usize>) {
         let refs = &self.refs[window];
-        // A long side still streaming colors the top line's surroundings
-        // first.
-        let top = refs.iter().find_map(|r| match *r {
-            RowRef::Line { seg, row } => Some((seg as usize, row)),
-            _ => None,
-        });
-        if let Some((seg, row)) = top {
-            let segment = &self.segments[seg];
-            let (p, file) = (&segment.projection, segment.projection.file[row as usize]);
-            if let Some((bridge, bridge_file)) = self.syntax_of(seg, file) {
-                for side in [Side::Old, Side::New] {
-                    let start = p
-                        .line(row, side)
-                        .and_then(|i| segment.doc.text(file, side).line_range(i).map(|r| r.start));
-                    if let Some(start) = start {
-                        bridge.set_focus(bridge_file, side, start);
-                    }
+        // A long side still streaming colors the surroundings of its top
+        // line on screen first (headers and the other side's rows have
+        // none).
+        for side in [Side::Old, Side::New] {
+            let top = refs.iter().find_map(|r| match *r {
+                RowRef::Line { seg, row } => {
+                    let p = &self.segments[seg as usize].projection;
+                    Some((seg as usize, row, p.line(row, side)?))
+                }
+                _ => None,
+            });
+            if let Some((seg, row, index)) = top {
+                let segment = &self.segments[seg];
+                let file = segment.projection.file[row as usize];
+                let start = segment.doc.text(file, side).line_range(index);
+                if let (Some((bridge, file)), Some(start)) = (self.syntax_of(seg, file), start) {
+                    bridge.set_focus(file, side, start.start);
                 }
             }
         }
