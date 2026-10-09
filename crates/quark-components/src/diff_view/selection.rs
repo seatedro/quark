@@ -130,7 +130,7 @@ impl DiffViewState {
                 segment.projection.len().saturating_sub(1)
             };
             for row in rows {
-                if segment.list_rows.get(row as usize) == Some(&super::state::NONE) {
+                if segment.list_rows.index(row).is_none() {
                     continue;
                 }
                 let Some((side, index)) = self.copied_line(seg as usize, row, side) else {
@@ -276,8 +276,8 @@ impl DiffViewState {
             let unit = segment.unit(segment.projection.file[row as usize]);
             Some(SelectionPoint::new(block_key(side, unit, index), byte))
         };
-        let first = self.refs.iter().find_map(|&r| point(r, 0));
-        let last = self.refs.iter().rev().find_map(|&r| point(r, usize::MAX));
+        let first = self.refs.iter().find_map(|r| point(r, 0));
+        let last = self.refs.iter().rev().find_map(|r| point(r, usize::MAX));
         if let (Some(first), Some(last)) = (first, last) {
             self.selection = Some(Selection::new(first, last));
             self.selection_side = side;
@@ -320,7 +320,7 @@ impl DiffViewState {
                 rows.len() - 1
             });
         let line_of = |r: &super::prepared::FrameRow| match self.refs.get(r.index as usize) {
-            Some(&RowRef::Line { seg, row }) => {
+            Some(RowRef::Line { seg, row }) => {
                 let (side, index) = self.shown_line(seg as usize, row, side)?;
                 Some((side, index, seg as usize, row))
             }

@@ -9,7 +9,7 @@
 use quark_diff::{RowKind, Side};
 
 use super::DiffViewState;
-use super::state::{NONE, RowRef, source_line, store_index};
+use super::state::{RowRef, source_line, store_index};
 
 pub use quark_diff::{FileId, Revision};
 
@@ -67,10 +67,7 @@ impl DiffViewState {
 
     /// Scrolls so projection row `row` is at the top (static view).
     pub fn scroll_to_row(&mut self, row: u32) {
-        let Some(&index) = self.segments[0].list_rows.get(row as usize) else {
-            return;
-        };
-        if index != NONE {
+        if let Some(index) = self.segments[0].list_rows.index(row) {
             let top = self.list.rows().offset_of_index(index as usize);
             self.set_scroll(top);
         }
@@ -106,8 +103,7 @@ impl DiffViewState {
                 let above = start.checked_sub(1).filter(|&r| {
                     hunks && matches!(p.kind[r as usize], RowKind::HunkHeader | RowKind::Gap)
                 });
-                let index = segment.list_rows[above.unwrap_or(start) as usize];
-                (index != NONE).then_some(index)
+                segment.list_rows.index(above.unwrap_or(start))
             })
         });
         // Half a point of slack: offsets are rounded to Fenwick units.
@@ -133,7 +129,7 @@ impl DiffViewState {
 
     /// Moves the keyboard focus target to list row `index`.
     pub(crate) fn set_focus(&mut self, index: Option<u32>) {
-        let key = index.map(|i| self.ref_key(self.refs[i as usize]));
+        let key = index.map(|i| self.ref_key(self.refs.at(i as usize)));
         self.focused_index = index;
         if key != self.focused {
             self.focused = key;
@@ -150,7 +146,7 @@ impl DiffViewState {
 
     /// The source target a list row stands for.
     pub(crate) fn target_of_index(&self, index: u32) -> Option<DiffTarget> {
-        let (seg, row) = match *self.refs.get(index as usize)? {
+        let (seg, row) = match self.refs.get(index as usize)? {
             RowRef::Line { seg, row } => (seg as usize, row),
             RowRef::Fact { seg, file, .. } => {
                 let unit = self.segments[seg as usize].unit(file);
@@ -190,8 +186,8 @@ impl DiffViewState {
     pub(crate) fn preview_target(&self) -> Option<DiffTarget> {
         self.preview?;
         let hidden = self.segments.iter().enumerate().find_map(|(seg, segment)| {
-            let row = segment.list_rows.iter().position(|&i| i == NONE)?;
-            Some((seg, row as u32))
+            let row = segment.list_rows.first_hidden(segment.projection.len())?;
+            Some((seg, row))
         });
         let (seg, row) = hidden?;
         let segment = &self.segments[seg];
@@ -236,7 +232,7 @@ impl DiffViewState {
                 let (seg, file) = self.locate(self.unit_of(file)?)?;
                 let segment = &self.segments[seg];
                 let row = *segment.projection.file_rows.get(file as usize)?;
-                Some(segment.list_rows[row as usize]).filter(|&i| i != NONE)
+                segment.list_rows.index(row)
             }
             DiffTarget::Hunk { file, hunk } => {
                 let unit = self.unit_of(file)?;
@@ -249,7 +245,7 @@ impl DiffViewState {
                     .checked_add(hunk)
                     .filter(|h| hunks.contains(h))?;
                 let row = *segment.projection.hunk_rows.get(global as usize)?;
-                Some(segment.list_rows[row as usize]).filter(|&i| i != NONE)
+                segment.list_rows.index(row)
             }
             DiffTarget::Source(point) => {
                 let unit = self.unit_of(point.file)?;

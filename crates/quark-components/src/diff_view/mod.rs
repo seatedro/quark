@@ -78,7 +78,7 @@ use annotations::AnnotationTable;
 use prepared::{Metrics, RowPaint, ViewFrame};
 use presentation::{DiffAppearance, DiffLayout, DiffPresentation};
 use search::SearchState;
-use state::{FileMap, RowRef, Segment};
+use state::{FileMap, RowRefs, Segment};
 use syntax::{DiffSyntax, SyntaxBudget};
 
 /// Lines one click on an expand control reveals by default.
@@ -237,7 +237,7 @@ pub struct DiffViewState {
     files: FileMap,
     mode: Mode,
     /// What each row of `list` shows.
-    refs: Vec<RowRef>,
+    refs: RowRefs,
     /// List index of each annotation entry's row, or [`state::NONE`].
     annotation_rows: Vec<u32>,
     /// Keyed by list index; see [`Self::rebuild_rows`].
@@ -323,7 +323,7 @@ impl DiffViewState {
             segments: Vec::new(),
             files: FileMap::default(),
             mode: Mode::Unified,
-            refs: Vec::new(),
+            refs: RowRefs::default(),
             annotation_rows: Vec::new(),
             list: VariableList::new(1.0, 0.0),
             style: DiffStyle::default(),

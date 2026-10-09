@@ -15,7 +15,7 @@
 //! valid while other files change around them.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
@@ -67,9 +67,8 @@ pub(crate) struct Segment {
     /// options.
     pub comparison: Comparison,
     pub projection: Projection,
-    /// List index of each projection row, or [`NONE`] where a preview cut
-    /// it.
-    pub list_rows: Vec<u32>,
+    /// Where each projection row sits in the list, if it is shown.
+    pub list_rows: ListRows,
     /// Changed ranges of each line pair shown, computed once for both
     /// unified rows of the pair (and the split row) while preparing.
     inline: RefCell<HashMap<LinePair, Rc<PairedInlineDiff>>>,
@@ -95,7 +94,7 @@ impl Segment {
             expansion,
             comparison,
             projection,
-            list_rows: Vec::new(),
+            list_rows: ListRows::default(),
             inline: RefCell::default(),
         }
     }
@@ -174,6 +173,181 @@ pub(crate) enum RowRef {
     Fact { seg: u32, file: u32, fact: u32 },
     Annotation { index: u32 },
     More { hidden: u32 },
+}
+
+/// What each row of the list shows, in runs: consecutive projection rows
+/// of one segment are one entry, so a diff of millions of lines between a
+/// few headers costs a few entries rather than one per row.
+#[derive(Debug, Default)]
+pub(crate) struct RowRefs {
+    /// List index each run starts at, ascending from 0.
+    starts: Vec<u32>,
+    /// A line run names its first row; every other run is one row.
+    runs: Vec<RowRef>,
+    len: u32,
+}
+
+impl RowRefs {
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Rows in run `k`.
+    fn run_len(&self, k: usize) -> u32 {
+        self.starts.get(k + 1).copied().unwrap_or(self.len) - self.starts[k]
+    }
+
+    /// Appends `r`, extending the last run when it continues it, and
+    /// returns its list index.
+    fn push(&mut self, r: RowRef) -> u32 {
+        let index = self.len;
+        let continues = match (self.runs.last(), r) {
+            (Some(&RowRef::Line { seg, row }), RowRef::Line { seg: s, row: next }) => {
+                let k = self.runs.len() - 1;
+                seg == s && row.checked_add(self.run_len(k)) == Some(next)
+            }
+            _ => false,
+        };
+        if !continues {
+            self.starts.push(index);
+            self.runs.push(r);
+        }
+        self.len += 1;
+        index
+    }
+
+    /// Appends rows `rows` of segment `seg` as one run.
+    fn push_lines(&mut self, seg: u32, rows: Range<u32>) {
+        if let Some(first) = rows.clone().next() {
+            self.push(RowRef::Line { seg, row: first });
+            self.len += rows.len() as u32 - 1;
+        }
+    }
+
+    /// What list row `index` shows. O(log runs).
+    pub fn get(&self, index: usize) -> Option<RowRef> {
+        let index = u32::try_from(index).ok().filter(|&i| i < self.len)?;
+        let k = self.starts.partition_point(|&s| s <= index) - 1;
+        Some(match self.runs[k] {
+            RowRef::Line { seg, row } => RowRef::Line {
+                seg,
+                row: row + (index - self.starts[k]),
+            },
+            r => r,
+        })
+    }
+
+    /// [`Self::get`] for an index known to be in range.
+    pub fn at(&self, index: usize) -> RowRef {
+        self.get(index)
+            .unwrap_or_else(|| panic!("row {index} of {}", self.len))
+    }
+
+    /// Every row in list order, run by run.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = RowRef> + '_ {
+        self.runs.iter().enumerate().flat_map(move |(k, &r)| {
+            (0..self.run_len(k)).map(move |j| match r {
+                RowRef::Line { seg, row } => RowRef::Line { seg, row: row + j },
+                r => r,
+            })
+        })
+    }
+
+    /// Rows `range` in list order.
+    pub fn range(&self, range: Range<usize>) -> impl DoubleEndedIterator<Item = RowRef> + '_ {
+        range.map(|i| self.at(i))
+    }
+}
+
+/// Builds [`RowRefs`], noting where each annotation's row lands.
+#[derive(Default)]
+struct RefsBuilder {
+    refs: RowRefs,
+    /// List index of each annotation entry's row, or [`NONE`].
+    annotation_rows: Vec<u32>,
+}
+
+impl RefsBuilder {
+    fn push(&mut self, r: RowRef) -> u32 {
+        let index = self.refs.push(r);
+        if let RowRef::Annotation { index: entry } = r {
+            let entry = entry as usize;
+            if self.annotation_rows.len() <= entry {
+                self.annotation_rows.resize(entry + 1, NONE);
+            }
+            self.annotation_rows[entry] = index;
+        }
+        index
+    }
+
+    /// The rows under `file`'s header: its metadata, then the annotations
+    /// that lost their lines.
+    fn file_extras(
+        &mut self,
+        doc: &DiffDocument,
+        outdated: Option<&Vec<u32>>,
+        seg: u32,
+        file: u32,
+    ) {
+        for fact in 0..file_facts(doc, file).len() as u32 {
+            self.push(RowRef::Fact { seg, file, fact });
+        }
+        for &index in outdated.into_iter().flatten() {
+            self.push(RowRef::Annotation { index });
+        }
+    }
+}
+
+/// Where a segment's projection rows sit in the list, in runs of rows
+/// shown one after another; rows a collapsed file or a preview leaves out
+/// have no place.
+#[derive(Debug, Default)]
+pub(crate) struct ListRows {
+    /// `(first row, its list index)` of each run, ascending.
+    runs: Vec<(u32, u32)>,
+    /// Rows in each run.
+    lens: Vec<u32>,
+}
+
+impl ListRows {
+    /// Records that `count` rows from `row` on sit from list index `index`.
+    fn push(&mut self, row: u32, index: u32, count: u32) {
+        if count == 0 {
+            return;
+        }
+        if let (Some(&(r, i)), Some(len)) = (self.runs.last(), self.lens.last_mut())
+            && r + *len == row
+            && i + *len == index
+        {
+            *len += count;
+            return;
+        }
+        self.runs.push((row, index));
+        self.lens.push(count);
+    }
+
+    /// The list index of projection row `row`, unless it is left out.
+    /// O(log runs).
+    pub fn index(&self, row: u32) -> Option<u32> {
+        let k = self
+            .runs
+            .partition_point(|&(r, _)| r <= row)
+            .checked_sub(1)?;
+        let (first, index) = self.runs[k];
+        (row - first < self.lens[k]).then(|| index + (row - first))
+    }
+
+    /// The first of `rows` projection rows left out of the list.
+    pub fn first_hidden(&self, rows: u32) -> Option<u32> {
+        let mut next = 0;
+        for (&(row, _), &len) in self.runs.iter().zip(&self.lens) {
+            if row > next {
+                return Some(next);
+            }
+            next = row + len;
+        }
+        (next < rows).then_some(next)
+    }
 }
 
 /// The scroll position to keep while rows change: the top row's key and
@@ -392,11 +566,11 @@ impl DiffViewState {
     /// The projection row a list row belongs to, for the static view.
     pub(crate) fn projection_row_of(&self, index: usize) -> Option<u32> {
         let segment = self.segments.first()?;
-        match *self.refs.get(index)? {
+        match self.refs.get(index)? {
             RowRef::Line { row, .. } => Some(row),
             RowRef::Fact { file, .. } => segment.projection.file_rows.get(file as usize).copied(),
             RowRef::Annotation { .. } | RowRef::More { .. } => {
-                (0..index).rev().find_map(|i| match self.refs[i] {
+                self.refs.range(0..index).rev().find_map(|r| match r {
                     RowRef::Line { row, .. } => Some(row),
                     _ => None,
                 })
@@ -412,7 +586,7 @@ impl DiffViewState {
         let rows = self.list.rows();
         let index = rows.row_at(self.list.scroll_offset())?;
         let line = match self.refs.get(index) {
-            Some(&RowRef::Line { seg, row }) => {
+            Some(RowRef::Line { seg, row }) => {
                 let segment = &self.segments[seg as usize];
                 [Side::New, Side::Old]
                     .into_iter()
@@ -421,7 +595,7 @@ impl DiffViewState {
             _ => None,
         };
         Some(Anchor {
-            key: self.ref_key(self.refs[index]),
+            key: self.ref_key(self.refs.at(index)),
             index: index as u32,
             delta: self.list.scroll_offset() - rows.offset_of_index(index),
             line,
@@ -433,11 +607,7 @@ impl DiffViewState {
         let (seg, file) = self.locate(unit)?;
         let segment = &self.segments[seg];
         let row = segment.projection.row_of(file, side, index)?;
-        segment
-            .list_rows
-            .get(row as usize)
-            .copied()
-            .filter(|&i| i != NONE)
+        segment.list_rows.index(row)
     }
 
     /// List index of the row keyed `key`, if it is shown. Line, file
@@ -458,12 +628,12 @@ impl DiffViewState {
                 Some(side) => p.row_of(file, side, index)?,
                 None => *p.file_rows.get(file as usize)?,
             };
-            segment.list_rows.get(row as usize).copied()
+            segment.list_rows.index(row)
         };
         let matches = |i: u32| {
             self.refs
                 .get(i as usize)
-                .is_some_and(|&r| self.ref_key(r) == key)
+                .is_some_and(|r| self.ref_key(r) == key)
         };
         let guess = match key >> 60 {
             t if t == FACT_TAG >> 60 => row_of(None).map(|header| header.saturating_add(1 + index)),
@@ -507,65 +677,76 @@ impl DiffViewState {
         let placed = self.annotation_placement();
         let limit = self.preview.map(|p| p.max_rows);
         let collapsed = &self.collapsed;
-        let mut refs = Vec::with_capacity(self.refs.len());
+        // Files with annotations on their lines, whose rows go one by one.
+        let annotated: HashSet<u32> = placed.at_line.keys().map(|&(unit, ..)| unit).collect();
+        let mut b = RefsBuilder::default();
         let mut hidden = 0u32;
         for (si, segment) in self.segments.iter_mut().enumerate() {
             let seg = si as u32;
             let p = &segment.projection;
-            segment.list_rows.clear();
-            segment.list_rows.resize(p.len() as usize, NONE);
-            for row in 0..p.len() {
-                let (kind, file) = (p.kind[row as usize], p.file[row as usize]);
-                if kind != RowKind::FileHeader && collapsed.contains(&(segment.slot + file)) {
-                    continue;
-                }
-                if limit.is_some_and(|max| refs.len() as u32 >= max) {
-                    hidden += 1;
-                    continue;
-                }
-                segment.list_rows[row as usize] = refs.len() as u32;
-                refs.push(RowRef::Line { seg, row });
+            let mut shown = ListRows::default();
+            for (file, &header) in p.file_rows.iter().enumerate() {
+                let file = file as u32;
+                let end = p
+                    .file_rows
+                    .get(file as usize + 1)
+                    .copied()
+                    .unwrap_or(p.len());
                 let unit = segment.slot + file;
-                if kind == RowKind::FileHeader && !collapsed.contains(&unit) {
-                    let facts = file_facts(&segment.doc, file).len() as u32;
-                    refs.extend((0..facts).map(|fact| RowRef::Fact { seg, file, fact }));
-                    if let Some(outdated) = placed.outdated.get(&unit) {
-                        refs.extend(outdated.iter().map(|&index| RowRef::Annotation { index }));
+                let folded = collapsed.contains(&unit);
+                // A folded file shows only its header.
+                let rows = header..if folded { header + 1 } else { end };
+                let outdated = placed.outdated.get(&unit).filter(|_| !folded);
+                if limit.is_none() && !annotated.contains(&unit) {
+                    // The common case, a run at a time: the header, its
+                    // metadata rows, then every other row of the file.
+                    shown.push(header, b.push(RowRef::Line { seg, row: header }), 1);
+                    if !folded {
+                        b.file_extras(&segment.doc, outdated, seg, file);
                     }
+                    let lines = header + 1..rows.end;
+                    shown.push(lines.start, b.refs.len() as u32, lines.len() as u32);
+                    b.refs.push_lines(seg, lines);
+                    continue;
                 }
-                if kind.is_line() {
-                    for side in [Side::Old, Side::New] {
-                        let Some(index) = p.line(row, side) else {
-                            continue;
-                        };
-                        if let Some(list) = placed.at_line.get(&(unit, side, index)) {
-                            refs.extend(list.iter().map(|&index| RowRef::Annotation { index }));
+                for row in rows {
+                    if limit.is_some_and(|max| b.refs.len() as u32 >= max) {
+                        hidden += 1;
+                        continue;
+                    }
+                    shown.push(row, b.push(RowRef::Line { seg, row }), 1);
+                    let kind = p.kind[row as usize];
+                    if kind == RowKind::FileHeader && !folded {
+                        b.file_extras(&segment.doc, outdated, seg, file);
+                    }
+                    if kind.is_line() {
+                        for side in [Side::Old, Side::New] {
+                            let Some(index) = p.line(row, side) else {
+                                continue;
+                            };
+                            for &index in placed
+                                .at_line
+                                .get(&(unit, side, index))
+                                .into_iter()
+                                .flatten()
+                            {
+                                b.push(RowRef::Annotation { index });
+                            }
                         }
                     }
                 }
             }
+            segment.list_rows = shown;
         }
         if hidden > 0 {
-            refs.push(RowRef::More { hidden });
+            b.push(RowRef::More { hidden });
         }
-        self.refs = refs;
-        self.annotation_rows.clear();
-        for (i, r) in self.refs.iter().enumerate() {
-            if let RowRef::Annotation { index } = *r {
-                let index = index as usize;
-                if self.annotation_rows.len() <= index {
-                    self.annotation_rows.resize(index + 1, NONE);
-                }
-                self.annotation_rows[index] = i as u32;
-            }
-        }
+        self.refs = b.refs;
+        self.annotation_rows = b.annotation_rows;
         // Rows are keyed by index, and line rows keep the estimate until
         // wrap measures them: building millions of rows is a pass over
         // their heights, with no key map.
-        let rows = RowTable::indexed(
-            m.line_h,
-            self.refs.iter().map(|&r| self.fixed_height(r, &m)),
-        );
+        let rows = RowTable::indexed(m.line_h, self.refs.iter().map(|r| self.fixed_height(r, &m)));
         let mut list = VariableList::with_rows(rows, self.viewport.1);
         // A fresh list is pinned to the bottom; a diff opens at the top.
         list.set_scroll_offset(0.0);
@@ -679,7 +860,7 @@ impl DiffViewState {
         let mut rows = Vec::with_capacity(window.len());
         let mut next_top: Option<f32> = None;
         for index in window {
-            let r = self.refs[index];
+            let r = self.refs.at(index);
             let key = self.ref_key(r);
             let stamp = self.stamp(r, &columns, scale);
             let paint = match self.painted.remove(&key) {
@@ -776,7 +957,7 @@ impl DiffViewState {
             return None;
         }
         let top = self.list.rows().row_at(scroll)?;
-        let (seg, file) = match self.refs[top] {
+        let (seg, file) = match self.refs.at(top) {
             RowRef::Line { seg, row } => (
                 seg,
                 self.segments[seg as usize].projection.file[row as usize],
@@ -786,8 +967,8 @@ impl DiffViewState {
         };
         let segment = &self.segments[seg as usize];
         let header = *segment.projection.file_rows.get(file as usize)?;
-        let index = *segment.list_rows.get(header as usize)?;
-        if index == NONE || index as usize >= top {
+        let index = segment.list_rows.index(header)?;
+        if index as usize >= top {
             return None;
         }
         let r = RowRef::Line { seg, row: header };
@@ -815,12 +996,12 @@ impl DiffViewState {
     /// highlighted first. Does nothing for bridges whose files did not
     /// move in or out of view.
     fn prioritize_syntax(&mut self, window: Range<usize>) {
-        let refs = &self.refs[window];
+        let refs = || self.refs.range(window.clone());
         // A long side still streaming colors the surroundings of its top
         // line on screen first (headers and the other side's rows have
         // none).
         for side in [Side::Old, Side::New] {
-            let top = refs.iter().find_map(|r| match *r {
+            let top = refs().find_map(|r| match r {
                 RowRef::Line { seg, row } => {
                     let p = &self.segments[seg as usize].projection;
                     Some((seg as usize, row, p.line(row, side)?))
@@ -836,7 +1017,7 @@ impl DiffViewState {
                 }
             }
         }
-        let seg_file = |r: &RowRef| match *r {
+        let seg_file = |r: RowRef| match r {
             RowRef::Line { seg, row } => Some((
                 seg,
                 self.segments[seg as usize].projection.file[row as usize],
@@ -844,10 +1025,9 @@ impl DiffViewState {
             RowRef::Fact { seg, file, .. } => Some((seg, file)),
             _ => None,
         };
-        let (Some(first), Some(last)) = (
-            refs.iter().find_map(seg_file),
-            refs.iter().rev().find_map(seg_file),
-        ) else {
+        let (Some(first), Some(last)) =
+            (refs().find_map(seg_file), refs().rev().find_map(seg_file))
+        else {
             return;
         };
         if self.files.is_static() {
@@ -877,7 +1057,7 @@ impl DiffViewState {
         let this = &*self;
         // Keys of the indexed row table are list indices.
         list.measure_visible(this.viewport.0, overscan, |index, _| {
-            let Some(&r) = this.refs.get(index as usize) else {
+            let Some(r) = this.refs.get(index as usize) else {
                 return m.line_h;
             };
             let key = this.ref_key(r);
@@ -1416,6 +1596,84 @@ mod tests {
         assert!(state.expand_all());
 
         assert_eq!(state.focused_target(), Some(line_30));
+    }
+
+    use proptest::prelude::*;
+
+    /// A row to append: a line (`seg`, `row`), a run of `len` lines, or a
+    /// metadata row.
+    fn appended() -> impl Strategy<Value = (u8, u32, u32)> {
+        (0..3u8, 0..6u32, 0..4u32)
+    }
+
+    proptest! {
+        // Catches runs that merge rows that do not follow on, or split
+        // and miscount them: every row reads back as appended, by index
+        // and in both directions.
+        #[test]
+        fn row_refs_read_back_as_appended(ops in prop::collection::vec(appended(), 0..40)) {
+            let mut refs = RowRefs::default();
+            let mut model = Vec::new();
+            // Rows continue from the last line row more often than not.
+            let mut next = 0u32;
+            for (op, seg, n) in ops {
+                let seg = seg % 2;
+                match op {
+                    0 => {
+                        let row = if n == 0 { next + 3 } else { next };
+                        refs.push(RowRef::Line { seg, row });
+                        model.push(RowRef::Line { seg, row });
+                        next = row + 1;
+                    }
+                    1 => {
+                        refs.push_lines(seg, next..next + n);
+                        model.extend((next..next + n).map(|row| RowRef::Line { seg, row }));
+                        next += n;
+                    }
+                    _ => {
+                        refs.push(RowRef::Fact { seg, file: 0, fact: n });
+                        model.push(RowRef::Fact { seg, file: 0, fact: n });
+                    }
+                }
+            }
+            prop_assert_eq!(refs.len(), model.len());
+            let by_index: Vec<RowRef> = (0..model.len()).map(|i| refs.at(i)).collect();
+            prop_assert_eq!(&by_index, &model);
+            prop_assert_eq!(&refs.iter().collect::<Vec<_>>(), &model);
+            let mut reversed: Vec<RowRef> = refs.iter().rev().collect();
+            reversed.reverse();
+            prop_assert_eq!(&reversed, &model);
+            prop_assert_eq!(refs.get(model.len()), None);
+        }
+
+        // Catches a shown run read past its end or merged across a gap:
+        // every projection row maps to its list index or to none.
+        #[test]
+        fn list_rows_map_rows_shown_and_left_out(
+            shown in prop::collection::vec(any::<bool>(), 0..60),
+        ) {
+            let mut list = ListRows::default();
+            let mut index = 0u32;
+            let mut model = Vec::new();
+            for (row, &on) in shown.iter().enumerate() {
+                if on {
+                    list.push(row as u32, index, 1);
+                    model.push(Some(index));
+                    // An extra list row between some shown rows.
+                    index += if row % 3 == 0 { 2 } else { 1 };
+                } else {
+                    model.push(None);
+                }
+            }
+            let rows = shown.len() as u32;
+            for (row, expected) in model.iter().enumerate() {
+                prop_assert_eq!(list.index(row as u32), *expected, "row {}", row);
+            }
+            prop_assert_eq!(
+                list.first_hidden(rows),
+                model.iter().position(Option::is_none).map(|r| r as u32)
+            );
+        }
     }
 
     /// Each prepared line row as `old | new`, changed words in brackets.
