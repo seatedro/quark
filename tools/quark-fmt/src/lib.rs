@@ -29,9 +29,10 @@ pub mod trivia;
 pub mod verify;
 pub mod workspace;
 
-pub use discover::{Delimiter, Invocation, discover};
+pub use discover::{Delimiter, Discovery, Invocation, discover};
 pub use printer::rust::{
-    NestedViews, PassThrough, Placement, ProviderError, RustContext, RustFragment, RustProvider,
+    Layout, LayoutLine, LayoutRequest, NestedViews, PassThrough, ProviderError, RustContext,
+    RustFragment, RustProvider,
 };
 pub use source::{Diagnostic, DiagnosticKind, Severity, TextEdit, apply_edits};
 
