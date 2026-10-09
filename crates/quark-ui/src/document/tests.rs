@@ -152,7 +152,7 @@ impl Doc {
         self.now_ms += 16;
     }
 
-    fn scroll_to(&mut self, offset: f32) {
+    fn scroll_to(&mut self, offset: impl Into<f64>) {
         self.view.set_scroll_offset(offset);
         self.frame();
     }
@@ -231,7 +231,7 @@ impl Doc {
     /// not it is materialized.
     fn screen_top(&self, key: u64) -> f32 {
         let rows = self.view.list().rows();
-        rows.offset_of(RowKey(key)).unwrap() - self.view.scroll_offset()
+        (rows.offset_of(RowKey(key)).unwrap() - self.view.list().scroll_offset()) as f32
     }
 
     fn last_row_bottom(&self) -> f32 {
@@ -1784,7 +1784,7 @@ fn an_image_resolving_above_the_view_does_not_move_the_rows_on_screen() {
     // Put row 12 at the top: the image row sits in the overscan above.
     let top = |md: &MarkdownDocument, row: u64| {
         let t = md.document();
-        t.list().rows().offset_of(RowKey(row)).unwrap() - t.scroll_offset()
+        (t.list().rows().offset_of(RowKey(row)).unwrap() - t.list().scroll_offset()) as f32
     };
     let offset = md.document().list().rows().offset_of(RowKey(12)).unwrap() + 5.0;
     md.document_mut().set_scroll_offset(offset);

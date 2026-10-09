@@ -82,7 +82,7 @@ impl DiffViewState {
         let rows = self.list.rows();
         let top = rows.offset_of_index(index as usize);
         let height = rows.offset_of_index(index as usize + 1) - top;
-        let (scroll, view) = (self.list.scroll_offset(), self.viewport.1);
+        let (scroll, view) = (self.list.scroll_offset(), f64::from(self.viewport.1));
         let target = match align {
             RevealAlign::Top => top,
             RevealAlign::Center => top + height * 0.5 - view * 0.5,
@@ -134,6 +134,7 @@ impl DiffViewState {
     /// Moves the keyboard focus target to list row `index`.
     pub(crate) fn set_focus(&mut self, index: Option<u32>) {
         let key = index.map(|i| self.ref_key(self.refs[i as usize]));
+        self.focused_index = index;
         if key != self.focused {
             self.focused = key;
             self.revision += 1;
@@ -143,8 +144,8 @@ impl DiffViewState {
     /// The target the keyboard focus sits on: the focused row's first
     /// line, or its file.
     pub fn focused_target(&self) -> Option<DiffTarget> {
-        let index = *self.key_index.get(&self.focused?)?;
-        self.target_of_index(index)
+        self.focused?;
+        self.target_of_index(self.focused_index?)
     }
 
     /// The source target a list row stands for.

@@ -219,7 +219,7 @@ struct Drag {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PrepareKey {
     window: (usize, usize),
-    scroll: u32,
+    scroll: u64,
     revision: u64,
     scale: u32,
     /// Each column's sideways scroll in long-line window grid steps.
@@ -238,8 +238,9 @@ pub struct DiffViewState {
     mode: Mode,
     /// What each row of `list` shows.
     refs: Vec<RowRef>,
-    /// List index of each row key, for measuring rows by key.
-    key_index: HashMap<u64, u32>,
+    /// List index of each annotation entry's row, or [`state::NONE`].
+    annotation_rows: Vec<u32>,
+    /// Keyed by list index; see [`Self::rebuild_rows`].
     list: VariableList,
     style: DiffStyle,
     viewport: (f32, f32),
@@ -280,6 +281,8 @@ pub struct DiffViewState {
     collapsed: HashSet<u32>,
     /// Key of the row the last navigation moved the keyboard focus to.
     focused: Option<u64>,
+    /// List index of that row, kept with the rows.
+    focused_index: Option<u32>,
     /// Source of segment generations, so a stamp never matches a row of a
     /// replaced document.
     generations: u64,
@@ -321,7 +324,7 @@ impl DiffViewState {
             files: FileMap::default(),
             mode: Mode::Unified,
             refs: Vec::new(),
-            key_index: HashMap::new(),
+            annotation_rows: Vec::new(),
             list: VariableList::new(1.0, 0.0),
             style: DiffStyle::default(),
             viewport: (0.0, 0.0),
@@ -352,6 +355,7 @@ impl DiffViewState {
             search: SearchState::default(),
             annotations: AnnotationTable::default(),
             focused: None,
+            focused_index: None,
             collapsed: HashSet::new(),
             generations: 0,
             revision: 0,
@@ -425,14 +429,15 @@ impl DiffViewState {
             })
     }
 
+    /// The vertical scroll offset; [`ViewFrame::scroll`] has it exactly.
     pub fn scroll_offset(&self) -> f32 {
-        self.list.scroll_offset()
+        self.list.scroll_offset() as f32
     }
 
     /// Height of every row together: what a bounded preview needs to show
     /// without scrolling.
     pub fn content_height(&self) -> f32 {
-        self.list.rows().total_extent()
+        self.list.rows().total_extent() as f32
     }
 
     pub fn selection(&self) -> Option<Selection> {
@@ -482,6 +487,7 @@ impl DiffViewState {
         self.segments[0] = segment;
         self.selection = None;
         self.focused = None;
+        self.focused_index = None;
         self.painted.clear();
         self.content_w = [0.0; 2];
         self.syntax
@@ -861,7 +867,7 @@ impl DiffViewState {
         true
     }
 
-    fn set_scroll(&mut self, offset: f32) -> bool {
+    fn set_scroll(&mut self, offset: f64) -> bool {
         let before = self.list.scroll_offset();
         if self.list.set_scroll_offset(offset) == before {
             return false;
@@ -904,10 +910,10 @@ impl DiffViewState {
                 self.drag = None;
                 false
             }
-            DiffEvent::Scroll(lines) => {
-                self.set_scroll(self.list.scroll_offset() + lines as f32 * WHEEL_LINE_PX)
-            }
-            DiffEvent::ScrollTo(offset) => self.set_scroll(offset),
+            DiffEvent::Scroll(lines) => self.set_scroll(
+                self.list.scroll_offset() + f64::from(lines) * f64::from(WHEEL_LINE_PX),
+            ),
+            DiffEvent::ScrollTo(offset) => self.set_scroll(f64::from(offset)),
             DiffEvent::Expand(gap, reveal) => {
                 self.reveal(gap, reveal, self.context_policy.reveal_step)
             }
@@ -944,8 +950,8 @@ impl DiffViewState {
     }
 
     fn key(&mut self, key: DiffKey) -> DiffOutcome {
-        let line = self.metrics().line_h;
-        let page = (self.viewport.1 - line * 2.0).max(line);
+        let line = f64::from(self.metrics().line_h);
+        let page = (f64::from(self.viewport.1) - line * 2.0).max(line);
         let offset = self.list.scroll_offset();
         let moved = match key {
             DiffKey::NextHunk => self.jump(true, true),
@@ -957,7 +963,7 @@ impl DiffViewState {
             DiffKey::PageUp => self.set_scroll(offset - page),
             DiffKey::PageDown => self.set_scroll(offset + page),
             DiffKey::Home => self.set_scroll(0.0),
-            DiffKey::End => self.set_scroll(f32::MAX),
+            DiffKey::End => self.set_scroll(f64::MAX),
             DiffKey::Copy => return DiffOutcome::Copy(self.selected_text()),
             DiffKey::SelectAll => {
                 self.select_all();
@@ -1016,7 +1022,7 @@ impl DiffViewState {
         } else {
             if let Some(last) = drag.last_ms {
                 let dt = now_ms.saturating_sub(last).min(AUTOSCROLL_MAX_DT_MS);
-                let offset = self.list.scroll_offset() + velocity * dt as f32;
+                let offset = self.list.scroll_offset() + f64::from(velocity) * dt as f64;
                 moved = self.set_scroll(offset);
             }
             drag.last_ms = Some(now_ms);

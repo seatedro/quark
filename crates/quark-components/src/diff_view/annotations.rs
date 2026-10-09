@@ -182,10 +182,10 @@ impl DiffViewState {
             return false;
         }
         entry.measured = Some((revision, height));
-        let key = self.ref_key(super::state::RowRef::Annotation {
-            index: index as u32,
-        });
-        if self.list.set_height(RowKey(key), height).is_ok() {
+        let row = self.annotation_rows.get(index).copied();
+        if let Some(row) = row.filter(|&row| row != super::state::NONE)
+            && self.list.set_height(RowKey(u64::from(row)), height).is_ok()
+        {
             self.revision += 1;
         }
         true

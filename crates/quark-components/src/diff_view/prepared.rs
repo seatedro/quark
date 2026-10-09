@@ -363,8 +363,11 @@ pub struct ViewFrame {
     pub sticky_header: Option<FrameRow>,
     /// Width of each side's widest line seen, padding included.
     pub content_w: [f32; 2],
-    pub scroll: f32,
-    pub total: f32,
+    /// The vertical scroll offset and the height of every row, in `f64`
+    /// so offsets deep into millions of rows stay exact. Row tops are
+    /// already relative to `scroll`.
+    pub scroll: f64,
+    pub total: f64,
     pub row_count: u32,
     pub hscroll: [ScrollHandle; 2],
     pub scrollbar_auto_hide: bool,

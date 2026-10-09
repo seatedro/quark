@@ -182,9 +182,10 @@ fn build(
     });
     view! {
         <div w={width} h={height} bg={colors.surface} track_focus={frame.focus}
-             // The body below is moved back by the offset, so this only
-             // feeds the wheel and the scrollbar.
+             // Its children are laid out from the scroll offset, so it
+             // only feeds the wheel and the scrollbar.
              scroll_y={frame.scroll} scroll_total={frame.total}
+             scroll_origin={(0.0, frame.scroll)}
              on:scroll={ScrollActionBuilder::new(move |lines| on_event(DiffEvent::Scroll(lines)))
                  .with_to_px(move |px| on_event(DiffEvent::ScrollTo(px as f32)))}
              @when {frame.scrollbar_auto_hide} {
@@ -195,7 +196,7 @@ fn build(
                  accessibility_id={frame.id} accessibility_role={Role::List}
                  aria-label={frame.label}
              }>
-            <div w={width} h={height} class="relative" translate={(0.0, frame.scroll)}
+            <div w={width} h={height} class="relative"
                  class="cursor-text"
                  on:drag={move |press: ClickEvent| {
                      Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
@@ -536,7 +537,9 @@ fn empty_side(frame: &ViewFrame, row: &FrameRow, side: Side, look: Look) -> AnyE
     let (x, width, height) = (column.gutter_x, column.gutter_w + column.text_w, row.height);
     let fill = look.presentation.empty_side;
     // The row's top in the document, so hatches of stacked rows join.
-    let phase = (row.top + frame.scroll).rem_euclid(paint::HATCH_SPACING);
+    // In content coordinates, so the hatch scrolls with the row.
+    let phase =
+        (f64::from(row.top) + frame.scroll).rem_euclid(f64::from(paint::HATCH_SPACING)) as f32;
     let colors = look.colors;
     let hash = inputs_hash(&(
         fill,

@@ -28,7 +28,7 @@ use quark_diff::{
 };
 use quark_render::FontKind;
 use quark_text::{LayoutCache, TextParams, TextStyle, TextSystem};
-use quark_ui::virtual_list::{RowKey, VariableList};
+use quark_ui::virtual_list::{RowTable, VariableList};
 
 use super::prepared::{
     Columns, FileFact, FrameRow, LineDetail, LinePaint, LineWindow, Metrics, PreparedKind,
@@ -181,7 +181,7 @@ pub(crate) enum RowRef {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Anchor {
     pub key: u64,
-    pub delta: f32,
+    pub delta: f64,
     /// `(unit, side, store index)`.
     pub line: Option<(u32, Side, u32)>,
 }
@@ -419,7 +419,7 @@ impl DiffViewState {
             _ => None,
         };
         Some(Anchor {
-            key: rows.keys()[index].0,
+            key: self.ref_key(self.refs[index]),
             delta: self.list.scroll_offset() - rows.offset_of_index(index),
             line,
         })
@@ -435,6 +435,50 @@ impl DiffViewState {
             .get(row as usize)
             .copied()
             .filter(|&i| i != NONE)
+    }
+
+    /// List index of the row keyed `key`. Line, file header, metadata, and
+    /// annotation rows are found from the key's parts; others (and keys
+    /// that no longer match) by a pass over the rows.
+    pub(crate) fn index_of_key(&self, key: u64) -> Option<u32> {
+        let unit = ((key >> UNIT_SHIFT) & UNIT_MASK) as u32;
+        let tag = key >> 60;
+        let line_row = |side, index| {
+            let (seg, file) = self.locate(unit)?;
+            let segment = &self.segments[seg];
+            let row = match side {
+                Some(side) => segment.projection.row_of(file, side, index)?,
+                None => *segment.projection.file_rows.get(file as usize)?,
+            };
+            segment.list_rows.get(row as usize).copied()
+        };
+        let index = (key & 0x3F_FFFF_FFFF) as u32;
+        let guess = match tag {
+            t if t == FACT_TAG >> 60 => line_row(None, 0).map(|header| header + 1 + index),
+            t if t == ANNOTATION_TAG >> 60 => self
+                .annotation_rows
+                .iter()
+                .copied()
+                .find(|&i| i != NONE && self.ref_key(self.refs[i as usize]) == key),
+            t if t == MORE_TAG >> 60 => self.refs.len().checked_sub(1).map(|i| i as u32),
+            t if t == RowKind::FileHeader as u64 => line_row(None, 0),
+            t if t == RowKind::Removed as u64 || t == RowKind::Modified as u64 => {
+                line_row(Some(Side::Old), index)
+            }
+            t if t == RowKind::Context as u64 || t == RowKind::Added as u64 => {
+                line_row(Some(Side::New), index)
+            }
+            _ => None,
+        };
+        let matches = |i: u32| {
+            self.refs
+                .get(i as usize)
+                .is_some_and(|&r| self.ref_key(r) == key)
+        };
+        match guess.filter(|&i| i != NONE) {
+            Some(i) if matches(i) => Some(i),
+            _ => (0..self.refs.len() as u32).find(|&i| matches(i)),
+        }
     }
 
     /// Rebuilds the row table from the segments' projections, keeping
@@ -487,39 +531,54 @@ impl DiffViewState {
             refs.push(RowRef::More { hidden });
         }
         self.refs = refs;
-        let keys: Vec<RowKey> = self.refs.iter().map(|&r| RowKey(self.ref_key(r))).collect();
-        self.key_index = keys.iter().zip(0..).map(|(k, i)| (k.0, i)).collect();
-        let mut list = VariableList::new(m.line_h, self.viewport.1);
-        // A fresh list is pinned to the bottom; a diff opens at the top.
-        list.set_scroll_offset(0.0);
-        let _ = list.extend(&keys);
-        for (index, key) in keys.iter().enumerate() {
-            let height = match self.refs[index] {
-                RowRef::Line { seg, row } => {
-                    let kind = self.segments[seg as usize].projection.kind[row as usize];
-                    (!kind.is_line()).then(|| row_height(kind, &m, &self.presentation))
+        self.annotation_rows.clear();
+        for (i, r) in self.refs.iter().enumerate() {
+            if let RowRef::Annotation { index } = *r {
+                let index = index as usize;
+                if self.annotation_rows.len() <= index {
+                    self.annotation_rows.resize(index + 1, NONE);
                 }
-                RowRef::Fact { .. } => None,
-                RowRef::Annotation { index } => Some(self.annotation_height(index, &m)),
-                RowRef::More { .. } => Some((m.line_h * 1.4).round()),
-            };
-            if let Some(height) = height {
-                let _ = list.set_height(*key, height);
+                self.annotation_rows[index] = i as u32;
             }
         }
+        // Rows are keyed by index, and line rows keep the estimate until
+        // wrap measures them: building millions of rows is a pass over
+        // their heights, with no key map.
+        let rows = RowTable::indexed(
+            m.line_h,
+            self.refs.iter().map(|&r| self.fixed_height(r, &m)),
+        );
+        let mut list = VariableList::with_rows(rows, self.viewport.1);
+        // A fresh list is pinned to the bottom; a diff opens at the top.
+        list.set_scroll_offset(0.0);
         let offset = anchor
             .and_then(|a| {
-                let by_line = a.line.and_then(|(unit, side, index)| {
-                    let i = self.list_index_of_line(unit, side, index)?;
-                    Some(list.rows().offset_of_index(i as usize))
-                });
-                let top = by_line.or_else(|| list.rows().offset_of(RowKey(a.key)))?;
-                Some(top + a.delta)
+                let index = a
+                    .line
+                    .and_then(|(unit, side, index)| self.list_index_of_line(unit, side, index))
+                    .or_else(|| self.index_of_key(a.key))?;
+                Some(list.rows().offset_of_index(index as usize) + a.delta)
             })
             .unwrap_or_else(|| self.list.scroll_offset());
         list.set_scroll_offset(offset);
         self.list = list;
+        self.focused_index = self.focused.and_then(|key| self.index_of_key(key));
         self.revision += 1;
+    }
+
+    /// The height of a row whose height does not come from its text: bands,
+    /// annotations, and the preview's last row. `None` for rows wrap
+    /// measures (their estimate is a line).
+    fn fixed_height(&self, r: RowRef, m: &Metrics) -> Option<f32> {
+        match r {
+            RowRef::Line { seg, row } => {
+                let kind = self.segments[seg as usize].projection.kind[row as usize];
+                (!kind.is_line()).then(|| row_height(kind, m, &self.presentation))
+            }
+            RowRef::Fact { .. } => None,
+            RowRef::Annotation { index } => Some(self.annotation_height(index, m)),
+            RowRef::More { .. } => Some((m.line_h * 1.4).round()),
+        }
     }
 
     // ---- Frame ---------------------------------------------------------
@@ -633,11 +692,11 @@ impl DiffViewState {
                 _ => Default::default(),
             };
             let rows_table = self.list.rows();
-            let height = rows_table.height_of(RowKey(key)).unwrap_or(m.line_h);
-            // Rows stack from the first row's top: offsets tens of millions
-            // of points down lose whole points to f32 rounding, and each
-            // row rounding on its own would overlap or gap its neighbors.
-            let top = *next_top.get_or_insert_with(|| rows_table.offset_of_index(index) - scroll);
+            let height = rows_table.height_at(index);
+            // Rows stack from the first row's top, taken relative to the
+            // scroll in f64 before it becomes a viewport position.
+            let top = *next_top
+                .get_or_insert_with(|| (rows_table.offset_of_index(index) - scroll) as f32);
             next_top = Some(top + height);
             rows.push(FrameRow {
                 key,
@@ -651,8 +710,7 @@ impl DiffViewState {
             });
             kept.insert(key, paint);
         }
-        let sticky_header =
-            self.sticky_header(scroll, &columns, scale, text, layouts, &mut kept, &m);
+        let sticky_header = self.sticky_header(scroll, &columns, scale, text, layouts, &mut kept);
         self.painted = kept;
         self.frame = Some(Rc::new(ViewFrame {
             id: self.id,
@@ -682,13 +740,12 @@ impl DiffViewState {
     #[allow(clippy::too_many_arguments)]
     fn sticky_header(
         &mut self,
-        scroll: f32,
+        scroll: f64,
         columns: &Columns,
         scale: f32,
         text: &mut TextSystem,
         layouts: &mut LayoutCache,
         kept: &mut HashMap<u64, Rc<RowPaint>>,
-        m: &Metrics,
     ) -> Option<FrameRow> {
         if !self.presentation.sticky_headers {
             return None;
@@ -716,7 +773,7 @@ impl DiffViewState {
             _ => Rc::new(self.build_row(r, stamp, text, layouts, scale, columns)),
         };
         kept.insert(key, paint.clone());
-        let height = self.list.rows().height_of(RowKey(key)).unwrap_or(m.line_h);
+        let height = self.list.rows().height_at(index as usize);
         Some(FrameRow {
             key,
             index,
@@ -793,11 +850,12 @@ impl DiffViewState {
         let mut list = std::mem::replace(&mut self.list, VariableList::new(1.0, 0.0));
         let mut painted = std::mem::take(&mut self.painted);
         let this = &*self;
-        list.measure_visible(this.viewport.0, overscan, |key, _| {
-            let Some(&index) = this.key_index.get(&key) else {
+        // Keys of the indexed row table are list indices.
+        list.measure_visible(this.viewport.0, overscan, |index, _| {
+            let Some(&r) = this.refs.get(index as usize) else {
                 return m.line_h;
             };
-            let r = this.refs[index as usize];
+            let key = this.ref_key(r);
             if let RowRef::Annotation { index } = r {
                 return this.annotation_height(index, &m);
             }
@@ -890,7 +948,9 @@ impl DiffViewState {
             &self.segments,
         );
         let fonts = text.font_epoch();
-        let changed = self.metrics.is_none_or(|(old, _)| old != m);
+        // The metrics the rows were built with: measured, or estimated
+        // before the first frame.
+        let old = self.metrics();
         let new_fonts = self.metrics.is_some_and(|(_, (_, old))| old != fonts);
         self.metrics = Some((m, (scale.to_bits(), fonts)));
         if new_fonts {
@@ -898,9 +958,18 @@ impl DiffViewState {
             self.painted.clear();
             self.content_w = [0.0; 2];
         }
-        if changed || new_fonts {
+        // Row heights follow the line height; wrapped rows also follow the
+        // text width, which the digit width moves. Anything else (the
+        // first frame measuring the font, mostly) keeps the rows: a
+        // rebuild costs a pass over every row.
+        if old.line_h != m.line_h {
             let anchor = self.anchor();
             self.rebuild_rows(anchor);
+        } else if old != m || new_fonts {
+            if self.style.wrap {
+                self.list.invalidate_all();
+            }
+            self.revision += 1;
         }
     }
 
@@ -1209,7 +1278,7 @@ mod tests {
     use quark_ui::FocusId;
 
     use super::*;
-    use crate::diff_view::DiffStyle;
+    use crate::diff_view::{DiffEvent, DiffStyle};
 
     // Catches rows shaped and wrapped before a font change being kept: a
     // wrapped diff must lay out as a fresh view does in the new fonts.
@@ -1265,6 +1334,37 @@ mod tests {
         let expected = layout(&mut open(), &mut text, &mut layouts);
         assert_ne!(before, expected, "the fonts lay the rows out differently");
         assert_eq!(after, expected);
+    }
+
+    // Catches the rows being rebuilt whenever the font metrics are
+    // measured again, though row heights did not change (here a font the
+    // diff does not use was loaded; the first frame of every view measures
+    // too). The rebuild dropped the measured heights of wrapped rows off
+    // screen, so the content height fell back to estimates, and it costs a
+    // pass over every row of a huge diff.
+    #[test]
+    fn remeasuring_fonts_keeps_wrapped_rows_measured_off_screen() {
+        let long = "word ".repeat(40);
+        let new: String = (0..40).map(|i| format!("{long}{i}\n")).collect();
+        let doc = quark_diff::diff_texts(Some("a.txt"), Some("a.txt"), Some(""), Some(&new), 3);
+        let mut state = DiffViewState::new("test.diff", FocusId::new(1), doc);
+        state.set_style(DiffStyle {
+            wrap: true,
+            ..DiffStyle::default()
+        });
+        state.set_viewport(300.0, 200.0);
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        state.prepare(&mut text, &mut layouts, 1.0, 0);
+        state.handle(DiffEvent::ScrollTo(f32::MAX));
+        state.prepare(&mut text, &mut layouts, 1.0, 0);
+        let before = state.content_height();
+
+        let font: &'static [u8] = include_bytes!("../../../quark-text/assets/fonts/Geist-Bold.otf");
+        text.load_font_data(Arc::new(font));
+        state.prepare(&mut text, &mut layouts, 1.0, 0);
+
+        assert_eq!(state.content_height(), before);
     }
 
     /// Each prepared line row as `old | new`, changed words in brackets.
