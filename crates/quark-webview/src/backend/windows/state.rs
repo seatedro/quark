@@ -351,6 +351,45 @@ impl ViewState {
     }
 }
 
+/// Whether a server certificate WebView2 rejected is the one test-only
+/// certificate trusted for `host` (`crate::test_trust`). WebView2 hands
+/// the certificate over as PEM; it matches only if its body is exactly the
+/// base64 of the trusted DER.
+pub(crate) fn test_trusted(host: &str, pem: &str, trust: Option<(&[u8], &[String])>) -> bool {
+    let Some((der, hosts)) = trust else {
+        return false;
+    };
+    if !hosts.iter().any(|trusted| trusted == host) {
+        return false;
+    }
+    let body: String = pem
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect();
+    let blocks = pem.matches("-----BEGIN CERTIFICATE-----").count();
+    blocks == 1 && body == base64(der)
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, byte)| n | u32::from(*byte) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -736,5 +775,28 @@ mod tests {
                 "closed ProcessTerminated"
             ]
         );
+    }
+
+    #[test]
+    fn only_the_trusted_certificate_for_its_host_passes() {
+        let der: &[u8] = b"Many hands";
+        let hosts = ["127.0.0.1".to_owned()];
+        let trust = Some((der, &hosts[..]));
+        let pem =
+            "-----BEGIN CERTIFICATE-----\r\nTWFueSBo\r\nYW5kcw==\r\n-----END CERTIFICATE-----\r\n";
+        for (host, pem, trust, expected) in [
+            ("127.0.0.1", pem, trust, true),
+            ("localhost", pem, trust, false),
+            ("127.0.0.1", pem, None, false),
+            (
+                "127.0.0.1",
+                "-----BEGIN CERTIFICATE-----\nTWFueSBoYW5kcx==\n-----END CERTIFICATE-----",
+                trust,
+                false,
+            ),
+            ("127.0.0.1", &format!("{pem}{pem}"), trust, false),
+        ] {
+            assert_eq!(test_trusted(host, pem, trust), expected, "{host} {pem:?}");
+        }
     }
 }

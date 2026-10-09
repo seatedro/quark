@@ -59,7 +59,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR, w};
 
 use super::cdp::CONTEXT_EVENTS;
-use super::state::{CdpCall, NewWindow, ViewState, WebError};
+use super::state::{CdpCall, NewWindow, ViewState, WebError, test_trusted};
 use crate::backend::{Backend, ClearRequest, EvalDispatch, NativeClose, NativeSink, OpenRequest};
 use crate::policy::BlockReason;
 use crate::profile::ProfileError;
@@ -1127,7 +1127,6 @@ unsafe fn install_handlers(
         }))
     );
 
-    let weak = Rc::downgrade(view);
     register!(
         webview14,
         add_ServerCertificateErrorDetected,
@@ -1136,11 +1135,31 @@ unsafe fn install_handlers(
             let Some(args) = args else {
                 return Ok(());
             };
-            // No override: the load fails as `NavigationError::Tls`, with no
-            // interstitial offering to continue.
-            let _ = weak.upgrade();
             // SAFETY: as above.
-            unsafe { args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL)? };
+            unsafe {
+                let uri = read_string(|out| args.RequestUri(out));
+                let host = url::Url::parse(&uri)
+                    .ok()
+                    .and_then(|url| {
+                        url.host_str()
+                            .map(|host| host.trim_matches(['[', ']']).to_owned())
+                    })
+                    .unwrap_or_default();
+                let pem = match args.ServerCertificate() {
+                    Ok(certificate) => read_string(|out| certificate.ToPemEncoding(out)),
+                    Err(_) => String::new(),
+                };
+                // Only the smoke tests' one certificate, for its loopback
+                // hosts, is let through. Anything else fails as
+                // `NavigationError::Tls`, with no interstitial offering to
+                // continue.
+                let action = if test_trusted(&host, &pem, crate::test_trust()) {
+                    COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW
+                } else {
+                    COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL
+                };
+                args.SetAction(action)?;
+            }
             Ok(())
         }))
     );
