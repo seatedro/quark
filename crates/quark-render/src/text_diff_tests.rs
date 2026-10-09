@@ -472,6 +472,102 @@ fn cases(other: &mut TextSystem) -> Vec<Case> {
     cases
 }
 
+/// The second text system of the matrix.
+fn other_fonts() -> TextSystem {
+    TextSystem::vendored_only(&FontSettings {
+        ui_family: "Source Sans 3".into(),
+        mono_family: "JetBrains Mono".into(),
+        ..FontSettings::default()
+    })
+}
+
+/// Every frame of `case`, drawn by one renderer whose atlas has `limits`
+/// (the defaults for `None`); `None` without a GPU.
+fn render_case(
+    case: &Case,
+    other: &mut TextSystem,
+    limits: Option<TextAtlasLimits>,
+) -> Option<(Vec<Vec<u8>>, TextAtlasStats)> {
+    let gpu = match case.texture_limit {
+        Some(limit) => GpuContext::headless_with_limits(wgpu::Limits {
+            max_texture_dimension_2d: limit,
+            ..wgpu::Limits::default()
+        }),
+        None => GpuContext::headless(),
+    };
+    let gpu = match gpu {
+        Ok(gpu) => gpu,
+        Err(error) => {
+            assert!(
+                std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
+                "QUARK_REQUIRE_GPU is set but no wgpu adapter is available: {error}"
+            );
+            return None;
+        }
+    };
+    let mut renderer = Renderer::headless_with_gpu(&gpu, case.size.0, case.size.1, 1.0);
+    renderer.set_options(case.options);
+    renderer.text_path = case.path;
+    if let Some(limits) = limits {
+        renderer.set_text_atlas_limits(limits);
+    }
+    let frames = case
+        .frames
+        .iter()
+        .map(|(scene, fonts)| {
+            let mut shared = test_text();
+            let system = match fonts {
+                Fonts::Shared => &mut *shared,
+                Fonts::Other => &mut *other,
+            };
+            renderer
+                .render_to_rgba(scene, system, case.size.0, case.size.1)
+                .expect("render")
+        })
+        .collect();
+    Some((frames, renderer.text_atlas_stats()))
+}
+
+// An atlas far too small for the matrix's frames (pages of 128 pixels, no
+// room for a resident color page, a few mask pages) draws every frame
+// exactly as a roomy one: glyphs spread over many pages and dedicated
+// textures, evicted while unpinned, and drawn in overflow mode ordinal by
+// ordinal in scene order, across layers, islands, clips, and scrolls.
+#[test]
+fn a_tiny_atlas_draws_the_pixels_of_a_roomy_one() {
+    let side = 128u64;
+    let tiny = TextAtlasLimits {
+        page_size: side as u32,
+        target_bytes: side * side,
+        // One color and one mask overflow page in reserve, two mask pages.
+        hard_limit_bytes: side * side * (4 + 1 + 2),
+    };
+    let mut other = other_fonts();
+    let cases = cases(&mut other);
+    let mut work = TextAtlasStats::default();
+    for case in cases.iter().filter(|c| !c.name.contains("1.25x")) {
+        let Some((roomy, _)) = render_case(case, &mut other, None) else {
+            return;
+        };
+        let (tight, stats) = render_case(case, &mut other, Some(tiny)).expect("renderer");
+        work = work + stats;
+        for (i, (a, b)) in roomy.iter().zip(&tight).enumerate() {
+            let differing = a
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(b.as_chunks::<4>().0)
+                .filter(|(p, q)| p != q)
+                .count();
+            assert_eq!(differing, 0, "{} frame {i}: pixels differ", case.name);
+        }
+    }
+    eprintln!("{work:?}");
+    // The atlas did the work the test is for.
+    assert!(work.overflow_segments > work.overflow_frames, "{work:?}");
+    assert!(work.evictions > 0 && work.pages_released > 0, "{work:?}");
+}
+
 #[test]
 #[ignore = "migration evidence; writes frames to QUARK_TEXT_DIFF_DIR"]
 fn dump_text_matrix() {
@@ -481,44 +577,15 @@ fn dump_text_matrix() {
     };
     let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).expect("output directory");
-    let mut other = TextSystem::vendored_only(&FontSettings {
-        ui_family: "Source Sans 3".into(),
-        mono_family: "JetBrains Mono".into(),
-        ..FontSettings::default()
-    });
+    let mut other = other_fonts();
     let cases = cases(&mut other);
     let mut written = 0;
-    for case in cases {
-        let gpu = match case.texture_limit {
-            Some(limit) => GpuContext::headless_with_limits(wgpu::Limits {
-                max_texture_dimension_2d: limit,
-                ..wgpu::Limits::default()
-            }),
-            None => GpuContext::headless(),
+    for case in &cases {
+        let Some(frames) = render_case(case, &mut other, None) else {
+            return;
         };
-        let gpu = match gpu {
-            Ok(gpu) => gpu,
-            Err(error) => {
-                assert!(
-                    std::env::var_os("QUARK_REQUIRE_GPU").is_none(),
-                    "QUARK_REQUIRE_GPU is set but no wgpu adapter is available: {error}"
-                );
-                return;
-            }
-        };
-        let mut renderer = Renderer::headless_with_gpu(&gpu, case.size.0, case.size.1, 1.0);
-        renderer.set_options(case.options);
-        renderer.text_path = case.path;
-        for (i, (scene, fonts)) in case.frames.iter().enumerate() {
-            let mut shared = test_text();
-            let system = match fonts {
-                Fonts::Shared => &mut *shared,
-                Fonts::Other => &mut other,
-            };
-            let pixels = renderer
-                .render_to_rgba(scene, system, case.size.0, case.size.1)
-                .expect("render");
-            std::fs::write(dir.join(format!("{}-{i}.rgba", case.name)), &pixels)
+        for (i, pixels) in frames.0.iter().enumerate() {
+            std::fs::write(dir.join(format!("{}-{i}.rgba", case.name)), pixels)
                 .expect("write frame");
             written += 1;
         }
