@@ -160,6 +160,9 @@ struct Subtree {
     memo: Vec<MeasureMemo>,
     /// The size the content was last laid out at.
     laid_out_at: Option<taffy::Size<Option<f32>>>,
+    /// The root takes the boundary's height when placed; see
+    /// [`boundary_root_style`].
+    fill_height: bool,
 }
 
 impl Subtree {
@@ -170,6 +173,7 @@ impl Subtree {
             host: None,
             memo: Vec::new(),
             laid_out_at: None,
+            fill_height: false,
         }
     }
 
@@ -179,6 +183,7 @@ impl Subtree {
         self.host = None;
         self.memo.clear();
         self.laid_out_at = None;
+        self.fill_height = false;
     }
 
     /// Lay the content out for one parent query. Known dimensions become
@@ -194,13 +199,18 @@ impl Subtree {
             return taffy::Size::ZERO;
         };
         if self.laid_out_at != Some(known) || known.width.is_none() || known.height.is_none() {
+            // A root that fills its height sizes at its content's height:
+            // its percentage height resolves against definite space only.
+            let open_height = if self.fill_height {
+                AvailableSpace::MaxContent
+            } else {
+                available.height
+            };
             let available = taffy::Size {
                 width: known
                     .width
                     .map_or(available.width, AvailableSpace::Definite),
-                height: known
-                    .height
-                    .map_or(available.height, AvailableSpace::Definite),
+                height: known.height.map_or(open_height, AvailableSpace::Definite),
             };
             // A sizing pass is not rounded: nothing reads its rounded
             // layout, and the final pass rounds the whole subtree again.
@@ -463,9 +473,12 @@ impl LayoutEngine {
         index: usize,
         style: taffy::Style,
         content: LayoutId,
+        fill_height: bool,
     ) -> LayoutId {
         let sub = &mut self.subtrees[index];
-        sub.root = Some(sub.engine.request_layout(boundary_root_style(), &[content]));
+        sub.fill_height = fill_height;
+        let root_style = boundary_root_style(fill_height);
+        sub.root = Some(sub.engine.request_layout(root_style, &[content]));
         // Always set, so the host is dirtied: its content may have changed.
         let host = self.node(&style, Children::Slice(&[]), Context::Subtree(index));
         self.subtrees[index].host = Some(host);
@@ -497,9 +510,10 @@ impl LayoutEngine {
         content: LayoutId,
         width: f32,
         height: f32,
+        fill_height: bool,
         cx: &mut MeasureContext,
     ) {
-        let root = self.request_layout(boundary_root_style(), &[content]);
+        let root = self.request_layout(boundary_root_style(fill_height), &[content]);
         self.compute_layout(root, width, height, cx);
     }
 
@@ -724,9 +738,20 @@ impl Context {
 
 /// A cache boundary's content root: a block box, so the content stretches
 /// to the width the parent gives the boundary and keeps its own height.
-fn boundary_root_style() -> taffy::Style {
+/// With `fill_height` the placed root is as tall as the boundary, so a
+/// percentage height inside it (`h_full`) resolves against the boundary;
+/// sizing queries still see the content's own height.
+fn boundary_root_style(fill_height: bool) -> taffy::Style {
     taffy::Style {
         display: taffy::Display::Block,
+        size: taffy::Size {
+            width: taffy::Dimension::auto(),
+            height: if fill_height {
+                taffy::Dimension::percent(1.0)
+            } else {
+                taffy::Dimension::auto()
+            },
+        },
         ..Default::default()
     }
 }
@@ -921,7 +946,7 @@ mod tests {
             },
             &[third, wrapped],
         );
-        let boundary = engine.finish_subtree(index, taffy::Style::default(), content);
+        let boundary = engine.finish_subtree(index, taffy::Style::default(), content, false);
         let root = engine.request_layout(flex(taffy::FlexDirection::Column), &[boundary]);
         engine.compute_layout(root, 137.5, 300.0, &mut cx);
 

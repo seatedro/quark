@@ -778,6 +778,69 @@ fn measured_blocks_match_the_painted_text_elements() {
     assert_eq!(painted, expected);
 }
 
+/// Lines of `layout`, as text.
+fn layout_lines(layout: &quark_text::TextLayout) -> Vec<String> {
+    layout
+        .lines()
+        .map(|line| layout.text()[line.byte_range].to_owned())
+        .collect()
+}
+
+// Catches measuring inline code without the room its pill keeps: the
+// palette sets the pill only on the painted spans, so measuring shaped
+// another layout, which wraps elsewhere once the room pushes a word over
+// (and costs a second shaping of every such paragraph). At each width the
+// measured lines are the painted ones.
+#[test]
+fn inline_code_is_measured_with_the_room_its_pill_keeps() {
+    use crate::element::StyledSpan;
+    let code = |text: &str| {
+        let span = StyledSpan {
+            font_kind: quark_render::FontKind::Mono,
+            ..StyledSpan::plain(text)
+        };
+        (span, SpanTone::InlineCode)
+    };
+    let plain = |text: &str| (StyledSpan::plain(text), SpanTone::Plain);
+    let block = Block::toned_prose(
+        BlockKey(10),
+        vec![
+            plain("Run "),
+            code("cargo test"),
+            plain(" then "),
+            code("cargo fmt"),
+            plain(" and "),
+            code("clippy"),
+            plain(" before you push the branch."),
+        ],
+    );
+    let text = block.text().to_owned();
+    let messages: HashMap<RowKey, DocumentRow> = [(
+        RowKey(1),
+        DocumentRow {
+            blocks: vec![block],
+            ..message_with(1, &[])
+        },
+    )]
+    .into_iter()
+    .collect();
+    for width in (100..=320).step_by(4).map(|w| w as f32) {
+        let mut view = real_view(&messages);
+        let painted = paint(&mut view, &messages, (width, 400.0), 0.0);
+        let measured = view
+            .visible_blocks()
+            .iter()
+            .find_map(|b| b.geometry.layout.as_deref().map(layout_lines));
+        let drawn = painted
+            .regions
+            .iter()
+            .find(|r| r.layout.text() == text)
+            .map(|r| layout_lines(&r.layout));
+        assert!(drawn.is_some(), "width {width}: the paragraph is drawn");
+        assert_eq!(measured, drawn, "width {width}");
+    }
+}
+
 #[test]
 fn rows_publish_their_position_among_all_rows_and_their_block_text() {
     let messages = real_document(50);
