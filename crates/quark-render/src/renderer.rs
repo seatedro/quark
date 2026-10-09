@@ -4975,6 +4975,9 @@ mod perf_tests;
 #[path = "svg_text_tests.rs"]
 mod svg_text_tests;
 #[cfg(test)]
+#[path = "text_diff_tests.rs"]
+mod text_diff_tests;
+#[cfg(test)]
 #[path = "text_fill_tests.rs"]
 mod text_fill_tests;
 
