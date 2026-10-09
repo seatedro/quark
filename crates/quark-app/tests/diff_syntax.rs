@@ -247,13 +247,18 @@ fn late_grammar_recolors_the_waiting_side() {
         syntax.status(0, Side::New),
         dump(&syntax, &doc, Side::New, "fn b"),
     );
-    while woke.try_recv().is_ok() {}
 
     store.release_deferred();
-    // Both sides recolor.
-    wait(&woke);
-    wait(&woke);
-    syntax.poll(1);
+    // Both sides recolor. The worker wakes after handing over each result,
+    // so wakes for the first results can still arrive after
+    // `finish_pending` took them: take results until no side waits.
+    while [Side::Old, Side::New]
+        .into_iter()
+        .any(|side| syntax.status(0, side) == Some(SyntaxStatus::Pending))
+    {
+        wait(&woke);
+        syntax.poll(1);
+    }
 
     assert_eq!(
         [
