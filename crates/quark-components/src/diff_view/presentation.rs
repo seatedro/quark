@@ -10,9 +10,12 @@
 //! marker, filler, or color choice invalidates paint only; changing the
 //! layout or numbers moves columns, so the state re-measures.
 
+use std::hash::{Hash, Hasher};
+
 use quark_diff::{Mode, RowKind, Side};
 use quark_syntax::HighlightKind;
-use quark_ui::theme::{Color, ThemeMode};
+use quark_ui::design::Alpha;
+use quark_ui::theme::{Color, Theme, ThemeMode};
 
 use super::prepared::{Columns, Metrics};
 
@@ -277,3 +280,166 @@ impl DiffAppearance {
         }
     }
 }
+
+/// Every color the view paints with: the theme's diff tokens with the
+/// appearance's overrides for the theme's mode applied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DiffColors {
+    pub surface: Color,
+    pub empty_side: Color,
+    pub hatch: Color,
+    pub text: Color,
+    pub muted: Color,
+    pub border: Color,
+    pub gutter: Color,
+    pub gutter_text: Color,
+    pub add_line: Color,
+    pub del_line: Color,
+    pub add_word: Color,
+    pub del_word: Color,
+    pub add_marker: Color,
+    pub del_marker: Color,
+    pub add_number: Color,
+    pub del_number: Color,
+    /// Counts in file headers.
+    pub add_text: Color,
+    pub del_text: Color,
+    pub file_header: Color,
+    pub separator: Color,
+    pub hover: Color,
+    pub search_match: Color,
+    pub search_active: Color,
+    pub search_outline: Color,
+    pub selection: Color,
+    pub focused_row: Color,
+    pub syntax: [Color; HIGHLIGHT_KINDS],
+}
+
+impl DiffColors {
+    pub fn resolve(theme: &Theme, appearance: &DiffAppearance) -> Self {
+        let c = &theme.colors;
+        let o = appearance.for_mode(theme.mode);
+        let pick = |over: Option<Color>, base: Color| over.unwrap_or(base);
+        let syntax_base = |kind: HighlightKind| match kind {
+            HighlightKind::Keyword | HighlightKind::Preprocessor => c.syntax_keyword,
+            HighlightKind::String => c.syntax_string,
+            HighlightKind::Comment => c.syntax_comment,
+            HighlightKind::Function => c.syntax_function,
+            HighlightKind::Type | HighlightKind::Namespace => c.syntax_type,
+            HighlightKind::Number | HighlightKind::Constant | HighlightKind::Builtin => {
+                c.syntax_number
+            }
+            HighlightKind::Property
+            | HighlightKind::Attribute
+            | HighlightKind::Tag
+            | HighlightKind::Label => c.syntax_property,
+            HighlightKind::Operator => c.syntax_operator,
+            HighlightKind::Normal | HighlightKind::Punctuation | HighlightKind::Variable => c.text,
+        };
+        let mut syntax = [c.text; HIGHLIGHT_KINDS];
+        for kind in ALL_KINDS {
+            syntax[kind as usize] = pick(o.syntax[kind as usize], syntax_base(kind));
+        }
+        let gutter_text = pick(o.gutter_text, c.gutter_text);
+        Self {
+            surface: c.editor_surface,
+            empty_side: pick(o.empty_side, c.background),
+            hatch: pick(o.hatch, c.border_variant),
+            text: c.text,
+            muted: c.text_muted,
+            border: c.border_variant,
+            gutter: pick(o.gutter, c.gutter_bg),
+            gutter_text,
+            add_line: pick(o.add_line, c.line_add),
+            del_line: pick(o.del_line, c.line_del),
+            add_word: pick(o.add_word, c.line_add_word_bg),
+            del_word: pick(o.del_word, c.line_del_word_bg),
+            add_marker: pick(o.add_marker, c.line_add_text),
+            del_marker: pick(o.del_marker, c.line_del_text),
+            add_number: pick(o.add_number, gutter_text),
+            del_number: pick(o.del_number, gutter_text),
+            add_text: c.line_add_text,
+            del_text: c.line_del_text,
+            file_header: pick(o.file_header, c.file_header_bg),
+            separator: pick(o.separator, c.hunk_header_bg),
+            hover: c.ghost_element_hover,
+            search_match: pick(o.search_match, c.search_match_bg),
+            search_active: pick(o.search_active, c.search_match_active_bg),
+            search_outline: c.focus_border,
+            selection: pick(o.selection, c.accent.with_alpha(Alpha::SOFT)),
+            focused_row: pick(o.focused_row, c.focus_border),
+            syntax,
+        }
+    }
+
+    /// Identifies these colors in cache keys.
+    pub fn key(&self) -> u64 {
+        let mut h = std::hash::DefaultHasher::new();
+        let colors = [
+            self.surface,
+            self.empty_side,
+            self.hatch,
+            self.text,
+            self.muted,
+            self.border,
+            self.gutter,
+            self.gutter_text,
+            self.add_line,
+            self.del_line,
+            self.add_word,
+            self.del_word,
+            self.add_marker,
+            self.del_marker,
+            self.add_number,
+            self.del_number,
+            self.add_text,
+            self.del_text,
+            self.file_header,
+            self.separator,
+            self.hover,
+            self.search_match,
+            self.search_active,
+            self.search_outline,
+            self.selection,
+            self.focused_row,
+        ];
+        for c in colors.iter().chain(&self.syntax) {
+            [c.r, c.g, c.b, c.a].hash(&mut h);
+        }
+        h.finish()
+    }
+
+    pub fn tone(&self, kind: HighlightKind) -> Color {
+        self.syntax[kind as usize]
+    }
+
+    /// Background of a line of `kind` on `side`, if it has one.
+    pub fn line(&self, kind: RowKind, side: Side) -> Option<Color> {
+        match (kind, side) {
+            (RowKind::Removed, _) | (RowKind::Modified, Side::Old) => Some(self.del_line),
+            (RowKind::Added, _) | (RowKind::Modified, Side::New) => Some(self.add_line),
+            _ => None,
+        }
+    }
+}
+
+const ALL_KINDS: [HighlightKind; HIGHLIGHT_KINDS] = [
+    HighlightKind::Normal,
+    HighlightKind::Keyword,
+    HighlightKind::String,
+    HighlightKind::Comment,
+    HighlightKind::Number,
+    HighlightKind::Type,
+    HighlightKind::Function,
+    HighlightKind::Operator,
+    HighlightKind::Punctuation,
+    HighlightKind::Variable,
+    HighlightKind::Constant,
+    HighlightKind::Builtin,
+    HighlightKind::Attribute,
+    HighlightKind::Tag,
+    HighlightKind::Property,
+    HighlightKind::Namespace,
+    HighlightKind::Label,
+    HighlightKind::Preprocessor,
+];

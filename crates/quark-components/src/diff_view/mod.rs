@@ -24,6 +24,8 @@
 //! Syntax colors come from a `quark-syntax` worker thread
 //! ([`DiffViewState::enable_syntax`]); rows repaint as files finish.
 
+pub mod decorator;
+mod paint;
 pub mod prepared;
 pub mod presentation;
 mod syntax;
@@ -48,7 +50,7 @@ use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX};
 use quark_ui::virtual_list::{RowKey, VariableList};
 
-pub use view::diff_view;
+pub use view::{diff_view, diff_view_with};
 
 use prepared::{
     Columns, FrameRow, LinePaint, Metrics, PreparedKind, RowPaint, ViewFrame, row_height,
