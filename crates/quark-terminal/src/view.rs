@@ -576,6 +576,8 @@ fn text_style(
         weight: None,
         style: Some(FontStyle::Italic),
         kind: None,
+        size: None,
+        letter_spacing: None,
     });
     (text_style, italic)
 }

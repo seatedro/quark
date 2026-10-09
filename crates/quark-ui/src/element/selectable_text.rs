@@ -147,9 +147,15 @@ pub struct StyledSpan {
     pub font_kind: FontKind,
     pub font_weight: FontWeight,
     pub italic: bool,
+    /// Font size relative to the text's: 0.86 sets 12 point inline code in
+    /// 14 point prose. `None` is the text's size.
+    pub font_scale: Option<f32>,
     /// `None` paints in the block's default color.
     pub color: Option<Color>,
-    /// `Some(bg)` paints a rounded background pill behind the run (inline code).
+    /// `Some(bg)` paints a rounded background pill behind the run (inline
+    /// code). The pill hugs the run's glyphs on the line's baseline, and the
+    /// layout keeps room for its padding on both sides, so the words around
+    /// it keep their distance.
     pub pill: Option<Color>,
     pub underline: bool,
     /// How the underline looks (dotted, dashed, thickness, offset, color);
@@ -170,6 +176,7 @@ impl StyledSpan {
             font_kind: FontKind::Ui,
             font_weight: FontWeight::Normal,
             italic: false,
+            font_scale: None,
             color: None,
             pill: None,
             underline: false,
@@ -222,6 +229,12 @@ impl StyledSpan {
 
     pub fn color(mut self, color: Color) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// Size relative to the text's; see [`Self::font_scale`](field@Self::font_scale).
+    pub fn font_scale(mut self, scale: f32) -> Self {
+        self.font_scale = Some(scale);
         self
     }
 
@@ -989,11 +1002,7 @@ pub(crate) fn with_styled_query<R>(
         let (text, text_spans) = &mut *joined.borrow_mut();
         text.clear();
         text_spans.clear();
-        for span in spans {
-            let start = text.len();
-            text.push_str(&span.text);
-            text_spans.push(styled_span(span, start..text.len(), &style));
-        }
+        join_spans(spans, &style, text, text_spans);
         f(&TextQuery {
             text,
             spans: text_spans,
@@ -1012,6 +1021,77 @@ fn styled_span(span: &StyledSpan, range: std::ops::Range<usize>, base: &TextStyl
         weight: (span.font_weight != base.font_weight).then_some(span.font_weight),
         style: span.italic.then_some(FontStyle::Italic),
         kind: (span.font_kind != base.font_kind).then_some(span.font_kind),
+        size: span.font_scale.map(|scale| base.font_size * scale),
+        letter_spacing: None,
+    }
+}
+
+/// Room a pill keeps on each side of its run, in ems of its size: the
+/// padding inside the pill and the gap outside it.
+const PILL_PAD: f32 = 0.4;
+const PILL_GAP: f32 = 0.1;
+/// How far the pill reaches above and below the baseline, and its corner
+/// radius, in ems of its size.
+const PILL_ASCENT: f32 = 1.0;
+const PILL_DESCENT: f32 = 0.38;
+const PILL_RADIUS: f32 = 0.35;
+
+/// The extra advance that makes room for pills: one entry per character
+/// that gets some (a pill's last character, and the character before a
+/// pill on its line), as its byte range, the span that styles it, and
+/// the extra ems of that span's size. Empty without pills.
+fn pill_room(spans: &[StyledSpan]) -> Vec<(std::ops::Range<usize>, &StyledSpan, f32)> {
+    let mut out: Vec<(std::ops::Range<usize>, &StyledSpan, f32)> = Vec::new();
+    if spans.iter().all(|s| s.pill.is_none()) {
+        return out;
+    }
+    let scale = |span: &StyledSpan| span.font_scale.unwrap_or(1.0);
+    let mut add = |range: std::ops::Range<usize>, owner, ems: f32| match out
+        .iter_mut()
+        .find(|(r, ..)| *r == range)
+    {
+        Some(entry) => entry.2 += ems,
+        None => out.push((range, owner, ems)),
+    };
+    // The span holding the last character so far, and where it ends.
+    let mut last: Option<(usize, char, &StyledSpan)> = None;
+    let mut start = 0;
+    for span in spans {
+        let end = start + span.text.len();
+        if span.pill.is_some()
+            && let Some(c) = span.text.chars().next_back()
+        {
+            if let Some((before, prev, owner)) = last.filter(|&(_, c, _)| c != '\n') {
+                let ems = (PILL_PAD + PILL_GAP) * scale(span) / scale(owner);
+                add(before - prev.len_utf8()..before, owner, ems);
+            }
+            add(end - c.len_utf8()..end, span, PILL_PAD + PILL_GAP);
+        }
+        if let Some(c) = span.text.chars().next_back() {
+            last = Some((end, c, span));
+        }
+        start = end;
+    }
+    out
+}
+
+/// Joins `spans` into `text` and their text spans into `out`: one per
+/// span, in order (so span `i` of a layout is `spans[i]`), then one per
+/// character that makes room for a pill, which [`span_colors`] colors
+/// after the span that styles it.
+fn join_spans(spans: &[StyledSpan], style: &TextStyle, text: &mut String, out: &mut Vec<TextSpan>) {
+    for span in spans {
+        let start = text.len();
+        text.push_str(&span.text);
+        out.push(styled_span(span, start..text.len(), style));
+    }
+    for (range, owner, ems) in pill_room(spans) {
+        // The style's own spacing, in ems of this span's size.
+        let own = style.letter_spacing / owner.font_scale.unwrap_or(1.0);
+        out.push(TextSpan {
+            letter_spacing: Some(own + ems),
+            ..styled_span(owner, range, style)
+        });
     }
 }
 
@@ -1025,18 +1105,16 @@ pub(crate) fn styled_params(
 ) -> TextParams {
     let mut text = String::with_capacity(spans.iter().map(|s| s.text.len()).sum());
     let mut text_spans = Vec::with_capacity(spans.len());
-    for span in spans {
-        let start = text.len();
-        text.push_str(&span.text);
-        text_spans.push(styled_span(span, start..text.len(), &style));
-    }
+    join_spans(spans, &style, &mut text, &mut text_spans);
     TextParams::new(text, style)
         .spans(text_spans)
         .wrap_width(wrap_width)
 }
 
-/// Paints inline-code pills behind each span that has one, snug around the
-/// span's glyphs on every line it covers.
+/// Paints inline-code pills behind each span that has one, on every line
+/// it covers: from the room [`pill_room`] keeps before the run to the room
+/// after it, and from just above the run's glyphs to just below its
+/// baseline.
 pub(super) fn paint_pills(
     scene: &mut Scene,
     layout: &TextLayout,
@@ -1047,15 +1125,30 @@ pub(super) fn paint_pills(
         let Some(bg) = span.pill else {
             continue;
         };
-        for r in layout.selection_rects(text_span.range.clone()) {
+        let size = text_span.size.unwrap_or(layout.style().font_size);
+        let rects: Vec<Rect> = layout.selection_rects(text_span.range.clone()).collect();
+        let last = rects.len().saturating_sub(1);
+        for (i, r) in rects.into_iter().enumerate() {
+            // The room after the run is on its last character only; a line
+            // the run wraps from ends at the run's glyphs.
+            let right = if i == last {
+                r.right() - PILL_GAP * size
+            } else {
+                r.right() + PILL_PAD * size
+            };
+            let x = r.x - PILL_PAD * size;
+            let baseline = layout
+                .lines()
+                .find(|l| r.y + r.height / 2.0 >= l.top && r.y + r.height / 2.0 < l.top + l.height)
+                .map_or(r.y + r.height * 0.75, |l| l.baseline);
             scene.rounded_rect(RoundedRectPrimitive::uniform(
                 Rect {
-                    x: origin.0 + r.x - 2.0,
-                    y: origin.1 + r.y + r.height * 0.1,
-                    width: r.width + 4.0,
-                    height: r.height * 0.8,
+                    x: origin.0 + x,
+                    y: origin.1 + baseline - PILL_ASCENT * size,
+                    width: right - x,
+                    height: (PILL_ASCENT + PILL_DESCENT) * size,
                 },
-                4.0,
+                PILL_RADIUS * size,
                 bg,
             ));
         }
@@ -1092,18 +1185,23 @@ pub(super) fn paint_selection<O: ToTextOffset>(
     }
 }
 
+/// The color of each text span [`join_spans`] makes: each span's own, then
+/// the color of the span under each character that keeps a pill's room.
 pub(super) fn span_colors(
     spans: &[StyledSpan],
     default_color: Color,
     link_color: Color,
 ) -> Arc<[Color]> {
+    let color = |span: &StyledSpan| match (span.color, &span.link) {
+        (Some(color), _) => color,
+        (None, Some(_)) => link_color,
+        (None, None) => default_color,
+    };
+    let room = pill_room(spans);
     spans
         .iter()
-        .map(|span| match (span.color, &span.link) {
-            (Some(color), _) => color,
-            (None, Some(_)) => link_color,
-            (None, None) => default_color,
-        })
+        .map(color)
+        .chain(room.into_iter().map(|(_, owner, _)| color(owner)))
         .collect()
 }
 
@@ -1597,6 +1695,63 @@ mod tests {
         let narrow = window.paint(column(120.0, block()));
         assert_eq!(narrow, Window::new().paint(column(120.0, block())));
         assert!(narrow.region().1.len() > 2, "{narrow:?}");
+    }
+
+    // Catches inline code pills that crowd the words around them (the
+    // owner saw "npm testpasses"): the pill pads its run by at least a
+    // third of an em on each side, and the words beside it keep at least a
+    // space's width clear of it.
+    #[test]
+    fn a_code_pill_pads_its_run_and_keeps_clear_of_its_neighbors() {
+        const PILL: Color = Color::rgba(1, 2, 3, 255);
+        let spans = vec![
+            StyledSpan::plain("Run "),
+            StyledSpan::plain("npm test")
+                .code()
+                .font_scale(12.0 / 14.0)
+                .pill(PILL),
+            StyledSpan::plain(" now"),
+        ];
+        let mut window = Window::new();
+        let mut scene = Scene::default();
+        {
+            let mut cx = ElementContext::new(
+                &window.theme,
+                1.0,
+                &mut window.text,
+                &mut window.layouts,
+                None,
+                &window.signals,
+            );
+            let mut root = div().w(400.0).child(rich_text(spans).size(14.0)).into_any();
+            render_element(&mut root, &mut scene, &mut cx, 400.0, 300.0);
+            window.regions = std::mem::take(&mut cx.selectable_text_runs);
+        }
+        let pill = scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                quark_render::Primitive::RoundedRect(r) if r.color == PILL => Some(r.rect),
+                _ => None,
+            })
+            .expect("a pill");
+        let space = window.width_of(" ");
+        let region = &window.regions[0];
+        let x = |offset: usize| region.bounds.x + region.layout.caret(offset).x;
+        // "Run" ends at 3, the code runs 4..12, "now" starts at 13. The
+        // code is monospaced: its glyphs end one cell past the last's start.
+        let code: Vec<_> = region
+            .layout
+            .glyphs()
+            .iter()
+            .filter(|g| (4..12).contains(&(g.byte_start as usize)))
+            .collect();
+        let code_start = region.bounds.x + code[0].x;
+        let code_end = region.bounds.x + code[code.len() - 1].x + code[0].advance;
+        assert!(pill.x <= code_start - 4.0, "{pill:?} pads {code_start}");
+        assert!(pill.right() >= code_end + 4.0, "{pill:?} pads {code_end}");
+        assert!(pill.x >= x(3) + space, "{pill:?} after {}", x(3));
+        assert!(pill.right() + space <= x(13), "{pill:?} before {}", x(13));
     }
 
     /// A paragraph mixing prose, bold, inline code, and a link long enough

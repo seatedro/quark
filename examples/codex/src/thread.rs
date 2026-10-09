@@ -49,15 +49,19 @@ pub fn view(
         None => composer::card(app, p, column, "Work with Codex", vcx),
     };
     let bottom_top = h - 16.0 - bottom_h;
-    let list_h = (bottom_top - 4.0).max(0.0);
+    // The transcript runs the card's full height and scrolls under the
+    // composer, which hides only what its own rounded shape covers. The
+    // view above the composer is what reading positions are measured in.
+    let view_h = (bottom_top - 4.0).max(0.0);
     // Room under the turns so the latest one can scroll to the top, as
     // the app keeps a new turn's prompt at the top of the view. Legacy
     // scenes pinned to an offset follow 26.623, which kept the end in view.
+    // Either way the end rests above the composer.
     let spacer = if app.scroll_px.is_some() {
         0.0
     } else {
-        (list_h - 160.0).max(0.0)
-    };
+        (view_h - 160.0).max(0.0)
+    } + (h - view_h);
     if app.stick_bottom {
         // Pending requests: the handle resolves them once laid out.
         match app.scroll_px {
@@ -86,8 +90,9 @@ pub fn view(
     view! {
         <div class="absolute top-0" left={x} w={w} h={h}>
             <div class="absolute left-0 top-0 flex-col items-center overflow-y-scroll" w={w}
-                 h={list_h} track_scroll={&app.thread_scroll} scrollbar_auto_hide
-                 accessibility_role={Role::Log} aria-label="Transcript">
+                 h={h} track_scroll={&app.thread_scroll} scrollbar_auto_hide
+                 fade_edge={(FadeEdge::Bottom, 16.0)} accessibility_role={Role::Log}
+                 aria-label="Transcript">
                 <transcript(&items, p, column, &mut embed)>
                     <div h={spacer} />
                 </transcript>
@@ -97,7 +102,7 @@ pub fn view(
                 let (adds, dels) = stats;
                 <div class="absolute left-0 flex-row justify-center" top={bottom_top - 42.0} w={w}>
                     <div class="flex-row items-center h-8 px-[14] gap-[5] rounded-[10]" bg={p.shell}
-                         border={p.shell_border} role="button" aria-label="View changes"
+                         border={p.shell_border} role="button" aria-label="View changes" block_mouse
                          on:click={Msg::OpenTab(crate::Tab::Changes)}>
                         <txt("1 file changed", BODY, p.text_soft) />
                         <txt(format!("+{adds}"), BODY, p.success) />
@@ -481,7 +486,11 @@ fn paragraph(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> An
             Span::Bold(t) => StyledSpan::plain(t)
                 .weight(FontWeight::Semibold)
                 .color(p.text),
-            Span::Code(c) => StyledSpan::plain(c).code().pill(p.chip).color(p.text),
+            Span::Code(c) => StyledSpan::plain(c)
+                .code()
+                .font_scale(CODE / BODY)
+                .pill(p.chip)
+                .color(p.text),
             Span::File(..) => return inline_flow(spans, p, color, pending),
         });
     }
@@ -619,7 +628,7 @@ fn approval_card(p: &Pal, a: &data::Approval, w: f32) -> (AnyElement, f32) {
     let card = view! {
         <div w={w} h={h} class="flex-col px-4 pt-[14] gap-[10] rounded-[20]"
              bg={p.composer.lerp(p.bg, 0.15)} border={p.composer_border}
-             accessibility_role={Role::AlertDialog} aria-label={a.question}>
+             accessibility_role={Role::AlertDialog} aria-label={a.question} block_mouse>
             <div class="flex-row items-center gap-2">
                 <icon svg={icons::TERMINAL} size={15.0} color={p.muted} />
                 <txt(a.category, SMALL, p.muted) />

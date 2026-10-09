@@ -115,6 +115,144 @@ fn hovering_a_chat_row_reveals_only_its_actions() {
     );
 }
 
+// Catches a popover that lets the pointer through: with the profile menu
+// open over the chat list, the row beneath the pointer must not hover and
+// reveal its Pin and Archive buttons through the menu.
+#[test]
+fn an_open_menu_keeps_the_rows_beneath_it_from_hovering() {
+    let mut ui = harness("file-change");
+    ui.click_node(By::role_name(Role::Button, "Open profile menu"));
+    ui.frame();
+    let menu = ui.find(By::role(Role::Menu)).bounds;
+    let inside = |x: f32, y: f32| {
+        x > menu.x && x < menu.x + menu.width && y > menu.y && y < menu.y + menu.height
+    };
+    let under = ui
+        .find_all(By::role(Role::ListItem))
+        .into_iter()
+        .map(|n| (n.bounds.x + 40.0, n.bounds.y + n.bounds.height / 2.0))
+        .find(|&(x, y)| inside(x, y))
+        .expect("a chat row under the menu");
+    ui.pointer_move(under);
+    ui.frame();
+    assert!(
+        ui.find_all(By::role_name(Role::Button, "Archive chat"))
+            .is_empty()
+    );
+}
+
+// Catches the transcript ending in a straight cut above the composer: a
+// card the composer half covers stays visible and clickable right up to
+// the composer's edge, and the composer, not the card, takes the pointer
+// where it covers it.
+#[test]
+fn the_composer_alone_covers_the_transcript_beneath_it() {
+    let mut ui = harness("file-change");
+    ui.resize(984.0, 620.0);
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let composer = ui.find(By::test_id(quark_codex::composer::CARD_ID)).bounds;
+    let view = ui.find(By::role_name(Role::Button, "View changes")).bounds;
+    assert!(
+        view.y < composer.y && view.y + view.height > composer.y,
+        "{view:?} must straddle the composer's top {composer:?}"
+    );
+    let x = view.x + view.width / 2.0;
+    let name_at = |ui: &UiTestHarness<Codex>, y: f32| ui.hit_test((x, y)).and_then(|n| n.name);
+    assert_eq!(
+        name_at(&ui, composer.y - 2.0).as_deref(),
+        Some("View changes")
+    );
+    assert_ne!(
+        name_at(&ui, composer.y + 3.0).as_deref(),
+        Some("View changes")
+    );
+}
+
+// Catches a side panel stuck at one width: dragging the divider between
+// the thread and the panel widens the panel by the drag, the arrow keys
+// step it once the divider has focus, and the thread keeps its minimum.
+#[test]
+fn the_side_panel_resizes_from_its_divider() {
+    let mut ui = harness("changes");
+    ui.resize(1400.0, 738.0);
+    ui.frame();
+    let panel = |ui: &UiTestHarness<Codex>| {
+        ui.find(By::role_name(Role::Complementary, "Side panel"))
+            .bounds
+    };
+    let before = panel(&ui);
+    let (x, y) = (before.x - 0.5, before.y + 200.0);
+    ui.drag((x, y), (x - 100.0, y));
+    ui.frame();
+    let dragged = panel(&ui);
+    assert_eq!(dragged.width, before.width + 100.0);
+    assert_eq!(dragged.x + dragged.width, before.x + before.width);
+
+    // Clicked at once, the press would read as a double click and reset.
+    ui.advance(1000);
+    let divider = By::role_name(Role::Splitter, "Resize side panel");
+    ui.click(ui.find(divider).center());
+    ui.key("left");
+    ui.frame();
+    assert_eq!(panel(&ui).width, dragged.width + 10.0);
+
+    let x = panel(&ui).x - 0.5;
+    ui.drag((x, y), (0.0, y));
+    ui.frame();
+    let thread = ui.find(By::role_name(Role::Log, "Transcript")).bounds;
+    assert_eq!(thread.width, quark_codex::panel::THREAD_MIN);
+}
+
+// Catches the file viewer's gutter collapsing beside long lines and its
+// code running under the file tree: every line number ends at one x,
+// every line's code starts at one x past the gutter, and the code stops
+// where the tree begins.
+#[test]
+fn the_file_viewer_keeps_its_gutter_and_stays_clear_of_the_tree() {
+    let ui = harness("file-panel");
+    let code = ui.find(By::role_name(Role::Document, "cart.js")).bounds;
+    let tree = ui.find(By::role_name(Role::Tree, "Files")).bounds;
+    assert!(
+        code.x + code.width <= tree.x,
+        "{code:?} runs under {tree:?}"
+    );
+    let runs: Vec<_> = ui
+        .painted_texts()
+        .into_iter()
+        .filter(|t| t.bounds.x >= code.x && t.bounds.x < tree.x && t.bounds.y > code.y)
+        .collect();
+    let mut number_ends = Vec::new();
+    let mut code_starts = Vec::new();
+    for n in 1..=9 {
+        let number = runs
+            .iter()
+            .find(|t| t.text == n.to_string())
+            .unwrap_or_else(|| panic!("line number {n}"));
+        let row = number.bounds.y + number.bounds.height / 2.0;
+        number_ends.push(number.bounds.x + number.bounds.width);
+        let first = runs
+            .iter()
+            .filter(|t| !std::ptr::eq(*t, number))
+            .filter(|t| row > t.bounds.y && row < t.bounds.y + t.bounds.height)
+            .map(|t| t.bounds.x)
+            .fold(f32::INFINITY, f32::min);
+        if first.is_finite() {
+            code_starts.push(first);
+        }
+    }
+    let end = number_ends[0];
+    assert!(number_ends.iter().all(|&x| x == end), "{number_ends:?}");
+    assert_eq!(code_starts.len(), 7, "{code_starts:?}");
+    assert!(
+        code_starts
+            .iter()
+            .all(|&x| x == code_starts[0] && x >= end + 16.0),
+        "{code_starts:?} after {end}"
+    );
+}
+
 /// The diff lines a diff view shows (its list items), top to bottom.
 fn diff_lines(ui: &UiTestHarness<Codex>, view: &str) -> Vec<(String, f32)> {
     let Some(list) = ui.try_find(By::id(view)) else {

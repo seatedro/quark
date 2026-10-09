@@ -981,6 +981,8 @@ mod tests {
                 weight: None,
                 style: Some(FontStyle::Italic),
                 kind: Some(kind),
+                size: None,
+                letter_spacing: None,
             };
             let params = TextParams::new("italic", TextStyle::new(14.0)).spans(vec![span]);
             let layout = system.layout(&params).expect("layout");

@@ -192,6 +192,13 @@ pub const SCENES: &[(&str, &str, Setup)] = &[
         a.tab = Tab::File;
         a.open_file = Some("cart.js");
     }),
+    ("file-panel", "88-side-panel-files-narrow-dark", |a| {
+        turn2(a, false, false);
+        a.side_panel = true;
+        a.tabs = vec![Tab::Changes, Tab::File];
+        a.tab = Tab::File;
+        a.open_file = Some("cart.js");
+    }),
     ("palette", "51-search-palette-dark", |a| {
         turn2(a, false, false);
         a.palette = Some(crate::palette::State::new());

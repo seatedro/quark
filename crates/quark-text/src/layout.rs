@@ -176,13 +176,20 @@ impl TextStyle {
 
 /// Attribute override for a byte range of the text. Later spans win where
 /// they overlap. Glyphs record the index of the span that styled them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextSpan {
     pub range: Range<usize>,
     pub weight: Option<FontWeight>,
     pub style: Option<FontStyle>,
     /// Font family override, e.g. an inline code run in UI text.
     pub kind: Option<FontKind>,
+    /// Font size override in logical pixels, e.g. inline code a little
+    /// smaller than the prose around it. The line keeps the style's line
+    /// height, and the span's glyphs sit on the line's baseline.
+    pub size: Option<f32>,
+    /// Extra advance after every glyph of the span, in ems of its size, in
+    /// place of the style's: room around an inline code pill.
+    pub letter_spacing: Option<f32>,
 }
 
 /// Everything a layout depends on. Sizes are logical pixels.
@@ -701,7 +708,7 @@ impl TextLayout {
                 let start = span.range.start.max(range.start);
                 let end = span.range.end.min(range.end);
                 if start < end {
-                    let span_attrs = span_attrs(&style, own_family, span, i, synth)
+                    let span_attrs = span_attrs(&style, own_family, span, i, synth, scale)
                         .font_features(mem::take(&mut base.font_features));
                     attrs.add_span(start - range.start..end - range.start, &span_attrs);
                     base.font_features = span_attrs.font_features;
@@ -1685,6 +1692,7 @@ fn span_attrs<'a>(
     span: &TextSpan,
     index: usize,
     synth: SyntheticItalic,
+    scale: f32,
 ) -> Attrs<'a> {
     let kind = span.kind.unwrap_or(style.font_kind);
     let weight = span.weight.unwrap_or(style.font_weight);
@@ -1706,12 +1714,19 @@ fn span_attrs<'a>(
     } else {
         CacheKeyFlags::empty()
     } | style_flags(style);
-    base_attrs(style, own_family)
+    let mut attrs = base_attrs(style, own_family)
         .family(if named { own_family } else { family(kind) })
         .weight(cosmic_text::Weight(font_weight_value(weight)))
         .style(font_style)
         .cache_key_flags(flags)
-        .metadata(index + 1)
+        .metadata(index + 1);
+    if let Some(size) = span.size {
+        attrs = attrs.metrics(Metrics::new(size * scale, style.line_height * scale));
+    }
+    if let Some(ems) = span.letter_spacing {
+        attrs = attrs.letter_spacing(ems);
+    }
+    attrs
 }
 #[cfg(test)]
 mod tests {
@@ -1761,6 +1776,8 @@ mod tests {
             weight: Some(FontWeight::Bold),
             style: Some(style),
             kind: None,
+            size: None,
+            letter_spacing: None,
         }]
     }
 
@@ -2074,12 +2091,68 @@ mod tests {
             weight: Some(FontWeight::Bold),
             style: Some(FontStyle::Italic),
             kind: None,
+            size: None,
+            letter_spacing: None,
         }];
         let params = TextParams::new("plain bold plain", TextStyle::new(14.0)).spans(spans);
         let layout = test_system().layout(&params).expect("layout");
         let runs: Vec<_> = layout.glyph_runs().collect();
         assert_eq!(runs.iter().map(|r| r.span).collect::<Vec<_>>(), [0, 1, 0]);
         assert_eq!(layout.glyphs()[runs[1].glyphs.start].byte_start, 6);
+    }
+
+    fn sized_span(range: Range<usize>, size: Option<f32>, letter_spacing: Option<f32>) -> TextSpan {
+        TextSpan {
+            range,
+            weight: None,
+            style: None,
+            kind: None,
+            size,
+            letter_spacing,
+        }
+    }
+
+    // Catches a span size that is ignored, or that moves the line: the
+    // span's glyphs shape at its size on the same baseline, and the line
+    // keeps the style's height.
+    #[test]
+    fn a_sized_span_shapes_smaller_on_the_lines_baseline() {
+        let style = TextStyle::new(14.0).line_height(22.0);
+        let plain = test_system()
+            .layout(&TextParams::new("abab", style))
+            .expect("layout");
+        let params = TextParams::new("abab", style).spans(vec![sized_span(2..4, Some(7.0), None)]);
+        let layout = test_system().layout(&params).expect("layout");
+        let g = layout.glyphs();
+        assert_eq!(
+            g.iter().map(|g| g.font_size).collect::<Vec<_>>(),
+            [14.0, 14.0, 7.0, 7.0]
+        );
+        assert_eq!(g[2].phys_y, g[0].phys_y);
+        assert_eq!(g[2].advance, plain.glyphs()[2].advance / 2.0);
+        assert_eq!(layout.size().1, plain.size().1);
+    }
+
+    // Catches span letter spacing that is ignored or applied in the wrong
+    // unit: it adds that many ems of the span's size after each of its
+    // glyphs and nowhere else.
+    #[test]
+    fn span_letter_spacing_widens_only_its_glyphs() {
+        let style = TextStyle::new(14.0);
+        let plain = test_system()
+            .layout(&TextParams::new("abc", style))
+            .expect("layout");
+        let params =
+            TextParams::new("abc", style).spans(vec![sized_span(1..2, Some(10.0), Some(0.5))]);
+        let layout = test_system().layout(&params).expect("layout");
+        let (g, p) = (layout.glyphs(), plain.glyphs());
+        assert_eq!(g[0].advance, p[0].advance);
+        assert!(
+            (g[1].advance - (p[1].advance * 10.0 / 14.0 + 5.0)).abs() < 0.01,
+            "{}",
+            g[1].advance
+        );
+        assert_eq!(g[2].advance, p[2].advance);
     }
 
     // Regression: mono text used Basic shaping, which skipped font fallback.
@@ -2289,6 +2362,8 @@ mod tests {
             weight,
             style: None,
             kind,
+            size: None,
+            letter_spacing: None,
         };
         vec![
             TextParams::new("office affine", style),
@@ -2367,6 +2442,8 @@ mod tests {
                 weight,
                 style,
                 kind,
+                size: None,
+                letter_spacing: None,
             }
         };
         vec![
@@ -2643,6 +2720,8 @@ mod tests {
             weight: None,
             style: Some(FontStyle::Italic),
             kind: None,
+            size: None,
+            letter_spacing: None,
         };
         let params = TextParams::new(text, style).spans(vec![italic(0..2), italic(6..11)]);
         let layout = system.layout(&params).expect("layout");
@@ -2666,6 +2745,8 @@ mod tests {
             weight: None,
             style: None,
             kind: None,
+            size: None,
+            letter_spacing: None,
         };
         let cases = [
             (

@@ -196,7 +196,7 @@ pub fn card(
     let card = view! {
         <div w={w} h={h} class="flex-col pt-[14] rounded-[20]" bg={p.composer}
              border={p.composer_border} @when {light} { shadow={(10.0, 2.0, p.shadow)} }
-             id={CARD_ID}>
+             id={CARD_ID} test-id={CARD_ID} block_mouse>
             <div class="px-3" h={text_h}>
                 <text_editor_element(COMPOSER_FOCUS, scroll)
                     editor_snapshot={&app.composer.editor} label={placeholder.to_owned()}
@@ -288,7 +288,7 @@ pub fn compact(app: &mut Codex, p: &Pal, w: f32, vcx: &mut ViewContext) -> AnyEl
     let scroll = ScrollActionBuilder::new(|lines| Msg::ComposerScroll(lines).into());
     view! {
         <div class="flex-row items-center h-11 pl-2 pr-2 gap-1 rounded-[22]" w={w}
-             bg={p.composer} border={p.composer_border} id={CARD_ID}>
+             bg={p.composer} border={p.composer_border} id={CARD_ID} block_mouse>
             <icon_button(p, icons::PLUS, 28.0, 16.0, p.text_soft, "Add files and more",
                          Msg::Open(Menu::Add)) />
             <div class="pl-1">
