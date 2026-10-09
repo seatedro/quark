@@ -1,0 +1,55 @@
+=== a block comment's interior lines keep their bytes when the code moves
+context: expr
+prefix: on:click={
+suffix: }
+--- input
+            on:click={move |_| {
+                    /* first
+                     * second
+                     */
+                    go()
+                }}
+--- expected
+            on:click={move |_| {
+                /* first
+                     * second
+                     */
+                go()
+            }}
+=== a line comment between arguments keeps the list broken
+context: expr
+prefix: aria-label={
+suffix: }
+--- input
+            aria-label={tr(KEY, // the catalog key
+                name)}
+--- expected
+            aria-label={tr(
+                KEY, // the catalog key
+                name
+            )}
+=== a multi-line string literal is copied exactly
+context: expr
+prefix: {
+suffix: }
+--- input
+                {text(format!("first
+  second {x}"),   size)}
+--- expected
+                {text(
+                    format!(
+                        "first
+  second {x}"
+                    ),
+                    size
+                )}
+=== a call rustfmt cannot fit keeps its lines' shape
+context: expr
+prefix: on:click={
+suffix: }
+--- input
+            on:click={foo(bar,
+                    baz(a_name_so_long_that_no_layout_of_this_call_can_fit_inside_the_width_at_all_not_even_on_its_own_line, qux))}
+--- expected
+            on:click={foo(bar,
+                    baz(a_name_so_long_that_no_layout_of_this_call_can_fit_inside_the_width_at_all_not_even_on_its_own_line, qux))}

@@ -1,0 +1,9 @@
+=== rustfmt.toml width and indentation apply to fragments
+context: expr
+prefix: icon={
+suffix: }
+--- input
+      icon={svg_icon(lucide::ALERT_CIRCLE, 14.0).color(colors.status_error)}
+--- expected
+      icon={svg_icon(lucide::ALERT_CIRCLE, 14.0)
+        .color(colors.status_error)}

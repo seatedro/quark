@@ -1,0 +1,116 @@
+=== radio.rs border: a match keeps its arms and trailing commas
+context: expr
+prefix: border={
+suffix: }
+--- input
+                             border={match (option.disabled, self.selected == Some(i)) {
+                                 (true, _) => tc.border_variant,
+                                 (false, true) => tc.accent,
+                                 (false, false) => tc.control_border,
+                             }}
+--- expected
+                             border={match (option.disabled, self.selected == Some(i)) {
+                                 (true, _) => tc.border_variant,
+                                 (false, true) => tc.accent,
+                                 (false, false) => tc.control_border,
+                             }}
+=== widgets.rs toggle: a short if/else stays on one line
+context: expr
+prefix: bg={
+suffix: }
+--- input
+                 bg={if on { p.toggle_on } else { p.menu_hi }}
+--- expected
+                 bg={if on { p.toggle_on } else { p.menu_hi }}
+=== radio.rs bg: an if/else past single_line_if_else_max_width expands
+context: expr
+prefix: bg={
+suffix: }
+--- input
+                                     bg={if option.disabled { tc.text_disabled } else { tc.accent }}
+--- expected
+                                     bg={if option.disabled {
+                                         tc.text_disabled
+                                     } else {
+                                         tc.accent
+                                     }}
+=== split.rs: a struct literal keeps its interior comment
+context: expr
+prefix: accessibility_numeric={
+suffix: }
+--- input
+                     accessibility_numeric={NumericValue {
+                         value: f64::from(size),
+                         // Collapsing is Enter's job; a size is never below min.
+                         min: f64::from(p.min),
+                         max: f64::from(p.max.min(extent)),
+                         step: Some(f64::from(NUDGE_STEP)),
+                     }}
+--- expected
+                     accessibility_numeric={NumericValue {
+                         value: f64::from(size),
+                         // Collapsing is Enter's job; a size is never below min.
+                         min: f64::from(p.min),
+                         max: f64::from(p.max.min(extent)),
+                         step: Some(f64::from(NUDGE_STEP)),
+                     }}
+=== table.rs on:drag: a closure body re-indents under its attribute
+context: expr
+prefix: on:drag={
+suffix: }
+--- input
+             on:drag={move |press: ClickEvent| {
+                 Box::new(HeaderDrag {
+                     column,
+                     press_x: press.x,
+                     on_event,
+                 }) as Box<dyn DragHandler>
+             }}
+--- expected
+             on:drag={move |press: ClickEvent| {
+                 Box::new(HeaderDrag {
+                     column,
+                     press_x: press.x,
+                     on_event,
+                 }) as Box<dyn DragHandler>
+             }}
+=== table.rs icon svg: an if/else hanging from the tag column
+context: expr
+prefix: <icon svg={
+suffix: }
+--- input
+                <icon svg={if direction == SortDirection::Descending {
+                          lucide::ARROW_DOWN
+                      } else {
+                          lucide::ARROW_UP
+                      }}
+--- expected
+                <icon svg={if direction == SortDirection::Descending {
+                    lucide::ARROW_DOWN
+                } else {
+                    lucide::ARROW_UP
+                }}
+=== split.rs tr_args: a call that fits joins one line without a trailing comma
+context: expr
+prefix: aria-label={
+suffix: }
+--- input
+                     aria-label={quark_ui::i18n::tr_args(
+                         "quark-resize-named",
+                         [("name", p.label.into())],
+                     )}
+--- expected
+                     aria-label={quark_ui::i18n::tr_args(
+                         "quark-resize-named",
+                         [("name", p.label.into())],
+                     )}
+=== table.rs on:scroll: a long builder call breaks its arguments
+context: expr
+prefix: on:scroll={
+suffix: }
+--- input
+                 on:scroll={ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))}
+--- expected
+                 on:scroll={
+                     ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))
+                 }
