@@ -1,0 +1,36 @@
+[package]
+name = "quark-fmt"
+description = "Formats quark view! templates in Rust source, changing only whitespace between tokens."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# The view! grammar quark-macros parses, with source spans for every leaf.
+quark-view-syntax = { path = "../../crates/quark-view-syntax", features = ["locations"] }
+# Byte ranges of tokens parsed outside a proc macro (`Span::byte_range`).
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+# `visit` finds every macro position in a parsed file.
+syn = { version = "2", features = ["full", "visit"] }
+# Comments, literal boundaries, and offsets of the original source. Template
+# structure comes from the shared parser, never from this lexer. Pinned to
+# the last release on unicode-xid: later ones assert that unicode-ident and
+# unicode-properties share a Unicode version, which the lockfile's
+# unicode-ident 1.0.26 and newest unicode-properties 0.1.4 do not.
+ra-ap-rustc_lexer = "=0.145.0"
+unicode-width = "0.2"
+# CLI (stream D): quark-fmt.toml, cargo metadata, scratch files, workspace
+# walks, check-mode diffs, and exclusion globs.
+serde.workspace = true
+toml = "1"
+serde_json = "1.0"
+tempfile = "3"
+walkdir = "2"
+similar = "2.7"
+glob = "0.3"
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile = "3"
