@@ -311,8 +311,11 @@ impl Div {
         self
     }
 
+    /// Sets the semantic role and the platform role it maps to, replacing
+    /// any role set earlier (by a helper, say): the last role wins. A later
+    /// [`Self::accessibility_role`] refines only the platform role.
     pub fn semantic_role(mut self, role: SemanticRole) -> Self {
-        self.accessibility_role = self.accessibility_role.or(accessibility_role_for(role));
+        self.accessibility_role = accessibility_role_for(role);
         self.semantic_role = Some(role);
         self
     }

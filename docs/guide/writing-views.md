@@ -110,10 +110,12 @@ calls the bound `text` and fails to compile. Rename the binding
   `textbox`, `toolbar`, `tooltip`, `tree`, `treeitem`, plus quark's
   `scrollarea` and `window`.
 - `role={expr}` takes a `SemanticRole`.
-- `role=` sets the platform role only when none is set yet: an earlier
-  `accessibility_role={..}` (from a helper, say) keeps its platform role
-  while `role=` changes the semantic role. `group` and `scrollarea` publish
-  no platform node; use `accessibility_role={Role::Group}` for one.
+- The last `role=` wins: it replaces both roles set earlier (by a helper,
+  say), including an `accessibility_role={..}`. A later
+  `accessibility_role={..}` changes only the platform role, as in
+  `role="menu" accessibility_role={Role::MenuBar}`. `group` and
+  `scrollarea` publish no platform node; use
+  `accessibility_role={Role::Group}` for one.
 - `on:hover` expands to `.on_hover(..)`, which no builder has. Hover is a
   style state: use `hover:` classes or `hover_bg={..}`.
 - In `view! { scale, ... }`, `gap`, `p`, `px`, `py`, `pt`, `pb`, `pl`, `pr`,
@@ -342,6 +344,9 @@ view! {
 | `for x in xs key={..} { match x { A => <a/> B => <b/> } }` | The body may instead be one `if` or `match` (after any `let`s); the key goes on the root of the branch taken. A branch holds one root or none; several are an error |
 | `let name = expr;` | Binds `name` for the children after it in the same list, branch, or loop body |
 
+- A keyed `for` drops the key on a `<text>`, `<p>`, `<icon>`, or `<spacer>`
+  root, which have no `.key`, so those items stay unkeyed; wrap one in a
+  `<div>` to key it.
 - A branch or arm with several children adds them to the parent directly; no
   wrapper `div`.
 - `if`, `match`, and `for` lower to plain Rust around `.child(..)` calls,

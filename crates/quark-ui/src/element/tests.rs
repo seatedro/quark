@@ -1412,6 +1412,37 @@ fn accessibility_tree_nests_buttons_under_their_dialog() {
     );
 }
 
+// Regression: a caller's role changed only the semantic role, and the
+// platform role a helper had set survived into the accessibility tree.
+#[test]
+fn caller_role_replaces_the_platform_role_a_helper_set() {
+    let helper = || {
+        div()
+            .w(100.0)
+            .h(50.0)
+            .accessibility_id("panel")
+            .accessibility_label("Search")
+            .semantic_role(SemanticRole::Menu)
+    };
+    for (role, expected) in [
+        (SemanticRole::Dialog, "panel | Dialog | Search\n"),
+        // Group publishes no platform node, so the helper's Menu goes too.
+        (SemanticRole::Group, ""),
+    ] {
+        let mut ts = TestText::new();
+        let mut store = SignalStore::new();
+        let mut cx = test_cx(&mut ts, &mut store);
+        let mut root = helper().semantic_role(role).into_any();
+        render_element(&mut root, &mut Scene::default(), &mut cx, 100.0, 50.0);
+
+        assert_eq!(
+            crate::accessibility::dump_accessibility_tree(&cx.accessibility),
+            expected,
+            "{role:?}"
+        );
+    }
+}
+
 // Regression: element style stored one corner radius and Div paint passed
 // [r; 4], so per-corner rounding could not reach the scene.
 #[test]
