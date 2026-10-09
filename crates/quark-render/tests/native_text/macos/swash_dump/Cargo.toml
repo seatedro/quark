@@ -1,0 +1,19 @@
+# Shapes the macOS reference strings with quark-text and rasterizes them with
+# quark's swash path. Its own workspace, so it stays out of quark's manifests
+# and lockfile; run.sh copies the root Cargo.lock in so versions match.
+[package]
+name = "swash-dump"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+quark = { path = "../../../../../quark" }
+quark-text = { path = "../../../../../quark-text", default-features = false }
+png = "0.18"
+
+[patch.crates-io]
+cosmic-text = { path = "../../../../../../vendor/cosmic-text" }
+taffy = { path = "../../../../../../vendor/taffy" }
+
+[workspace]
