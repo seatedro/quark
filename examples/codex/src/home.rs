@@ -2,7 +2,7 @@
 //! project as a dotted-underlined picker, and the composer with its tray
 //! pinned to the bottom of the main card. Coordinates are card-local.
 
-use accesskit::Role;
+use quark::view;
 use quark_app::ViewContext;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -25,65 +25,45 @@ pub fn view(
     let (card, card_h) = composer::card(app, p, column, "Do anything", vcx);
     let card_top = h - 16.0 - card_h;
     let tray_w = column - 26.0;
-    let headline = match app.project.and_then(|id| app.data.project(id)) {
-        Some(project) => hrow()
-            .child(txt("What should we build in ", HEADING, p.text))
-            .child(
-                div()
-                    .relative()
-                    .id("headline.project")
-                    .accessibility_role(Role::Button)
-                    .accessibility_label(format!("{}?", project.name))
-                    .on_click(Msg::Open(Menu::ProjectPicker))
-                    .child(txt(format!("{}?", project.name), HEADING, p.text))
-                    .child(dotted(p, 31.0)),
-            ),
-        None => hrow().child(txt("What should we work on?", HEADING, p.text)),
-    };
+    let project = app.project.and_then(|id| app.data.project(id));
     // The glyph and headline sit a little above the middle of the space
     // over the composer (u73: glyph top 266, headline 342 of 738).
     let mid = (h - card_h - 16.0) * 0.5 - 66.0;
-    div()
-        .absolute()
-        .left(x)
-        .top(0.0)
-        .w(w)
-        .h(h)
-        .child(
-            div()
-                .absolute()
-                .left(0.0)
-                .top(mid.max(8.0))
-                .w(w)
-                .flex_col()
-                .items_center()
-                .child(svg_icon(icons::MASCOT, 48.0).color(p.muted))
-                .child(div().h(28.0))
-                .child(headline),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(cx + 13.0)
-                .top(card_top - 38.0)
-                .child(composer::tray(app, p, tray_w)),
-        )
-        .child(div().absolute().left(cx).top(card_top).child(card))
-        .into_any()
+    view! {
+        <div class="absolute top-0" left={x} w={w} h={h}>
+            <div class="absolute left-0 flex-col items-center" top={mid.max(8.0)} w={w}>
+                <icon svg={icons::MASCOT} size={48.0} color={p.muted} />
+                <div class="h-7" />
+                <div class="flex-row items-center">
+                    if let Some(project) = project {
+                        <txt("What should we build in ", HEADING, p.text) />
+                        <div class="relative" id="headline.project" role="button"
+                             aria-label={format!("{}?", project.name)}
+                             on:click={Msg::Open(Menu::ProjectPicker)}>
+                            <txt(format!("{}?", project.name), HEADING, p.text) />
+                            {dotted(p, 31.0)}
+                        </div>
+                    } else {
+                        <txt("What should we work on?", HEADING, p.text) />
+                    }
+                </div>
+            </div>
+            <div class="absolute" left={cx + 13.0} top={card_top - 38.0}>
+                {composer::tray(app, p, tray_w)}
+            </div>
+            <div class="absolute" left={cx} top={card_top}>{card}</div>
+        </div>
+    }
 }
 
 /// A dotted underline across its parent at `y` (the "?" excluded).
-fn dotted(p: &Pal, y: f32) -> Div {
-    let mut row = hrow()
-        .absolute()
-        .left(0.0)
-        .right(14.0)
-        .top(y)
-        .h(1.0)
-        .gap(2.0)
-        .overflow_hidden();
-    for _ in 0..80 {
-        row = row.child(div().w(2.0).h(1.0).flex_shrink_0().bg(p.muted));
+fn dotted(p: &Pal, y: f32) -> AnyElement {
+    view! {
+        <div class="flex-row items-center absolute left-0 right-[14] h-px gap-0.5 overflow-hidden"
+             top={y}>
+            for _ in 0..80 {
+                <div class="w-0.5 h-px shrink-0" bg={p.muted} />
+            }
+        </div>
     }
-    row
 }
