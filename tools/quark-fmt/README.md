@@ -49,6 +49,9 @@ Unknown flags are errors.
 - `--check` is strict: a warning (a view hidden in another macro, embedded
   Rust kept as written) also exits 2.
 - Files without views get rustfmt alone, exactly as `cargo fmt` would.
+- Views inside `vec![..]` (any `expr_macros` entry) are formatted when the
+  body parses as Rust expressions (`a, b` or `x; n`); a view inside any
+  other macro is left as written with a warning.
 - `// quark-fmt: skip` on the line before a view, statement, or item keeps
   it as written; so does `#[rustfmt::skip]`.
 - `--stdin` prints only the formatted source. On failure stdout is empty and
@@ -79,6 +82,7 @@ Unknown flags are errors.
 |---|---|---|
 | `style_version` | `1` | Pins the layout policy; only `1` exists |
 | `macro_names` | `["view", "quark::view"]` | Macro paths formatted as views |
+| `expr_macros` | `["vec"]` | Macros whose bodies are searched for views as Rust |
 | `exclude` | `[]` | Globs relative to this file, e.g. `"vendor/**"` |
 
 ## Editors

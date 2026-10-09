@@ -588,7 +588,8 @@ impl<'a> Engine<'a> {
     }
 
     fn discover(&self, source: &str) -> Result<Vec<Invocation>, Vec<Problem>> {
-        crate::discover(source, &self.settings.quark.macro_names)
+        let q = &self.settings.quark;
+        crate::discover(source, &q.macro_names, &q.expr_macros)
             .map(|d| d.invocations)
             .map_err(|d| vec![Problem::from_diagnostic(&d, source)])
     }
@@ -609,6 +610,7 @@ impl<'a> Engine<'a> {
             hard_tabs: r.hard_tabs,
             newline_style,
             macro_names: self.settings.quark.macro_names.clone(),
+            expr_macros: self.settings.quark.expr_macros.clone(),
         };
         let outcome = crate::format_source(source, &options, &self.provider);
         let notes = outcome
@@ -675,7 +677,8 @@ fn format_source(
     }
     // Most files hold no views. Their result is rustfmt's alone, as `cargo
     // fmt` would write it, so the verifying round is skipped.
-    let discovery = crate::discover(source, &settings.quark.macro_names);
+    let q = &settings.quark;
+    let discovery = crate::discover(source, &q.macro_names, &q.expr_macros);
     if discovery.is_ok_and(|d| d.invocations.is_empty() && d.diagnostics.is_empty()) {
         return Ok(Formatted::unchanged(&engine.rustfmt(source)?));
     }

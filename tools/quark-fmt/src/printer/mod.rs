@@ -22,7 +22,7 @@ use self::rust::{
     Layout, LayoutLine, LayoutRequest, NestedViews, PassThrough, RustFragment, RustProvider,
     source_layout,
 };
-use crate::discover::{Delimiter, NestedCall, scan, span_range};
+use crate::discover::{Delimiter, Names, NestedCall, scan, span_range};
 use crate::doc::{self, Doc, Embeds, PrintConfig};
 use crate::source::{Diagnostic, DiagnosticKind};
 
@@ -56,7 +56,7 @@ pub(crate) fn build_view<'s>(
     body: Range<usize>,
     delimiter: Delimiter,
     suffix: usize,
-    names: &[&str],
+    names: &Names<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<View<'s>, Diagnostic> {
     let (_, tree) = parse_with_syntax.parse2(tokens).map_err(|e| {
