@@ -11,6 +11,7 @@ use swash::zeno::{Format, Vector};
 use crate::{CacheKey, CacheKeyFlags, Color, FontSystem, HashMap};
 
 pub use swash::scale::image::{Content as SwashContent, Image as SwashImage};
+pub use swash::scale::Source as SwashSource;
 pub use swash::zeno::{Angle, Command, Placement, Transform};
 
 fn swash_image(

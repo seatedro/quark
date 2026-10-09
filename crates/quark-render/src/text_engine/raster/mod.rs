@@ -19,6 +19,8 @@
 // backend's tests exercise it meanwhile.
 #![allow(dead_code)]
 
+pub(crate) mod swash;
+
 use std::ops::Range;
 
 use quark_text::cosmic_text::{CacheKey, CacheKeyFlags, SubpixelBin};
