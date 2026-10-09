@@ -1,7 +1,7 @@
 # Platform services
 
 Menus, notifications, badges, tray, dialogs, deep links, single instance,
-and window state.
+window state, and modal webviews.
 
 - Calls go on the window context (`cx.window`, an `EventContext`); answers
   come back through `UiApp::app_event`.
@@ -72,6 +72,7 @@ impl UiApp for Notes {
 | Window state | `WindowOptions::persist_key` | | Size and position | Size and position | Size and position on X11; size only on Wayland, which reports no positions |
 | Desktop theme | `AppEvent::ThemeChanged` | | System appearance | System setting | XDG settings portal `color-scheme`; bare window managers report nothing |
 | Clipboard image | `clipboard_image`, `set_clipboard_image` | `clipboard-image` | yes | yes | yes, X11 and Wayland data control |
+| Webviews | `webviews().open`; `AppEvent::WebView` | `webview` | WKWebView | WebView2; Evergreen runtime required | WebKitGTK 2.40+ (API 4.1), GTK 3 window on X11 and Wayland |
 
 - Window state: JSON per key under `<state dir>/quark/`, in logical points,
   restored onto a connected monitor.
@@ -87,3 +88,49 @@ impl UiApp for Notes {
 | Chrome | `WindowChrome::Custom`: the app draws its own title bar. macOS: transparent title bar, traffic lights stay (`WindowOptions::traffic_lights` moves them). Elsewhere: decorations removed |
 | File drops | `InputEvent::FileHovered`, `FileHoverCancelled`, `FileDropped(path)` reach `UiApp::event` |
 | Crashes | `WindowOptions::panic_hook` (on by default) logs message, location, and backtrace through `tracing` and to a crash log in the platform state directory, then runs the previous hook |
+
+## Webviews
+
+A modal browser window over a parent, for signing in to a website.
+`quark_app::platform::webview`, feature `webview`.
+
+| Call | Does |
+|---|---|
+| `cx.window.webviews().open(url, options)` | Modal over the context's window; `open_with_parent` for another |
+| `evaluate_script(view, script, guard)` | Future of the result; dropping it cancels |
+| `evaluate_script_event(view, script, guard)` | Result as `WebViewEvent::EvaluationFinished` |
+| `cancel_evaluation(id)`, `close(view)` | Idempotent |
+| `clear_profile(&profile)` | Future; fails while a view uses the profile |
+
+- Events: `Opened`, `NavigationStarted`, `NavigationRedirected`,
+  `NavigationBlocked`, `NavigationCommitted`, `NavigationFailed`,
+  `PageLoadFinished`, `LocationChanged`, `TitleChanged`,
+  `EvaluationFinished`, and one `Closed` per handle. The context is the
+  parent window.
+- `WebViewOptions::new(origins)`: required, nonempty list of exact `https`
+  origins. Every top-level and frame navigation, redirect, and popup is
+  checked against it.
+- `evaluation_origins`: where scripts may run; empty by default.
+- `OriginGuard::new(origin, document)`: the committed document from
+  `NavigationCommitted`. Any later navigation fails the script with
+  `NavigationChanged`, even back to the same URL.
+- `AsyncScript`: a constant async function body, run in the page's world;
+  arguments go in `args`, never in the source. Results must be JSON.
+- Defaults: title "Sign in", 520 × 720 points (minimum 360 × 480), fresh
+  ephemeral data store, popups denied, devtools off, 10 s timeout, 1 MiB
+  result, depth 64, 8 evaluations in flight.
+- `DataStore::Persistent(ProfileId::new(app, purpose))` keeps cookies and
+  storage; one view at a time. macOS 14+.
+- Parent lock: no pointer, key, IME, drop, menu, or accessibility input
+  reaches the parent while its modal is open. One modal per parent.
+- `Capabilities::parent`: `Native` where the window system knows the
+  parent, else `AppEnforced` (Wayland without xdg-foreign).
+  `require_native_parent(true)` fails instead.
+- No webview engine built: `OpenError::Unsupported`.
+
+| Platform | Build | Run |
+|---|---|---|
+| Linux | `pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev` (Fedora: `gtk3-devel webkit2gtk4.1-devel`); `nix develop .#webview` | WebKitGTK 4.1 2.40+, libsoup 3, glib-networking, CA certificates, a session bus |
+| macOS | SDK only | System WebKit; sandboxed apps need the outgoing network entitlement |
+| Windows | MSVC toolchain | Evergreen WebView2 Runtime; the installer must provide it |
+
