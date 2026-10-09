@@ -311,10 +311,12 @@ fn a_backend_that_never_settles_leaves_the_file_unchanged() {
     // pass appends another line.
     let script = fx.write("fake-rustfmt", "#!/bin/sh\ncat\necho '// again'\n");
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    fx.write("a.rs", FORMATTED);
+    // Files without views take rustfmt's output unverified, as cargo fmt does.
+    let source = "fn main() {\n    let _ = view! { <div /> };\n}\n";
+    fx.write("a.rs", source);
     let bin = env!("CARGO_BIN_EXE_quark-fmt");
     let run = fx.run_with(bin, &["a.rs"], None, &[("QUARK_FMT_RUSTFMT", &script)]);
     assert_eq!(run.code, 2);
     assert!(run.stderr.contains("did not converge"), "{}", run.stderr);
-    assert_eq!(fx.read("a.rs"), FORMATTED);
+    assert_eq!(fx.read("a.rs"), source);
 }

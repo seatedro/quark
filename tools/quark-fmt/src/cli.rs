@@ -540,6 +540,7 @@ struct Formatted {
 }
 
 impl Formatted {
+    /// `source` as the result, with nothing to report.
     fn unchanged(source: &str) -> Self {
         Self {
             text: source.to_owned(),
@@ -571,6 +572,13 @@ fn format_source(
     // Rustfmt's output can move a view, which changes the width the view
     // printer sees, which can change rustfmt's next decision. Accept only a
     // state that one more round leaves alone, within a fixed budget.
+    // Most files hold no views. Their result is rustfmt's alone, as `cargo
+    // fmt` would write it, so the verifying round is skipped.
+    let discovery = crate::discover(source, &settings.quark.macro_names);
+    if discovery.is_ok_and(|d| d.invocations.is_empty() && d.diagnostics.is_empty()) {
+        let text = rustfmt(source, settings, dir).map_err(|p| vec![p])?;
+        return Ok(Formatted::unchanged(&text));
+    }
     let mut seen = vec![source.to_owned()];
     let mut current = compose(source, settings, dir, true)?;
     for _ in 1..MAX_TRANSFORMS {
