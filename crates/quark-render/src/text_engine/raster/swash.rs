@@ -253,4 +253,93 @@ mod tests {
         // The comparison covered both kinds of bitmap.
         assert!(masks > 0 && colors > 0, "{masks} masks, {colors} colors");
     }
+
+    // Regression: SF Pro drawn after bold JetBrains Mono through one shared
+    // swash context took the coordinate left by the earlier variable face
+    // on an axis its own settings leave out, about 15% more ink, so its
+    // pixels depended on drawing order. Both swash paths must draw it alike
+    // whatever came before. Only macOS has SF Pro installed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sf_pro_draws_alike_whatever_was_drawn_before() {
+        use quark_text::fonts::SYSTEM_UI;
+
+        let mut system = TextSystem::with_settings(&FontSettings {
+            ui_family: SYSTEM_UI.into(),
+            mono_family: "JetBrains Mono".into(),
+            ..FontSettings::default()
+        });
+        let keys = |system: &mut TextSystem, style: TextStyle| {
+            let params = TextParams::new("Hamburgefonstiv quick 0123 llll", style);
+            let layout = system.layout(&params).expect("layout");
+            (0..layout.glyph_count())
+                .map(|i| {
+                    layout
+                        .physical_glyph(i, (0.0, 0.0))
+                        .expect("glyph")
+                        .cache_key
+                })
+                .collect::<Vec<_>>()
+        };
+        let sf = keys(&mut system, TextStyle::new(13.0));
+        let mono: Vec<_> = [11.0, 13.0, 17.0, 20.0, 28.0, 9.0, 10.0, 12.0, 14.0]
+            .into_iter()
+            .flat_map(|size| {
+                let style = TextStyle::new(size)
+                    .kind(quark::FontKind::Mono)
+                    .weight(quark::FontWeight::Bold);
+                keys(&mut system, style)
+            })
+            .collect();
+
+        // The font system path, one context as the atlas's fallback keeps.
+        let mut legacy = |cache: &mut SwashCache, keys: &[quark_text::cosmic_text::CacheKey]| {
+            keys.iter()
+                .map(|&key| {
+                    cache
+                        .get_image_uncached(system.raster_font_system(), key)
+                        .map(|image| image.data)
+                })
+                .collect::<Vec<_>>()
+        };
+        let alone = legacy(&mut SwashCache::new(), &sf);
+        assert!(
+            alone.iter().flatten().any(|data| !data.is_empty()),
+            "SF Pro drew nothing"
+        );
+        let mut shared = SwashCache::new();
+        legacy(&mut shared, &mono);
+        assert!(
+            legacy(&mut shared, &sf) == alone,
+            "font system path: order changed SF Pro"
+        );
+
+        // The prepared-font path.
+        let mut registry = FontRegistry::new(system.font_snapshot());
+        let mut draw = |rasterizer: &mut SwashRasterizer,
+                        keys: &[quark_text::cosmic_text::CacheKey]| {
+            let mut scratch = RasterScratch::default();
+            keys.iter()
+                .map(|key| {
+                    let font = registry
+                        .prepare(key.font_id, key.font_weight, key.flags)
+                        .expect("font")
+                        .clone();
+                    let request = RasterRequest::from_cache_key(key, 1.0).expect("request");
+                    match rasterizer.rasterize(&font, &request, &mut scratch) {
+                        Ok(RasterOutcome::Bitmap(bitmap)) => scratch.bitmap(&bitmap).to_vec(),
+                        Ok(RasterOutcome::Empty) => Vec::new(),
+                        Err(error) => panic!("{error}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let alone = draw(&mut SwashRasterizer::default(), &sf);
+        let mut shared = SwashRasterizer::default();
+        draw(&mut shared, &mono);
+        assert!(
+            draw(&mut shared, &sf) == alone,
+            "prepared path: order changed SF Pro"
+        );
+    }
 }
