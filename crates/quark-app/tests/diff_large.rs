@@ -17,6 +17,7 @@ use quark_app::quark_ui::test_alloc::{self, Counting};
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::testing::UiTestHarness;
 use quark_app::{UiApp, UiContext, ViewContext};
+use quark_components::diff_view::FindOptions;
 use quark_components::diff_view::syntax::SyntaxStatus;
 use quark_components::{CollectionEnv, DiffEvent, DiffOutcome, DiffViewState, diff_view};
 use quark_diff::fixtures::{
@@ -216,7 +217,14 @@ fn report_large_diffs() {
         } else {
             String::new()
         };
-        for _ in 0..3 {
+        // Find over both whole sources, on the UI thread.
+        let searched = Instant::now();
+        ui.app_mut()
+            .diff
+            .set_find_query("compute(", FindOptions::default());
+        let search = searched.elapsed();
+        ui.app_mut().diff.set_find_query("", FindOptions::default());
+        for _ in 0..30 {
             ui.frame();
         }
 
@@ -236,8 +244,8 @@ fn report_large_diffs() {
             "{name}: diff {diffed:.2?}, view state {state_built:.2?}, first paint {first_paint:.2?}, first colors \
              {first_colors:.2?}, full syntax {full:.2?}; scroll {avg:.2?} avg / {worst:.2?} worst \
              (to {wheeled:.0} pt), \
-             jumps {jump_avg:.2?} / {jump_worst:.2?}{sideways}; settled frame {settled} \
-             allocations; peak RSS {:.0} MiB ({:.0} with inputs)",
+             jumps {jump_avg:.2?} / {jump_worst:.2?}{sideways}; find {search:.2?}; settled frame \
+             {settled} allocations; peak RSS {:.0} MiB ({:.0} with inputs)",
             mib(peak.saturating_sub(inputs)),
             mib(peak),
         );
