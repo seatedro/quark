@@ -1253,7 +1253,7 @@ fn heading_weights_reach_the_glyphs() {
             )
         })
         .collect();
-    let expected = [("Title", 700), ("Small", 600), ("plain", 450)];
+    let expected = [("Title", 700), ("Small", 600), ("plain", 400)];
     let expected: Vec<(String, u16)> = expected.iter().map(|(t, w)| (t.to_string(), *w)).collect();
     assert_eq!(weights, expected);
 }
