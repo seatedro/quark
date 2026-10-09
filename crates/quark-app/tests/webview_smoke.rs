@@ -31,11 +31,32 @@ fn main() -> ExitCode {
             }
         };
     }
+    #[cfg(all(target_os = "linux", feature = "webview"))]
+    if std::env::args().any(|arg| arg == "--linux") {
+        return webview::linux::run();
+    }
     let mut failures = Vec::new();
     fixture_checks(&mut failures);
     #[cfg(feature = "webview")]
     if failures.is_empty() {
-        failures.extend(browser::run());
+        // One winit event loop per process: the Linux-specific checks get
+        // their own.
+        #[cfg(target_os = "linux")]
+        match std::process::Command::new(std::env::current_exe().expect("own path"))
+            .arg("--linux")
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            other => failures.push(format!("linux checks: {other:?}")),
+        }
+        if cfg!(target_os = "linux")
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+        {
+            println!("webview_smoke: no display; browser scenarios skipped");
+        } else {
+            failures.extend(browser::run());
+        }
     }
     if failures.is_empty() {
         println!("webview_smoke: ok");
@@ -355,38 +376,6 @@ mod browser {
             }),
             NoRequest(Site::Foreign, "/frame"),
             Close,
-            Open(
-                "popups are denied",
-                f.url(Site::App, "/popup", &[("to", &getter("popup"))]),
-                app_idp.clone(),
-            ),
-            Load(Site::App),
-            Saw("popup blocked", |e| {
-                matches!(
-                    e,
-                    WebViewEvent::NavigationBlocked {
-                        reason: BlockReason::Popup,
-                        ..
-                    }
-                )
-            }),
-            Close,
-            Open(
-                "an unknown certificate authority",
-                f.url(Site::BadCert, "/getter", &[]),
-                options(f, &[Site::App, Site::BadCert]),
-            ),
-            Saw("failed with TLS", |e| {
-                matches!(
-                    e,
-                    WebViewEvent::NavigationFailed {
-                        error: NavigationError::Tls,
-                        ..
-                    }
-                )
-            }),
-            NoRequest(Site::BadCert, "/getter"),
-            Close,
             Open("evaluation deadline", getter("t"), {
                 let limits = EvaluationLimits::default().timeout(Duration::from_secs(1));
                 let view = options(f, &[Site::App])
@@ -426,12 +415,53 @@ mod browser {
                 Want::Value(json!(["v", "c=1"])),
             ),
             Close,
-            Open("ephemeral storage, second view", getter("t"), app_idp),
+            Open(
+                "ephemeral storage, second view",
+                getter("t"),
+                app_idp.clone(),
+            ),
             Load(Site::App),
             Eval(
                 "return [localStorage.getItem('k'), document.cookie];",
                 Want::Value(json!([null, ""])),
             ),
+            Close,
+            Open(
+                "an unknown certificate authority",
+                f.url(Site::BadCert, "/getter", &[]),
+                options(f, &[Site::App, Site::BadCert]),
+            ),
+            Saw("failed with TLS", |e| {
+                matches!(
+                    e,
+                    WebViewEvent::NavigationFailed {
+                        error: NavigationError::Tls,
+                        ..
+                    }
+                )
+            }),
+            NoRequest(Site::BadCert, "/getter"),
+            Close,
+            Open(
+                "popups are denied",
+                f.url(Site::App, "/popup", &[("to", &getter("popup"))]),
+                app_idp,
+            ),
+            Load(Site::App),
+            // Denied: `window.open` hands the page no window.
+            Eval(
+                "return window.fixture.openPopup();",
+                Want::Value(json!(false)),
+            ),
+            Saw("popup blocked", |e| {
+                matches!(
+                    e,
+                    WebViewEvent::NavigationBlocked {
+                        reason: BlockReason::Popup,
+                        ..
+                    }
+                )
+            }),
             Close,
         ]
     }
@@ -478,6 +508,8 @@ mod browser {
                             }
                         }
                     }
+                    // Already sent; `EvaluationFinished` advances.
+                    Step::Eval(..) if self.pending.is_some() => return,
                     Step::Eval(body, _) | Step::Start(body) => {
                         let (Some(view), Some(guard)) = (self.view, self.guard()) else {
                             self.fail("no loaded document to evaluate in".into());
