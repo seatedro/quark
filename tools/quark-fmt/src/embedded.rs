@@ -169,10 +169,7 @@ impl RustfmtProvider {
         let results = self.run(&jobs);
         let mut cache = self.cache.borrow_mut();
         for (key, result) in todo.iter().zip(results) {
-            let layout = result.and_then(|(p, out)| match assemble(&p, &out, &key.text, None)? {
-                Assembled::Done(layout) => Ok(layout),
-                Assembled::Rebreak(_) => Err("a nested view in a fragment without one".to_owned()),
-            });
+            let layout = result.and_then(|(p, out)| assemble(&p, &out, &key.text, None));
             cache.insert(key.clone(), layout);
         }
     }
@@ -236,7 +233,6 @@ impl RustfmtProvider {
         key: &Key,
         fragment: &RustFragment<'_>,
         nested: &dyn NestedViews,
-        probe: bool,
     ) -> Result<Layout, String> {
         if self.depth.get() >= MAX_NESTING {
             return Err("views are nested too deeply in embedded Rust".to_owned());
@@ -252,43 +248,23 @@ impl RustfmtProvider {
                     .ok_or("a nested view lies outside its fragment")
             })
             .collect::<Result<_, _>>()?;
-        let mut placeholders: Vec<Option<usize>> = (0..ranges.len())
+        // One-line children get placeholders as wide as their one-line
+        // form, so rustfmt's fit decisions see their size; children that
+        // must break get a placeholder spanning lines.
+        let placeholders: Vec<Option<usize>> = (0..ranges.len())
             .map(|id| nested.flat(id).map(|s| columns(s, key.place.tab_spaces)))
             .collect();
+        let job = Job {
+            key,
+            nested: ranges,
+            placeholders,
+        };
         self.depth.set(self.depth.get() + 1);
-        let mut result = Err("a nested view did not settle on one or several lines".to_owned());
-        // A child printed on several lines inside a one-line placeholder
-        // goes round once more with a breaking placeholder.
-        for _ in 0..=ranges.len() {
-            let job = Job {
-                key,
-                nested: ranges.clone(),
-                placeholders: placeholders.clone(),
-            };
-            let run = self
-                .run(std::slice::from_ref(&job))
-                .pop()
-                .expect("one job, one result");
-            let done = run.and_then(|(p, out)| {
-                let mode = if probe {
-                    Nested::Flat(nested)
-                } else {
-                    Nested::Layout(nested)
-                };
-                assemble(&p, &out, &key.text, Some(mode))
-            });
-            match done {
-                Ok(Assembled::Done(layout)) => {
-                    result = Ok(layout);
-                    break;
-                }
-                Ok(Assembled::Rebreak(k)) => placeholders[k] = None,
-                Err(e) => {
-                    result = Err(e);
-                    break;
-                }
-            }
-        }
+        let result = self
+            .run(std::slice::from_ref(&job))
+            .pop()
+            .expect("one job, one result")
+            .and_then(|(p, out)| assemble(&p, &out, &key.text, Some(nested)));
         self.depth.set(self.depth.get() - 1);
         result
     }
@@ -398,7 +374,7 @@ impl RustProvider for RustfmtProvider {
             } else if (0..fragment.nested.len()).any(|id| nested.flat(id).is_none()) {
                 Ok(Layout::default())
             } else {
-                self.with_nested(&key, fragment, nested, true)
+                self.with_nested(&key, fragment, nested)
             }
         });
         self.answer(result.map(|layout| match &layout.lines[..] {
@@ -425,7 +401,7 @@ impl RustProvider for RustfmtProvider {
         let result = if fragment.nested.is_empty() {
             self.cached(&key, true)
         } else {
-            self.with_nested(&key, fragment, nested, false)
+            self.with_nested(&key, fragment, nested)
         };
         self.answer(result)
     }
@@ -800,28 +776,14 @@ struct Piece {
     comma_after: bool,
 }
 
-enum Assembled {
-    Done(Layout),
-    /// Nested view `k` printed on several lines in a one-line placeholder.
-    Rebreak(usize),
-}
-
-/// How nested views are filled in: their one-line forms for a probe, or
-/// laid out by the printer.
-#[derive(Clone, Copy)]
-enum Nested<'a> {
-    Flat(&'a dyn NestedViews),
-    Layout(&'a dyn NestedViews),
-}
-
 /// Builds the fragment's lines from rustfmt's whitespace and the original
 /// token bytes, splicing in nested views.
 fn assemble(
     p: &Prepared,
     out: &Output,
     text: &str,
-    nested: Option<Nested<'_>>,
-) -> Result<Assembled, String> {
+    nested: Option<&dyn NestedViews>,
+) -> Result<Layout, String> {
     let mut b = LineBuilder::new(p.depth * p.tab_spaces, p.tab_spaces);
     // A fragment that starts its wrapper line has nothing before it.
     // Otherwise a line break after the lead-in means rustfmt moved the
@@ -844,22 +806,19 @@ fn assemble(
             Part::Token { src, .. } => b.token(&text[src.clone()]),
             Part::Nested {
                 nested: k, flat, ..
-            } => match nested {
-                Some(Nested::Flat(views)) => b.token(
-                    views
-                        .flat(*k)
-                        .ok_or("a nested view lost its one-line form")?,
-                ),
-                Some(Nested::Layout(views)) => {
+            } => {
+                let views = nested.ok_or("a nested view without a printer")?;
+                if *flat {
+                    b.token(
+                        views
+                            .flat(*k)
+                            .ok_or("a nested view lost its one-line form")?,
+                    );
+                } else {
                     let host = b.current_indent();
-                    let child = views.layout(*k, host);
-                    if *flat && child.lines.len() > 1 {
-                        return Ok(Assembled::Rebreak(*k));
-                    }
-                    b.splice(&child);
+                    b.splice(&views.layout(*k, host));
                 }
-                None => return Err("a nested view without a printer".to_owned()),
-            },
+            }
         }
         if piece.comma_after {
             b.token(",");
@@ -871,7 +830,7 @@ fn assemble(
         // The closing delimiter goes back to the template indentation.
         b.newline(0, false, String::new());
     }
-    Ok(Assembled::Done(b.finish()))
+    Ok(b.finish())
 }
 
 /// Commas directly before a closing delimiter, except the one of a
