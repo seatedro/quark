@@ -150,13 +150,16 @@ impl SourceRemap {
                 LineMap::Kept(at) | LineMap::Replaced { at } => Some(at..at),
             };
         }
-        let (LineMap::Kept(start), LineMap::Kept(last)) = (
-            self.map_line(side, lines.start),
-            self.map_line(side, lines.end - 1),
-        ) else {
+        let LineMap::Kept(start) = self.map_line(side, lines.start) else {
             return None;
         };
-        (last - start == lines.end - 1 - lines.start).then_some(start..last + 1)
+        // Every line, not just the ends: a one-for-one replacement inside
+        // the range keeps the ends contiguous.
+        lines
+            .clone()
+            .zip(start..)
+            .all(|(line, at)| self.map_line(side, line) == LineMap::Kept(at))
+            .then(|| start..start + lines.len() as u32)
     }
 
     /// Whether this remap leads from `current` to `next`.
@@ -206,6 +209,17 @@ mod tests {
         );
         let ranges = [0..1, 1..3, 2..4, 1..1].map(|r| remap.map_range(Side::New, r));
         assert_eq!(ranges, [Some(1..2), None, Some(3..5), Some(2..2)]);
+    }
+
+    // A line replaced one-for-one inside a range leaves its ends kept and
+    // contiguous; the range must still be refused.
+    #[test]
+    fn a_range_with_a_line_replaced_inside_is_not_kept() {
+        let from = snapshot(1, "a\nb\nc\n");
+        let to = snapshot(2, "a\nB\nc\n");
+        let remap = SourceRemap::between(&from, &to).unwrap();
+        assert_eq!(remap.map_range(Side::New, 0..3), None);
+        assert_eq!(remap.map_range(Side::New, 2..3), Some(2..3));
     }
 
     #[test]
