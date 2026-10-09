@@ -1260,6 +1260,27 @@ mod tests {
     }
 
     #[test]
+    fn a_coalesced_title_arrives_after_the_commit_before_it() {
+        let mut h = Harness::new();
+        let (view, _) = h.open_committed();
+        let sink = h.sink(view);
+        sink.title_changed("old page");
+        let next = url("https://app.example/next");
+        let navigation = sink.navigation_started(&next);
+        sink.navigation_committed(navigation, &next);
+        sink.title_changed("new page");
+        h.drain();
+        assert_eq!(
+            h.events(),
+            [
+                "started https://app.example/next",
+                "committed https://app.example/next",
+                "title new page"
+            ]
+        );
+    }
+
+    #[test]
     fn a_persistent_profile_serves_one_view_and_clears_once_released() {
         let mut h = Harness::new();
         let profile = ProfileId::new("com.example.app", "sign-in").unwrap();

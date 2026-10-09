@@ -319,8 +319,12 @@ impl Inbox {
             let mut queue = self.lock();
             if let Inbound::View(view, event) = &inbound {
                 let same = |queued: &Inbound| matches!(queued, Inbound::View(other, queued) if other == view && event.coalesces_with(queued));
+                // The newest replaces the queued one at the tail, not in its
+                // place: a title queued before a navigation must not carry a
+                // new page's title ahead of that page's commit.
                 if let Some(index) = queue.events.iter().position(same) {
-                    queue.events[index] = inbound;
+                    queue.events.remove(index);
+                    queue.events.push_back(inbound);
                     return;
                 }
                 if !event.is_critical() && queue.events.len() >= INBOX_CAPACITY {
