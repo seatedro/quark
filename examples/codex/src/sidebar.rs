@@ -37,7 +37,11 @@ const ROW: GroupId = GroupId::new("sidebar.thread");
 /// Archive, in the same trailing space so nothing moves.
 fn thread_row(app: &Codex, p: &Pal, t: &Thread, indent: bool) -> AnyElement {
     let selected = app.screen == Screen::Thread(t.id);
-    let fill = if selected { p.row_selected } else { p.row_hover };
+    let fill = if selected {
+        p.row_selected
+    } else {
+        p.row_hover
+    };
     view! {
         <div class="relative flex-row items-center shrink-0 h-[30] pr-[10] gap-1.5 rounded-[8]"
              w={ROW_W} pl={if indent { 32.0 } else { 8.0 }} bg={if selected { p.row_selected }}

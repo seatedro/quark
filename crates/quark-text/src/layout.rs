@@ -1978,7 +1978,10 @@ mod tests {
                 .map(|run| (run.rtl, run.glyphs.len()))
                 .collect();
             assert_eq!(runs.len(), layout.line_count(), "{text:?}: {runs:?}");
-            assert!(runs.iter().all(|&(_, glyphs)| glyphs > 0), "{text:?}: {runs:?}");
+            assert!(
+                runs.iter().all(|&(_, glyphs)| glyphs > 0),
+                "{text:?}: {runs:?}"
+            );
             if text.contains('\n') {
                 assert_eq!(runs.iter().map(|r| r.0).collect::<Vec<_>>(), [false, true]);
             }

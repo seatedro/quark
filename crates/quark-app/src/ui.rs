@@ -2346,7 +2346,10 @@ mod tests {
         let layout = layout_of(&shaped);
         assert!(origin.x >= 20.0 && origin.y >= 40.0, "{origin:?}");
         let logical_size = layout.style().font_size;
-        assert_eq!(layout.glyph(0).expect("glyph").font_size, logical_size * 2.0);
+        assert_eq!(
+            layout.glyph(0).expect("glyph").font_size,
+            logical_size * 2.0
+        );
     }
 
     // Regression: the pointer stayed in physical pixels while hit regions

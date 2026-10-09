@@ -44,11 +44,11 @@ pub use renderer::{
     SurfaceCapabilities, TextAtlasStats, TextMetrics,
 };
 pub use scene::{
-    AlphaMask, BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive, EffectType,
-    FadeEdge, FontKind, FontStyle, FontWeight, ImagePrimitive, IsolatePrimitive, LayerPrimitive,
-    MaskStop, MaskStops, Path, PathBuilder, PathPrimitive, Primitive, Rect, RectPrimitive,
-    RichTextPrimitive, RoundedRectPrimitive, Scene, ShadowPrimitive, ShapedText, ShimmerDirection,
-    ShimmerSpec, StripesPrimitive, StrokePattern, StrokeStyle, StyledDecoration,
+    AlphaMask, BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive,
+    EffectType, FadeEdge, FontKind, FontStyle, FontWeight, ImagePrimitive, IsolatePrimitive,
+    LayerPrimitive, MaskStop, MaskStops, Path, PathBuilder, PathPrimitive, Primitive, Rect,
+    RectPrimitive, RichTextPrimitive, RoundedRectPrimitive, Scene, ShadowPrimitive, ShapedText,
+    ShimmerDirection, ShimmerSpec, StripesPrimitive, StrokePattern, StrokeStyle, StyledDecoration,
     StyledTextPrimitive, TextBackdrop, TextDecoration, TextDecorationKind, TextDecorationStyle,
     TextFill, TextGradient, TextPrimitive, TextRendering, Transform2D, UiCompositing,
 };

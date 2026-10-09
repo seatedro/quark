@@ -100,6 +100,8 @@ pub use selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionTe
 pub use semantic::{
     SemanticActions, SemanticFrame, SemanticNode, SemanticNodeState, SemanticRole, dump_semantic,
 };
-pub use style::{BackgroundEffect, BorderStyle, ElementStyle, ShadowStyle, StyleOverride, apply_override};
+pub use style::{
+    BackgroundEffect, BorderStyle, ElementStyle, ShadowStyle, StyleOverride, apply_override,
+};
 pub use style_state::StyleState;
 pub use transform::Transform2D;

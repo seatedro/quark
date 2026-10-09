@@ -94,13 +94,8 @@ mod tests {
             .collect();
         for step in 1..80 {
             let max_width = full * step as f32 / 80.0;
-            let (truncated, _) = truncate_text_to_fit_styled(
-                &mut cx,
-                &text,
-                TextStyle::new(14.0),
-                full,
-                max_width,
-            );
+            let (truncated, _) =
+                truncate_text_to_fit_styled(&mut cx, &text, TextStyle::new(14.0), full, max_width);
             let kept = truncated.strip_suffix('\u{2026}').unwrap_or(&truncated);
             assert!(
                 text.starts_with(kept) && boundaries.contains(&kept.len()),
