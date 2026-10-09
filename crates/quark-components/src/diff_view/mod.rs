@@ -1,13 +1,15 @@
 //! A virtualized diff view over a [`quark_diff::DiffDocument`]: unified or
 //! side by side, with line numbers, word-level change highlights, syntax
 //! colors, collapsible unchanged regions, file headers, selection and copy,
-//! and keyboard navigation between hunks and files.
+//! search, annotations, and keyboard navigation between hunks and files.
 //!
 //! The app owns a [`DiffViewState`]. Each frame it calls
 //! [`DiffViewState::prepare`] with the frame's text system, which shapes
 //! the rows entering the window (and nothing on a frame that repeats the
 //! last one), then builds [`diff_view`]. Input comes back as
-//! [`DiffEvent`]s for [`DiffViewState::handle`].
+//! [`DiffEvent`]s for [`DiffViewState::handle`]. A diff whose files change
+//! while it is shown uses [`DiffSessionViewState`] and
+//! [`diff_session_view`] instead, with the same rendering and interaction.
 //!
 //! Rows live in a [`VariableList`] (a Fenwick row table), so a 100,000-line
 //! diff builds only the rows on screen. Text is laid out by `quark-text`:
@@ -16,44 +18,59 @@
 //! where they are drawn. Each text column scrolls sideways on its own
 //! [`ScrollHandle`] when wrap is off.
 //!
-//! Selection endpoints are [`SelectionPoint`]s keyed by side, file, and
+//! Selection endpoints are [`quark::selection::SelectionPoint`]s keyed by side, file, and
 //! line, so a selection spans hunks and survives scrolling and expanding.
 //! Copy takes the side under the selection when side by side; unified
-//! copies [`DiffStyle::copy_side`] (new text by default).
+//! copies [`DiffStyle::copy_side`] (new text by default). [`CopyContent`]
+//! names every copy policy, including exact whole-file and whole-line
+//! copies.
+//!
+//! Positions outside the view use [`SourcePoint`]s: a file, a side, a
+//! zero-based source line, and a byte of that line. Search results,
+//! annotation anchors, and navigation targets all convert through them.
 //!
 //! Syntax colors come from a `quark-syntax` worker thread
 //! ([`DiffViewState::enable_syntax`]); rows repaint as files finish.
 
+mod annotations;
+mod navigation;
 pub mod prepared;
 pub mod presentation;
+mod search;
+mod selection;
+// mod session;
+mod state;
 mod syntax;
 mod view;
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use quark::selection::{BlockKey, Selection, SelectionPoint};
-use quark_diff::{
-    BlockKind, DiffDocument, Expansion, GapId, Mode, Projection, Reveal, RowKind, Side, inline_diff,
-};
-use quark_render::FontKind;
+use quark::selection::Selection;
+use quark_diff::{DiffDocument, GapId, Mode, Projection, Reveal, Side};
 use quark_render::scene::Rect;
 use quark_syntax::GrammarStore;
-use quark_text::{FontEpoch, LayoutCache, TextParams, TextStyle, TextSystem};
+use quark_text::{FontEpoch, LayoutCache, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX};
-use quark_ui::virtual_list::{RowKey, VariableList};
+use quark_ui::virtual_list::VariableList;
 
+pub use annotations::{DiffAnchor, DiffAnnotation};
+pub use navigation::{DiffTarget, FileId, RevealAlign, Revision, SourcePoint};
+pub use prepared::{AnnotationId, DiffPreviewLimit};
+pub use search::{FindOptions, SearchCoverage, SearchDirection, SearchSides, SearchSummary};
+pub use selection::CopyContent;
+// pub use session::{DiffSessionViewState, diff_session_view};
 pub use view::diff_view;
 
-use prepared::{
-    Columns, FrameRow, LinePaint, Metrics, PreparedKind, RowPaint, ViewFrame, row_height,
-};
+use annotations::AnnotationTable;
+use prepared::{Metrics, RowPaint, ViewFrame};
 use presentation::{DiffAppearance, DiffLayout, DiffPresentation};
+use search::SearchState;
+use state::{FileMap, RowRef, Segment};
 use syntax::DiffSyntax;
 
 /// Lines one click on an expand control reveals.
@@ -104,16 +121,62 @@ impl Default for DiffStyle {
     }
 }
 
+/// Size limits that keep exceptional input from stalling a frame. Past a
+/// limit the view shows less detail and says so; it never alters the
+/// source that copy reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DiffLimits {
+    /// Longest line, in bytes, whose pair gets changed-word highlights.
+    pub inline_line_bytes: usize,
+    /// Longest line, in bytes, shaped whole. A longer line shows its first
+    /// bytes up to this many, cut on a grapheme boundary, with
+    /// [`prepared::LineDetail::Prefix`].
+    pub shaped_line_bytes: usize,
+    /// Most search matches kept; past it the count reads "at least".
+    pub search_matches: usize,
+}
+
+impl Default for DiffLimits {
+    fn default() -> Self {
+        Self {
+            inline_line_bytes: quark_diff::MAX_INLINE_LINE_BYTES,
+            shaped_line_bytes: 4_096,
+            search_matches: 10_000,
+        }
+    }
+}
+
 /// Input from [`diff_view`], in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DiffEvent {
-    Press { x: f32, y: f32 },
-    Drag { x: f32, y: f32 },
+    Press {
+        x: f32,
+        y: f32,
+    },
+    Drag {
+        x: f32,
+        y: f32,
+    },
     Release,
     Scroll(i32),
     ScrollTo(f32),
     Key(DiffKey),
     Expand(GapId, Reveal),
+    /// The open control of a bounded preview's last row.
+    OpenFull,
+    /// The add-annotation control of a line (gutter utility or focused
+    /// row command).
+    Annotate {
+        file: FileId,
+        side: Side,
+        line: u32,
+    },
+    /// An annotation row measured its content at the row's width.
+    AnnotationMeasured {
+        id: AnnotationId,
+        revision: u64,
+        height: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -130,6 +193,11 @@ pub enum DiffKey {
     End,
     Copy,
     SelectAll,
+    /// Next and previous search match.
+    NextMatch,
+    PrevMatch,
+    /// Annotate the selection, or the focused row's line.
+    Annotate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,15 +206,15 @@ pub enum DiffOutcome {
     Changed,
     /// Copy was pressed: put this on the clipboard.
     Copy(String),
-}
-
-/// What the last prepare materialized from.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PrepareKey {
-    window: (usize, usize),
-    scroll: u32,
-    revision: u64,
-    scale: u32,
+    /// The preview's open control was pressed: show the full diff at
+    /// `target`, the first row the preview left out.
+    OpenFull {
+        target: DiffTarget,
+    },
+    /// The app should open its annotation editor for `anchor`.
+    Annotate {
+        anchor: DiffAnchor,
+    },
 }
 
 /// A selection drag in progress.
@@ -158,16 +226,29 @@ struct Drag {
     last_ms: Option<u64>,
 }
 
+/// What the last prepare materialized from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PrepareKey {
+    window: (usize, usize),
+    scroll: u32,
+    revision: u64,
+    scale: u32,
+}
+
 /// App-owned diff view state. See the [module docs](self).
 pub struct DiffViewState {
     id: &'static str,
     label: &'static str,
     focus: FocusId,
-    doc: Rc<DiffDocument>,
-    /// Bumped with every new document, so stamps never match an old one.
-    doc_generation: u64,
-    expansion: Expansion,
-    projection: Projection,
+    /// The static view has one segment holding the whole document; a
+    /// session view has one per file, in display order.
+    segments: Vec<Segment>,
+    files: FileMap,
+    mode: Mode,
+    /// What each row of `list` shows.
+    refs: Vec<RowRef>,
+    /// List index of each row key, for measuring rows by key.
+    key_index: HashMap<u64, u32>,
     list: VariableList,
     style: DiffStyle,
     viewport: (f32, f32),
@@ -186,14 +267,21 @@ pub struct DiffViewState {
     /// were measured under.
     metrics: Option<(Metrics, (u32, FontEpoch))>,
     painted: HashMap<u64, Rc<RowPaint>>,
-    /// Projection row of each row key, for measuring rows by key.
-    row_index: HashMap<u64, u32>,
     frame: Option<Rc<ViewFrame>>,
     prepared: Option<PrepareKey>,
     content_w: [f32; 2],
     syntax: DiffSyntax,
     presentation: DiffPresentation,
     appearance: DiffAppearance,
+    preview: Option<DiffPreviewLimit>,
+    limits: DiffLimits,
+    search: SearchState,
+    annotations: AnnotationTable,
+    /// Key of the row the last navigation moved the keyboard focus to.
+    focused: Option<u64>,
+    /// Source of segment generations, so a stamp never matches a row of a
+    /// replaced document.
+    generations: u64,
     revision: u64,
     /// Bumped with every frame `prepare` builds.
     frame_id: u64,
@@ -203,17 +291,28 @@ impl DiffViewState {
     /// `id` names cache entries and accessibility ids (unique in the
     /// window); `focus` is the view's keyboard focus target.
     pub fn new(id: &'static str, focus: FocusId, doc: DiffDocument) -> Self {
-        let doc = Rc::new(doc);
-        let expansion = Expansion::new(&doc);
-        let projection = Projection::new(&doc, Mode::Unified, &expansion);
-        let mut state = Self {
+        let mut state = Self::empty(id, focus);
+        state
+            .segments
+            .push(Segment::new(Arc::new(doc), 0, 0, Mode::Unified));
+        state
+            .syntax
+            .reset(state.segments[0].doc.file_count() as usize);
+        state.rebuild_rows(None);
+        state
+    }
+
+    /// A view with no segments, for the session view to fill.
+    fn empty(id: &'static str, focus: FocusId) -> Self {
+        Self {
             id,
             label: "Diff",
             focus,
-            doc,
-            doc_generation: 0,
-            expansion,
-            projection,
+            segments: Vec::new(),
+            files: FileMap::default(),
+            mode: Mode::Unified,
+            refs: Vec::new(),
+            key_index: HashMap::new(),
             list: VariableList::new(1.0, 0.0),
             style: DiffStyle::default(),
             viewport: (0.0, 0.0),
@@ -226,19 +325,21 @@ impl DiffViewState {
             bounds: Rc::default(),
             metrics: None,
             painted: HashMap::new(),
-            row_index: HashMap::new(),
             frame: None,
             prepared: None,
             content_w: [0.0; 2],
             syntax: DiffSyntax::default(),
             presentation: DiffPresentation::default(),
             appearance: DiffAppearance::default(),
+            preview: None,
+            limits: DiffLimits::default(),
+            search: SearchState::default(),
+            annotations: AnnotationTable::default(),
+            focused: None,
+            generations: 0,
             revision: 0,
             frame_id: 0,
-        };
-        state.syntax.reset(state.doc.file_count() as usize);
-        state.rebuild_rows(None);
-        state
+        }
     }
 
     pub fn with_label(mut self, label: &'static str) -> Self {
@@ -264,27 +365,47 @@ impl DiffViewState {
     // ---- Queries -------------------------------------------------------
 
     pub fn document(&self) -> &DiffDocument {
-        &self.doc
+        &self.segments[0].doc
     }
 
     pub fn projection(&self) -> &Projection {
-        &self.projection
+        &self.segments[0].projection
     }
 
     pub fn mode(&self) -> Mode {
-        self.projection.mode
+        self.mode
     }
 
     pub fn style(&self) -> DiffStyle {
         self.style
     }
 
+    pub fn presentation(&self) -> DiffPresentation {
+        self.presentation
+    }
+
+    pub fn limits(&self) -> DiffLimits {
+        self.limits
+    }
+
     pub fn scroll_offset(&self) -> f32 {
         self.list.scroll_offset()
     }
 
+    /// Height of every row together: what a bounded preview needs to show
+    /// without scrolling.
+    pub fn content_height(&self) -> f32 {
+        self.list.rows().total_extent()
+    }
+
     pub fn selection(&self) -> Option<Selection> {
         self.selection
+    }
+
+    /// The frame the last [`Self::prepare`] built, as the renderer reads
+    /// it.
+    pub fn frame(&self) -> Option<&Rc<ViewFrame>> {
+        self.frame.as_ref()
     }
 
     /// Rows the last [`Self::prepare`] materialized: the window plus
@@ -294,22 +415,11 @@ impl DiffViewState {
         range.start as u32..range.end as u32
     }
 
-    /// The row at the top of the viewport.
+    /// The projection row at the top of the viewport. A metadata or
+    /// annotation row counts as the row it belongs to.
     pub fn top_row(&self) -> Option<u32> {
-        self.list
-            .rows()
-            .row_at(self.list.scroll_offset())
-            .map(|i| i as u32)
-    }
-
-    pub fn presentation(&self) -> DiffPresentation {
-        self.presentation
-    }
-
-    /// The frame the last [`Self::prepare`] built, as the renderer reads
-    /// it.
-    pub fn frame(&self) -> Option<&Rc<ViewFrame>> {
-        self.frame.as_ref()
+        let index = self.list.rows().row_at(self.list.scroll_offset())?;
+        self.projection_row_of(index)
     }
 
     pub fn horizontal_scroll(&self, side: Side) -> &ScrollHandle {
@@ -318,19 +428,25 @@ impl DiffViewState {
 
     // ---- Changes -------------------------------------------------------
 
-    /// Shows another document; expansion, selection, and scroll reset.
+    /// Shows another document; expansion, selection, search position, and
+    /// scroll reset. Annotations of the previous document become outdated.
     pub fn set_document(&mut self, doc: DiffDocument) {
-        self.doc = Rc::new(doc);
-        self.doc_generation += 1;
-        self.expansion = Expansion::new(&self.doc);
+        self.generations += 1;
+        let revision = self.segments[0].revision + 1;
+        let mut segment = Segment::new(Arc::new(doc), 0, self.generations, self.mode);
+        segment.revision = revision;
+        self.segments[0] = segment;
         self.selection = None;
+        self.focused = None;
         self.painted.clear();
         self.content_w = [0.0; 2];
-        self.syntax.reset(self.doc.file_count() as usize);
-        let mode = self.projection.mode;
-        self.projection.rebuild(&self.doc, mode, &self.expansion);
+        self.syntax
+            .reset(self.segments[0].doc.file_count() as usize);
+        self.annotations.outdate_all();
+        self.rerun_search();
         self.rebuild_rows(None);
-        self.syntax.request(&self.doc, self.doc_generation);
+        self.syntax
+            .request(&self.segments[0].doc, self.segments[0].generation);
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
@@ -338,11 +454,19 @@ impl DiffViewState {
             Mode::Unified => DiffLayout::Unified,
             Mode::Split => DiffLayout::Split,
         };
-        if mode == self.projection.mode {
+        self.switch_mode(mode);
+    }
+
+    /// Changes the comparison layout, keeping the top source line in place.
+    fn switch_mode(&mut self, mode: Mode) {
+        if mode == self.mode {
             return;
         }
         let anchor = self.anchor();
-        self.projection.rebuild(&self.doc, mode, &self.expansion);
+        self.mode = mode;
+        for segment in &mut self.segments {
+            segment.rebuild(mode);
+        }
         self.rebuild_rows(anchor);
     }
 
@@ -359,7 +483,8 @@ impl DiffViewState {
     }
 
     /// Changes how the diff is drawn; see [`DiffPresentation`]. An explicit
-    /// layout switches the mode as [`Self::set_mode`] does.
+    /// layout switches the mode as [`Self::set_mode`] does; an automatic one
+    /// is resolved against the viewport on the next [`Self::prepare`].
     pub fn set_presentation(&mut self, presentation: DiffPresentation) {
         if presentation == self.presentation {
             return;
@@ -368,8 +493,8 @@ impl DiffViewState {
             != (self.presentation.numbers, self.presentation.markers);
         self.presentation = presentation;
         match presentation.layout {
-            DiffLayout::Unified => self.set_mode(Mode::Unified),
-            DiffLayout::Split => self.set_mode(Mode::Split),
+            DiffLayout::Unified => self.switch_mode(Mode::Unified),
+            DiffLayout::Split => self.switch_mode(Mode::Split),
             DiffLayout::Auto { .. } => {}
         }
         if columns_moved && self.style.wrap {
@@ -383,6 +508,26 @@ impl DiffViewState {
     pub fn set_appearance(&mut self, appearance: DiffAppearance) {
         if appearance != self.appearance {
             self.appearance = appearance;
+            self.revision += 1;
+        }
+    }
+
+    /// Bounds the view to a compact preview of at most `limit.max_rows`
+    /// rows, ending in a row that counts the rest and offers
+    /// [`DiffOutcome::OpenFull`]; `None` shows every row.
+    pub fn set_preview_limit(&mut self, limit: Option<DiffPreviewLimit>) {
+        if limit != self.preview {
+            self.preview = limit;
+            self.rebuild_rows(None);
+        }
+    }
+
+    pub fn set_limits(&mut self, limits: DiffLimits) {
+        if limits != self.limits {
+            self.limits = limits;
+            self.painted.clear();
+            self.content_w = [0.0; 2];
+            self.rerun_search();
             self.revision += 1;
         }
     }
@@ -402,9 +547,14 @@ impl DiffViewState {
     /// Highlights every file on a background thread, by file extension,
     /// with `store`'s grammars. Files whose language has no grammar (or
     /// whose grammar is still downloading) stay plain until it arrives.
+    /// Session views stay plain for now.
     pub fn enable_syntax(&mut self, store: GrammarStore) {
+        if !self.files.is_static() {
+            return;
+        }
         self.syntax.enable(store);
-        self.syntax.request(&self.doc, self.doc_generation);
+        self.syntax
+            .request(&self.segments[0].doc, self.segments[0].generation);
     }
 
     pub fn set_selection(&mut self, selection: Option<Selection>, side: Side) {
@@ -413,22 +563,26 @@ impl DiffViewState {
         self.revision += 1;
     }
 
-    /// Reveals lines of a collapsed gap; see [`Expansion::reveal`].
+    /// Reveals lines of a collapsed gap; see [`quark_diff::Expansion::reveal`].
+    /// The gap's `file` is the view's file index (the document's, for the
+    /// static view).
     pub fn reveal(&mut self, gap: GapId, reveal: Reveal, amount: u32) -> bool {
-        if !self.expansion.reveal(&self.doc, gap, reveal, amount) {
+        let Some((seg, file)) = self.locate(gap.file) else {
+            return false;
+        };
+        let local = GapId { file, ..gap };
+        let segment = &mut self.segments[seg];
+        if !segment
+            .expansion
+            .reveal(&segment.doc, local, reveal, amount)
+        {
             return false;
         }
         let anchor = self.anchor();
-        let mode = self.projection.mode;
-        self.projection.rebuild(&self.doc, mode, &self.expansion);
+        let mode = self.mode;
+        self.segments[seg].rebuild(mode);
         self.rebuild_rows(anchor);
         true
-    }
-
-    /// Scrolls so `row` is at the top.
-    pub fn scroll_to_row(&mut self, row: u32) {
-        let top = self.list.rows().offset_of_index(row as usize);
-        self.set_scroll(top);
     }
 
     fn set_scroll(&mut self, offset: f32) -> bool {
@@ -480,6 +634,23 @@ impl DiffViewState {
             DiffEvent::ScrollTo(offset) => self.set_scroll(offset),
             DiffEvent::Expand(gap, reveal) => self.reveal(gap, reveal, REVEAL_STEP),
             DiffEvent::Key(key) => return self.key(key),
+            DiffEvent::OpenFull => {
+                return match self.preview_target() {
+                    Some(target) => DiffOutcome::OpenFull { target },
+                    None => DiffOutcome::Unchanged,
+                };
+            }
+            DiffEvent::Annotate { file, side, line } => {
+                return match self.anchor_for(file, side, line..line + 1) {
+                    Some(anchor) => DiffOutcome::Annotate { anchor },
+                    None => DiffOutcome::Unchanged,
+                };
+            }
+            DiffEvent::AnnotationMeasured {
+                id,
+                revision,
+                height,
+            } => self.set_annotation_height(id, revision, height),
         };
         if changed {
             DiffOutcome::Changed
@@ -508,263 +679,20 @@ impl DiffViewState {
                 self.select_all();
                 true
             }
+            DiffKey::NextMatch => self.next_match(SearchDirection::Forward).is_some(),
+            DiffKey::PrevMatch => self.next_match(SearchDirection::Backward).is_some(),
+            DiffKey::Annotate => {
+                return match self.annotate_selection_or_focus() {
+                    Some(anchor) => DiffOutcome::Annotate { anchor },
+                    None => DiffOutcome::Unchanged,
+                };
+            }
         };
         if moved {
             DiffOutcome::Changed
         } else {
             DiffOutcome::Unchanged
         }
-    }
-
-    /// Scrolls to the next or previous hunk or file start: the header or
-    /// gap row above a hunk's first line when there is one.
-    fn jump(&mut self, forward: bool, hunks: bool) -> bool {
-        let p = &self.projection;
-        let starts = if hunks { &p.hunk_rows } else { &p.file_rows };
-        let rows = self.list.rows();
-        let target_of = |&start: &u32| {
-            let above = start.checked_sub(1).filter(|&r| {
-                hunks && matches!(p.kind[r as usize], RowKind::HunkHeader | RowKind::Gap)
-            });
-            above.unwrap_or(start)
-        };
-        let current = self.list.scroll_offset();
-        // Half a point of slack: offsets are rounded to Fenwick units.
-        let target = if forward {
-            starts
-                .iter()
-                .map(target_of)
-                .find(|&r| rows.offset_of_index(r as usize) > current + 0.5)
-        } else {
-            starts
-                .iter()
-                .rev()
-                .map(target_of)
-                .find(|&r| rows.offset_of_index(r as usize) < current - 0.5)
-        };
-        match target {
-            Some(row) => {
-                let top = rows.offset_of_index(row as usize);
-                self.set_scroll(top)
-            }
-            None => false,
-        }
-    }
-
-    /// Selects every line: the new side unless a side-by-side selection
-    /// already chose one.
-    pub fn select_all(&mut self) {
-        let side = match self.projection.mode {
-            Mode::Split => self.selection_side,
-            Mode::Unified => Side::New,
-        };
-        let p = &self.projection;
-        let point = |row: u32, byte: usize| {
-            let (side, index) = self.shown_line(row, side)?;
-            let key = block_key(side, p.file[row as usize], index);
-            Some(SelectionPoint::new(key, byte))
-        };
-        let first = (0..p.len()).find_map(|r| point(r, 0));
-        let last = (0..p.len()).rev().find_map(|r| point(r, usize::MAX));
-        if let (Some(first), Some(last)) = (first, last) {
-            self.selection = Some(Selection::new(first, last));
-            self.selection_side = side;
-            self.revision += 1;
-        }
-    }
-
-    // ---- Selection -----------------------------------------------------
-
-    /// The selected text: lines joined by `\n`, from the side the
-    /// selection copies. Empty without a selection.
-    pub fn selected_text(&self) -> String {
-        let mut out = String::new();
-        let Some(((start_row, start_byte), (end_row, end_byte))) = self.ordered_selection() else {
-            return out;
-        };
-        let side = self.copy_side();
-        let mut first = true;
-        for row in start_row..=end_row {
-            let Some((side, index)) = self.copied_line(row, side) else {
-                continue;
-            };
-            let file = self.projection.file[row as usize];
-            let text = self.doc.text(file, side).display_line(index).unwrap_or("");
-            let from = if row == start_row {
-                floor_boundary(text, start_byte)
-            } else {
-                0
-            };
-            let to = if row == end_row {
-                floor_boundary(text, end_byte)
-            } else {
-                text.len()
-            };
-            if !first {
-                out.push('\n');
-            }
-            first = false;
-            out.push_str(&text[from..to.max(from)]);
-        }
-        out
-    }
-
-    /// Which side copy reads: the selection's side by side, else the
-    /// style's choice (`None` for lines as shown).
-    fn copy_side(&self) -> Option<Side> {
-        match (self.projection.mode, self.style.copy_side) {
-            (Mode::Split, _) => Some(self.selection_side),
-            (Mode::Unified, CopySide::New) => Some(Side::New),
-            (Mode::Unified, CopySide::Old) => Some(Side::Old),
-            (Mode::Unified, CopySide::Shown) => None,
-        }
-    }
-
-    /// The line of `row` that copy takes, or `None` when the row has none
-    /// on that side.
-    fn copied_line(&self, row: u32, side: Option<Side>) -> Option<(Side, u32)> {
-        let kind = self.projection.kind[row as usize];
-        let side = side.unwrap_or(if kind == RowKind::Removed {
-            Side::Old
-        } else {
-            Side::New
-        });
-        self.projection.line(row, side).map(|i| (side, i))
-    }
-
-    /// The line a point on `row` keys to: `side`'s line when side by
-    /// side, else the line the row shows.
-    fn shown_line(&self, row: u32, side: Side) -> Option<(Side, u32)> {
-        let p = &self.projection;
-        match p.mode {
-            Mode::Split => p.line(row, side).map(|i| (side, i)),
-            Mode::Unified => {
-                let side = if p.kind[row as usize] == RowKind::Removed {
-                    Side::Old
-                } else {
-                    Side::New
-                };
-                p.line(row, side).map(|i| (side, i))
-            }
-        }
-    }
-
-    /// Row and byte of each endpoint, start first. `None` without a
-    /// selection or when an endpoint's line is not shown.
-    fn ordered_selection(&self) -> Option<((u32, usize), (u32, usize))> {
-        let s = self.selection?;
-        let at = |point: SelectionPoint| {
-            let (side, file, index) = decode_key(point.block);
-            Some((self.projection.row_of(file, side, index)?, point.byte))
-        };
-        let (a, b) = (at(s.anchor)?, at(s.focus)?);
-        Some(if a <= b { (a, b) } else { (b, a) })
-    }
-
-    /// Selected byte range of `row`'s line on `side`, as painted.
-    fn row_selection(
-        &self,
-        ordered: Option<((u32, usize), (u32, usize))>,
-        row: u32,
-        side: Side,
-        len: usize,
-    ) -> Option<(usize, usize)> {
-        let ((start_row, start_byte), (end_row, end_byte)) = ordered?;
-        if row < start_row || row > end_row {
-            return None;
-        }
-        // Only lines copy takes are highlighted, and side by side only on
-        // the selection's side.
-        self.copied_line(row, self.copy_side())?;
-        if self.projection.mode == Mode::Split && side != self.selection_side {
-            return None;
-        }
-        let lo = if row == start_row {
-            start_byte.min(len)
-        } else {
-            0
-        };
-        let hi = if row == end_row {
-            end_byte.min(len)
-        } else {
-            len
-        };
-        (lo < hi).then_some((lo, hi))
-    }
-
-    fn local(&self, x: f32, y: f32) -> (f32, f32) {
-        let b = self.bounds.get();
-        (x - b.x, y - b.y)
-    }
-
-    /// The side a press at view-local `x` selects.
-    fn side_at(&self, x: f32) -> Side {
-        let m = self.metrics();
-        let columns = Columns::new(
-            self.projection.mode,
-            self.viewport.0,
-            &m,
-            &self.presentation,
-        );
-        match self.projection.mode {
-            Mode::Unified => Side::New,
-            Mode::Split if x < columns.of(Side::New).gutter_x => Side::Old,
-            Mode::Split => Side::New,
-        }
-    }
-
-    /// The selection point under view-local `(x, y)`, on the selection's
-    /// side when side by side. Points above or below the window clamp to
-    /// its first or last line; rows without a line on the side (headers,
-    /// gaps, padding) give the start of the next line, or the end of the
-    /// previous one at the bottom.
-    pub fn point_at(&self, x: f32, y: f32) -> Option<SelectionPoint> {
-        let frame = self.frame.as_ref()?;
-        let side = self.selection_side;
-        let rows = &frame.rows;
-        let hit = rows
-            .iter()
-            .position(|r| y >= r.top && y < r.top + r.height)
-            .unwrap_or(if y < rows.first()?.top {
-                0
-            } else {
-                rows.len() - 1
-            });
-        let line_of = |r: &FrameRow| self.shown_line(r.index, side);
-        let row = &rows[hit];
-        if let Some((line_side, index)) = line_of(row) {
-            let paint = row.paint.sides[line_side as usize].as_ref()?;
-            let column = frame.columns.of(line_side);
-            let scroll = if frame.wrap {
-                0.0
-            } else {
-                self.hscroll[column_slot(frame.columns.mode, line_side)]
-                    .offset()
-                    .0
-            };
-            let tx = x - column.text_x - frame.metrics.text_pad + scroll;
-            let byte = if x < column.text_x {
-                0
-            } else {
-                paint.layout.hit(tx, y - row.top).get()
-            };
-            return Some(SelectionPoint::new(
-                block_key(line_side, row.paint.file, index),
-                byte,
-            ));
-        }
-        if let Some(next) = rows[hit..].iter().find_map(|r| Some((r, line_of(r)?))) {
-            let (r, (s, i)) = next;
-            return Some(SelectionPoint::new(block_key(s, r.paint.file, i), 0));
-        }
-        let (r, (s, i)) = rows[..hit]
-            .iter()
-            .rev()
-            .find_map(|r| Some((r, line_of(r)?)))?;
-        Some(SelectionPoint::new(
-            block_key(s, r.paint.file, i),
-            usize::MAX,
-        ))
     }
 
     // ---- Autoscroll ----------------------------------------------------
@@ -829,28 +757,6 @@ impl DiffViewState {
         }
     }
 
-    // ---- Frame ---------------------------------------------------------
-
-    fn overscan(&self) -> f32 {
-        self.metrics().line_h * 8.0
-    }
-
-    pub(crate) fn metrics(&self) -> Metrics {
-        self.metrics
-            .map_or_else(|| self.estimated_metrics(), |(m, _)| m)
-    }
-
-    /// Metrics before the font has been measured.
-    fn estimated_metrics(&self) -> Metrics {
-        let font_size = self.style.font_size;
-        metrics_for(
-            font_size,
-            self.style.line_height,
-            font_size * 0.6,
-            &self.doc,
-        )
-    }
-
     /// Advances a drag's autoscroll to `now_ms`, shapes the rows entering
     /// the window, and builds the frame the view paints. Does nothing (and
     /// allocates nothing) when the window, the state, and the scale are
@@ -862,7 +768,10 @@ impl DiffViewState {
         scale: f32,
         now_ms: u64,
     ) {
-        if self.syntax.poll(self.doc_generation) {
+        if self.files.is_static()
+            && let Some(segment) = self.segments.first()
+            && self.syntax.poll(segment.generation)
+        {
             self.revision += 1;
         }
         let scrolled = self.autoscroll(now_ms);
@@ -871,484 +780,5 @@ impl DiffViewState {
         if scrolled && self.follow_pointer() {
             self.build_frame(text, layouts, scale);
         }
-    }
-
-    fn build_frame(&mut self, text: &mut TextSystem, layouts: &mut LayoutCache, scale: f32) {
-        let measured = (scale.to_bits(), text.font_epoch());
-        if self.metrics.is_none_or(|(_, key)| key != measured) {
-            self.measure_font(text, layouts, scale);
-        }
-        let m = self.metrics();
-        let columns = Columns::new(
-            self.projection.mode,
-            self.viewport.0,
-            &m,
-            &self.presentation,
-        );
-        if self.style.wrap {
-            self.measure_window(text, layouts, scale, &columns);
-        }
-        let window = self.list.window(self.overscan()).range;
-        let key = PrepareKey {
-            window: (window.start, window.end),
-            scroll: self.list.scroll_offset().to_bits(),
-            revision: self.revision,
-            scale: scale.to_bits(),
-        };
-        if self.prepared == Some(key) && self.frame.is_some() {
-            return;
-        }
-        self.prepared = Some(key);
-        self.frame_id += 1;
-
-        let scroll = self.list.scroll_offset();
-        let ordered = self.ordered_selection();
-        let mut kept = HashMap::with_capacity(window.len());
-        let mut rows = Vec::with_capacity(window.len());
-        for index in window {
-            let row = index as u32;
-            let key = self.projection.row_key(row);
-            let stamp = self.stamp(row, &columns, scale);
-            let paint = match self.painted.remove(&key) {
-                Some(p) if p.stamp == stamp => p,
-                _ => Rc::new(self.build_row(row, stamp, text, layouts, scale, &columns)),
-            };
-            for (side, line) in [Side::Old, Side::New].into_iter().zip(&paint.sides) {
-                let Some(line) = line else {
-                    continue;
-                };
-                let slot = column_slot(self.projection.mode, side);
-                self.content_w[slot] = self.content_w[slot]
-                    .max((line.layout.size().0 + m.text_pad * 2.0 + m.char_w).ceil());
-            }
-            let rows_table = self.list.rows();
-            let selected = [Side::Old, Side::New].map(|side| {
-                let len = paint.sides[side as usize]
-                    .as_ref()
-                    .map_or(0, |l| l.layout.text().len());
-                paint.sides[side as usize].as_ref()?;
-                self.row_selection(ordered, row, side, len)
-            });
-            rows.push(FrameRow {
-                key,
-                index: row,
-                top: rows_table.offset_of_index(index) - scroll,
-                height: rows_table.height_of(RowKey(key)).unwrap_or(m.line_h),
-                paint: paint.clone(),
-                selected,
-                search: Default::default(),
-                focused: false,
-            });
-            kept.insert(key, paint);
-        }
-        self.painted = kept;
-        self.frame = Some(Rc::new(ViewFrame {
-            id: self.id,
-            label: self.label,
-            focus: self.focus,
-            viewport: self.viewport,
-            metrics: m,
-            columns,
-            presentation: self.presentation,
-            appearance: self.appearance,
-            wrap: self.style.wrap,
-            rows,
-            content_w: self.content_w,
-            scroll,
-            total: self.list.rows().total_extent(),
-            row_count: self.projection.len(),
-            hscroll: self.hscroll.clone(),
-            scrollbar_auto_hide: self.scrollbar_auto_hide,
-            scrollbar: self.scrollbar.clone(),
-        }));
-    }
-
-    /// Heights of rows entering the window, from their wrapped layouts.
-    fn measure_window(
-        &mut self,
-        text: &mut TextSystem,
-        layouts: &mut LayoutCache,
-        scale: f32,
-        columns: &Columns,
-    ) {
-        let m = self.metrics();
-        let overscan = self.overscan();
-        let mut list = std::mem::replace(&mut self.list, VariableList::new(1.0, 0.0));
-        let mut painted = std::mem::take(&mut self.painted);
-        let this = &*self;
-        list.measure_visible(this.viewport.0, overscan, |key, _| {
-            let Some(&row) = this.row_index.get(&key) else {
-                return m.line_h;
-            };
-            let stamp = this.stamp(row, columns, scale);
-            match painted.get(&key) {
-                Some(p) if p.stamp == stamp => p.height(&m),
-                _ => {
-                    let p = this.build_row(row, stamp, text, layouts, scale, columns);
-                    let height = p.height(&m);
-                    painted.insert(key, Rc::new(p));
-                    height
-                }
-            }
-        });
-        self.list = list;
-        self.painted = painted;
-    }
-
-    /// Identifies everything a row's paint depends on besides its key.
-    fn stamp(&self, row: u32, columns: &Columns, scale: f32) -> u64 {
-        let mut h = std::hash::DefaultHasher::new();
-        let file = self.projection.file[row as usize];
-        (
-            self.doc_generation,
-            self.syntax.file_generation(file),
-            scale.to_bits(),
-            self.style.font_size.to_bits(),
-            self.style.line_height.to_bits(),
-            self.projection.mode,
-        )
-            .hash(&mut h);
-        if self.style.wrap {
-            let m = self.metrics();
-            for side in [Side::Old, Side::New] {
-                columns.wrap_width(side, &m).to_bits().hash(&mut h);
-            }
-        }
-        if self.projection.kind[row as usize] == RowKind::Gap {
-            // Its count changes as lines are revealed.
-            self.projection.gap(row).map(|g| g.hidden).hash(&mut h);
-        }
-        h.finish()
-    }
-
-    fn measure_font(&mut self, text: &mut TextSystem, layouts: &mut LayoutCache, scale: f32) {
-        let style = self.text_style();
-        let params = TextParams::new("0000000000", style).scale_factor(scale);
-        let char_w = layouts
-            .layout(text, &params)
-            .map_or(self.style.font_size * 0.6, |l| l.size().0 / 10.0);
-        let m = metrics_for(
-            self.style.font_size,
-            self.style.line_height,
-            char_w,
-            &self.doc,
-        );
-        let fonts = text.font_epoch();
-        let changed = self.metrics.is_none_or(|(old, _)| old != m);
-        let new_fonts = self.metrics.is_some_and(|(_, (_, old))| old != fonts);
-        self.metrics = Some((m, (scale.to_bits(), fonts)));
-        if new_fonts {
-            // Rows were shaped and wrapped with the old fonts.
-            self.painted.clear();
-            self.content_w = [0.0; 2];
-        }
-        if changed || new_fonts {
-            let anchor = self.anchor();
-            self.rebuild_rows(anchor);
-        }
-    }
-
-    fn text_style(&self) -> TextStyle {
-        TextStyle::new(self.style.font_size)
-            .kind(FontKind::Mono)
-            .line_height((self.style.font_size * self.style.line_height).round())
-    }
-
-    fn build_row(
-        &self,
-        row: u32,
-        stamp: u64,
-        text: &mut TextSystem,
-        layouts: &mut LayoutCache,
-        scale: f32,
-        columns: &Columns,
-    ) -> RowPaint {
-        let p = &self.projection;
-        let r = row as usize;
-        let (kind, file) = (p.kind[r], p.file[r]);
-        let doc = &self.doc;
-        let meta = &doc.files().meta[file as usize];
-        let mut paint = RowPaint {
-            stamp,
-            kind: PreparedKind::Diff(kind),
-            file,
-            sides: [None, None],
-            source_lines: [None, None],
-            title: Arc::from(""),
-            gap: None,
-            status: meta.status,
-            stats: (
-                doc.files().additions[file as usize],
-                doc.files().deletions[file as usize],
-            ),
-            binary: meta.binary,
-        };
-        match kind {
-            RowKind::FileHeader => {
-                paint.title = match (&meta.old_path, &meta.new_path) {
-                    (Some(old), Some(new)) if old != new => format!("{old} \u{2192} {new}").into(),
-                    _ => doc.path(file).into(),
-                };
-            }
-            RowKind::HunkHeader => paint.title = hunk_title(doc, p.hunk[r]).into(),
-            RowKind::Gap => {
-                let gap = p.gap(row).expect("gap row");
-                paint.gap = Some(gap.id);
-                let lines = if gap.hidden == 1 { "line" } else { "lines" };
-                let mut title = format!("{} unchanged {lines}", gap.hidden);
-                if let Some(h) = gap.id.hunk {
-                    title.push_str("    ");
-                    title.push_str(&hunk_title(doc, h));
-                }
-                paint.title = title.into();
-            }
-            _ => {
-                let m = self.metrics();
-                let words = self.word_ranges(row);
-                for side in [Side::Old, Side::New] {
-                    let Some(index) = p.line(row, side) else {
-                        continue;
-                    };
-                    paint.source_lines[side as usize] = Some(source_line(doc, p, row, side, index));
-                    if p.mode == Mode::Unified && kind == RowKind::Context && side == Side::Old {
-                        // Unified context shows the new side's text.
-                        continue;
-                    }
-                    let store = doc.text(file, side);
-                    let line = store.display_line(index).unwrap_or("");
-                    let range = store.display_range(index).unwrap_or(0..0);
-                    let (spans, tones) = self.syntax.spans(file, side, range);
-                    let params = TextParams::new(line, self.text_style())
-                        .spans(spans)
-                        .scale_factor(scale)
-                        .wrap_width(self.style.wrap.then(|| columns.wrap_width(side, &m)));
-                    let Ok(layout) = layouts.layout(text, &params) else {
-                        continue;
-                    };
-                    paint.sides[side as usize] = Some(LinePaint {
-                        layout,
-                        tones,
-                        words: words[side as usize].clone(),
-                        detail: prepared::LineDetail::Complete,
-                    });
-                }
-            }
-        }
-        paint
-    }
-
-    /// Changed words of `row`'s lines, by side.
-    fn word_ranges(&self, row: u32) -> [Vec<Range<usize>>; 2] {
-        let p = &self.projection;
-        let r = row as usize;
-        let (old, new) = match p.kind[r] {
-            RowKind::Modified => (p.old[r], p.new[r]),
-            RowKind::Removed => (p.old[r], p.pair[r]),
-            RowKind::Added => (p.pair[r], p.new[r]),
-            _ => return Default::default(),
-        };
-        if old == quark_diff::NONE || new == quark_diff::NONE {
-            return Default::default();
-        }
-        let file = p.file[r];
-        let line = |side, i| self.doc.text(file, side).display_line(i).unwrap_or("");
-        let d = inline_diff(line(Side::Old, old), line(Side::New, new));
-        let bytes = |v: Vec<Range<u32>>| -> Vec<Range<usize>> {
-            v.into_iter()
-                .map(|r| r.start as usize..r.end as usize)
-                .collect()
-        };
-        [bytes(d.old), bytes(d.new)]
-    }
-
-    // ---- Rows ----------------------------------------------------------
-
-    /// The first visible row and its offset into the viewport, to restore
-    /// after the rows change.
-    fn anchor(&self) -> Option<(u64, f32)> {
-        let index = self.list.rows().row_at(self.list.scroll_offset())?;
-        let rows = self.list.rows();
-        Some((
-            rows.keys()[index].0,
-            self.list.scroll_offset() - rows.offset_of_index(index),
-        ))
-    }
-
-    /// Rebuilds the row table from the projection, keeping `anchor` where
-    /// it was when the row still exists.
-    fn rebuild_rows(&mut self, anchor: Option<(u64, f32)>) {
-        let m = self.metrics();
-        let keys: Vec<RowKey> = (0..self.projection.len())
-            .map(|r| RowKey(self.projection.row_key(r)))
-            .collect();
-        self.row_index = keys.iter().zip(0..).map(|(k, r)| (k.0, r)).collect();
-        let mut list = VariableList::new(m.line_h, self.viewport.1);
-        // A fresh list is pinned to the bottom; a diff opens at the top.
-        list.set_scroll_offset(0.0);
-        let _ = list.extend(&keys);
-        for (row, key) in keys.iter().enumerate() {
-            let kind = self.projection.kind[row];
-            if !kind.is_line() {
-                let _ = list.set_height(*key, row_height(kind, &m));
-            }
-        }
-        let offset = anchor
-            .and_then(|(key, delta)| Some(list.rows().offset_of(RowKey(key))? + delta))
-            .unwrap_or_else(|| self.list.scroll_offset());
-        list.set_scroll_offset(offset);
-        self.list = list;
-        self.revision += 1;
-    }
-}
-
-/// Sizes for a font of `font_size` points whose digits are `char_w` wide.
-fn metrics_for(font_size: f32, line_height: f32, char_w: f32, doc: &DiffDocument) -> Metrics {
-    let lines = (0..doc.file_count())
-        .flat_map(|f| [doc.text(f, Side::Old), doc.text(f, Side::New)])
-        .map(|t| t.line_count())
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    // Partial stores hold fewer lines than the files; leave room for a
-    // few more digits than they need.
-    let digits = (lines.ilog10() + 1).max(3) as f32;
-    Metrics {
-        font_size,
-        line_h: (font_size * line_height).round(),
-        char_w,
-        number_w: (digits * char_w + char_w * 2.0).ceil(),
-        sign_w: (char_w * 2.0).ceil(),
-        text_pad: (char_w * 0.5).ceil(),
-    }
-}
-
-/// The scroll handle a side's text column uses: unified has one column.
-pub(crate) fn column_slot(mode: Mode, side: Side) -> usize {
-    match mode {
-        Mode::Unified => Side::New as usize,
-        Mode::Split => side as usize,
-    }
-}
-
-/// `@@ -a,b +c,d @@ section` of a hunk.
-fn hunk_title(doc: &DiffDocument, hunk: u32) -> String {
-    let (h, i) = (doc.hunks(), hunk as usize);
-    let section = &h.section[i];
-    format!(
-        "@@ -{},{} +{},{} @@{}{section}",
-        h.old_start[i],
-        h.old_len[i],
-        h.new_start[i],
-        h.new_len[i],
-        if section.is_empty() { "" } else { " " }
-    )
-}
-
-/// Zero-based source line of store line `index` shown on `row`.
-fn source_line(doc: &DiffDocument, p: &Projection, row: u32, side: Side, index: u32) -> u32 {
-    let file = p.file[row as usize];
-    if !doc.files().partial[file as usize] {
-        return index;
-    }
-    let hunk = p.hunk[row as usize];
-    let (h, b) = (doc.hunks(), doc.blocks());
-    for block in h.blocks[hunk as usize].clone() {
-        let bi = block as usize;
-        let (store, len, line) = match side {
-            Side::Old => (b.old_store[bi], b.old_len[bi], b.old_line[bi]),
-            Side::New => (b.new_store[bi], b.new_len[bi], b.new_line[bi]),
-        };
-        if (store..store + len).contains(&index) {
-            debug_assert!(b.kind[bi] == BlockKind::Context || len > 0);
-            return (line + index - store).saturating_sub(1);
-        }
-    }
-    index
-}
-
-const SIDE_BIT: u64 = 1 << 63;
-
-/// The selection key of a line: side, file, and store index.
-fn block_key(side: Side, file: u32, index: u32) -> BlockKey {
-    let side = if side == Side::New { SIDE_BIT } else { 0 };
-    BlockKey(side | (u64::from(file) << 32) | u64::from(index))
-}
-
-fn decode_key(key: BlockKey) -> (Side, u32, u32) {
-    let side = if key.0 & SIDE_BIT != 0 {
-        Side::New
-    } else {
-        Side::Old
-    };
-    (side, ((key.0 & !SIDE_BIT) >> 32) as u32, key.0 as u32)
-}
-
-/// Largest char boundary at or below `byte`, clamped to the text.
-fn floor_boundary(text: &str, byte: usize) -> usize {
-    let mut at = byte.min(text.len());
-    while !text.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Catches rows shaped and wrapped before a font change being kept: a
-    // wrapped diff must lay out as a fresh view does in the new fonts.
-    #[test]
-    fn font_change_reshapes_and_rewraps_every_row() {
-        let long = "let wrapped = some_function(first_argument, second_argument, third);";
-        let patch = format!(
-            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-{long}\n+{long} // x\n"
-        );
-        let doc = || quark_diff::parse_unified(&patch).unwrap();
-        let open = || {
-            let mut state = DiffViewState::new("test.diff", FocusId::new(1), doc());
-            state.set_style(DiffStyle {
-                wrap: true,
-                ..DiffStyle::default()
-            });
-            state.set_viewport(260.0, 400.0);
-            state
-        };
-        let mut text = TextSystem::vendored_only(&Default::default());
-        let mut layouts = LayoutCache::default();
-        // Row heights, and each side's text in pixels wide.
-        let layout =
-            |state: &mut DiffViewState, text: &mut TextSystem, layouts: &mut LayoutCache| {
-                state.prepare(text, layouts, 1.0, 0);
-                let frame = state.frame.as_ref().unwrap();
-                let rows: Vec<String> = frame
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        let widths: Vec<f32> = row
-                            .paint
-                            .sides
-                            .iter()
-                            .flatten()
-                            .map(|side| side.layout.size().0)
-                            .collect();
-                        format!("{}:{widths:?}", row.height)
-                    })
-                    .collect();
-                rows.join(" ")
-            };
-        let mut state = open();
-        let before = layout(&mut state, &mut text, &mut layouts);
-
-        text.set_font_settings(&quark_text::FontSettings {
-            // Proportional, so the lines wrap elsewhere.
-            mono_family: "Inter".into(),
-            ..Default::default()
-        });
-        let after = layout(&mut state, &mut text, &mut layouts);
-
-        let expected = layout(&mut open(), &mut text, &mut layouts);
-        assert_ne!(before, expected, "the fonts lay the rows out differently");
-        assert_eq!(after, expected);
     }
 }
