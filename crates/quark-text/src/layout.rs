@@ -10,6 +10,7 @@ use quark::scene::FontStyle;
 use quark::{FontKind, FontWeight, Rect};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::fonts::{FamilyId, FamilyNames, FontFamily};
 use crate::offset::{TextOffset, ToTextOffset};
 use crate::source::TextSource;
 
@@ -34,6 +35,8 @@ pub enum TextError {
     },
     #[error("text longer than u32::MAX bytes")]
     TextTooLong,
+    #[error("font weight must be 1 to 1000, got {0}")]
+    InvalidFontWeight(u16),
 }
 
 /// A broken [`TextLayout`] column invariant, reported by
@@ -102,7 +105,7 @@ pub struct TextStyle {
     /// text that keeps its own font whatever the app's settings (a
     /// terminal's). Spans that set their own kind still use that kind's
     /// family.
-    pub family: Option<&'static str>,
+    pub family: Option<FamilyId>,
     /// Extra advance after every glyph, in ems. A terminal sets it so
     /// glyphs land on its whole-pixel cell grid.
     pub letter_spacing: f32,
@@ -146,8 +149,21 @@ impl TextStyle {
         self
     }
 
+    /// A family by static name; see [`Self::font_family`].
     pub fn family(mut self, family: Option<&'static str>) -> Self {
-        self.family = family;
+        self.family = family.map(FamilyId::from_static);
+        self
+    }
+
+    /// The family text draws in. [`FontFamily::SystemUi`] and
+    /// [`FontFamily::UiMonospace`] set the kind; a named family keeps it,
+    /// for spans that re-kind and for a family the system lacks.
+    pub fn font_family(mut self, family: FontFamily) -> Self {
+        match family {
+            FontFamily::SystemUi => (self.font_kind, self.family) = (FontKind::Ui, None),
+            FontFamily::UiMonospace => (self.font_kind, self.family) = (FontKind::Mono, None),
+            FontFamily::Named(id) => self.family = Some(id),
+        }
         self
     }
 
@@ -260,6 +276,14 @@ impl<'a> TextQuery<'a> {
         }
         if u32::try_from(self.text.len()).is_err() {
             return Err(TextError::TextTooLong);
+        }
+        let weights = std::iter::once(style.font_weight)
+            .chain(self.spans.iter().filter_map(|span| span.weight));
+        for weight in weights {
+            let value = weight_value(style.font_kind, weight);
+            if !(1..=1000).contains(&value) {
+                return Err(TextError::InvalidFontWeight(value));
+            }
         }
         for (index, span) in self.spans.iter().enumerate() {
             let Range { start, end } = span.range;
@@ -405,6 +429,38 @@ impl GlyphColumns {
     }
 }
 
+/// One glyph of a [`TextLayout`], in the units [`GlyphColumns`] documents.
+/// Read glyphs through [`TextLayout::glyph`] and [`TextLayout::glyph_iter`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Glyph {
+    pub x: f32,
+    pub advance: f32,
+    pub line: u32,
+    pub byte_start: u32,
+    pub byte_end: u32,
+    /// Unicode bidi embedding level; odd = RTL.
+    pub level: u8,
+    pub span: u32,
+    pub font_id: fontdb::ID,
+    pub glyph_id: u16,
+    pub font_size: f32,
+    pub font_weight: fontdb::Weight,
+    pub flags: CacheKeyFlags,
+    pub phys_x: f32,
+    pub phys_y: f32,
+}
+
+impl Glyph {
+    pub fn rtl(&self) -> bool {
+        self.level % 2 == 1
+    }
+
+    /// The text bytes the glyph's cluster covers.
+    pub fn bytes(&self) -> Range<usize> {
+        self.byte_start as usize..self.byte_end as usize
+    }
+}
+
 fn clear_reserve<T>(column: &mut Vec<T>, len: usize) {
     column.clear();
     column.reserve(len);
@@ -499,6 +555,17 @@ pub struct TextLayout {
     spare_lines: Vec<BufferLine>,
 }
 
+/// What shaping depends on besides the params and the font system: the
+/// [`crate::TextSystem`]'s derived font facts and settings.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ShapeEnv<'a> {
+    pub(crate) synth: SyntheticItalic,
+    /// The color emoji family emoji clusters ask for first.
+    pub(crate) emoji: Option<&'static str>,
+    pub(crate) ligatures: bool,
+    pub(crate) names: &'a FamilyNames,
+}
+
 /// Temporaries of a layout build. The [`TextSystem`](crate::TextSystem)
 /// keeps them, so a build allocates only what its result keeps.
 #[derive(Debug, Default)]
@@ -535,11 +602,9 @@ impl TextLayout {
         fs: &mut FontSystem,
         scratch: &mut LayoutScratch,
         params: &TextParams,
-        synth: SyntheticItalic,
-        emoji: Option<&'static str>,
-        ligatures: bool,
+        env: &ShapeEnv,
     ) -> Result<Self, TextError> {
-        Self::build_with(fs, scratch, params, synth, emoji, ligatures, |_| true)
+        Self::build_with(fs, scratch, params, env, |_| true)
     }
 
     /// [`Self::build`] keeping only the shaped runs `keep` accepts, so tests
@@ -548,15 +613,13 @@ impl TextLayout {
         fs: &mut FontSystem,
         scratch: &mut LayoutScratch,
         params: &TextParams,
-        synth: SyntheticItalic,
-        emoji: Option<&'static str>,
-        ligatures: bool,
+        env: &ShapeEnv,
         keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
     ) -> Result<Self, TextError> {
         params.validate()?;
         let mut layout = Self::empty();
         layout.copy_inputs(&params.query());
-        layout.rebuild_with(fs, scratch, synth, emoji, ligatures, keep);
+        layout.rebuild_with(fs, scratch, env, keep);
         Ok(layout)
     }
 
@@ -649,22 +712,24 @@ impl TextLayout {
         &mut self,
         fs: &mut FontSystem,
         scratch: &mut LayoutScratch,
-        synth: SyntheticItalic,
-        emoji: Option<&'static str>,
-        ligatures: bool,
+        env: &ShapeEnv,
     ) {
-        self.rebuild_with(fs, scratch, synth, emoji, ligatures, |_| true);
+        self.rebuild_with(fs, scratch, env, |_| true);
     }
 
     fn rebuild_with(
         &mut self,
         fs: &mut FontSystem,
         scratch: &mut LayoutScratch,
-        synth: SyntheticItalic,
-        emoji: Option<&'static str>,
-        ligatures: bool,
+        env: &ShapeEnv,
         keep: impl Fn(&cosmic_text::LayoutRun) -> bool,
     ) {
+        let ShapeEnv {
+            synth,
+            emoji,
+            ligatures,
+            names,
+        } = *env;
         // A reference count, not a copy: the fields below are borrowed
         // mutably while the text is read.
         let source = self.source.clone();
@@ -687,8 +752,12 @@ impl TextLayout {
         // One features vector moves between the base and each span's
         // attributes: an `Attrs` owns its features, so a clone per span
         // would allocate whenever ligatures are off.
-        let synth = synth.for_family(fs, style.family);
-        let mut base = base_attrs(&style).font_features(mem::take(&mut scratch.features));
+        // A named family another system interned draws in the generic one.
+        let named = style.family.and_then(|id| names.name(id));
+        let own_family = named.map_or_else(|| family(style.font_kind), Family::Name);
+        let synth = synth.for_family(fs, named);
+        let mut base =
+            base_attrs(&style, own_family).font_features(mem::take(&mut scratch.features));
         while buffer.lines.len() > paragraphs.len() {
             spare_lines.extend(buffer.lines.pop());
         }
@@ -698,7 +767,7 @@ impl TextLayout {
                 let start = span.range.start.max(range.start);
                 let end = span.range.end.min(range.end);
                 if start < end {
-                    let span_attrs = span_attrs(&style, span, i, synth)
+                    let span_attrs = span_attrs(&style, own_family, span, i, synth)
                         .font_features(mem::take(&mut base.font_features));
                     attrs.add_span(start - range.start..end - range.start, &span_attrs);
                     base.font_features = span_attrs.font_features;
@@ -713,9 +782,7 @@ impl TextLayout {
                         style.font_kind == FontKind::Mono,
                         weight_value(style.font_kind, style.font_weight),
                     );
-                    let faces = scratch
-                        .text_faces
-                        .faces(fs.db(), key, style_family(&style), emoji);
+                    let faces = scratch.text_faces.faces(fs.db(), key, own_family, emoji);
                     text_spans(&mut attrs, paragraph, fs, &mut scratch.text_faces, faces);
                 }
             }
@@ -1125,6 +1192,40 @@ impl TextLayout {
         &self.glyphs
     }
 
+    pub fn glyph_count(&self) -> usize {
+        self.glyphs.len()
+    }
+
+    /// Glyph `i`, in storage order (see [`GlyphColumns`]).
+    pub fn glyph(&self, i: usize) -> Option<Glyph> {
+        (i < self.glyph_count()).then(|| self.glyph_at(i))
+    }
+
+    /// Every glyph, in storage order.
+    pub fn glyph_iter(&self) -> impl ExactSizeIterator<Item = Glyph> + '_ {
+        (0..self.glyph_count()).map(|i| self.glyph_at(i))
+    }
+
+    fn glyph_at(&self, i: usize) -> Glyph {
+        let g = &self.glyphs;
+        Glyph {
+            x: g.x[i],
+            advance: g.advance[i],
+            line: g.line[i],
+            byte_start: g.byte_start[i],
+            byte_end: g.byte_end[i],
+            level: g.level[i],
+            span: g.span[i],
+            font_id: g.font_id[i],
+            glyph_id: g.glyph_id[i],
+            font_size: g.font_size[i],
+            font_weight: g.font_weight[i],
+            flags: g.flags[i],
+            phys_x: g.phys_x[i],
+            phys_y: g.phys_y[i],
+        }
+    }
+
     pub fn glyph_runs(&self) -> impl ExactSizeIterator<Item = GlyphRun> + '_ {
         self.runs.iter().map(|r| GlyphRun {
             line: r.line as usize,
@@ -1516,13 +1617,6 @@ fn split_paragraphs(text: &str, out: &mut Vec<(Range<usize>, LineEnding)>) {
     out.push((start..text.len(), LineEnding::None));
 }
 
-/// The family of text in `style` that no span re-kinds.
-fn style_family(style: &TextStyle) -> Family<'static> {
-    style
-        .family
-        .map_or_else(|| family(style.font_kind), Family::Name)
-}
-
 fn family(kind: FontKind) -> Family<'static> {
     match kind {
         FontKind::Ui => Family::SansSerif,
@@ -1616,9 +1710,11 @@ fn set_font_features(features: &mut cosmic_text::FontFeatures, ligatures: bool) 
     }
 }
 
-fn base_attrs(style: &TextStyle) -> Attrs<'static> {
+/// Attributes of text no span styles; `own_family` is the family of text
+/// in `style` that no span re-kinds.
+fn base_attrs<'a>(style: &TextStyle, own_family: Family<'a>) -> Attrs<'a> {
     let attrs = Attrs::new()
-        .family(style_family(style))
+        .family(own_family)
         .weight(cosmic_text::Weight(weight_value(
             style.font_kind,
             style.font_weight,
@@ -1692,17 +1788,18 @@ impl SyntheticItalic {
     }
 }
 
-fn span_attrs(
+fn span_attrs<'a>(
     style: &TextStyle,
+    own_family: Family<'a>,
     span: &TextSpan,
     index: usize,
     synth: SyntheticItalic,
-) -> Attrs<'static> {
+) -> Attrs<'a> {
     let kind = span.kind.unwrap_or(style.font_kind);
     let weight = span.weight.unwrap_or(style.font_weight);
     let italic = span.style == Some(FontStyle::Italic);
     // The style's named family, unless the span picks a kind of its own.
-    let named = span.kind.is_none() && style.family.is_some();
+    let named = span.kind.is_none() && matches!(own_family, Family::Name(_));
     let font_style = if italic {
         cosmic_text::Style::Italic
     } else {
@@ -1718,12 +1815,8 @@ fn span_attrs(
     } else {
         CacheKeyFlags::empty()
     } | style_flags(style);
-    base_attrs(style)
-        .family(if named {
-            style_family(style)
-        } else {
-            family(kind)
-        })
+    base_attrs(style, own_family)
+        .family(if named { own_family } else { family(kind) })
         .weight(cosmic_text::Weight(weight_value(kind, weight)))
         .style(font_style)
         .cache_key_flags(flags)
@@ -2218,6 +2311,16 @@ mod tests {
         }
     }
 
+    fn env(synth: SyntheticItalic) -> ShapeEnv<'static> {
+        static NO_NAMES: FamilyNames = FamilyNames::new();
+        ShapeEnv {
+            synth,
+            emoji: None,
+            ligatures: true,
+            names: &NO_NAMES,
+        }
+    }
+
     // Regression: `hit` indexed line `count - 1`, guarded only by a
     // `debug_assert`, so a layout without shaped lines underflowed.
     #[test]
@@ -2227,9 +2330,8 @@ mod tests {
         let fs = system.raster_font_system();
         let synth = SyntheticItalic::new(fs);
         let mut scratch = LayoutScratch::default();
-        let layout =
-            TextLayout::build_with(fs, &mut scratch, &params, synth, None, true, |_| false)
-                .expect("layout");
+        let layout = TextLayout::build_with(fs, &mut scratch, &params, &env(synth), |_| false)
+            .expect("layout");
         assert_eq!(layout.line_count(), 1);
         assert_eq!(layout.hit(50.0, 50.0), 0);
         let caret = layout.caret(2);
