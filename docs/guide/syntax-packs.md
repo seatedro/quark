@@ -30,6 +30,14 @@ chat.set_grammar_store(store.clone()); // MarkdownDocument
 diff.enable_syntax(store);             // DiffViewState
 ```
 
+A pack root holds `<target triple>/<language>/`, as the tool writes it;
+`quark_syntax::pack::TARGET` is this build's triple, for checking that a
+root has packs before using it. Where an app's packs live is its own
+choice. The examples read `$QUARK_SYNTAX_PACKS`, else the workspace's
+`target/syntax-packs`; the Workbench also looks in `assets/syntax-packs/`
+beside its executable
+([assets.rs](../../examples/workbench/src/assets.rs)).
+
 With downloads, `index_url` may contain `{target}`, which becomes the
 build's target triple, and `keys` are `quark_syntax::PublicKey` values (the
 same type and hex format as quark-update's). The cache defaults to
@@ -87,7 +95,11 @@ it reads and compares the result with the pinned `sha256`, compiles
 target's C compiler (MSVC on Windows) into a shared library that exports
 only the language function, and writes the manifest. Grammars with C++
 scanners are rejected; every pinned grammar uses a C scanner or none.
-`--sources` serves offline and Nix builds; the hash still applies. Files
+`--sources` serves offline and Nix builds; the hash still applies. Each
+language reads its own directory, even where languages share a
+repository: `DIR/tsx/` is another copy of the tree-sitter-typescript
+checkout, `DIR/markdown_inline/` of tree-sitter-markdown, and TypeScript
+and TSX also read JavaScript's queries from `DIR/javascript/`. Files
 are hashed with LF line endings, so a Windows checkout that converted them
 hashes the same, and query files ship with LF endings on every target.
 
