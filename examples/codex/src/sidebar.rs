@@ -116,7 +116,7 @@ pub fn view(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
                 </nav_row>
             </div>
             <div class="absolute left-2 top-[127] flex-col overflow-hidden" w={ROW_W}
-                 h={(h - 127.0).max(0.0)} accessibility_role={Role::List}
+                 h={(h - 127.0).max(0.0)} role="list"
                  aria-label={if app.activity { "Activity" } else { "Chats" }}>
                 <div class="flex-col shrink-0" w={ROW_W}>
                     if app.activity {
