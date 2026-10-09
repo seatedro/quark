@@ -72,7 +72,7 @@ use quark_render::scene::Rect;
 use quark_text::FontEpoch;
 
 use crate::element::{
-    AnyElement, Binding, ScrollHandle, ScrollbarVisibility, StyledSpan, join_code_lines,
+    AnyElement, Binding, LineHeight, ScrollHandle, ScrollbarVisibility, StyledSpan, join_code_lines,
 };
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
@@ -631,6 +631,11 @@ pub struct DocumentStyle {
     pub edge: f32,
     /// Extra pixels above and below the viewport that are materialized.
     pub overscan: f32,
+    /// Line height of body text: prose, list items, failed image alt
+    /// text, and table cells. Headings scale it with their text
+    /// ([`LineHeight::scaled`]); code blocks keep their own. An invalid
+    /// value falls back to [`LineHeight::PARAGRAPH`].
+    pub line_height: LineHeight,
 }
 
 impl DocumentStyle {
@@ -644,7 +649,21 @@ impl DocumentStyle {
             line_scroll: (font_size * 3.0).round(),
             edge: (font_size * 2.0).round(),
             overscan: (font_size * 20.0).round(),
+            line_height: LineHeight::PARAGRAPH,
         }
+    }
+
+    /// The same proportions with body text at `line_height`.
+    pub fn with_line_height(mut self, line_height: LineHeight) -> Self {
+        self.line_height = line_height;
+        self
+    }
+
+    /// The line height of a block `scale` times the body size.
+    pub fn block_line_height(&self, scale: f32) -> LineHeight {
+        self.line_height
+            .valid_or(LineHeight::PARAGRAPH)
+            .scaled(scale)
     }
 }
 
@@ -688,6 +707,16 @@ pub trait BlockGeometry: Clone {
 pub trait BlockMeasurer {
     type Geometry: BlockGeometry;
     fn measure(&mut self, block: &Block, width: f32) -> Self::Geometry;
+
+    /// Takes the document-wide settings blocks are measured under (body
+    /// line height). The document calls it before measuring, on the UI
+    /// thread and the background one alike, so geometry always matches
+    /// what its element paints. A measurer whose geometry depends on them
+    /// must reflect them in [`Self::settings_key`]. The default ignores
+    /// them.
+    fn apply_style(&mut self, style: &DocumentStyle) {
+        let _ = style;
+    }
 
     /// Identifies the settings geometry depends on besides the block and
     /// width (fonts, font size, scale factor). When it changes, every block
@@ -861,6 +890,9 @@ pub struct Document<G = TextGeometry> {
     kept_row: Option<RowKey>,
     /// A row the next prepare keeps at its place in the viewport.
     held_row: Option<RowKey>,
+    /// A row every prepare keeps at a requested place until a scroll or
+    /// another request replaces it.
+    anchor: Option<RowAnchor>,
     /// Geometry of the blocks measured for the current window; materialize
     /// reuses it instead of measuring every visible block every frame.
     measured: HashMap<BlockKey, Measured<G>>,
@@ -898,6 +930,15 @@ pub struct Document<G = TextGeometry> {
     elements_built: u64,
 }
 
+/// A row kept at a fixed place in the viewport: its top sits
+/// `viewport_offset` points below the viewport's top. See
+/// [`Document::anchor_row`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowAnchor {
+    pub row: RowKey,
+    pub viewport_offset: f32,
+}
+
 #[derive(Debug, Clone)]
 struct Reveal {
     block: BlockKey,
@@ -927,6 +968,7 @@ impl<G: BlockGeometry> Document<G> {
             adornments: Vec::new(),
             kept_row: None,
             held_row: None,
+            anchor: None,
             measured: HashMap::new(),
             measured_spare: HashMap::new(),
             measure_key: None,
@@ -947,6 +989,16 @@ impl<G: BlockGeometry> Document<G> {
 
     pub fn style(&self) -> &DocumentStyle {
         &self.style
+    }
+
+    /// Changes the document's style, such as its body line height. Every
+    /// row is measured again as it becomes visible; the row at the top of
+    /// the viewport keeps its place.
+    pub fn set_style(&mut self, style: DocumentStyle) {
+        if style != self.style {
+            self.style = style;
+            self.list.invalidate_all();
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -1115,6 +1167,10 @@ impl<G: BlockGeometry> Document<G> {
 
     pub fn remove(&mut self, key: RowKey) -> Result<(), RowError> {
         self.list.remove(key)?;
+        // The rows on screen stay put; nothing is left to keep in place.
+        if self.anchor.is_some_and(|a| a.row == key) {
+            self.anchor = None;
+        }
         for block in self.row_blocks.remove(&key).unwrap_or_default() {
             self.forget_block(block);
         }
@@ -1178,13 +1234,56 @@ impl<G: BlockGeometry> Document<G> {
         self.list.max_scroll_offset()
     }
 
-    /// A user scroll; landing at the bottom pins the view there.
+    /// A user scroll; landing at the bottom pins the view there. Cancels
+    /// a [`Self::anchor_row`].
     pub fn set_scroll_offset(&mut self, offset: f32) -> f32 {
+        self.anchor = None;
+        self.adjust_scroll(offset)
+    }
+
+    /// Moves the view without cancelling an anchor: the document's own
+    /// corrections.
+    fn adjust_scroll(&mut self, offset: f32) -> f32 {
         let offset = self.list.set_scroll_offset(offset);
         if self.list.is_stuck_to_bottom() {
             self.content_below = false;
         }
         offset
+    }
+
+    /// Keeps `row`'s top `viewport_offset` points below the viewport's top,
+    /// from the next prepare on: through rows prepended or appended,
+    /// streaming, and remeasurement (new widths, fonts, line heights, and
+    /// heights measured in the background), each corrected before the
+    /// frame is built. A row outside the window is located by its
+    /// estimated offset, measured, and placed in the same prepare. The view
+    /// never scrolls past either end, so a row too near one sits as close
+    /// as it can.
+    ///
+    /// A user scroll ([`Self::set_scroll_offset`], wheel, drag
+    /// autoscroll), a reveal, another anchor, or removing the row cancels
+    /// it; removal leaves the view where it is. Fails for a row that is not
+    /// in the document, or a nonfinite offset.
+    pub fn anchor_row(&mut self, row: RowKey, viewport_offset: f32) -> Result<(), RowError> {
+        if self.list.rows().index_of(row).is_none() || !viewport_offset.is_finite() {
+            return Err(RowError::UnknownKey(row));
+        }
+        self.anchor = Some(RowAnchor {
+            row,
+            viewport_offset,
+        });
+        self.reveal = None;
+        Ok(())
+    }
+
+    /// The anchor in effect, if any.
+    pub fn anchor(&self) -> Option<RowAnchor> {
+        self.anchor
+    }
+
+    /// Stops keeping the anchored row in place; the view stays where it is.
+    pub fn clear_anchor(&mut self) {
+        self.anchor = None;
     }
 
     pub fn scroll_by(&mut self, delta: f32) -> f32 {
@@ -1379,6 +1478,7 @@ impl<G: BlockGeometry> Document<G> {
             .find(|b| b.key == block)
             .and_then(|b| self.range_extent(b, range.clone()))
             .is_some_and(|(top, bottom)| top >= 0.0 && bottom <= self.size.1);
+        self.anchor = None;
         if !in_view {
             let _ = self.list.scroll_to(row, align);
             if self.list.is_stuck_to_bottom() {
@@ -1595,6 +1695,7 @@ impl<G: BlockGeometry> Document<G> {
             self.list.set_viewport_height(height);
         }
         self.size = (width, height);
+        measurer.apply_style(&self.style);
         self.autoscroll(now_ms);
 
         let held = self.held_row.take().and_then(|row| {
@@ -1613,10 +1714,11 @@ impl<G: BlockGeometry> Document<G> {
                 if delta.abs() < 0.5 {
                     break;
                 }
-                self.set_scroll_offset(self.list.scroll_offset() + delta);
+                self.adjust_scroll(self.list.scroll_offset() + delta);
                 self.measure_window(source, measurer);
             }
         }
+        self.place_anchor(source, measurer);
         if self.list.is_stuck_to_bottom() {
             self.content_below = false;
         }
@@ -1630,6 +1732,37 @@ impl<G: BlockGeometry> Document<G> {
         // selection end under it.
         if let Some(drag) = self.drag {
             self.extend_selection_to(drag.pointer.0, drag.pointer.1);
+        }
+    }
+
+    /// Scrolls the anchored row to its place, measuring the rows that
+    /// come into the window. Rows measured on the way can move it again,
+    /// so it takes a few passes; one that cannot move further (the view
+    /// is at an end) stops early.
+    fn place_anchor<M: BlockMeasurer<Geometry = G>>(
+        &mut self,
+        source: &impl DocumentSource,
+        measurer: &mut M,
+    ) {
+        let Some(anchor) = self.anchor else {
+            return;
+        };
+        for _ in 0..3 {
+            let Some(top) = self.list.rows().offset_of(anchor.row) else {
+                self.anchor = None;
+                return;
+            };
+            let before = self.list.scroll_offset();
+            let target = top - anchor.viewport_offset;
+            if (target - before).abs() < 0.5 {
+                return;
+            }
+            self.adjust_scroll(target);
+            let moved = self.list.scroll_offset() != before;
+            self.measure_window(source, measurer);
+            if !moved {
+                return;
+            }
         }
     }
 

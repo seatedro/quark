@@ -84,6 +84,7 @@ type MeasureRow = fn(&mut TextMeasurer<'_>, &RowLayout, &RowSnapshot) -> f32;
 
 fn measure_row(measurer: &mut TextMeasurer<'_>, layout: &RowLayout, row: &RowSnapshot) -> f32 {
     let width = block_width(&layout.style, layout.width);
+    measurer.apply_style(&layout.style);
     lay_out_row(
         &layout.style,
         row.header,

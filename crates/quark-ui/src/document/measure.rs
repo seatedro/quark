@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use quark_render::FontKind;
+use quark_render::FontWeight;
 use quark_render::scene::Rect;
 use quark_text::{LayoutCache, TextLayout, TextParams, TextSystem};
 
@@ -16,7 +16,9 @@ use super::{
     Block, BlockContent, BlockGeometry, BlockMeasurer, IMAGE_PLACEHOLDER_HEIGHT, ImageState,
     MeasureKey, MeasureSpec, RULE_HEIGHT, TableGeometry, TableMetrics,
 };
-use crate::element::{CodeBlock, CodeHeader, SelectableText, StyledSpan};
+use crate::element::{
+    CodeBlock, CodeHeader, LineHeight, ParagraphStyle, SelectableText, StyledSpan,
+};
 
 /// Measures blocks with the frame's text system and layout cache.
 /// `font_size` is in logical points; `scale_factor` must be the one the
@@ -27,6 +29,10 @@ pub struct TextMeasurer<'a> {
     pub layouts: &'a mut LayoutCache,
     pub font_size: f32,
     pub scale_factor: f32,
+    /// Body line height; the document sets it from its
+    /// [`DocumentStyle::line_height`](super::DocumentStyle::line_height)
+    /// before measuring.
+    pub line_height: LineHeight,
 }
 
 impl<'a> TextMeasurer<'a> {
@@ -41,7 +47,16 @@ impl<'a> TextMeasurer<'a> {
             layouts,
             font_size,
             scale_factor,
+            line_height: LineHeight::PARAGRAPH,
         }
+    }
+
+    /// The paragraph style of body text `scale` times the body size.
+    fn paragraph(&self, scale: f32, weight: FontWeight) -> ParagraphStyle {
+        let line_height = self.line_height.valid_or(LineHeight::PARAGRAPH);
+        ParagraphStyle::new(self.font_size * scale)
+            .weight(weight)
+            .line_height(line_height.scaled(scale))
     }
 
     fn layout(&mut self, params: TextParams) -> Option<Arc<TextLayout>> {
@@ -120,11 +135,21 @@ impl BlockMeasurer for TextMeasurer<'_> {
     type Geometry = TextGeometry;
 
     fn settings_key(&self) -> MeasureKey {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (self.font_size.to_bits(), self.scale_factor.to_bits()).hash(&mut hasher);
+        match self.line_height {
+            LineHeight::Relative(factor) => (0u8, factor.to_bits()).hash(&mut hasher),
+            LineHeight::Points(points) => (1u8, points.to_bits()).hash(&mut hasher),
+        }
         MeasureKey {
-            settings: (u64::from(self.font_size.to_bits()) << 32)
-                | u64::from(self.scale_factor.to_bits()),
+            settings: hasher.finish(),
             fonts: Some(self.text.font_epoch()),
         }
+    }
+
+    fn apply_style(&mut self, style: &super::DocumentStyle) {
+        self.line_height = style.line_height;
     }
 
     fn background_spec(&self) -> Option<MeasureSpec> {
@@ -143,16 +168,11 @@ impl BlockMeasurer for TextMeasurer<'_> {
         let text_len = block.text().len();
         match &block.content {
             BlockContent::Prose(spans) => {
-                let params = SelectableText::layout_params(
-                    spans,
-                    font_size,
-                    FontKind::Ui,
-                    style.weight,
-                    width,
-                );
+                let paragraph = self.paragraph(style.scale, style.weight);
+                let params = SelectableText::paragraph_params(spans, &paragraph, width);
                 let layout = self.layout(params);
                 TextGeometry {
-                    height: SelectableText::measured_height(layout.as_deref(), font_size, None),
+                    height: SelectableText::paragraph_height(layout.as_deref(), &paragraph, None),
                     layout,
                     text_origin: (inset, 0.0),
                     width,
@@ -204,16 +224,11 @@ impl BlockMeasurer for TextMeasurer<'_> {
                 ..
             } => {
                 let spans = failed_image_spans(block.text());
-                let params = SelectableText::layout_params(
-                    &spans,
-                    font_size,
-                    FontKind::Ui,
-                    style.weight,
-                    width,
-                );
+                let paragraph = self.paragraph(style.scale, style.weight);
+                let params = SelectableText::paragraph_params(&spans, &paragraph, width);
                 let layout = self.layout(params);
                 TextGeometry {
-                    height: SelectableText::measured_height(layout.as_deref(), font_size, None),
+                    height: SelectableText::paragraph_height(layout.as_deref(), &paragraph, None),
                     layout,
                     text_origin: (inset, 0.0),
                     width,
@@ -238,7 +253,8 @@ impl BlockMeasurer for TextMeasurer<'_> {
                 }
             }
             BlockContent::Table(cells) => {
-                let table = TableGeometry::new(cells, font_size, |params| self.layout(params));
+                let paragraph = self.paragraph(style.scale, FontWeight::Normal);
+                let table = TableGeometry::new(cells, &paragraph, |params| self.layout(params));
                 TextGeometry {
                     layout: None,
                     text_origin: (inset, 0.0),

@@ -101,6 +101,155 @@ impl From<LinkClicked> for Action {
     }
 }
 
+/// Emitted while a drag changes the selection of a [`RichTextState`]:
+/// the state already holds the new selection, so apps only use it to clear
+/// other selections or to repaint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSelectionChanged {
+    /// The [`SelectableText::source`] key of the text.
+    pub source: u64,
+}
+
+impl From<TextSelectionChanged> for Action {
+    fn from(value: TextSelectionChanged) -> Self {
+        Action::new(value)
+    }
+}
+
+/// The selection of one standalone paragraph, kept across frames by the
+/// app and shared with its element through [`SelectableText::state`]:
+/// pressing and dragging over the painted text selects it, and the app
+/// reads the selection or copies it from here. Offsets are bytes of the
+/// concatenated span texts, so a selection survives rewrapping and
+/// restyling. Clones share one selection; keep one per paragraph, keyed by
+/// the same identity as its [`SelectableText::source`].
+#[derive(Clone, Default)]
+pub struct RichTextState(Rc<RefCell<RichTextSelection>>);
+
+#[derive(Default)]
+struct RichTextSelection {
+    /// Where the selection started and where it ends now.
+    anchor: usize,
+    focus: usize,
+    /// The text last painted with this state, which offsets index.
+    text: Option<TextSource>,
+}
+
+impl RichTextState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The selected byte range, start before end, or `None` when nothing
+    /// is selected.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let s = self.0.borrow();
+        let (lo, hi) = (s.anchor.min(s.focus), s.anchor.max(s.focus));
+        (lo < hi).then_some((lo, hi))
+    }
+
+    /// Selects bytes `start..end` (in either order), or clears the
+    /// selection.
+    pub fn set_selection(&self, selection: Option<(usize, usize)>) {
+        let mut s = self.0.borrow_mut();
+        (s.anchor, s.focus) = selection.unwrap_or((0, 0));
+    }
+
+    /// Selects all of the text last painted with this state.
+    pub fn select_all(&self) {
+        let mut s = self.0.borrow_mut();
+        s.anchor = 0;
+        s.focus = s.text.as_ref().map_or(0, |t| t.len());
+    }
+
+    /// The selected text, as copy puts it on the clipboard: the bytes of
+    /// the painted text, snapped onto character boundaries. Empty when
+    /// nothing is selected or nothing was painted.
+    pub fn selected_text(&self) -> String {
+        let Some((lo, hi)) = self.selection() else {
+            return String::new();
+        };
+        let s = self.0.borrow();
+        let Some(text) = &s.text else {
+            return String::new();
+        };
+        let text = text.as_str();
+        let (lo, hi) = (text.floor_char_boundary(lo), text.floor_char_boundary(hi));
+        text.get(lo..hi).unwrap_or_default().to_owned()
+    }
+
+    fn set_text(&self, text: &TextSource) {
+        self.0.borrow_mut().text = Some(text.clone());
+    }
+
+    fn press(&self, at: usize) {
+        let mut s = self.0.borrow_mut();
+        (s.anchor, s.focus) = (at, at);
+    }
+
+    fn extend(&self, to: usize) {
+        self.0.borrow_mut().focus = to;
+    }
+}
+
+impl std::fmt::Debug for RichTextState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = self.0.borrow();
+        f.debug_struct("RichTextState")
+            .field("anchor", &s.anchor)
+            .field("focus", &s.focus)
+            .finish()
+    }
+}
+
+/// A press and drag over a paragraph with a [`RichTextState`]: the press
+/// collapses the selection at the grapheme boundary under the pointer and
+/// each move extends it, through the layout that was painted.
+struct RichTextDrag {
+    state: RichTextState,
+    region: SelectableTextRegion,
+    press: ClickEvent,
+}
+
+impl RichTextDrag {
+    fn changed(&self) -> Vec<Action> {
+        vec![
+            TextSelectionChanged {
+                source: self.region.source_key,
+            }
+            .into(),
+        ]
+    }
+}
+
+impl DragHandler for RichTextDrag {
+    fn on_press(&mut self) -> Vec<Action> {
+        let at = self.region.hit(self.press.x, self.press.y).get();
+        self.state.press(at);
+        self.changed()
+    }
+
+    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+        self.state.extend(self.region.hit(x, y).get());
+        self.changed()
+    }
+
+    fn on_release(&mut self) -> DragReleaseResult {
+        DragReleaseResult {
+            actions: Vec::new(),
+        }
+    }
+
+    /// The selection made so far stays.
+    fn on_cancel(&mut self) -> Vec<Action> {
+        Vec::new()
+    }
+
+    fn cursor(&self) -> CursorHint {
+        CursorHint::Text
+    }
+}
+
 /// Maps a clicked link's URL to the app action it emits.
 type LinkFn = dyn Fn(&Arc<str>) -> Action;
 
@@ -331,6 +480,80 @@ pub(super) fn register_selectable(cx: &mut ElementContext, mut region: Selectabl
     }
 }
 
+/// What a paragraph's line boxes and shaping depend on: its base font,
+/// line height, and tracking. Spans override the font per run; everything
+/// else applies to the whole paragraph. Selectable text, rich text, and
+/// document blocks all lay out through one, so measuring with
+/// [`SelectableText::paragraph_params`] and [`SelectableText::paragraph_height`]
+/// yields exactly the layout and height the element paints.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct ParagraphStyle {
+    /// Logical points.
+    pub font_size: f32,
+    pub line_height: LineHeight,
+    /// Base font for text outside any span's overrides.
+    pub font_kind: FontKind,
+    pub font_weight: FontWeight,
+    /// Extra advance after every glyph, in ems.
+    pub letter_spacing: f32,
+}
+
+impl ParagraphStyle {
+    /// UI text of `font_size` points at [`LineHeight::PARAGRAPH`].
+    pub fn new(font_size: f32) -> Self {
+        Self {
+            font_size,
+            line_height: LineHeight::PARAGRAPH,
+            font_kind: FontKind::Ui,
+            font_weight: FontWeight::Normal,
+            letter_spacing: 0.0,
+        }
+    }
+
+    /// Invalid line heights are ignored.
+    pub fn line_height(mut self, line_height: LineHeight) -> Self {
+        if line_height.is_valid() {
+            self.line_height = line_height;
+        }
+        self
+    }
+
+    pub fn kind(mut self, kind: FontKind) -> Self {
+        self.font_kind = kind;
+        self
+    }
+
+    pub fn weight(mut self, weight: FontWeight) -> Self {
+        self.font_weight = weight;
+        self
+    }
+
+    /// Nonfinite values are ignored.
+    pub fn letter_spacing(mut self, ems: f32) -> Self {
+        if ems.is_finite() {
+            self.letter_spacing = ems;
+        }
+        self
+    }
+
+    /// Height of one line box in logical points.
+    pub fn line_height_points(&self) -> f32 {
+        self.line_height
+            .valid_or(LineHeight::PARAGRAPH)
+            .resolve(self.font_size)
+    }
+
+    /// The text style the paragraph shapes with.
+    pub fn text_style(&self) -> TextStyle {
+        TextStyle::new(self.font_size)
+            .kind(self.font_kind)
+            .weight(self.font_weight)
+            .letter_spacing(self.letter_spacing)
+            .line_height(self.line_height_points())
+    }
+}
+
 /// Static text that wraps to its box (or an explicit width) and supports
 /// mouse drag-selection + copy. Selection state lives in app state (keyed by byte offsets into the source
 /// string, which survive re-wrap); the element renders the highlight from a
@@ -340,14 +563,13 @@ pub struct SelectableText {
     /// the element every frame without copying their text.
     spans: Arc<[StyledSpan]>,
     wrap: WrapMode,
-    font_size: f32,
-    /// Base font for text outside any span's overrides.
-    font_kind: FontKind,
-    font_weight: FontWeight,
+    /// Font size zero takes the theme's UI font size.
+    paragraph: ParagraphStyle,
     color: Option<Color>,
     max_lines: Option<usize>,
     source_key: u64,
     selection: Option<(usize, usize)>,
+    state: Option<RichTextState>,
     on_link: LinkHandler,
 }
 
@@ -362,15 +584,23 @@ pub fn selectable_rich_text(spans: impl Into<Arc<[StyledSpan]>>) -> SelectableTe
     SelectableText {
         spans: spans.into(),
         wrap: WrapMode::Auto,
-        font_size: 0.0,
-        font_kind: FontKind::Ui,
-        font_weight: FontWeight::Normal,
+        paragraph: ParagraphStyle::new(0.0),
         color: None,
         max_lines: None,
         source_key: 0,
         selection: None,
+        state: None,
         on_link: LinkHandler::default(),
     }
+}
+
+/// A styled paragraph: one text flow of [`StyledSpan`]s that wraps as a
+/// whole, with links, inline code pills, selection highlight, copy, and
+/// accessible text over the concatenated span texts. The same element as
+/// [`selectable_rich_text`]; build the spans once and share them across
+/// frames.
+pub fn rich_text(spans: impl Into<Arc<[StyledSpan]>>) -> SelectableText {
+    selectable_rich_text(spans)
 }
 
 impl SelectableText {
@@ -394,7 +624,7 @@ impl SelectableText {
         self
     }
     pub fn size(mut self, s: f32) -> Self {
-        self.font_size = s;
+        self.paragraph.font_size = s;
         self
     }
     pub fn color(mut self, c: Color) -> Self {
@@ -402,7 +632,27 @@ impl SelectableText {
         self
     }
     pub fn weight(mut self, w: FontWeight) -> Self {
-        self.font_weight = w;
+        self.paragraph.font_weight = w;
+        self
+    }
+    /// Base font kind of text outside spans that set their own.
+    pub fn font_kind(mut self, kind: FontKind) -> Self {
+        self.paragraph.font_kind = kind;
+        self
+    }
+    /// Line height of every line ([`LineHeight::PARAGRAPH`] by default);
+    /// invalid values are ignored.
+    pub fn line_height(mut self, line_height: LineHeight) -> Self {
+        self.paragraph = self.paragraph.line_height(line_height);
+        self
+    }
+    /// Line height in logical points, whatever the font size.
+    pub fn line_height_points(self, points: f32) -> Self {
+        self.line_height(LineHeight::Points(points))
+    }
+    /// Extra advance after every glyph, in ems (zero by default).
+    pub fn letter_spacing(mut self, ems: f32) -> Self {
+        self.paragraph = self.paragraph.letter_spacing(ems);
         self
     }
     /// Shows at most `n` lines; the rest is laid out but clipped. Unlimited by
@@ -425,6 +675,21 @@ impl SelectableText {
         self
     }
 
+    /// Keeps the selection in `state`: pressing and dragging over the text
+    /// selects it, emitting [`TextSelectionChanged`], and the highlight
+    /// paints from the state. An explicit [`Self::selection`] wins over it.
+    /// Links stay clickable.
+    pub fn state(mut self, state: &RichTextState) -> Self {
+        self.state = Some(state.clone());
+        self
+    }
+
+    /// The highlighted range: the explicit one, else the state's.
+    fn effective_selection(&self) -> Option<(usize, usize)> {
+        self.selection
+            .or_else(|| self.state.as_ref().and_then(RichTextState::selection))
+    }
+
     /// Action a link click emits, given its URL. Defaults to [`LinkClicked`].
     pub fn on_link(mut self, f: impl Fn(&Arc<str>) -> Action + 'static) -> Self {
         self.on_link = LinkHandler::new(f);
@@ -436,15 +701,15 @@ impl SelectableText {
         self
     }
 
-    /// Line height of selectable text at `font_size`.
+    /// Line height of selectable text at `font_size` with the default
+    /// [`LineHeight::PARAGRAPH`].
     pub fn line_height_for(font_size: f32) -> f32 {
-        font_size * 1.35
+        LineHeight::PARAGRAPH.resolve(font_size)
     }
 
     /// The text params `request_layout` shapes: `spans` over a base font
-    /// of `kind` and `weight`, wrapped to `width`. Measuring with these
-    /// through the frame's `LayoutCache` yields the layout the element
-    /// paints.
+    /// of `kind` and `weight` at the default line height, wrapped to
+    /// `width`. See [`Self::paragraph_params`].
     pub fn layout_params(
         spans: &[StyledSpan],
         font_size: f32,
@@ -452,38 +717,40 @@ impl SelectableText {
         weight: FontWeight,
         width: f32,
     ) -> TextParams {
-        Self::params(spans, font_size, kind, weight, Some(width))
+        let paragraph = ParagraphStyle::new(font_size).kind(kind).weight(weight);
+        Self::paragraph_params(spans, &paragraph, width)
     }
 
-    fn params(
+    /// The text params `request_layout` shapes for `spans` in `paragraph`,
+    /// wrapped to `width`. Measuring with these through the frame's
+    /// `LayoutCache` yields the layout the element paints.
+    pub fn paragraph_params(
         spans: &[StyledSpan],
-        font_size: f32,
-        kind: FontKind,
-        weight: FontWeight,
-        width: Option<f32>,
+        paragraph: &ParagraphStyle,
+        width: f32,
     ) -> TextParams {
-        styled_params(
-            spans,
-            Self::style(font_size, kind, weight),
-            width.map(|w| w.max(1.0)),
-        )
-    }
-
-    fn style(font_size: f32, kind: FontKind, weight: FontWeight) -> TextStyle {
-        TextStyle::new(font_size)
-            .kind(kind)
-            .weight(weight)
-            .line_height(Self::line_height_for(font_size))
+        styled_params(spans, paragraph.text_style(), Some(width.max(1.0)))
     }
 
     /// Height the element lays out at for `layout` (from
-    /// [`Self::layout_params`]), showing at most `max_lines`.
+    /// [`Self::layout_params`]), showing at most `max_lines`, at the
+    /// default line height.
     pub fn measured_height(
         layout: Option<&TextLayout>,
         font_size: f32,
         max_lines: Option<usize>,
     ) -> f32 {
-        let line_height = Self::line_height_for(font_size);
+        Self::paragraph_height(layout, &ParagraphStyle::new(font_size), max_lines)
+    }
+
+    /// Height the element lays out at for `layout` (from
+    /// [`Self::paragraph_params`]), showing at most `max_lines`.
+    pub fn paragraph_height(
+        layout: Option<&TextLayout>,
+        paragraph: &ParagraphStyle,
+        max_lines: Option<usize>,
+    ) -> f32 {
+        let line_height = paragraph.line_height_points();
         match layout {
             Some(layout) => text_height(layout, max_lines, line_height),
             None => line_height.ceil(),
@@ -626,7 +893,8 @@ pub(super) fn span_colors(
 impl Element for SelectableText {
     /// The element's node and its shaped text.
     type LayoutState = (LayoutId, Option<Arc<TextLayout>>);
-    type PrepaintState = Vec<LinkHits>;
+    /// The drag-select hit of a text with a state, and its links' hits.
+    type PrepaintState = (Option<HitId>, Vec<LinkHits>);
 
     fn request_layout(
         &mut self,
@@ -637,23 +905,26 @@ impl Element for SelectableText {
             WrapMode::Explicit(width) => Some(width),
             WrapMode::Auto | WrapMode::NoWrap => None,
         };
+        if self.paragraph.font_size <= 0.0 {
+            self.paragraph.font_size = cx.theme.metrics.ui_font_size;
+        }
+        let paragraph = self.paragraph;
         // Unwrapped unless the width is explicit; automatic wrapping
         // reshapes at the resolved width in prepaint.
-        let style = Self::style(self.font_size, self.font_kind, self.font_weight);
+        let style = paragraph.text_style();
         let layout = with_styled_query(&self.spans, style, explicit.map(|w| w.max(1.0)), |q| {
             cx.layout_text_query(q)
         });
         let id = match (self.wrap, &layout) {
             (WrapMode::Auto, Some(unwrapped)) => engine.request_text_layout(
                 &taffy::Style::default(),
-                TextMeasure::new(unwrapped.clone(), Self::line_height_for(self.font_size))
+                TextMeasure::new(unwrapped.clone(), paragraph.line_height_points())
                     .max_lines(self.max_lines),
             ),
             _ => {
                 let width =
                     explicit.unwrap_or_else(|| layout.as_ref().map_or(0.0, |l| l.size().0.ceil()));
-                let height =
-                    Self::measured_height(layout.as_deref(), self.font_size, self.max_lines);
+                let height = Self::paragraph_height(layout.as_deref(), &paragraph, self.max_lines);
                 engine.request_layout(
                     taffy::Style {
                         size: taffy::Size {
@@ -676,7 +947,7 @@ impl Element for SelectableText {
         (id, layout_state): &mut Self::LayoutState,
         engine: &LayoutEngine,
         cx: &mut ElementContext,
-    ) -> Vec<LinkHits> {
+    ) -> (Option<HitId>, Vec<LinkHits>) {
         // Shaped where measurement wrapped at the width layout resolved,
         // which the last measure query may not have been (it can be an
         // intrinsic-size probe). Link hits, `max_lines` clipping, paint,
@@ -690,17 +961,21 @@ impl Element for SelectableText {
         if wrapped.is_some() {
             *layout_state = wrapped;
         }
-        match layout_state {
+        // Under the links, which are inserted after it and so win a press.
+        let select = (self.state.is_some() && layout_state.is_some())
+            .then(|| cx.insert_hit(bounds, HitFlags::DRAG | HitFlags::HOVER, CursorHint::Text));
+        let links = match layout_state {
             Some(layout) => register_link_hits(&self.spans, layout, (bounds.x, bounds.y), cx),
             None => Vec::new(),
-        }
+        };
+        (select, links)
     }
 
     fn paint(
         &mut self,
         bounds: Bounds,
         (_, state): &mut Self::LayoutState,
-        links: &mut Vec<LinkHits>,
+        (select, links): &mut (Option<HitId>, Vec<LinkHits>),
         _engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
@@ -720,7 +995,8 @@ impl Element for SelectableText {
 
         paint_pills(scene, &layout, &self.spans, origin);
         let highlight = cx.theme.colors.accent.with_alpha(Alpha::SOFT);
-        paint_selection(scene, &layout, self.selection, origin, highlight);
+        let selection = self.effective_selection();
+        paint_selection(scene, &layout, selection, origin, highlight);
 
         // Italic glyphs ink past their advance; widen the text rect (which
         // the renderer clips to) so the last glyph of a line is not shaved.
@@ -728,7 +1004,7 @@ impl Element for SelectableText {
         let decorations = span_decorations(&self.spans, &layout, &colors, links, cx);
         scene.rich_text(RichTextPrimitive {
             rect: Rect {
-                width: bounds.width + self.font_size * 0.5,
+                width: bounds.width + self.paragraph.font_size * 0.5,
                 ..bounds
             },
             layout: ShapedText::new(layout.clone()),
@@ -759,26 +1035,47 @@ impl Element for SelectableText {
                 )
                 .label(text.to_string())
                 .read_only(true)
-                .text(match self.selection {
+                .text(match selection {
                     Some((start, end)) => AccessibleText::new(text.as_str()).selection(start, end),
                     None => AccessibleText::new(text.as_str()),
                 }),
             );
         }
 
-        register_link_input(links, &text, &self.on_link, self.source_key, cx);
+        let region = SelectableTextRegion {
+            bounds,
+            text_origin: origin,
+            text,
+            layout,
+            source_key: self.source_key,
+            transform: cx.current_transform(),
+        };
+        if let (Some(state), Some(hit)) = (&self.state, *select) {
+            state.set_text(&region.text);
+            // Under a transform that flattens the text nothing can be
+            // pressed, so it registers no drag.
+            if region.transform.invert().is_some() {
+                let mut node = SemanticNode::new(bounds);
+                node.parent = cx.current_semantic_parent();
+                node.actions = SemanticActions::default().draggable();
+                let index = cx.semantic.push(node);
+                cx.bind_hit(hit, index);
+                let (state, region) = (state.clone(), region.clone());
+                cx.handlers.on_drag(
+                    index,
+                    DragStart::new(move |press| {
+                        Box::new(RichTextDrag {
+                            state: state.clone(),
+                            region: region.clone(),
+                            press,
+                        })
+                    }),
+                );
+            }
+        }
 
-        register_selectable(
-            cx,
-            SelectableTextRegion {
-                bounds,
-                text_origin: origin,
-                text,
-                layout,
-                source_key: self.source_key,
-                transform: Transform2D::IDENTITY,
-            },
-        );
+        register_link_input(links, &region.text, &self.on_link, self.source_key, cx);
+        register_selectable(cx, region);
     }
 }
 

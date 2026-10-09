@@ -27,13 +27,75 @@ pub enum WrapMode {
     Explicit(f32),
 }
 
+/// Height of one line box of text. Resolved to logical points before
+/// shaping, so measurement, paint, selection, and hit testing all use the
+/// same line boxes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineHeight {
+    /// A multiple of the font size.
+    Relative(f32),
+    /// Logical points, whatever the font size.
+    Points(f32),
+}
+
+impl LineHeight {
+    /// Line height of [`text`]: 1.5 times the font size.
+    pub const TEXT: Self = Self::Relative(1.5);
+    /// Line height of selectable text, rich text, and documents: 1.35 times
+    /// the font size.
+    pub const PARAGRAPH: Self = Self::Relative(1.35);
+
+    /// Whether the value is finite and positive. Builders ignore other
+    /// values and keep the line height they had.
+    pub fn is_valid(self) -> bool {
+        let value = match self {
+            Self::Relative(factor) => factor,
+            Self::Points(points) => points,
+        };
+        value.is_finite() && value > 0.0
+    }
+
+    /// `self` when valid, else `fallback`.
+    pub fn valid_or(self, fallback: Self) -> Self {
+        if self.is_valid() { self } else { fallback }
+    }
+
+    /// The line box height in logical points for text of `font_size`.
+    pub fn resolve(self, font_size: f32) -> f32 {
+        match self {
+            Self::Relative(factor) => font_size * factor,
+            Self::Points(points) => points,
+        }
+    }
+
+    /// The line height of text `factor` times as large: a fixed height
+    /// grows with it, a relative one already does. Headings scale the body
+    /// line height this way.
+    pub fn scaled(self, factor: f32) -> Self {
+        match self {
+            Self::Relative(relative) => Self::Relative(relative),
+            Self::Points(points) => Self::Points(points * factor),
+        }
+    }
+}
+
+impl Default for LineHeight {
+    fn default() -> Self {
+        Self::PARAGRAPH
+    }
+}
+
 pub struct TextElement {
     content: String,
     font_size: f32,
-    line_height_factor: f32,
+    line_height: LineHeight,
     color: Option<Color>,
     font_kind: FontKind,
     font_weight: FontWeight,
+    /// Extra advance after every glyph, in ems.
+    letter_spacing: f32,
+    underline: bool,
+    strikethrough: bool,
     align: TextAlign,
     truncate: bool,
     wrap: WrapMode,
@@ -43,10 +105,13 @@ pub fn text(content: impl Into<String>) -> TextElement {
     TextElement {
         content: content.into(),
         font_size: 0.0,
-        line_height_factor: 1.5,
+        line_height: LineHeight::TEXT,
         color: None,
         font_kind: FontKind::Ui,
         font_weight: FontWeight::Normal,
+        letter_spacing: 0.0,
+        underline: false,
+        strikethrough: false,
         align: TextAlign::Left,
         truncate: false,
         wrap: WrapMode::Auto,
@@ -84,8 +149,48 @@ impl TextElement {
         self
     }
 
-    pub fn line_height(mut self, factor: f32) -> Self {
-        self.line_height_factor = factor;
+    /// Line height as a multiple of the font size (1.5 by default).
+    pub fn line_height(self, factor: f32) -> Self {
+        self.line_height_of(LineHeight::Relative(factor))
+    }
+
+    /// Line height in logical points, whatever the font size.
+    pub fn line_height_points(self, points: f32) -> Self {
+        self.line_height_of(LineHeight::Points(points))
+    }
+
+    /// Line height as either kind; invalid values are ignored.
+    pub fn line_height_of(mut self, line_height: LineHeight) -> Self {
+        if line_height.is_valid() {
+            self.line_height = line_height;
+        }
+        self
+    }
+
+    pub fn weight(mut self, weight: FontWeight) -> Self {
+        self.font_weight = weight;
+        self
+    }
+
+    /// Extra advance after every glyph, in ems (zero by default). Applies
+    /// to measurement, wrapping, and paint alike. Nonfinite values are
+    /// ignored.
+    pub fn letter_spacing(mut self, ems: f32) -> Self {
+        if ems.is_finite() {
+            self.letter_spacing = ems;
+        }
+        self
+    }
+
+    /// A solid line under the text, in its color.
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
+    /// A solid line through the text, in its color.
+    pub fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
         self
     }
 
@@ -156,8 +261,24 @@ impl TextElement {
         let style = TextStyle::new(font_size)
             .kind(self.font_kind)
             .weight(self.font_weight)
-            .line_height(font_size * self.line_height_factor);
+            .letter_spacing(self.letter_spacing)
+            .line_height(self.line_height.resolve(font_size));
         TextQuery::new(content, style).wrap_width(wrap)
+    }
+
+    /// The decorations to paint over `len` bytes of text in `color`.
+    fn decorations(&self, len: usize, color: Color) -> impl Iterator<Item = TextDecoration> {
+        [
+            (self.underline, TextDecorationKind::Underline),
+            (self.strikethrough, TextDecorationKind::Strikethrough),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(move |(_, kind)| TextDecoration {
+            range: 0..len,
+            kind,
+            color,
+        })
     }
 
     fn resolve_font_size(&self, theme: &Theme) -> f32 {
@@ -191,7 +312,7 @@ impl Element for TextElement {
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
         let font_size = self.resolve_font_size(cx.theme);
-        let line_height = font_size * self.line_height_factor;
+        let line_height = self.line_height.resolve(font_size);
         let wrap = self.wrap_mode();
         let explicit = match wrap {
             WrapMode::Explicit(width) => Some(width),
@@ -309,14 +430,25 @@ impl Element for TextElement {
         };
 
         if let Some(layout) = layout {
+            let decorated = self.underline || self.strikethrough;
             scene.text(TextPrimitive {
                 rect: Rect {
                     x: bounds.x + x_offset,
                     ..bounds
                 },
-                layout: ShapedText::new(layout),
+                layout: ShapedText::new(layout.clone()),
                 color,
             });
+            if decorated {
+                let decorations: Vec<TextDecoration> =
+                    self.decorations(layout.text().len(), color).collect();
+                push_text_decorations(
+                    scene,
+                    &layout,
+                    (bounds.x + x_offset, bounds.y),
+                    &decorations,
+                );
+            }
         }
 
         if !content.is_empty()
