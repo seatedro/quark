@@ -737,8 +737,8 @@ pub trait BlockMeasurer {
 /// width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MeasureKey {
-    /// Measurer-defined settings; [`TextMeasurer`] packs the font size and
-    /// scale factor.
+    /// Measurer-defined settings; [`TextMeasurer`] hashes the font size,
+    /// scale factor, and body line height.
     pub settings: u64,
     /// The fonts text is shaped with, for measurers that shape text. It
     /// changes with the font settings, a loaded font, or a replaced text
