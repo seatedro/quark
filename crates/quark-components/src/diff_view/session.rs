@@ -12,27 +12,34 @@
 //! proves unchanged. A replaced top line moves to the nearest surviving
 //! line; a selection touching replaced text is cleared; an anchor on
 //! replaced lines becomes outdated. Without a remap, the file's selection
-//! is cleared and its annotations become outdated. Expanded context of the
-//! updated file collapses again.
+//! is cleared and its annotations become outdated. Context the reader
+//! expanded stays expanded where the remap proves its lines unchanged;
+//! without a remap it collapses again.
 //!
 //! Rendering and interaction are the static view's: [`diff_session_view`]
 //! draws with [`super::diff_view`], and events go through
-//! [`DiffSessionViewState::handle`]. Syntax colors are not wired for
-//! sessions yet.
+//! [`DiffSessionViewState::handle`]. With syntax on
+//! ([`DiffSessionViewState::enable_syntax`]) every file revision is
+//! highlighted as it arrives, and sides an update leaves unchanged keep
+//! their colors.
 
 use std::rc::Rc;
 
 use quark::selection::{Selection, SelectionPoint};
 use quark_diff::{
-    ContextPolicy, DiffLimits, DiffSession, DiffUpdate, GapId, LineMap, Mode, Reveal, Side,
-    SourceRemap, UpdateError, UpdateOutcome,
+    ComparisonOptions, ContextPolicy, DiffLimits, DiffSession, DiffUpdate, GapId, InlineOptions,
+    LineMap, Mode, Reveal, Side, SourceRemap, UpdateError, UpdateOutcome,
 };
 use quark_text::{LayoutCache, TextSystem};
 use quark_ui::element::{AnyElement, ScrollHandle};
 use quark_ui::theme::Theme;
 use quark_ui::{Action, FocusId};
 
+use quark_diff::RowKind;
+use quark_syntax::{GrammarStore, HighlightWorker};
+
 use super::annotations::{DiffAnchor, DiffAnnotation};
+use super::decorator::DiffDecorator;
 use super::navigation::{DiffTarget, FileId, RevealAlign, SourcePoint};
 use super::prepared::{AnnotationId, DiffPreviewLimit, ViewFrame};
 use super::presentation::{DiffAppearance, DiffPresentation};
@@ -107,6 +114,9 @@ impl DiffSessionViewState {
         fn style() -> DiffStyle;
         fn presentation() -> DiffPresentation;
         fn limits() -> DiffLimits;
+        fn comparison() -> ComparisonOptions;
+        fn inline_options() -> InlineOptions;
+        fn hidden_whitespace_changes(file: FileId) -> u32;
         fn scroll_offset() -> f32;
         fn content_height() -> f32;
         fn selection() -> Option<Selection>;
@@ -128,6 +138,8 @@ impl DiffSessionViewState {
         fn set_appearance(appearance: DiffAppearance) -> ();
         fn set_preview_limit(limit: Option<DiffPreviewLimit>) -> ();
         fn set_limits(limits: DiffLimits) -> ();
+        fn set_comparison(options: ComparisonOptions) -> ();
+        fn set_inline_options(options: InlineOptions) -> ();
         fn set_context_policy(policy: ContextPolicy) -> ();
         fn set_viewport(width: f32, height: f32) -> ();
         fn set_selection(selection: Option<Selection>, side: Side) -> ();
@@ -142,6 +154,14 @@ impl DiffSessionViewState {
         fn set_annotation_height(id: AnnotationId, revision: u64, height: f32) -> bool;
         fn handle(event: DiffEvent) -> DiffOutcome;
         fn set_file_collapsed(file: FileId, collapsed: bool) -> bool;
+        fn enable_syntax(store: GrammarStore) -> ();
+        fn enable_syntax_shared(worker: &HighlightWorker, store: GrammarStore) -> ();
+        fn finish_syntax() -> bool;
+    }
+
+    /// See [`DiffViewState::set_syntax_wake`].
+    pub fn set_syntax_wake(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        self.view.set_syntax_wake(wake);
     }
 
     /// Each annotation with whether it is outdated, in the order given.
@@ -211,11 +231,13 @@ impl DiffSessionViewState {
             view.generations,
             view.mode,
             view.context_policy,
+            view.comparison,
         );
         segment.revision = snapshot.revision.0;
         view.segments.insert(index, segment);
         self.index_slots();
         self.view.recheck_annotations(id);
+        self.view.request_slot_syntax(index);
     }
 
     /// Swaps segment `index` for the session's current revision of its
@@ -315,9 +337,14 @@ impl DiffSessionViewState {
             view.generations,
             view.mode,
             view.context_policy,
+            view.comparison,
         );
         segment.revision = snapshot.revision.0;
+        if let Some(remap) = remap {
+            carry_expansion(&view.segments[index], &mut segment, remap, view.mode);
+        }
         view.segments[index] = segment;
+        view.request_slot_syntax(index);
         if let Some((unit, side, store)) = anchor.and_then(|a| a.line)
             && unit == slot
         {
@@ -356,6 +383,7 @@ impl DiffSessionViewState {
         let view = &mut self.view;
         let slot = view.segments[index].slot;
         view.segments.remove(index);
+        view.drop_slot_syntax(slot);
         if let Some(s) = view.selection {
             let touches = |p: SelectionPoint| decode_key(p.block).1 == slot;
             if touches(s.anchor) || touches(s.focus) {
@@ -406,6 +434,45 @@ impl DiffSessionViewState {
     }
 }
 
+/// Reveals in `new` the gap lines `old` showed revealed whose text
+/// `remap` proves unchanged, so an update does not fold context the
+/// reader opened. Reveals run from the gap's ends, as expanding does.
+fn carry_expansion(old: &Segment, new: &mut Segment, remap: &SourceRemap, mode: Mode) {
+    let p = &old.projection;
+    // New-side store indices, in `new`, of lines `old` showed from gaps.
+    let mut shown: Vec<u32> = (0..p.len())
+        .filter(|&row| p.kind[row as usize] == RowKind::Context && p.hunk[row as usize] == NONE)
+        .filter_map(|row| {
+            let index = p.line(row, Side::New)?;
+            let line = source_line(&old.doc, 0, Side::New, index);
+            match remap.map_line(Side::New, line) {
+                LineMap::Kept(line) => store_index(&new.doc, 0, Side::New, line),
+                LineMap::Replaced { .. } => None,
+            }
+        })
+        .collect();
+    if shown.is_empty() {
+        return;
+    }
+    shown.sort_unstable();
+    let is_shown = |index: u32| shown.binary_search(&index).is_ok();
+    let mut changed = false;
+    for gap in new.projection.gaps.clone() {
+        let lines = gap.new_start..gap.new_start + gap.hidden;
+        let top = lines.clone().take_while(|&i| is_shown(i)).count() as u32;
+        let bottom = lines.rev().take_while(|&i| is_shown(i)).count() as u32;
+        if top > 0 {
+            changed |= new.expansion.reveal(&new.doc, gap.id, Reveal::Down, top);
+        }
+        if bottom > 0 && top < gap.hidden && gap.id.hunk.is_some() {
+            changed |= new.expansion.reveal(&new.doc, gap.id, Reveal::Up, bottom);
+        }
+    }
+    if changed {
+        new.rebuild(mode);
+    }
+}
+
 /// The session diff at its viewport size, as of the last
 /// [`DiffSessionViewState::prepare`]; see [`super::diff_view`].
 pub fn diff_session_view(
@@ -415,4 +482,91 @@ pub fn diff_session_view(
     on_event: fn(DiffEvent) -> Action,
 ) -> AnyElement {
     super::diff_view(&mut state.view, theme, env, on_event)
+}
+
+/// [`diff_session_view`] with the app's `decorator`; see
+/// [`super::diff_view_with`].
+pub fn diff_session_view_with(
+    state: &mut DiffSessionViewState,
+    theme: &Theme,
+    env: CollectionEnv,
+    on_event: fn(DiffEvent) -> Action,
+    decorator: Option<Rc<dyn DiffDecorator>>,
+) -> AnyElement {
+    super::diff_view_with(&mut state.view, theme, env, on_event, decorator)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use quark_diff::{FileDiffSnapshot, FileId, Revision, diff_texts};
+    use quark_text::{LayoutCache, TextSystem};
+    use quark_ui::FocusId;
+
+    use super::*;
+
+    fn numbered(lines: std::ops::Range<u32>) -> String {
+        lines.map(|i| format!("line {i}\n")).collect()
+    }
+
+    /// Revision `rev` of file 1, one line of context.
+    fn snap(rev: u64, old: &str, new: &str) -> FileDiffSnapshot {
+        let doc = diff_texts(Some("f.txt"), Some("f.txt"), Some(old), Some(new), 1);
+        FileDiffSnapshot::new(FileId(1), Revision(rev), Arc::new(doc)).unwrap()
+    }
+
+    /// New-side source lines of the prepared rows, in order.
+    fn shown(state: &mut DiffSessionViewState, text: &mut TextSystem) -> Vec<u32> {
+        state.prepare(text, &mut LayoutCache::default(), 1.0, 0);
+        state
+            .frame()
+            .unwrap()
+            .rows
+            .iter()
+            .filter_map(|r| r.paint.source_lines[1])
+            .collect()
+    }
+
+    // Catches an update folding context the reader opened: lines the
+    // remap proves unchanged stay revealed, around the new hunk too.
+    #[test]
+    fn opened_context_stays_open_across_an_update_elsewhere() {
+        let base = numbered(0..40);
+        let first = base.replace("line 20\n", "twenty\n");
+        let second = first.replace("line 35\n", "thirty-five\n");
+        let (a, b) = (snap(1, &base, &first), snap(2, &base, &second));
+        let remap = SourceRemap::between(&a, &b).unwrap();
+        let mut session = DiffSession::new();
+        session
+            .apply(DiffUpdate::Upsert {
+                file: a,
+                remap: None,
+            })
+            .unwrap();
+        let mut state = DiffSessionViewState::new("test.diff", FocusId::new(1), session);
+        state.set_viewport(600.0, 4000.0);
+        let mut text = TextSystem::vendored_only(&Default::default());
+        shown(&mut state, &mut text);
+        let gap = state
+            .frame()
+            .unwrap()
+            .rows
+            .iter()
+            .find_map(|r| r.paint.gap)
+            .unwrap();
+        assert!(state.reveal(gap, Reveal::All, 0));
+        let opened = shown(&mut state, &mut text);
+        assert_eq!(opened[..3], [0, 1, 2]);
+
+        state
+            .apply_update(DiffUpdate::Upsert {
+                file: b,
+                remap: Some(remap),
+            })
+            .unwrap();
+
+        // Lines 0 to 19 stay above the edited line 20.
+        assert_eq!(shown(&mut state, &mut text)[..20], opened[..20]);
+    }
 }
