@@ -140,11 +140,11 @@ jobs:
       # Rust, plus HTML, JavaScript, CSS, and Markdown for embedded
       # languages. The build also loads each and checks its sample.
       - name: Build test grammar packs
-        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline
+        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline python
 
       # Compiled apart from the run so step timings separate the two.
       - name: Build tests
-        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax --no-run
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax,quark-app/syntax --no-run
 
       - name: Test
         env:
@@ -160,7 +160,7 @@ jobs:
         # Full O(n) integrity checks after every mutation (quark-ui's feature
         # turns on quark's too); cheap debug checks run without it. `syntax`
         # runs the document's highlighting tests against the pack above.
-        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax,quark-app/syntax
 
       # Full kache counters (hits, misses, passthroughs, remote) for judging
       # the cache; informational, so it never fails the job.
@@ -268,16 +268,16 @@ jobs:
       # Built with this platform's compiler and linker (MSVC on Windows), so
       # the tests load a dylib or DLL the way apps do.
       - name: Build test grammar packs
-        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline
+        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline python
 
       # Compiled apart from the run so step timings separate the two.
       - name: Build tests
-        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax --no-run
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax,quark-app/syntax --no-run
 
       - name: Test
         env:
           QUARK_REQUIRE_SYNTAX_PACKS: "1"
-        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax
+        run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax,quark-app/syntax
 
       # QUARK_EXIT_AFTER_FRAMES (debug builds only) quits after that many
       # presented frames, so a zero exit means a window opened and drew.
