@@ -18,6 +18,7 @@ pub mod dock_drag;
 pub mod drag_out;
 #[cfg(feature = "components")]
 pub mod drawn_menu;
+pub(crate) mod font_watch;
 #[cfg(feature = "global-shortcut")]
 pub mod global_shortcut;
 pub mod material;

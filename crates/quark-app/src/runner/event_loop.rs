@@ -60,6 +60,8 @@ struct Runner<A> {
     capabilities: PlatformCapabilities,
     started: bool,
     text: AppText,
+    /// Font directory times, compared when a window gains focus.
+    font_dirs: crate::platform::font_watch::FontDirs,
     waker: Waker,
     events: EventSink,
     app_events: Receiver<Posted>,
@@ -96,6 +98,7 @@ impl<A: App> Runner<A> {
             capabilities: PlatformCapabilities::default(),
             started: false,
             text,
+            font_dirs: crate::platform::font_watch::FontDirs::new(),
             waker,
             events,
             app_events,
@@ -123,6 +126,7 @@ impl<A: App> Runner<A> {
         options: &WindowOptions,
     ) -> Result<WindowState, RunError> {
         crate::platform::material::watch_accessibility(&self.waker);
+        crate::platform::font_watch::watch(&self.waker);
         let environment = crate::platform::material::environment(event_loop);
         let wants_alpha = environment.wants_alpha(options.background);
         let attributes = window_attributes(options, event_loop).with_transparent(wants_alpha);
@@ -606,6 +610,13 @@ impl<A: App> Runner<A> {
 }
 
 impl<A: App> Runner<A> {
+    /// Rescan the installed fonts after the platform reported a change; a
+    /// new font epoch lays every window's text out again.
+    fn reload_fonts(&mut self) {
+        self.text.system.reload_system_fonts();
+        self.flags.redraw_all = true;
+    }
+
     /// Re-resolve every open window's surface against the user's current
     /// accessibility settings, telling the app of each that changed.
     fn refresh_surfaces(&mut self, event_loop: &ActiveEventLoop) {
@@ -627,6 +638,9 @@ impl<A: App> ApplicationHandler for Runner<A> {
         self.process_app_events(event_loop);
         if crate::platform::material::take_accessibility_change() {
             self.refresh_surfaces(event_loop);
+        }
+        if crate::platform::font_watch::take_change() {
+            self.reload_fonts();
         }
         // A worker thread can wake the loop before the first window exists;
         // the app has not seen `init` yet, so it is not told.
@@ -738,6 +752,11 @@ impl<A: App> ApplicationHandler for Runner<A> {
                     // Accessibility display settings change in the system
                     // settings app, which takes focus from the window.
                     surface_changed = state.refresh_surface();
+                    // So do installed fonts, from another app.
+                    if self.font_dirs.changed() {
+                        self.text.system.reload_system_fonts();
+                        self.flags.redraw_all = true;
+                    }
                 }
                 let events = state.input.normalize(event);
                 if surface_changed {
