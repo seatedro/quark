@@ -378,11 +378,17 @@ fn general(app: &Codex, p: &Pal, w: f32) -> AnyElement {
                         ),
                         view! {
                             <div class="flex-row items-center gap-3">
-                                <text size={12.5} color={p.muted} class="font-mono whitespace-nowrap">
+                                <text
+                                    size={12.5}
+                                    color={p.muted}
+                                    class="font-mono whitespace-nowrap"
+                                >
                                     "/Users/rohit/…uments/Codex"
                                 </text>
-                                <div class="flex-row items-center h-7 px-[10] rounded-[8]"
-                                     bg={p.rail_tile.lerp(settings_card(p), 0.3)}>
+                                <div
+                                    class="flex-row items-center h-7 px-[10] rounded-[8]"
+                                    bg={p.rail_tile.lerp(settings_card(p), 0.3)}
+                                >
                                     <txt("Change", SMALL, p.text) />
                                 </div>
                             </div>
@@ -501,13 +507,21 @@ fn appearance(app: &Codex, p: &Pal, w: f32) -> AnyElement {
             {group(
                 p,
                 vec![view! {
-                    <setting_row(p, "Mode", None, view! {
-                        <div class="flex-row items-center gap-4">
-                            {preview(ThemeChoice::System, white, black)}
-                            {preview(ThemeChoice::Light, white, white)}
-                            {preview(ThemeChoice::Dark, black, black)}
-                        </div>
-                    }, w) class="h-[76]" />
+                    <setting_row(
+                        p,
+                        "Mode",
+                        None,
+                        view! {
+                            <div class="flex-row items-center gap-4">
+                                {preview(ThemeChoice::System, white, black)}
+                                {preview(ThemeChoice::Light, white, white)}
+                                {preview(ThemeChoice::Dark, black, black)}
+                            </div>
+                        },
+                        w
+                    )
+                        class="h-[76]"
+                    />
                 }],
             )}
             <div class="h-4" />
