@@ -193,9 +193,8 @@ pub enum FontSourceError {
     /// shaped by another text system.
     #[error("no face with this id in the font snapshot")]
     UnknownFace,
-    /// The face's file was never read into memory; cosmic-text cannot
-    /// shape with such a face either.
-    #[error("the face's file is not loaded")]
+    /// The face's file could not be read.
+    #[error("the face's file could not be read")]
     NotLoaded,
     /// The face's bytes do not parse at its collection index.
     #[error("the face's bytes do not parse")]
@@ -301,7 +300,10 @@ fn face_record(db: &fontdb::Database, font_id: fontdb::ID) -> Result<FaceRecord,
     let (data, path) = match &info.source {
         fontdb::Source::Binary(data) => (data.clone(), None),
         fontdb::Source::SharedFile(path, data) => (data.clone(), Some(path)),
-        fontdb::Source::File(_) => return Err(FontSourceError::NotLoaded),
+        // A face the snapshot's database never loaded: shaping loads it
+        // into its own database when it first needs it, after a snapshot
+        // taken earlier was copied, so read the file here.
+        fontdb::Source::File(path) => (read_font_file(path)?, Some(path)),
     };
     let font = FontRef::from_index((*data).as_ref(), info.index)
         .map_err(|_| FontSourceError::Unparsable)?;
@@ -360,6 +362,24 @@ fn face_variations(axes: &[Axis], weight: fontdb::Weight) -> Arc<[Variation]> {
             },
         })
         .collect()
+}
+
+/// The bytes of the font file at `path`, read once per process while any
+/// registry holds them.
+fn read_font_file(path: &std::path::Path) -> Result<FontBytes, FontSourceError> {
+    type Files = HashMap<std::path::PathBuf, Weak<dyn AsRef<[u8]> + Send + Sync>>;
+    static FILES: OnceLock<Mutex<Files>> = OnceLock::new();
+    let mut files = FILES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(data) = files.get(path).and_then(Weak::upgrade) {
+        return Ok(data);
+    }
+    let data: FontBytes = Arc::new(std::fs::read(path).map_err(|_| FontSourceError::NotLoaded)?);
+    files.retain(|_, data| data.strong_count() > 0);
+    files.insert(path.to_path_buf(), Arc::downgrade(&data));
+    Ok(data)
 }
 
 fn same_memory(a: &[u8], b: &[u8]) -> bool {
@@ -501,6 +521,40 @@ mod tests {
             }
         }
         bytes
+    }
+
+    // Regression: a face listed but not yet loaded when the snapshot was
+    // copied (shaping loads it later, into its own database) failed to
+    // prepare, so installed fonts never reached a native rasterizer.
+    #[test]
+    fn a_face_the_snapshot_never_loaded_prepares_from_its_file() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/fonts/IBMPlexMono-Regular.ttf"
+        );
+        let mut db = fontdb::Database::new();
+        db.load_font_file(path).expect("font file");
+        let id = db.faces().next().expect("a face").id;
+        assert!(matches!(
+            db.face(id).map(|f| &f.source),
+            Some(fontdb::Source::File(_))
+        ));
+        let snapshot = crate::FontSnapshot {
+            epoch: crate::FontEpoch {
+                system: crate::TextSystemId::next(),
+                generation: 0,
+            },
+            database: Arc::new(db),
+        };
+        let mut registry = FontRegistry::new(snapshot);
+        let font = registry
+            .prepare(id, fontdb::Weight::NORMAL, CacheKeyFlags::empty())
+            .expect("prepared from the file");
+        assert_eq!(font.source().data(), std::fs::read(path).expect("read"));
+        assert!(matches!(
+            font.source().provenance(),
+            FontProvenance::Installed { .. }
+        ));
     }
 
     // Catches keying rasters by cosmic-text face id or family name: two
