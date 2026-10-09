@@ -320,3 +320,78 @@ fn a_backend_that_never_settles_leaves_the_file_unchanged() {
     assert!(run.stderr.contains("did not converge"), "{}", run.stderr);
     assert_eq!(fx.read("a.rs"), source);
 }
+
+const VIEW_UNFORMATTED: &str = r#"fn f(){let x=1;}
+fn ui() -> Div {
+    view! { <div w={size} h={size} class="shrink-0 items-center justify-center rounded-[7]" role="button">
+        <icon svg={svg} /></div> }
+}
+"#;
+
+#[test]
+fn full_mode_formats_the_rust_and_the_views() {
+    let fx = Fixture::new();
+    fx.write("a.rs", VIEW_UNFORMATTED);
+    let run = fx.run(&["a.rs"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let expected = r#"fn f() {
+    let x = 1;
+}
+fn ui() -> Div {
+    view! {
+        <div
+            w={size}
+            h={size}
+            class="shrink-0 items-center justify-center rounded-[7]"
+            role="button"
+        >
+            <icon svg={svg} />
+        </div>
+    }
+}
+"#;
+    assert_eq!(fx.read("a.rs"), expected);
+}
+
+#[test]
+fn view_only_leaves_the_surrounding_rust_alone() {
+    let fx = Fixture::new();
+    let run = fx.stdin(&["--stdin", "--view-only"], VIEW_UNFORMATTED);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        run.stdout.starts_with("fn f(){let x=1;}\n"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("        <div\n            w={size}\n"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn rustfmt_toml_width_reaches_the_view_printer() {
+    let fx = Fixture::new();
+    fx.write("rustfmt.toml", "max_width = 40\n");
+    let source = "fn ui() -> Div {\n    view! { <div w={size} h={size} role=\"button\" /> }\n}\n";
+    let run = fx.stdin(&["--stdin", "--view-only"], source);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        run.stdout.contains("        <div\n            w={size}\n"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_view_error_points_into_the_users_file_not_rustfmts_output() {
+    let fx = Fixture::new();
+    // rustfmt spreads the first line over several, moving the view down.
+    let broken = "fn a(){}fn b(){}\nfn c() { view! { <div> } }\n";
+    fx.write("a.rs", broken);
+    let run = fx.run(&["a.rs"]);
+    assert_eq!(run.code, 2);
+    assert!(run.stderr.starts_with("error: a.rs:2:"), "{}", run.stderr);
+    assert_eq!(fx.read("a.rs"), broken);
+}
