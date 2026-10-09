@@ -26,7 +26,7 @@
 
 pub mod prepared;
 pub mod presentation;
-mod syntax;
+pub mod syntax;
 mod view;
 
 use std::cell::Cell;
