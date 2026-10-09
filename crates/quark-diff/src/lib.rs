@@ -11,9 +11,12 @@
 //!   tables; [`Projection`] turns it into display rows, unified or side by
 //!   side, with gaps of unchanged lines collapsed per an [`Expansion`] and
 //!   its [`ContextPolicy`].
+//! - [`DiffLimits`] refuses input the model cannot represent and bounds
+//!   per-line detail; [`DiffDocument::facts`] reports metadata-only changes.
 
 mod compute;
 mod inline;
+mod limits;
 mod model;
 pub mod myers;
 mod patch;
@@ -25,9 +28,13 @@ mod tests;
 
 pub use compute::{DEFAULT_CONTEXT, diff_texts};
 pub use inline::{InlineDiff, MAX_INLINE_LINE_BYTES, inline_diff};
+pub use limits::{
+    DiffError, DiffLimits, LimitKind, LineDetail, MAX_REPRESENTABLE, diff_texts_checked,
+    line_detail, parse_unified_checked,
+};
 pub use model::{
-    BlockKind, BlockTable, DiffDocument, FileMeta, FileStatus, FileSummary, FileTable, HunkTable,
-    IntegrityError, Side,
+    BlockKind, BlockTable, DiffDocument, FileFacts, FileMeta, FileStatus, FileSummary, FileTable,
+    HunkTable, IntegrityError, Side,
 };
 pub use patch::{ApplyError, PatchError, apply, parse_unified, write_unified};
 pub use projection::{

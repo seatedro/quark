@@ -122,6 +122,23 @@ pub struct FileSummary {
     pub deletions: u32,
 }
 
+/// What a file's diff changes besides its lines, for metadata rows: a
+/// file whose only change is its mode, name, or binary content must not
+/// read as an empty `+0 -0` diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFacts {
+    pub status: FileStatus,
+    pub binary: bool,
+    /// Old and new mode, when both are stated and differ.
+    pub mode_change: Option<(Arc<str>, Arc<str>)>,
+    /// Whether any hunk changes or shows text.
+    pub has_hunks: bool,
+    /// Whether each side's last line lacks a newline, as the whole source
+    /// or the patch's marker states it.
+    pub old_missing_newline: bool,
+    pub new_missing_newline: bool,
+}
+
 /// Lines before a hunk side: its start, less one when it is not empty.
 pub(crate) fn lines_before(start: u32, len: u32) -> u32 {
     start.saturating_sub(u32::from(len > 0))
@@ -184,6 +201,24 @@ impl DiffDocument {
                 deletions: self.files.deletions[f],
             }
         })
+    }
+
+    /// Status, binary, mode, and end-of-file facts of `file`.
+    pub fn facts(&self, file: u32) -> FileFacts {
+        let f = file as usize;
+        let meta = &self.files.meta[f];
+        let mode_change = match (&meta.old_mode, &meta.new_mode) {
+            (Some(old), Some(new)) if old != new => Some((old.clone(), new.clone())),
+            _ => None,
+        };
+        FileFacts {
+            status: meta.status,
+            binary: meta.binary,
+            mode_change,
+            has_hunks: !self.files.hunks[f].is_empty(),
+            old_missing_newline: self.files.old_text[f].no_newline_at_eof(),
+            new_missing_newline: self.files.new_text[f].no_newline_at_eof(),
+        }
     }
 
     /// Added and deleted lines over every file.
