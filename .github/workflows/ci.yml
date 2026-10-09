@@ -351,6 +351,14 @@ jobs:
           QUARK_REQUIRE_SYNTAX_PACKS: "1"
         run: cargo test --workspace --features quark-ui/integrity-checks,quark-ui/syntax,quark-app/syntax
 
+      # The WKWebView backend against the local fixture. The script wraps
+      # the test binary in a .app and `open`s it: AppKit gives windows only
+      # to a process LaunchServices starts.
+      - name: Webview smoke
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: crates/quark-app/tests/webview/macos/run-macos-smoke.sh
+
       # QUARK_EXIT_AFTER_FRAMES (debug builds only) quits after that many
       # presented frames, so a zero exit means a window opened and drew.
       - name: Smoke run hello_ui

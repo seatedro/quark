@@ -7,6 +7,7 @@ AT-SPI with the [cua](https://github.com/trycua/cua) driver. Linux only.
 
 ```bash
 cargo build -p quark-app --examples --features ui,notifications
+cargo build -p quark-app --example webview_demo --features ui,webview  # WebKitGTK 4.1
 e2e/install-cua.sh
 e2e/run.sh                              # every spec
 e2e/run.sh e2e/specs/hello_ui/*.py      # some specs

@@ -9,6 +9,7 @@
 # A spec lives at e2e/specs/<example>/<behavior>.py and runs against
 # <example>. Build the examples first:
 #   cargo build -p quark-app --examples --features ui,notifications
+#   cargo build -p quark-app --example webview_demo --features ui,webview
 #
 # Environment:
 #   QUARK_E2E_BIN_DIR  example binaries (default target/debug/examples); a
