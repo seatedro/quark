@@ -48,7 +48,11 @@ pub struct ElementContext<'a> {
     /// Inspector recording, style overrides, and phase timings.
     #[cfg(feature = "devtools")]
     pub devtools: crate::inspector::FrameProbe,
-    hovered: Vec<HitId>,
+    pub(super) hovered: Vec<HitId>,
+    /// Interaction groups and slots of this frame.
+    pub(super) interaction: super::interaction::InteractionFrame,
+    /// First hit row of each cache boundary recording now, innermost last.
+    hit_recording_starts: Vec<usize>,
     /// Intersections of the clips pushed so far; the last one is current.
     clip_stack: Vec<ClipEntry>,
     /// The window's element cache, when the host keeps one.
@@ -129,6 +133,8 @@ impl<'a> ElementContext<'a> {
             #[cfg(feature = "devtools")]
             devtools: Default::default(),
             hovered: Vec::new(),
+            interaction: Default::default(),
+            hit_recording_starts: Vec::new(),
             clip_stack: Vec::new(),
             cache: None,
             hit_recordings: 0,
@@ -768,6 +774,7 @@ impl<'a> ElementContext<'a> {
             self.local_hit_base = self.hit_table.len();
         }
         self.hit_recordings += 1;
+        self.hit_recording_starts.push(self.hit_table.len());
         self.clip_stack.push(ClipEntry {
             effective: self.current_clip(),
             local: quark::hit::UNCLIPPED,
@@ -787,12 +794,24 @@ impl<'a> ElementContext<'a> {
     pub(super) fn end_hit_recording(&mut self, start: usize) {
         self.clip_stack.pop();
         self.hit_recordings -= 1;
+        self.hit_recording_starts.pop();
         if self.hit_recordings > 0 {
             let outer = self.current_local_clip();
             for clip in &mut self.local_hit_clips[start - self.local_hit_base..] {
                 *clip = intersect(*clip, outer);
             }
         }
+    }
+
+    /// First hit row of the innermost cache boundary recording now.
+    pub(super) fn innermost_hit_recording(&self) -> Option<usize> {
+        self.hit_recording_starts.last().copied()
+    }
+
+    /// Make what is being painted depend on more than a cache boundary's
+    /// inputs, so the boundary does not keep it.
+    pub(super) fn mark_volatile(&mut self) {
+        self.volatile_reads += 1;
     }
 
     /// Note a scroll handle prepainted now, when a cache boundary records.
@@ -816,6 +835,10 @@ impl<'a> ElementContext<'a> {
     }
 
     pub fn run_hit_test(&mut self) {
+        if self.has_interaction_slots() {
+            self.resolve_interaction();
+            return;
+        }
         match self.mouse_position {
             Some((x, y)) => self.hit_table.stack_at_into(x, y, &mut self.hovered),
             None => self.hovered.clear(),
@@ -882,6 +905,8 @@ pub(super) struct FrameBuffers {
     accessibility_text_hidden_stack: Vec<bool>,
     semantic_parent_stack: Vec<usize>,
     hovered: Vec<HitId>,
+    interaction: super::interaction::InteractionFrame,
+    hit_recording_starts: Vec<usize>,
     local_hit_clips: Vec<Rect>,
     local_hit_ids: Vec<HitId>,
     paint_spaces: Vec<PaintSpace>,
@@ -911,6 +936,11 @@ macro_rules! swap_buffers {
             &mut $cx.semantic_parent_stack,
         );
         std::mem::swap(&mut $buffers.hovered, &mut $cx.hovered);
+        std::mem::swap(&mut $buffers.interaction, &mut $cx.interaction);
+        std::mem::swap(
+            &mut $buffers.hit_recording_starts,
+            &mut $cx.hit_recording_starts,
+        );
         std::mem::swap(&mut $buffers.local_hit_clips, &mut $cx.local_hit_clips);
         std::mem::swap(&mut $buffers.local_hit_ids, &mut $cx.local_hit_ids);
         std::mem::swap(&mut $buffers.paint_spaces, &mut $cx.paint_spaces);
@@ -952,6 +982,8 @@ impl ElementContext<'_> {
         buffers.accessibility_text_hidden_stack.clear();
         buffers.semantic_parent_stack.clear();
         buffers.hovered.clear();
+        buffers.interaction.clear();
+        buffers.hit_recording_starts.clear();
         buffers.local_hit_clips.clear();
         buffers.local_hit_ids.clear();
         buffers.paint_spaces.clear();

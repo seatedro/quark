@@ -350,6 +350,15 @@ impl Recording {
             record.hit_node.push(node);
             record.hit_identity.push(cx.hit_table.identity(id));
         }
+        // Rows a hidden interaction slot gave up after prepaint replay as
+        // given up, not as they were inserted.
+        for (i, &id) in record.hit_ids.iter().enumerate() {
+            if cx.hit_table.is_disabled(id) {
+                record.hit_clip[i] = quark::hit::EMPTY_CLIP;
+                record.hit_flags[i] = HitFlags::NONE;
+                record.hit_cursor[i] = CursorHint::Default;
+            }
+        }
         complete &= cx
             .handlers
             .copy_since(marks.handlers, base, &mut record.handlers);

@@ -598,6 +598,15 @@ impl InputRouter {
             .find_map(|id| self.frame.hits.node(id))
     }
 
+    /// Whether a primary press at `(x, y)` should move the window: it lands
+    /// in a [`Div::window_drag_region`] with no control above it taking the
+    /// press. Hosts ask after [`Self::pointer_down`] delivered nothing and
+    /// no selectable text took the press, then start the platform's native
+    /// window move while the press is still current.
+    pub fn window_drag_at(&self, x: f32, y: f32) -> bool {
+        self.capture.is_none() && self.frame.hits.window_drag_at(x, y)
+    }
+
     pub fn cursor_at(&self, x: f32, y: f32) -> CursorHint {
         if let Some(capture) = &self.capture {
             return capture.drag.cursor();
@@ -1911,6 +1920,54 @@ mod tests {
             let pressed: Binding = pressed.parse().unwrap();
             let delivery = router.activate(&pressed, focus);
             assert_eq!(dump(&router, delivery), expected, "{pressed} on {focus:?}");
+        }
+    }
+
+    // A custom title bar: blank parts move the window; its controls, a
+    // text field, a drag handle, and an excluded strip keep their presses.
+    // A tab strip too narrow for its tabs clips the last one away, leaving
+    // the bar beneath it draggable there.
+    #[test]
+    fn title_bar_press_moves_the_window_only_on_blank_chrome() {
+        let bar = div()
+            .w(400.0)
+            .h(40.0)
+            .flex_row()
+            .window_drag_region()
+            .child(button("close", 40.0, 40.0))
+            .child(
+                text_input("", "")
+                    .bare()
+                    .focus_target(FocusId::new(7))
+                    .w(80.0)
+                    .h(40.0),
+            )
+            .child(div().w(40.0).h(40.0).on_drag(|_| Box::new(RecordDrag)))
+            .child(div().w(40.0).h(40.0).window_drag_exclude())
+            .child(
+                div()
+                    .w(80.0)
+                    .h(40.0)
+                    .flex_row()
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .child(button("tab", 40.0, 40.0).flex_shrink_0())
+                    .child(div().w(40.0).h(40.0).flex_shrink_0())
+                    .child(button("clipped tab", 40.0, 40.0).flex_shrink_0()),
+            );
+        let router = routed(div().w(400.0).h(100.0).child(bar), 400.0, 100.0);
+        let cases = [
+            ("blank chrome", 360.0, 20.0, true),
+            ("close button", 20.0, 20.0, false),
+            ("text field", 80.0, 20.0, false),
+            ("drag handle", 140.0, 20.0, false),
+            ("excluded strip", 180.0, 20.0, false),
+            ("tab in the strip", 210.0, 20.0, false),
+            ("tab clipped off the strip", 300.0, 20.0, true),
+            ("below the bar", 360.0, 70.0, false),
+        ];
+        for (name, x, y, drags) in cases {
+            assert_eq!(router.window_drag_at(x, y), drags, "{name}");
         }
     }
 }

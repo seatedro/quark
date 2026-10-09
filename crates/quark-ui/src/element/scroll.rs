@@ -116,6 +116,57 @@ pub enum ScrollAlign {
     Nearest,
 }
 
+/// How a programmatic scroll moves: at once, or as a smooth scroll (a
+/// jump under reduced motion or without an animation table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollBehavior {
+    #[default]
+    Instant,
+    Smooth,
+}
+
+/// Where [`ScrollHandle::scroll_to_item_with`] puts an item.
+///
+/// `inset` is in points per axis (`[x, y]`), and a positive value moves
+/// the item toward the end of the axis (down, right):
+///
+/// - `Start`: the item starts `inset` inside the viewport (an item at
+///   y=200 with inset 12 asks for offset 188);
+/// - `End`: the item ends `inset` before the viewport end (a positive
+///   inset therefore raises it);
+/// - `Center`: the item's center sits `inset` past the viewport center;
+/// - `Nearest`: the least movement that shows the item inside the
+///   viewport shrunk by `inset` at both ends.
+///
+/// An item longer than the space its alignment gives it starts at the
+/// start of that space instead. The offset is clamped to the content once,
+/// after the item's geometry of the frame is known.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScrollIntoView {
+    pub align: ScrollAlign,
+    pub inset: [f32; 2],
+    pub behavior: ScrollBehavior,
+}
+
+impl ScrollIntoView {
+    pub fn new(align: ScrollAlign) -> Self {
+        Self {
+            align,
+            ..Self::default()
+        }
+    }
+
+    pub fn inset(mut self, x: f32, y: f32) -> Self {
+        self.inset = [x, y];
+        self
+    }
+
+    pub fn smooth(mut self) -> Self {
+        self.behavior = ScrollBehavior::Smooth;
+        self
+    }
+}
+
 /// A scroll a key press asks for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KeyScroll {
@@ -279,6 +330,7 @@ enum Request {
     Item {
         key: u64,
         align: ScrollAlign,
+        inset: [f32; 2],
         smooth: bool,
     },
 }
@@ -394,22 +446,28 @@ impl ScrollHandle {
     }
 
     /// Jump so the descendant with sibling key `key` (see [`Div::key`]) sits
-    /// at `align` on each scrolling axis. Items are found by the bounds they
-    /// had in the last frame (or in the next one, at the cost of a frame).
+    /// at `align` on each scrolling axis; [`Self::scroll_to_item_with`]
+    /// with no inset.
     pub fn scroll_to_item(&self, key: &str, align: ScrollAlign) {
-        self.request(Request::Item {
-            key: quark::stable_hash(key),
-            align,
-            smooth: false,
-        });
+        self.scroll_to_item_with(key, ScrollIntoView::new(align));
     }
 
     /// [`Self::scroll_to_item`], scrolling smoothly.
     pub fn animate_to_item(&self, key: &str, align: ScrollAlign) {
+        self.scroll_to_item_with(key, ScrollIntoView::new(align).smooth());
+    }
+
+    /// Scroll so the descendant with sibling key `key` (see [`Div::key`])
+    /// sits where `options` say, on each scrolling axis. The item's bounds
+    /// in the frame being painted decide the offset, so the first frame
+    /// that paints the item already shows it in place. A request for a key
+    /// no frame paints is dropped.
+    pub fn scroll_to_item_with(&self, key: &str, options: ScrollIntoView) {
         self.request(Request::Item {
             key: quark::stable_hash(key),
-            align,
-            smooth: true,
+            align: options.align,
+            inset: options.inset,
+            smooth: options.behavior == ScrollBehavior::Smooth,
         });
     }
 
@@ -572,10 +630,10 @@ impl ScrollHandle {
         if let Some(request) = s.request {
             let resolved = match request {
                 Request::Offset { to, smooth } => Some((to, smooth)),
-                Request::Item { key, align, smooth } => {
-                    item_offset(&s.items, key, align, s.offset, viewport, axes)
-                        .map(|to| (to, smooth))
-                }
+                Request::Item {
+                    key, align, smooth, ..
+                } => item_offset(&s.items, key, align, s.offset, viewport, axes)
+                    .map(|to| (to, smooth)),
             };
             if let Some((to, smooth)) = resolved {
                 s.request = None;

@@ -38,6 +38,10 @@ pub struct Div {
     scrollbar_visibility: Option<ScrollbarVisibility>,
     clips: bool,
     block_mouse: bool,
+    /// [`HitFlags::WINDOW_DRAG`] or [`HitFlags::WINDOW_DRAG_EXCLUDE`].
+    window_drag: HitFlags,
+    interaction_group: Option<GroupId>,
+    show_when: Option<GroupCondition>,
     focus_target: Option<FocusId>,
     focus_ring_offset: f32,
     tooltip: Option<std::sync::Arc<str>>,
@@ -92,6 +96,9 @@ pub fn div() -> Div {
         scrollbar_visibility: None,
         clips: false,
         block_mouse: false,
+        window_drag: HitFlags::NONE,
+        interaction_group: None,
+        show_when: None,
         focus_target: None,
         focus_ring_offset: 0.0,
         tooltip: None,
@@ -229,6 +236,43 @@ impl Div {
     /// clicked where it covers. Use on elevated surfaces and scrims.
     pub fn block_mouse(mut self) -> Self {
         self.block_mouse = true;
+        self
+    }
+
+    /// Make blank parts of this div move the window, for custom title bars:
+    /// a primary press here that no control above takes (buttons, text
+    /// fields, drags, [`Self::window_drag_exclude`]) is a window move; see
+    /// [`InputRouter::window_drag_at`]. Pure hit metadata: no focus stop,
+    /// no semantic role.
+    pub fn window_drag_region(mut self) -> Self {
+        self.window_drag = HitFlags::WINDOW_DRAG;
+        self
+    }
+
+    /// Keep presses on this div from moving the window, inside a
+    /// [`Self::window_drag_region`].
+    pub fn window_drag_exclude(mut self) -> Self {
+        self.window_drag = HitFlags::WINDOW_DRAG_EXCLUDE;
+        self
+    }
+
+    /// Make this div interaction group `id`: descendants marked
+    /// [`Self::show_when`] with this id follow whether it is hovered or
+    /// holds focus. See [the module docs](super::interaction). For keyboard
+    /// users, make the group itself focusable (a stable id with a
+    /// `tab_stop` or click handler), so focusing it reveals its actions
+    /// ahead of them in the Tab order.
+    pub fn interaction_group(mut self, id: impl Into<GroupId>) -> Self {
+        self.interaction_group = Some(id.into());
+        self
+    }
+
+    /// Show this div only under `condition` of its nearest enclosing
+    /// [`Self::interaction_group`] with the condition's id. Hidden, it keeps
+    /// its layout space but paints nothing and takes no input. It always
+    /// shows while it holds the focused element.
+    pub fn show_when(mut self, condition: GroupCondition) -> Self {
+        self.show_when = Some(condition);
         self
     }
 
@@ -723,6 +767,27 @@ impl Div {
         builder.clone().map(ScrollSink::Builder)
     }
 
+    /// The focus id the div takes Tab focus as: its `focus_ring` target, or
+    /// for a clickable div or tab stop with a stable id, that id
+    /// (`SemanticFrame::focus_id`).
+    fn focus_identity(&self) -> Option<FocusId> {
+        let clickable = self.on_click_handler.is_some()
+            || self
+                .on_click
+                .as_ref()
+                .is_some_and(|a| !a.is::<NoopAction>());
+        self.focus_target.or_else(|| {
+            let id = self
+                .semantic_id
+                .as_ref()
+                .map(UiNodeId::as_str)
+                .or(self.accessibility_id.as_deref())
+                .or(self.test_id.as_ref().map(TestId::as_str));
+            id.filter(|_| clickable || self.tab_stop.is_some())
+                .map(FocusId::from_key)
+        })
+    }
+
     /// Author id of the div's accessibility node: its stable id or key
     /// when it has one, else a hash of its role and label. Equal fallbacks
     /// get `#2`, `#3`, ... in paint order, so ids do not move with layout.
@@ -746,6 +811,8 @@ impl Div {
 /// and its scroll offset and scrollbars.
 pub struct DivPrepaintState {
     hit: Option<HitId>,
+    /// The div's [`Div::show_when`] slot this frame.
+    slot: Option<u32>,
     translate: (f32, f32),
     /// Rotation and scale about the center, when the div has any.
     matrix: Option<Transform2D>,
@@ -803,7 +870,12 @@ impl Element for Div {
             cx.push_transform(matrix);
         }
 
+        // Before the div's own hit, so the slot's rows include it.
+        let slot = self.show_when.map(|c| cx.begin_interaction_slot(c));
         let mut flags = HitFlags::NONE;
+        if self.interaction_group.is_some() {
+            flags |= HitFlags::HOVER;
+        }
         if self.block_mouse {
             flags |= HitFlags::BLOCKS_MOUSE;
         }
@@ -822,8 +894,16 @@ impl Element for Div {
         if self.scrolls() {
             flags |= HitFlags::SCROLL;
         }
+        flags |= self.window_drag;
         let hit = (!flags.is_empty() || self.hit_identity.is_some())
             .then(|| cx.insert_hit(bounds, flags, self.cursor));
+        let group = self
+            .interaction_group
+            .zip(hit)
+            .map(|(id, hit)| cx.begin_interaction_group(id, hit));
+        if let Some(target) = self.focus_identity() {
+            cx.note_focus_target(target);
+        }
 
         let clips = self.clips
             || self.base_style.layout.overflow.x != taffy::Overflow::Visible
@@ -850,6 +930,12 @@ impl Element for Div {
             handle.end_frame(cx);
         }
         let scrollbars = self.prepaint_scrollbars(bounds, content, scroll, cx);
+        if let Some(group) = group {
+            cx.end_interaction_group(group);
+        }
+        if let Some(slot) = slot {
+            cx.end_interaction_slot(slot);
+        }
         if clips {
             cx.pop_clip();
         }
@@ -862,6 +948,7 @@ impl Element for Div {
 
         DivPrepaintState {
             hit,
+            slot,
             translate,
             matrix,
             scroll,
@@ -878,6 +965,14 @@ impl Element for Div {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        // A hidden slot keeps its space and nothing else; its hit rows
+        // were disabled with the hit test.
+        if prepaint_state
+            .slot
+            .is_some_and(|slot| !cx.interaction_slot_visible(slot))
+        {
+            return;
+        }
         let translate = prepaint_state.translate;
         let bounds = offset_bounds(bounds, translate);
         let scroll = prepaint_state.scroll;
@@ -998,21 +1093,7 @@ impl Element for Div {
 
         // A clickable div with a stable id takes Tab focus without a
         // `focus_ring` (`SemanticFrame::focus_id`), so it gets the ring too.
-        let clickable = self.on_click_handler.is_some()
-            || self
-                .on_click
-                .as_ref()
-                .is_some_and(|a| !a.is::<NoopAction>());
-        let ring_target = self.focus_target.or_else(|| {
-            let id = self
-                .semantic_id
-                .as_ref()
-                .map(UiNodeId::as_str)
-                .or(self.accessibility_id.as_deref())
-                .or(self.test_id.as_ref().map(TestId::as_str));
-            id.filter(|_| clickable || self.tab_stop.is_some())
-                .map(FocusId::from_key)
-        });
+        let ring_target = self.focus_identity();
         if let Some(target) = ring_target
             && cx.is_focused(target)
         {
