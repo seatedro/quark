@@ -254,6 +254,7 @@ impl Element for TextEditorElement {
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> HitId {
+        cx.note_focus_target(self.focus_target);
         if let Some(anchor) = &self.caret_anchor {
             let (x, y) = self.caret_at;
             anchor.set(Some(CaretGeometry {
