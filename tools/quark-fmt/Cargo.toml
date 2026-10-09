@@ -19,6 +19,16 @@ syn = { version = "2", features = ["full", "visit"] }
 # unicode-ident 1.0.26 and newest unicode-properties 0.1.4 do not.
 ra-ap-rustc_lexer = "=0.145.0"
 unicode-width = "0.2"
+# CLI (stream D): quark-fmt.toml, cargo metadata, scratch files, workspace
+# walks, check-mode diffs, and exclusion globs.
+serde.workspace = true
+toml = "1"
+serde_json = "1.0"
+tempfile = "3"
+walkdir = "2"
+similar = "2.7"
+glob = "0.3"
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile = "3"
