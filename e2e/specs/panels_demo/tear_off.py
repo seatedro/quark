@@ -30,11 +30,12 @@ def frame(name):
     return next((f for f in app_frames() if f.name == name), None)
 
 
-def window_geometry(name):
-    wid = xdotool("search", "--sync", "--name", f"^{name}$").splitlines()[0]
-    out = xdotool("getwindowgeometry", "--shell", wid)
-    values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
-    return tuple(int(values[k]) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+def on_screen(name):
+    """The window's client area when all of it is on the screen. From the
+    frame's extents: under a reparenting window manager, xdotool's
+    getwindowgeometry adds the decorations' offset to the position twice."""
+    x, y, w, h = frame(name).extents
+    return (x, y, w, h) if x >= 0 and y >= 0 and x + w <= 1280 and y + h <= 800 else None
 
 
 def node_by_id(window, node_id):
@@ -79,9 +80,9 @@ def spec(cua: Cua):
     xdotool("mouseup", 1)
     wait_for("Threads to leave the main window", lambda: strip_of(MAIN, THREADS) is None)
     # Released where it fits, the window stays under the pointer; where it
-    # would leave the screen, the dock fits it inside the work area instead.
-    x, y, w, h = window_geometry(FLOATING)
-    assert x >= 0 and y >= 0 and x + w <= 1280 and y + h <= 800, "the window left the screen"
+    # would leave the screen, the dock fits it inside the work area instead,
+    # a move the window manager makes after the release.
+    x, y, w, h = wait_for("the window to fit on the screen", lambda: on_screen(FLOATING))
     # Window decorations sit outside the client geometry.
     clamped = x + w >= 1280 - 12 or y + h >= 800 - 40
     assert clamped or threads_under(FLOATING, later), "the window moved on release"
