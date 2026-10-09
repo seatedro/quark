@@ -1,27 +1,27 @@
 # Performance model
 
-A view rebuilds its element tree every frame, which keeps app code simple.
-Three mechanisms keep that cheap: frames are drawn only when something
-changed, cache boundaries replay unchanged subtrees without building them,
-and per-frame buffers are recycled so a steady frame does not call the
-allocator. Tests measure the last property as allocation budgets.
+How to keep a view that rebuilds every frame cheap.
+
+- A view rebuilds its element tree every frame.
+- Frames are drawn only when something changed.
+- Cache boundaries replay unchanged subtrees without building them.
+- Steady frames reuse last frame's memory instead of allocating.
 
 ## Frames only when needed
 
-The adapter draws a frame for a reason it can name (hover, focus, an
-action, a text edit, a scroll, a theme change) or when an animation or the
-app asks for one. An idle window draws nothing. A pointer move that does
-not change the set of elements under the pointer does not redraw.
-[State, actions, and messages](state-actions-messages.md#when-frames-are-drawn)
-lists the triggers.
+- An idle window draws nothing.
+- A pointer move that does not change the elements under the pointer does
+  not redraw.
+- Full trigger list:
+[State, actions, and messages](state-actions-messages.md#when-frames-are-drawn).
 
 ## Cache boundaries
 
 `quark_ui::element::cached(key, inputs_hash, build)` stores a subtree's
-layout and paint output in the window's `ElementCache` and replays it,
-moved to the boundary's new position, without calling `build`. This
-doctest from [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs)
-caches each row of a list:
+layout and paint in the window's `ElementCache` and replays it at the
+boundary's new position without calling `build`.
+
+From [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs):
 
 ```rust
 use quark::view;
@@ -54,69 +54,48 @@ fn row_view(row: &Row, is_selected: bool) -> AnyElement {
 }
 ```
 
-A boundary replays only while all of these match the frame that recorded
-it: the key and inputs hash, the size its parent offers, the scale factor
-and theme, the focused element (if the subtree read focus), and inherited
-paint state. Hovered subtrees, subtrees with animations in motion, and
-subtrees containing a text input rebuild instead of going stale. The hash
-must cover every value the closure reads; a value it misses is the one way
-a boundary shows stale content. Unused entries are evicted after 60 layout
-passes. The full contract is in
-[element/cache/mod.rs](../../crates/quark-ui/src/element/cache/mod.rs).
+- Replays only while these match the recording frame: key and inputs hash,
+  the size the parent offers, scale factor and theme, the focused element
+  (if the subtree read focus), inherited paint state.
+- Hovered subtrees, subtrees with running animations, and subtrees
+  containing a text input rebuild instead.
+- The hash must cover every value the closure reads. A missed value is the
+  one way a boundary shows stale content.
+- Unused entries are evicted after 60 layout passes.
+- Full contract:
+  [element/cache/mod.rs](../../crates/quark-ui/src/element/cache/mod.rs).
 
-The tree, table, and diff views put each row (the diff view: each row's
-cells) in a boundary inside one boundary for the whole view, so a frame
-where nothing changed replays one entry, and a scrolled frame builds only
-the rows that entered the window. The block document caches each row.
+### What caches itself
 
-Dock tab strips and split dividers cache themselves too, but an app's own
-chrome (a title bar, a toolbar, a sidebar header) rebuilds every frame
-unless the app puts it in a boundary. In the Workbench, boundaries around
-the dock, splits, toolbar, and sidebar took a repeated frame from 507
-allocations to 45.
+- Tree, table, and diff views: each row (diff view: each row's cells) in a
+  boundary inside one for the whole view. An unchanged frame replays one
+  entry; a scrolled frame builds only rows that entered.
+- The block document: each row.
+- Dock tab strips and split dividers.
+- Not the app's own chrome (title bar, toolbar, sidebar header): it rebuilds
+  every frame unless wrapped. In the Workbench, wrapping the dock, splits,
+  toolbar, and sidebar cut a repeated frame from 507 allocations to 45.
 
-The `build` closure is `'static`, so it owns what it reads, and cloning
-strings into it allocates on every frame, replayed or not. The
-Workbench's title bar ([titlebar.rs](../../examples/workbench/src/shell/titlebar.rs))
-keeps its text in an `Rc` that the view reuses while the text is
-unchanged, moves a clone of the `Rc` into the closure, and hashes the
-data with the size it is drawn at:
-`inputs_hash(&(&*data, width.to_bits(), height.to_bits()))`.
+### Closure gotcha
 
-## Recycled frame memory
+- `build` is `'static`, so it owns what it reads. Cloning strings into it
+  allocates every frame, replayed or not.
+- Keep such data in an `Rc` reused while unchanged, move an `Rc` clone into
+  the closure, and hash the data with its drawn size.
+- Example: the Workbench title bar
+  ([titlebar.rs](../../examples/workbench/src/shell/titlebar.rs)) hashes
+  `inputs_hash(&(&*data, width.to_bits(), height.to_bits()))`.
 
-- **Element storage.** Each element type keeps a free list of its boxes,
-  and child lists keep their buffers, so a steady frame builds its tree
-  from the last frame's memory ([element/pool.rs](../../crates/quark-ui/src/element/pool.rs)).
-  The builder API stays plain values with no arena lifetimes.
-- **Frame buffers.** The adapter keeps the buffers of the frame before
-  last (the scene the renderer hands back, the input routing frame, the
-  text input areas, the accessibility frame, the tooltip regions) and
-  refills them.
-- **Text layouts.** The `LayoutCache` keeps shaped layouts across frames
-  and evicts the ones unused for a number of frames, so unchanged text is
-  not shaped again.
+## Measuring
 
-## Data layout
+- Count a frame's allocations in a test:
+  [Testing](testing.md#allocation-counts).
+- The `devtools` HUD (`ctrl+shift+h`) shows per-window frame timings,
+  primitive counts, and text layout cache hits and misses.
+- `profile-puffin` serves profiler scopes (frame phases, layout, paint, text
+  shaping) on `127.0.0.1:8585` for `puffin_viewer`.
+- `profile-tracy` sends the same scopes to Tracy. Enable one of the two at a
+  time.
 
-State that grows with content lives in parallel columns indexed by row or
-key rather than in a graph of objects: the animation table, the virtual
-list's row table and Fenwick offsets, the element cache, the diff
-document, the tree and table views, and the markdown block model. Stable
-keys map to rows through an index, which the animation table, for one,
-keeps in sync as it swap-removes rows. Each of these types has a
-`verify_integrity` method that debug builds call after mutations, as
-[TEST_BIBLE.md](../../TEST_BIBLE.md) requires. For `BlockOrder`, the
-animation table, the row table, and the block document, debug builds check
-only the entries a mutation touched unless the `integrity-checks` feature
-asks for the whole structure.
-
-## Profiling
-
-- The `devtools` feature's HUD (`ctrl+shift+h`) shows per-window frame
-  timings, primitive counts, and text layout cache hits and misses.
-- `profile-puffin` serves profiler scopes around frame phases, layout,
-  paint, and text shaping on `127.0.0.1:8585` for `puffin_viewer`;
-  `profile-tracy` sends the same scopes to Tracy. Enable one at a time.
-- Release builds use thin LTO and one codegen unit, and keep symbols so
-  the panic hook's backtrace is readable.
+How quark reuses frame memory internally:
+[docs/maintainers/performance.md](../maintainers/performance.md).
