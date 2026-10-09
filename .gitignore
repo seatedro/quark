@@ -1,3 +1,7 @@
 target/
 target-*/
 .direnv/
+
+# Python bytecode from e2e specs
+__pycache__/
+*.pyc
