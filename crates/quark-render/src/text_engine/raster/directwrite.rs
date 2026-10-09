@@ -983,28 +983,46 @@ mod tests {
         assert_eq!(pixel(&canvas, 1, 1), [0, 0, 128, 128]);
     }
 
-    /// The first glyph of `text` laid out at 32 px, and its prepared font.
+    /// The glyphs of `text` laid out at `size` logical pixels under
+    /// device `scale`: each one's prepared font and raster request, as the
+    /// atlas would ask for it.
     #[cfg(all(windows, feature = "text-raster-directwrite"))]
-    fn shaped(text: &str, family: Option<&'static str>) -> (quark_text::fonts::PreparedFont, u16) {
+    fn shaped_glyphs(
+        text: &str,
+        family: Option<&'static str>,
+        size: f32,
+        scale: f32,
+    ) -> Vec<(quark_text::fonts::PreparedFont, super::super::RasterRequest)> {
         use quark_text::fonts::FontRegistry;
         use quark_text::{TextParams, TextStyle};
         let mut system = crate::text::test_text();
-        let layout = system
-            .layout(&TextParams::new(text, TextStyle::new(32.0).family(family)))
-            .expect("layout");
-        let glyph = layout
+        let params = TextParams::new(text, TextStyle::new(size).family(family)).scale_factor(scale);
+        let layout = system.layout(&params).expect("layout");
+        let mut registry = FontRegistry::new(system.font_snapshot());
+        layout
             .buffer()
             .layout_runs()
             .flat_map(|run| run.glyphs.iter())
-            .next()
-            .expect("a glyph")
-            .clone();
-        let mut registry = FontRegistry::new(system.font_snapshot());
-        let font = registry
-            .prepare(glyph.font_id, glyph.font_weight, glyph.cache_key_flags)
-            .expect("prepared font")
-            .clone();
-        (font, glyph.glyph_id)
+            .map(|glyph| {
+                let font = registry
+                    .prepare(glyph.font_id, glyph.font_weight, glyph.cache_key_flags)
+                    .expect("prepared font")
+                    .clone();
+                let key = glyph.physical((0.0, 0.0), 1.0).cache_key;
+                let request =
+                    super::super::RasterRequest::from_cache_key(&key, scale).expect("request");
+                (font, request)
+            })
+            .collect()
+    }
+
+    /// The first glyph of `text` at 32 px, scale 1.
+    #[cfg(all(windows, feature = "text-raster-directwrite"))]
+    fn shaped(
+        text: &str,
+        family: Option<&'static str>,
+    ) -> (quark_text::fonts::PreparedFont, super::super::RasterRequest) {
+        shaped_glyphs(text, family, 32.0, 1.0).swap_remove(0)
     }
 
     // NOT YET RUN: needs a Windows host. A capital H of the bundled UI font
@@ -1014,20 +1032,9 @@ mod tests {
     #[cfg(all(windows, feature = "text-raster-directwrite"))]
     #[test]
     fn windows_draws_grayscale_coverage_on_the_baseline() {
-        use super::super::{
-            BitmapContent, GlyphRasterizer, RasterOptions, RasterOutcome, RasterRequest,
-            RasterScratch,
-        };
-        let (font, glyph) = shaped("H", None);
+        use super::super::{BitmapContent, GlyphRasterizer, RasterOutcome, RasterScratch};
+        let (font, request) = shaped("H", None);
         let mut rasterizer = DirectWriteRasterizer::new().expect("DirectWrite");
-        let request = RasterRequest::new(
-            glyph,
-            32.0,
-            1.0,
-            SubpixelOffset::ZERO,
-            RasterOptions::default(),
-        )
-        .expect("request");
         let mut scratch = RasterScratch::default();
         let RasterOutcome::Bitmap(bitmap) = rasterizer
             .rasterize(&font, &request, &mut scratch)
@@ -1050,20 +1057,57 @@ mod tests {
     #[cfg(all(windows, feature = "text-raster-directwrite"))]
     #[test]
     fn windows_hands_embedded_bitmap_emoji_to_swash() {
-        use super::super::{GlyphRasterizer, RasterOptions, RasterRequest, RasterScratch};
-        let (font, glyph) = shaped("😀", Some(quark_text::fonts::EMOJI_FAMILY));
+        use super::super::{GlyphRasterizer, RasterScratch};
+        let (font, request) = shaped("😀", Some(quark_text::fonts::EMOJI_FAMILY));
         let mut rasterizer = DirectWriteRasterizer::new().expect("DirectWrite");
-        let request = RasterRequest::new(
-            glyph,
-            32.0,
-            1.0,
-            SubpixelOffset::ZERO,
-            RasterOptions::default(),
-        )
-        .expect("request");
         assert_eq!(
             rasterizer.rasterize(&font, &request, &mut RasterScratch::default()),
             Err(RasterError::UnsupportedFormat)
         );
+    }
+
+    // NOT YET RUN: needs a Windows host. Backend parity (design 8.2): for
+    // the same instance, glyph, size, and subpixel offset, DirectWrite's ink
+    // lands where swash's does, each edge within a pixel (hinting and
+    // antialiasing may move an edge by one), at 1x and 2x, upright and
+    // variable weight.
+    #[cfg(all(windows, feature = "text-raster-directwrite"))]
+    #[test]
+    fn windows_ink_lands_within_a_pixel_of_swash() {
+        use super::super::swash::SwashRasterizer;
+        use super::super::{GlyphRasterizer, RasterOutcome, RasterScratch};
+        let mut native = DirectWriteRasterizer::new().expect("DirectWrite");
+        let mut swash = SwashRasterizer::default();
+        let (mut a, mut b) = (RasterScratch::default(), RasterScratch::default());
+        for (family, scale) in [
+            (None, 1.0),
+            (None, 2.0),
+            (Some(quark_text::fonts::INTER_FAMILY), 1.0),
+        ] {
+            for (font, request) in shaped_glyphs("Hamburgefonstiv 0123", family, 13.0, scale) {
+                let native = native
+                    .rasterize(&font, &request, &mut a)
+                    .expect("DirectWrite");
+                let reference = swash.rasterize(&font, &request, &mut b).expect("swash");
+                let (RasterOutcome::Bitmap(n), RasterOutcome::Bitmap(r)) = (native, reference)
+                else {
+                    continue;
+                };
+                let edges = |p: Placement| {
+                    [
+                        p.left,
+                        p.top,
+                        p.left + p.width as i32,
+                        p.top - p.height as i32,
+                    ]
+                };
+                let (n, r) = (edges(n.placement), edges(r.placement));
+                assert!(
+                    n.iter().zip(&r).all(|(n, r)| n.abs_diff(*r) <= 1),
+                    "glyph {} at {scale}x: DirectWrite {n:?}, swash {r:?}",
+                    request.glyph()
+                );
+            }
+        }
     }
 }
