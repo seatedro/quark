@@ -6,4 +6,6 @@
 pub mod fixture;
 #[cfg(all(target_os = "linux", feature = "webview"))]
 pub mod linux;
+#[cfg(all(target_os = "macos", feature = "webview"))]
+pub mod macos;
 pub mod pages;

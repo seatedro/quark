@@ -22,6 +22,12 @@ use std::time::Duration;
 use webview::fixture::{Fixture, Site, client};
 
 fn main() -> ExitCode {
+    // macOS checks need their own process launched by LaunchServices; see
+    // `webview/macos/run-macos-smoke.sh`.
+    #[cfg(all(target_os = "macos", feature = "webview"))]
+    if std::env::args().any(|arg| arg == "--macos") {
+        return webview::macos::run();
+    }
     if std::env::args().any(|arg| arg == "--serve") {
         return match webview::fixture::serve_stdio() {
             Ok(()) => ExitCode::SUCCESS,
@@ -34,6 +40,11 @@ fn main() -> ExitCode {
     #[cfg(all(target_os = "linux", feature = "webview"))]
     if std::env::args().any(|arg| arg == "--linux") {
         return webview::linux::run();
+    }
+    // Measurements and screenshots, not checks; never run by default.
+    #[cfg(all(target_os = "linux", feature = "webview"))]
+    if std::env::args().any(|arg| arg == "--linux-evidence") {
+        return webview::linux::evidence::run();
     }
     let mut failures = Vec::new();
     fixture_checks(&mut failures);
