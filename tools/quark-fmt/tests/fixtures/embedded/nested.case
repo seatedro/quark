@@ -1,0 +1,58 @@
+=== a one-line nested view keeps its call on one line
+context: expr
+prefix: {
+suffix: }
+--- input
+            {Some(  view! { <spacer /> }  )}
+--- expected
+            {Some(view! { <spacer /> })}
+=== combobox.rs: a broken nested view as the only argument hugs its call
+context: expr
+prefix: {
+suffix: }
+--- input
+                {anchored(
+                    view! {
+                        <popover_panel(theme) w={width}>
+                            {rows}
+                        </popover_panel>
+                    })}
+--- expected
+                {anchored(view! {
+                    <popover_panel(theme) w={width}>
+                        {rows}
+                    </popover_panel>
+                })}
+=== sidebar.rs: a broken nested view among arguments breaks the call
+context: expr
+prefix: {
+suffix: }
+--- input
+                {nav_row(p, view! {
+                    <div class="w-4 h-4 items-center justify-center">
+                        <icon svg={icons::PET} size={15.0} color={p.accent} />
+                    </div>
+                }, "Your dot", Msg::Noop)}
+--- expected
+                {nav_row(
+                    p,
+                    view! {
+                        <div class="w-4 h-4 items-center justify-center">
+                            <icon svg={icons::PET} size={15.0} color={p.accent} />
+                        </div>
+                    },
+                    "Your dot",
+                    Msg::Noop
+                )}
+=== a closure body keeps no block rustfmt adds when it breaks
+context: expr
+prefix: on:click={
+suffix: }
+--- input
+            on:click={move |_| show_popover(anchor, view! { <text class="text-sm">"Copied to the clipboard"</text> }, Duration::from_millis(1500))}
+--- expected
+            on:click={move |_| show_popover(
+                anchor,
+                view! { <text class="text-sm">"Copied to the clipboard"</text> },
+                Duration::from_millis(1500)
+            )}

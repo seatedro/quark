@@ -1,0 +1,74 @@
+=== thread.rs: a short let child stays as written
+context: local
+--- input
+                let key = format!("item-{i}");
+--- expected
+                let key = format!("item-{i}");
+=== a let child too long for its line breaks like a Rust statement
+context: local
+--- input
+                let scroll = ScrollActionBuilder::new(|lines| Action::ScrollLines(lines).into()).extent(rows);
+--- expected
+                let scroll = ScrollActionBuilder::new(|lines| Action::ScrollLines(lines).into())
+                    .extent(rows);
+=== table.rs: a let chain condition
+context: cond
+prefix: if 
+suffix:  {
+--- input
+            if let Some((dragged, to)) = reorder_target && to == pos && dragged != column {
+--- expected
+            if let Some((dragged, to)) = reorder_target
+                && to == pos
+                && dragged != column {
+=== an else-if condition is measured after the closing brace
+context: cond
+prefix: } else if 
+suffix:  {
+--- input
+            } else if   matches!(state, State::Loading)||state.is_stale() {
+--- expected
+            } else if matches!(state, State::Loading) || state.is_stale() {
+=== thread.rs: a for header
+context: for
+prefix: for 
+suffix:  {
+--- input
+            for (i,item) in items.iter().enumerate() {
+--- expected
+            for (i, item) in items.iter().enumerate() {
+=== thread.rs: a match arm pattern with a guard
+context: arm
+suffix:  => {
+--- input
+                    Item::ModelChanged { from, to } if from!=to => {
+--- expected
+                    Item::ModelChanged { from, to } if from != to => {
+=== thread.rs: function tag arguments break without gaining a comma
+context: args
+prefix: <txt(
+suffix: ) />
+--- input
+                                <txt(format!("Model changed from {from} to {to}."), BODY, p.divider_text) />
+--- expected
+                                <txt(
+                                    format!("Model changed from {from} to {to}."),
+                                    BODY,
+                                    p.divider_text
+                                ) />
+=== short constructor arguments stay on the tag line
+context: args
+prefix: <Badge(
+suffix: )>
+--- input
+            <Badge( label ,tone )>
+--- expected
+            <Badge(label, tone)>
+=== a typed root
+context: type
+prefix: view! { -> 
+suffix: ,
+--- input
+    view! { -> Option < Div >,
+--- expected
+    view! { -> Option<Div>,
