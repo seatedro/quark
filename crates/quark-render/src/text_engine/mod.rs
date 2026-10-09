@@ -13,6 +13,7 @@
 //! cosmic-text through quark-text.
 
 mod atlas;
+mod backend;
 mod error;
 mod pipeline;
 pub(crate) mod raster;
@@ -21,6 +22,8 @@ mod viewport;
 
 pub(crate) use atlas::GlyphAtlas;
 pub use atlas::{AtlasLimits, AtlasMemory, AtlasStats};
+pub(crate) use backend::auto as auto_rasterizer;
+pub use backend::{TextRasterizer, TextSmoothing};
 pub use error::{PrepareError, RenderError};
 pub(crate) use pipeline::Cache;
 pub(crate) use render::{GlyphFill, MAX_GLYPH_FILLS, TextRenderer};

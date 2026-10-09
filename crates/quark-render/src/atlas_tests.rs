@@ -311,3 +311,71 @@ fn blank_glyphs_take_no_page() {
         (0, 0, 0)
     );
 }
+
+// A rasterizer the build or platform lacks is refused, and the renderer
+// keeps drawing with the one it had.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_unavailable_rasterizer_is_refused() {
+    let Some(mut renderer) = renderer(None) else {
+        return;
+    };
+    let wanted = TextRasterizer::CoreText(TextSmoothing::System);
+    assert!(matches!(
+        renderer.set_text_rasterizer(wanted),
+        Err(RenderError::TextRasterizerUnavailable(r)) if r == wanted
+    ));
+    assert_eq!(
+        renderer.text_rasterizer(),
+        (TextRasterizer::Swash, TextRasterizer::Swash)
+    );
+}
+
+// CoreText's system smoothing admits five coverage planes per glyph; the
+// shader draws the one smoothed for the text's own gray, so white and
+// black text each draw as the fixed smoothing for their gray does.
+#[cfg(target_os = "macos")]
+#[test]
+fn system_smoothing_draws_the_plane_of_the_text_gray() {
+    let mut system = test_text();
+    let frame = |system: &mut TextSystem, ink: Color, paper: Color| {
+        let mut scene = Scene::default();
+        scene.rect(RectPrimitive {
+            rect: rect(0.0, 0.0, SIZE.0 as f32, SIZE.1 as f32),
+            color: paper,
+        });
+        let layout = system
+            .layout(&TextParams::new("Smoothed llll 0123", TextStyle::new(13.0)))
+            .expect("layout");
+        scene.text(TextPrimitive {
+            rect: rect(4.0, 4.0, SIZE.0 as f32, 40.0),
+            layout: ShapedText::new(Arc::new(layout)),
+            color: ink,
+        });
+        scene
+    };
+    let draw_with = |rasterizer, scene: &Scene, system: &mut TextSystem| {
+        let mut renderer = renderer(None)?;
+        renderer.set_text_rasterizer(rasterizer).expect("CoreText");
+        Some(draw(&mut renderer, scene, system))
+    };
+    let white = Color::rgba(255, 255, 255, 255);
+    let black = Color::rgba(0, 0, 0, 255);
+    for (ink, paper, level) in [(white, black, 4), (black, white, 0)] {
+        let scene = frame(&mut system, ink, paper);
+        let Some(system_drawn) = draw_with(
+            TextRasterizer::CoreText(TextSmoothing::System),
+            &scene,
+            &mut system,
+        ) else {
+            return;
+        };
+        let fixed = draw_with(
+            TextRasterizer::CoreText(TextSmoothing::Fixed(level)),
+            &scene,
+            &mut system,
+        )
+        .expect("renderer");
+        assert!(system_drawn == fixed, "level {level}: another plane drew");
+    }
+}

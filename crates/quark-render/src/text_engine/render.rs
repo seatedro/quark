@@ -353,8 +353,9 @@ impl TextRenderer {
             color: metadata.color.0,
             // Colors are sRGB-encoded; the shader decodes them unless the
             // target is encoded.
+            // Bits 2 to 15: a smoothing bundle's plane step, in texels.
             content_type_with_srgb: [
-                placed.kind as u16,
+                placed.kind as u16 | (placed.plane_step() as u16) << 2,
                 CONVERT_TO_LINEAR | linear_correction(&metadata.cache_key),
             ],
             depth: 0.0,

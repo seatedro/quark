@@ -42,7 +42,8 @@ pub use text::{push_styled_text_decorations, push_text_decorations, text_decorat
 pub use quark_text::TextSystem;
 pub use renderer::{
     FrameStats, GpuContext, OffscreenTarget, RenderError, Renderer, RendererOptions,
-    SurfaceCapabilities, TextAtlasStats, TextMetrics, TextPrepareError, TextRenderError,
+    SurfaceCapabilities, TextAtlasLimits, TextAtlasMemory, TextAtlasStats, TextMetrics,
+    TextPrepareError, TextRasterizer, TextRenderError, TextSmoothing,
 };
 pub use scene::{
     AlphaMask, BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive,

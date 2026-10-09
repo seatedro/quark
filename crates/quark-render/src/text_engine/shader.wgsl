@@ -22,6 +22,9 @@ struct VertexOutput {
     // Fill index plus one (0: the vertex color), and 1 on an encoded
     // target.
     @location(4) @interpolate(flat) fill_encoded: vec2<u32>,
+    // A smoothing bundle's step from one coverage plane to the next, in
+    // texture coordinates; 0 for a single plane.
+    @location(5) @interpolate(flat) plane_step: f32,
 };
 
 // quark patch: per-renderer glyph fills; see `GlyphFill`.
@@ -117,7 +120,8 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
 
     vert_output.position.y *= -1.0;
 
-    let content_type = in_vert.content_type_with_srgb & 0xffffu;
+    let content_type = in_vert.content_type_with_srgb & 0x3u;
+    let plane_rows = (in_vert.content_type_with_srgb & 0xffffu) >> 2u;
     let upper = (in_vert.content_type_with_srgb & 0xffff0000u) >> 16u;
     let encoded = params._pad.x & 1u;
     // An encoded target keeps colors as authored.
@@ -175,6 +179,7 @@ fn vs_main(in_vert: VertexInput) -> VertexOutput {
     vert_output.content_type = content_type;
 
     vert_output.uv = vec2<f32>(uv) / vec2<f32>(dim);
+    vert_output.plane_step = f32(plane_rows) / f32(max(dim.y, 1u));
 
     return vert_output;
 }
@@ -213,12 +218,24 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
             return c;
         }
         case 1u: {
-            var a = textureSampleLevel(mask_atlas_texture, atlas_sampler, in_frag.uv, 0.0).x;
             var color = in_frag.color;
             if in_frag.fill_encoded.x > 0u {
                 let fill = fill_color(in_frag.fill_encoded.x - 1u, in_frag.position.xy, in_frag.fill_encoded.y);
                 color = vec4<f32>(fill.rgb, fill.a * in_frag.color.a);
             }
+            var uv = in_frag.uv;
+            if in_frag.plane_step > 0.0 {
+                // A smoothing bundle: the plane smoothed for the text gray
+                // nearest this pixel's paint, in quarter steps of its
+                // sRGB-encoded luminance.
+                var encoded_rgb = color.rgb;
+                if in_frag.fill_encoded.y == 0u {
+                    encoded_rgb = encode(color.rgb);
+                }
+                let level = clamp(floor(luminance(encoded_rgb) * 4.0 + 0.5), 0.0, 4.0);
+                uv.y = uv.y + level * in_frag.plane_step;
+            }
+            var a = textureSampleLevel(mask_atlas_texture, atlas_sampler, uv, 0.0).x;
             if in_frag.correction.x > 0.5 {
                 // Ghostty's linear-corrected blending: blend the two
                 // luminances in sRGB space, then pick the coverage that

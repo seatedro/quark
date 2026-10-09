@@ -12,6 +12,7 @@ pub use crate::text_engine::AtlasStats as TextAtlasStats;
 use crate::text_engine::{Cache, GlyphAtlas, Resolution, Viewport};
 /// Why text could not be prepared or drawn, in [`RenderError`].
 pub use crate::text_engine::{PrepareError as TextPrepareError, RenderError as TextRenderError};
+pub use crate::text_engine::{TextRasterizer, TextSmoothing};
 use bytemuck::{Pod, Zeroable};
 use quark_text::TextSystem;
 use thiserror::Error;
@@ -101,6 +102,10 @@ pub enum RenderError {
     PrepareText(#[from] TextPrepareError),
     #[error("failed to render text: {0}")]
     RenderText(#[from] TextRenderError),
+    /// [`Renderer::set_text_rasterizer`] asked for a rasterizer this build
+    /// or platform does not have.
+    #[error("the text rasterizer {0:?} is not available here")]
+    TextRasterizerUnavailable(TextRasterizer),
     #[error("surface acquisition failed")]
     SurfaceAcquire,
     /// The surface was lost or outdated and has been reconfigured; nothing
@@ -784,6 +789,8 @@ pub struct Renderer {
     viewport_bind_group: wgpu::BindGroup,
     viewport: Viewport,
     atlas: GlyphAtlas,
+    /// The rasterizer [`Self::set_text_rasterizer`] last asked for.
+    text_rasterizer: TextRasterizer,
     /// One text renderer per text run of the frame, kept with what it
     /// prepared.
     text_runs: text_runs::TextRuns,
@@ -868,6 +875,34 @@ impl Renderer {
     /// limits, and the peak.
     pub fn text_atlas_memory(&self) -> TextAtlasMemory {
         self.atlas.memory()
+    }
+
+    /// Rasterizes glyphs with `rasterizer` from the next frame, forgetting
+    /// every glyph rasterized before; layouts stay valid. Swash still
+    /// draws what a native rasterizer cannot. Fails, changing nothing, for
+    /// a rasterizer this build or platform lacks.
+    pub fn set_text_rasterizer(&mut self, rasterizer: TextRasterizer) -> Result<(), RenderError> {
+        self.atlas
+            .set_rasterizer(rasterizer)
+            .map_err(|_| RenderError::TextRasterizerUnavailable(rasterizer))?;
+        self.text_rasterizer = rasterizer;
+        self.text_runs.forget();
+        Ok(())
+    }
+
+    /// The rasterizer asked for, and the one drawing: [`TextRasterizer::Auto`]
+    /// resolved, or [`TextRasterizer::Swash`] when Auto's could not start.
+    pub fn text_rasterizer(&self) -> (TextRasterizer, TextRasterizer) {
+        use crate::text_engine::raster::RasterBackend;
+        let effective = match self.atlas.native_profile().map(|p| p.backend) {
+            None | Some(RasterBackend::Swash) => TextRasterizer::Swash,
+            Some(RasterBackend::DirectWrite) => TextRasterizer::DirectWrite,
+            Some(RasterBackend::CoreText) => match self.text_rasterizer {
+                TextRasterizer::Auto => crate::text_engine::auto_rasterizer(),
+                other => other,
+            },
+        };
+        (self.text_rasterizer, effective)
     }
 
     /// Limits this renderer's glyph atlas to `limits` from the next frame.
@@ -981,7 +1016,17 @@ impl Renderer {
 
         let texture_pool = TexturePool::new(shared.format);
         let viewport = Viewport::new(&device, &shared.glyph_cache);
-        let atlas = GlyphAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
+        let mut atlas = GlyphAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
+        // Windows draw with the platform's rasterizer; headless renderers
+        // (tests, fixtures) with deterministic swash unless asked.
+        let text_rasterizer = if surface.is_some() {
+            TextRasterizer::Auto
+        } else {
+            TextRasterizer::Swash
+        };
+        if let Err(error) = atlas.set_rasterizer(text_rasterizer) {
+            tracing::warn!("text rasterizer unavailable, drawing with swash: {error}");
+        }
 
         Self {
             device,
@@ -1000,6 +1045,7 @@ impl Renderer {
             viewport_bind_group,
             viewport,
             atlas,
+            text_rasterizer,
             text_runs: text_runs::TextRuns::default(),
             text_ready: true,
             text_path: TextPath::default(),

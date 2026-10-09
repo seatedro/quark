@@ -47,6 +47,8 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
+use super::backend::{Native, NativeOutcome, TextRasterizer};
+use super::raster::FontInstanceId;
 use super::raster::swash::SwashRasterizer;
 use super::raster::{
     AlphaMode, BitmapContent, GlyphRasterizer, MAX_BITMAP_BYTES, RasterError, RasterKey,
@@ -137,6 +139,8 @@ pub struct AtlasStats {
     /// Glyphs drawn by the font system path because their font instance
     /// could not be prepared for the rasterizer.
     pub fallbacks: u64,
+    /// Glyphs the native rasterizer could not draw, drawn by swash.
+    pub native_fallbacks: u64,
     /// Glyphs not drawn at all (too large even alone, or overflow staging
     /// full).
     pub dropped_glyphs: u64,
@@ -168,6 +172,7 @@ impl std::ops::Add for AtlasStats {
             unbatched_uploads: self.unbatched_uploads + o.unbatched_uploads,
             raster_failures: self.raster_failures + o.raster_failures,
             fallbacks: self.fallbacks + o.fallbacks,
+            native_fallbacks: self.native_fallbacks + o.native_fallbacks,
             dropped_glyphs: self.dropped_glyphs + o.dropped_glyphs,
             pages_released: self.pages_released + o.pages_released,
             overflow_frames: self.overflow_frames + o.overflow_frames,
@@ -242,7 +247,28 @@ pub(crate) struct Placed {
     pub left: i32,
     pub top: i32,
     pub kind: ContentType,
+    /// Coverage planes stacked below each other, a gutter apart (five for
+    /// a smoothing bundle, one otherwise).
+    pub planes: u8,
 }
+
+impl Placed {
+    fn rows(&self) -> u32 {
+        u32::from(self.planes) * (self.height + 2 * GUTTER)
+    }
+
+    /// Texels from one coverage plane to the next; zero for one plane.
+    pub(crate) fn plane_step(&self) -> u32 {
+        if self.planes > 1 {
+            self.height + 2 * GUTTER
+        } else {
+            0
+        }
+    }
+}
+
+/// Plane steps the vertex format can carry (14 bits).
+const MAX_PLANE_STEP: u32 = 1 << 14;
 
 /// A glyph ready to draw.
 #[derive(Debug, Clone, Copy)]
@@ -437,6 +463,10 @@ pub(crate) struct GlyphAtlas {
     frame: u64,
     registry: Option<FontRegistry>,
     swash: SwashRasterizer,
+    /// The native rasterizer drawing glyphs before swash, if any, and the
+    /// font instances it cannot draw (swash draws them).
+    native: Option<Native>,
+    native_unsupported: std::collections::HashSet<FontInstanceId, Fx>,
     legacy: SwashCache,
     scratch: RasterScratch,
     shelves: [Shelf; 2],
@@ -465,7 +495,19 @@ struct Drawn {
     width: u32,
     height: u32,
     stride: usize,
+    /// The first plane's bytes; a bundle's later planes follow at
+    /// `plane_len` steps.
     bytes: std::ops::Range<usize>,
+    planes: u32,
+    plane_len: usize,
+}
+
+impl Drawn {
+    /// Rows of the glyph's rectangle in the atlas: every plane, each in a
+    /// gutter of its own.
+    fn rows(&self) -> u32 {
+        self.planes * (self.height + 2 * GUTTER)
+    }
 }
 
 enum Raster {
@@ -524,6 +566,8 @@ impl GlyphAtlas {
             frame: 1,
             registry: None,
             swash: SwashRasterizer::default(),
+            native: None,
+            native_unsupported: Default::default(),
             legacy: SwashCache::new(),
             scratch: RasterScratch::default(),
             shelves: [Shelf::new(page_size, 1), Shelf::new(page_size, 4)],
@@ -552,6 +596,22 @@ impl GlyphAtlas {
             self.page_size = page_size;
             self.shelves = [Shelf::new(page_size, 1), Shelf::new(page_size, 4)];
         }
+    }
+
+    /// Rasterizes glyphs with `choice` from now on (swash where it cannot
+    /// draw a font or glyph). Glyphs of the previous rasterizer are
+    /// forgotten. Fails, changing nothing, when this build or platform
+    /// lacks the rasterizer.
+    pub(crate) fn set_rasterizer(&mut self, choice: TextRasterizer) -> Result<(), RasterError> {
+        self.native = Native::new(choice)?;
+        self.native_unsupported.clear();
+        self.clear();
+        Ok(())
+    }
+
+    /// The rasterizer drawing glyphs before swash: `None` for swash alone.
+    pub(crate) fn native_profile(&self) -> Option<super::raster::RasterProfile> {
+        self.native.as_ref().map(Native::profile)
     }
 
     pub(crate) fn stats(&self) -> AtlasStats {
@@ -766,8 +826,14 @@ impl GlyphAtlas {
             && let Ok(font) = registry.prepare(key.font_id, key.font_weight, key.flags)
             && let Ok(request) = RasterRequest::from_cache_key(&key, scale)
         {
+            let profile = match &self.native {
+                Some(native) if !self.native_unsupported.contains(&font.instance()) => {
+                    native.profile()
+                }
+                _ => self.swash.profile(),
+            };
             let key = RasterKey {
-                profile: self.swash.profile(),
+                profile,
                 instance: font.instance(),
                 request,
             };
@@ -785,34 +851,83 @@ impl GlyphAtlas {
         font: Option<&PreparedFont>,
     ) -> Raster {
         if let (GlyphKey::Raster(raster), Some(font)) = (glyph_key, font) {
-            return match self
-                .swash
-                .rasterize(font, &raster.request, &mut self.scratch)
+            if let Some(native) = &mut self.native
+                && raster.profile == native.profile()
             {
-                Ok(RasterOutcome::Empty) => Raster::Blank,
-                Ok(RasterOutcome::Bitmap(bitmap)) => {
-                    let (kind, premultiplied) = match bitmap.content {
-                        BitmapContent::Mask => (ContentType::Mask, false),
-                        BitmapContent::Color { alpha } => {
-                            (ContentType::Color, alpha == AlphaMode::Premultiplied)
-                        }
-                    };
-                    Raster::Drawn(Drawn {
-                        kind,
-                        premultiplied,
-                        left: bitmap.placement.left,
-                        top: bitmap.placement.top,
-                        width: bitmap.placement.width,
-                        height: bitmap.placement.height,
-                        stride: bitmap.stride as usize,
-                        bytes: bitmap.bytes,
-                    })
+                match native.rasterize(font, &raster.request, &mut self.scratch) {
+                    Ok(NativeOutcome::Single(outcome)) => return self.raster_outcome(Ok(outcome)),
+                    Ok(NativeOutcome::Bundle {
+                        placement,
+                        stride,
+                        planes,
+                    }) => {
+                        return Raster::Drawn(Drawn {
+                            kind: ContentType::Mask,
+                            premultiplied: false,
+                            left: placement.left,
+                            top: placement.top,
+                            width: placement.width,
+                            height: placement.height,
+                            stride: stride as usize,
+                            plane_len: planes[0].len(),
+                            bytes: planes[0].clone(),
+                            planes: planes.len() as u32,
+                        });
+                    }
+                    // A font the backend cannot use: swash draws all of it.
+                    Err(RasterError::UnsupportedFont) => {
+                        self.native_unsupported.insert(font.instance());
+                        self.stats.native_fallbacks += 1;
+                    }
+                    // A glyph or option it cannot draw: swash draws this
+                    // glyph, kept under the native key.
+                    Err(RasterError::UnsupportedFormat | RasterError::UnsupportedOptions) => {
+                        self.stats.native_fallbacks += 1;
+                    }
+                    Err(error) => return self.raster_outcome(Err(error)),
                 }
-                Err(error) => Raster::Failed {
-                    transient: error == RasterError::Platform,
-                },
-            };
+            }
+            let outcome = self
+                .swash
+                .rasterize(font, &raster.request, &mut self.scratch);
+            return self.raster_outcome(outcome);
         }
+        self.legacy_raster(font_system, key)
+    }
+
+    /// A single-bitmap outcome as the atlas admits it.
+    fn raster_outcome(&self, outcome: Result<RasterOutcome, RasterError>) -> Raster {
+        match outcome {
+            Ok(RasterOutcome::Empty) => Raster::Blank,
+            Ok(RasterOutcome::Bitmap(bitmap)) => {
+                let (kind, premultiplied) = match bitmap.content {
+                    BitmapContent::Mask => (ContentType::Mask, false),
+                    BitmapContent::Color { alpha } => {
+                        (ContentType::Color, alpha == AlphaMode::Premultiplied)
+                    }
+                };
+                Raster::Drawn(Drawn {
+                    kind,
+                    premultiplied,
+                    left: bitmap.placement.left,
+                    top: bitmap.placement.top,
+                    width: bitmap.placement.width,
+                    height: bitmap.placement.height,
+                    stride: bitmap.stride as usize,
+                    plane_len: bitmap.bytes.len(),
+                    bytes: bitmap.bytes,
+                    planes: 1,
+                })
+            }
+            Err(error) => Raster::Failed {
+                transient: error == RasterError::Platform,
+            },
+        }
+    }
+
+    /// Draws a glyph through the font system that shaped it, for a face
+    /// the registry could not prepare.
+    fn legacy_raster(&mut self, font_system: &mut FontSystem, key: CacheKey) -> Raster {
         self.stats.fallbacks += 1;
         let Some(image) = self.legacy.get_image_uncached(font_system, key) else {
             return Raster::Blank;
@@ -847,6 +962,8 @@ impl GlyphAtlas {
             height: placement.height,
             stride,
             bytes: 0..len,
+            planes: 1,
+            plane_len: len,
         })
     }
 
@@ -881,8 +998,9 @@ impl GlyphAtlas {
             Raster::Drawn(drawn) => drawn,
         };
         let bpp = bytes_per_pixel(drawn.kind);
-        let (w, h) = (drawn.width + 2 * GUTTER, drawn.height + 2 * GUTTER);
-        let too_large = w > self.max_dimension
+        let (w, h) = (drawn.width + 2 * GUTTER, drawn.rows());
+        let too_large = (drawn.planes > 1 && drawn.height + 2 * GUTTER >= MAX_PLANE_STEP)
+            || w > self.max_dimension
             || h > self.max_dimension
             || u64::from(w) * u64::from(h) * u64::from(bpp) > MAX_BITMAP_BYTES as u64;
         if too_large {
@@ -946,6 +1064,7 @@ impl GlyphAtlas {
             left: drawn.left,
             top: drawn.top,
             kind: drawn.kind,
+            planes: drawn.planes as u8,
         }
     }
 
@@ -957,26 +1076,33 @@ impl GlyphAtlas {
         let bpp = bytes_per_pixel(drawn.kind) as usize;
         let (w, h) = (
             drawn.width as usize + 2 * GUTTER as usize,
-            drawn.height as usize + 2 * GUTTER as usize,
+            drawn.rows() as usize,
         );
         let shelf_index = (drawn.kind == ContentType::Color) as usize;
         let used = self.shelves.iter().map(|s| s.data.len()).sum::<usize>()
             - self.shelves[shelf_index].data.len();
         let budget = MAX_STAGING_BYTES.saturating_sub(used);
-        let source = &self.scratch.pixels[drawn.bytes.clone()];
+        let pixels = &self.scratch.pixels;
         let row_bytes = drawn.width as usize * bpp;
+        let plane_rows = drawn.height as usize + 2 * GUTTER as usize;
         let write_rows = |out: &mut [u8], pitch: usize| {
-            for row in 0..drawn.height as usize {
-                let src = &source[row * drawn.stride..row * drawn.stride + row_bytes];
-                let at = (row + GUTTER as usize) * pitch + GUTTER as usize * bpp;
-                let dst = &mut out[at..at + row_bytes];
-                dst.copy_from_slice(src);
-                if drawn.premultiplied {
-                    unpremultiply(dst);
+            for plane in 0..drawn.planes as usize {
+                let start = drawn.bytes.start + plane * drawn.plane_len;
+                let source = &pixels[start..start + drawn.plane_len];
+                for row in 0..drawn.height as usize {
+                    let src = &source[row * drawn.stride..row * drawn.stride + row_bytes];
+                    let at = (plane * plane_rows + row + GUTTER as usize) * pitch
+                        + GUTTER as usize * bpp;
+                    let dst = &mut out[at..at + row_bytes];
+                    dst.copy_from_slice(src);
+                    if drawn.premultiplied {
+                        unpremultiply(dst);
+                    }
                 }
             }
         };
-        self.stats.upload_bytes += (row_bytes * drawn.height as usize) as u64;
+        self.stats.upload_bytes +=
+            (row_bytes * drawn.height as usize * drawn.planes as usize) as u64;
         let shelf = &mut self.shelves[shelf_index];
         if let Some(offset) = shelf.place(w, h, budget) {
             let pitch = shelf.pitch;
@@ -1650,9 +1776,7 @@ impl GlyphAtlas {
         let bytes: u64 = moving
             .iter()
             .map(|&i| match self.entries[i as usize].state {
-                State::Resident(p) => {
-                    u64::from(p.width + 2 * GUTTER) * u64::from(p.height + 2 * GUTTER) * bpp
-                }
+                State::Resident(p) => u64::from(p.width + 2 * GUTTER) * u64::from(p.rows()) * bpp,
                 _ => 0,
             })
             .sum();
@@ -1666,7 +1790,7 @@ impl GlyphAtlas {
             let State::Resident(p) = self.entries[index as usize].state else {
                 continue;
             };
-            let (w, h) = (p.width + 2 * GUTTER, p.height + 2 * GUTTER);
+            let (w, h) = (p.width + 2 * GUTTER, p.rows());
             match self.allocate_elsewhere(kind, w, h, source) {
                 Some(found) => targets.push(found),
                 None => {
@@ -1694,7 +1818,7 @@ impl GlyphAtlas {
                 from_origin: (p.x - GUTTER, p.y - GUTTER),
                 to: slot,
                 to_origin: (x, y),
-                size: (p.width + 2 * GUTTER, p.height + 2 * GUTTER),
+                size: (p.width + 2 * GUTTER, p.rows()),
             });
             entry.state = State::Resident(Placed {
                 page: slot,
