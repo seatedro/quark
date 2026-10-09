@@ -23,7 +23,6 @@ members = ["."]
 
 # The root workspace's patches do not reach this one; quark's crates need them.
 [patch.crates-io]
-glyphon = { path = "../vendor/glyphon" }
 cosmic-text = { path = "../vendor/cosmic-text" }
 taffy = { path = "../vendor/taffy" }
 
