@@ -26,7 +26,9 @@ use std::ops::Range;
 // Its portable mapping is unit tested on every platform; the backend itself
 // builds on Windows with text-raster-directwrite.
 #[cfg(any(test, all(windows, feature = "text-raster-directwrite")))]
-mod directwrite;
+pub(crate) mod directwrite;
+#[cfg(target_os = "macos")]
+pub(crate) mod coretext;
 
 use quark_text::cosmic_text::{CacheKey, CacheKeyFlags, SubpixelBin};
 pub(crate) use quark_text::fonts::{FontInstanceId, PreparedFont};
