@@ -376,12 +376,14 @@ pub(super) fn span_decorations(
 }
 
 /// Binds each link's hits to its own clickable semantic node and click
-/// handler, and exposes it to assistive tech as a link.
+/// handler, and exposes it to assistive tech as a link. Each link is a Tab
+/// stop, ringed while focused, and Enter or Space opens it as a click does.
 pub(super) fn register_link_input(
     links: &[LinkHits],
     text: &str,
     handler: &LinkHandler,
     source_key: u64,
+    scene: &mut Scene,
     cx: &mut ElementContext,
 ) {
     for link in links {
@@ -405,11 +407,21 @@ pub(super) fn register_link_input(
             width: x1 - x0,
             height: y1 - y0,
         };
+        let key = format!("link:{source_key}:{}:{}", link.range.start, link.url);
+        let focus = FocusId::from_key(&key);
+        if cx.is_focused(focus) {
+            for rect in &link.rects {
+                paint_focus_ring(scene, cx, *rect, [2.0; 4], 0.0);
+            }
+        }
         let label = text.get(link.range.clone()).unwrap_or_default().to_owned();
         let action = handler.action(&link.url);
         let mut node = SemanticNode::new(bounds).label(label.clone());
         node.parent = cx.current_semantic_parent();
+        node.role = Some(SemanticRole::Link);
         node.actions = SemanticActions::default().clickable().hit_test();
+        node.focus = Some(focus);
+        node.tab_stop = Some(TabStop::new(0));
         let index = cx.semantic.push(node);
         for hit in &link.hits {
             cx.bind_hit(*hit, index);
@@ -417,15 +429,13 @@ pub(super) fn register_link_input(
         cx.handlers
             .on_click(index, ClickHandler::from_action(action.clone()));
         if cx.accessibility_enabled() && !cx.accessibility_text_hidden() {
-            cx.push_accessibility(
-                AccessibilityNode::new(
-                    format!("link:{source_key}:{}:{}", link.range.start, link.url),
-                    AccessibilityRole::Link,
-                    bounds,
-                )
-                .label(label)
-                .value(link.url.to_string())
-                .action(AccessibilityAction::Click(action)),
+            cx.push_accessibility_for_semantic(
+                AccessibilityNode::new(key, AccessibilityRole::Link, bounds)
+                    .label(label)
+                    .value(link.url.to_string())
+                    .focus(focus)
+                    .action(AccessibilityAction::Click(action)),
+                index,
             );
         }
     }
@@ -1074,7 +1084,14 @@ impl Element for SelectableText {
             }
         }
 
-        register_link_input(links, &region.text, &self.on_link, self.source_key, cx);
+        register_link_input(
+            links,
+            &region.text,
+            &self.on_link,
+            self.source_key,
+            scene,
+            cx,
+        );
         register_selectable(cx, region);
     }
 }
@@ -1105,6 +1122,8 @@ mod tests {
         cache: ElementCache,
         regions: Vec<SelectableTextRegion>,
         router: InputRouter,
+        /// The last frame's accessibility nodes.
+        accessibility: AccessibilityFrame,
     }
 
     /// What a frame painted: each selectable region's box and lines, the
@@ -1143,6 +1162,7 @@ mod tests {
                 cache: ElementCache::new(),
                 regions: Vec::new(),
                 router: InputRouter::default(),
+                accessibility: AccessibilityFrame::default(),
             }
         }
 
@@ -1157,12 +1177,13 @@ mod tests {
                 None,
                 &self.signals,
             )
-            .with_accessibility(false)
             .with_element_cache(&mut self.cache);
             cx.semantic = SemanticFrame::new(400.0, 300.0);
+            cx.accessibility = AccessibilityFrame::new(400.0, 300.0);
             let mut scene = Scene::default();
             render_element(&mut root.into_any(), &mut scene, &mut cx, 400.0, 300.0);
             self.regions = std::mem::take(&mut cx.selectable_text_runs);
+            self.accessibility = std::mem::take(&mut cx.accessibility);
             self.router.set_frame(cx.take_input_frame());
 
             let mut frame = Frame {
@@ -1352,5 +1373,134 @@ mod tests {
         let narrow = window.paint(column(120.0, block()));
         assert_eq!(narrow, Window::new().paint(column(120.0, block())));
         assert!(narrow.region().1.len() > 2, "{narrow:?}");
+    }
+
+    /// A paragraph mixing prose, bold, inline code, and a link long enough
+    /// to wrap in a narrow column.
+    fn mixed_spans() -> Vec<StyledSpan> {
+        vec![
+            StyledSpan::plain("Call "),
+            StyledSpan::plain("fn main()").code(),
+            StyledSpan::plain(" then read "),
+            StyledSpan::plain("the bold part").bold(),
+            StyledSpan::plain(" and "),
+            StyledSpan::plain("follow this wrapping link").link("https://quark.dev"),
+            StyledSpan::plain(" at the end."),
+        ]
+    }
+
+    /// Window point at the middle of the left or right edge of the first
+    /// painted rectangle of bytes `range` of the painted region.
+    fn edge_of(
+        region: &SelectableTextRegion,
+        range: std::ops::Range<usize>,
+        right: bool,
+    ) -> (f32, f32) {
+        let rects: Vec<Rect> = region.layout.selection_rects(range).collect();
+        let r = if right {
+            rects[rects.len() - 1]
+        } else {
+            rects[0]
+        };
+        let x = if right { r.right() - 0.5 } else { r.x + 0.5 };
+        (
+            region.text_origin.0 + x,
+            region.text_origin.1 + r.y + r.height / 2.0,
+        )
+    }
+
+    // Catches a line height that only part of the paragraph honors: at 22
+    // points, 14-point lines are 22 apart in the painted layout, selection
+    // covers each 22-point line box, and the box below starts after them.
+    #[test]
+    fn paragraph_lines_sit_at_the_requested_point_line_height() {
+        let mut window = Window::new();
+        let frame = window.paint(column(
+            120.0,
+            rich_text(mixed_spans()).size(14.0).line_height_points(22.0),
+        ));
+
+        let region = &window.regions[0];
+        let lines: Vec<(f32, f32)> = region.layout.lines().map(|l| (l.top, l.baseline)).collect();
+        assert!(lines.len() > 2, "{lines:?}");
+        for (i, pair) in lines.windows(2).enumerate() {
+            assert_eq!(pair[0].0, 22.0 * i as f32, "{lines:?}");
+            assert!((pair[1].1 - pair[0].1 - 22.0).abs() < 0.01, "{lines:?}");
+        }
+        let text_len = region.text.len();
+        let boxes: Vec<(f32, f32)> = region
+            .layout
+            .selection_rects(0..text_len)
+            .map(|r| (r.y, r.height))
+            .collect();
+        let expected: Vec<(f32, f32)> = (0..lines.len()).map(|i| (22.0 * i as f32, 22.0)).collect();
+        assert_eq!(boxes, expected);
+        let (bounds, _) = frame.region();
+        assert_eq!(
+            frame.swatch.expect("swatch").y,
+            bounds.y + 22.0 * lines.len() as f32
+        );
+    }
+
+    // Catches standalone rich text that cannot be selected without a
+    // document around it, or whose copy reads anything but the spans'
+    // own text: a drag from inline code into the bold run selects across
+    // the styled runs, highlights them, and copies the source string.
+    #[test]
+    fn dragging_over_rich_text_selects_and_copies_its_source_text() {
+        let state = RichTextState::new();
+        let paragraph = || rich_text(mixed_spans()).size(14.0).source(7).state(&state);
+        let mut window = Window::new();
+        window.paint(column(160.0, paragraph()));
+        let text = window.regions[0].text.as_str().to_owned();
+        let code = text.find("fn main").expect("code");
+        let bold_end = text.find(" part").expect("bold") + " part".len();
+        let from = edge_of(&window.regions[0], code..code + 2, false);
+        let to = edge_of(&window.regions[0], bold_end - 4..bold_end, true);
+
+        let press = window.router.pointer_down(from.0, from.1, &mut None);
+        window.router.pointer_move(to.0, to.1);
+        window.router.pointer_up();
+        let frame = window.paint(column(160.0, paragraph()));
+
+        let changed = press
+            .actions
+            .iter()
+            .filter_map(|a| a.downcast_ref::<TextSelectionChanged>())
+            .count();
+        assert_eq!(
+            (state.selected_text().as_str(), changed),
+            ("fn main() then read the bold part", 1)
+        );
+        assert!(!frame.highlights.is_empty(), "{frame:?}");
+    }
+
+    // Catches links only a pointer can reach: a wrapped link is a Tab
+    // stop exposed as a link, and Enter on it opens its URL.
+    #[test]
+    fn a_link_is_reachable_and_opened_from_the_keyboard() {
+        let mut window = Window::new();
+        window.paint(column(160.0, rich_text(mixed_spans()).size(14.0)));
+
+        let focus = window.router.traverse_focus(None, false);
+        let enter: Binding = "enter".parse().expect("binding");
+        let opened: Vec<Arc<str>> = window
+            .router
+            .activate(&enter, focus)
+            .actions
+            .iter()
+            .filter_map(|a| a.downcast_ref::<LinkClicked>())
+            .map(|link| link.url.clone())
+            .collect();
+        let dump = crate::accessibility::dump_accessibility(&window.accessibility);
+        let links: Vec<&str> = dump
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split(" | ").collect();
+                (fields[1] == "Link").then(|| fields[2])
+            })
+            .collect();
+        assert_eq!(opened, [Arc::from("https://quark.dev")]);
+        assert_eq!(links, ["follow this wrapping link"]);
     }
 }
