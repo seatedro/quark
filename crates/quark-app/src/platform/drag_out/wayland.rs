@@ -73,6 +73,8 @@ use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, event_created_child,
 };
+use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
 use wayland_protocols::xdg::toplevel_drag::v1::client::xdg_toplevel_drag_manager_v1::XdgToplevelDragManagerV1;
 use wayland_protocols::xdg::toplevel_drag::v1::client::xdg_toplevel_drag_v1::XdgToplevelDragV1;
@@ -98,6 +100,9 @@ struct Wayland {
     /// Written to wake the thread for a request.
     wake: OwnedFd,
     thread: JoinHandle<State>,
+    /// Whether the compositor has `wp_viewporter`, so drag icons can take
+    /// fractional scales.
+    viewporter: bool,
 }
 
 enum Request {
@@ -245,11 +250,73 @@ impl DockStarted {
 /// The drag image in a shared memory file, ready for a buffer.
 struct IconPixels {
     file: OwnedFd,
-    width: i32,
-    height: i32,
+    geometry: IconGeometry,
+}
+
+/// How a drag image of some pixel size and scale goes on an icon surface
+/// so that it shows at its logical size, `pixels / scale` points.
+///
+/// `wl_surface.set_buffer_scale` takes only integers, so a 1.25x image
+/// shown through it is either 1.25 times too large or blurry. With
+/// `wp_viewporter` the buffer keeps its pixels at buffer scale 1 and the
+/// viewport's destination sets the logical size. Without it the pixels are
+/// resampled to the next integer scale at the same logical size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IconGeometry {
+    /// The buffer's size in pixels.
+    buffer: (u32, u32),
     buffer_scale: i32,
-    /// Where the pointer sits in the icon, in surface coordinates.
+    /// The viewport destination: the icon's logical size, where the
+    /// compositor has `wp_viewporter`.
+    destination: Option<(i32, i32)>,
+    /// Where the pointer sits, in the surface's logical coordinates.
     hotspot: (i32, i32),
+}
+
+impl IconGeometry {
+    /// For a `size` pixel image at `scale` pixels per point with the
+    /// pointer over pixel `hotspot`.
+    fn new(size: (u32, u32), scale: f64, hotspot: (u32, u32), viewporter: bool) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        let points = |px: u32| (f64::from(px) / scale).round().max(1.0) as u32;
+        let logical = (points(size.0), points(size.1));
+        let hotspot = (
+            (f64::from(hotspot.0) / scale).round() as i32,
+            (f64::from(hotspot.1) / scale).round() as i32,
+        );
+        if viewporter {
+            return Self {
+                buffer: size,
+                buffer_scale: 1,
+                destination: Some((logical.0 as i32, logical.1 as i32)),
+                hotspot,
+            };
+        }
+        // Rounded up, so the image loses no sharpness it had.
+        let integer = (scale.ceil() as u32).clamp(1, 16);
+        Self {
+            buffer: (logical.0 * integer, logical.1 * integer),
+            buffer_scale: integer as i32,
+            destination: None,
+            hotspot,
+        }
+    }
+
+    /// The icon's size in logical points, as the compositor shows it.
+    #[cfg(test)]
+    fn logical(&self) -> (u32, u32) {
+        match self.destination {
+            Some((w, h)) => (w as u32, h as u32),
+            None => (
+                self.buffer.0 / self.buffer_scale as u32,
+                self.buffer.1 / self.buffer_scale as u32,
+            ),
+        }
+    }
 }
 
 /// The thread's protocol state.
@@ -260,6 +327,7 @@ struct State {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     toplevel_drags: Option<XdgToplevelDragManagerV1>,
+    viewporter: Option<WpViewporter>,
     seats: Seats<SeatObjects>,
     /// The dock drag running, if any.
     dock: Option<ActiveDock>,
@@ -390,6 +458,7 @@ fn connect(display: *mut std::ffi::c_void) -> Result<Wayland, String> {
         compositor: None,
         shm: None,
         toplevel_drags: None,
+        viewporter: None,
         seats: Seats::default(),
         dock: None,
         starts: BTreeMap::new(),
@@ -415,6 +484,7 @@ fn connect(display: *mut std::ffi::c_void) -> Result<Wayland, String> {
     // SAFETY: both ends are fresh descriptors this function now owns.
     let (woken, wake) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
     let (requests, received) = mpsc::channel();
+    let viewporter = state.viewporter.is_some();
     let thread = std::thread::Builder::new()
         .name("quark-drag-out".into())
         .spawn(move || run(queue, state, woken, received))
@@ -423,6 +493,7 @@ fn connect(display: *mut std::ffi::c_void) -> Result<Wayland, String> {
         requests,
         wake,
         thread,
+        viewporter,
     })
 }
 
@@ -617,8 +688,9 @@ fn request_start<T>(
     // `window` borrows the window.
     let origin = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }
         .map_err(|_| DragOutError::Platform("the window has no wl_surface".into()))?;
+    let viewporter = WAYLAND.with(|slot| slot.borrow().as_ref().is_some_and(|w| w.viewporter));
     // Before anything about the seat, so the drag starts at once after.
-    let icon = image.and_then(|image| match icon_pixels(image) {
+    let icon = image.and_then(|image| match icon_pixels(image, viewporter) {
         Ok(icon) => Some(icon),
         Err(error) => {
             tracing::warn!("drag out: no drag image: {error}");
@@ -646,19 +718,17 @@ fn request_start<T>(
     })
 }
 
-/// `image` as premultiplied `ARGB8888` in a memfd, padded to a multiple of
-/// the buffer scale, which `wl_surface` requires of buffer sizes.
-fn icon_pixels(image: &DragImage) -> std::io::Result<IconPixels> {
-    let scale = (image.scale().round() as u32).clamp(1, 16);
-    let pad = |side: u32| side.div_ceil(scale) * scale;
-    let (width, height) = (pad(image.width()), pad(image.height()));
+/// `image` as premultiplied `ARGB8888` in a memfd, sized as
+/// [`IconGeometry`] places it.
+fn icon_pixels(image: &DragImage, viewporter: bool) -> std::io::Result<IconPixels> {
+    let size = (image.width(), image.height());
+    let geometry = IconGeometry::new(size, image.scale(), image.hotspot(), viewporter);
     let pixels = image.premultiplied_bgra();
-    let row = image.width() as usize * 4;
-    let mut padded = vec![0u8; width as usize * height as usize * 4];
-    for (y, line) in pixels.chunks_exact(row).enumerate() {
-        let at = y * width as usize * 4;
-        padded[at..at + row].copy_from_slice(line);
-    }
+    let pixels = if geometry.buffer == size {
+        pixels
+    } else {
+        resample(&pixels, size, geometry.buffer)
+    };
     // SAFETY: memfd_create with a NUL-terminated name; the descriptor it
     // returns is owned here.
     let file = unsafe {
@@ -669,29 +739,56 @@ fn icon_pixels(image: &DragImage) -> std::io::Result<IconPixels> {
         OwnedFd::from_raw_fd(fd)
     };
     let mut writer = std::fs::File::from(file);
-    writer.write_all(&padded)?;
-    let (hx, hy) = image.hotspot();
-    let logical = |px: u32| (f64::from(px) / f64::from(scale)).round() as i32;
+    writer.write_all(&pixels)?;
     Ok(IconPixels {
         file: writer.into(),
-        width: width as i32,
-        height: height as i32,
-        buffer_scale: scale as i32,
-        hotspot: (logical(hx), logical(hy)),
+        geometry,
     })
+}
+
+/// Premultiplied 4-byte pixels of a `from` sized image, bilinearly
+/// resampled to `to`: once per drag, for compositors without a viewporter.
+fn resample(pixels: &[u8], from: (u32, u32), to: (u32, u32)) -> Vec<u8> {
+    let (fw, fh) = (from.0 as usize, from.1 as usize);
+    let mut out = Vec::with_capacity(to.0 as usize * to.1 as usize * 4);
+    let sx = from.0 as f32 / to.0 as f32;
+    let sy = from.1 as f32 / to.1 as f32;
+    for y in 0..to.1 {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, (fh - 1) as f32);
+        let (y0, ty) = (fy.floor() as usize, fy.fract());
+        let y1 = (y0 + 1).min(fh - 1);
+        for x in 0..to.0 {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, (fw - 1) as f32);
+            let (x0, tx) = (fx.floor() as usize, fx.fract());
+            let x1 = (x0 + 1).min(fw - 1);
+            for channel in 0..4 {
+                let at = |x: usize, y: usize| f32::from(pixels[(y * fw + x) * 4 + channel]);
+                let top = at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx;
+                let bottom = at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx;
+                out.push((top * (1.0 - ty) + bottom * ty).round() as u8);
+            }
+        }
+    }
+    out
 }
 
 /// A drag's icon surface and its buffer, kept until the drag ends.
 #[derive(Clone)]
 struct Icon {
     surface: WlSurface,
+    /// Sets the icon's logical size, where the compositor has a viewporter.
+    viewport: Option<WpViewport>,
     buffer: WlBuffer,
     pool: WlShmPool,
 }
 
 impl Icon {
     fn destroy(&self) {
-        // The surface first, which lets go of the buffer.
+        // The viewport before its surface, as the protocol asks; then the
+        // surface, which lets go of the buffer.
+        if let Some(viewport) = &self.viewport {
+            viewport.destroy();
+        }
         self.surface.destroy();
         self.buffer.destroy();
         self.pool.destroy();
@@ -735,6 +832,9 @@ impl State {
             }
             "xdg_toplevel_drag_manager_v1" if self.toplevel_drags.is_none() => {
                 self.toplevel_drags = Some(self.registry.bind(name, 1, qh, ()));
+            }
+            "wp_viewporter" if self.viewporter.is_none() => {
+                self.viewporter = Some(self.registry.bind(name, 1, qh, ()));
             }
             _ => {}
         }
@@ -879,21 +979,23 @@ impl State {
     /// A roleless surface with a buffer of `pixels`, not yet committed.
     fn icon(&self, qh: &QueueHandle<Self>, pixels: &IconPixels) -> Option<Icon> {
         let (compositor, shm) = (self.compositor.as_ref()?, self.shm.as_ref()?);
-        let stride = pixels.width * 4;
-        // libwayland duplicates the descriptor, so ours can close after.
-        let pool = shm.create_pool(pixels.file.as_fd(), stride * pixels.height, qh, ());
-        let buffer = pool.create_buffer(
-            0,
-            pixels.width,
-            pixels.height,
-            stride,
-            wl_shm::Format::Argb8888,
-            qh,
-            (),
+        let (width, height) = (
+            i32::try_from(pixels.geometry.buffer.0).ok()?,
+            i32::try_from(pixels.geometry.buffer.1).ok()?,
         );
+        let stride = width * 4;
+        // libwayland duplicates the descriptor, so ours can close after.
+        let pool = shm.create_pool(pixels.file.as_fd(), stride * height, qh, ());
+        let buffer = pool.create_buffer(0, width, height, stride, wl_shm::Format::Argb8888, qh, ());
         let surface = compositor.create_surface(qh, ());
+        let viewport = pixels
+            .geometry
+            .destination
+            .and(self.viewporter.as_ref())
+            .map(|viewporter| viewporter.get_viewport(&surface, qh, ()));
         Some(Icon {
             surface,
+            viewport,
             buffer,
             pool,
         })
@@ -902,10 +1004,16 @@ impl State {
 
 fn show(icon: &Icon, pixels: &IconPixels) {
     let surface = &icon.surface;
-    if surface.version() >= 3 {
-        surface.set_buffer_scale(pixels.buffer_scale);
+    let geometry = &pixels.geometry;
+    // Both before the buffer's first commit, so it never shows at the
+    // wrong size.
+    if let (Some(viewport), Some((width, height))) = (&icon.viewport, geometry.destination) {
+        viewport.set_destination(width, height);
     }
-    let (dx, dy) = (-pixels.hotspot.0, -pixels.hotspot.1);
+    if surface.version() >= 3 {
+        surface.set_buffer_scale(geometry.buffer_scale);
+    }
+    let (dx, dy) = (-geometry.hotspot.0, -geometry.hotspot.1);
     // Since version 5 attach's offset must be zero, and offset moves it.
     if surface.version() >= 5 {
         surface.attach(Some(&icon.buffer), 0, 0);
@@ -914,7 +1022,7 @@ fn show(icon: &Icon, pixels: &IconPixels) {
         surface.attach(Some(&icon.buffer), dx, dy);
     }
     if surface.version() >= 4 {
-        surface.damage_buffer(0, 0, pixels.width, pixels.height);
+        surface.damage_buffer(0, 0, geometry.buffer.0 as i32, geometry.buffer.1 as i32);
     } else {
         surface.damage(0, 0, i32::MAX, i32::MAX);
     }
@@ -1316,6 +1424,8 @@ ignore_events!(
     WlDataDeviceManager,
     XdgToplevelDragManagerV1,
     XdgToplevelDragV1,
+    WpViewporter,
+    WpViewport,
     WlCompositor,
     WlShm,
     WlShmPool,
@@ -1329,7 +1439,7 @@ mod tests {
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::sync::Arc;
 
-    use super::{Outgoing, Transfer};
+    use super::{IconGeometry, Outgoing, Transfer, resample};
     use wayland_client::backend::WaylandError;
 
     /// A blocking pipe, as a drop target hands over: its read end, and the
@@ -1410,6 +1520,111 @@ mod tests {
                 (accepted, events),
                 "{name}"
             );
+        }
+    }
+
+    // Catches a fractional scale rounded to an integer, which shows a
+    // 1.25x image 1.25 times too large with its hotspot off the pointer.
+    #[test]
+    fn a_drag_icon_shows_at_its_logical_size_with_the_hotspot_under_the_pointer() {
+        // (case, pixels, scale, hotspot in pixels, viewporter,
+        //  logical size, buffer, buffer scale, hotspot in points)
+        let cases = [
+            (
+                "1x",
+                (100, 50),
+                1.0,
+                (50, 25),
+                true,
+                (100, 50),
+                (100, 50),
+                1,
+                (50, 25),
+            ),
+            (
+                "1.25x",
+                (100, 50),
+                1.25,
+                (50, 25),
+                true,
+                (80, 40),
+                (100, 50),
+                1,
+                (40, 20),
+            ),
+            (
+                "1.5x",
+                (90, 45),
+                1.5,
+                (30, 15),
+                true,
+                (60, 30),
+                (90, 45),
+                1,
+                (20, 10),
+            ),
+            (
+                "2x",
+                (100, 50),
+                2.0,
+                (50, 24),
+                true,
+                (50, 25),
+                (100, 50),
+                1,
+                (25, 12),
+            ),
+            (
+                "1.25x without a viewporter resamples up to 2x",
+                (100, 50),
+                1.25,
+                (50, 25),
+                false,
+                (80, 40),
+                (160, 80),
+                2,
+                (40, 20),
+            ),
+            (
+                "2x without a viewporter keeps its pixels",
+                (100, 50),
+                2.0,
+                (50, 24),
+                false,
+                (50, 25),
+                (100, 50),
+                2,
+                (25, 12),
+            ),
+        ];
+        for (case, size, scale, hotspot, viewporter, logical, buffer, buffer_scale, points) in cases
+        {
+            let geometry = IconGeometry::new(size, scale, hotspot, viewporter);
+            assert_eq!(
+                (
+                    geometry.logical(),
+                    geometry.buffer,
+                    geometry.buffer_scale,
+                    geometry.hotspot
+                ),
+                (logical, buffer, buffer_scale, points),
+                "{case}"
+            );
+        }
+    }
+
+    // Catches a resample that mixes rows or columns up, or bleeds the
+    // transparent half into the opaque one: the no-viewporter icon.
+    #[test]
+    fn a_resampled_drag_icon_keeps_its_left_and_right_halves() {
+        let red = [0, 0, 255, 255];
+        let clear = [0, 0, 0, 0];
+        let row = [red, red, clear, clear].concat();
+        let pixels = [row.clone(), row].concat();
+        let out = resample(&pixels, (4, 2), (8, 4));
+        let at = |x: usize, y: usize| &out[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
+        for y in 0..4 {
+            assert_eq!((at(0, y), at(7, y)), (&red[..], &clear[..]), "row {y}");
         }
     }
 }

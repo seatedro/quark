@@ -198,6 +198,7 @@ pub(crate) struct SurfaceEnvironment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum Backend {
     MacOs,
     /// `build` is the Windows build number, when known.
