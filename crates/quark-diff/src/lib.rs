@@ -16,8 +16,14 @@
 //!   [`paired_inline_diff`] finds changed words or graphemes of a pair.
 //! - [`DiffDocument::hydrate_file`] swaps a patch's fragments for checked
 //!   whole sources.
+//! - [`DiffSession`] holds files of a changing diff by stable [`FileId`] and
+//!   monotonic [`Revision`]; [`SourceRemap`] carries source lines across
+//!   revisions.
 //! - [`DiffLimits`] refuses input the model cannot represent and bounds
-//!   per-line detail; [`DiffDocument::facts`] reports metadata-only changes.
+//!   per-line detail.
+//!
+//! Coordinates: source lines are zero-based, byte offsets are UTF-8 bytes,
+//! ranges are half-open; display line numbers are one-based.
 
 mod compare;
 mod compute;
@@ -27,6 +33,8 @@ mod model;
 pub mod myers;
 mod patch;
 mod projection;
+mod remap;
+mod session;
 mod source;
 mod text;
 
@@ -34,8 +42,8 @@ mod text;
 mod tests;
 
 pub use compare::{
-    Comparison, ComparisonError, ComparisonOptions, LinePair, MAX_PAIRING_COMPARISONS,
-    PairingMode, SIMILARITY_SCAN_BYTES, WhitespaceMode,
+    Comparison, ComparisonError, ComparisonOptions, LinePair, MAX_PAIRING_COMPARISONS, PairingMode,
+    SIMILARITY_SCAN_BYTES, WhitespaceMode,
 };
 pub use compute::{DEFAULT_CONTEXT, diff_texts};
 pub use inline::{
@@ -54,6 +62,11 @@ pub use patch::{ApplyError, PatchError, apply, parse_unified, write_unified};
 pub use projection::{
     ContextPolicy, Expansion, GapId, GapRow, MIN_HIDDEN, Mode, NONE, Projection, ProjectionError,
     REVEAL_STEP, Reveal, RowKind,
+};
+pub use remap::{LineMap, RemapError, SourceRemap};
+pub use session::{
+    DiffSession, DiffUpdate, FileDiffSnapshot, FileId, Revision, SessionIntegrityError,
+    SourcePurpose, SourceRequest, UpdateError, UpdateOutcome,
 };
 pub use source::{ContextLen, FileSources, HydrationError, SourceCoverage};
 pub use text::TextStore;
