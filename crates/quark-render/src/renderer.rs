@@ -13,7 +13,8 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::path::{Band, push_bands, rule_code, stroke_outline, to_kurbo};
 use crate::scene::{
-    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive, Transform2D,
+    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, SurfaceBackground, TextPrimitive,
+    TextRendering, Transform2D, UiCompositing,
 };
 
 use crate::shaders::{
@@ -25,7 +26,7 @@ mod chunks;
 mod text_runs;
 
 use crate::text::{
-    GlyphOwner, RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width,
+    GlyphOwner, RecoloredBuffers, TextPath, color_to_unit, measure_mono_char_width,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,6 +48,26 @@ impl Default for TextMetrics {
             mono_char_width_px: 8.0,
         }
     }
+}
+
+/// How one renderer's surface draws: chosen per window or headless
+/// renderer, never process-wide, so changing one leaves other windows and
+/// offscreen renders as they were.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererOptions {
+    pub compositing: UiCompositing,
+    /// Coverage policy of `TextRun` and `RichTextRun` primitives; a
+    /// `StyledText` primitive names its own.
+    pub text_rendering: TextRendering,
+}
+
+/// What a renderer's surface does with its options and background.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SurfaceCapabilities {
+    /// Transparent pixels reach the window system's compositor.
+    pub transparent: bool,
+    /// The surface composites in [`UiCompositing::WebCompatible`].
+    pub web_compatible: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -881,6 +902,8 @@ pub struct Renderer {
     segment_texture: Option<SegmentTexture>,
     /// Effect animation time of the frame being drawn, in seconds.
     time: f32,
+    options: RendererOptions,
+    background: SurfaceBackground,
 }
 
 impl Renderer {
@@ -1058,8 +1081,67 @@ impl Renderer {
             layer_viewports: Vec::new(),
             segment_texture: None,
             time: 0.0,
+            options: RendererOptions::default(),
+            background: SurfaceBackground::default(),
             gpu,
         }
+    }
+
+    /// A renderer for `window` drawing as `options` say, on a new context.
+    pub fn new_with_options(
+        window: Arc<Window>,
+        options: RendererOptions,
+    ) -> Result<Self, RenderError> {
+        let mut renderer = Self::new(window)?;
+        renderer.set_options(options);
+        Ok(renderer)
+    }
+
+    /// [`Self::with_gpu`] drawing as `options` say.
+    pub fn with_gpu_and_options(
+        gpu: &GpuContext,
+        window: Arc<Window>,
+        options: RendererOptions,
+    ) -> Result<Self, RenderError> {
+        let mut renderer = Self::with_gpu(gpu, window)?;
+        renderer.set_options(options);
+        Ok(renderer)
+    }
+
+    /// [`Self::headless_with_gpu`] drawing as `options` say.
+    #[cfg(any(test, feature = "headless-render"))]
+    pub fn headless_with_options(
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+        options: RendererOptions,
+    ) -> Self {
+        let mut renderer = Self::headless_with_gpu(gpu, width, height, scale_factor);
+        renderer.set_options(options);
+        renderer
+    }
+
+    pub fn options(&self) -> RendererOptions {
+        self.options
+    }
+
+    /// Draw later frames as `options` say. Affects this renderer only.
+    pub fn set_options(&mut self, options: RendererOptions) {
+        self.options = options;
+    }
+
+    /// What the surface does with the options it was given.
+    pub fn capabilities(&self) -> SurfaceCapabilities {
+        SurfaceCapabilities::default()
+    }
+
+    /// Show `background` where the scene paints nothing, returning the
+    /// background in effect: `Opaque` when a transparent one was asked for
+    /// but the surface offers no alpha mode that composites it.
+    pub fn set_surface_background(&mut self, background: SurfaceBackground) -> SurfaceBackground {
+        self.background = background;
+        background
     }
 
     /// Adopt a new window size. A zero dimension (a minimized window) leaves
@@ -1315,7 +1397,7 @@ impl Renderer {
         let viewport_uniform = ViewportUniform {
             resolution: [sw as f32, sh as f32],
             time: time_seconds,
-            _padding: 0.0,
+            encoded: 0.0,
         };
         self.queue.write_buffer(
             &self.viewport_buffer,
@@ -2394,7 +2476,7 @@ struct ShadowInstance {
     draw_bounds: [f32; 4],
     /// Original shadow-casting rect (x, y, w, h) before expansion.
     shadow_bounds: [f32; 4],
-    /// Shadow color (linear RGBA, premultiplied).
+    /// Shadow color (sRGB-encoded, straight alpha; see `color_to_unit`).
     color: [f32; 4],
     /// [blur_sigma, corner_radius, 0, 0]
     params: [f32; 4],
@@ -2450,9 +2532,9 @@ impl ShadowInstance {
 struct EffectQuadInstance {
     /// Element bounds: [x, y, width, height].
     bounds: [f32; 4],
-    /// First color (linear RGBA, premultiplied).
+    /// First color (sRGB-encoded, straight alpha; see `color_to_unit`).
     color_a: [f32; 4],
-    /// Second color (linear RGBA, premultiplied).
+    /// Second color (sRGB-encoded, straight alpha).
     color_b: [f32; 4],
     /// [effect_type, param1, param2, corner_radius].
     params: [f32; 4],
@@ -2627,7 +2709,9 @@ impl BlurInstance {
 struct ViewportUniform {
     resolution: [f32; 2],
     time: f32,
-    _padding: f32,
+    /// 1 when the target holds encoded sRGB values; see `to_target` in
+    /// the shaders.
+    encoded: f32,
 }
 
 impl ViewportUniform {
@@ -2635,7 +2719,7 @@ impl ViewportUniform {
         Self {
             resolution: [width as f32, height as f32],
             time: 0.0,
-            _padding: 0.0,
+            encoded: 0.0,
         }
     }
 }
@@ -3243,6 +3327,8 @@ fn flatten_scene_into(
             | Primitive::Shadow(_)
             | Primitive::TextRun(_)
             | Primitive::RichTextRun(_)
+            | Primitive::StyledText(_)
+            | Primitive::Stripes(_)
             | Primitive::BlurRegion(_)
             | Primitive::EffectQuad(_)
             | Primitive::Image(_)
@@ -3310,7 +3396,8 @@ fn flatten_scene_into(
                     fl.alpha = alpha;
                 }
             }
-            Primitive::LayerBoundary => {}
+            // Drawn in place until isolated groups render offscreen.
+            Primitive::IsolateStart(_) | Primitive::IsolateEnd | Primitive::LayerBoundary => {}
         }
     }
 
@@ -3415,14 +3502,14 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
     Some(match primitive {
         Primitive::Rect(rect) => quad(
             rect.rect,
-            color_to_linear(rect.color),
+            color_to_unit(rect.color),
             [0.0; 4],
             [0.0; 4],
             [0.0; 4],
         ),
         Primitive::RoundedRect(rect) => quad(
             rect.rect,
-            color_to_linear(rect.color),
+            color_to_unit(rect.color),
             [0.0; 4],
             rect.corner_radii,
             [0.0; 4],
@@ -3430,7 +3517,7 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
         Primitive::Border(border) => quad(
             border.rect,
             [0.0; 4],
-            color_to_linear(border.color),
+            color_to_unit(border.color),
             border.corner_radii,
             border.widths,
         ),
@@ -3452,7 +3539,7 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
                     rect.width,
                     rect.height,
                 ],
-                color: color_to_linear(shadow.color),
+                color: color_to_unit(shadow.color),
                 params: [sigma, shadow.corner_radius, 0.0, 0.0],
                 clip_bounds: [0.0; 4],
                 clip_radii: [0.0; 4],
@@ -3460,6 +3547,13 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
         }
         Primitive::TextRun(text) => Drawn::Text(text.clone()),
         Primitive::RichTextRun(text) => Drawn::RichText(text.clone()),
+        // In its base color until text fills reach the glyph shader.
+        Primitive::StyledText(text) => Drawn::RichText(RichTextPrimitive {
+            rect: text.rect,
+            layout: text.layout.clone(),
+            default_color: text.fill.base_color(),
+            span_colors: text.span_colors.clone(),
+        }),
         Primitive::BlurRegion(blur) => Drawn::Blur(FlattenedBlurRegion {
             rect: blur.rect,
             blur_radius: blur.blur_radius,
@@ -3469,8 +3563,8 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
             let rect = effect.rect;
             Drawn::Effect(EffectQuadInstance {
                 bounds: [rect.x, rect.y, rect.width, rect.height],
-                color_a: color_to_linear(effect.color_a),
-                color_b: color_to_linear(effect.color_b),
+                color_a: color_to_unit(effect.color_a),
+                color_b: color_to_unit(effect.color_b),
                 params: [
                     effect.effect_type as u32 as f32,
                     effect.params[0],
@@ -3507,11 +3601,14 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
             })
         }
         Primitive::Path(_)
+        | Primitive::Stripes(_)
         | Primitive::Chunk(_)
         | Primitive::ClipStart(_)
         | Primitive::ClipEnd
         | Primitive::LayerStart(_)
         | Primitive::LayerEnd
+        | Primitive::IsolateStart(_)
+        | Primitive::IsolateEnd
         | Primitive::ZIndexPush(_)
         | Primitive::ZIndexPop
         | Primitive::LayerBoundary => return None,
@@ -3561,7 +3658,7 @@ fn path_parts(
         if !push_bands(&outline, segments, &mut scratch.bands, &mut scratch.points) {
             continue;
         }
-        let color = color_to_linear(color);
+        let color = color_to_unit(color);
         let start = bands.len() as u32;
         bands.extend(scratch.bands.iter().map(|band| {
             let rect = band.rect.offset(origin[0], origin[1]);
@@ -4055,6 +4152,8 @@ fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
         }
         Primitive::TextRun(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
         Primitive::RichTextRun(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
+        Primitive::StyledText(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
+        Primitive::Stripes(p) => Some(p.rect),
         Primitive::Icon(p) => Some(p.rect),
         Primitive::Image(p) => Some(p.rect),
         Primitive::EffectQuad(p) => Some(p.rect),
@@ -4066,6 +4165,8 @@ fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
         | Primitive::ZIndexPop
         | Primitive::LayerStart(_)
         | Primitive::LayerEnd
+        | Primitive::IsolateStart(_)
+        | Primitive::IsolateEnd
         | Primitive::LayerBoundary
         | Primitive::Chunk(_) => None,
     }

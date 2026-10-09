@@ -604,22 +604,11 @@ pub(super) fn glyphon_color(color: Color) -> GlyphonColor {
     GlyphonColor::rgba(color.r, color.g, color.b, color.a)
 }
 
-pub(super) fn color_to_linear(color: Color) -> [f32; 4] {
-    [
-        srgb_to_linear(color.r),
-        srgb_to_linear(color.g),
-        srgb_to_linear(color.b),
-        color.a as f32 / 255.0,
-    ]
-}
-
-fn srgb_to_linear(channel: u8) -> f32 {
-    let value = channel as f32 / 255.0;
-    if value <= 0.04045 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
+/// `color`'s channels in 0..1, still sRGB-encoded and straight alpha. The
+/// shaders decode them for a linear target, so cached draws suit targets
+/// of either compositing mode.
+pub(super) fn color_to_unit(color: Color) -> [f32; 4] {
+    [color.r, color.g, color.b, color.a].map(|c| f32::from(c) / 255.0)
 }
 
 /// One vendored-only system shared by the tests that shape and render;

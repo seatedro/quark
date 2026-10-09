@@ -2,11 +2,24 @@ pub(super) const SHADOW_SHADER: &str = r#"
 struct ViewportUniform {
     resolution: vec2<f32>,
     time: f32,
-    _padding: f32,
+    // 1 when the target holds encoded sRGB values (web-compatible
+    // compositing), 0 when it blends in linear light.
+    encoded: f32,
 };
 
 @group(0) @binding(0)
 var<uniform> viewport: ViewportUniform;
+
+// Colors arrive as straight-alpha sRGB-encoded channels in 0..1; a linear
+// target blends them decoded.
+fn to_target(c: vec4<f32>) -> vec4<f32> {
+    if (viewport.encoded > 0.5) {
+        return c;
+    }
+    let lo = c.rgb / 12.92;
+    let hi = pow((c.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return vec4<f32>(select(hi, lo, c.rgb <= vec3<f32>(0.04045)), c.a);
+}
 
 struct VertexInput {
     @builtin(vertex_index) vertex_id: u32,
@@ -39,7 +52,7 @@ fn vs_shadow(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
     out.shadow_bounds = input.shadow_bounds;
-    out.color = input.color;
+    out.color = to_target(input.color);
     out.params = input.params;
     out.clip_bounds = input.clip_bounds;
     out.clip_radii = input.clip_radii;
@@ -147,11 +160,24 @@ pub(super) const QUAD_SHADER: &str = r#"
 struct ViewportUniform {
     resolution: vec2<f32>,
     time: f32,
-    _padding: f32,
+    // 1 when the target holds encoded sRGB values (web-compatible
+    // compositing), 0 when it blends in linear light.
+    encoded: f32,
 };
 
 @group(0) @binding(0)
 var<uniform> viewport: ViewportUniform;
+
+// Colors arrive as straight-alpha sRGB-encoded channels in 0..1; a linear
+// target blends them decoded.
+fn to_target(c: vec4<f32>) -> vec4<f32> {
+    if (viewport.encoded > 0.5) {
+        return c;
+    }
+    let lo = c.rgb / 12.92;
+    let hi = pow((c.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return vec4<f32>(select(hi, lo, c.rgb <= vec3<f32>(0.04045)), c.a);
+}
 
 struct VertexInput {
     @builtin(vertex_index) vertex_id: u32,
@@ -187,8 +213,8 @@ fn vs_quad(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
     out.bounds = input.bounds;
-    out.background = input.background;
-    out.border_color = input.border_color;
+    out.background = to_target(input.background);
+    out.border_color = to_target(input.border_color);
     out.corner_radii = input.corner_radii;
     out.border_widths = input.border_widths;
     out.clip_bounds = input.clip_bounds;
@@ -305,11 +331,24 @@ pub(super) const EFFECT_SHADER: &str = r#"
 struct ViewportUniform {
     resolution: vec2<f32>,
     time: f32,
-    _padding: f32,
+    // 1 when the target holds encoded sRGB values (web-compatible
+    // compositing), 0 when it blends in linear light.
+    encoded: f32,
 };
 
 @group(0) @binding(0)
 var<uniform> viewport: ViewportUniform;
+
+// Colors arrive as straight-alpha sRGB-encoded channels in 0..1; a linear
+// target blends them decoded.
+fn to_target(c: vec4<f32>) -> vec4<f32> {
+    if (viewport.encoded > 0.5) {
+        return c;
+    }
+    let lo = c.rgb / 12.92;
+    let hi = pow((c.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return vec4<f32>(select(hi, lo, c.rgb <= vec3<f32>(0.04045)), c.a);
+}
 
 struct VertexInput {
     @builtin(vertex_index) vertex_id: u32,
@@ -343,8 +382,8 @@ fn vs_effect(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
     out.bounds = input.bounds;
-    out.color_a = input.color_a;
-    out.color_b = input.color_b;
+    out.color_a = to_target(input.color_a);
+    out.color_b = to_target(input.color_b);
     out.params = input.params;
     out.clip_bounds = input.clip_bounds;
     out.clip_radii = input.clip_radii;
@@ -544,7 +583,9 @@ pub(super) const BLIT_SHADER: &str = r#"
 struct ViewportUniform {
     resolution: vec2<f32>,
     time: f32,
-    _padding: f32,
+    // 1 when the target holds encoded sRGB values (web-compatible
+    // compositing), 0 when it blends in linear light.
+    encoded: f32,
 };
 
 @group(0) @binding(0)
@@ -626,7 +667,9 @@ pub(super) const LAYER_SHADER: &str = r#"
 struct ViewportUniform {
     resolution: vec2<f32>,
     time: f32,
-    _padding: f32,
+    // 1 when the target holds encoded sRGB values (web-compatible
+    // compositing), 0 when it blends in linear light.
+    encoded: f32,
 };
 
 @group(0) @binding(0)
@@ -715,11 +758,24 @@ pub(super) const PATH_SHADER: &str = r#"
 struct ViewportUniform {
     resolution: vec2<f32>,
     time: f32,
-    _padding: f32,
+    // 1 when the target holds encoded sRGB values (web-compatible
+    // compositing), 0 when it blends in linear light.
+    encoded: f32,
 };
 
 @group(0) @binding(0)
 var<uniform> viewport: ViewportUniform;
+
+// Colors arrive as straight-alpha sRGB-encoded channels in 0..1; a linear
+// target blends them decoded.
+fn to_target(c: vec4<f32>) -> vec4<f32> {
+    if (viewport.encoded > 0.5) {
+        return c;
+    }
+    let lo = c.rgb / 12.92;
+    let hi = pow((c.rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return vec4<f32>(select(hi, lo, c.rgb <= vec3<f32>(0.04045)), c.a);
+}
 
 // One segment [x0, y0, x1, y1] per texel, path-local physical pixels.
 @group(1) @binding(0)
@@ -758,7 +814,7 @@ fn vs_path(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
     out.origin_rule = input.origin_rule;
-    out.color = input.color;
+    out.color = to_target(input.color);
     out.segments = input.segments;
     out.clip_bounds = input.clip_bounds;
     out.clip_radii = input.clip_radii;
@@ -830,7 +886,9 @@ pub(super) const BLUR_SHADER: &str = r#"
 struct ViewportUniform {
     resolution: vec2<f32>,
     time: f32,
-    _padding: f32,
+    // 1 when the target holds encoded sRGB values (web-compatible
+    // compositing), 0 when it blends in linear light.
+    encoded: f32,
 };
 
 @group(0) @binding(0)
