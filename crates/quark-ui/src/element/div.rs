@@ -38,6 +38,10 @@ pub struct Div {
     scrollbar_visibility: Option<ScrollbarVisibility>,
     clips: bool,
     block_mouse: bool,
+    /// [`HitFlags::WINDOW_DRAG`] or [`HitFlags::WINDOW_DRAG_EXCLUDE`].
+    window_drag: HitFlags,
+    interaction_group: Option<GroupId>,
+    show_when: Option<GroupCondition>,
     focus_target: Option<FocusId>,
     focus_ring_offset: f32,
     tooltip: Option<std::sync::Arc<str>>,
@@ -92,6 +96,9 @@ pub fn div() -> Div {
         scrollbar_visibility: None,
         clips: false,
         block_mouse: false,
+        window_drag: HitFlags::NONE,
+        interaction_group: None,
+        show_when: None,
         focus_target: None,
         focus_ring_offset: 0.0,
         tooltip: None,
@@ -229,6 +236,43 @@ impl Div {
     /// clicked where it covers. Use on elevated surfaces and scrims.
     pub fn block_mouse(mut self) -> Self {
         self.block_mouse = true;
+        self
+    }
+
+    /// Make blank parts of this div move the window, for custom title bars:
+    /// a primary press here that no control above takes (buttons, text
+    /// fields, drags, [`Self::window_drag_exclude`]) is a window move; see
+    /// [`InputRouter::window_drag_at`]. Pure hit metadata: no focus stop,
+    /// no semantic role.
+    pub fn window_drag_region(mut self) -> Self {
+        self.window_drag = HitFlags::WINDOW_DRAG;
+        self
+    }
+
+    /// Keep presses on this div from moving the window, inside a
+    /// [`Self::window_drag_region`].
+    pub fn window_drag_exclude(mut self) -> Self {
+        self.window_drag = HitFlags::WINDOW_DRAG_EXCLUDE;
+        self
+    }
+
+    /// Make this div interaction group `id`: descendants marked
+    /// [`Self::show_when`] with this id follow whether it is hovered or
+    /// holds focus. See [the module docs](super::interaction). For keyboard
+    /// users, make the group itself focusable (a stable id with a
+    /// `tab_stop` or click handler), so focusing it reveals its actions
+    /// ahead of them in the Tab order.
+    pub fn interaction_group(mut self, id: impl Into<GroupId>) -> Self {
+        self.interaction_group = Some(id.into());
+        self
+    }
+
+    /// Show this div only under `condition` of its nearest enclosing
+    /// [`Self::interaction_group`] with the condition's id. Hidden, it keeps
+    /// its layout space but paints nothing and takes no input. It always
+    /// shows while it holds the focused element.
+    pub fn show_when(mut self, condition: GroupCondition) -> Self {
+        self.show_when = Some(condition);
         self
     }
 
@@ -822,6 +866,7 @@ impl Element for Div {
         if self.scrolls() {
             flags |= HitFlags::SCROLL;
         }
+        flags |= self.window_drag;
         let hit = (!flags.is_empty() || self.hit_identity.is_some())
             .then(|| cx.insert_hit(bounds, flags, self.cursor));
 

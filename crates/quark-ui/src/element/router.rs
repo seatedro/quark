@@ -598,6 +598,15 @@ impl InputRouter {
             .find_map(|id| self.frame.hits.node(id))
     }
 
+    /// Whether a primary press at `(x, y)` should move the window: it lands
+    /// in a [`Div::window_drag_region`] with no control above it taking the
+    /// press. Hosts ask after [`Self::pointer_down`] delivered nothing and
+    /// no selectable text took the press, then start the platform's native
+    /// window move while the press is still current.
+    pub fn window_drag_at(&self, x: f32, y: f32) -> bool {
+        self.capture.is_none() && self.frame.hits.window_drag_at(x, y)
+    }
+
     pub fn cursor_at(&self, x: f32, y: f32) -> CursorHint {
         if let Some(capture) = &self.capture {
             return capture.drag.cursor();
