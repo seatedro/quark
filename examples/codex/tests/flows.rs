@@ -170,6 +170,41 @@ fn the_composer_alone_covers_the_transcript_beneath_it() {
     );
 }
 
+// Catches a side panel stuck at one width: dragging the divider between
+// the thread and the panel widens the panel by the drag, the arrow keys
+// step it once the divider has focus, and the thread keeps its minimum.
+#[test]
+fn the_side_panel_resizes_from_its_divider() {
+    let mut ui = harness("changes");
+    ui.resize(1400.0, 738.0);
+    ui.frame();
+    let panel = |ui: &UiTestHarness<Codex>| {
+        ui.find(By::role_name(Role::Complementary, "Side panel"))
+            .bounds
+    };
+    let before = panel(&ui);
+    let (x, y) = (before.x - 0.5, before.y + 200.0);
+    ui.drag((x, y), (x - 100.0, y));
+    ui.frame();
+    let dragged = panel(&ui);
+    assert_eq!(dragged.width, before.width + 100.0);
+    assert_eq!(dragged.x + dragged.width, before.x + before.width);
+
+    // Clicked at once, the press would read as a double click and reset.
+    ui.advance(1000);
+    let divider = By::role_name(Role::Splitter, "Resize side panel");
+    ui.click(ui.find(divider).center());
+    ui.key("left");
+    ui.frame();
+    assert_eq!(panel(&ui).width, dragged.width + 10.0);
+
+    let x = panel(&ui).x - 0.5;
+    ui.drag((x, y), (0.0, y));
+    ui.frame();
+    let thread = ui.find(By::role_name(Role::Log, "Transcript")).bounds;
+    assert_eq!(thread.width, quark_codex::panel::THREAD_MIN);
+}
+
 /// The diff lines a diff view shows (its list items), top to bottom.
 fn diff_lines(ui: &UiTestHarness<Codex>, view: &str) -> Vec<(String, f32)> {
     let Some(list) = ui.try_find(By::id(view)) else {

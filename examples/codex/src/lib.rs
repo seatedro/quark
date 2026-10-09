@@ -235,6 +235,8 @@ pub enum Msg {
     Terminal(quark_terminal::TerminalEvent),
     /// The inline diff card, the Changes diff, and their controls.
     Diff(diff::DiffMsg),
+    /// The divider between the thread and the side panel moved.
+    PanelSplit(quark_components::split::SplitEvent),
     Noop,
 }
 
@@ -263,6 +265,9 @@ pub struct Codex {
     /// A command waiting for approval; replaces the composer.
     pub pending: Option<data::Approval>,
     pub side_panel: bool,
+    /// The thread and side panel widths beside each other, which the
+    /// divider between them changes for the session.
+    pub panel_split: quark_components::split::SplitState,
     pub tabs: Vec<Tab>,
     pub tab: Tab,
     /// The side panel fills the window, the thread becomes a tab.
@@ -313,6 +318,7 @@ impl Codex {
             composer: composer::State::new(),
             pending: None,
             side_panel: false,
+            panel_split: panel::split_state(),
             tabs: vec![Tab::Changes],
             tab: Tab::Changes,
             full_view: false,
@@ -602,13 +608,19 @@ pub fn frame(app: &Codex) -> Frame {
     let main_x = left + sidebar_w;
     let avail = (right - main_x).max(0.0);
     let panel_w = panel::width(app, avail);
+    // Beside the thread the panel and the thread share `avail` with the
+    // split's 1 point divider between them.
     Frame {
         w,
         h,
         left,
         sidebar_w,
         main_x,
-        main_w: avail - panel_w,
+        main_w: if panel_w > 0.0 && !app.full_view {
+            (avail - panel_w - quark_components::split::DIVIDER_THICKNESS).max(0.0)
+        } else {
+            avail - panel_w
+        },
         panel_x: right - panel_w,
         panel_w,
         top: TITLE_H,
@@ -654,11 +666,14 @@ impl UiApp for Codex {
                     cards.push(sidebar::view(self, p, f.sidebar_w, f.card_h()));
                 }
                 let main = (local(f.main_x), f.main_w, f.card_h());
-                cards.push(match screen {
-                    Screen::Thread(id) => thread::view(self, id, p, main, vcx),
-                    _ => home::view(self, p, main, vcx),
-                });
-                if f.panel_w > 0.0 {
+                match screen {
+                    Screen::Thread(id) if f.panel_w > 0.0 && !self.full_view => {
+                        cards.push(panel::beside_thread(self, id, p, &f, vcx));
+                    }
+                    Screen::Thread(id) => cards.push(thread::view(self, id, p, main, vcx)),
+                    _ => cards.push(home::view(self, p, main, vcx)),
+                }
+                if f.panel_w > 0.0 && self.full_view {
                     let panel = (local(f.panel_x), f.panel_w, f.card_h());
                     cards.push(panel::view(self, p, panel, vcx));
                 }
@@ -867,6 +882,9 @@ impl UiApp for Codex {
                 }
             }
             Msg::FullView => self.full_view = !self.full_view,
+            Msg::PanelSplit(event) => {
+                self.panel_split.apply(event, self.now_ms);
+            }
             Msg::SetScope(scope) => self.scope = scope,
             Msg::OpenFile(name) => {
                 self.open_file = Some(name);

@@ -10,6 +10,7 @@ use quark_app::ViewContext;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Color;
+use quark_components::split::{Axis, DIVIDER_THICKNESS, Pane, Split, SplitState};
 
 use crate::data;
 use crate::diff::DiffMsg;
@@ -17,11 +18,32 @@ use crate::theme::{BODY, CODE, Pal, SMALL};
 use crate::widgets::*;
 use crate::{Codex, Frame, Menu, Msg, SCOPES, Tab, composer, icons};
 
-/// The panel card's width beside the thread (u25, u26).
+/// The panel card's width beside the thread (u25, u26), until the divider
+/// moves it.
 pub const PANEL_W: f32 = 319.0;
+/// The narrowest the divider makes the panel, and the widest.
+pub const PANEL_MIN: f32 = 240.0;
+pub const PANEL_MAX: f32 = 900.0;
+/// The narrowest the divider leaves the thread.
+pub const THREAD_MIN: f32 = 320.0;
+/// The divider's split: its focus and accessibility names.
+const SPLIT_ID: &str = "codex.panel";
 const ROW_H: f32 = 21.5;
 /// The Changes tab's toolbar row, with the gap above it.
 const TOOLBAR_H: f32 = 52.0;
+
+/// The thread beside the panel: the thread takes what the panel leaves.
+pub fn split_state() -> SplitState {
+    SplitState::new(
+        Axis::Horizontal,
+        vec![
+            Pane::flex("thread").min(THREAD_MIN),
+            Pane::fixed("side panel", PANEL_W)
+                .min(PANEL_MIN)
+                .max(PANEL_MAX),
+        ],
+    )
+}
 
 pub fn width(app: &Codex, avail: f32) -> f32 {
     if !app.side_panel || !matches!(app.screen, crate::Screen::Thread(_)) {
@@ -29,7 +51,38 @@ pub fn width(app: &Codex, avail: f32) -> f32 {
     } else if app.full_view {
         avail
     } else {
-        PANEL_W.min(avail * 0.6)
+        app.panel_split.resolve(avail).as_slice()[1]
+    }
+}
+
+/// The thread and the panel side by side, with the divider between them
+/// that drags (or, focused, steps with the arrow keys) the panel's width.
+pub fn beside_thread(
+    app: &mut Codex,
+    id: data::ThreadId,
+    p: &Pal,
+    f: &Frame,
+    vcx: &mut ViewContext,
+) -> AnyElement {
+    let avail = f.main_w + DIVIDER_THICKNESS + f.panel_w;
+    let thread = crate::thread::view(app, id, p, (0.0, f.main_w, f.card_h()), vcx);
+    let panel = view(app, p, (0.0, f.panel_w, f.card_h()), vcx);
+    // The divider draws in the theme's border color and lights up in its
+    // accent while hovered: the panel's own edge line, and a faint tint
+    // over the 8 points that take the pointer.
+    let mut theme = vcx.theme.clone();
+    theme.colors.border_variant = p.frame_border.lerp(p.text, 0.06);
+    theme.colors.accent = p.text.with_alpha(28);
+    let split = Split::new(SPLIT_ID, &app.panel_split, avail, |e| {
+        Msg::PanelSplit(e).into()
+    })
+    .child(thread)
+    .child(panel)
+    .build(&theme);
+    view! {
+        <div class="absolute top-0" left={f.main_x - f.left} w={avail} h={f.card_h()}>
+            <div w={avail} h={f.card_h()}>{split}</div>
+        </div>
     }
 }
 
@@ -57,7 +110,6 @@ pub fn view(
     });
     view! {
         <div class="absolute top-0" left={x} w={w} h={h} bg={p.bg}
-             @when {!full} { border_l={p.frame_border.lerp(p.text, 0.06)} }
              accessibility_role={Role::Complementary} aria-label="Side panel">
             {body}
             {?composer}
