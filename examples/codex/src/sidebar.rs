@@ -5,7 +5,7 @@
 //! the card starts at window x 52, y 44).
 
 use accesskit::Role;
-use quark::{FadeEdge, view};
+use quark::{FadeEdge, MaterialKind, view};
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Color;
@@ -95,7 +95,8 @@ pub fn view(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
         p.sidebar_muted
     };
     view! {
-        <div class="absolute left-0 top-0" w={w} h={h} bg={p.sidebar}
+        <div class="absolute left-0 top-0" w={w} h={h} bg={if !app.vibrant { p.sidebar }}
+             @when {app.vibrant} { material={MaterialKind::Sidebar} }
              border_r={p.frame_border.lerp(p.text, 0.06)}
              accessibility_role={Role::Navigation} aria-label="Sidebar">
             <div class="flex-row items-center absolute left-[10] top-[10] h-8 px-1.5 gap-1.5

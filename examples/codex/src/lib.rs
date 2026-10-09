@@ -26,13 +26,14 @@ pub mod widgets;
 
 use accesskit::Role;
 use quark::view;
+use quark_app::platform::material::{MaterialOptions, WindowBackground};
 use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome};
 use quark_app::quark_ui::theme::{Color, ThemeMode};
 use quark_app::{
-    InputEvent, TrafficLights, UiAdapter, UiApp, UiContext, ViewContext, WindowChrome,
+    AppEvent, InputEvent, TrafficLights, UiAdapter, UiApp, UiContext, ViewContext, WindowChrome,
     WindowOptions,
 };
 
@@ -289,6 +290,11 @@ pub struct Codex {
     pub now_ms: u64,
     /// When the running turn started.
     pub run_started: Option<u64>,
+    /// The window got its native material: the frame and sidebar leave
+    /// their fills off so the material shows. Otherwise (no compositor,
+    /// reduced transparency, a platform without materials) every surface
+    /// paints its captured color, as on a window capture.
+    pub vibrant: bool,
 }
 
 impl Codex {
@@ -330,6 +336,7 @@ impl Codex {
             size: (INITIAL_SIZE.0 as f32, INITIAL_SIZE.1 as f32),
             now_ms: 0,
             run_started: None,
+            vibrant: false,
             options,
         };
         if let Some(store) = grammar_store() {
@@ -503,6 +510,14 @@ pub fn window_options() -> WindowOptions {
             center_y: 22.0,
         }),
         fonts: fonts(),
+        // The app is Electron: match how CSS blends, and show the
+        // platform's window material behind the frame and sidebar where
+        // it has one (the frame's dark capture color elsewhere).
+        compositing: quark::UiCompositing::WebCompatible,
+        background: WindowBackground::Material(MaterialOptions::new(
+            quark::MaterialKind::WindowBackground,
+            theme::DARK.frame,
+        )),
         ..WindowOptions::default()
     }
 }
@@ -549,6 +564,21 @@ impl Frame {
     }
 }
 
+impl Codex {
+    /// Whether the window's material took, from what the runner resolved.
+    fn refresh_surface(&mut self, cx: &mut UiContext) {
+        let surface = cx
+            .window_handle()
+            .and_then(|window| cx.window.window_surface(window));
+        self.vibrant = surface.is_some_and(|s| {
+            matches!(
+                s.background,
+                quark_app::platform::material::EffectiveBackground::Material { .. }
+            )
+        });
+    }
+}
+
 pub fn frame(app: &Codex) -> Frame {
     let (w, h) = app.size;
     let left = RAIL_W;
@@ -586,6 +616,13 @@ impl UiApp for Codex {
         let waker = cx.window.waker().clone();
         self.changes.set_syntax_wake(move || waker.wake());
         cx.set_focus(Some(COMPOSER_FOCUS));
+        self.refresh_surface(cx);
+    }
+
+    fn app_event(&mut self, event: AppEvent, cx: &mut UiContext) {
+        if let AppEvent::WindowOpened(_) | AppEvent::WindowSurfaceChanged(_) = event {
+            self.refresh_surface(cx);
+        }
     }
 
     fn view(&mut self, vcx: &mut ViewContext) -> AnyElement {
@@ -621,12 +658,21 @@ impl UiApp for Codex {
         };
         let menu = menus::view(self, p, vcx);
         let palette = self.palette.is_some().then(|| palette::view(self, p, vcx));
+        // Over a native material only the main and panel cards are opaque.
+        let vibrant = self.vibrant && f.sidebar_w > 0.0;
+        let card_w = w - f.left - FRAME_INSET;
         let root = view! {
-            <div class="relative overflow-hidden" w={w} h={h} bg={p.frame}
-                 accessibility_role={Role::Window} aria-label={APP_TITLE}>
+            <div class="relative overflow-hidden" w={w} h={h}
+                 bg={if !vibrant { p.frame }} accessibility_role={Role::Window}
+                 aria-label={APP_TITLE}>
                 {rail(self, p, h)}
                 <div class="absolute rounded-[10] overflow-hidden" left={f.left} top={f.top}
-                     w={w - f.left - FRAME_INSET} h={f.card_h()} border={p.frame_border} bg={p.bg}>
+                     w={card_w} h={f.card_h()} border={p.frame_border}
+                     bg={if !vibrant { p.bg }}>
+                    if vibrant {
+                        <div class="absolute top-0" left={f.sidebar_w} w={card_w - f.sidebar_w}
+                             h={f.card_h()} bg={p.bg} />
+                    }
                     {...cards}
                 </div>
                 {title_bar(self, p, &f)}

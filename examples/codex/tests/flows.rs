@@ -339,3 +339,26 @@ fn the_changes_view_highlights_javascript() {
         .unwrap();
     assert_eq!(export.tones.first(), Some(&HighlightKind::Keyword));
 }
+
+// Catches a material window that still paints the captured sidebar color
+// over the material, or never asks for it: once the window has its
+// material, the sidebar requests the Sidebar material over its own bounds.
+#[test]
+fn a_material_window_shows_the_sidebar_material() {
+    let mut ui = harness("home");
+    let main = ui.main_window();
+    assert!(ui.window(main).material_regions().is_empty());
+    ui.app_mut().vibrant = true;
+    ui.frame();
+    let sidebar = ui.find(By::role_name(Role::Navigation, "Sidebar")).bounds;
+    let regions = ui.window(main).material_regions().to_vec();
+    assert_eq!(regions.len(), 1);
+    let (r, kind) = (regions[0].rect, regions[0].kind);
+    assert_eq!(kind, quark::MaterialKind::Sidebar);
+    // The card's clip may take the last point of the sidebar's height.
+    assert!(
+        (r.x, r.y, r.width) == (sidebar.x, sidebar.y, sidebar.width)
+            && (r.height - sidebar.height).abs() <= 1.0,
+        "{r:?} for {sidebar:?}"
+    );
+}
