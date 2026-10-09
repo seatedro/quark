@@ -19,6 +19,8 @@
 // backend's tests exercise it meanwhile.
 #![allow(dead_code)]
 
+pub(crate) mod swash;
+
 use std::ops::Range;
 
 // Its portable mapping is unit tested on every platform; the backend itself

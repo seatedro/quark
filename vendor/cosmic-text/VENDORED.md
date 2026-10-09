@@ -210,3 +210,21 @@ allocations they remove):
   Rasterization ignores it; it travels with the glyph to the vendored
   glyphon, which blends its edges as Ghostty's `linear-corrected` does.
   quark-text sets it for `TextStyle::linear_correction`.
+- Rendering without a font system (`src/swash.rs`): `SwashFace` holds a
+  face's shared bytes and swash key, and `SwashCache::render_face_into`
+  draws a glyph of it into a reused `SwashImage` from explicit size,
+  hinting, variation values, offset, embolden, skew, and color sources.
+  quark-render's swash rasterizer draws the exact font instance quark-text
+  prepared (every axis, not only `wght`) through it, with no
+  `&mut FontSystem`; its differential test checks the bitmaps equal
+  `get_image_uncached`'s. Upstream could take it as a lower-level entry
+  beside `get_image`.
+- Variation coordinates cleared per glyph (`src/swash.rs`): swash's
+  `ScaleContext` keeps the previous font's normalized coordinates, and
+  `ScalerBuilder::variations` only overwrites the axes it names, so with
+  only `wght` set an axis such as Inter's `opsz` took whatever coordinate
+  the previously drawn variable font left at its index. `swash_image` and
+  `render_face_into` clear the coordinates first. quark-text's
+  `drawing_another_variable_font_first_changes_no_glyph` checks it. Worth
+  reporting to swash, whose `variations` could reset the coordinates it
+  resizes.
