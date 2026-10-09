@@ -14,9 +14,16 @@ use crate::patch::{PatchError, parse_unified};
 /// Bytes or lines past which the model's `u32` offsets would overflow.
 pub const MAX_REPRESENTABLE: u64 = u32::MAX as u64 - 1;
 
-/// Size limits. Detail limits are starting policies, not measured
-/// hardware limits; the input limits default to what the model can
-/// represent, and an app can lower them.
+/// Bytes per side every default detail limit covers: a diff of two sides
+/// this large gets word highlights, whole shaped lines, and syntax colors.
+pub const DETAIL_SIDE_BYTES: usize = 64 << 20;
+
+/// Size limits. The input limits default to what the model can represent;
+/// the detail limits default to [`DETAIL_SIDE_BYTES`], so nothing is left
+/// out below that size. An app can lower any of them, and whatever it
+/// then leaves out is reported (as [`LineDetail::Prefix`],
+/// `InlineDetail::Limited`, or a limited syntax status), never dropped
+/// silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DiffLimits {
     /// Bytes of one patch, or of one side of a text diff. Capped at
@@ -26,7 +33,9 @@ pub struct DiffLimits {
     pub input_lines: u64,
     /// Longer lines get no inline diff.
     pub inline_line_bytes: usize,
-    /// Longer lines shape only a prefix; see [`line_detail`].
+    /// Longer lines shape only a prefix; see [`line_detail`]. Lines up to
+    /// this long are shown whole: a viewer shapes the part of a long line
+    /// in view, not a prefix.
     pub shaped_line_bytes: usize,
     /// Larger sources get plain text instead of a syntax parse.
     pub syntax_file_bytes: usize,
@@ -38,8 +47,8 @@ impl Default for DiffLimits {
             input_bytes: MAX_REPRESENTABLE,
             input_lines: MAX_REPRESENTABLE,
             inline_line_bytes: MAX_INLINE_LINE_BYTES,
-            shaped_line_bytes: 4_096,
-            syntax_file_bytes: 8 << 20,
+            shaped_line_bytes: DETAIL_SIDE_BYTES,
+            syntax_file_bytes: DETAIL_SIDE_BYTES,
         }
     }
 }

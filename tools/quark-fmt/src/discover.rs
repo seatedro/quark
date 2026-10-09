@@ -49,30 +49,39 @@ pub struct Discovery {
 /// Parses `source` and returns its selected invocations. A file that is not
 /// valid Rust yields a single error and must stay unchanged.
 pub fn discover(source: &str, macro_names: &[String]) -> Result<Discovery, Diagnostic> {
-    // syn strips a BOM and shebang itself but then reports offsets into
-    // the remainder; strip here so offsets can be shifted back.
-    let base = rust_start(source);
-    let file: syn::File = syn::parse_str(&source[base..]).map_err(|e| {
-        let range = span_range(e.span(), base);
+    discover_with_tokens(source, macro_names).map(|(found, _)| found)
+}
+
+/// [`discover`], plus each invocation's body tokens, whose spans resolve
+/// to byte offsets in `source`.
+pub(crate) fn discover_with_tokens(
+    source: &str,
+    macro_names: &[String],
+) -> Result<(Discovery, Vec<TokenStream>), Diagnostic> {
+    let file: syn::File = syn::parse_str(&blank_preamble(source)).map_err(|e| {
         Diagnostic::error(
             DiagnosticKind::RustParse,
-            range,
+            span_range(e.span()),
             format!("not valid Rust: {e}"),
         )
     })?;
-    let names: Vec<&str> = macro_names
-        .iter()
-        .map(|n| n.trim().trim_start_matches("::"))
-        .collect();
+    let names = normalize(macro_names);
     let mut visitor = Visitor {
         source,
-        base,
         names: &names,
         skip_depth: 0,
         found: Discovery::default(),
+        tokens: Vec::new(),
     };
     visitor.visit_file(&file);
-    Ok(visitor.found)
+    Ok((visitor.found, visitor.tokens))
+}
+
+pub(crate) fn normalize(macro_names: &[String]) -> Vec<&str> {
+    macro_names
+        .iter()
+        .map(|n| n.trim().trim_start_matches("::"))
+        .collect()
 }
 
 /// Whether `path` (as written, spaces allowed) names a selected macro.
@@ -81,25 +90,32 @@ pub fn is_selected(path: &syn::Path, names: &[&str]) -> bool {
     names.contains(&written.as_str())
 }
 
-/// Byte offset where Rust tokens may begin, after a BOM and a shebang line.
-fn rust_start(source: &str) -> usize {
-    let mut at = 0;
+/// `source` with a BOM and a shebang line turned into spaces of the same
+/// byte length. syn would strip them and report offsets into the rest;
+/// blanking keeps every span's byte range an offset into `source`.
+fn blank_preamble(source: &str) -> std::borrow::Cow<'_, str> {
+    let mut end = 0;
     if source.starts_with('\u{feff}') {
-        at = '\u{feff}'.len_utf8();
+        end = '\u{feff}'.len_utf8();
     }
-    let rest = &source[at..];
+    let rest = &source[end..];
     if let Some(after) = rest.strip_prefix("#!") {
         // `#![attr]` is an inner attribute, not a shebang.
         if !after.trim_start().starts_with('[') {
-            at += rest.find('\n').unwrap_or(rest.len());
+            end += rest.find('\n').unwrap_or(rest.len());
         }
     }
-    at
+    if end == 0 {
+        return source.into();
+    }
+    let mut out = " ".repeat(end);
+    out.push_str(&source[end..]);
+    out.into()
 }
 
-fn span_range(span: proc_macro2::Span, base: usize) -> Option<Range<usize>> {
+pub(crate) fn span_range(span: proc_macro2::Span) -> Option<Range<usize>> {
     let r = span.byte_range();
-    (r != (0..0)).then(|| r.start + base..r.end + base)
+    (r != (0..0)).then_some(r)
 }
 
 fn path_string(path: &syn::Path) -> String {
@@ -127,16 +143,16 @@ fn has_rustfmt_skip(attrs: &[syn::Attribute]) -> bool {
 
 struct Visitor<'a> {
     source: &'a str,
-    base: usize,
     names: &'a [&'a str],
     /// Nonzero inside an item or statement under a skip.
     skip_depth: usize,
     found: Discovery,
+    tokens: Vec<TokenStream>,
 }
 
 impl Visitor<'_> {
     fn start_of(&self, node: &impl Spanned) -> usize {
-        node.span().byte_range().start + self.base
+        node.span().byte_range().start
     }
 
     /// Visits a node that may carry a skip, counting it while inside.
@@ -151,37 +167,91 @@ impl Visitor<'_> {
         visit(self);
         self.skip_depth -= usize::from(skip);
     }
+}
 
-    fn hidden_scan(&mut self, tokens: &TokenStream) {
-        let tokens: Vec<TokenTree> = tokens.clone().into_iter().collect();
-        for (i, tt) in tokens.iter().enumerate() {
-            match tt {
-                TokenTree::Group(g) => self.hidden_scan(&g.stream()),
-                TokenTree::Punct(p) if p.as_char() == '!' && i > 0 => {
-                    let Some(path) = trailing_path(&tokens[..i]) else {
-                        continue;
+/// A selected invocation inside an embedded Rust fragment.
+#[derive(Clone, Debug)]
+pub(crate) struct NestedCall {
+    /// From the macro path through the closing delimiter.
+    pub range: Range<usize>,
+    /// Between the delimiters.
+    pub body: Range<usize>,
+    pub delimiter: Delimiter,
+    pub tokens: TokenStream,
+}
+
+/// Rust keywords that can precede `!` without naming a macro: `if !x`.
+const KEYWORDS: &[&str] = &[
+    "as", "break", "else", "for", "if", "in", "let", "loop", "match", "move", "mut", "ref",
+    "return", "while", "yield", "await", "dyn", "impl", "where", "unsafe", "async", "const",
+];
+
+/// Scans tokens for selected invocations. Outside any other macro they
+/// are collected in `nested`; inside one they are opaque and only produce
+/// a coverage warning.
+pub(crate) fn scan(
+    tokens: &TokenStream,
+    names: &[&str],
+    inside_macro: bool,
+    nested: &mut Vec<NestedCall>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let tokens: Vec<TokenTree> = tokens.clone().into_iter().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let call = match (&tokens[i], tokens.get(i + 1)) {
+            (TokenTree::Punct(p), Some(TokenTree::Group(g))) if p.as_char() == '!' && i > 0 => {
+                trailing_path(&tokens[..i]).map(|(path, start)| (path, start, p, g))
+            }
+            _ => None,
+        };
+        match call {
+            Some((path, start, bang, group)) if !KEYWORDS.contains(&path.as_str()) => {
+                if !names.contains(&path.as_str()) {
+                    scan(&group.stream(), names, true, nested, diagnostics);
+                } else if inside_macro {
+                    diagnostics.push(Diagnostic::warning(
+                        DiagnosticKind::HiddenMacro,
+                        span_range(bang.span()),
+                        format!("`{path}!` inside another macro's body is left as written"),
+                    ));
+                } else {
+                    let delimiter = match group.delimiter() {
+                        proc_macro2::Delimiter::Parenthesis => Delimiter::Paren,
+                        proc_macro2::Delimiter::Bracket => Delimiter::Bracket,
+                        _ => Delimiter::Brace,
                     };
-                    if self.names.contains(&path.as_str()) {
-                        self.found.diagnostics.push(Diagnostic::warning(
-                            DiagnosticKind::HiddenMacro,
-                            span_range(p.span(), self.base),
-                            format!("`{path}!` inside another macro's body is left as written"),
-                        ));
-                    }
+                    let open = group.span_open().byte_range();
+                    let close = group.span_close().byte_range();
+                    nested.push(NestedCall {
+                        range: tokens[start].span().byte_range().start..close.end,
+                        body: open.end..close.start,
+                        delimiter,
+                        tokens: group.stream(),
+                    });
                 }
-                _ => {}
+                i += 2;
+            }
+            _ => {
+                if let TokenTree::Group(g) = &tokens[i] {
+                    scan(&g.stream(), names, inside_macro, nested, diagnostics);
+                }
+                i += 1;
             }
         }
     }
 }
 
-/// The `a::b` path whose last segment ends `tokens`, as written.
-fn trailing_path(tokens: &[TokenTree]) -> Option<String> {
+/// The `a::b` path whose last segment ends `tokens`, as written, and the
+/// index of its first token (a leading `::` included).
+fn trailing_path(tokens: &[TokenTree]) -> Option<(String, usize)> {
     let mut segments = Vec::new();
     let mut i = tokens.len();
+    let mut start = i;
     while let Some(TokenTree::Ident(ident)) = i.checked_sub(1).and_then(|j| tokens.get(j)) {
         segments.push(ident.to_string());
         i -= 1;
+        start = i;
         let colons = i >= 2
             && matches!(&tokens[i - 1], TokenTree::Punct(p) if p.as_char() == ':')
             && matches!(&tokens[i - 2], TokenTree::Punct(p) if p.as_char() == ':');
@@ -189,12 +259,13 @@ fn trailing_path(tokens: &[TokenTree]) -> Option<String> {
             break;
         }
         i -= 2;
+        start = i;
     }
     if segments.is_empty() {
         return None;
     }
     segments.reverse();
-    Some(segments.join("::"))
+    Some((segments.join("::"), start))
 }
 
 impl<'ast> Visit<'ast> for Visitor<'_> {
@@ -237,7 +308,14 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if !is_selected(&mac.path, self.names) {
-            self.hidden_scan(&mac.tokens);
+            let mut ignored = Vec::new();
+            scan(
+                &mac.tokens,
+                self.names,
+                true,
+                &mut ignored,
+                &mut self.found.diagnostics,
+            );
             return;
         }
         let (delimiter, span) = match &mac.delimiter {
@@ -252,10 +330,11 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
         self.found.invocations.push(Invocation {
             path: path_string(&mac.path),
             delimiter,
-            range: start..close.end + self.base,
-            body: open.end + self.base..close.start + self.base,
+            range: start..close.end,
+            body: open.end..close.start,
             skipped,
         });
+        self.tokens.push(mac.tokens.clone());
     }
 }
 

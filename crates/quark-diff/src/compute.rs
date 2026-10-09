@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::model::{BlockKind, DiffDocument, FileMeta, FileStatus};
-use crate::myers::{Change, diff, intern};
+use crate::myers::{Budget, Change, diff_with, intern};
 use crate::text::TextStore;
 
 /// Context lines around each change in hunks, as `git diff` shows.
@@ -88,6 +88,11 @@ pub fn diff_texts(
 /// Line changes between two stores. Lines compare with their newline, so
 /// a final line gaining or losing one is a change.
 pub(crate) fn line_changes(old: &TextStore, new: &TextStore) -> Vec<Change> {
+    line_changes_with(old, new, Budget::LINEAR)
+}
+
+/// [`line_changes`] under `budget`.
+pub(crate) fn line_changes_with(old: &TextStore, new: &TextStore, budget: Budget) -> Vec<Change> {
     fn with_newline(store: &TextStore, i: u32) -> &str {
         let range = store.line_range(i).unwrap_or(0..0);
         let end = (range.end + 1).min(store.as_str().len());
@@ -97,7 +102,7 @@ pub(crate) fn line_changes(old: &TextStore, new: &TextStore) -> Vec<Change> {
         (0..old.line_count()).map(|i| with_newline(old, i)),
         (0..new.line_count()).map(|i| with_newline(new, i)),
     );
-    diff(&a, &b)
+    diff_with(&a, &b, budget)
 }
 
 /// Splits changes into hunks: a change starts a new hunk when more than

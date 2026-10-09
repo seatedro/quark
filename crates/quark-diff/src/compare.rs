@@ -35,17 +35,27 @@ pub enum PairingMode {
     Positional,
     /// Like positional, but when the sides differ in length the shorter
     /// one may shift to sit beside the lines it resembles, if that is
-    /// decisively better. Bounded by [`MAX_PAIRING_COMPARISONS`].
+    /// decisively better. Bounded by [`MAX_PAIRING_COMPARISONS`] plus
+    /// [`PAIRING_COMPARISONS_PER_LINE`] per line of the change.
     #[default]
     Similarity,
 }
 
-/// Line comparisons one change may spend choosing a similarity pairing;
-/// beyond this it stays positional.
+/// Line comparisons any change may spend choosing a similarity pairing,
+/// on top of [`PAIRING_COMPARISONS_PER_LINE`].
 pub const MAX_PAIRING_COMPARISONS: u32 = 4_096;
+
+/// Line comparisons a change may spend per line it holds, so the budget
+/// grows with the input. Past it every shift is still scored, from evenly
+/// spread sample lines; only a change with more shifts than the budget can
+/// sample at all stays positional and counts as limited.
+pub const PAIRING_COMPARISONS_PER_LINE: u32 = 4;
 
 /// Bytes compared from each end of a line when scoring similarity.
 pub const SIMILARITY_SCAN_BYTES: usize = 256;
+
+/// Fewest sample lines a shift is scored from.
+const MIN_PAIRING_SAMPLES: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ComparisonOptions {
@@ -84,7 +94,7 @@ pub struct Comparison {
     /// Per file: line pairs hidden as whitespace-only changes.
     hidden: Vec<u32>,
     /// Per file: changes left positional because similarity would have
-    /// cost more than [`MAX_PAIRING_COMPARISONS`].
+    /// cost more than its budget (see [`PairingMode::Similarity`]).
     limited: Vec<u32>,
 }
 
@@ -207,20 +217,30 @@ impl Comparison {
         let mut limited = false;
         if self.options.pairing == PairingMode::Similarity && short > 0 && short != long {
             let offsets = long - short + 1;
-            if u64::from(offsets) * u64::from(short) > u64::from(MAX_PAIRING_COMPARISONS) {
+            let budget = u64::from(MAX_PAIRING_COMPARISONS)
+                + u64::from(PAIRING_COMPARISONS_PER_LINE) * u64::from(o + n);
+            // Lines of the shorter side each shift is scored on: all of
+            // them when the budget allows, else an even sample.
+            let samples = (budget / u64::from(offsets)).min(u64::from(short));
+            if samples < MIN_PAIRING_SAMPLES.min(u64::from(short)) {
                 limited = true;
             } else {
-                // The shorter side shifted by `d` lines into the longer.
+                let samples = samples as u32;
+                let sample = |i: u32| (u64::from(i) * u64::from(short) / u64::from(samples)) as u32;
+                // The shorter side shifted by `d` lines into the longer,
+                // scaled to a full count of lines.
                 let score = |d: u32| -> f32 {
-                    (0..short)
-                        .map(|k| {
+                    let sum: f32 = (0..samples)
+                        .map(|i| {
+                            let k = sample(i);
                             let (oi, ni) = if o < n { (k, k + d) } else { (k + d, k) };
                             similarity(
                                 old.line(olds.start + oi).unwrap_or(""),
                                 new.line(news.start + ni).unwrap_or(""),
                             )
                         })
-                        .sum()
+                        .sum();
+                    sum * short as f32 / samples as f32
                 };
                 offset = choose_offset(offsets, short, score);
             }
@@ -334,7 +354,9 @@ fn choose_offset(offsets: u32, short: u32, score: impl Fn(u32) -> f32) -> u32 {
 
 /// How alike two lines are, 0 to 1: the share of the longer line covered
 /// by their common prefix and suffix once edge spaces are trimmed, both
-/// scanned at most [`SIMILARITY_SCAN_BYTES`] deep.
+/// scanned at most [`SIMILARITY_SCAN_BYTES`] deep. Past twice that length
+/// the share is of the bytes scanned, so two long lines alike at both ends
+/// score as alike rather than near zero.
 pub(crate) fn similarity(a: &str, b: &str) -> f32 {
     let edge = [' ', '\t', '\r'];
     let (a, b) = (
@@ -359,7 +381,7 @@ pub(crate) fn similarity(a: &str, b: &str) -> f32 {
         .take((limit - prefix).min(SIMILARITY_SCAN_BYTES))
         .take_while(|(x, y)| x == y)
         .count();
-    (prefix + suffix) as f32 / longest as f32
+    (prefix + suffix) as f32 / longest.min(2 * SIMILARITY_SCAN_BYTES) as f32
 }
 
 /// Line `i` of `store` with spaces normalized per `mode`, keeping a `\r`

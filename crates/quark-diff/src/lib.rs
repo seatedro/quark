@@ -27,6 +27,8 @@
 
 mod compare;
 mod compute;
+#[doc(hidden)]
+pub mod fixtures;
 mod inline;
 mod limits;
 mod model;
@@ -42,8 +44,8 @@ mod text;
 mod tests;
 
 pub use compare::{
-    Comparison, ComparisonError, ComparisonOptions, LinePair, MAX_PAIRING_COMPARISONS, PairingMode,
-    SIMILARITY_SCAN_BYTES, WhitespaceMode,
+    Comparison, ComparisonError, ComparisonOptions, LinePair, MAX_PAIRING_COMPARISONS,
+    PAIRING_COMPARISONS_PER_LINE, PairingMode, SIMILARITY_SCAN_BYTES, WhitespaceMode,
 };
 pub use compute::{DEFAULT_CONTEXT, diff_texts};
 pub use inline::{
@@ -51,8 +53,8 @@ pub use inline::{
     PairedInlineDiff, inline_diff, paired_inline_diff,
 };
 pub use limits::{
-    DiffError, DiffLimits, LimitKind, LineDetail, MAX_REPRESENTABLE, diff_texts_checked,
-    line_detail, parse_unified_checked,
+    DETAIL_SIDE_BYTES, DiffError, DiffLimits, LimitKind, LineDetail, MAX_REPRESENTABLE,
+    diff_texts_checked, line_detail, parse_unified_checked,
 };
 pub use model::{
     BlockKind, BlockTable, DiffDocument, FileFacts, FileMeta, FileStatus, FileSummary, FileTable,

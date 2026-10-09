@@ -1,7 +1,7 @@
-//! `view!`: parse (`parse.rs`) into an AST (`ast.rs`), then lower it to
-//! builder calls (`emit.rs`).
+//! `view!`: the grammar and its AST live in `quark-view-syntax`, shared
+//! with the formatter; this module lowers the AST to builder calls
+//! (`emit.rs`).
 
-pub(crate) mod ast;
+pub(crate) use quark_view_syntax::ast;
 pub(crate) mod emit;
-mod parse;
 pub(crate) mod text;

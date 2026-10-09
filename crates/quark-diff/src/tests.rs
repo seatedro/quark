@@ -537,16 +537,18 @@ fn unified_rows_of_a_shifted_pair_point_at_their_partner() {
     assert_eq!(pairs, [None, Some((0, 1)), None, Some((0, 1))]);
 }
 
+// Catches the pairing budget staying fixed (it used to give up past 4,096
+// comparisons per change): 1 old line against 5,000 new means 5,000 shifts
+// to score, and the old line still finds the new line it resembles.
 #[test]
-fn similarity_pairing_over_budget_stays_positional_and_says_so() {
-    // 1 old line against 5,000 new: 5,000 offsets to score.
+fn similarity_pairing_scales_its_budget_with_the_change() {
     let new: String = (0..5_000).map(|i| format!("n{i}\n")).collect();
     let doc = diff_texts(Some("f"), Some("f"), Some("n4999 edited\n"), Some(&new), 0);
     let comparison = Comparison::new(&doc, ComparisonOptions::default());
     let p = Projection::with_comparison(&doc, Mode::Split, &Expansion::new(&doc), &comparison);
-    assert_eq!(p.kind[1], RowKind::Modified);
-    assert_eq!(p.line(1, Side::New), Some(0));
-    assert_eq!(comparison.limited_pairings(0), 1);
+    let modified = (0..p.len()).find(|&r| p.kind[r as usize] == RowKind::Modified);
+    assert_eq!(modified.and_then(|r| p.line(r, Side::New)), Some(4_999));
+    assert_eq!(comparison.limited_pairings(0), 0);
 }
 
 #[test]
@@ -875,4 +877,101 @@ fn file_facts_report_changes_that_have_no_lines() {
             "e.txt modified hunks newline removed",
         ]
     );
+}
+
+/// Time and peak memory of diffing the 64 MiB fixtures. Run in the test
+/// profile (optimized) with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement, prints a report"]
+fn report_large_inputs() {
+    use crate::fixtures::{
+        edit_line, every_nth, javascript, minified, one_block, peak_rss, repetitive,
+        reset_peak_rss, scattered_edits,
+    };
+    const MIB: usize = 1 << 20;
+    let size = std::env::var("QUARK_DIFF_FIXTURE_MIB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64)
+        * MIB;
+    // A little under the size, so edits keep the new side within it.
+    let base = javascript(1, size - size / 64);
+    let line = minified(2, size - size / 64);
+    let repeated = repetitive(3, size - size / 64);
+    type Make<'a> = Box<dyn Fn() -> (String, String) + 'a>;
+    let cases: [(&str, Make); 4] = [
+        (
+            "1% scattered",
+            Box::new(|| (base.clone(), scattered_edits(&base, 4, 10))),
+        ),
+        (
+            "one huge block",
+            Box::new(|| (base.clone(), one_block(&base, 5, 0.5))),
+        ),
+        (
+            "minified line",
+            Box::new(|| (line.clone(), edit_line(&line, 6, 5))),
+        ),
+        (
+            "many small hunks",
+            Box::new(|| (repeated.clone(), every_nth(&repeated, 7, 8))),
+        ),
+    ];
+    let mib = |b: u64| b as f64 / MIB as f64;
+    for (name, make) in cases {
+        let (old, new) = make();
+        eprintln!(
+            "{name}: {:.1} MiB -> {:.1} MiB",
+            mib(old.len() as u64),
+            mib(new.len() as u64)
+        );
+        reset_peak_rss();
+        let before = peak_rss().unwrap_or(0);
+        let started = std::time::Instant::now();
+        let doc = diff_texts(Some("f.js"), Some("f.js"), Some(&old), Some(&new), 3);
+        let diffed = started.elapsed();
+        let comparison = Comparison::new(&doc, ComparisonOptions::default());
+        let compared = started.elapsed() - diffed;
+        let peak = peak_rss().unwrap_or(0);
+        let edits: u32 = doc.files().additions[0] + doc.files().deletions[0];
+        if std::env::var_os("QUARK_DIFF_COMPARE_PLAIN").is_some() {
+            use crate::compute::line_changes_with;
+            use crate::myers::Budget;
+            let (a, b) = (TextStore::new(old.as_str()), TextStore::new(new.as_str()));
+            let started = std::time::Instant::now();
+            let plain = line_changes_with(&a, &b, Budget::UNLIMITED);
+            let took = started.elapsed();
+            let ours = line_changes_with(&a, &b, Budget::LINEAR);
+            let count = |c: &[crate::myers::Change]| -> usize {
+                c.iter().map(|c| c.old.len() + c.new.len()).sum()
+            };
+            eprintln!(
+                "  plain search {took:.2?}: {} edits; budgeted: {} edits; identical: {}",
+                count(&plain),
+                count(&ours),
+                plain == ours
+            );
+        }
+        if !old.contains('\n') {
+            reset_peak_rss();
+            let started = std::time::Instant::now();
+            let words = crate::paired_inline_diff(&old, &new, &crate::InlineOptions::default());
+            eprintln!(
+                "  inline diff of the line pair: {:.2?}, {:?}, {} + {} ranges, peak RSS {:.0} MiB",
+                started.elapsed(),
+                words.detail,
+                words.old.len(),
+                words.new.len(),
+                mib(peak_rss().unwrap_or(0)),
+            );
+        }
+        eprintln!(
+            "{name}: diff {diffed:.2?}, comparison {compared:.2?}, {} hunks, {edits} lines \
+             changed, {} pairings limited, peak RSS {:.0} MiB (+{:.0} over inputs)",
+            doc.hunk_count(),
+            comparison.limited_pairings(0),
+            mib(peak),
+            mib(peak.saturating_sub(before)),
+        );
+    }
 }
