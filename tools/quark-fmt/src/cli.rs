@@ -315,7 +315,11 @@ fn run_files(opts: &Options, stdout: &mut dyn Write, stderr: &mut dyn Write) -> 
 
     let outcomes = parallel_map(&work, |(file, settings)| process(opts, file, settings));
 
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // Canonical, like the selected paths: on Windows those carry the
+    // verbatim `\\?\` prefix, which a plain current directory lacks.
+    let cwd = std::env::current_dir()
+        .and_then(|d| d.canonicalize())
+        .unwrap_or_default();
     let mut code = 0;
     let mut files = [0usize; 4]; // changed, unchanged, excluded, failed
     let mut views = Coverage::default();
