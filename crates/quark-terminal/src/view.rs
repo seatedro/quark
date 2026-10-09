@@ -13,7 +13,7 @@ use std::sync::{Arc, LazyLock};
 use accesskit::Role;
 use quark::Color;
 use quark_render::scene::{BorderPrimitive, Rect, RectPrimitive, RichTextPrimitive, ShapedText};
-use quark_render::{FontStyle, FontWeight, Scene};
+use quark_render::{FontStyle, FontWeight, Scene, UiCompositing};
 use quark_text::{TextBlock, TextLayout, TextQuery, TextSpan, TextStyle};
 use quark_ui::accessibility::{AccessibilityNode, AccessibleText};
 use quark_ui::element::{
@@ -1002,8 +1002,13 @@ impl Element for BoundsProbe {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        // The grid keeps its linear-light cell blending (and the glyph
+        // correction tuned for it) inside a web-compatible window; in a
+        // linear window the island draws in place.
+        scene.push_compositing_island(bounds, UiCompositing::Linear);
         self.child.paint(engine, scene, cx);
         let caret = self.ime.paint(bounds, scene, cx);
+        scene.pop_isolate();
         cx.register_ime_target(self.ime.focus, caret);
     }
 }
