@@ -9,7 +9,8 @@
 //! - [`inline_diff`] finds the changed words of a pair of changed lines.
 //! - [`DiffDocument`] stores files, hunks, and blocks as flat column
 //!   tables; [`Projection`] turns it into display rows, unified or side by
-//!   side, with gaps of unchanged lines collapsed per an [`Expansion`].
+//!   side, with gaps of unchanged lines collapsed per an [`Expansion`] and
+//!   its [`ContextPolicy`].
 
 mod compute;
 mod inline;
@@ -30,6 +31,7 @@ pub use model::{
 };
 pub use patch::{ApplyError, PatchError, apply, parse_unified, write_unified};
 pub use projection::{
-    Expansion, GapId, GapRow, MIN_HIDDEN, Mode, NONE, Projection, ProjectionError, Reveal, RowKind,
+    ContextPolicy, Expansion, GapId, GapRow, MIN_HIDDEN, Mode, NONE, Projection, ProjectionError,
+    REVEAL_STEP, Reveal, RowKind,
 };
 pub use text::TextStore;
