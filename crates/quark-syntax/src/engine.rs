@@ -688,11 +688,14 @@ pub(crate) struct Window {
 /// cuts anyway (at a line end when it has no node to cut at); only then
 /// can the next window start inside a construct and color differently.
 ///
-/// Before each exact window, when `focus` (polled each time) lies beyond
-/// it and outside the last inexact window, the lines around the focus are
-/// highlighted on their own and emitted first.
+/// Before each exact window, when `focus` (polled each time) lies past the
+/// exact windows so far and outside the last inexact window, the lines
+/// around the focus are highlighted on their own and emitted first: a
+/// window of a few hundred kilobytes colors in a fraction of the time an
+/// exact one takes, even at the very start.
 ///
-/// The exact pass starts at `from`: 0, or where an earlier call yielded.
+/// The exact pass starts at `from`: 0, or where an earlier call yielded,
+/// with the inexact window that call colored last.
 /// After each exact window it hands off, `yield_after` is asked with the
 /// number handed off in this call, and the call stops when it says so (so a
 /// worker can take turns between long sources).
@@ -701,7 +704,11 @@ pub(crate) fn highlight_windows(
     root: &Arc<Grammar>,
     source: &str,
     sizes: Windowing,
-    (from, yield_after): (usize, &dyn Fn(usize) -> bool),
+    (from, mut inexact, yield_after): (
+        usize,
+        Option<std::ops::Range<usize>>,
+        &dyn Fn(usize) -> bool,
+    ),
     resolve: &(dyn Fn(&LanguageId) -> Tag + Sync),
     cancelled: &(dyn Fn() -> bool + Sync),
     focus: &dyn Fn() -> Option<usize>,
@@ -746,7 +753,6 @@ pub(crate) fn highlight_windows(
         let len = source.len();
         let mut at = from.min(len);
         let mut handed = 0;
-        let mut inexact: Option<std::ops::Range<usize>> = None;
         while at < len {
             for window in done.try_iter() {
                 emit(window);
@@ -755,7 +761,7 @@ pub(crate) fn highlight_windows(
                 return WindowsEnd::Cancelled;
             }
             if let Some(f) = focus().map(|f| f.min(len))
-                && f >= at + sizes.window
+                && f >= at
                 && inexact.as_ref().is_none_or(|r| !r.contains(&f))
             {
                 let start = line_start(source, f.saturating_sub(sizes.focus_before)).max(at);
@@ -826,7 +832,7 @@ pub(crate) fn highlight_windows(
         if cancelled() {
             WindowsEnd::Cancelled
         } else if at < len {
-            WindowsEnd::Yielded(at)
+            WindowsEnd::Yielded(at, inexact)
         } else {
             WindowsEnd::Done
         }
@@ -834,11 +840,12 @@ pub(crate) fn highlight_windows(
 }
 
 /// How [`highlight_windows`] stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WindowsEnd {
     Done,
-    /// It yielded; the exact pass goes on from this byte.
-    Yielded(usize),
+    /// It yielded; the exact pass goes on from this byte, and this is the
+    /// inexact window it last colored.
+    Yielded(usize, Option<std::ops::Range<usize>>),
     Cancelled,
 }
 

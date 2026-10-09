@@ -253,7 +253,7 @@ impl GrammarStore {
                         &grammar,
                         source,
                         sizes,
-                        (slice.from, slice.yield_after),
+                        (slice.from, slice.inexact.clone(), slice.yield_after),
                         &|embedded| inner.lookup(embedded.as_str()),
                         cancelled,
                         focus,
@@ -273,8 +273,8 @@ impl GrammarStore {
                             });
                         },
                     );
-                    if let crate::engine::WindowsEnd::Yielded(at) = end {
-                        out.resume = Some(at);
+                    if let crate::engine::WindowsEnd::Yielded(at, inexact) = end {
+                        out.resume = Some((at, inexact));
                     }
                     out
                 }
@@ -346,8 +346,9 @@ pub(crate) struct Outcome {
     pub(crate) work: crate::engine::Work,
     /// The spans went out window by window as [`Part`]s; `spans` is empty.
     pub(crate) streamed: bool,
-    /// A streamed highlight yielded: run it again from this byte.
-    pub(crate) resume: Option<usize>,
+    /// A streamed highlight yielded: run it again from this byte, with
+    /// the inexact window it colored last.
+    pub(crate) resume: Option<(usize, Option<std::ops::Range<usize>>)>,
 }
 
 /// Where a streamed highlight starts its exact pass, and when it should
@@ -355,6 +356,8 @@ pub(crate) struct Outcome {
 /// how many it finished in this call.
 pub(crate) struct Slice<'a> {
     pub(crate) from: usize,
+    /// The inexact window an earlier turn colored last.
+    pub(crate) inexact: Option<std::ops::Range<usize>>,
     pub(crate) yield_after: &'a dyn Fn(usize) -> bool,
 }
 
@@ -363,6 +366,7 @@ impl Slice<'_> {
     #[cfg(test)]
     pub(crate) const WHOLE: Slice<'static> = Slice {
         from: 0,
+        inexact: None,
         yield_after: &|_| false,
     };
 }

@@ -110,8 +110,9 @@ struct Job {
     slot: u64,
     generation: u64,
     request: HighlightRequest,
-    /// Where a streamed highlight that yielded goes on from; 0 to start.
-    resume: usize,
+    /// Where a streamed highlight that yielded goes on from (0 to start),
+    /// and the inexact window it colored last.
+    resume: (usize, Option<Range<usize>>),
 }
 
 /// Where one handle's results go.
@@ -367,7 +368,7 @@ impl HighlightWorker {
             slot,
             generation,
             request,
-            resume: 0,
+            resume: (0, None),
         }));
     }
 
@@ -574,10 +575,11 @@ fn run(
         // window when it starts (so every visible side gets colors early),
         // then four at a time.
         let others = !queued.is_empty();
-        let turn = if job.resume == 0 { 1 } else { 4 };
+        let turn = if job.resume.0 == 0 { 1 } else { 4 };
         let yield_after = move |handed: usize| others && handed >= turn;
         let slice = Slice {
-            from: job.resume,
+            from: job.resume.0,
+            inexact: job.resume.1.clone(),
             yield_after: &yield_after,
         };
         // A grammar bug must not take the thread down: every later block
@@ -610,21 +612,21 @@ fn run(
             }
             let carried = Parked {
                 job: Job {
-                    resume: 0,
+                    resume: (0, None),
                     ..job.clone()
                 },
                 revision: next_revision.saturating_sub(1),
                 spans: Vec::new(),
                 unresolved,
             };
-            if let Some(at) = outcome.resume {
+            if let Some(resume) = outcome.resume {
                 // Its turn is over: back of the line, carrying what it
                 // published.
                 order.push(key);
                 queued.insert(
                     key,
                     Queued {
-                        job: Job { resume: at, ..job },
+                        job: Job { resume, ..job },
                         previous: Some(carried),
                     },
                 );
@@ -782,7 +784,7 @@ mod tests {
                     if k + 1 < 3 && (slice.yield_after)(handed) {
                         return Outcome {
                             streamed: true,
-                            resume: Some(k as usize + 1),
+                            resume: Some((k as usize + 1, None)),
                             ..Outcome::default()
                         };
                     }
