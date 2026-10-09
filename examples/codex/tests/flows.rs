@@ -28,7 +28,7 @@ fn allowing_the_command_replaces_the_card_with_the_answer() {
     ui.click_node(By::role_name(Role::Button, "Allow once"));
     ui.frame();
     assert!(ui.try_find(By::role(Role::AlertDialog)).is_none());
-    assert!(ui.try_find(By::name("1.3.0")).is_some());
+    assert!(ui.painted_text().contains("1.3.0"), "{}", ui.painted_text());
 }
 
 // Catches Escape denying nothing: it must answer the prompt as Deny.
@@ -38,7 +38,7 @@ fn escape_denies_the_pending_command() {
     ui.key("escape");
     ui.frame();
     assert!(ui.try_find(By::role(Role::AlertDialog)).is_none());
-    assert!(ui.try_find(By::name("declined.")).is_some());
+    assert!(ui.painted_text().contains("declined."), "{}", ui.painted_text());
 }
 
 // Catches the slash list not following the draft: typing "/" lists the

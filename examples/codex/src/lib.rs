@@ -271,11 +271,9 @@ pub struct Codex {
     pub stick_bottom: bool,
     /// A scene's exact transcript offset, instead of the latest turn.
     pub scroll_px: Option<f32>,
-    /// A scene's nudge from the latest turn's position, applied the frame
-    /// after the jump (the handle knows the item's place only then).
+    /// A scene's nudge from the latest turn's position: the transcript
+    /// scrolls this many points past the turn's top.
     pub scroll_adjust: Option<f32>,
-    /// Frames left before the nudge applies, and the nudge.
-    pending_adjust: Option<(u8, f32)>,
     pub settings_handle: ScrollHandle,
     pub terminal: terminal::State,
     pub theme_choice: ThemeChoice,
@@ -314,7 +312,6 @@ impl Codex {
             stick_bottom: true,
             scroll_px: None,
             scroll_adjust: None,
-            pending_adjust: None,
             settings_handle: ScrollHandle::new(),
             terminal,
             theme_choice: options.theme,
@@ -472,9 +469,6 @@ pub fn themes_for(
 /// Custom chrome everywhere: macOS keeps its traffic lights, inset to
 /// where the app has them; elsewhere the app draws look-alikes.
 pub fn window_options() -> WindowOptions {
-    let mut fonts = quark_text::FontSettings::default();
-    // The closest bundled face to SF Pro, which the app uses.
-    fonts.ui_family = quark_text::fonts::INTER_FAMILY.to_owned();
     WindowOptions {
         title: APP_TITLE.into(),
         size: INITIAL_SIZE,
@@ -484,9 +478,25 @@ pub fn window_options() -> WindowOptions {
             left_margin: 15.0,
             center_y: 22.0,
         }),
-        fonts,
+        fonts: fonts(),
         ..WindowOptions::default()
     }
+}
+
+/// The app's fonts. On macOS `system-ui` resolves to SF Pro and
+/// `ui-monospace` to SF Mono, the faces the app itself uses. Elsewhere the
+/// platform's UI font is not the reference's (DejaVu Sans or Segoe UI), so
+/// the bundled Inter, the closest face to SF Pro, stands in;
+/// `QUARK_CODEX_FONTS=system` asks for the platform fonts there too.
+pub fn fonts() -> quark_text::FontSettings {
+    let system = cfg!(target_os = "macos")
+        || std::env::var("QUARK_CODEX_FONTS").is_ok_and(|v| v == "system");
+    if system {
+        return quark_text::FontSettings::system();
+    }
+    let mut fonts = quark_text::FontSettings::default();
+    fonts.ui_family = quark_text::fonts::INTER_FAMILY.to_owned();
+    fonts
 }
 
 pub const COMPOSER_FOCUS: FocusId = FocusId::from_key("codex.composer");
@@ -512,32 +522,6 @@ pub struct Frame {
 impl Frame {
     pub fn card_h(&self) -> f32 {
         self.bottom - self.top
-    }
-}
-
-impl Codex {
-    /// A scroll nudge that is due this frame. The jump to an item settles
-    /// only once the item has been laid out, which can take two frames.
-    pub fn take_adjust(&mut self) -> Option<f32> {
-        match self.pending_adjust {
-            Some((0, dy)) => {
-                self.pending_adjust = None;
-                Some(dy)
-            }
-            Some((n, dy)) => {
-                self.pending_adjust = Some((n - 1, dy));
-                None
-            }
-            None => None,
-        }
-    }
-
-    pub fn defer_adjust(&mut self, dy: f32) {
-        self.pending_adjust = Some((2, dy));
-    }
-
-    pub fn adjust_pending(&self) -> bool {
-        self.pending_adjust.is_some()
     }
 }
 
@@ -632,8 +616,9 @@ impl UiApp for Codex {
                 {?palette}
             </div>
         };
-        if self.run_started.is_some() || self.has_live_text() {
-            // The shimmer moves every frame; the fake run steps on its own.
+        if self.run_started.is_some() {
+            // The fake run steps on its own; shimmering text asks for its
+            // own frames.
             vcx.frame
                 .request_frame_in(std::time::Duration::from_millis(33));
         }
@@ -922,23 +907,6 @@ impl UiApp for Codex {
     }
 }
 
-impl Codex {
-    /// Whether the shown thread has shimmering text that must animate.
-    fn has_live_text(&self) -> bool {
-        self.current_thread().is_some_and(|t| {
-            t.items.iter().any(|i| match i {
-                Item::Thinking | Item::Starting => true,
-                Item::Work {
-                    steps,
-                    running: true,
-                    ..
-                } => steps.iter().any(|s| matches!(s, Step::Live { .. })),
-                _ => false,
-            })
-        })
-    }
-}
-
 /// The icon rail: Home (selected), Space, Scheduled, Plugins, Explore,
 /// then Code Review and Sites, and the profile avatar at the bottom.
 fn rail(app: &Codex, p: &Pal, h: f32) -> AnyElement {
@@ -990,7 +958,8 @@ fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
     };
     let title_w = (right_edge - toolbar_x - 180.0).max(40.0);
     view! {
-        <div class="absolute left-0 top-0 z-20" w={f.w} h={TITLE_H}>
+        // Blank title bar moves the window; its buttons still click.
+        <div class="absolute left-0 top-0 z-20" w={f.w} h={TITLE_H} window_drag_region>
             <div class="flex-row items-center absolute left-[88] top-2 h-7 gap-1">
                 <icon_button(p, icons::ARROW_LEFT, 28.0, 16.0, p.icon, "Back", Msg::Noop) />
                 <icon_button(p, icons::ARROW_RIGHT, 28.0, 16.0, p.icon_faint, "Forward",

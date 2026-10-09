@@ -5,7 +5,7 @@
 //! and floats the composer over it (u29).
 
 use accesskit::Role;
-use quark::view;
+use quark::{Path, StrokePattern, StrokeStyle, view};
 use quark_app::ViewContext;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -198,18 +198,29 @@ fn split_glyph(p: &Pal) -> AnyElement {
     }
 }
 
-/// The striped bar a deleted row carries; added rows get a solid one.
+/// The striped bar a deleted row carries (a dashed stroke, six segments
+/// to a row); added rows get a solid one.
 fn bar(p: &Pal, kind: i8) -> AnyElement {
+    let color = p.del_bar;
+    let dashes = move |painter: &mut CanvasPainter<'_>| {
+        let (w, h) = painter.size();
+        let mut line = Path::builder();
+        line.move_to(w / 2.0, 0.0).line_to(w / 2.0, h);
+        let dash = h / 6.0;
+        painter.stroke(
+            line.build(),
+            color,
+            StrokeStyle::new(w).pattern(StrokePattern::dashed(dash, dash)),
+        );
+    };
     view! {
-        <div class="absolute left-0 top-0 w-1 flex-col" h={ROW_H}
-             bg={if kind >= 0 { p.add_bar }}>
-            if kind < 0 {
-                for i in 0..6 {
-                    <div class="w-1" h={ROW_H / 6.0}
-                         bg={if i % 2 == 0 { p.del_bar } else { p.del_code }} />
-                }
-            }
-        </div>
+        if kind < 0 {
+            <div class="absolute left-0 top-0">
+                <path_canvas(dashes) class="w-1" h={ROW_H} />
+            </div>
+        } else {
+            <div class="absolute left-0 top-0 w-1" h={ROW_H} bg={p.add_bar} />
+        }
     }
 }
 
