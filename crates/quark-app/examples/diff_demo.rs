@@ -367,7 +367,12 @@ mod tests {
         FileId, FindOptions, RevealAlign, Revision, SearchCoverage, SearchDirection, SearchSides,
         SourcePoint,
     };
-    use quark_diff::{RowKind, Side};
+    use std::sync::Arc;
+
+    use quark_components::diff_view::{DiffSessionViewState, diff_session_view};
+    use quark_diff::{
+        DiffSession, DiffUpdate, FileDiffSnapshot, RowKind, Side, SourceRemap, UpdateError,
+    };
 
     use super::*;
 
@@ -1052,5 +1057,275 @@ diff --git a/f.txt b/f.txt
                 Mode::Unified
             ]
         );
+    }
+
+    /// The session view in the same window as [`Demo`].
+    struct SessionDemo {
+        diff: DiffSessionViewState,
+    }
+
+    impl UiApp for SessionDemo {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+            let (width, height) = cx.frame.size();
+            self.diff.set_viewport(width, height);
+            let scale = cx.frame.scale_factor();
+            let now_ms = cx.frame.elapsed().as_millis() as u64;
+            let text_cx = cx.frame.text();
+            self.diff
+                .prepare(&mut text_cx.system, &mut text_cx.layouts, scale, now_ms);
+            let env = CollectionEnv {
+                focused: cx.is_focused(DIFF_FOCUS),
+                accessible: cx.frame.accessibility_active(),
+            };
+            diff_session_view(&mut self.diff, cx.theme, env, |e| Msg::Diff(e).into())
+        }
+
+        fn update(&mut self, msg: Msg, cx: &mut UiContext) {
+            if let Msg::Diff(event) = msg
+                && let DiffOutcome::Copy(copied) = self.diff.handle(event)
+            {
+                cx.window.set_clipboard_text(&copied);
+            }
+        }
+    }
+
+    /// Revision `rev` of file `id`: `old` against `new`, every line shown.
+    fn snap(id: u64, rev: u64, old: &str, new: &str) -> FileDiffSnapshot {
+        let path = format!("file{id}.txt");
+        let doc = diff_texts(Some(&path), Some(&path), Some(old), Some(new), 100_000);
+        FileDiffSnapshot::new(FileId(id), Revision(rev), Arc::new(doc)).unwrap()
+    }
+
+    fn upsert(file: FileDiffSnapshot, remap: Option<SourceRemap>) -> DiffUpdate {
+        DiffUpdate::Upsert { file, remap }
+    }
+
+    fn session_ui(files: Vec<FileDiffSnapshot>) -> UiTestHarness<SessionDemo> {
+        let mut session = DiffSession::new();
+        for file in files {
+            session.apply(upsert(file, None)).unwrap();
+        }
+        let diff = DiffSessionViewState::new("demo.diff", DIFF_FOCUS, session);
+        UiTestHarness::new(SessionDemo { diff }, SIZE, 1.0)
+    }
+
+    fn session_lines(ui: &UiTestHarness<SessionDemo>) -> Vec<(String, f32)> {
+        ui.find_all(By::role(Role::ListItem))
+            .into_iter()
+            .map(|n| (n.name.unwrap_or_default(), n.bounds.y))
+            .collect()
+    }
+
+    /// Scrolls file 1's new line `line` to the top.
+    fn scroll_to(ui: &mut UiTestHarness<SessionDemo>, line: u32) {
+        let target = DiffTarget::Source(SourcePoint {
+            file: FileId(1),
+            side: Side::New,
+            line,
+            byte: 0,
+        });
+        assert!(ui.app_mut().diff.reveal_target(target, RevealAlign::Top));
+        ui.frame();
+    }
+
+    /// File 1 revision 1 (line 5 changed) and revision 2 (five lines
+    /// inserted at the top, and line `replaced` edited when given).
+    fn revisions(replaced: Option<u32>) -> (FileDiffSnapshot, FileDiffSnapshot, SourceRemap) {
+        let old = numbered(0..300);
+        let first = old.replace("line 5\n", "five\n");
+        let mut second = format!("{}{first}", numbered(1000..1005));
+        if let Some(n) = replaced {
+            second = second.replace(&format!("line {n}\n"), &format!("edited {n}\n"));
+        }
+        let (a, b) = (snap(1, 1, &old, &first), snap(1, 2, &old, &second));
+        let remap = SourceRemap::between(&a, &b).unwrap();
+        (a, b, remap)
+    }
+
+    // Catches a file arriving before the one being read moving the
+    // reader's line or dropping the selection.
+    #[test]
+    fn a_file_inserted_above_keeps_the_top_line_and_selection() {
+        let (a, _, _) = revisions(None);
+        let mut ui = session_ui(vec![a]);
+        scroll_to(&mut ui, 100);
+        let from = ui.find(line("line 101")).bounds;
+        let to = ui.find(line("line 102")).bounds;
+        ui.drag(
+            (from.x + 1.0, from.y + 5.0),
+            (to.x + to.width - 1.0, to.y + 5.0),
+        );
+        let before = (session_lines(&ui)[0].clone(), ui.app().diff.selected_text());
+
+        let b = snap(2, 1, "x\n", "y\n");
+        ui.app_mut().diff.apply_update(upsert(b, None)).unwrap();
+        let order = DiffUpdate::Order {
+            revision: Revision(1),
+            files: Arc::from([FileId(2), FileId(1)]),
+        };
+        ui.app_mut().diff.apply_update(order).unwrap();
+        ui.frame();
+
+        let after = (session_lines(&ui)[0].clone(), ui.app().diff.selected_text());
+        assert_eq!(after, before);
+        assert_eq!(before.1, "line 101\nline 102");
+    }
+
+    // Catches an update above the viewport shifting the reader's line: the
+    // remap carries the top line to its new position.
+    #[test]
+    fn an_update_above_the_viewport_keeps_the_top_line() {
+        let (a, b, remap) = revisions(None);
+        let mut ui = session_ui(vec![a]);
+        scroll_to(&mut ui, 200);
+        let before = session_lines(&ui)[0].clone();
+        ui.app_mut()
+            .diff
+            .apply_update(upsert(b, Some(remap)))
+            .unwrap();
+        ui.frame();
+        assert_eq!(session_lines(&ui)[0], before);
+    }
+
+    // Catches a selection surviving on replaced text, or not following
+    // unchanged text to its new lines.
+    #[test]
+    fn a_selection_follows_unchanged_lines_and_clears_on_replaced_ones() {
+        // (line replaced by the update, selection copied after it)
+        for (replaced, expected) in [(None, "line 150\nline 151"), (Some(151), "")] {
+            let (a, b, remap) = revisions(replaced);
+            let mut ui = session_ui(vec![a]);
+            scroll_to(&mut ui, 148);
+            let from = ui.find(line("line 150")).bounds;
+            let to = ui.find(line("line 151")).bounds;
+            ui.drag(
+                (from.x + 1.0, from.y + 5.0),
+                (to.x + to.width - 1.0, to.y + 5.0),
+            );
+            ui.app_mut()
+                .diff
+                .apply_update(upsert(b, Some(remap)))
+                .unwrap();
+            ui.frame();
+            assert_eq!(ui.app().diff.selected_text(), expected, "{replaced:?}");
+        }
+    }
+
+    // Catches annotations silently attaching to whatever line now has
+    // their old number: unchanged anchors move, replaced ones outdate.
+    #[test]
+    fn annotations_follow_unchanged_lines_and_outdate_on_replaced_ones() {
+        let (a, b, remap) = revisions(Some(3));
+        let mut ui = session_ui(vec![a]);
+        let note = |id, line: u32| DiffAnnotation {
+            id: AnnotationId(id),
+            anchor: DiffAnchor {
+                file: FileId(1),
+                revision: Revision(1),
+                side: Side::New,
+                lines: line..line + 1,
+            },
+            revision: 0,
+        };
+        ui.app_mut()
+            .diff
+            .set_annotations(vec![note(1, 100), note(2, 3)]);
+        ui.app_mut()
+            .diff
+            .apply_update(upsert(b, Some(remap)))
+            .unwrap();
+        let state: Vec<_> = ui
+            .app()
+            .diff
+            .annotations()
+            .map(|(a, outdated)| (a.anchor.lines.clone(), a.anchor.revision, outdated))
+            .collect();
+        assert_eq!(
+            state,
+            [(105..106, Revision(2), false), (3..4, Revision(1), true)]
+        );
+    }
+
+    // Catches a late upsert resurrecting a removed file.
+    #[test]
+    fn a_removed_file_refuses_a_late_upsert_and_stays_gone() {
+        let mut ui = session_ui(vec![snap(1, 1, "a\n", "b\n"), snap(2, 1, "c\n", "d\n")]);
+        let remove = DiffUpdate::Remove {
+            file: FileId(2),
+            revision: Revision(2),
+        };
+        ui.app_mut().diff.apply_update(remove).unwrap();
+        let late = ui
+            .app_mut()
+            .diff
+            .apply_update(upsert(snap(2, 3, "c\n", "e\n"), None));
+        ui.frame();
+        assert!(matches!(late, Err(UpdateError::Removed { .. })), "{late:?}");
+        let names: Vec<String> = session_lines(&ui).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    // Catches an update to a file off screen reshaping the visible rows.
+    #[test]
+    fn updating_an_offscreen_file_keeps_visible_rows_shaped() {
+        let lines = numbered(0..100);
+        let mut ui = session_ui(vec![
+            snap(1, 1, &lines, &lines.replace("line 1\n", "one\n")),
+            snap(2, 1, "x\n", "y\n"),
+        ]);
+        let paints = |ui: &UiTestHarness<SessionDemo>| {
+            let frame = ui.app().diff.frame().unwrap().clone();
+            frame
+                .rows
+                .iter()
+                .map(|r| r.paint.clone())
+                .collect::<Vec<_>>()
+        };
+        let before = paints(&ui);
+        ui.app_mut()
+            .diff
+            .apply_update(upsert(snap(2, 2, "x\n", "z\n"), None))
+            .unwrap();
+        ui.frame();
+        let after = paints(&ui);
+        assert_eq!(before.len(), after.len());
+        assert!(before.iter().zip(&after).all(|(a, b)| Rc::ptr_eq(a, b)));
+    }
+
+    // Catches incremental updates leaving the view different from showing
+    // the final files from scratch.
+    #[test]
+    fn a_sequence_of_updates_converges_to_the_final_input() {
+        let (a1, a2) = (
+            snap(1, 1, "a\nb\n", "a\nB\n"),
+            snap(1, 2, "a\nb\n", "A\nB\nc\n"),
+        );
+        let (b1, c1) = (snap(2, 1, "x\n", "y\n"), snap(3, 1, "p\n", "q\n"));
+        let mut ui = session_ui(vec![a1]);
+        for update in [
+            upsert(b1.clone(), None),
+            upsert(a2.clone(), None),
+            DiffUpdate::Order {
+                revision: Revision(1),
+                files: Arc::from([FileId(2), FileId(1)]),
+            },
+            upsert(c1, None),
+            DiffUpdate::Remove {
+                file: FileId(3),
+                revision: Revision(2),
+            },
+        ] {
+            ui.app_mut().diff.apply_update(update).unwrap();
+        }
+        ui.frame();
+        let fresh = session_ui(vec![b1, a2]);
+        let shown = |ui: &UiTestHarness<SessionDemo>| {
+            let names: Vec<String> = session_lines(ui).into_iter().map(|(n, _)| n).collect();
+            (names, ui.app().diff.copy(CopyContent::Patch))
+        };
+        assert_eq!(shown(&ui), shown(&fresh));
     }
 }
