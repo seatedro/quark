@@ -29,7 +29,7 @@ impl LayoutKey {
         let style = &params.style;
         let mut attrs = DefaultHasher::new();
         attrs.write_u8(kind_tag(style.font_kind));
-        attrs.write_u8(weight_tag(Some(style.font_weight)));
+        attrs.write_u16(weight_tag(Some(style.font_weight)));
         attrs.write_u32(style.line_height.to_bits());
         style.family.hash(&mut attrs);
         attrs.write_u32(style.letter_spacing.to_bits());
@@ -39,7 +39,7 @@ impl LayoutKey {
         for span in params.spans.iter() {
             attrs.write_usize(span.range.start);
             attrs.write_usize(span.range.end);
-            attrs.write_u8(weight_tag(span.weight));
+            attrs.write_u16(weight_tag(span.weight));
             attrs.write_u8(style_tag(span.style));
             attrs.write_u8(span.kind.map_or(255, kind_tag));
         }
@@ -764,14 +764,10 @@ fn kind_tag(kind: FontKind) -> u8 {
     }
 }
 
-fn weight_tag(weight: Option<FontWeight>) -> u8 {
-    match weight {
-        None => 255,
-        Some(FontWeight::Normal) => 0,
-        Some(FontWeight::Medium) => 1,
-        Some(FontWeight::Semibold) => 2,
-        Some(FontWeight::Bold) => 3,
-    }
+/// The CSS weight, or 0 (no weight is) for none: any weight a layout can
+/// ask for keys apart from the others.
+fn weight_tag(weight: Option<FontWeight>) -> u16 {
+    weight.map_or(0, crate::layout::font_weight_value)
 }
 
 fn style_tag(style: Option<FontStyle>) -> u8 {

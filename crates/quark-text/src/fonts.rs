@@ -10,6 +10,14 @@ use unicode_script::Script;
 
 use crate::epoch::FontEpoch;
 
+#[cfg(target_os = "macos")]
+mod coretext;
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+mod fontconfig;
+mod platform;
+
+pub(crate) use platform::Candidate;
+
 pub const UI_FAMILY: &str = "Geist";
 pub const MONO_FAMILY: &str = "Geist Mono";
 pub const INTER_FAMILY: &str = "Inter";
@@ -283,45 +291,136 @@ pub(crate) fn vendored_font_sources() -> impl Iterator<Item = fontdb::Source> {
         .map(|&bytes| fontdb::Source::Binary(Arc::new(bytes)))
 }
 
+/// Where [`SYSTEM_UI`] and [`UI_MONOSPACE`] resolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GenericFonts {
+    /// To the bundled families, on every machine.
+    Bundled,
+    /// To what the platform's font API answers for the locale, asked when
+    /// first needed.
+    Platform { locale: String },
+    /// To the first of these candidates (UI, then monospace) that is
+    /// loaded: the platform's answers once asked, which a recipe passes on
+    /// so worker systems need not ask again, or a test's fixture.
+    Pinned([Vec<Candidate>; 2]),
+}
+
+impl GenericFonts {
+    fn candidates(&mut self, role: FontRole) -> Option<&[Candidate]> {
+        if let Self::Platform { locale } = self {
+            let ask = |role| platform::candidates(role, locale);
+            *self = Self::Pinned([ask(FontRole::Ui), ask(FontRole::Mono)]);
+        }
+        match (self, role) {
+            (Self::Bundled | Self::Platform { .. }, _) => None,
+            (Self::Pinned([ui, _]), FontRole::Ui) => Some(ui),
+            (Self::Pinned([_, mono]), FontRole::Mono) => Some(mono),
+        }
+    }
+}
+
 /// Points the generic sans-serif and monospace families at the settings'
 /// UI and monospace families, and reports what each resolved to.
 pub(crate) fn configure_generic_families(
     db: &mut fontdb::Database,
     settings: &FontSettings,
+    generics: &mut GenericFonts,
 ) -> [ResolvedFamily; 2] {
     let settings = settings.normalized();
-    let ui = resolve_family(db, FontRole::Ui, &settings.ui_family);
-    let mono = resolve_family(db, FontRole::Mono, &settings.mono_family);
-    // A family picked for UI or code text with fewer weights than quark
-    // asks for (Fira Code's variable face registers only as Light) would
-    // otherwise lose to a fallback family of the exact weight.
-    fill_weights(db, [ui.family.as_str(), mono.family.as_str()]);
+    let ui = resolve_family(db, FontRole::Ui, &settings.ui_family, generics);
+    let mono = resolve_family(db, FontRole::Mono, &settings.mono_family, generics);
     db.set_sans_serif_family(ui.family.clone());
     db.set_monospace_family(mono.family.clone());
     [ui, mono]
 }
 
-fn resolve_family(db: &fontdb::Database, role: FontRole, selection: &str) -> ResolvedFamily {
-    let generic = matches!(selection, SYSTEM_UI | UI_MONOSPACE);
-    let found = (!generic).then(|| family_source(db, selection)).flatten();
-    let (family, source, fallback) = match found {
-        Some(source) => (selection.to_owned(), source, None),
-        None => {
-            let reason = if generic {
-                FallbackReason::PlatformUnavailable
-            } else {
-                FallbackReason::NotInstalled
-            };
-            let family = default_family(role).to_owned();
-            (family, ResolvedSource::Bundled, Some(reason))
-        }
+fn resolve_family(
+    db: &mut fontdb::Database,
+    role: FontRole,
+    selection: &str,
+    generics: &mut GenericFonts,
+) -> ResolvedFamily {
+    let generic = match selection {
+        SYSTEM_UI => Some(FontRole::Ui),
+        UI_MONOSPACE => Some(FontRole::Mono),
+        _ => None,
     };
-    ResolvedFamily {
+    let resolved = |family: String, source, fallback| ResolvedFamily {
         requested: selection.to_owned(),
         family,
         source,
         fallback,
+    };
+    let Some(generic) = generic else {
+        return match family_source(db, selection) {
+            Some(source) => resolved(selection.to_owned(), source, None),
+            None => resolved(
+                default_family(role).to_owned(),
+                ResolvedSource::Bundled,
+                Some(FallbackReason::NotInstalled),
+            ),
+        };
+    };
+    let Some(candidates) = generics.candidates(generic) else {
+        return resolved(
+            default_family(role).to_owned(),
+            ResolvedSource::Bundled,
+            Some(FallbackReason::Deterministic),
+        );
+    };
+    for candidate in candidates {
+        if let Some(family) = find_candidate(db, candidate) {
+            let fallback = (!candidate.from_api).then_some(FallbackReason::PlatformUnavailable);
+            return resolved(family, ResolvedSource::Platform, fallback);
+        }
     }
+    resolved(
+        default_family(role).to_owned(),
+        ResolvedSource::Bundled,
+        Some(FallbackReason::PlatformUnavailable),
+    )
+}
+
+/// The family, as the font database names it, of the face `candidate`
+/// describes: the face of its file (with its PostScript name, when the
+/// file has several), loading the file when no face of it is loaded; else
+/// a face with its family name in any language. `None` when there is no
+/// such face.
+fn find_candidate(db: &mut fontdb::Database, candidate: &Candidate) -> Option<String> {
+    if let Some(path) = &candidate.path {
+        let in_file = |face: &&fontdb::FaceInfo| match &face.source {
+            fontdb::Source::File(file) | fontdb::Source::SharedFile(file, _) => file == path,
+            fontdb::Source::Binary(_) => false,
+        };
+        if !db.faces().any(|face| in_file(&face)) {
+            // Not under a directory the database scanned; a missing or
+            // unreadable file loads nothing.
+            let _ = db.load_font_file(path);
+        }
+        let named = |face: &&fontdb::FaceInfo| {
+            candidate
+                .post_script_name
+                .as_ref()
+                .is_none_or(|name| &face.post_script_name == name)
+        };
+        let face = db
+            .faces()
+            .filter(in_file)
+            .find(named)
+            .or_else(|| db.faces().find(in_file));
+        if let Some((family, _)) = face.and_then(|face| face.families.first()) {
+            return Some(family.clone());
+        }
+    }
+    let name = candidate.family.as_deref()?;
+    db.faces()
+        .find(|face| {
+            face.families
+                .iter()
+                .any(|(family, _)| family.eq_ignore_ascii_case(name))
+        })
+        .and_then(|face| face.families.first())
+        .map(|(family, _)| family.clone())
 }
 
 /// Whether a face of `family` is loaded, and from where: the vendored
@@ -408,61 +507,6 @@ impl Fallback for QuarkFallback {
             Some(list) => list,
             None => PlatformFallback.script_fallback(script, locale),
         }
-    }
-}
-
-/// Weights quark asks for (see `layout::weight_value`).
-const TEXT_WEIGHTS: [u16; 5] = [400, 450, 500, 600, 700];
-
-impl QuarkFallback {
-    /// cosmic-text takes a fallback family only through a face of exactly
-    /// the requested weight, so a family with fewer weights (the bundled
-    /// emoji and CJK faces have one) is skipped at the UI's normal weight
-    /// (450) and in bold, and an arbitrary face of the nearest weight wins
-    /// instead. Registers each listed family again under every missing text
-    /// weight, copying the face fontdb's own query picks for that weight;
-    /// copies share the original's bytes.
-    pub(crate) fn fill_weights(&self, db: &mut fontdb::Database) {
-        let mut families: Vec<&str> = self.common.clone();
-        families.extend(self.scripts.values().flatten());
-        families.sort_unstable();
-        families.dedup();
-        fill_weights(db, families);
-    }
-}
-
-/// Register each of `families` again under every text weight it lacks, as
-/// a copy of the face fontdb's own query picks for that weight; copies
-/// share the original's bytes.
-pub(crate) fn fill_weights<'a>(
-    db: &mut fontdb::Database,
-    families: impl IntoIterator<Item = &'a str>,
-) {
-    let mut copies = Vec::new();
-    for family in families {
-        for weight in TEXT_WEIGHTS {
-            let has_weight = db.faces().any(|face| {
-                face.weight.0 == weight
-                    && face.style == fontdb::Style::Normal
-                    && face.families.iter().any(|(name, _)| name == family)
-            });
-            if has_weight {
-                continue;
-            }
-            let query = fontdb::Query {
-                families: &[fontdb::Family::Name(family)],
-                weight: fontdb::Weight(weight),
-                ..fontdb::Query::default()
-            };
-            if let Some(face) = db.query(&query).and_then(|id| db.face(id)) {
-                let mut copy = face.clone();
-                copy.weight = fontdb::Weight(weight);
-                copies.push(copy);
-            }
-        }
-    }
-    for copy in copies {
-        db.push_face_info(copy);
     }
 }
 
@@ -1143,6 +1187,265 @@ mod tests {
             let separate = glyphs(&mut system, text);
             assert_ne!(joined, alone, "{text} with ligatures");
             assert_eq!(separate, alone, "{text} without ligatures");
+        }
+    }
+
+    // Regression: UI text at Normal asked for weight 450 (mono for 400),
+    // which a variable UI family such as Inter draws heavier than its
+    // regular weight. Normal is 400 in every family, the weight glyphs
+    // rasterize at.
+    #[test]
+    fn normal_weight_is_400_in_every_family() {
+        let settings = FontSettings {
+            ui_family: INTER_FAMILY.to_owned(),
+            ..FontSettings::default()
+        };
+        let mut system = crate::TextSystem::vendored_only(&settings);
+        for kind in [quark::FontKind::Ui, quark::FontKind::Mono] {
+            let style = crate::TextStyle::new(14.0).kind(kind);
+            let layout = system
+                .layout(&crate::TextParams::new("Hamburg", style))
+                .expect("layout");
+            for glyph in layout.glyph_iter() {
+                assert_eq!(glyph.font_weight.0, 400, "{kind:?}");
+            }
+        }
+    }
+
+    // A weight a family has no face for takes the family's face nearest
+    // it, as CSS matching does, rather than another family that has the
+    // exact weight: before, Geist at 300 drew in Fira Code (whose variable
+    // face registers as 300) and Fira Code at 700 in Geist Bold. fontdb
+    // breaks the 400 to 500 tie at 450, looking down first from there.
+    #[test]
+    fn weight_without_a_face_takes_the_family_face_nearest_it() {
+        use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+        let cases: [(&str, u16, (&str, u16)); 4] = [
+            (UI_FAMILY, 300, (UI_FAMILY, 400)),
+            (UI_FAMILY, 450, (UI_FAMILY, 400)),
+            (FIRA_CODE_FAMILY, 700, (FIRA_CODE_FAMILY, 300)),
+            (SOURCE_SANS_3_FAMILY, 300, (SOURCE_SANS_3_FAMILY, 400)),
+        ];
+        let mut system = test_system();
+        let fs = system.raster_font_system();
+        for (family, weight, expected) in cases {
+            let attrs = Attrs::new()
+                .family(Family::Name(family))
+                .weight(Weight(weight));
+            let mut buffer = Buffer::new(fs, Metrics::new(14.0, 20.0));
+            buffer.set_text(fs, "Hamburg", &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(fs, false);
+            let run = buffer.layout_runs().next().expect("run");
+            for glyph in run.glyphs {
+                let face = fs.db().face(glyph.font_id).expect("face");
+                let got = (face.families[0].0.as_str(), face.weight.0);
+                assert_eq!(got, expected, "{family} at {weight}");
+            }
+        }
+    }
+
+    // A static family taken at a lighter weight than its lightest face
+    // draws that face as it is: no synthetic thinning (or emboldening)
+    // makes up the difference.
+    #[test]
+    fn static_face_at_a_missing_weight_rasterizes_as_its_own_weight() {
+        use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, SwashCache, Weight};
+        let mut system = test_system();
+        let fs = system.raster_font_system();
+        let mut raster = SwashCache::new();
+        let mut images = Vec::new();
+        for weight in [300, 400] {
+            let attrs = Attrs::new()
+                .family(Family::Name(SOURCE_SANS_3_FAMILY))
+                .weight(Weight(weight));
+            let mut buffer = Buffer::new(fs, Metrics::new(20.0, 28.0));
+            buffer.set_text(fs, "R", &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(fs, false);
+            let run = buffer.layout_runs().next().expect("run");
+            let key = run.glyphs[0].physical((0.0, 0.0), 1.0).cache_key;
+            assert_eq!(key.font_weight.0, weight);
+            let image = raster.get_image_uncached(fs, key).expect("image");
+            images.push(image.data);
+        }
+        assert!(images[0].iter().any(|&a| a != 0), "ink");
+        assert_eq!(images[0], images[1]);
+    }
+
+    /// The family of the face the first glyph of UI text (mono text with
+    /// `mono`) draws from.
+    fn drawn_family(system: &mut crate::TextSystem, mono: bool) -> String {
+        let kind = if mono {
+            quark::FontKind::Mono
+        } else {
+            quark::FontKind::Ui
+        };
+        let style = crate::TextStyle::new(14.0).kind(kind);
+        let layout = system
+            .layout(&crate::TextParams::new("Hamburg", style))
+            .expect("layout");
+        let glyph = layout.glyph(0).expect("glyph");
+        let face = system.font_system().db().face(glyph.font_id).expect("face");
+        face.families[0].0.clone()
+    }
+
+    // How the system UI and monospace names resolve, given what the
+    // platform answered: the first answer a loaded face has (by name in
+    // any case), a guessed family flagged as a fallback, the bundled family
+    // when nothing matches, and the bundled family without asking at all in
+    // the deterministic mode. Named families resolve as before. The text
+    // must draw in the reported family.
+    #[test]
+    fn generic_names_resolve_to_the_first_loaded_platform_candidate() {
+        let api = |name: &str| Candidate::family(name, true);
+        let guess = |name: &str| Candidate::family(name, false);
+        let platform = |ui: Vec<Candidate>| GenericFonts::Pinned([ui.clone(), ui]);
+        let cases = [
+            (
+                SYSTEM_UI,
+                platform(vec![api("No Such Sans"), api(INTER_FAMILY)]),
+                (INTER_FAMILY, ResolvedSource::Platform, None),
+            ),
+            (
+                UI_MONOSPACE,
+                platform(vec![api("jetbrains mono")]),
+                (JETBRAINS_MONO_FAMILY, ResolvedSource::Platform, None),
+            ),
+            (
+                SYSTEM_UI,
+                platform(vec![api("No Such Sans"), guess(IBM_PLEX_SANS_FAMILY)]),
+                (
+                    IBM_PLEX_SANS_FAMILY,
+                    ResolvedSource::Platform,
+                    Some(FallbackReason::PlatformUnavailable),
+                ),
+            ),
+            (
+                SYSTEM_UI,
+                platform(vec![api("No Such Sans")]),
+                (
+                    UI_FAMILY,
+                    ResolvedSource::Bundled,
+                    Some(FallbackReason::PlatformUnavailable),
+                ),
+            ),
+            (
+                SYSTEM_UI,
+                GenericFonts::Bundled,
+                (
+                    UI_FAMILY,
+                    ResolvedSource::Bundled,
+                    Some(FallbackReason::Deterministic),
+                ),
+            ),
+            (
+                "No Such Sans",
+                platform(vec![api(INTER_FAMILY)]),
+                (
+                    UI_FAMILY,
+                    ResolvedSource::Bundled,
+                    Some(FallbackReason::NotInstalled),
+                ),
+            ),
+        ];
+        for (requested, generics, (family, source, fallback)) in cases {
+            let mono = requested == UI_MONOSPACE;
+            let settings = if mono {
+                FontSettings {
+                    mono_family: requested.to_owned(),
+                    ..FontSettings::default()
+                }
+            } else {
+                FontSettings {
+                    ui_family: requested.to_owned(),
+                    ..FontSettings::default()
+                }
+            };
+            let mut system = crate::TextSystem::with_generics(&settings, generics);
+            let role = if mono { FontRole::Mono } else { FontRole::Ui };
+            let resolved = system.resolved_family(role).clone();
+            let expected = ResolvedFamily {
+                requested: requested.to_owned(),
+                family: family.to_owned(),
+                source,
+                fallback,
+            };
+            assert_eq!(resolved, expected);
+            assert_eq!(drawn_family(&mut system, mono), family, "{requested}");
+        }
+    }
+
+    // macOS reports the UI font by file (its family is private), and the
+    // file can lie outside the directories the font database scanned: the
+    // face is loaded from it and picked by PostScript name, and a worker
+    // built from the recipe draws in it too.
+    #[test]
+    fn generic_name_loads_the_platform_font_file() {
+        let dir = std::env::temp_dir().join(format!("quark-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("platform-ui.ttf");
+        std::fs::write(&path, crate::system::renamed_inter()).expect("font file");
+        let candidate = Candidate {
+            family: Some(".PrivateUIFont".to_owned()),
+            path: Some(path.clone()),
+            post_script_name: None,
+            from_api: true,
+        };
+        let generics = GenericFonts::Pinned([vec![candidate], Vec::new()]);
+        let mut system = crate::TextSystem::with_generics(&FontSettings::system(), generics);
+        let mut worker = system.recipe().build();
+        let drawn = [
+            drawn_family(&mut system, false),
+            drawn_family(&mut worker, false),
+        ];
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            system.resolved_family(FontRole::Ui).family,
+            crate::system::RENAMED_INTER
+        );
+        assert_eq!(drawn, [crate::system::RENAMED_INTER; 2]);
+    }
+
+    // Platform check, run by hand on each OS: system-ui and ui-monospace
+    // text draws in the face the platform's font API names (by file where
+    // it gives one, else by family).
+    #[test]
+    #[ignore = "platform integration: needs the platform's installed fonts"]
+    fn system_fonts_draw_in_the_platform_api_faces() {
+        let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned());
+        let mut system = crate::TextSystem::with_settings(&FontSettings::system());
+        for role in [FontRole::Ui, FontRole::Mono] {
+            let resolved = system.resolved_family(role).clone();
+            eprintln!("{role:?}: {resolved:?}");
+            let candidates = platform::candidates(role, &locale);
+            let api = candidates
+                .iter()
+                .find(|c| c.from_api)
+                .expect("platform answer");
+            assert_eq!(resolved.source, ResolvedSource::Platform, "{role:?}");
+            assert_eq!(resolved.fallback, None, "{role:?}");
+            let style = crate::TextStyle::new(14.0).kind(match role {
+                FontRole::Ui => quark::FontKind::Ui,
+                FontRole::Mono => quark::FontKind::Mono,
+            });
+            let layout = system
+                .layout(&crate::TextParams::new("Hamburg", style))
+                .expect("layout");
+            let db = system.font_system().db();
+            let face = db
+                .face(layout.glyph(0).expect("glyph").font_id)
+                .expect("face");
+            match (&api.path, &face.source) {
+                (Some(path), fontdb::Source::File(file) | fontdb::Source::SharedFile(file, _)) => {
+                    assert_eq!(file, path, "{role:?}")
+                }
+                _ => assert!(
+                    face.families
+                        .iter()
+                        .any(|(name, _)| Some(name) == api.family.as_ref()),
+                    "{role:?}: {:?} vs {api:?}",
+                    face.families
+                ),
+            }
         }
     }
 
