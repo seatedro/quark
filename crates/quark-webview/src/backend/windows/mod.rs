@@ -1,8 +1,14 @@
-//! The WebView2 backend. Placeholder until its stream lands: no engine, so
-//! every open fails with `OpenError::Unsupported`.
+//! The WebView2 backend. `cdp` and `state` hold the protocol and ordering
+//! logic and build everywhere for their tests; `native` is the COM glue.
+#![cfg_attr(not(all(feature = "native", windows)), allow(dead_code))]
 
-use super::Backend;
+mod cdp;
+mod state;
 
-pub(super) fn backend() -> Option<Box<dyn Backend>> {
-    None
+#[cfg(all(feature = "native", windows))]
+mod native;
+
+#[cfg(all(feature = "native", windows))]
+pub(super) fn backend() -> Option<Box<dyn super::Backend>> {
+    native::backend()
 }

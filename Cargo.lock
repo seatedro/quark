@@ -3902,6 +3902,8 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "webkit2gtk",
+ "webview2-com",
+ "windows",
  "wry",
 ]
 
