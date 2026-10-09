@@ -192,12 +192,18 @@ impl<'a> ElementContext<'a> {
         font_kind: FontKind,
         font_weight: FontWeight,
     ) -> f32 {
-        if text.is_empty() {
-            return 0.0;
-        }
         let style = TextStyle::new(font_size)
             .kind(font_kind)
             .weight(font_weight);
+        self.measure_text_width_styled(text, style)
+    }
+
+    /// [`Self::measure_text_width`] in a full `style`: tracking, family,
+    /// and weight measured exactly as text painted in it.
+    pub fn measure_text_width_styled(&mut self, text: &str, style: TextStyle) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
         self.layout_text_query(&TextQuery::new(text, style))
             .map_or(0.0, |layout| layout.size().0.ceil())
     }

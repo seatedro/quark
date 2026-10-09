@@ -18,6 +18,22 @@ pub(super) fn truncate_text_to_fit(
     full_width: f32,
     max_width: f32,
 ) -> (String, f32) {
+    let style = TextStyle::new(font_size)
+        .kind(font_kind)
+        .weight(font_weight);
+    truncate_text_to_fit_styled(cx, text, style, full_width, max_width)
+}
+
+/// The longest grapheme prefix of `text` that fits `max_width` with an
+/// ellipsis, measured in `style`, and its width; `text` itself when its
+/// `full_width` fits.
+pub(super) fn truncate_text_to_fit_styled(
+    cx: &mut ElementContext<'_>,
+    text: &str,
+    style: TextStyle,
+    full_width: f32,
+    max_width: f32,
+) -> (String, f32) {
     const ELLIPSIS: &str = "\u{2026}";
 
     if text.is_empty() || max_width <= 0.0 {
@@ -28,7 +44,7 @@ pub(super) fn truncate_text_to_fit(
         return (text.to_owned(), full_width);
     }
 
-    let ellipsis_width = cx.measure_text_width(ELLIPSIS, font_size, font_kind, font_weight);
+    let ellipsis_width = cx.measure_text_width_styled(ELLIPSIS, style);
     if ellipsis_width > max_width {
         return (String::new(), 0.0);
     }
@@ -51,8 +67,7 @@ pub(super) fn truncate_text_to_fit(
     while low < high {
         let mid = (low + high).div_ceil(2);
         let end = boundaries.get(mid).copied().unwrap_or_default();
-        let candidate_width =
-            cx.measure_text_width(&with_ellipsis(end), font_size, font_kind, font_weight);
+        let candidate_width = cx.measure_text_width_styled(&with_ellipsis(end), style);
         if candidate_width <= max_width {
             low = mid;
             best_width = candidate_width;
@@ -109,5 +124,28 @@ mod tests {
                 "{max_width}: {truncated:?}"
             );
         }
+    }
+
+    // Regression: truncation measured without tracking, so tracked text
+    // cut to "fit" overflowed its column once painted with the tracking.
+    #[test]
+    fn truncation_fits_with_the_style_letter_spacing() {
+        let theme = Theme::default_dark();
+        let signals = SignalStore::new();
+        let mut text_system = quark_text::TextSystem::vendored_only(&Default::default());
+        let mut layouts = quark_text::LayoutCache::default();
+        let mut cx =
+            ElementContext::new(&theme, 1.0, &mut text_system, &mut layouts, None, &signals);
+        let tracked = TextStyle::new(14.0).letter_spacing(0.3);
+        let text = "Workspace settings";
+        let full = cx.measure_text_width_styled(text, tracked);
+        let max_width = full * 0.6;
+
+        let (truncated, width) =
+            truncate_text_to_fit_styled(&mut cx, text, tracked, full, max_width);
+
+        assert!(truncated.ends_with('\u{2026}'), "{truncated:?}");
+        assert!(width <= max_width, "{width} > {max_width}");
+        assert_eq!(cx.measure_text_width_styled(&truncated, tracked), width);
     }
 }
