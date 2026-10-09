@@ -651,7 +651,16 @@ fn load_failed(event: LoadEvent, error: &glib::Error, sink: &NativeSink, nav: &R
         (blocked, error.kind::<PolicyError>())
     {
         NavigationError::Policy(reason)
-    } else if error.matches(NetworkError::Cancelled) || error.matches(gio::IOErrorEnum::Cancelled) {
+    } else if stage == FailureStage::Provisional
+        && (error.matches(gio::IOErrorEnum::Cancelled) || error.kind::<gio::TlsError>().is_some())
+    {
+        // WebKit refuses a bad certificate by cancelling the request, and
+        // its cancellation can win the race with the TLS error it reports
+        // next. Quark never cancels a provisional load itself, and WebKit
+        // reports a stopped or superseded load as its own network
+        // cancellation, so a GIO cancellation here is the certificate.
+        NavigationError::Tls
+    } else if error.matches(NetworkError::Cancelled) {
         NavigationError::Cancelled
     } else if error.kind::<NetworkError>().is_some() {
         NavigationError::Transport

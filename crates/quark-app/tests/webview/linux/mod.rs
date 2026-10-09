@@ -290,9 +290,6 @@ impl Smoke {
                 cx.webviews().close(view);
             }
             (Step::BadCert, WebViewEvent::NavigationFailed { stage, error, .. }) => {
-                // WebKitGTK races its own cancellation against the TLS error
-                // it reports, so either can name a refused certificate.
-                let error = if error == NavigationError::Cancelled { NavigationError::Tls } else { error };
                 self.check("a bad certificate fails", (stage, error), (FailureStage::Provisional, NavigationError::Tls));
                 // WebKit loads its error page right after the failure,
                 // unless the backend stops it. Give it time to, then look.
