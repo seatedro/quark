@@ -1,6 +1,7 @@
 use super::*;
 use quark_render::scene::{
-    StyledDecoration, TextBackdrop, TextDecorationStyle, TextFill, TextRendering,
+    AlphaMask, FadeEdge, StyledDecoration, TextBackdrop, TextDecorationStyle, TextFill,
+    TextRendering,
 };
 use quark_text::fonts::FontFamily;
 
@@ -14,6 +15,19 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+}
+
+/// What one-line text does when its box is narrower than the text. The
+/// whole text stays the element's accessible label either way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextOverflow {
+    /// Cut at the box's edge.
+    Clip,
+    /// Shortened at a grapheme boundary to end in an ellipsis.
+    Ellipsis,
+    /// Faded out over this many points at the box's trailing edge,
+    /// showing whatever lies behind (a hovered row, a material).
+    Fade(f32),
 }
 
 /// How a [`TextElement`] breaks into lines.
@@ -106,7 +120,8 @@ pub struct TextElement {
     strikethrough: bool,
     paint: TextPaint,
     align: TextAlign,
-    truncate: bool,
+    /// One line that shrinks with its box, overflowing this way.
+    overflow: Option<TextOverflow>,
     wrap: WrapMode,
 }
 
@@ -125,7 +140,7 @@ pub fn text(content: impl Into<String>) -> TextElement {
         strikethrough: false,
         paint: TextPaint::default(),
         align: TextAlign::Left,
-        truncate: false,
+        overflow: None,
         wrap: WrapMode::Auto,
     }
 }
@@ -271,8 +286,14 @@ impl TextElement {
 
     /// One line that shrinks with an ellipsis when its box is narrower
     /// than the text. Truncated text does not wrap automatically.
-    pub fn truncate(mut self) -> Self {
-        self.truncate = true;
+    pub fn truncate(self) -> Self {
+        self.overflow(TextOverflow::Ellipsis)
+    }
+
+    /// One line that shrinks with its box and overflows it as `overflow`
+    /// says. Like [`Self::truncate`], it does not wrap automatically.
+    pub fn overflow(mut self, overflow: TextOverflow) -> Self {
+        self.overflow = Some(overflow);
         self
     }
 
@@ -302,7 +323,7 @@ impl TextElement {
     /// The wrap mode in effect: truncation keeps text on one line.
     fn wrap_mode(&self) -> WrapMode {
         match self.wrap {
-            WrapMode::Auto if self.truncate => WrapMode::NoWrap,
+            WrapMode::Auto if self.overflow.is_some() => WrapMode::NoWrap,
             mode => mode,
         }
     }
@@ -392,7 +413,7 @@ impl Element for TextElement {
                 // Unwrapped text shrinks only when `.truncate()` is set;
                 // otherwise it holds its natural width so it isn't crushed
                 // next to flex_shrink:0 siblings like SvgIcon.
-                let shrink = if self.truncate { 1.0 } else { 0.0 };
+                let shrink = if self.overflow.is_some() { 1.0 } else { 0.0 };
                 engine.request_layout(
                     taffy::Style {
                         size: taffy::Size {
@@ -446,6 +467,14 @@ impl Element for TextElement {
 
         let wrap = self.wrap_mode();
         let mut wrapped = false;
+        let overflows =
+            wrap == WrapMode::NoWrap && bounds.width > 0.0 && natural_width > bounds.width;
+        // Clipped or faded: the painted line keeps the whole text.
+        let cut = match self.overflow {
+            Some(TextOverflow::Clip) if overflows => Some(None),
+            Some(TextOverflow::Fade(length)) if overflows => Some(Some(length)),
+            _ => None,
+        };
         match wrap {
             // Shaped where measurement wrapped at the width layout
             // resolved, which the last measure query may not have been (it
@@ -459,18 +488,10 @@ impl Element for TextElement {
                     wrapped = true;
                 }
             }
-            WrapMode::NoWrap
-                if self.truncate && bounds.width > 0.0 && natural_width > bounds.width =>
-            {
-                let (truncated, truncated_width) = truncate_text_to_fit(
-                    cx,
-                    &content,
-                    font_size,
-                    self.font_kind,
-                    self.font_weight,
-                    natural_width,
-                    bounds.width,
-                );
+            WrapMode::NoWrap if self.overflow == Some(TextOverflow::Ellipsis) && overflows => {
+                let style = self.query("", font_size, None).style;
+                let (truncated, truncated_width) =
+                    truncate_text_to_fit_styled(cx, &content, style, natural_width, bounds.width);
                 layout = cx.layout_text_query(&self.query(&truncated, font_size, None));
                 content = truncated;
                 text_width = truncated_width;
@@ -485,6 +506,16 @@ impl Element for TextElement {
             TextAlign::Right => (bounds.width - text_width).max(0.0),
         };
 
+        if let Some(length) = cut {
+            if let Some(length) = length {
+                scene.push_mask(
+                    bounds,
+                    AlphaMask::fade_edge(bounds, FadeEdge::Right, length),
+                );
+            }
+            scene.clip(bounds);
+            text_width = bounds.width;
+        }
         if let Some(layout) = layout {
             let rect = Rect {
                 x: bounds.x + x_offset,
@@ -507,6 +538,12 @@ impl Element for TextElement {
             if self.underline || self.strikethrough {
                 let decorations = self.decorations(layout.text().len(), color);
                 paint_decorations(scene, &layout, (rect.x, rect.y), &decorations);
+            }
+        }
+        if let Some(length) = cut {
+            scene.pop_clip();
+            if length.is_some() {
+                scene.pop_isolate();
             }
         }
 
@@ -647,6 +684,9 @@ mod tests {
         families: Vec<String>,
         /// Fill of each styled text, in paint order.
         fills: Vec<TextFill>,
+        /// Masked groups and clips, in paint order.
+        masks: Vec<(Rect, AlphaMask)>,
+        clips: Vec<Rect>,
     }
 
     impl Frame {
@@ -695,6 +735,8 @@ mod tests {
                 decorations: Vec::new(),
                 families: Vec::new(),
                 fills: Vec::new(),
+                masks: Vec::new(),
+                clips: Vec::new(),
             };
             for primitive in &scene.primitives {
                 let (rect, shaped) = match primitive {
@@ -704,6 +746,16 @@ mod tests {
                     }
                     quark_render::Primitive::TextRun(run) => (run.rect, &run.layout),
                     quark_render::Primitive::RichTextRun(run) => (run.rect, &run.layout),
+                    quark_render::Primitive::IsolateStart(group) => {
+                        frame
+                            .masks
+                            .extend(group.mask.map(|mask| (group.bounds, mask)));
+                        continue;
+                    }
+                    quark_render::Primitive::ClipStart(clip) => {
+                        frame.clips.push(clip.rect);
+                        continue;
+                    }
                     quark_render::Primitive::StyledText(run) => {
                         frame.fills.push(run.fill);
                         (run.rect, &run.layout)
@@ -1064,6 +1116,61 @@ mod tests {
                 vec![TextFill::Shimmer(spec.phase(0.25))],
                 vec![TextFill::Solid(SWATCH)]
             )
+        );
+    }
+
+    // Catches tracked text truncated by its untracked width: the ellipsis
+    // line, tracked as painted, still fits the box.
+    #[test]
+    fn truncation_measures_with_letter_spacing() {
+        let mut window = Window::new();
+        let row = div()
+            .w(150.0)
+            .flex_row()
+            .child(sentence().letter_spacing(0.2).truncate());
+        let frame = window.paint(row);
+        let (rect, lines) = frame.text();
+        assert!(lines[0].ends_with('\u{2026}'), "{lines:?}");
+        let params = TextParams::new(
+            lines[0].as_str(),
+            TextStyle::new(14.0).line_height(LINE).letter_spacing(0.2),
+        );
+        let tracked = window
+            .layouts
+            .layout(&mut window.text, &params)
+            .expect("layout");
+        assert!(
+            tracked.size().0 <= rect.width,
+            "{} > {}",
+            tracked.size().0,
+            rect.width
+        );
+    }
+
+    // Catches a fade that shortens the text or leaks past the box: the
+    // whole sentence stays on its line, clipped to the box, under a mask
+    // opaque at the start and clear at the trailing edge, half way 12
+    // points into a 24-point fade.
+    #[test]
+    fn a_fading_overflow_keeps_the_text_and_fades_its_trailing_edge() {
+        let frame = Window::new().paint(
+            div()
+                .w(100.0)
+                .flex_row()
+                .child(sentence().overflow(TextOverflow::Fade(24.0))),
+        );
+        let (rect, lines) = frame.text();
+        let [(bounds, mask)] = frame.masks[..] else {
+            panic!("{frame:?}");
+        };
+        let y = rect.y + 5.0;
+        assert_eq!(
+            (lines.as_slice(), bounds, frame.clips.as_slice()),
+            (&[SENTENCE.to_owned()][..], *rect, &[*rect][..])
+        );
+        assert_eq!(
+            [rect.x, rect.right() - 12.0, rect.right()].map(|x| mask.alpha_at([x, y])),
+            [1.0, 0.5, 0.0]
         );
     }
 }
