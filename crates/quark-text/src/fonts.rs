@@ -14,8 +14,13 @@ use crate::epoch::FontEpoch;
 mod coretext;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
 mod fontconfig;
+mod identity;
 mod platform;
 
+pub use identity::{
+    FaceId, FontInstanceId, FontProvenance, FontRegistry, FontSource, FontSourceError,
+    FontSourceId, PreparedFont, Synthesis, Variation,
+};
 pub(crate) use platform::Candidate;
 
 pub const UI_FAMILY: &str = "Geist";
