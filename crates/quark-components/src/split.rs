@@ -667,9 +667,9 @@ impl<'a> Split<'a> {
 
 /// A divider, replayed from the element cache while nothing it shows or
 /// does changes: its handlers capture only these values and the event map,
-/// which must be pure. Dividers between side by side panes are built every
-/// frame: a cache boundary keeps its content's own height, and theirs is
-/// the split's, which the split does not know.
+/// which must be pure. The divider spans the split's cross axis through
+/// layout (`h_full`/`w_full`), so a side by side divider's boundary lays its
+/// content out in the boundary's full height.
 fn divider(
     id: &'static str,
     state: &SplitState,
@@ -697,23 +697,26 @@ fn divider(
         map: map.clone(),
         colors: theme.colors,
     };
-    if horizontal {
-        return view.build();
-    }
     let mut hasher = std::hash::DefaultHasher::new();
     (id, index, horizontal, collapsed, p.label, p.collapsible).hash(&mut hasher);
     for v in [extent, size, grow, p.min, p.max] {
         v.to_bits().hash(&mut hasher);
     }
-    cached(
+    let element = cached(
         CacheKey(quark_ui::element::inputs_hash(&(id, "divider", index))),
         hasher.finish(),
         move || view.build(),
     )
-    .flex_shrink_0()
-    .h(DIVIDER_THICKNESS)
-    .w_full()
-    .into_any()
+    .flex_shrink_0();
+    if horizontal {
+        element
+            .fill_height()
+            .w(DIVIDER_THICKNESS)
+            .h_full()
+            .into_any()
+    } else {
+        element.h(DIVIDER_THICKNESS).w_full().into_any()
+    }
 }
 
 struct DividerView {
@@ -1023,34 +1026,40 @@ mod tests {
     use super::*;
 
     /// Where the pointer shows `ResizeCol` along `x`, sampled every 10
-    /// points down a 400 point tall side by side split of `state`.
-    fn resize_cursor_rows(state: &SplitState, x: f32) -> Vec<f32> {
+    /// points down a 400 point tall side by side split of `state`, in each
+    /// of two frames drawn with an element cache: the divider builds, then
+    /// replays.
+    fn resize_cursor_rows(state: &SplitState, x: f32) -> [Vec<f32>; 2] {
         use quark::reactive::SignalStore;
         use quark_render::Scene;
-        use quark_ui::element::{ElementContext, InputRouter, render_element};
+        use quark_ui::element::{ElementCache, ElementContext, InputRouter, render_element};
 
         let theme = Theme::default_dark();
         let mut text = quark_text::TextSystem::vendored_only(&Default::default());
         let mut layouts = quark_text::LayoutCache::default();
         let store = SignalStore::new();
-        let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &store);
-        let split = Split::new("test", state, 600.0, |_| Action::new(()))
-            .child(div())
-            .child(div())
-            .build(&theme);
-        let mut root = div().w(600.0).h(400.0).child(split).into_any();
-        render_element(&mut root, &mut Scene::default(), &mut cx, 600.0, 400.0);
-        let mut router = InputRouter::default();
-        router.set_frame(cx.take_input_frame());
-        (0..40)
-            .map(|i| i as f32 * 10.0 + 5.0)
-            .filter(|&y| router.cursor_at(x, y) == CursorHint::ResizeCol)
-            .collect()
+        let mut cache = ElementCache::new();
+        std::array::from_fn(|_| {
+            let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &store)
+                .with_element_cache(&mut cache);
+            let split = Split::new("test", state, 600.0, |_| Action::new(()))
+                .child(div())
+                .child(div())
+                .build(&theme);
+            let mut root = div().w(600.0).h(400.0).child(split).into_any();
+            render_element(&mut root, &mut Scene::default(), &mut cx, 600.0, 400.0);
+            let mut router = InputRouter::default();
+            router.set_frame(cx.take_input_frame());
+            (0..40)
+                .map(|i| i as f32 * 10.0 + 5.0)
+                .filter(|&y| router.cursor_at(x, y) == CursorHint::ResizeCol)
+                .collect()
+        })
     }
 
-    // Regression: a side by side split's divider was a cache boundary,
-    // which keeps its content's own height, so the divider had none and
-    // took the pointer nowhere along the split.
+    // Regression: a side by side split's divider is a cache boundary, which
+    // kept its content's own height, so the divider had none and took the
+    // pointer nowhere along the split, built or replayed.
     #[test]
     fn a_vertical_divider_takes_the_pointer_down_its_whole_length() {
         let state = SplitState::new(
@@ -1058,7 +1067,8 @@ mod tests {
             vec![Pane::flex("Main"), Pane::fixed("Side", 200.0)],
         );
         // The divider line is the 1 point at x 399.
-        assert_eq!(resize_cursor_rows(&state, 399.5).len(), 40);
+        let [built, replayed] = resize_cursor_rows(&state, 399.5);
+        assert_eq!((built.len(), replayed.len()), (40, 40));
     }
 
     fn three_panes() -> SplitState {

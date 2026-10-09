@@ -546,6 +546,52 @@ fn a_resized_fixed_boundary_rewraps_its_text() {
     assert!(narrow[0].len() > 1, "{narrow:?}");
 }
 
+/// A 4pt `h_full` bar beside a 30pt tall box, in a row `height` tall
+/// (`None`: as tall as its content). With `boundary` the bar is a
+/// `fill_height` boundary around `h_full` content.
+fn filled_bar(height: Option<f32>, boundary: bool) -> AnyElement {
+    let row = div().w(100.0).flex_row();
+    let bar = if boundary {
+        cached("bar", 1, || div().w_full().h_full().bg(BUTTON))
+            .fill_height()
+            .w(4.0)
+            .h_full()
+            .into_any()
+    } else {
+        div().w(4.0).h_full().bg(BUTTON).into_any()
+    };
+    match height {
+        Some(h) => row.h(h),
+        None => row,
+    }
+    .child(bar)
+    .child(div().w(10.0).h(30.0))
+    .into_any()
+}
+
+// Catches a boundary that keeps its content's own height (none, for h_full
+// content) when the boundary is stretched: a side by side split divider
+// had no line and no grab strip. Built, replayed, rebuilt at a new height
+// after a replay, and in a row sized by its other child (where measuring
+// at the available height would make the row the window's height); each
+// as tall as the same bar without a boundary.
+#[test]
+fn a_fill_height_boundary_lays_h_full_content_out_at_its_height() {
+    let rows = [Some(200.0), Some(200.0), Some(250.0), None];
+    let mut window = Window::new();
+    let bar = |frame: Frame| frame.rect_of(BUTTON).map(|r| r.height);
+    let cached: Vec<_> = rows
+        .iter()
+        .map(|&h| bar(window.paint(filled_bar(h, true))))
+        .collect();
+    let plain: Vec<_> = rows
+        .iter()
+        .map(|&h| bar(Window::new().paint(filled_bar(h, false))))
+        .collect();
+    assert_eq!(cached, plain);
+    assert_eq!(plain[..3], [Some(200.0), Some(200.0), Some(250.0)]);
+}
+
 // ---------------------------------------------------------------------------
 // Frame budget: the regression guard for per-frame waste
 // ---------------------------------------------------------------------------

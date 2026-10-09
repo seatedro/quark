@@ -37,8 +37,10 @@
 //!   or is in motion. Replays keep the handles' viewports current.
 //!
 //! A boundary is a block box: the content is laid out at the width the
-//! parent gives the boundary and keeps its own height. Style the boundary
-//! itself (grow, fixed size) through [`Styled`] on the [`Cached`].
+//! parent gives the boundary and keeps its own height, unless
+//! [`Cached::fill_height`] lays it out in the boundary's full height. Style
+//! the boundary itself (grow, fixed size) through [`Styled`] on the
+//! [`Cached`].
 //!
 //! Replay re-registers everything the subtree registered: scene
 //! primitives, hit entries (clipped again under the current ancestor
@@ -410,6 +412,7 @@ pub fn cached<E: IntoAnyElement>(
         key: key.into(),
         hash: inputs_hash,
         style: ElementStyle::default(),
+        fill_height: false,
         build: Some(move || build().into_any()),
         state: State::Idle,
     }
@@ -421,6 +424,7 @@ pub struct Cached<F> {
     hash: u64,
     /// The boundary's own box in its parent; only `layout` is used.
     style: ElementStyle,
+    fill_height: bool,
     build: Option<F>,
     state: State,
 }
@@ -463,6 +467,16 @@ impl<F> Styled for Cached<F> {
 }
 
 impl<F> Cached<F> {
+    /// Lay the content out in the boundary's full height, so content sized
+    /// with `h_full` spans a boundary whose height its parent sets (a
+    /// divider stretched across a row). The content's own height is still
+    /// what the boundary measures at. A replay at another height rebuilds,
+    /// so the inputs hash need not cover it.
+    pub fn fill_height(mut self) -> Self {
+        self.fill_height = true;
+        self
+    }
+
     /// The inputs hash, mixed with what every entry depends on that the
     /// caller does not hash: the inspector's style overrides, which apply
     /// to elements inside the subtree while it builds.
@@ -497,6 +511,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Cached<F> {
             content,
             bounds.width,
             bounds.height,
+            self.fill_height,
             &mut cx.measure_context(),
         );
         Live {
@@ -610,7 +625,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
         };
         let index = engine.begin_subtree();
         let content = child.request_layout(engine.subtree_mut(index), cx);
-        let id = engine.finish_subtree(index, self.style.layout.clone(), content);
+        let id = engine.finish_subtree(index, self.style.layout.clone(), content, self.fill_height);
         self.state = State::Live(Live {
             child,
             layout: LiveLayout::Subtree(index),
