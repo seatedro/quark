@@ -124,8 +124,14 @@ impl EventContext<'_> {
     /// Do what a double-click on `window`'s title bar does on this
     /// platform, for an app-drawn title bar.
     pub fn title_double_click(&mut self, window: WindowHandle) -> TitleAction {
-        let Some(WindowEntry::Open(state)) = self.windows.get(window) else {
-            return TitleAction::Nothing;
+        let state = match self.windows.get_mut(window) {
+            Some(WindowEntry::Open(state)) => state,
+            #[cfg(feature = "test-support")]
+            Some(WindowEntry::Virtual(virtual_window)) => {
+                virtual_window.title_double_clicks += 1;
+                return TitleAction::ToggleMaximize;
+            }
+            _ => return TitleAction::Nothing,
         };
         let action = crate::platform::material::title_double_click();
         match action {

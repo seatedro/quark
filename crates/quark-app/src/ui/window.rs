@@ -3,6 +3,8 @@
 //! The app, its messages, signals, theme, and key bindings are the
 //! adapter's and shared by every window.
 
+use std::time::Duration;
+
 use quark::Rect;
 use quark::hit::HitId;
 use quark::scene::Scene;
@@ -81,8 +83,42 @@ pub(crate) struct WindowUiState {
     pub(super) spare_ime_targets: Vec<ImeTarget>,
     /// Last frame's scrollbar track buffer, reused by the next frame.
     pub(super) spare_tooltip_regions: Vec<TooltipRegion>,
+    /// The last press on window drag chrome, to tell a double-click.
+    pub(super) title_press: TitlePress,
     #[cfg(feature = "devtools")]
     pub(super) devtools: quark_ui::inspector::Devtools,
+}
+
+/// Presses on app-drawn title chrome, told apart into drags and the
+/// double-clicks that zoom or minimize the window.
+#[derive(Debug, Default)]
+pub(super) struct TitlePress {
+    last: Option<(Duration, (f32, f32))>,
+}
+
+impl TitlePress {
+    /// The longest gap between a double-click's presses: the default on
+    /// macOS, Windows, and GNOME.
+    const INTERVAL: Duration = Duration::from_millis(500);
+    /// How far apart a double-click's presses may be, in points.
+    const SLOP: f32 = 4.0;
+
+    /// A press at `at` and time `now`: whether it completes a double-click.
+    /// The press after a double-click starts over.
+    pub(super) fn press(&mut self, now: Duration, at: (f32, f32)) -> bool {
+        let double = self.last.is_some_and(|(then, (x, y))| {
+            now.saturating_sub(then) <= Self::INTERVAL
+                && (x - at.0).abs() <= Self::SLOP
+                && (y - at.1).abs() <= Self::SLOP
+        });
+        self.last = (!double).then_some((now, at));
+        double
+    }
+
+    /// A press elsewhere: the next press on the chrome is a first one.
+    pub(super) fn reset(&mut self) {
+        self.last = None;
+    }
 }
 
 impl WindowUiState {
@@ -114,6 +150,7 @@ impl WindowUiState {
             spare_text_areas: Vec::new(),
             spare_ime_targets: Vec::new(),
             spare_tooltip_regions: Vec::new(),
+            title_press: TitlePress::default(),
             #[cfg(feature = "devtools")]
             devtools: quark_ui::inspector::Devtools::from_env(),
         }

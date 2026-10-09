@@ -51,6 +51,8 @@ pub(crate) struct VirtualWindow {
     pub(crate) surface: SurfaceState,
     /// Window drags started on it ([`EventContext::start_window_drag`]).
     pub(crate) window_drags: u32,
+    /// Title bar double-clicks on it ([`EventContext::title_double_click`]).
+    pub(crate) title_double_clicks: u32,
     /// Times frames were requested for, in ms since launch, sorted and
     /// deduplicated. One frame serves every request due by then, as the
     /// real frame clock does. A vector so a frame that schedules the next
@@ -80,6 +82,7 @@ impl VirtualWindow {
             min_size: None,
             surface: SurfaceState::headless(Default::default(), Default::default()),
             window_drags: 0,
+            title_double_clicks: 0,
             frames: Vec::new(),
             last_frame_ms: None,
             frames_drawn: 0,

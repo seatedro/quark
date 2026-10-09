@@ -816,6 +816,19 @@ impl<U: UiApp> UiWindow<'_, U> {
         &self.ui.open(self.window).title
     }
 
+    /// How many native window moves were started on the window
+    /// ([`crate::EventContext::start_window_drag`]), as from app-drawn
+    /// title chrome.
+    pub fn window_drags(&self) -> u32 {
+        self.ui.open(self.window).window_drags
+    }
+
+    /// How many title bar double-click actions were asked of the window
+    /// ([`crate::EventContext::title_double_click`]).
+    pub fn title_double_clicks(&self) -> u32 {
+        self.ui.open(self.window).title_double_clicks
+    }
+
     /// Draw a frame of this window now, whether or not one was asked for,
     /// then run until idle; see [`UiTestHarness::frame`].
     pub fn frame(&mut self) -> &Scene {

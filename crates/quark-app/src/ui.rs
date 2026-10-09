@@ -1065,7 +1065,28 @@ impl<U: UiApp> UiAdapter<U> {
         if win.focus != before {
             redraw(Redraw::Focus, self.win_handle, cx);
         }
+        // A press nothing else took, on app-drawn title chrome, moves the
+        // window natively; it must start now, while the press is current.
+        let unclaimed = delivery.node.is_none() && delivery.actions.is_empty();
+        if unclaimed && win.router.window_drag_at(x, y) {
+            self.chrome_pressed((x, y), cx);
+        } else {
+            win.title_press.reset();
+        }
         self.deliver(delivery, cx);
+    }
+
+    /// A press on window drag chrome: the platform's title double-click
+    /// action when it completes one, else a native window move.
+    fn chrome_pressed(&mut self, at: (f32, f32), cx: &mut EventContext) {
+        let Some(window) = self.win_handle.or(cx.window_handle()) else {
+            return;
+        };
+        if self.win.title_press.press(cx.elapsed(), at) {
+            cx.title_double_click(window);
+        } else if let Err(error) = cx.start_window_drag(window) {
+            tracing::debug!("no window drag from the title chrome: {error}");
+        }
     }
 
     /// Apply `command` to the text field `target`, passing any copied text
@@ -2603,6 +2624,81 @@ mod tests {
             let after = ui.app().field.cursor();
             assert_eq!(after > before, grows, "{name}: cursor {before} -> {after}");
         }
+    }
+
+    /// A 40 point title bar that moves the window, with a Save button at
+    /// its start.
+    struct TitleBarApp {
+        saved: u32,
+    }
+
+    impl UiApp for TitleBarApp {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            div()
+                .w(400.0)
+                .h(40.0)
+                .flex_row()
+                .window_drag_region()
+                .child(
+                    div()
+                        .w(80.0)
+                        .h(40.0)
+                        .accessibility_role(Role::Button)
+                        .accessibility_label("Save")
+                        .on_click(Msg::Save),
+                )
+                .into_any()
+        }
+
+        fn update(&mut self, Msg::Save: Msg, _cx: &mut UiContext) {
+            self.saved += 1;
+        }
+    }
+
+    // Catches app-drawn title chrome that does not move the window, a
+    // button in it that moves the window instead of clicking, and a
+    // double-click that only starts another drag.
+    #[test]
+    fn title_chrome_moves_the_window_and_double_clicks_but_its_buttons_click() {
+        let mut ui = UiTestHarness::new(TitleBarApp { saved: 0 }, (400.0, 300.0), 1.0);
+        let main = ui.main_window();
+        let counts = |ui: &mut UiTestHarness<TitleBarApp>| {
+            let window = ui.window(main);
+            (window.window_drags(), window.title_double_clicks())
+        };
+
+        ui.click((200.0, 20.0));
+        assert_eq!(counts(&mut ui), (1, 0), "blank chrome moves the window");
+
+        ui.advance(1_000);
+        ui.click((40.0, 20.0));
+        assert_eq!(ui.app().saved, 1, "the button clicks");
+        assert_eq!(
+            counts(&mut ui),
+            (1, 0),
+            "the button does not move the window"
+        );
+
+        ui.advance(1_000);
+        ui.click((200.0, 20.0));
+        ui.advance(100);
+        ui.click((201.0, 20.0));
+        assert_eq!(
+            counts(&mut ui),
+            (2, 1),
+            "the second press is the title action"
+        );
+
+        ui.advance(1_000);
+        ui.click((200.0, 200.0));
+        assert_eq!(
+            counts(&mut ui),
+            (2, 1),
+            "content below the chrome does nothing"
+        );
     }
 
     /// The published text field as assistive tech sees it, without its id.
