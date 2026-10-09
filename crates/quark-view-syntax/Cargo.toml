@@ -22,3 +22,6 @@ syn = { version = "2", features = ["full"] }
 # tracks source locations; quark-macros leaves it off.
 locations = ["proc-macro2/span-locations"]
 
+[dev-dependencies]
+# The source boundary tests read byte ranges.
+quark-view-syntax = { path = ".", features = ["locations"] }
