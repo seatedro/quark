@@ -97,6 +97,13 @@ On a `div`:
   stop. A clickable div with a stable id (`id`, `test_id`,
   `accessibility_id`) is a Tab stop too. `trap_focus(true)` keeps Tab
   inside a modal's focus scope.
+- The focus ring is 2 points wide (`Sz::FOCUS_RING_W`) and drawn outside
+  the element, `focus_ring_offset(gap)` points further out; checkboxes,
+  switches, and radio rows use a 2-point gap (`Sz::FOCUS_RING_GAP`). A
+  container that clips, scrolling ones included, cuts off the ring of a
+  control at its edge. Pad the container's content by the ring's reach,
+  or draw the ring just inside with `focus_ring_offset(-Sz::FOCUS_RING_W)`
+  for an element that fills a clipping parent, as dock tabs do.
 - `tooltip(text)` shows a tooltip on hover.
 - `id`, `key`, and `test_id` give the div a stable identity. Keys keep
   identity when siblings reorder; animations, transitions, and inspector
@@ -120,6 +127,63 @@ quark_app::run(adapter, options)
 ```
 
 `with_themes(light, dark)` keeps following the desktop with your pair.
+
+`Theme::components` (`ComponentMetrics`) sizes components for the whole
+app: heights, radii, padding, gaps, font and icon sizes, and shadows for
+buttons, selects and their options, popovers, tooltips, toasts, modals,
+skeletons, and form fields. Each value is in points at 100% zoom, and
+components multiply it by `ThemeMetrics::ui_scale()` once, as they do
+their own defaults, so a recipe can ask for 13-point control text while
+`ui_font_size` stays at the 16-point zoom anchor. Do not pass scaled
+values. `None` keeps the component's default, and `theme::scaled_or`
+applies the same rule in an app's own components.
+
+## Colors and blending
+
+The renderer draws into an sRGB surface, so the GPU blends in linear
+light; browsers blend the encoded values. Opaque colors look the same in
+both, translucent ones do not:
+
+- Black at a CSS alpha darkens less. A scrim or shadow from a CSS design
+  matches at alpha `1 - (1 - a)^2.2`: CSS 12% black is about 25% (62 of
+  255), and 50% is about 78% (200).
+- A light color at a low alpha over a dark surface comes out much
+  brighter than its alpha suggests, so a translucent tint that is subtle
+  in a browser is loud on a dark canvas. Mix tints opaque instead, in
+  sRGB as CSS `color-mix` does. The Workbench's helper, from
+  [recipes.rs](../../examples/workbench/src/design/recipes.rs):
+
+  ```rust
+  pub fn tint(base: Color, color: Color, amount: f32) -> Color {
+      base.lerp(color.with_alpha(255), amount).with_alpha(255)
+  }
+  ```
+
+- Black shadows barely show on a near-black background at any alpha. In
+  dark themes, give raised surfaces (menus, popovers, cards) a hairline
+  border lighter than the canvas so they stand apart.
+
+`theme::contrast_ratio` composites a translucent foreground the way the
+renderer does. A per-window mode that blends as browsers do is planned.
+
+## Points and pixels
+
+Element geometry and scene coordinates are logical points. The window's
+scale factor, physical pixels per point (`ElementContext::scale_factor`,
+`cx.frame.scale_factor()` in a view), applies when the scene is drawn; app
+code needs it only where pixels matter, such as measuring text with
+`TextQuery::scale_factor`. It is separate from the app's zoom,
+`theme.metrics.ui_scale()` (set with `Theme::with_ui_scale`), which
+components, `svg_icon`, and `raster_image` multiply their sizes by.
+
+SVG icons rasterize at the window's device pixels and stay sharp at any
+scale factor. Raster images are drawn into their bounds and filtered, so
+ship them at 2x and size the element in points:
+`animated_image(&image).size(w, h)` takes points, and without `size` it
+uses the pixel size as points, which shows an @2x image twice as large.
+In the block document, `MarkdownDocument::hint_image_size(src, w, h)`
+gives an image's size in points; pixels that are an exact whole multiple
+of it (`DecodedImage::density`) show at the hinted size.
 
 ## Transitions and animation
 
