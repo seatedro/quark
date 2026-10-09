@@ -216,6 +216,8 @@ fn compact_separator_height(m: &Metrics) -> f32 {
 /// accessible description, whatever the colors.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DiffColorOverrides {
+    /// The view's background behind unchanged lines.
+    pub surface: Option<Color>,
     /// Code text without a syntax color, and file header titles.
     pub text: Option<Color>,
     /// Background of added and removed lines, gutter included.
@@ -345,7 +347,7 @@ impl DiffColors {
         }
         let gutter_text = pick(o.gutter_text, c.gutter_text);
         Self {
-            surface: c.editor_surface,
+            surface: pick(o.surface, c.editor_surface),
             empty_side: pick(o.empty_side, c.background),
             hatch: pick(o.hatch, c.border_variant),
             text,
