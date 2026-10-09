@@ -704,11 +704,11 @@ pub(super) fn measure_mono_char_width(text: &mut TextSystem, font_size: f32) -> 
     let Ok(layout) = text.layout(&params) else {
         return 8.0;
     };
-    let advances = &layout.glyphs().advance;
-    if advances.is_empty() {
+    let glyphs = layout.glyphs();
+    if glyphs.is_empty() {
         return 8.0;
     }
-    advances.iter().sum::<f32>() / advances.len() as f32
+    glyphs.iter().map(|g| g.advance).sum::<f32>() / glyphs.len() as f32
 }
 
 pub(super) fn glyphon_color(color: Color) -> GlyphonColor {
@@ -740,12 +740,12 @@ mod tests {
 
     /// Lowest and highest x of the glyphs whose bytes fall in `range` on `line`.
     fn glyph_span(layout: &TextLayout, line: usize, range: std::ops::Range<usize>) -> (f32, f32) {
-        let g = layout.glyphs();
-        (0..g.len())
-            .filter(|&i| g.line[i] as usize == line)
-            .filter(|&i| range.contains(&(g.byte_start[i] as usize)))
-            .fold((f32::MAX, f32::MIN), |(lo, hi), i| {
-                (lo.min(g.x[i]), hi.max(g.x[i] + g.advance[i]))
+        layout
+            .glyph_iter()
+            .filter(|g| g.line as usize == line)
+            .filter(|g| range.contains(&(g.byte_start as usize)))
+            .fold((f32::MAX, f32::MIN), |(lo, hi), g| {
+                (lo.min(g.x), hi.max(g.x + g.advance))
             })
     }
 
@@ -984,8 +984,9 @@ mod tests {
             };
             let params = TextParams::new("italic", TextStyle::new(14.0)).spans(vec![span]);
             let layout = system.layout(&params).expect("layout");
-            let flags = &layout.glyphs().flags;
-            flags.iter().all(|f| f.contains(CacheKeyFlags::FAKE_ITALIC))
+            layout
+                .glyph_iter()
+                .all(|g| g.flags.contains(CacheKeyFlags::FAKE_ITALIC))
         }
 
         // Its own system: changing fonts on the shared one would race other

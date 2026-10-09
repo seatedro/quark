@@ -2346,7 +2346,7 @@ mod tests {
         let layout = layout_of(&shaped);
         assert!(origin.x >= 20.0 && origin.y >= 40.0, "{origin:?}");
         let logical_size = layout.style().font_size;
-        assert_eq!(layout.glyphs().font_size[0], logical_size * 2.0);
+        assert_eq!(layout.glyph(0).expect("glyph").font_size, logical_size * 2.0);
     }
 
     // Regression: the pointer stayed in physical pixels while hit regions
@@ -2386,8 +2386,8 @@ mod tests {
         let (before, after) = (layout_of(&before), layout_of(&after));
         assert_eq!((before.scale_factor(), after.scale_factor()), (1.0, 2.0));
         assert_eq!(
-            after.glyphs().font_size[0],
-            before.glyphs().font_size[0] * 2.0
+            after.glyph(0).expect("glyph").font_size,
+            before.glyph(0).expect("glyph").font_size * 2.0
         );
     }
 
