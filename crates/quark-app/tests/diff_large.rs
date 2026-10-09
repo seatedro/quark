@@ -108,6 +108,40 @@ fn wait(woke: &Receiver<()>, timeout: Duration) -> bool {
     woke.recv_timeout(timeout).is_ok()
 }
 
+/// How far from its column the new side's long line paints, scrolled
+/// to a fraction of a point short of its far end (hundreds of millions of
+/// points in), where f32 offsets would round by tens of points.
+fn far_end_error(ui: &mut UiTestHarness<Large>) -> f64 {
+    let end = ui
+        .app()
+        .diff
+        .frame()
+        .map_or(0.0, |f| f.content_w[Side::New as usize]);
+    let to = end - 2_000.5;
+    ui.app()
+        .diff
+        .horizontal_scroll(Side::New)
+        .set_offset(to, 0.0);
+    ui.frame();
+    ui.frame();
+    let Some(frame) = ui.app().diff.frame().cloned() else {
+        return f64::NAN;
+    };
+    let shown = frame.rows.iter().rev().find_map(|row| {
+        let line = row.paint.sides[Side::New as usize].as_ref()?;
+        Some((line.layout.text().to_owned(), line.window?.x))
+    });
+    let Some((text, x)) = shown else {
+        return f64::NAN;
+    };
+    let Some(run) = ui.painted_texts().into_iter().find(|t| t.text == text) else {
+        return f64::NAN;
+    };
+    let column = frame.columns.of(Side::New);
+    let expected = f64::from(column.text_x + frame.metrics.text_pad) + x - to;
+    (f64::from(run.bounds.x) - expected).abs()
+}
+
 #[test]
 #[ignore = "measurement, prints a report"]
 fn report_large_diffs() {
@@ -224,7 +258,8 @@ fn report_large_diffs() {
                     .horizontal_scroll(Side::New)
                     .set_offset(x, 0.0);
             });
-            format!(", sideways {a:.2?} avg / {w:.2?} worst")
+            let error = far_end_error(&mut ui);
+            format!(", sideways {a:.2?} avg / {w:.2?} worst, far end painted {error:.2} pt off")
         } else {
             String::new()
         };
