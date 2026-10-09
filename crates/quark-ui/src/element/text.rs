@@ -1,4 +1,9 @@
 use super::*;
+use quark_render::scene::{
+    AlphaMask, FadeEdge, StyledDecoration, TextBackdrop, TextDecorationStyle, TextFill,
+    TextRendering,
+};
+use quark_text::fonts::FontFamily;
 
 // ---------------------------------------------------------------------------
 // TextElement — text with intrinsic sizing
@@ -10,6 +15,19 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+}
+
+/// What one-line text does when its box is narrower than the text. The
+/// whole text stays the element's accessible label either way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextOverflow {
+    /// Cut at the box's edge.
+    Clip,
+    /// Shortened at a grapheme boundary to end in an ellipsis.
+    Ellipsis,
+    /// Faded out over this many points at the box's trailing edge,
+    /// showing whatever lies behind (a hovered row, a material).
+    Fade(f32),
 }
 
 /// How a [`TextElement`] breaks into lines.
@@ -27,15 +45,83 @@ pub enum WrapMode {
     Explicit(f32),
 }
 
+/// Height of one line box of text. Resolved to logical points before
+/// shaping, so measurement, paint, selection, and hit testing all use the
+/// same line boxes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineHeight {
+    /// A multiple of the font size.
+    Relative(f32),
+    /// Logical points, whatever the font size.
+    Points(f32),
+}
+
+impl LineHeight {
+    /// Line height of [`text`]: 1.5 times the font size.
+    pub const TEXT: Self = Self::Relative(1.5);
+    /// Line height of selectable text, rich text, and documents: 1.35 times
+    /// the font size.
+    pub const PARAGRAPH: Self = Self::Relative(1.35);
+
+    /// Whether the value is finite and positive. Builders ignore other
+    /// values and keep the line height they had.
+    pub fn is_valid(self) -> bool {
+        let value = match self {
+            Self::Relative(factor) => factor,
+            Self::Points(points) => points,
+        };
+        value.is_finite() && value > 0.0
+    }
+
+    /// `self` when valid, else `fallback`.
+    pub fn valid_or(self, fallback: Self) -> Self {
+        if self.is_valid() { self } else { fallback }
+    }
+
+    /// The line box height in logical points for text of `font_size`.
+    pub fn resolve(self, font_size: f32) -> f32 {
+        match self {
+            Self::Relative(factor) => font_size * factor,
+            Self::Points(points) => points,
+        }
+    }
+
+    /// The line height of text `factor` times as large: a fixed height
+    /// grows with it, a relative one already does. Headings scale the body
+    /// line height this way.
+    pub fn scaled(self, factor: f32) -> Self {
+        match self {
+            Self::Relative(relative) => Self::Relative(relative),
+            Self::Points(points) => Self::Points(points * factor),
+        }
+    }
+}
+
+impl Default for LineHeight {
+    fn default() -> Self {
+        Self::PARAGRAPH
+    }
+}
+
 pub struct TextElement {
     content: String,
     font_size: f32,
-    line_height_factor: f32,
+    line_height: LineHeight,
     color: Option<Color>,
     font_kind: FontKind,
     font_weight: FontWeight,
+    /// A family in place of `font_kind`'s generic one.
+    family: Option<FontFamily>,
+    /// Extra advance after every glyph, in ems.
+    letter_spacing: f32,
+    underline: bool,
+    /// How the underline looks; `None` is solid in the text color.
+    underline_style: Option<TextDecorationStyle>,
+    strikethrough: bool,
+    paint: TextPaint,
     align: TextAlign,
-    truncate: bool,
+    /// One line that shrinks with its box, overflowing this way.
+    overflow: Option<TextOverflow>,
     wrap: WrapMode,
 }
 
@@ -43,12 +129,18 @@ pub fn text(content: impl Into<String>) -> TextElement {
     TextElement {
         content: content.into(),
         font_size: 0.0,
-        line_height_factor: 1.5,
+        line_height: LineHeight::TEXT,
         color: None,
         font_kind: FontKind::Ui,
         font_weight: FontWeight::Normal,
+        family: None,
+        letter_spacing: 0.0,
+        underline: false,
+        underline_style: None,
+        strikethrough: false,
+        paint: TextPaint::default(),
         align: TextAlign::Left,
-        truncate: false,
+        overflow: None,
         wrap: WrapMode::Auto,
     }
 }
@@ -84,8 +176,86 @@ impl TextElement {
         self
     }
 
-    pub fn line_height(mut self, factor: f32) -> Self {
-        self.line_height_factor = factor;
+    /// Line height as a multiple of the font size (1.5 by default).
+    pub fn line_height(self, factor: f32) -> Self {
+        self.line_height_of(LineHeight::Relative(factor))
+    }
+
+    /// Line height in logical points, whatever the font size.
+    pub fn line_height_points(self, points: f32) -> Self {
+        self.line_height_of(LineHeight::Points(points))
+    }
+
+    /// Line height as either kind; invalid values are ignored.
+    pub fn line_height_of(mut self, line_height: LineHeight) -> Self {
+        if line_height.is_valid() {
+            self.line_height = line_height;
+        }
+        self
+    }
+
+    pub fn weight(mut self, weight: FontWeight) -> Self {
+        self.font_weight = weight;
+        self
+    }
+
+    /// Draws in `family`: the system UI or monospace font, or a named one
+    /// from [`TextSystem::family_id`]. Wins over [`Self::mono`]; a family
+    /// the system lacks draws in the generic one.
+    pub fn font_family(mut self, family: FontFamily) -> Self {
+        self.family = Some(family);
+        self
+    }
+
+    /// Extra advance after every glyph, in ems (zero by default). Applies
+    /// to measurement, wrapping, and paint alike. Nonfinite values are
+    /// ignored.
+    pub fn letter_spacing(mut self, ems: f32) -> Self {
+        if ems.is_finite() {
+            self.letter_spacing = ems;
+        }
+        self
+    }
+
+    /// A solid line under the text, in its color.
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
+    /// A line under the text in `style`: dotted, dashed, or solid, with
+    /// its own thickness, offset, and color.
+    pub fn underline_style(mut self, style: TextDecorationStyle) -> Self {
+        self.underline = true;
+        self.underline_style = Some(style);
+        self
+    }
+
+    /// Fills the glyphs with `fill` (a gradient or a shimmer) in place of
+    /// the text color. A shimmer sweeps with the frame clock and stands
+    /// still under reduced motion. Never reshapes the text.
+    pub fn fill(mut self, fill: TextFill) -> Self {
+        self.paint.fill = Some(fill);
+        self
+    }
+
+    /// How glyph coverage blends; see [`TextRendering`]. The renderer's
+    /// default applies without it.
+    pub fn text_rendering(mut self, rendering: TextRendering) -> Self {
+        self.paint.rendering = Some(rendering);
+        self
+    }
+
+    /// The opaque color behind the text, which perceptual coverage needs;
+    /// see [`TextBackdrop`].
+    pub fn text_backdrop(mut self, backdrop: TextBackdrop) -> Self {
+        self.paint.backdrop = backdrop;
+        self
+    }
+
+    /// A solid line through the text, in its color.
+    pub fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
         self
     }
 
@@ -116,8 +286,14 @@ impl TextElement {
 
     /// One line that shrinks with an ellipsis when its box is narrower
     /// than the text. Truncated text does not wrap automatically.
-    pub fn truncate(mut self) -> Self {
-        self.truncate = true;
+    pub fn truncate(self) -> Self {
+        self.overflow(TextOverflow::Ellipsis)
+    }
+
+    /// One line that shrinks with its box and overflows it as `overflow`
+    /// says. Like [`Self::truncate`], it does not wrap automatically.
+    pub fn overflow(mut self, overflow: TextOverflow) -> Self {
+        self.overflow = Some(overflow);
         self
     }
 
@@ -147,17 +323,39 @@ impl TextElement {
     /// The wrap mode in effect: truncation keeps text on one line.
     fn wrap_mode(&self) -> WrapMode {
         match self.wrap {
-            WrapMode::Auto if self.truncate => WrapMode::NoWrap,
+            WrapMode::Auto if self.overflow.is_some() => WrapMode::NoWrap,
             mode => mode,
         }
     }
 
     fn query<'s>(&self, content: &'s str, font_size: f32, wrap: Option<f32>) -> TextQuery<'s> {
-        let style = TextStyle::new(font_size)
+        let mut style = TextStyle::new(font_size)
             .kind(self.font_kind)
             .weight(self.font_weight)
-            .line_height(font_size * self.line_height_factor);
+            .letter_spacing(self.letter_spacing)
+            .line_height(self.line_height.resolve(font_size));
+        if let Some(family) = self.family {
+            style = style.font_family(family);
+        }
         TextQuery::new(content, style).wrap_width(wrap)
+    }
+
+    /// The decorations to paint over `len` bytes of text in `color`. A
+    /// plain [`Self::underline`] takes the text color.
+    fn decorations(&self, len: usize, color: Color) -> Vec<StyledDecoration> {
+        let underline = self.underline.then(|| StyledDecoration {
+            range: 0..len,
+            kind: TextDecorationKind::Underline,
+            style: self
+                .underline_style
+                .unwrap_or_else(|| TextDecorationStyle::solid(color)),
+        });
+        let strike = self.strikethrough.then(|| StyledDecoration {
+            range: 0..len,
+            kind: TextDecorationKind::Strikethrough,
+            style: TextDecorationStyle::solid(color),
+        });
+        underline.into_iter().chain(strike).collect()
     }
 
     fn resolve_font_size(&self, theme: &Theme) -> f32 {
@@ -191,7 +389,7 @@ impl Element for TextElement {
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
         let font_size = self.resolve_font_size(cx.theme);
-        let line_height = font_size * self.line_height_factor;
+        let line_height = self.line_height.resolve(font_size);
         let wrap = self.wrap_mode();
         let explicit = match wrap {
             WrapMode::Explicit(width) => Some(width),
@@ -215,7 +413,7 @@ impl Element for TextElement {
                 // Unwrapped text shrinks only when `.truncate()` is set;
                 // otherwise it holds its natural width so it isn't crushed
                 // next to flex_shrink:0 siblings like SvgIcon.
-                let shrink = if self.truncate { 1.0 } else { 0.0 };
+                let shrink = if self.overflow.is_some() { 1.0 } else { 0.0 };
                 engine.request_layout(
                     taffy::Style {
                         size: taffy::Size {
@@ -269,6 +467,14 @@ impl Element for TextElement {
 
         let wrap = self.wrap_mode();
         let mut wrapped = false;
+        let overflows =
+            wrap == WrapMode::NoWrap && bounds.width > 0.0 && natural_width > bounds.width;
+        // Clipped or faded: the painted line keeps the whole text.
+        let cut = match self.overflow {
+            Some(TextOverflow::Clip) if overflows => Some(None),
+            Some(TextOverflow::Fade(length)) if overflows => Some(Some(length)),
+            _ => None,
+        };
         match wrap {
             // Shaped where measurement wrapped at the width layout
             // resolved, which the last measure query may not have been (it
@@ -282,18 +488,10 @@ impl Element for TextElement {
                     wrapped = true;
                 }
             }
-            WrapMode::NoWrap
-                if self.truncate && bounds.width > 0.0 && natural_width > bounds.width =>
-            {
-                let (truncated, truncated_width) = truncate_text_to_fit(
-                    cx,
-                    &content,
-                    font_size,
-                    self.font_kind,
-                    self.font_weight,
-                    natural_width,
-                    bounds.width,
-                );
+            WrapMode::NoWrap if self.overflow == Some(TextOverflow::Ellipsis) && overflows => {
+                let style = self.query("", font_size, None).style;
+                let (truncated, truncated_width) =
+                    truncate_text_to_fit_styled(cx, &content, style, natural_width, bounds.width);
                 layout = cx.layout_text_query(&self.query(&truncated, font_size, None));
                 content = truncated;
                 text_width = truncated_width;
@@ -308,15 +506,45 @@ impl Element for TextElement {
             TextAlign::Right => (bounds.width - text_width).max(0.0),
         };
 
+        if let Some(length) = cut {
+            if let Some(length) = length {
+                scene.push_mask(
+                    bounds,
+                    AlphaMask::fade_edge(bounds, FadeEdge::Right, length),
+                );
+            }
+            scene.clip(bounds);
+            text_width = bounds.width;
+        }
         if let Some(layout) = layout {
-            scene.text(TextPrimitive {
-                rect: Rect {
-                    x: bounds.x + x_offset,
-                    ..bounds
-                },
-                layout: ShapedText::new(layout),
-                color,
-            });
+            let rect = Rect {
+                x: bounds.x + x_offset,
+                ..bounds
+            };
+            if self.paint.is_plain() {
+                scene.text(TextPrimitive {
+                    rect,
+                    layout: ShapedText::new(layout.clone()),
+                    color,
+                });
+            } else {
+                let fill = self.paint.fill_now(color, cx);
+                scene.styled_text(self.paint.primitive(
+                    rect,
+                    ShapedText::new(layout.clone()),
+                    fill,
+                ));
+            }
+            if self.underline || self.strikethrough {
+                let decorations = self.decorations(layout.text().len(), color);
+                paint_decorations(scene, &layout, (rect.x, rect.y), &decorations);
+            }
+        }
+        if let Some(length) = cut {
+            scene.pop_clip();
+            if length.is_some() {
+                scene.pop_isolate();
+            }
         }
 
         if !content.is_empty()
@@ -428,6 +656,8 @@ mod tests {
     /// 14pt selectable text.
     const SELECTABLE_LINE: f32 = 14.0 * 1.35;
     const SWATCH: Color = Color::rgba(10, 20, 30, 255);
+    /// Text color whose solid quads are decorations.
+    const INK: Color = Color::rgba(200, 100, 50, 255);
 
     /// A window's text state and element cache, kept across frames.
     struct Window {
@@ -437,6 +667,8 @@ mod tests {
         signals: SignalStore,
         theme: Theme,
         cache: ElementCache,
+        /// The frame clock elements read.
+        clock_ms: u64,
     }
 
     /// What a frame painted: each text's (plain or rich) rect and lines,
@@ -446,6 +678,15 @@ mod tests {
     struct Frame {
         texts: Vec<(Rect, Vec<String>)>,
         swatch: Option<Rect>,
+        /// Solid quads in the `INK` color: text decorations.
+        decorations: Vec<Rect>,
+        /// Family of each text's first glyph, in paint order.
+        families: Vec<String>,
+        /// Fill of each styled text, in paint order.
+        fills: Vec<TextFill>,
+        /// Masked groups and clips, in paint order.
+        masks: Vec<(Rect, AlphaMask)>,
+        clips: Vec<Rect>,
     }
 
     impl Frame {
@@ -468,11 +709,13 @@ mod tests {
                 signals: SignalStore::new(),
                 theme: Theme::default_dark(),
                 cache: ElementCache::new(),
+                clock_ms: 0,
             }
         }
 
         fn paint(&mut self, root: impl IntoAnyElement) -> Frame {
             self.layouts.begin_frame();
+            let fonts = self.text.font_snapshot();
             let mut cx = ElementContext::new(
                 &self.theme,
                 self.scale,
@@ -483,16 +726,40 @@ mod tests {
             )
             .with_accessibility(false)
             .with_element_cache(&mut self.cache);
+            cx.clock_ms = self.clock_ms;
             let mut scene = Scene::default();
             render_element(&mut root.into_any(), &mut scene, &mut cx, 400.0, 300.0);
             let mut frame = Frame {
                 texts: Vec::new(),
                 swatch: None,
+                decorations: Vec::new(),
+                families: Vec::new(),
+                fills: Vec::new(),
+                masks: Vec::new(),
+                clips: Vec::new(),
             };
             for primitive in &scene.primitives {
                 let (rect, shaped) = match primitive {
+                    quark_render::Primitive::Rect(r) if r.color == INK => {
+                        frame.decorations.push(r.rect);
+                        continue;
+                    }
                     quark_render::Primitive::TextRun(run) => (run.rect, &run.layout),
                     quark_render::Primitive::RichTextRun(run) => (run.rect, &run.layout),
+                    quark_render::Primitive::IsolateStart(group) => {
+                        frame
+                            .masks
+                            .extend(group.mask.map(|mask| (group.bounds, mask)));
+                        continue;
+                    }
+                    quark_render::Primitive::ClipStart(clip) => {
+                        frame.clips.push(clip.rect);
+                        continue;
+                    }
+                    quark_render::Primitive::StyledText(run) => {
+                        frame.fills.push(run.fill);
+                        (run.rect, &run.layout)
+                    }
                     quark_render::Primitive::RoundedRect(r) if r.color == SWATCH => {
                         frame.swatch = Some(r.rect);
                         continue;
@@ -505,6 +772,12 @@ mod tests {
                     .map(|line| layout.text()[line.byte_range].to_owned())
                     .collect();
                 frame.texts.push((rect, lines));
+                let family = layout
+                    .glyph(0)
+                    .and_then(|g| fonts.database().face(g.font_id))
+                    .and_then(|face| face.families.first())
+                    .map_or_else(String::new, |(name, _)| name.clone());
+                frame.families.push(family);
             }
             frame
         }
@@ -751,5 +1024,153 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    // Catches a point line height that paint and measurement disagree on:
+    // wrapped 14-point lines at 22 points stack 22 apart, and the box
+    // below starts after the last one.
+    #[test]
+    fn point_line_height_spaces_wrapped_lines() {
+        let frame = Window::new().paint(column(120.0, sentence().line_height_points(22.0)));
+        let (rect, lines) = frame.text();
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(
+            frame.swatch.expect("swatch").y,
+            rect.y + lines.len() as f32 * 22.0
+        );
+    }
+
+    // Catches tracking that paint applies but measurement ignores: 0.1 em
+    // at 14 points adds 1.4 points after each of ten glyphs, and a
+    // sentence that fits its column untracked wraps once tracked.
+    #[test]
+    fn letter_spacing_widens_and_rewraps_text() {
+        let mut window = Window::new();
+        let word = "abcdefghij";
+        let plain = window.width_of(word);
+        let tracked = window.paint(text(word).size(14.0).letter_spacing(0.1).no_wrap());
+        assert_eq!(tracked.text().0.width, (plain + 14.0).ceil());
+
+        let natural = window.width_of(SENTENCE).ceil();
+        let untracked = window.paint(column(natural, sentence()));
+        let wrapped = window.paint(column(natural, sentence().letter_spacing(0.1)));
+        assert_eq!(untracked.text().1.len(), 1);
+        assert!(wrapped.text().1.len() > 1, "{wrapped:?}");
+        assert_word_lines(&wrapped.text().1);
+    }
+
+    // Catches an underline drawn once across the box instead of per line:
+    // wrapped underlined text gets one quad under each painted line, below
+    // its baseline and inside its line box.
+    #[test]
+    fn an_underline_follows_each_wrapped_line() {
+        let frame = Window::new().paint(column(120.0, sentence().color(INK).underline()));
+        let (rect, lines) = frame.text();
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(frame.decorations.len(), lines.len(), "{frame:?}");
+        for (i, quad) in frame.decorations.iter().enumerate() {
+            let top = rect.y + i as f32 * LINE;
+            // The baseline of 14-point text sits past the middle of its
+            // 21-point line box.
+            assert!(
+                quad.y > top + LINE / 2.0 && quad.bottom() <= top + LINE,
+                "line {i}: {quad:?}"
+            );
+            assert!(quad.width > 0.0 && quad.x >= rect.x, "line {i}: {quad:?}");
+        }
+    }
+
+    // Catches a family that stops at the builder: a named family reaches
+    // the painted glyphs of plain and selectable text alike.
+    #[test]
+    fn a_named_family_reaches_the_painted_glyphs() {
+        let mut window = Window::new();
+        let named = FontFamily::Named(window.text.family_id("JetBrains Mono"));
+        let frame = window.paint(
+            div()
+                .flex_col()
+                .child(text("Typography").size(14.0))
+                .child(text("Typography").size(14.0).font_family(named))
+                .child(selectable_text("Typography").size(14.0).font_family(named)),
+        );
+        assert_eq!(frame.families[1..], ["JetBrains Mono", "JetBrains Mono"]);
+        assert_ne!(frame.families[0], "JetBrains Mono");
+    }
+
+    // Catches a shimmer frozen at its authored phase, or animating under
+    // reduced motion: the painted phase follows the frame clock, and
+    // reduced motion paints the static base color.
+    #[test]
+    fn a_shimmer_follows_the_clock_and_rests_under_reduced_motion() {
+        use quark_render::scene::ShimmerSpec;
+        let spec = ShimmerSpec::new(SWATCH, INK).duration_ms(1000);
+        let shimmer = || text("Thinking").size(14.0).fill(TextFill::Shimmer(spec));
+        let mut window = Window::new();
+        window.clock_ms = 2250;
+        let moving = window.paint(shimmer());
+        window.theme.reduced_motion = true;
+        let still = window.paint(shimmer());
+        assert_eq!(
+            (moving.fills, still.fills),
+            (
+                vec![TextFill::Shimmer(spec.phase(0.25))],
+                vec![TextFill::Solid(SWATCH)]
+            )
+        );
+    }
+
+    // Catches tracked text truncated by its untracked width: the ellipsis
+    // line, tracked as painted, still fits the box.
+    #[test]
+    fn truncation_measures_with_letter_spacing() {
+        let mut window = Window::new();
+        let row = div()
+            .w(150.0)
+            .flex_row()
+            .child(sentence().letter_spacing(0.2).truncate());
+        let frame = window.paint(row);
+        let (rect, lines) = frame.text();
+        assert!(lines[0].ends_with('\u{2026}'), "{lines:?}");
+        let params = TextParams::new(
+            lines[0].as_str(),
+            TextStyle::new(14.0).line_height(LINE).letter_spacing(0.2),
+        );
+        let tracked = window
+            .layouts
+            .layout(&mut window.text, &params)
+            .expect("layout");
+        assert!(
+            tracked.size().0 <= rect.width,
+            "{} > {}",
+            tracked.size().0,
+            rect.width
+        );
+    }
+
+    // Catches a fade that shortens the text or leaks past the box: the
+    // whole sentence stays on its line, clipped to the box, under a mask
+    // opaque at the start and clear at the trailing edge, half way 12
+    // points into a 24-point fade.
+    #[test]
+    fn a_fading_overflow_keeps_the_text_and_fades_its_trailing_edge() {
+        let frame = Window::new().paint(
+            div()
+                .w(100.0)
+                .flex_row()
+                .child(sentence().overflow(TextOverflow::Fade(24.0))),
+        );
+        let (rect, lines) = frame.text();
+        let [(bounds, mask)] = frame.masks[..] else {
+            panic!("{frame:?}");
+        };
+        let y = rect.y + 5.0;
+        assert_eq!(
+            (lines.as_slice(), bounds, frame.clips.as_slice()),
+            (&[SENTENCE.to_owned()][..], *rect, &[*rect][..])
+        );
+        assert_eq!(
+            [rect.x, rect.right() - 12.0, rect.right()].map(|x| mask.alpha_at([x, y])),
+            [1.0, 0.5, 0.0]
+        );
     }
 }

@@ -11,11 +11,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use quark_render::scene::Rect;
-use quark_render::{FontKind, FontWeight};
 use quark_text::{TextLayout, TextParams};
 
 use super::{Block, BlockContent, BlockStyle, SpanTone, next_revision};
-use crate::element::{SelectableText, StyledSpan};
+use crate::element::{ParagraphStyle, SelectableText, StyledSpan};
 
 /// Horizontal padding inside a cell, in multiples of the font size.
 const CELL_PAD_X: f32 = 0.7;
@@ -132,12 +131,14 @@ pub struct TableMetrics {
 }
 
 impl TableMetrics {
-    /// Height of a cell's text line at `font_size`.
+    /// Height of a cell's text line at `font_size` and the default line
+    /// height.
     pub fn line_height(font_size: f32) -> f32 {
         SelectableText::line_height_for(font_size)
     }
 
-    fn new(font_size: f32, columns: usize, natural: impl Fn(usize) -> f32) -> Self {
+    fn new(paragraph: &ParagraphStyle, columns: usize, natural: impl Fn(usize) -> f32) -> Self {
+        let font_size = paragraph.font_size;
         let pad = (
             (font_size * CELL_PAD_X).round(),
             (font_size * CELL_PAD_Y).round(),
@@ -154,7 +155,7 @@ impl TableMetrics {
         }
         Self {
             edges: edges.into(),
-            row_height: (Self::line_height(font_size) + pad.1 * 2.0).ceil(),
+            row_height: (paragraph.line_height_points() + pad.1 * 2.0).ceil(),
             pad,
         }
     }
@@ -179,16 +180,11 @@ impl TableMetrics {
     }
 }
 
-/// The params a cell's text is shaped with: one unwrapped line in the UI
-/// font. The element lays the same text out at its column's width.
-pub(super) fn cell_params(spans: &[StyledSpan], font_size: f32) -> TextParams {
-    SelectableText::layout_params(
-        spans,
-        font_size,
-        FontKind::Ui,
-        FontWeight::Normal,
-        f32::INFINITY,
-    )
+/// The params a cell's text is shaped with: one unwrapped line in the
+/// body paragraph style. The element lays the same text out at its
+/// column's width.
+pub(super) fn cell_params(spans: &[StyledSpan], paragraph: &ParagraphStyle) -> TextParams {
+    SelectableText::paragraph_params(spans, paragraph, f32::INFINITY)
 }
 
 /// A table block's measured grid, for hit-testing and highlights.
@@ -200,10 +196,10 @@ pub struct TableGeometry {
 }
 
 impl TableGeometry {
-    /// Lays out `table` at `font_size`, shaping each cell with `layout`.
+    /// Lays out `table` in `paragraph`, shaping each cell with `layout`.
     pub(super) fn new(
         table: &TableCells,
-        font_size: f32,
+        paragraph: &ParagraphStyle,
         mut layout: impl FnMut(TextParams) -> Option<Arc<TextLayout>>,
     ) -> Self {
         let cells: Vec<(Range<usize>, Option<Arc<TextLayout>>)> = table
@@ -212,7 +208,7 @@ impl TableGeometry {
             .map(|cell| {
                 (
                     cell.range.clone(),
-                    layout(cell_params(&cell.spans, font_size)),
+                    layout(cell_params(&cell.spans, paragraph)),
                 )
             })
             .collect();
@@ -225,7 +221,7 @@ impl TableGeometry {
                 .fold(0.0, f32::max)
         };
         Self {
-            metrics: TableMetrics::new(font_size, table.columns, natural),
+            metrics: TableMetrics::new(paragraph, table.columns, natural),
             columns: table.columns,
             cells,
         }

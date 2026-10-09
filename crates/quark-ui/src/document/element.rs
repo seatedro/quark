@@ -29,9 +29,9 @@ use crate::design::Alpha;
 use crate::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, CodeBlock, CodeHeader, DragHandler,
     DragReleaseResult, DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId,
-    LinkClicked, LinkHandler, ScrollActionBuilder, ScrollAxes, ScrollHandle, ScrollSink,
-    ScrollTarget, ScrollbarInput, ScrollbarVisibility, Scrollbars, SelectableText, StyledSpan,
-    cached, code_block_joined, div, inputs_hash, selectable_rich_text, svg_icon, text,
+    LineHeight, LinkClicked, LinkHandler, ParagraphStyle, ScrollActionBuilder, ScrollAxes,
+    ScrollHandle, ScrollSink, ScrollTarget, ScrollbarInput, ScrollbarVisibility, Scrollbars,
+    StyledSpan, cached, code_block_joined, div, inputs_hash, selectable_rich_text, svg_icon, text,
 };
 use crate::icons::lucide;
 use crate::style::Styled;
@@ -186,6 +186,8 @@ struct RowBuild {
     decorator: Option<Decorator>,
     header: Rect,
     font_size: f32,
+    /// Body line height; see [`DocumentStyle::line_height`](super::DocumentStyle::line_height).
+    line_height: LineHeight,
     colors: RowColors,
     blocks: Vec<BlockBuild>,
     /// Adornments with their bands relative to the row, in flow order.
@@ -424,6 +426,10 @@ impl<G: BlockGeometry> Document<G> {
         (row.index, row_count, theme_hash).hash(&mut hasher);
         (self.size.0.to_bits(), row.height.to_bits()).hash(&mut hasher);
         self.style.font_size.to_bits().hash(&mut hasher);
+        match self.style.line_height {
+            LineHeight::Relative(factor) => (0u8, factor.to_bits()).hash(&mut hasher),
+            LineHeight::Points(points) => (1u8, points.to_bits()).hash(&mut hasher),
+        }
         chrome.hash(&mut hasher);
         // Another decorator draws other chrome.
         self.decorator
@@ -540,6 +546,7 @@ impl<G: BlockGeometry> Document<G> {
             chrome: chrome.cloned().unwrap_or_default(),
             decorator: self.decorator.clone(),
             font_size: style.font_size,
+            line_height: style.line_height,
             colors,
             blocks: built,
             adornments: self
@@ -593,6 +600,7 @@ impl RowElement {
                 BlockPaint {
                     rect: b.rect,
                     base_font_size: build.font_size,
+                    line_height: build.line_height,
                     selection: b.selection,
                     links,
                     controls,
@@ -786,6 +794,8 @@ impl IntoAnyElement for RowElement {
 struct BlockPaint<'a> {
     rect: Rect,
     base_font_size: f32,
+    /// Body line height, before the block's scale.
+    line_height: LineHeight,
     selection: Option<(usize, usize)>,
     links: &'a LinkHandler,
     controls: &'a CodeControls,
@@ -806,6 +816,7 @@ fn block_elements(
     let BlockPaint {
         rect,
         base_font_size,
+        line_height,
         selection,
         links,
         controls,
@@ -815,6 +826,10 @@ fn block_elements(
     } = paint;
     let style = &block.style;
     let font_size = base_font_size * style.scale;
+    // As `DocumentStyle::block_line_height`, which the measurer uses.
+    let line_height = line_height
+        .valid_or(LineHeight::PARAGRAPH)
+        .scaled(style.scale);
     let inset = style.inset(base_font_size);
     let muted = colors.muted;
     for level in 0..style.quote_depth {
@@ -834,7 +849,7 @@ fn block_elements(
     }
     if let Some(marker) = &style.marker {
         let gutter = LIST_STEP * base_font_size;
-        let line = SelectableText::line_height_for(font_size);
+        let line = line_height.resolve(font_size);
         let cell = Rect {
             x: rect.x + inset - gutter,
             y: rect.y,
@@ -867,6 +882,7 @@ fn block_elements(
             let mut el = selectable_rich_text(spans)
                 .width(content.width)
                 .size(font_size)
+                .line_height(line_height)
                 .weight(style.weight)
                 .source(block.key.0)
                 .selection(selection)
@@ -941,12 +957,16 @@ fn block_elements(
                     element: selectable_rich_text(vec![StyledSpan::plain(&*block.text)])
                         .width(content.width)
                         .size(font_size)
+                        .line_height(line_height)
                         .source(block.key.0)
                         .selection(selection)
                         .into_any(),
                 });
             };
-            let grid = TableGrid::new(block.key, cells, table, font_size, selection, colors, links);
+            let paragraph = ParagraphStyle::new(font_size).line_height(line_height);
+            let grid = TableGrid::new(
+                block.key, cells, table, &paragraph, selection, colors, links,
+            );
             match scroll {
                 // Wider than the column: scrolls sideways like wide code.
                 Some((handle, _)) => div()
@@ -968,6 +988,7 @@ fn block_elements(
         } => selectable_rich_text(failed_image_spans(&block.text))
             .width(content.width)
             .size(font_size)
+            .line_height(line_height)
             .weight(style.weight)
             .source(block.key.0)
             .selection(selection)
@@ -1027,7 +1048,7 @@ impl TableGrid {
         key: BlockKey,
         table: &TableCells,
         build: &TableBuild,
-        font_size: f32,
+        paragraph: &ParagraphStyle,
         selection: Option<(usize, usize)>,
         colors: &RowColors,
         links: &LinkHandler,
@@ -1044,7 +1065,7 @@ impl TableGrid {
                     x: rect.x + pad_x,
                     y: rect.y + pad_y,
                     width: (rect.width - pad_x * 2.0).max(1.0),
-                    height: TableMetrics::line_height(font_size).ceil(),
+                    height: paragraph.line_height_points().ceil(),
                 };
                 // The selection in the cell's own bytes.
                 let local = selection.and_then(|(lo, hi)| {
@@ -1055,7 +1076,8 @@ impl TableGrid {
                     rect: text,
                     element: selectable_rich_text(spans.clone())
                         .width(text.width)
-                        .size(font_size)
+                        .size(paragraph.font_size)
+                        .line_height(paragraph.line_height)
                         .source(key.0)
                         .selection(local)
                         .link_handler(links.clone())

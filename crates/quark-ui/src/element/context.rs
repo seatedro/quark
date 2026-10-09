@@ -45,10 +45,17 @@ pub struct ElementContext<'a> {
     pub geometry: LayoutSnapshot,
     /// Drop targets added so far; becomes the frame's [`DropTargets`].
     pub drop_targets: DropTargets,
+    /// Native material regions painted so far; see
+    /// [`Self::add_material_region`].
+    pub material_regions: Vec<MaterialRegionRequest>,
     /// Inspector recording, style overrides, and phase timings.
     #[cfg(feature = "devtools")]
     pub devtools: crate::inspector::FrameProbe,
-    hovered: Vec<HitId>,
+    pub(super) hovered: Vec<HitId>,
+    /// Interaction groups and slots of this frame.
+    pub(super) interaction: super::interaction::InteractionFrame,
+    /// First hit row of each cache boundary recording now, innermost last.
+    hit_recording_starts: Vec<usize>,
     /// Intersections of the clips pushed so far; the last one is current.
     clip_stack: Vec<ClipEntry>,
     /// The window's element cache, when the host keeps one.
@@ -126,9 +133,12 @@ impl<'a> ElementContext<'a> {
                 geometry
             },
             drop_targets: DropTargets::default(),
+            material_regions: Vec::new(),
             #[cfg(feature = "devtools")]
             devtools: Default::default(),
             hovered: Vec::new(),
+            interaction: Default::default(),
+            hit_recording_starts: Vec::new(),
             clip_stack: Vec::new(),
             cache: None,
             hit_recordings: 0,
@@ -182,12 +192,18 @@ impl<'a> ElementContext<'a> {
         font_kind: FontKind,
         font_weight: FontWeight,
     ) -> f32 {
-        if text.is_empty() {
-            return 0.0;
-        }
         let style = TextStyle::new(font_size)
             .kind(font_kind)
             .weight(font_weight);
+        self.measure_text_width_styled(text, style)
+    }
+
+    /// [`Self::measure_text_width`] in a full `style`: tracking, family,
+    /// and weight measured exactly as text painted in it.
+    pub fn measure_text_width_styled(&mut self, text: &str, style: TextStyle) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
         self.layout_text_query(&TextQuery::new(text, style))
             .map_or(0.0, |layout| layout.size().0.ceil())
     }
@@ -278,6 +294,8 @@ impl<'a> ElementContext<'a> {
         frame.semantic.clear();
         frame.geometry.reset();
         frame.drop_targets.clear();
+        frame.material_regions.clear();
+        self.material_regions = frame.material_regions;
         self.hit_table = frame.hits;
         self.handlers = frame.handlers;
         self.semantic = frame.semantic;
@@ -694,6 +712,17 @@ impl<'a> ElementContext<'a> {
         self.volatile_reads += 1;
     }
 
+    /// `rect` (layout coordinates) in window coordinates within the current
+    /// clips, when no rotation or scale applies; `None` under one or when
+    /// the clips hide it.
+    pub(super) fn window_rect_if_untransformed(&self, rect: Rect) -> Option<Rect> {
+        let space = self.current_paint_space();
+        if !space.transform.is_identity() {
+            return None;
+        }
+        rect.intersection(space.window_clip)
+    }
+
     /// Push a geometry row clipped to `clip` (layout coordinates) within
     /// the current clips: how a replayed cache boundary republishes its
     /// rows under the current transform.
@@ -768,6 +797,7 @@ impl<'a> ElementContext<'a> {
             self.local_hit_base = self.hit_table.len();
         }
         self.hit_recordings += 1;
+        self.hit_recording_starts.push(self.hit_table.len());
         self.clip_stack.push(ClipEntry {
             effective: self.current_clip(),
             local: quark::hit::UNCLIPPED,
@@ -787,12 +817,46 @@ impl<'a> ElementContext<'a> {
     pub(super) fn end_hit_recording(&mut self, start: usize) {
         self.clip_stack.pop();
         self.hit_recordings -= 1;
+        self.hit_recording_starts.pop();
         if self.hit_recordings > 0 {
             let outer = self.current_local_clip();
             for clip in &mut self.local_hit_clips[start - self.local_hit_base..] {
                 *clip = intersect(*clip, outer);
             }
         }
+    }
+
+    /// Where this frame's prepaint output stands, for
+    /// [`Self::rewind_prepaint`].
+    pub(super) fn prepaint_mark(&self) -> PrepaintMark {
+        PrepaintMark {
+            hits: self.hit_table.len(),
+            local_hits: self.local_hit_ids.len(),
+            scroll_watches: self.scroll_watches.len(),
+            interaction: self.interaction.mark(),
+        }
+    }
+
+    /// Forget what prepaint registered since `mark` (hit rows, and the
+    /// recordings and groups of the elements that inserted them), so a
+    /// subtree can be prepainted again at another offset.
+    pub(super) fn rewind_prepaint(&mut self, mark: PrepaintMark) {
+        self.hit_table.truncate(mark.hits);
+        self.local_hit_ids.truncate(mark.local_hits);
+        self.local_hit_clips.truncate(mark.local_hits);
+        self.scroll_watches.truncate(mark.scroll_watches);
+        self.interaction.rewind(mark.interaction);
+    }
+
+    /// First hit row of the innermost cache boundary recording now.
+    pub(super) fn innermost_hit_recording(&self) -> Option<usize> {
+        self.hit_recording_starts.last().copied()
+    }
+
+    /// Make what is being painted depend on more than a cache boundary's
+    /// inputs, so the boundary does not keep it.
+    pub(super) fn mark_volatile(&mut self) {
+        self.volatile_reads += 1;
     }
 
     /// Note a scroll handle prepainted now, when a cache boundary records.
@@ -816,6 +880,10 @@ impl<'a> ElementContext<'a> {
     }
 
     pub fn run_hit_test(&mut self) {
+        if self.has_interaction_slots() {
+            self.resolve_interaction();
+            return;
+        }
         match self.mouse_position {
             Some((x, y)) => self.hit_table.stack_at_into(x, y, &mut self.hovered),
             None => self.hovered.clear(),
@@ -832,8 +900,18 @@ impl<'a> ElementContext<'a> {
             semantic: std::mem::take(&mut self.semantic),
             geometry: std::mem::take(&mut self.geometry),
             drop_targets: std::mem::take(&mut self.drop_targets),
+            material_regions: std::mem::take(&mut self.material_regions),
         }
     }
+}
+
+/// See [`ElementContext::prepaint_mark`].
+#[derive(Clone, Copy)]
+pub(super) struct PrepaintMark {
+    hits: usize,
+    local_hits: usize,
+    scroll_watches: usize,
+    interaction: (usize, usize),
 }
 
 /// One level of the paint space stack.
@@ -882,6 +960,8 @@ pub(super) struct FrameBuffers {
     accessibility_text_hidden_stack: Vec<bool>,
     semantic_parent_stack: Vec<usize>,
     hovered: Vec<HitId>,
+    interaction: super::interaction::InteractionFrame,
+    hit_recording_starts: Vec<usize>,
     local_hit_clips: Vec<Rect>,
     local_hit_ids: Vec<HitId>,
     paint_spaces: Vec<PaintSpace>,
@@ -911,6 +991,11 @@ macro_rules! swap_buffers {
             &mut $cx.semantic_parent_stack,
         );
         std::mem::swap(&mut $buffers.hovered, &mut $cx.hovered);
+        std::mem::swap(&mut $buffers.interaction, &mut $cx.interaction);
+        std::mem::swap(
+            &mut $buffers.hit_recording_starts,
+            &mut $cx.hit_recording_starts,
+        );
         std::mem::swap(&mut $buffers.local_hit_clips, &mut $cx.local_hit_clips);
         std::mem::swap(&mut $buffers.local_hit_ids, &mut $cx.local_hit_ids);
         std::mem::swap(&mut $buffers.paint_spaces, &mut $cx.paint_spaces);
@@ -952,6 +1037,8 @@ impl ElementContext<'_> {
         buffers.accessibility_text_hidden_stack.clear();
         buffers.semantic_parent_stack.clear();
         buffers.hovered.clear();
+        buffers.interaction.clear();
+        buffers.hit_recording_starts.clear();
         buffers.local_hit_clips.clear();
         buffers.local_hit_ids.clear();
         buffers.paint_spaces.clear();

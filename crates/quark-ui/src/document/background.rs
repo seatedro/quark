@@ -84,6 +84,7 @@ type MeasureRow = fn(&mut TextMeasurer<'_>, &RowLayout, &RowSnapshot) -> f32;
 
 fn measure_row(measurer: &mut TextMeasurer<'_>, layout: &RowLayout, row: &RowSnapshot) -> f32 {
     let width = block_width(&layout.style, layout.width);
+    measurer.apply_style(&layout.style);
     lay_out_row(
         &layout.style,
         row.header,
@@ -714,6 +715,35 @@ mod tests {
             );
             assert_eq!(ui.heights(), expected, "{name}");
         }
+    }
+
+    // Catches the worker measuring at another line height than the UI
+    // thread, and a line height change moving the rows on screen: after
+    // the change every height, on screen or off, is the one the UI thread
+    // measures, and the row at the top keeps its place.
+    #[test]
+    fn a_line_height_change_remeasures_every_row_without_moving_the_anchor() {
+        use crate::element::LineHeight;
+        let mut ui = Ui::new(history(60), (420.0, 300.0));
+        let max = ui.md.document().max_scroll_offset();
+        ui.scroll_to((max * 0.5).round());
+        ui.md.finish_measures();
+        ui.frame();
+        let (before, anchor) = (ui.heights(), ui.anchor());
+
+        let style = ui
+            .md
+            .document()
+            .style()
+            .with_line_height(LineHeight::Points(22.0));
+        ui.md.document_mut().set_style(style);
+        ui.frame();
+        ui.md.finish_measures();
+        ui.frame();
+
+        let expected = ui.synchronous_heights();
+        assert_ne!(before, expected, "the line height changes the heights");
+        assert_eq!((ui.heights(), ui.anchor()), (expected, anchor));
     }
 
     proptest! {
