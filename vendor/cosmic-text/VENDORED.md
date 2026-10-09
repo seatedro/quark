@@ -210,3 +210,12 @@ allocations they remove):
   Rasterization ignores it; it travels with the glyph to the vendored
   glyphon, which blends its edges as Ghostty's `linear-corrected` does.
   quark-text sets it for `TextStyle::linear_correction`.
+- Rendering without a font system (`src/swash.rs`): `SwashFace` holds a
+  face's shared bytes and swash key, and `SwashCache::render_face_into`
+  draws a glyph of it into a reused `SwashImage` from explicit size,
+  hinting, variation values, offset, embolden, skew, and color sources.
+  quark-render's swash rasterizer draws the exact font instance quark-text
+  prepared (every axis, not only `wght`) through it, with no
+  `&mut FontSystem`; its differential test checks the bitmaps equal
+  `get_image_uncached`'s. Upstream could take it as a lower-level entry
+  beside `get_image`.
