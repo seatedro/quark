@@ -346,6 +346,7 @@ impl TextRuns {
             if std::mem::take(pending) {
                 renderer.upload(device, queue);
             }
+            renderer.upload_fills(queue);
         }
         for viewport in viewports {
             viewport.set_draw_offsets(queue, &self.offsets);
@@ -535,7 +536,7 @@ impl Renderer {
                 crate::text::run_fills(rich_texts, &mut runs.fills);
                 let renderer = &mut runs.renderers[slot];
                 renderer.set_target_format(&self.atlas, &self.device, format);
-                renderer.set_fills(&self.queue, &runs.fills);
+                renderer.set_fills(&runs.fills);
                 index += 1;
             }
         }

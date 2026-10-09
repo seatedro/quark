@@ -193,11 +193,13 @@ fn fill_color(index: u32, p: vec2<f32>, encoded: u32) -> vec4<f32> {
         let half_width = max(fill.params.y, 1.0e-3);
         t = 1.0 - smoothstep(0.0, half_width, abs(along - fill.params.z));
     }
-    let c = mix(fill.color_a, fill.color_b, t);
+    // Interpolate in the target's space.
     if encoded == 1u {
-        return c;
+        return mix(fill.color_a, fill.color_b, t);
     }
-    return vec4<f32>(decode(c.rgb), c.a);
+    let a = vec4<f32>(decode(fill.color_a.rgb), fill.color_a.a);
+    let b = vec4<f32>(decode(fill.color_b.rgb), fill.color_b.a);
+    return mix(a, b, t);
 }
 
 @fragment

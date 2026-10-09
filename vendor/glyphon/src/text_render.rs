@@ -44,6 +44,7 @@ pub struct TextRenderer {
     multisample: MultisampleState,
     depth_stencil: Option<DepthStencilState>,
     fills: Vec<GlyphFill>,
+    fills_dirty: bool,
     fills_buffer: Buffer,
     fills_bind_group: wgpu::BindGroup,
     glyph_vertices: Vec<GlyphToRender>,
@@ -82,6 +83,7 @@ impl TextRenderer {
             multisample,
             depth_stencil,
             fills: Vec::new(),
+            fills_dirty: false,
             fills_buffer,
             fills_bind_group,
             glyph_vertices: Vec::new(),
@@ -111,21 +113,27 @@ impl TextRenderer {
     // quark patch: per-renderer glyph fills.
     /// Sets the fills glyphs prepared with a nonzero
     /// [`PositionedGlyph::fill`] read; at most [`MAX_GLYPH_FILLS`] are kept.
-    /// Writes the buffer only when a fill changed, so a moving shimmer
-    /// costs one small write a frame and no preparing.
-    pub fn set_fills(&mut self, queue: &Queue, fills: &[GlyphFill]) {
+    /// [`Self::upload_fills`] copies them to the GPU when they changed, so
+    /// a moving shimmer costs one small write a frame and no preparing.
+    pub fn set_fills(&mut self, fills: &[GlyphFill]) {
         let fills = &fills[..fills.len().min(MAX_GLYPH_FILLS)];
-        if self.fills == fills {
-            return;
+        if self.fills != fills {
+            self.fills.clear();
+            self.fills.extend_from_slice(fills);
+            self.fills_dirty = true;
         }
-        self.fills.clear();
-        self.fills.extend_from_slice(fills);
-        if fills.is_empty() {
-            return;
+    }
+
+    /// Writes the fills set since the last upload.
+    pub fn upload_fills(&mut self, queue: &Queue) {
+        if std::mem::take(&mut self.fills_dirty) && !self.fills.is_empty() {
+            queue.write_buffer(&self.fills_buffer, 0, unsafe {
+                slice::from_raw_parts(
+                    self.fills.as_ptr() as *const u8,
+                    std::mem::size_of_val(&self.fills[..]),
+                )
+            });
         }
-        queue.write_buffer(&self.fills_buffer, 0, unsafe {
-            slice::from_raw_parts(fills.as_ptr() as *const u8, std::mem::size_of_val(fills))
-        });
     }
 
     /// Prepares all of the provided text areas for rendering.
