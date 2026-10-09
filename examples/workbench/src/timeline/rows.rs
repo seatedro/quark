@@ -41,12 +41,13 @@ pub const HEADER: AdornmentKey = AdornmentKey(1);
 pub const CURSOR: AdornmentKey = AdornmentKey(2);
 pub const ACTIONS: AdornmentKey = AdornmentKey(3);
 
-/// The transcript's geometry: 14-point prose, 16-point insets, and 24
-/// points between messages (12 above and below each row).
+/// The transcript's geometry: 14-point prose on 22-point lines, 16-point
+/// insets, and 24 points between messages (12 above and below each row).
 pub fn document_style() -> DocumentStyle {
-    let (font_size, _) = tokens::TYPE_PROSE;
+    let (font_size, line_height) = tokens::TYPE_PROSE;
     DocumentStyle {
         font_size,
+        line_height: quark_ui::element::LineHeight::Points(line_height),
         pad_x: tokens::SPACE_16,
         pad_y: tokens::SPACE_12,
         block_gap: 10.0,

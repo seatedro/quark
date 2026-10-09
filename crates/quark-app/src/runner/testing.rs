@@ -46,6 +46,17 @@ pub(crate) struct VirtualWindow {
     /// None by default.
     pub(crate) client_offset: DesktopPoint,
     pub(crate) monitor: Option<MonitorInfo>,
+    /// The smallest content size in logical points, from the options.
+    pub(crate) min_size: Option<(f64, f64)>,
+    pub(crate) surface: SurfaceState,
+    /// Window drags started on it ([`EventContext::start_window_drag`]).
+    pub(crate) window_drags: u32,
+    /// Title bar double-clicks on it ([`EventContext::title_double_click`]).
+    pub(crate) title_double_clicks: u32,
+    /// The renderer options its window options asked for.
+    pub(crate) renderer_options: quark_render::renderer::RendererOptions,
+    /// The material regions its frames last asked for.
+    pub(crate) material_regions: Vec<crate::platform::material::MaterialRect>,
     /// Times frames were requested for, in ms since launch, sorted and
     /// deduplicated. One frame serves every request due by then, as the
     /// real frame clock does. A vector so a frame that schedules the next
@@ -72,6 +83,12 @@ impl VirtualWindow {
             position,
             client_offset: (0.0, 0.0),
             monitor: None,
+            min_size: None,
+            surface: SurfaceState::headless(Default::default(), Default::default()),
+            window_drags: 0,
+            title_double_clicks: 0,
+            material_regions: Vec::new(),
+            renderer_options: Default::default(),
             frames: Vec::new(),
             last_frame_ms: None,
             frames_drawn: 0,
@@ -599,6 +616,12 @@ impl HeadlessRunner {
                 // On the main window's display, as a window placed by the
                 // window manager would be.
                 opened.monitor = self.window(self.main).and_then(|w| w.monitor.clone());
+                opened.min_size = options.min_size;
+                opened.surface = SurfaceState::headless(options.background, options.corners);
+                opened.renderer_options = quark_render::renderer::RendererOptions {
+                    compositing: options.compositing,
+                    text_rendering: options.text_rendering,
+                };
                 if let Some(entry) = self.windows.get_mut(window) {
                     *entry = WindowEntry::Virtual(Box::new(opened));
                 }
@@ -731,9 +754,13 @@ impl HeadlessRunner {
             ime: FrameIme::default(),
             accessibility_active: self.accessibility_active,
             last_render: Default::default(),
+            material_regions: None,
         };
         let scene = app.frame(&mut cx);
         let ime = cx.ime;
+        if let Some(regions) = cx.material_regions.take() {
+            virtual_window.material_regions = regions;
+        }
         virtual_window.ime.apply(ime);
         self.text.end_frame();
         virtual_window.frames_drawn += 1;

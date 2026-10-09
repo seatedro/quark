@@ -1197,17 +1197,14 @@ impl TerminalState {
                 .faces()
                 .any(|face| face.families.iter().any(|(family, _)| family == name))
         });
-        if let Some(family) = family {
-            text.fill_family_weights(family);
-        }
         let style = TextStyle::new(self.style.font_size)
             .kind(FontKind::Mono)
             .family(family);
         let params = TextParams::new("0000000000", style).scale_factor(scale);
         let layout = layouts.layout(text, &params).ok()?;
         let advance = f64::from(layout.size().0 / 10.0 * scale);
-        let glyphs = layout.glyphs();
-        let (&id, &weight) = glyphs.font_id.first().zip(glyphs.font_weight.first())?;
+        let first = layout.glyph(0)?;
+        let (id, weight) = (first.font_id, first.font_weight);
         let font = text.raster_font_system().get_font(id, weight)?;
         let px_per_em = f64::from(self.style.font_size * scale);
         let face = FaceMetrics::from_font(&font, px_per_em, advance);

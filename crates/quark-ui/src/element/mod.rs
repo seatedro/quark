@@ -28,9 +28,7 @@ use quark::{
     UiEventPhase, UiEventResult, UiKey, UiNodeId,
 };
 use quark_render::Scene;
-use quark_render::scene::{
-    BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect, Transform2D,
-};
+use quark_render::scene::{BlurRegionPrimitive, Rect, Transform2D};
 
 pub use taffy::NodeId as LayoutId;
 
@@ -38,6 +36,7 @@ use crate::style::{ElementStyle, StyleOverride, Styled, apply_override};
 use crate::theme::Color;
 use quark_render::{BorderPrimitive, FontWeight, RoundedRectPrimitive, ShadowPrimitive};
 
+pub use quark::scene::{AlphaMask, FadeEdge};
 pub use quark::style::{
     BackgroundEffect, color_tint, linear_gradient, noise_gradient, radial_gradient, shimmer,
     vignette,
@@ -62,7 +61,9 @@ mod drop_targets;
 mod hit;
 mod image;
 mod ime;
+mod interaction;
 mod layout;
+mod material;
 mod measure;
 mod pool;
 mod render;
@@ -91,7 +92,9 @@ pub use drop_targets::*;
 pub use hit::*;
 pub use image::*;
 pub use ime::ImeTarget;
+pub use interaction::*;
 pub use layout::*;
+pub use material::*;
 use measure::*;
 pub use render::*;
 pub use router::*;

@@ -449,3 +449,78 @@ fn a_block_lays_out_into_storage_another_block_gave() {
     assert!(sites.is_empty(), "{sites:#?}");
     assert_eq!(shown.text(), "brisk eagle");
 }
+
+/// A sidebar row: a 13-point title and an 11-point age, each unique.
+fn sidebar_row(seed: usize) -> [Input; 2] {
+    let topics = ["sidebar", "review", "plan", "dock", "theme"];
+    let title = format!(
+        "Thread {seed}: tidy the {} layout",
+        topics[seed % topics.len()]
+    );
+    [
+        Input {
+            style: TextStyle::new(13.0),
+            ..ui(title)
+        },
+        Input {
+            style: TextStyle::new(11.0),
+            ..ui(format!("{}h ago", seed + 1))
+        },
+    ]
+}
+
+// Rows entering a fresh app's view lay out text no layout held before, so
+// the pool has nothing to refill (G14 in gap-fixes-design). Each such
+// layout allocates only what it keeps: its `Arc`, its source (an `Arc`
+// and the text), one glyph vector, its lines and runs, and cosmic-text's
+// buffer line (the vector holding it, its text, its line layout, and that
+// layout's glyphs); the rest is the cache's maps growing. Fonts are loaded
+// and their lookups warm. It was 33 per layout, and 8.4 KiB kept per
+// layout, when every glyph field was a vector of its own and each layout
+// kept the shaping it was laid out from (a vector per word); fewer
+// allocations must not come from keeping more.
+#[test]
+fn cold_layouts_allocate_only_what_they_keep() {
+    const PER_LAYOUT: u64 = 10;
+    const CACHE_GROWTH: u64 = 16;
+    const BYTES_PER_LAYOUT: usize = 5 << 10;
+    let mut system = fresh_system();
+    let warm = ui(format!("{PANGRAM} 0123456789 THE: QUICK BROWN FOX"));
+    system.layout(&warm.query().to_params()).expect("warm");
+    let mut cache = LayoutCache::new(240);
+    cache.begin_frame();
+    // The first rows warm the text system's shaping scratch; the cache
+    // pools nothing, since nothing is evicted.
+    for input in (0..4).flat_map(sidebar_row) {
+        cache
+            .layout_query(&mut system, &input.query())
+            .expect("warm");
+    }
+    let rows: Vec<Input> = (4..24).flat_map(sidebar_row).collect();
+    let mut held = Vec::with_capacity(rows.len());
+    let ((), allocations) = count(|| {
+        for input in &rows {
+            held.push(
+                cache
+                    .layout_query(&mut system, &input.query())
+                    .expect("layout"),
+            );
+        }
+    });
+    let budget = CACHE_GROWTH + PER_LAYOUT * rows.len() as u64;
+    assert!(
+        allocations <= budget,
+        "{allocations} allocations for {} cold layouts (budget {budget})",
+        rows.len()
+    );
+    for (layout, input) in held.iter().zip(&rows) {
+        assert_eq!(layout.text(), input.text);
+        assert_eq!(layout.verify_integrity(), Ok(()));
+    }
+    let memory = cache.memory();
+    assert!(
+        memory.pinned_bytes <= BYTES_PER_LAYOUT * held.len(),
+        "{} bytes kept per layout",
+        memory.pinned_bytes / held.len()
+    );
+}

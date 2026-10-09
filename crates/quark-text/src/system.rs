@@ -4,9 +4,10 @@ use cosmic_text::{FontSystem, fontdb};
 
 use crate::epoch::{FontEpoch, TextSystemId};
 use crate::fonts::{
-    FontSettings, QuarkFallback, configure_generic_families, emoji_family, vendored_font_sources,
+    FamilyId, FamilyNames, FontRole, FontSettings, FontSnapshot, GenericFonts, QuarkFallback,
+    ResolvedFamily, configure_generic_families, emoji_family, vendored_font_sources,
 };
-use crate::layout::{LayoutScratch, SyntheticItalic, TextError, TextLayout, TextParams};
+use crate::layout::{LayoutScratch, ShapeEnv, SyntheticItalic, TextError, TextLayout, TextParams};
 
 /// Owns the cosmic-text [`FontSystem`]: vendored fonts, system fonts (for
 /// fallback), and the generic sans/mono family mapping.
@@ -26,6 +27,16 @@ pub struct TextSystem {
     vendored_only: bool,
     /// Fonts added by [`Self::load_font_data`], in order.
     loaded: Vec<FontData>,
+    /// Family names [`Self::family_id`] interned.
+    families: FamilyNames,
+    /// Where the system UI and monospace names resolve.
+    generics: GenericFonts,
+    /// What the settings' UI and monospace families resolved to.
+    resolved: [ResolvedFamily; 2],
+    /// The last [`Self::font_snapshot`], while the fonts are unchanged.
+    snapshot: Option<FontSnapshot>,
+    /// What [`Self::set_shape_plan_capacity`] set, for a reload to keep.
+    shape_plan_capacity: Option<usize>,
     scratch: LayoutScratch,
 }
 
@@ -58,20 +69,22 @@ pub struct TextSystemRecipe {
     settings: FontSettings,
     vendored_only: bool,
     loaded: Vec<FontData>,
+    families: FamilyNames,
+    /// The platform's answers for the generic families, so a twin resolves
+    /// them as the original did without asking again.
+    generics: GenericFonts,
 }
 
 impl TextSystemRecipe {
     pub fn build(&self) -> TextSystem {
-        let mut system = if self.vendored_only {
-            TextSystem::vendored_only(&self.settings)
-        } else {
-            TextSystem::with_settings(&self.settings)
-        };
+        let mut system =
+            TextSystem::build(&self.settings, self.generics.clone(), self.vendored_only);
         // Loaded one at a time as the original did, so families resolve
         // and fill in weights the same way.
         for font in &self.loaded {
             system.load_font_data(font.0.clone());
         }
+        system.families = self.families.clone();
         system
     }
 }
@@ -83,30 +96,33 @@ impl TextSystem {
         Self::with_settings(&FontSettings::default())
     }
 
+    /// [`crate::fonts::SYSTEM_UI`] and [`crate::fonts::UI_MONOSPACE`] in the
+    /// settings resolve through the platform's font API.
     pub fn with_settings(settings: &FontSettings) -> Self {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-        for source in vendored_font_sources() {
-            db.load_font_source(source);
-        }
-        let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned());
-        let font_system = font_system(locale, db, settings);
-        Self::from_parts(font_system, settings, false)
+        let locale = system_locale();
+        Self::build(settings, GenericFonts::Platform { locale }, false)
     }
 
     /// Loads only the vendored fonts, with a fixed locale, so shaping does
     /// not depend on the machine. Characters the vendored fonts lack shape as
-    /// `.notdef`. Tests and fuzzing use this.
+    /// `.notdef`, and the system UI and monospace names resolve to the
+    /// bundled families. Tests and fuzzing use this.
     pub fn vendored_only(settings: &FontSettings) -> Self {
+        Self::build(settings, GenericFonts::Bundled, true)
+    }
+
+    fn build(settings: &FontSettings, mut generics: GenericFonts, vendored_only: bool) -> Self {
         let mut db = fontdb::Database::new();
+        let locale = if vendored_only {
+            "en-US".to_owned()
+        } else {
+            db.load_system_fonts();
+            system_locale()
+        };
         for source in vendored_font_sources() {
             db.load_font_source(source);
         }
-        let font_system = font_system("en-US".to_owned(), db, settings);
-        Self::from_parts(font_system, settings, true)
-    }
-
-    fn from_parts(font_system: FontSystem, settings: &FontSettings, vendored_only: bool) -> Self {
+        let (font_system, resolved) = font_system(locale, db, settings, &mut generics);
         Self {
             synthetic_italic: SyntheticItalic::new(&font_system),
             emoji_family: emoji_family(font_system.db(), settings.bundled_fallback),
@@ -116,8 +132,20 @@ impl TextSystem {
             generation: 0,
             vendored_only,
             loaded: Vec::new(),
+            families: FamilyNames::new(),
+            generics,
+            resolved,
+            snapshot: None,
+            shape_plan_capacity: None,
             scratch: LayoutScratch::default(),
         }
+    }
+
+    /// A system with `generics` in place of the platform's answers, for
+    /// tests of generic resolution.
+    #[cfg(test)]
+    pub(crate) fn with_generics(settings: &FontSettings, generics: GenericFonts) -> Self {
+        Self::build(settings, generics, true)
     }
 
     /// How to build a system that shapes like this one, on another thread.
@@ -126,11 +154,53 @@ impl TextSystem {
             settings: self.settings.clone(),
             vendored_only: self.vendored_only,
             loaded: self.loaded.clone(),
+            families: self.families.clone(),
+            generics: self.generics.clone(),
         }
     }
 
     pub fn font_settings(&self) -> &FontSettings {
         &self.settings
+    }
+
+    /// What the settings' family for `role` resolved to: the family text
+    /// draws in, and why it is not the one asked for when it is not.
+    pub fn resolved_family(&self, role: FontRole) -> &ResolvedFamily {
+        match role {
+            FontRole::Ui => &self.resolved[0],
+            FontRole::Mono => &self.resolved[1],
+        }
+    }
+
+    /// The id of family `name`, for [`crate::fonts::FontFamily::Named`].
+    /// Interns the name on first use; later calls allocate nothing, and
+    /// [`Self::recipe`] carries the ids to systems built from it. A family
+    /// no face has draws in the text's generic family.
+    pub fn family_id(&mut self, name: &str) -> FamilyId {
+        self.families.intern(name)
+    }
+
+    /// The name of `id`, or `None` when another system interned it.
+    pub fn family_name(&self, id: FamilyId) -> Option<&str> {
+        self.families.name(id)
+    }
+
+    /// The fonts as they are now, for rasterizers on any thread. Copies
+    /// the font database's face list (not the face data) once per
+    /// [`Self::font_epoch`]; later calls share that copy.
+    pub fn font_snapshot(&mut self) -> FontSnapshot {
+        let epoch = self.font_epoch();
+        match &self.snapshot {
+            Some(snapshot) if snapshot.epoch == epoch => snapshot.clone(),
+            _ => {
+                let snapshot = FontSnapshot {
+                    epoch,
+                    database: Arc::new(self.font_system.db().clone()),
+                };
+                self.snapshot = Some(snapshot.clone());
+                snapshot
+            }
+        }
     }
 
     /// Changes the generic families. Advances [`Self::font_epoch`] so layout
@@ -145,9 +215,14 @@ impl TextSystem {
             // rebuild reuses the font database, so nothing is rescanned.
             let empty = FontSystem::new_with_locale_and_db(String::new(), fontdb::Database::new());
             let (locale, db) = std::mem::replace(&mut self.font_system, empty).into_locale_and_db();
-            self.font_system = font_system(locale, db, &settings);
+            (self.font_system, self.resolved) =
+                font_system(locale, db, &settings, &mut self.generics);
         } else {
-            configure_generic_families(self.font_system.db_mut(), &settings);
+            self.resolved = configure_generic_families(
+                self.font_system.db_mut(),
+                &settings,
+                &mut self.generics,
+            );
         }
         self.settings = settings;
         self.fonts_changed();
@@ -162,24 +237,16 @@ impl TextSystem {
         let db = self.font_system.db_mut();
         db.load_font_source(fontdb::Source::Binary(data.clone()));
         // The settings may name a family only this font has.
-        configure_generic_families(db, &self.settings);
+        self.resolved = configure_generic_families(db, &self.settings, &mut self.generics);
         self.loaded.push(FontData(data));
         self.fonts_changed();
     }
 
-    /// Makes `family` available at every weight quark asks for, as the UI
-    /// and monospace families are, for text that names it with
-    /// [`crate::TextStyle::family`]: a family with fewer faces (one
-    /// variable face, say) otherwise loses bold text to a fallback family.
-    /// Advances [`Self::font_epoch`] when it registers anything.
-    pub fn fill_family_weights(&mut self, family: &str) {
-        let db = self.font_system.db_mut();
-        let before = db.len();
-        crate::fonts::fill_weights(db, [family]);
-        if db.len() != before {
-            self.fonts_changed();
-        }
-    }
+    /// Does nothing. Text in a family with fewer weights than it asks for
+    /// (one variable face, say) used to fall back to another family unless
+    /// this registered the family at every weight; matching now takes the
+    /// family's face nearest the weight. Kept until callers drop it.
+    pub fn fill_family_weights(&mut self, _family: &str) {}
 
     /// Rederives what depends on the font database, and advances the
     /// generation so everything shaped before is shaped again.
@@ -187,6 +254,7 @@ impl TextSystem {
         self.synthetic_italic = SyntheticItalic::new(&self.font_system);
         self.emoji_family = emoji_family(self.font_system.db(), self.settings.bundled_fallback);
         self.scratch.text_faces.clear();
+        self.snapshot = None;
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -222,41 +290,72 @@ impl TextSystem {
     /// shaping, so changing this keeps the font epoch.
     pub fn set_shape_plan_capacity(&mut self, capacity: usize) {
         self.font_system.set_shape_plan_capacity(capacity);
+        self.shape_plan_capacity = Some(capacity);
+    }
+
+    /// Scans the installed fonts again and asks the platform again for the
+    /// system UI and monospace families, for an app the OS told that fonts
+    /// were installed, removed, or changed. Keeps loaded fonts, settings,
+    /// interned family ids, and the shape plan capacity; becomes a new
+    /// [`Self::font_epoch`], so
+    /// caches lay everything out again. Slow, like [`Self::new`]; a
+    /// [`Self::vendored_only`] system has nothing to rescan.
+    pub fn reload_system_fonts(&mut self) {
+        if self.vendored_only {
+            return;
+        }
+        let mut fresh = Self::with_settings(&self.settings);
+        for font in &self.loaded {
+            fresh.load_font_data(font.0.clone());
+        }
+        fresh.families = std::mem::take(&mut self.families);
+        if let Some(capacity) = self.shape_plan_capacity {
+            fresh.set_shape_plan_capacity(capacity);
+        }
+        *self = fresh;
     }
 
     /// Shapes and lays out text without caching. Prefer
     /// [`crate::LayoutCache::layout`] for per-frame use.
     pub fn layout(&mut self, params: &TextParams) -> Result<TextLayout, TextError> {
         profile_scope!("text_shape");
-        TextLayout::build(
-            &mut self.font_system,
-            &mut self.scratch,
-            params,
-            self.synthetic_italic,
-            self.emoji_family,
-            self.settings.ligatures,
-        )
+        let env = ShapeEnv {
+            synth: self.synthetic_italic,
+            emoji: self.emoji_family,
+            ligatures: self.settings.ligatures,
+            names: &self.families,
+        };
+        TextLayout::build(&mut self.font_system, &mut self.scratch, params, &env)
     }
 
     /// Shapes and lays out `layout`'s inputs again in its own storage; see
     /// [`TextLayout::rebuild`].
     pub(crate) fn rebuild(&mut self, layout: &mut TextLayout) {
         profile_scope!("text_shape");
-        layout.rebuild(
-            &mut self.font_system,
-            &mut self.scratch,
-            self.synthetic_italic,
-            self.emoji_family,
-            self.settings.ligatures,
-        );
+        let env = ShapeEnv {
+            synth: self.synthetic_italic,
+            emoji: self.emoji_family,
+            ligatures: self.settings.ligatures,
+            names: &self.families,
+        };
+        layout.rebuild(&mut self.font_system, &mut self.scratch, &env);
     }
 }
 
-fn font_system(locale: String, mut db: fontdb::Database, settings: &FontSettings) -> FontSystem {
-    configure_generic_families(&mut db, settings);
+fn system_locale() -> String {
+    sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned())
+}
+
+fn font_system(
+    locale: String,
+    mut db: fontdb::Database,
+    settings: &FontSettings,
+    generics: &mut GenericFonts,
+) -> (FontSystem, [ResolvedFamily; 2]) {
+    let resolved = configure_generic_families(&mut db, settings, generics);
     let fallback = QuarkFallback::new(settings.bundled_fallback, &locale);
-    fallback.fill_weights(&mut db);
-    FontSystem::new_with_locale_and_db_and_fallback(locale, db, fallback)
+    let font_system = FontSystem::new_with_locale_and_db_and_fallback(locale, db, fallback);
+    (font_system, resolved)
 }
 
 impl Default for TextSystem {
@@ -326,13 +425,35 @@ mod tests {
         assert_eq!(widths, [width(&mut inter); 2]);
     }
 
+    // A family named by an interned id draws in that family, in the system
+    // that interned it and in a worker built from its recipe, which must
+    // resolve the same ids; another system does not know the id and draws
+    // in the generic family.
+    #[test]
+    fn interned_family_draws_in_that_family_in_recipe_twins() {
+        let mut system = TextSystem::vendored_only(&FontSettings::default());
+        let id = system.family_id("JetBrains Mono");
+        let style = TextStyle::new(14.0).font_family(crate::fonts::FontFamily::Named(id));
+        let family = |system: &mut TextSystem| {
+            let layout = system
+                .layout(&TextParams::new("ok", style))
+                .expect("layout");
+            let glyph = layout.glyph(0).expect("glyph");
+            let face = system.font_system().db().face(glyph.font_id).expect("face");
+            face.families[0].0.clone()
+        };
+        let mut twin = system.recipe().build();
+        let mut other = TextSystem::vendored_only(&FontSettings::default());
+        let drawn = [family(&mut system), family(&mut twin), family(&mut other)];
+        assert_eq!(drawn, ["JetBrains Mono", "JetBrains Mono", "Geist"]);
+    }
+
     // Catches bold text in a family named by the style falling back to
     // another family: JetBrains Mono ships one variable face, registered
-    // at a single weight, which cosmic-text does not take for bold.
+    // at a single weight, which cosmic-text took only at that weight.
     #[test]
     fn bold_text_in_a_named_family_keeps_the_family() {
         let mut system = TextSystem::vendored_only(&FontSettings::default());
-        system.fill_family_weights("JetBrains Mono");
         let style = TextStyle::new(14.0)
             .family(Some("JetBrains Mono"))
             .weight(quark::FontWeight::Bold);
@@ -340,8 +461,8 @@ mod tests {
             .layout(&TextParams::new("bold", style))
             .expect("layout");
         let db = system.font_system().db();
-        for id in &layout.glyphs().font_id {
-            let family = &db.face(*id).expect("face").families[0].0;
+        for glyph in layout.glyphs() {
+            let family = &db.face(glyph.font_id).expect("face").families[0].0;
             assert_eq!(family, "JetBrains Mono");
         }
     }

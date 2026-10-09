@@ -79,6 +79,8 @@ pub(super) struct TextRuns {
     /// texts' places.
     moved_hashes: Vec<u64>,
     moved_lookup: HashMap<u64, usize, BuildHasherDefault<Passthrough>>,
+    /// Scratch for a run's glyph fills.
+    fills: Vec<glyphon::GlyphFill>,
 }
 
 /// The texts a renderer's vertices were prepared from.
@@ -115,11 +117,12 @@ impl RunMemo {
                 .iter()
                 .zip(texts)
                 .all(|(a, b)| a.primitive == b.primitive && a.clip == b.clip)
-            && self
-                .rich_texts
-                .iter()
-                .zip(rich_texts)
-                .all(|(a, b)| a.primitive == b.primitive && a.clip == b.clip && a.alpha == b.alpha)
+            && self.rich_texts.iter().zip(rich_texts).all(|(a, b)| {
+                a.primitive == b.primitive
+                    && a.clip == b.clip
+                    && a.alpha == b.alpha
+                    && a.paint.same_vertices(&b.paint)
+            })
     }
 
     /// How far `texts` and `rich_texts` moved, in whole pixels, when they
@@ -170,6 +173,10 @@ impl RunMemo {
                 && a.primitive.default_color == b.primitive.default_color
                 && a.primitive.span_colors == b.primitive.span_colors
                 && a.alpha == b.alpha
+                // Fills sit in target pixels, which a draw offset does not
+                // move.
+                && a.paint == b.paint
+                && b.paint.fill.is_none()
                 && moved(a.primitive.rect, b.primitive.rect)
                 && moved(a.clip, b.clip)
         });
@@ -339,6 +346,7 @@ impl TextRuns {
             if std::mem::take(pending) {
                 renderer.upload(device, queue);
             }
+            renderer.upload_fills(queue);
         }
         for viewport in viewports {
             viewport.set_draw_offsets(queue, &self.offsets);
@@ -513,6 +521,23 @@ impl Renderer {
                     }
                     index += 1;
                 }
+            }
+        }
+
+        // Every run draws to its target's format with its current fills,
+        // kept vertices included: a moving shimmer only rewrites its fills.
+        let mut index = 0;
+        for frame in frames {
+            let format = self.target_format(frame.encoded);
+            for run in &frame.batches.text_runs {
+                let runs = &mut self.text_runs;
+                let slot = runs.slots[index];
+                let (_, rich_texts) = run_items(frame, run);
+                crate::text::run_fills(rich_texts, &mut runs.fills);
+                let renderer = &mut runs.renderers[slot];
+                renderer.set_target_format(&self.atlas, &self.device, format);
+                renderer.set_fills(&runs.fills);
+                index += 1;
             }
         }
 

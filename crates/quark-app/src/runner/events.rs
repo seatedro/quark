@@ -57,6 +57,10 @@ pub enum AppEvent {
     /// The desktop's light or dark preference, once when it is first known
     /// and again whenever it changes. See [`EventContext::theme`].
     ThemeChanged(Theme),
+    /// What the window's background or corners resolved to changed
+    /// ([`EventContext::window_surface`]), for example because the user
+    /// turned on reduced transparency and a material fell back.
+    WindowSurfaceChanged(WindowHandle),
     /// A dialog from [`EventContext::file_dialog`] closed. `paths` is empty
     /// when the user cancelled.
     #[cfg(feature = "dialogs")]

@@ -1,4 +1,7 @@
 use super::*;
+use quark::scene::{TextRendering, UiCompositing};
+
+use crate::platform::material::{WindowBackground, WindowCorners};
 
 /// An application driven by [`run`]. Scene, size, and pointer coordinates
 /// are logical points; the runner scales each window's scene to physical
@@ -97,6 +100,18 @@ pub struct WindowOptions {
     /// Open maximized. A `persist_key` window restores its saved state
     /// instead.
     pub maximized: bool,
+    /// What shows behind the app's paint: an opaque color, a transparent
+    /// surface, or a native material. Resolved against the platform; see
+    /// [`crate::platform::material`] and [`EventContext::window_surface`].
+    pub background: WindowBackground,
+    /// The window's corner shape, as far as the platform allows.
+    pub corners: WindowCorners,
+    /// How the window's UI paint blends: linear light (the default) or as
+    /// browsers blend CSS ([`UiCompositing::WebCompatible`]). See
+    /// [`quark::scene::UiCompositing`].
+    pub compositing: UiCompositing,
+    /// How glyph coverage blends on a linear window.
+    pub text_rendering: TextRendering,
 }
 
 impl Default for WindowOptions {
@@ -114,6 +129,10 @@ impl Default for WindowOptions {
             position: None,
             active: true,
             maximized: false,
+            background: WindowBackground::default(),
+            corners: WindowCorners::default(),
+            compositing: UiCompositing::default(),
+            text_rendering: TextRendering::default(),
         }
     }
 }

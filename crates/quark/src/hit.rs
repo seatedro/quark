@@ -84,6 +84,12 @@ impl HitFlags {
     pub const DRAG: Self = Self(1 << 3);
     pub const SCROLL: Self = Self(1 << 4);
     pub const TEXT: Self = Self(1 << 5);
+    /// A press here that nothing above consumes moves the window (custom
+    /// title bars); see [`HitTable::window_drag_at`].
+    pub const WINDOW_DRAG: Self = Self(1 << 6);
+    /// A press here never moves the window, though a drag region lies
+    /// beneath it.
+    pub const WINDOW_DRAG_EXCLUDE: Self = Self(1 << 7);
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -357,11 +363,24 @@ impl HitTable {
     /// [`Self::stack_at`] into `out`, replacing its contents, so a caller
     /// that keeps `out` reuses its buffer.
     pub fn stack_at_into(&self, x: f32, y: f32, out: &mut Vec<HitId>) {
+        self.stack_at_where(x, y, out, |_| true);
+    }
+
+    /// [`Self::stack_at_into`] over only the entries `keep` accepts: the
+    /// others neither appear nor block.
+    pub fn stack_at_where(
+        &self,
+        x: f32,
+        y: f32,
+        out: &mut Vec<HitId>,
+        mut keep: impl FnMut(HitId) -> bool,
+    ) {
         out.clear();
         out.extend(
             (0..self.bounds.len())
                 .filter(|&i| self.contains(i, x, y))
-                .map(|i| self.id(i)),
+                .map(|i| self.id(i))
+                .filter(|&id| keep(id)),
         );
         let z = |id: &HitId| self.z[id.index as usize];
         out.sort_unstable_by_key(|id| std::cmp::Reverse((z(id), id.index)));
@@ -371,6 +390,60 @@ impl HitTable {
         {
             out.truncate(blocker + 1);
         }
+    }
+
+    /// Whether a primary press at `(x, y)` that no handler consumed should
+    /// move the window: walking the stack topmost first, a
+    /// [`HitFlags::WINDOW_DRAG`] entry is reached before any entry that
+    /// takes the press itself (click, drag, text) or excludes dragging.
+    pub fn window_drag_at(&self, x: f32, y: f32) -> bool {
+        let takes_press = HitFlags::CLICK
+            .union(HitFlags::DRAG)
+            .union(HitFlags::TEXT)
+            .union(HitFlags::WINDOW_DRAG_EXCLUDE);
+        let mut stack = Vec::new();
+        self.stack_at_into(x, y, &mut stack);
+        for id in stack {
+            let flags = self.flags[id.index as usize];
+            if flags.0 & takes_press.0 != 0 {
+                return false;
+            }
+            if flags.contains(HitFlags::WINDOW_DRAG) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Take rows `rows` out of hit testing for the rest of the frame: they
+    /// keep their ids and bounds but contain no point and respond to
+    /// nothing. How content hidden after prepaint gives up its hits.
+    pub fn disable(&mut self, rows: std::ops::Range<usize>) {
+        let rows = rows.start.min(self.len())..rows.end.min(self.len());
+        for row in rows {
+            self.clip[row] = EMPTY_CLIP;
+            self.flags[row] = HitFlags::NONE;
+            self.cursor[row] = CursorHint::Default;
+        }
+    }
+
+    /// Whether `id` was taken out of hit testing by [`Self::disable`].
+    pub fn is_disabled(&self, id: HitId) -> bool {
+        self.row(id)
+            .is_some_and(|row| self.clip[row] == EMPTY_CLIP && self.flags[row].is_empty())
+    }
+
+    /// Drop rows from `len` on, as if they were never pushed, so a subtree
+    /// can be prepainted again. Spaces stay: a row-less space is inert.
+    pub fn truncate(&mut self, len: usize) {
+        self.bounds.truncate(len);
+        self.clip.truncate(len);
+        self.z.truncate(len);
+        self.node.truncate(len);
+        self.flags.truncate(len);
+        self.cursor.truncate(len);
+        self.identity.truncate(len);
+        self.space.truncate(len);
     }
 
     /// Empty the table for a new frame, keeping its buffers. Ids issued

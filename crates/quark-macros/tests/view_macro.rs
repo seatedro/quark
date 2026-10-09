@@ -614,6 +614,36 @@ fn keyed_for_puts_the_key_on_each_root() {
     assert_eq!(keys, [["key(\"row-a\")"], ["key(\"row-b\")"]]);
 }
 
+// Each `match` arm and `if` branch of a keyed `for` has its own root; the key
+// goes on whichever one the item takes, and an empty arm adds nothing.
+#[test]
+fn keyed_for_keys_the_root_of_each_branch() {
+    let items: [Option<u8>; 4] = [Some(0), Some(1), Some(2), None];
+    let el = view! {
+        <div>
+            for (i, item) in items.iter().enumerate() key={format!("k{i}")} {
+                let n = item.unwrap_or(9);
+                match n {
+                    0 => <div test-id="zero" />
+                    9 => {}
+                    _ => {
+                        if let Some(1) = item { <div test-id="one" /> } else { <div test-id="two" /> }
+                    }
+                }
+            }
+        </div>
+    };
+    let calls: Vec<&[String]> = el.children.iter().map(|c| c.calls.as_slice()).collect();
+    assert_eq!(
+        calls,
+        [
+            ["test_id(\"zero\")", "key(\"k0\")"],
+            ["test_id(\"one\")", "key(\"k1\")"],
+            ["test_id(\"two\")", "key(\"k2\")"],
+        ]
+    );
+}
+
 #[test]
 fn match_arms_take_markup_rust_and_multiple_children() {
     let render = |n: u8| {

@@ -28,7 +28,7 @@ fn allowing_the_command_replaces_the_card_with_the_answer() {
     ui.click_node(By::role_name(Role::Button, "Allow once"));
     ui.frame();
     assert!(ui.try_find(By::role(Role::AlertDialog)).is_none());
-    assert!(ui.try_find(By::name("1.3.0")).is_some());
+    assert!(ui.painted_text().contains("1.3.0"), "{}", ui.painted_text());
 }
 
 // Catches Escape denying nothing: it must answer the prompt as Deny.
@@ -38,7 +38,11 @@ fn escape_denies_the_pending_command() {
     ui.key("escape");
     ui.frame();
     assert!(ui.try_find(By::role(Role::AlertDialog)).is_none());
-    assert!(ui.try_find(By::name("declined.")).is_some());
+    assert!(
+        ui.painted_text().contains("declined."),
+        "{}",
+        ui.painted_text()
+    );
 }
 
 // Catches the slash list not following the draft: typing "/" lists the
@@ -77,6 +81,37 @@ fn view_changes_opens_the_changes_tab() {
     assert!(
         ui.try_find(By::role_name(Role::Heading, "cart.js"))
             .is_some()
+    );
+}
+
+// Catches row actions that never appear, or appear on every row: hovering
+// one chat row reveals its Pin and Archive buttons, inside the row, and no
+// other row's.
+#[test]
+fn hovering_a_chat_row_reveals_only_its_actions() {
+    let mut ui = harness("home");
+    assert!(
+        ui.find_all(By::role_name(Role::Button, "Archive chat"))
+            .is_empty()
+    );
+    let row = ui
+        .find(By::role_name(
+            Role::ListItem,
+            "Design self-improving intent layer",
+        ))
+        .bounds;
+    ui.pointer_move((row.x + 40.0, row.y + row.height / 2.0));
+    ui.frame();
+    let archive = ui.find_all(By::role_name(Role::Button, "Archive chat"));
+    assert_eq!(archive.len(), 1);
+    let b = archive[0].bounds;
+    assert!(
+        b.x > row.x + row.width / 2.0 && b.x + b.width <= row.x + row.width,
+        "{b:?} in {row:?}"
+    );
+    assert!(
+        b.y >= row.y && b.y + b.height <= row.y + row.height,
+        "{b:?} in {row:?}"
     );
 }
 
@@ -303,4 +338,27 @@ fn the_changes_view_highlights_javascript() {
         .find(|l| l.layout.text().starts_with("export function subtotal"))
         .unwrap();
     assert_eq!(export.tones.first(), Some(&HighlightKind::Keyword));
+}
+
+// Catches a material window that still paints the captured sidebar color
+// over the material, or never asks for it: once the window has its
+// material, the sidebar requests the Sidebar material over its own bounds.
+#[test]
+fn a_material_window_shows_the_sidebar_material() {
+    let mut ui = harness("home");
+    let main = ui.main_window();
+    assert!(ui.window(main).material_regions().is_empty());
+    ui.app_mut().vibrant = true;
+    ui.frame();
+    let sidebar = ui.find(By::role_name(Role::Navigation, "Sidebar")).bounds;
+    let regions = ui.window(main).material_regions().to_vec();
+    assert_eq!(regions.len(), 1);
+    let (r, kind) = (regions[0].rect, regions[0].kind);
+    assert_eq!(kind, quark::MaterialKind::Sidebar);
+    // The card's clip may take the last point of the sidebar's height.
+    assert!(
+        (r.x, r.y, r.width) == (sidebar.x, sidebar.y, sidebar.width)
+            && (r.height - sidebar.height).abs() <= 1.0,
+        "{r:?} for {sidebar:?}"
+    );
 }

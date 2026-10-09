@@ -310,16 +310,35 @@ pub fn pal(mode: ThemeMode) -> &'static Pal {
     }
 }
 
-/// Type scale (points): Codex's UI font is 14, secondary text 13.
-/// Inter runs about 4% wider than SF Pro Text at the same size; these
-/// sizes match the captures' measured text widths.
-pub const BODY: f32 = 13.5;
-pub const SMALL: f32 = 12.5;
-pub const TINY: f32 = 11.0;
-pub const CODE: f32 = 12.0;
-/// SF Pro Display at 28 runs narrower than the bundled Inter; 26 matches
-/// the headline's measured width.
-pub const HEADING: f32 = 25.5;
+/// Type scale (points): Codex's UI font is 14, secondary text 13, the
+/// headline 28. On macOS the window resolves `system-ui` to SF Pro, the
+/// app's own font, so these are the app's sizes.
+#[cfg(target_os = "macos")]
+mod scale {
+    pub const BODY: f32 = 14.0;
+    pub const SMALL: f32 = 13.0;
+    pub const TINY: f32 = 11.0;
+    pub const CODE: f32 = 12.0;
+    pub const HEADING: f32 = 28.0;
+}
+
+/// Elsewhere the bundled Inter stands in for SF Pro (see
+/// [`crate::window_options`]). It runs about 4% wider than SF Pro Text at
+/// the same size, and SF Pro Display at 28 runs narrower still, so these
+/// sizes match the captures' measured text widths instead.
+#[cfg(not(target_os = "macos"))]
+mod scale {
+    pub const BODY: f32 = 13.5;
+    pub const SMALL: f32 = 12.5;
+    pub const TINY: f32 = 11.0;
+    pub const CODE: f32 = 12.0;
+    pub const HEADING: f32 = 25.5;
+}
+
+pub use scale::*;
+
+/// Transcript prose sits on 22-point lines, as the app's 14-point body does.
+pub const LINE_PT: f32 = 22.0;
 
 /// quark's theme of `mode` with the Codex surfaces swapped in.
 pub fn quark_theme(mode: ThemeMode) -> Theme {

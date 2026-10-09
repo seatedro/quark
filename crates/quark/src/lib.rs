@@ -84,17 +84,24 @@ pub use hit::{
     TooltipRegion, UNCLIPPED,
 };
 pub use identity::{TestId, UiKey, UiNodeId, intern, stable_hash};
-pub use path::{FillRule, LineCap, LineJoin, Path, PathBuilder, PathVerb, StrokeStyle};
+pub use path::{
+    FillRule, LineCap, LineJoin, Path, PathBuilder, PathVerb, StrokePattern, StrokeStyle,
+};
 pub use scene::{
-    BlurRegionPrimitive, BorderPrimitive, ChunkPrimitive, ClipPrimitive, EffectQuadPrimitive,
-    EffectType, FontKind, FontWeight, IconPrimitive, ImagePrimitive, LayerPrimitive, PathFill,
-    PathPrimitive, PathStroke, Primitive, RectPrimitive, RichTextPrimitive, RoundedRectPrimitive,
-    Scene, SceneChunk, ShadowPrimitive, ShapedText, TextPrimitive,
+    AlphaMask, BlurRegionPrimitive, BorderPrimitive, ChunkPrimitive, ClipPrimitive,
+    EffectQuadPrimitive, EffectType, FadeEdge, FontKind, FontWeight, IconPrimitive, ImagePrimitive,
+    IsolatePrimitive, LayerPrimitive, MaskStop, MaskStops, MaterialKind, PathFill, PathPrimitive,
+    PathStroke, Primitive, RectPrimitive, RichTextPrimitive, RoundedRectPrimitive, Scene,
+    SceneChunk, ShadowPrimitive, ShapedText, ShimmerDirection, ShimmerSpec, StripesPrimitive,
+    StyledDecoration, StyledTextPrimitive, SurfaceBackground, TextBackdrop, TextDecorationStyle,
+    TextFill, TextGradient, TextPrimitive, TextRendering, UiCompositing,
 };
 pub use selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText, copy_text};
 pub use semantic::{
     SemanticActions, SemanticFrame, SemanticNode, SemanticNodeState, SemanticRole, dump_semantic,
 };
-pub use style::{BackgroundEffect, ElementStyle, ShadowStyle, StyleOverride, apply_override};
+pub use style::{
+    BackgroundEffect, BorderStyle, ElementStyle, ShadowStyle, StyleOverride, apply_override,
+};
 pub use style_state::StyleState;
 pub use transform::Transform2D;

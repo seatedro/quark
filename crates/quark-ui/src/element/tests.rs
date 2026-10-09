@@ -366,12 +366,10 @@ fn truncate_text_to_fit_accounts_for_font_weight() {
         cx.measure_text_width("Open Compare", font_size, FontKind::Ui, FontWeight::Medium);
     let full_width = cx.measure_text_width(text, font_size, FontKind::Ui, FontWeight::Medium);
 
-    let (truncated, truncated_width) = truncate_text_to_fit(
+    let (truncated, truncated_width) = truncate_text_to_fit_styled(
         &mut cx,
         text,
-        font_size,
-        FontKind::Ui,
-        FontWeight::Medium,
+        TextStyle::new(font_size).weight(FontWeight::Medium),
         full_width,
         max_width,
     );
@@ -1509,18 +1507,18 @@ fn selectable_text_hit_inside_bold_span_lands_on_painted_glyph() {
 
     let painted = &rich_text_runs(&scene)[0];
     let layout = painted.layout.downcast_ref::<TextLayout>().expect("layout");
-    let g = layout.glyphs();
-    let i = (0..g.len())
-        .find(|&i| g.byte_start[i] as usize == target)
+    let g = layout
+        .glyph_iter()
+        .find(|g| g.byte_start as usize == target)
         .expect("glyph at target byte");
     let line = layout.line(0).expect("line");
-    let x = painted.rect.x + g.x[i] + g.advance[i] * 0.25;
+    let x = painted.rect.x + g.x + g.advance * 0.25;
     let y = painted.rect.y + line.top + line.height * 0.5;
 
     let region = &cx.selectable_text_runs[0];
     assert_eq!(region.hit(x, y), target);
     let caret_x = region.text_origin.0 + region.layout.caret(target).x;
-    assert!((caret_x - (painted.rect.x + g.x[i])).abs() < 0.01);
+    assert!((caret_x - (painted.rect.x + g.x)).abs() < 0.01);
 }
 
 // Colors are applied at paint, so recoloring a block (hover, theme switch)
@@ -1547,4 +1545,127 @@ fn selectable_text_color_change_reuses_layout() {
 
     assert_eq!(red[0].layout, blue[0].layout, "recolor shaped a new layout");
     assert_ne!(red[0].span_colors, blue[0].span_colors);
+}
+
+// A dashed border is stroked along the box with its pattern, not drawn as
+// the solid border primitive.
+#[test]
+fn dashed_border_paints_a_patterned_stroke_along_the_box() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let dashed = quark::path::StrokePattern::Dashed {
+        dash: 4.0,
+        gap: 2.0,
+        offset: 0.0,
+    };
+    let scene = paint_one(
+        &mut cx,
+        div()
+            .w(100.0)
+            .h(40.0)
+            .border(Color::rgba(255, 255, 255, 255))
+            .border_style(dashed),
+    );
+
+    let strokes: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            quark::scene::Primitive::Path(path) => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(strokes.len(), 1);
+    assert_eq!(strokes[0].stroke.map(|s| s.style.pattern), Some(dashed));
+    let b = strokes[0].bounds();
+    assert_eq!((b.x, b.y, b.width, b.height), (0.0, 0.0, 100.0, 40.0));
+}
+
+// A faded div masks its children as one group; its own background stays
+// outside the mask.
+#[test]
+fn fade_edge_masks_the_children_but_not_the_div_itself() {
+    use quark::scene::Primitive;
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let red = Color::rgba(255, 0, 0, 255);
+    let blue = Color::rgba(0, 0, 255, 255);
+    let scene = paint_one(
+        &mut cx,
+        div()
+            .w(100.0)
+            .h(40.0)
+            .bg(red)
+            .fade_edge(FadeEdge::Right, 20.0)
+            .child(div().w(100.0).h(40.0).bg(blue)),
+    );
+
+    let fill = |color| {
+        scene
+            .primitives
+            .iter()
+            .position(|p| matches!(p, Primitive::RoundedRect(r) if r.color == color))
+    };
+    let start = scene
+        .primitives
+        .iter()
+        .position(|p| matches!(p, Primitive::IsolateStart(_)));
+    let end = scene
+        .primitives
+        .iter()
+        .position(|p| matches!(p, Primitive::IsolateEnd));
+    let (Some(red), Some(start), Some(blue), Some(end)) = (fill(red), start, fill(blue), end)
+    else {
+        panic!("missing primitives in {:?}", scene.primitives);
+    };
+    assert!(red < start && start < blue && blue < end);
+    let Primitive::IsolateStart(isolate) = &scene.primitives[start] else {
+        unreachable!()
+    };
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    assert_eq!(
+        isolate.mask,
+        Some(AlphaMask::fade_edge(bounds, FadeEdge::Right, 20.0))
+    );
+}
+
+// The fade clips: a child reaching past the faded div takes no click
+// where it is not painted.
+#[test]
+fn faded_div_clips_child_hits_to_its_bounds() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    cx.semantic = SemanticFrame::new(400.0, 100.0);
+    let mut root = div()
+        .w(400.0)
+        .h(100.0)
+        .child(
+            div()
+                .w(100.0)
+                .h(40.0)
+                .fade_edge(FadeEdge::Right, 20.0)
+                .child(
+                    div()
+                        .w(200.0)
+                        .h(40.0)
+                        .flex_shrink_0()
+                        .test_id("wide")
+                        .on_click(NoopAction),
+                ),
+        )
+        .into_any();
+    render_element(&mut root, &mut Scene::default(), &mut cx, 400.0, 100.0);
+    let mut router = InputRouter::default();
+    router.set_frame(cx.take_input_frame());
+
+    assert!(router.target_at(50.0, 20.0).is_some(), "inside the fade");
+    assert_eq!(router.target_at(150.0, 20.0), None, "past the div");
 }

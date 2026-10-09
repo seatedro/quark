@@ -2,7 +2,7 @@
 //! icon buttons, and the one menu style all Codex popovers use.
 
 use accesskit::Role;
-use quark::view;
+use quark::{StrokePattern, TextDecorationStyle, view};
 use quark_app::quark_ui::Action;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -16,6 +16,14 @@ pub fn txt(s: impl Into<String>, size: f32, color: Color) -> TextElement {
     view! { -> TextElement,
         <text size={size} color={color} class="whitespace-nowrap leading-tight">{s}</text>
     }
+}
+
+/// A dotted underline in `color`, dots `spacing` points apart, as the
+/// app draws under file and project links.
+pub fn dotted(color: Color, spacing: f32) -> TextDecorationStyle {
+    TextDecorationStyle::solid(color)
+        .pattern(StrokePattern::dotted(spacing))
+        .thickness(1.0)
 }
 
 /// A square ghost button holding one icon, with a hover fill.

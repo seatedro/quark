@@ -317,11 +317,24 @@ impl<'a> FontFallbackIter<'a> {
     fn default_font_match_key(&self) -> Option<&FontMatchKey> {
         let default_family = self.default_families[self.default_i - 1];
         let default_family_name = self.font_system.db().family_name(default_family);
+        self.family_match_key(default_family_name)
+    }
 
-        self.font_match_keys
-            .iter()
-            .filter(|m_key| m_key.font_weight_diff == 0)
-            .find(|m_key| self.face_contains_family(m_key.id, default_family_name))
+    /// The face of `family_name` nearest the ideal weight: the family
+    /// comes before the weight, as in CSS font matching, so a family with
+    /// fewer weights than asked for (one variable face, a single-weight
+    /// fallback) is taken at its nearest one rather than skipped for
+    /// another family of the exact weight. The keys sort by weight
+    /// difference, except that the first is fontdb's CSS match for the
+    /// default family, which also settles ties toward the CSS side.
+    fn family_match_key(&self, family_name: &str) -> Option<&FontMatchKey> {
+        let in_family = |m_key: &&FontMatchKey| self.face_contains_family(m_key.id, family_name);
+        self.font_match_keys.first().filter(in_family).or_else(|| {
+            self.font_match_keys
+                .iter()
+                .filter(in_family)
+                .min_by_key(|m_key| m_key.font_weight_diff)
+        })
     }
 
     /// How many of the word's chars font `id` lacks, or `None` when the
@@ -394,12 +407,6 @@ impl<'a> FontFallbackIter<'a> {
                 return Some(font);
             }
         }
-
-        let font_match_keys_iter = |is_mono| {
-            self.font_match_keys
-                .iter()
-                .filter(move |m_key| m_key.font_weight_diff == 0 || is_mono)
-        };
 
         'DEF_FAM: while self.default_i < self.default_families.len() {
             self.default_i += 1;
@@ -474,11 +481,9 @@ impl<'a> FontFallbackIter<'a> {
             while self.script_i.1 < script_families.len() {
                 let script_family = script_families[self.script_i.1];
                 self.script_i.1 += 1;
-                for m_key in font_match_keys_iter(false) {
-                    if self.face_contains_family(m_key.id, script_family) {
-                        if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
-                            return Some(font);
-                        }
+                if let Some(m_key) = self.family_match_key(script_family).copied() {
+                    if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
+                        return Some(font);
                     }
                 }
                 log::debug!(
@@ -497,11 +502,9 @@ impl<'a> FontFallbackIter<'a> {
         while self.common_i < common_families.len() {
             let common_family = common_families[self.common_i];
             self.common_i += 1;
-            for m_key in font_match_keys_iter(false) {
-                if self.face_contains_family(m_key.id, common_family) {
-                    if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
-                        return Some(font);
-                    }
+            if let Some(m_key) = self.family_match_key(common_family).copied() {
+                if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
+                    return Some(font);
                 }
             }
             log::debug!("failed to find family '{common_family}'");

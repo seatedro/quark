@@ -1065,7 +1065,35 @@ impl<U: UiApp> UiAdapter<U> {
         if win.focus != before {
             redraw(Redraw::Focus, self.win_handle, cx);
         }
+        // A press nothing else took, on app-drawn title chrome, moves the
+        // window natively; it must start now, while the press is current.
+        if delivery.window_drag {
+            self.chrome_pressed((x, y), cx);
+        } else {
+            win.title_press.reset();
+        }
         self.deliver(delivery, cx);
+    }
+
+    /// A press on window drag chrome: the platform's title double-click
+    /// action when it completes one, else a native window move.
+    fn chrome_pressed(&mut self, at: (f32, f32), cx: &mut EventContext) {
+        let Some(window) = self.win_handle.or(cx.window_handle()) else {
+            return;
+        };
+        if self.win.title_press.press(cx.elapsed(), at) {
+            cx.title_double_click(window);
+        } else if window::DEFER_CHROME_DRAG {
+            self.win.title_press.hold(at);
+        } else {
+            Self::start_chrome_drag(window, cx);
+        }
+    }
+
+    fn start_chrome_drag(window: WindowHandle, cx: &mut EventContext) {
+        if let Err(error) = cx.start_window_drag(window) {
+            tracing::debug!("no window drag from the title chrome: {error}");
+        }
     }
 
     /// Apply `command` to the text field `target`, passing any copied text
@@ -1165,6 +1193,11 @@ impl<U: UiApp> UiAdapter<U> {
         match input {
             UiInput::PointerMove { x, y } => {
                 self.win.pointer = Some((x, y));
+                if self.win.title_press.moved((x, y))
+                    && let Some(window) = self.win_handle.or(cx.window_handle())
+                {
+                    Self::start_chrome_drag(window, cx);
+                }
                 let delivery = self.win.router.pointer_move(x, y);
                 self.deliver(delivery, cx);
                 self.update_hover(cx);
@@ -1177,6 +1210,7 @@ impl<U: UiApp> UiAdapter<U> {
             }
             UiInput::PointerDown(PointerButton::Primary) => self.pointer_pressed(cx),
             UiInput::PointerUp(PointerButton::Primary) => {
+                self.win.title_press.release();
                 let delivery = self.win.router.pointer_up();
                 self.deliver(delivery, cx);
                 // A release the app's hook did not finish the session on
@@ -1675,6 +1709,7 @@ impl<U: UiApp> App for UiAdapter<U> {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
         let (scene, ime) = self.finish_frame(painted);
+        self.forward_material_regions(cx);
         if ime.reset {
             cx.reset_ime();
         }
@@ -1840,6 +1875,31 @@ impl<U: UiApp> UiAdapter<U> {
         let mut update = state.accessibility.tree_update(name, state.focus);
         state.announcer.publish(&mut update);
         Some(update)
+    }
+
+    /// Hand the frame's `Div::material` regions to the window when they
+    /// changed, so their native views follow the layout.
+    fn forward_material_regions(&mut self, cx: &mut FrameContext) {
+        use crate::platform::material::MaterialRect;
+
+        let win = &mut *self.win;
+        let requests = &win.router.frame().material_regions;
+        let same = requests.len() == win.material_regions.len()
+            && requests.iter().zip(&win.material_regions).all(|(r, m)| {
+                (r.id, r.rect, r.corner_radius, r.kind) == (m.id, m.rect, m.corner_radius, m.kind)
+            });
+        if same {
+            return;
+        }
+        win.material_regions.clear();
+        win.material_regions
+            .extend(requests.iter().map(|r| MaterialRect {
+                id: r.id,
+                rect: r.rect,
+                corner_radius: r.corner_radius,
+                kind: r.kind,
+            }));
+        cx.set_material_regions(win.material_regions.clone());
     }
 
     /// Keep `painted`'s input state for routing until the next frame, and
@@ -2346,7 +2406,10 @@ mod tests {
         let layout = layout_of(&shaped);
         assert!(origin.x >= 20.0 && origin.y >= 40.0, "{origin:?}");
         let logical_size = layout.style().font_size;
-        assert_eq!(layout.glyphs().font_size[0], logical_size * 2.0);
+        assert_eq!(
+            layout.glyph(0).expect("glyph").font_size,
+            logical_size * 2.0
+        );
     }
 
     // Regression: the pointer stayed in physical pixels while hit regions
@@ -2386,8 +2449,8 @@ mod tests {
         let (before, after) = (layout_of(&before), layout_of(&after));
         assert_eq!((before.scale_factor(), after.scale_factor()), (1.0, 2.0));
         assert_eq!(
-            after.glyphs().font_size[0],
-            before.glyphs().font_size[0] * 2.0
+            after.glyph(0).expect("glyph").font_size,
+            before.glyph(0).expect("glyph").font_size * 2.0
         );
     }
 
@@ -2603,6 +2666,144 @@ mod tests {
             let after = ui.app().field.cursor();
             assert_eq!(after > before, grows, "{name}: cursor {before} -> {after}");
         }
+    }
+
+    /// A 40 point title bar that moves the window, with a Save button at
+    /// its start.
+    struct TitleBarApp {
+        saved: u32,
+    }
+
+    impl UiApp for TitleBarApp {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            div()
+                .w(400.0)
+                .h(40.0)
+                .flex_row()
+                .window_drag_region()
+                .child(
+                    div()
+                        .w(80.0)
+                        .h(40.0)
+                        .accessibility_role(Role::Button)
+                        .accessibility_label("Save")
+                        .on_click(Msg::Save),
+                )
+                .into_any()
+        }
+
+        fn update(&mut self, Msg::Save: Msg, _cx: &mut UiContext) {
+            self.saved += 1;
+        }
+    }
+
+    // Catches app-drawn title chrome that does not move the window, a
+    // button in it that moves the window instead of clicking, and a
+    // double-click that only starts another drag.
+    #[test]
+    fn title_chrome_moves_the_window_and_double_clicks_but_its_buttons_click() {
+        let mut ui = UiTestHarness::new(TitleBarApp { saved: 0 }, (400.0, 300.0), 1.0);
+        let main = ui.main_window();
+        let counts = |ui: &mut UiTestHarness<TitleBarApp>| {
+            let window = ui.window(main);
+            (window.window_drags(), window.title_double_clicks())
+        };
+
+        // Pressed and moved, as a drag is on every platform.
+        let drag = |ui: &mut UiTestHarness<TitleBarApp>, at: (f32, f32)| {
+            ui.pointer_down(at);
+            ui.pointer_move((at.0 + 30.0, at.1 + 10.0));
+            ui.pointer_up((at.0 + 30.0, at.1 + 10.0));
+            ui.advance(1_000);
+        };
+
+        drag(&mut ui, (200.0, 20.0));
+        assert_eq!(counts(&mut ui), (1, 0), "blank chrome moves the window");
+
+        ui.click((40.0, 20.0));
+        drag(&mut ui, (40.0, 20.0));
+        assert_eq!(ui.app().saved, 2, "the button clicks");
+        assert_eq!(
+            counts(&mut ui),
+            (1, 0),
+            "the button does not move the window"
+        );
+
+        ui.click((200.0, 20.0));
+        ui.advance(100);
+        ui.click((201.0, 20.0));
+        assert_eq!(counts(&mut ui).1, 1, "the second press is the title action");
+        let drags = counts(&mut ui).0;
+
+        ui.advance(1_000);
+        drag(&mut ui, (200.0, 200.0));
+        assert_eq!(
+            counts(&mut ui),
+            (drags, 1),
+            "content below the chrome does nothing"
+        );
+    }
+
+    /// A sidebar of a given width that asks for the sidebar material.
+    struct Panes {
+        sidebar: f32,
+    }
+
+    impl UiApp for Panes {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            div()
+                .w(400.0)
+                .h(300.0)
+                .flex_row()
+                .child(
+                    div()
+                        .w(self.sidebar)
+                        .h(300.0)
+                        .material(quark::scene::MaterialKind::Sidebar),
+                )
+                .into_any()
+        }
+
+        fn update(&mut self, _msg: Msg, _cx: &mut UiContext) {}
+    }
+
+    // Catches Div::material regions that never reach the window's native
+    // views, or keep their old rectangle after the layout moves.
+    #[test]
+    fn material_regions_reach_the_window_and_follow_the_layout() {
+        let mut ui = UiTestHarness::new(Panes { sidebar: 200.0 }, (400.0, 300.0), 1.0);
+        let main = ui.main_window();
+        let regions = |ui: &mut UiTestHarness<Panes>| {
+            ui.window(main)
+                .material_regions()
+                .iter()
+                .map(|r| (r.rect, r.kind))
+                .collect::<Vec<_>>()
+        };
+        let sidebar = |width| {
+            vec![(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height: 300.0,
+                },
+                quark::scene::MaterialKind::Sidebar,
+            )]
+        };
+
+        ui.frame();
+        assert_eq!(regions(&mut ui), sidebar(200.0));
+
+        ui.app_mut().sidebar = 240.0;
+        ui.frame();
+        assert_eq!(regions(&mut ui), sidebar(240.0));
     }
 
     /// The published text field as assistive tech sees it, without its id.

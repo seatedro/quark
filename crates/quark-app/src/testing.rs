@@ -627,6 +627,7 @@ impl<U: UiApp> UiTestHarness<U> {
         let main = self.open(self.main_window());
         let scale = main.scale_factor;
         let (width, height) = main.size;
+        let options = main.renderer_options;
         let mut scene = main.scene.clone();
         let width = (f64::from(width) * scale).round() as u32;
         let height = (f64::from(height) * scale).round() as u32;
@@ -637,6 +638,7 @@ impl<U: UiApp> UiTestHarness<U> {
                 .insert(quark_render::Renderer::new_headless(width, height, scale)?),
         };
         renderer.resize(width, height, scale);
+        renderer.set_options(options);
         crate::scene_to_physical(&mut scene, scale as f32);
         let rgba =
             renderer.render_to_rgba(&scene, &mut self.runner.text().system, width, height)?;
@@ -814,6 +816,25 @@ impl<U: UiApp> UiWindow<'_, U> {
     /// The title the window was opened with.
     pub fn title(&self) -> &str {
         &self.ui.open(self.window).title
+    }
+
+    /// How many native window moves were started on the window
+    /// ([`crate::EventContext::start_window_drag`]), as from app-drawn
+    /// title chrome.
+    pub fn window_drags(&self) -> u32 {
+        self.ui.open(self.window).window_drags
+    }
+
+    /// The native material regions the window's frames last asked for
+    /// ([`crate::EventContext::set_material_regions`]).
+    pub fn material_regions(&self) -> &[crate::platform::material::MaterialRect] {
+        &self.ui.open(self.window).material_regions
+    }
+
+    /// How many title bar double-click actions were asked of the window
+    /// ([`crate::EventContext::title_double_click`]).
+    pub fn title_double_clicks(&self) -> u32 {
+        self.ui.open(self.window).title_double_clicks
     }
 
     /// Draw a frame of this window now, whether or not one was asked for,
@@ -1130,6 +1151,7 @@ fn painted_texts(scene: &Scene) -> Vec<PaintedText> {
             let (bounds, layout) = match primitive {
                 Primitive::TextRun(run) => (run.rect, &run.layout),
                 Primitive::RichTextRun(run) => (run.rect, &run.layout),
+                Primitive::StyledText(run) => (run.rect, &run.layout),
                 _ => return None,
             };
             let layout = layout.downcast_ref::<quark_text::TextLayout>()?;

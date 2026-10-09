@@ -1,11 +1,13 @@
 //! Operating system integration beyond the window: menus, notifications,
 //! badges, single instance handoff, deep links, dragging files out, docking
-//! drags across windows, window state persistence, crash reports, and the
-//! opt-in launch at login, global shortcuts, and telemetry.
+//! drags across windows, window state persistence, crash reports, native
+//! window materials and app-drawn chrome, and the opt-in launch at login,
+//! global shortcuts, and telemetry.
 
 #[cfg(feature = "autostart")]
 pub mod autostart;
 pub mod badge;
+pub mod chrome;
 pub mod crash;
 pub mod deep_link;
 pub mod desktop_entry;
@@ -16,8 +18,10 @@ pub mod dock_drag;
 pub mod drag_out;
 #[cfg(feature = "components")]
 pub mod drawn_menu;
+pub(crate) mod font_watch;
 #[cfg(feature = "global-shortcut")]
 pub mod global_shortcut;
+pub mod material;
 #[cfg(feature = "ui")]
 pub mod menu;
 #[cfg(any(target_os = "macos", windows))]
@@ -33,3 +37,6 @@ pub(crate) mod theme;
 #[cfg(feature = "tray")]
 pub mod tray;
 pub mod window_state;
+pub(crate) mod work_area;
+#[cfg(target_os = "linux")]
+pub(crate) mod x11_root;

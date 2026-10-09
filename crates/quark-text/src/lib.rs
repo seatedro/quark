@@ -43,10 +43,13 @@ pub use block::TextBlock;
 pub use cache::{LayoutCache, LayoutCacheLimits, LayoutCacheMemory, LayoutCacheStats, LayoutKey};
 pub use cosmic_text;
 pub use epoch::{FontEpoch, TextSystemId};
-pub use fonts::{BundledFallback, FontRole, FontSettings, MONO_FAMILY, UI_FAMILY};
+pub use fonts::{
+    BundledFallback, FamilyId, FontFamily, FontRole, FontSettings, FontSnapshot, MONO_FAMILY,
+    ResolvedFamily, UI_FAMILY,
+};
 pub use layout::{
-    Caret, DEFAULT_LINE_HEIGHT_FACTOR, GlyphColumns, GlyphRun, IntegrityError, LineInfo, TextError,
-    TextLayout, TextParams, TextQuery, TextSpan, TextStyle,
+    Caret, DEFAULT_LINE_HEIGHT_FACTOR, Glyph, GlyphColumns, GlyphRun, IntegrityError, LineInfo,
+    TextError, TextLayout, TextParams, TextQuery, TextSpan, TextStyle,
 };
 pub use offset::{TextOffset, ToTextOffset};
 pub use row::{RowHeights, RowMeasure};

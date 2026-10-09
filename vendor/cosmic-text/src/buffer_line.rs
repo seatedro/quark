@@ -249,6 +249,45 @@ impl BufferLine {
         self.shape_opt.get().expect("shape not found")
     }
 
+    /// Takes the shaping out, keeping the layout made from it: a line that
+    /// is laid out for good then lends its shaping storage to another
+    /// line's next shaping (see [`Self::lend_shape_storage`]). A used
+    /// shaping leaves an empty one with the same direction and metrics
+    /// behind, since [`crate::LayoutRunIter`] reads the direction of every
+    /// line it lays out runs for.
+    pub fn take_shape(&mut self) -> Option<ShapeLine> {
+        match core::mem::replace(&mut self.shape_opt, Cached::Empty) {
+            Cached::Empty => None,
+            Cached::Unused(shape) => Some(shape),
+            Cached::Used(shape) => {
+                self.shape_opt = Cached::Used(ShapeLine {
+                    rtl: shape.rtl,
+                    spans: Vec::new(),
+                    metrics_opt: shape.metrics_opt,
+                });
+                Some(shape)
+            }
+        }
+    }
+
+    /// Gives a line that holds no shaping storage `shape`'s, for its next
+    /// shaping to build in rather than allocate; a line with storage of its
+    /// own hands `shape` back. The empty shaping [`Self::take_shape`]
+    /// leaves holds none, once the line's text has changed.
+    pub fn lend_shape_storage(&mut self, shape: ShapeLine) -> Option<ShapeLine> {
+        let holds_none = match &self.shape_opt {
+            Cached::Empty => true,
+            Cached::Unused(own) => own.spans.capacity() == 0,
+            Cached::Used(_) => false,
+        };
+        if holds_none {
+            self.shape_opt = Cached::Unused(shape);
+            None
+        } else {
+            Some(shape)
+        }
+    }
+
     /// Get line shaping cache
     pub const fn shape_opt(&self) -> Option<&ShapeLine> {
         self.shape_opt.get()

@@ -36,16 +36,19 @@ pub mod scene {
     pub use quark::scene::*;
 }
 
-pub use text::{push_text_decorations, text_decoration_rects};
+pub use text::{push_styled_text_decorations, push_text_decorations, text_decoration_rects};
 
 pub use quark_text::TextSystem;
 pub use renderer::{
-    FrameStats, GpuContext, OffscreenTarget, RenderError, Renderer, TextAtlasStats, TextMetrics,
+    FrameStats, GpuContext, OffscreenTarget, RenderError, Renderer, RendererOptions,
+    SurfaceCapabilities, TextAtlasStats, TextMetrics,
 };
 pub use scene::{
-    BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive, EffectType, FontKind,
-    FontStyle, FontWeight, ImagePrimitive, LayerPrimitive, Path, PathBuilder, PathPrimitive,
-    Primitive, Rect, RectPrimitive, RichTextPrimitive, RoundedRectPrimitive, Scene,
-    ShadowPrimitive, ShapedText, StrokeStyle, TextDecoration, TextDecorationKind, TextPrimitive,
-    Transform2D,
+    AlphaMask, BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive,
+    EffectType, FadeEdge, FontKind, FontStyle, FontWeight, ImagePrimitive, IsolatePrimitive,
+    LayerPrimitive, MaskStop, MaskStops, Path, PathBuilder, PathPrimitive, Primitive, Rect,
+    RectPrimitive, RichTextPrimitive, RoundedRectPrimitive, Scene, ShadowPrimitive, ShapedText,
+    ShimmerDirection, ShimmerSpec, StripesPrimitive, StrokePattern, StrokeStyle, StyledDecoration,
+    StyledTextPrimitive, TextBackdrop, TextDecoration, TextDecorationKind, TextDecorationStyle,
+    TextFill, TextGradient, TextPrimitive, TextRendering, Transform2D, UiCompositing,
 };

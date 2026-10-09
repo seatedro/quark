@@ -13,7 +13,8 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::path::{Band, push_bands, rule_code, stroke_outline, to_kurbo};
 use crate::scene::{
-    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive, Transform2D,
+    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, SurfaceBackground, TextPrimitive,
+    TextRendering, Transform2D, UiCompositing,
 };
 
 use crate::shaders::{
@@ -24,9 +25,7 @@ mod chunks;
 #[path = "text_runs.rs"]
 mod text_runs;
 
-use crate::text::{
-    GlyphOwner, RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width,
-};
+use crate::text::{GlyphOwner, RecoloredBuffers, TextPath, color_to_unit, measure_mono_char_width};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextMetrics {
@@ -47,6 +46,30 @@ impl Default for TextMetrics {
             mono_char_width_px: 8.0,
         }
     }
+}
+
+/// How one renderer's surface draws: chosen per window or headless
+/// renderer, never process-wide, so changing one leaves other windows and
+/// offscreen renders as they were.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererOptions {
+    pub compositing: UiCompositing,
+    /// Coverage policy for the whole surface: `Perceptual` (the default)
+    /// honors each `StyledText` primitive's own rendering and backdrop;
+    /// `Linear` keeps every glyph's plain coverage, the appearance before
+    /// perceptual text, for apps that rely on it. `TextRun` and
+    /// `RichTextRun` primitives name no backdrop, so they draw with plain
+    /// coverage (or their layout's terminal correction) either way.
+    pub text_rendering: TextRendering,
+}
+
+/// What a renderer's surface does with its options and background.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SurfaceCapabilities {
+    /// Transparent pixels reach the window system's compositor.
+    pub transparent: bool,
+    /// The surface composites in [`UiCompositing::WebCompatible`].
+    pub web_compatible: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -121,6 +144,7 @@ struct PooledTexture {
     bind_group: Option<wgpu::BindGroup>,
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
     /// Shared with the [`OffscreenTarget`] handed out for this texture, so
     /// the entry is in use exactly while that handle is alive. Dropping a
     /// target without releasing it frees the entry instead of pinning the
@@ -137,6 +161,8 @@ impl PooledTexture {
 
 struct TexturePool {
     textures: Vec<PooledTexture>,
+    /// The format of linear-light targets; encoded targets use its
+    /// non-sRGB twin.
     format: wgpu::TextureFormat,
     frame: u64,
 }
@@ -224,15 +250,33 @@ impl TexturePool {
         self.frame = self.frame.saturating_add(1);
     }
 
-    /// Acquire a texture of at least the given dimensions. It stays out of
-    /// the pool until the target is released or dropped.
+    /// Acquire a linear-light texture of at least the given dimensions;
+    /// see [`Self::acquire_in`].
     fn acquire(&mut self, device: &wgpu::Device, width: u32, height: u32) -> OffscreenTarget {
+        self.acquire_in(device, width, height, false)
+    }
+
+    /// Acquire a texture of at least the given dimensions, holding encoded
+    /// sRGB values when `encoded`. It stays out of the pool until the
+    /// target is released or dropped.
+    fn acquire_in(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        encoded: bool,
+    ) -> OffscreenTarget {
         let w = width.max(1);
         let h = height.max(1);
+        let format = if encoded {
+            self.format.remove_srgb_suffix()
+        } else {
+            self.format
+        };
 
         // Look for an existing unused texture that's big enough.
         for entry in &mut self.textures {
-            if !entry.in_use() && entry.width >= w && entry.height >= h {
+            if !entry.in_use() && entry.format == format && entry.width >= w && entry.height >= h {
                 entry.last_used_frame = self.frame;
                 return OffscreenTarget {
                     lease: Arc::clone(&entry.lease),
@@ -253,7 +297,7 @@ impl TexturePool {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: self.format,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -264,6 +308,7 @@ impl TexturePool {
             bind_group: None,
             width: w,
             height: h,
+            format,
             lease: Arc::clone(&lease),
             last_used_frame: self.frame,
         });
@@ -351,18 +396,11 @@ struct GpuShared {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    /// Every pipeline targets this format, so every surface uses it.
+    /// Every surface uses this (sRGB) format; `linear` draws to it.
     format: wgpu::TextureFormat,
-    quad_pipeline: wgpu::RenderPipeline,
-    shadow_pipeline: wgpu::RenderPipeline,
-    effect_quad_pipeline: wgpu::RenderPipeline,
-    blit_pipeline: wgpu::RenderPipeline,
-    blur_pipeline: wgpu::RenderPipeline,
-    layer_pipeline: wgpu::RenderPipeline,
-    path_pipeline: wgpu::RenderPipeline,
-    viewport_bind_group_layout: wgpu::BindGroupLayout,
-    texture_bind_group_layout: wgpu::BindGroupLayout,
-    segment_bind_group_layout: wgpu::BindGroupLayout,
+    linear: Pipelines,
+    encoded: std::sync::OnceLock<Pipelines>,
+    layouts: Layouts,
     sampler: wgpu::Sampler,
     glyph_cache: Cache,
     images: Arc<Mutex<SharedImages>>,
@@ -454,127 +492,6 @@ impl GpuContext {
                 }],
             });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("quark_quad_shader"),
-            source: wgpu::ShaderSource::Wgsl(QUAD_SHADER.into()),
-        });
-        let quad_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("quark_quad_pipeline_layout"),
-            bind_group_layouts: &[&viewport_bind_group_layout],
-            immediate_size: 0,
-        });
-        let quad_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("quark_quad_pipeline"),
-            layout: Some(&quad_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_quad"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[QuadInstance::layout()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_quad"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("quark_shadow_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()),
-        });
-        let shadow_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("quark_shadow_pipeline_layout"),
-                bind_group_layouts: &[&viewport_bind_group_layout],
-                immediate_size: 0,
-            });
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("quark_shadow_pipeline"),
-            layout: Some(&shadow_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_shader,
-                entry_point: Some("vs_shadow"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[ShadowInstance::layout()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shadow_shader,
-                entry_point: Some("fs_shadow"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let effect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("quark_effect_shader"),
-            source: wgpu::ShaderSource::Wgsl(EFFECT_SHADER.into()),
-        });
-        let effect_quad_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("quark_effect_quad_pipeline_layout"),
-                bind_group_layouts: &[&viewport_bind_group_layout],
-                immediate_size: 0,
-            });
-        let effect_quad_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("quark_effect_quad_pipeline"),
-            layout: Some(&effect_quad_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &effect_shader,
-                entry_point: Some("vs_effect"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[EffectQuadInstance::layout()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &effect_shader,
-                entry_point: Some("fs_effect"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        // --- Blit pipeline (composites offscreen textures back to screen) ---
-
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("quark_texture_bind_group_layout"),
@@ -605,94 +522,6 @@ impl GpuContext {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("quark_blit_shader"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
-        });
-        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("quark_blit_pipeline_layout"),
-            bind_group_layouts: &[&viewport_bind_group_layout, &texture_bind_group_layout],
-            immediate_size: 0,
-        });
-        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("quark_blit_pipeline"),
-            layout: Some(&blit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &blit_shader,
-                entry_point: Some("vs_blit"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[BlitInstance::layout()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_shader,
-                entry_point: Some("fs_blit"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("quark_blur_shader"),
-            source: wgpu::ShaderSource::Wgsl(BLUR_SHADER.into()),
-        });
-        let blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("quark_blur_pipeline_layout"),
-            bind_group_layouts: &[&viewport_bind_group_layout, &texture_bind_group_layout],
-            immediate_size: 0,
-        });
-        let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("quark_blur_pipeline"),
-            layout: Some(&blur_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &blur_shader,
-                entry_point: Some("vs_blur"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[BlurInstance::layout()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blur_shader,
-                entry_point: Some("fs_blur"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None, // blur fully overwrites
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                ..wgpu::PrimitiveState::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let layer_pipeline = instanced_pipeline(
-            &device,
-            "quark_layer",
-            LAYER_SHADER,
-            ("vs_layer", "fs_layer"),
-            &[&viewport_bind_group_layout, &texture_bind_group_layout],
-            LayerInstance::layout(),
-            surface_format,
-        );
         let segment_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("quark_segment_bind_group_layout"),
@@ -707,15 +536,12 @@ impl GpuContext {
                     count: None,
                 }],
             });
-        let path_pipeline = instanced_pipeline(
-            &device,
-            "quark_path",
-            PATH_SHADER,
-            ("vs_path", "fs_path"),
-            &[&viewport_bind_group_layout, &segment_bind_group_layout],
-            PathInstance::layout(),
-            surface_format,
-        );
+        let layouts = Layouts {
+            viewport: viewport_bind_group_layout,
+            texture: texture_bind_group_layout,
+            segment: segment_bind_group_layout,
+        };
+        let linear = Pipelines::new(&device, &layouts, surface_format);
 
         let glyph_cache = Cache::new(&device);
         Ok(Self {
@@ -725,25 +551,128 @@ impl GpuContext {
                 device,
                 queue,
                 format: surface_format,
-                quad_pipeline,
-                shadow_pipeline,
-                effect_quad_pipeline,
-                blit_pipeline,
-                blur_pipeline,
-                layer_pipeline,
-                path_pipeline,
-                viewport_bind_group_layout,
-                texture_bind_group_layout,
-                segment_bind_group_layout,
+                linear,
+                encoded: std::sync::OnceLock::new(),
+                layouts,
                 sampler,
                 glyph_cache,
                 images: Arc::default(),
             }),
         })
     }
+
+    /// The format a target holding encoded sRGB values uses: the shared
+    /// format without its sRGB suffix, so a view of the same texture can
+    /// write either.
+    fn encoded_format(&self) -> wgpu::TextureFormat {
+        self.inner.format.remove_srgb_suffix()
+    }
+
+    /// Pipelines drawing to encoded targets, built on first use.
+    fn encoded_pipelines(&self) -> &Pipelines {
+        let gpu = &*self.inner;
+        gpu.encoded
+            .get_or_init(|| Pipelines::new(&gpu.device, &gpu.layouts, self.encoded_format()))
+    }
 }
 
-/// An instanced triangle-strip pipeline drawing premultiplied color.
+/// Bind group layouts every pipeline set shares.
+struct Layouts {
+    viewport: wgpu::BindGroupLayout,
+    texture: wgpu::BindGroupLayout,
+    segment: wgpu::BindGroupLayout,
+}
+
+/// Every quark pipeline, built for one target format. A frame draws each
+/// target with the set of its format: linear-light targets with the
+/// shared sRGB format's, encoded targets with its non-sRGB twin's.
+#[derive(Clone)]
+struct Pipelines {
+    quad: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
+    effect: wgpu::RenderPipeline,
+    blit: wgpu::RenderPipeline,
+    /// Overwrites instead of blending.
+    blur: wgpu::RenderPipeline,
+    layer: wgpu::RenderPipeline,
+    path: wgpu::RenderPipeline,
+}
+
+impl Pipelines {
+    fn new(device: &wgpu::Device, layouts: &Layouts, format: wgpu::TextureFormat) -> Self {
+        let blend = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let viewport = &layouts.viewport;
+        let textured = [viewport, &layouts.texture];
+        let pipeline =
+            |label, source, entries, layouts: &[&wgpu::BindGroupLayout], instance, blend| {
+                instanced_pipeline(
+                    device, label, source, entries, layouts, instance, format, blend,
+                )
+            };
+        Self {
+            quad: pipeline(
+                "quark_quad",
+                QUAD_SHADER,
+                ("vs_quad", "fs_quad"),
+                &[viewport],
+                QuadInstance::layout(),
+                blend,
+            ),
+            shadow: pipeline(
+                "quark_shadow",
+                SHADOW_SHADER,
+                ("vs_shadow", "fs_shadow"),
+                &[viewport],
+                ShadowInstance::layout(),
+                blend,
+            ),
+            effect: pipeline(
+                "quark_effect_quad",
+                EFFECT_SHADER,
+                ("vs_effect", "fs_effect"),
+                &[viewport],
+                EffectQuadInstance::layout(),
+                blend,
+            ),
+            blit: pipeline(
+                "quark_blit",
+                BLIT_SHADER,
+                ("vs_blit", "fs_blit"),
+                &textured,
+                BlitInstance::layout(),
+                blend,
+            ),
+            blur: pipeline(
+                "quark_blur",
+                BLUR_SHADER,
+                ("vs_blur", "fs_blur"),
+                &textured,
+                BlurInstance::layout(),
+                None,
+            ),
+            layer: pipeline(
+                "quark_layer",
+                LAYER_SHADER,
+                ("vs_layer", "fs_layer"),
+                &textured,
+                LayerInstance::layout(),
+                blend,
+            ),
+            path: pipeline(
+                "quark_path",
+                PATH_SHADER,
+                ("vs_path", "fs_path"),
+                &[viewport, &layouts.segment],
+                PathInstance::layout(),
+                blend,
+            ),
+        }
+    }
+}
+
+/// An instanced triangle-strip pipeline drawing premultiplied color with
+/// `blend` (none overwrites).
+#[allow(clippy::too_many_arguments)]
 fn instanced_pipeline(
     device: &wgpu::Device,
     label: &'static str,
@@ -752,6 +681,7 @@ fn instanced_pipeline(
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     instance: wgpu::VertexBufferLayout<'static>,
     format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
 ) -> wgpu::RenderPipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -777,7 +707,7 @@ fn instanced_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                blend,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
@@ -836,13 +766,7 @@ pub struct Renderer {
     surface_config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
     scale_factor: f64,
-    quad_pipeline: wgpu::RenderPipeline,
-    shadow_pipeline: wgpu::RenderPipeline,
-    effect_quad_pipeline: wgpu::RenderPipeline,
-    blit_pipeline: wgpu::RenderPipeline,
-    blur_pipeline: wgpu::RenderPipeline,
-    layer_pipeline: wgpu::RenderPipeline,
-    path_pipeline: wgpu::RenderPipeline,
+    pipelines: Pipelines,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     texture_pool: TexturePool,
@@ -881,6 +805,14 @@ pub struct Renderer {
     segment_texture: Option<SegmentTexture>,
     /// Effect animation time of the frame being drawn, in seconds.
     time: f32,
+    options: RendererOptions,
+    background: SurfaceBackground,
+    /// Encoded frames draw through a non-sRGB view of the window's own
+    /// texture; otherwise they draw into a pooled encoded texture that
+    /// one more pass converts into it.
+    pub(crate) direct_encoded: bool,
+    /// Viewport uniform of that conversion pass.
+    present_uniform: Option<(wgpu::Buffer, wgpu::BindGroup)>,
 }
 
 impl Renderer {
@@ -949,13 +881,20 @@ impl Renderer {
                 view_formats: vec![],
             });
         surface.configure(&shared.device, &surface_config);
-        Ok(Self::assemble(
+        let direct = shared
+            .adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::SURFACE_VIEW_FORMATS);
+        let mut renderer = Self::assemble(
             gpu,
             surface_config,
             size,
             window.scale_factor(),
             Some(surface),
-        ))
+        );
+        renderer.direct_encoded = direct;
+        Ok(renderer)
     }
 
     /// Build a windowless renderer that targets `OffscreenTarget`s only, on a
@@ -984,7 +923,14 @@ impl Renderer {
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
         };
-        Self::assemble(gpu.clone(), surface_config, size, scale_factor, None)
+        let mut renderer = Self::assemble(gpu.clone(), surface_config, size, scale_factor, None);
+        renderer.direct_encoded = gpu
+            .inner
+            .adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::VIEW_FORMATS);
+        renderer
     }
 
     /// Per-window state on top of the shared context.
@@ -1006,7 +952,7 @@ impl Renderer {
         });
         let viewport_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("quark_viewport_bind_group"),
-            layout: &shared.viewport_bind_group_layout,
+            layout: &shared.layouts.viewport,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: viewport_buffer.as_entire_binding(),
@@ -1025,14 +971,8 @@ impl Renderer {
             surface_config,
             size,
             scale_factor,
-            quad_pipeline: shared.quad_pipeline.clone(),
-            shadow_pipeline: shared.shadow_pipeline.clone(),
-            effect_quad_pipeline: shared.effect_quad_pipeline.clone(),
-            blit_pipeline: shared.blit_pipeline.clone(),
-            blur_pipeline: shared.blur_pipeline.clone(),
-            layer_pipeline: shared.layer_pipeline.clone(),
-            path_pipeline: shared.path_pipeline.clone(),
-            texture_bind_group_layout: shared.texture_bind_group_layout.clone(),
+            pipelines: shared.linear.clone(),
+            texture_bind_group_layout: shared.layouts.texture.clone(),
             sampler: shared.sampler.clone(),
             texture_pool,
             instance_buffer_pool: TransientBufferPool::default(),
@@ -1058,7 +998,272 @@ impl Renderer {
             layer_viewports: Vec::new(),
             segment_texture: None,
             time: 0.0,
+            options: RendererOptions::default(),
+            background: SurfaceBackground::default(),
+            direct_encoded: false,
+            present_uniform: None,
             gpu,
+        }
+    }
+
+    /// A renderer for `window` drawing as `options` say, on a new context.
+    pub fn new_with_options(
+        window: Arc<Window>,
+        options: RendererOptions,
+    ) -> Result<Self, RenderError> {
+        let mut renderer = Self::new(window)?;
+        renderer.set_options(options);
+        Ok(renderer)
+    }
+
+    /// [`Self::with_gpu`] drawing as `options` say.
+    pub fn with_gpu_and_options(
+        gpu: &GpuContext,
+        window: Arc<Window>,
+        options: RendererOptions,
+    ) -> Result<Self, RenderError> {
+        let mut renderer = Self::with_gpu(gpu, window)?;
+        renderer.set_options(options);
+        Ok(renderer)
+    }
+
+    /// [`Self::headless_with_gpu`] drawing as `options` say.
+    #[cfg(any(test, feature = "headless-render"))]
+    pub fn headless_with_options(
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+        options: RendererOptions,
+    ) -> Self {
+        let mut renderer = Self::headless_with_gpu(gpu, width, height, scale_factor);
+        renderer.set_options(options);
+        renderer
+    }
+
+    pub fn options(&self) -> RendererOptions {
+        self.options
+    }
+
+    /// Draw later frames as `options` say. Affects this renderer only.
+    pub fn set_options(&mut self, options: RendererOptions) {
+        self.options = options;
+        self.configure_view_formats();
+    }
+
+    /// Let the surface's textures take a view of the encoded format when
+    /// frames draw encoded through one.
+    fn configure_view_formats(&mut self) {
+        let encoded = self.gpu.encoded_format();
+        let wanted = if self.options.compositing == UiCompositing::WebCompatible
+            && self.direct_encoded
+            && encoded != self.surface_config.format
+        {
+            vec![encoded]
+        } else {
+            Vec::new()
+        };
+        if self.surface_config.view_formats != wanted {
+            self.surface_config.view_formats = wanted;
+            if let Some(surface) = &self.surface
+                && self.size.width > 0
+                && self.size.height > 0
+            {
+                surface.configure(&self.device, &self.surface_config);
+            }
+        }
+    }
+
+    /// Record the frame flattened last into `texture`, the window's
+    /// target of `width` x `height`: directly when it composites in linear
+    /// light, through an encoded view when it is web-compatible and the
+    /// backend allows one, and otherwise into an encoded texture converted
+    /// into `texture` by one more pass.
+    fn record_root(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+        (width, height): (u32, u32),
+        text: &mut TextSystem,
+    ) -> Result<(), RenderError> {
+        let encoded = self.options.compositing == UiCompositing::WebCompatible;
+        let encoded_format = self.gpu.encoded_format();
+        if !encoded {
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            return self.record_frame(encoder, &view, text);
+        }
+        if self.direct_encoded || texture.format() == encoded_format {
+            let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(encoded_format),
+                ..Default::default()
+            });
+            return self.record_frame(encoder, &view, text);
+        }
+        let staging = self
+            .texture_pool
+            .acquire_in(&self.device, width, height, true);
+        let staging_view = self.texture_pool.view(&staging).clone();
+        let result = self.record_frame(encoder, &staging_view, text);
+        if result.is_ok() {
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.present_encoded(encoder, &staging, &view, (width, height));
+        }
+        self.texture_pool.release(staging);
+        result
+    }
+
+    /// Convert the encoded frame in `source` into the linear-light `dest`.
+    fn present_encoded(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &OffscreenTarget,
+        dest: &wgpu::TextureView,
+        (width, height): (u32, u32),
+    ) {
+        let uniform = ViewportUniform::new(width, height);
+        let (buffer, bind_group) = self.present_uniform.get_or_insert_with(|| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("quark_present_uniform"),
+                size: std::mem::size_of::<ViewportUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("quark_present_bind_group"),
+                layout: &self.gpu.inner.layouts.viewport,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            (buffer, bind_group)
+        });
+        self.queue
+            .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+        let bind_group = bind_group.clone();
+        let instance = [BlitInstance {
+            bounds: [0.0, 0.0, width as f32, height as f32],
+            uv_rect: [
+                0.0,
+                0.0,
+                width as f32 / source.width as f32,
+                height as f32 / source.height as f32,
+            ],
+            tint: [1.0; 4],
+            radii: [0.0; 4],
+            space: [SOURCE_ENCODED, 0.0, 0.0, 0.0],
+        }];
+        let Some(instances) = self.instance_buffer_pool.upload(
+            &self.device,
+            &self.queue,
+            "quark_present_blit",
+            &instance,
+        ) else {
+            return;
+        };
+        let texture = self.texture_pool.bind_group(
+            &self.device,
+            &self.texture_bind_group_layout,
+            &self.sampler,
+            source,
+        );
+        let mut pass = begin_pass(
+            encoder,
+            "quark_present_pass",
+            dest,
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+        );
+        pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+        pass.set_pipeline(&self.pipelines.blit);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(1, &texture, &[]);
+        pass.set_vertex_buffer(0, instances.slice(..));
+        pass.draw(0..4, 0..1);
+    }
+
+    /// What the surface does with the options it was given.
+    pub fn capabilities(&self) -> SurfaceCapabilities {
+        SurfaceCapabilities {
+            transparent: self.background == SurfaceBackground::Transparent,
+            web_compatible: self.options.compositing == UiCompositing::WebCompatible,
+        }
+    }
+
+    /// Snapshot `text`'s fonts for SVG text when they changed since the
+    /// last snapshot (a new system or a font change), dropping flattened
+    /// chunks whose icons were rasterized with the old ones.
+    fn adopt_svg_fonts(&mut self, text: &TextSystem) {
+        let epoch = text.font_epoch();
+        let fl = &mut self.flattener;
+        if fl.svg_fonts.as_ref().map(crate::icons::SvgFonts::epoch) != Some(epoch) {
+            if fl.svg_fonts.is_some() {
+                fl.chunks = chunks::ChunkCache::default();
+            }
+            fl.svg_fonts = Some(crate::icons::SvgFonts::new(text));
+        }
+    }
+
+    /// The pipelines drawing to an encoded or a linear-light target.
+    fn pipelines_for(&self, encoded: bool) -> &Pipelines {
+        if encoded {
+            self.gpu.encoded_pipelines()
+        } else {
+            &self.pipelines
+        }
+    }
+
+    /// The format of an encoded or a linear-light target.
+    pub(super) fn target_format(&self, encoded: bool) -> wgpu::TextureFormat {
+        if encoded {
+            self.gpu.encoded_format()
+        } else {
+            self.gpu.inner.format
+        }
+    }
+
+    /// Show `background` where the scene paints nothing, returning the
+    /// background in effect. A transparent background picks a surface alpha
+    /// mode that composites premultiplied output with the window system's
+    /// (see [`transparent_alpha_mode`]) and keeps it across resizes; with no
+    /// such mode it falls back to an opaque black background and says so.
+    /// Headless renderers keep alpha in their readback either way.
+    pub fn set_surface_background(&mut self, background: SurfaceBackground) -> SurfaceBackground {
+        let effective = match (background, &self.surface) {
+            (SurfaceBackground::Transparent, Some(surface)) => {
+                let modes = surface
+                    .get_capabilities(&self.gpu.inner.adapter)
+                    .alpha_modes;
+                match transparent_alpha_mode(&modes) {
+                    Some(mode) => {
+                        self.set_alpha_mode(mode);
+                        SurfaceBackground::Transparent
+                    }
+                    None => {
+                        self.set_alpha_mode(wgpu::CompositeAlphaMode::Opaque);
+                        SurfaceBackground::default()
+                    }
+                }
+            }
+            (SurfaceBackground::Opaque(_), Some(_)) => {
+                self.set_alpha_mode(wgpu::CompositeAlphaMode::Opaque);
+                background
+            }
+            (_, None) => background,
+        };
+        self.background = effective;
+        effective
+    }
+
+    fn set_alpha_mode(&mut self, mode: wgpu::CompositeAlphaMode) {
+        if self.surface_config.alpha_mode == mode {
+            return;
+        }
+        self.surface_config.alpha_mode = mode;
+        if let Some(surface) = &self.surface
+            && self.size.width > 0
+            && self.size.height > 0
+        {
+            surface.configure(&self.device, &self.surface_config);
         }
     }
 
@@ -1193,11 +1398,14 @@ impl Renderer {
         self.texture_pool.begin_frame();
         self.instance_buffer_pool.begin_frame();
         self.time = 0.0;
-        self.queue.write_buffer(
-            &self.viewport_buffer,
-            0,
-            bytemuck::bytes_of(&ViewportUniform::new(w, h)),
-        );
+        let encoded = self.options.compositing == UiCompositing::WebCompatible;
+        let uniform = ViewportUniform {
+            encoded: f32::from(u8::from(encoded)),
+            ..ViewportUniform::new(w, h)
+        };
+        self.queue
+            .write_buffer(&self.viewport_buffer, 0, bytemuck::bytes_of(&uniform));
+        self.viewport.set_encoded(&self.queue, encoded);
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -1205,10 +1413,12 @@ impl Renderer {
                 height: h,
             },
         );
+        self.adopt_svg_fonts(text);
         self.flatten(scene, w, h);
 
         // Owned target texture (COPY_SRC so we can read it back). Format matches
         // the surface format the pipelines were built against.
+        let encoded_format = self.gpu.encoded_format();
         let target = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("quark_png_target"),
             size: wgpu::Extent3d {
@@ -1221,15 +1431,18 @@ impl Renderer {
             dimension: wgpu::TextureDimension::D2,
             format: self.texture_pool.format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            view_formats: if encoded && self.direct_encoded {
+                std::slice::from_ref(&encoded_format)
+            } else {
+                &[]
+            },
         });
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quark_png_encoder"),
             });
-        self.record_frame(&mut encoder, &view, text)?;
+        self.record_root(&mut encoder, &target, (w, h), text)?;
 
         let bytes_per_pixel = 4u32;
         let unpadded_bytes_per_row = w * bytes_per_pixel;
@@ -1312,17 +1525,20 @@ impl Renderer {
 
         // Update time in the viewport uniform buffer.
         self.time = time_seconds;
+        let encoded = self.options.compositing == UiCompositing::WebCompatible;
         let viewport_uniform = ViewportUniform {
             resolution: [sw as f32, sh as f32],
             time: time_seconds,
-            _padding: 0.0,
+            encoded: f32::from(u8::from(encoded)),
         };
+        self.viewport.set_encoded(&self.queue, encoded);
         self.queue.write_buffer(
             &self.viewport_buffer,
             0,
             bytemuck::bytes_of(&viewport_uniform),
         );
 
+        self.adopt_svg_fonts(text);
         self.flatten(scene, sw, sh);
 
         let surface = self.surface.as_ref().ok_or(RenderError::NoSurface)?;
@@ -1347,15 +1563,12 @@ impl Renderer {
             },
         );
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quark_frame_encoder"),
             });
-        self.record_frame(&mut encoder, &view, text)?;
+        self.record_root(&mut encoder, &frame.texture, (sw, sh), text)?;
 
         let present_started_at = Instant::now();
         self.queue.submit(Some(encoder.finish()));
@@ -1399,7 +1612,14 @@ impl Renderer {
         } else {
             &scene.primitives[..]
         };
-        let offscreen = plan_layers(prims, viewport, &mut self.plans, &mut self.layer_scratch);
+        let encoded = self.options.compositing == UiCompositing::WebCompatible;
+        let offscreen = plan_layers(
+            prims,
+            viewport,
+            encoded,
+            &mut self.plans,
+            &mut self.layer_scratch,
+        );
         self.active_frames = 1 + offscreen;
         if self.frames.len() < self.active_frames {
             self.frames
@@ -1407,23 +1627,27 @@ impl Renderer {
         }
         self.frames[0].width = width;
         self.frames[0].height = height;
+        self.frames[0].encoded = encoded;
         // Textures first, so composites know their texture sizes.
         for plan in &mut self.plans {
             if plan.mode != LayerMode::Offscreen {
                 continue;
             }
-            let texture = self
-                .texture_pool
-                .acquire(&self.device, plan.size.0, plan.size.1);
+            let texture =
+                self.texture_pool
+                    .acquire_in(&self.device, plan.size.0, plan.size.1, plan.encoded);
             plan.texture = (texture.width, texture.height);
             let frame = &mut self.frames[plan.target];
             (frame.width, frame.height) = plan.size;
+            frame.encoded = plan.encoded;
             frame.layer = Some(texture);
         }
 
         let images = lock_images(&self.images);
+        self.flattener.text_rendering = self.options.text_rendering;
         self.flattener.segments.clear();
         self.flattener.chunks.begin_frame();
+        self.flattener.encoded = encoded;
         flatten_scene_into(
             prims,
             0..prims.len(),
@@ -1439,16 +1663,26 @@ impl Renderer {
                 continue;
             }
             let frame = &mut self.frames[plan.target];
+            let region = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: frame.width as f32,
+                height: frame.height as f32,
+            };
+            // An isolated group shows nothing outside its bounds.
+            let viewport = match plan.isolate {
+                Some(bounds) => bounds
+                    .offset(-plan.origin.0, -plan.origin.1)
+                    .intersection(region)
+                    .unwrap_or_default(),
+                None => region,
+            };
+            self.flattener.encoded = plan.encoded;
             flatten_scene_into(
                 prims,
                 plan.start + 1..plan.end,
                 plan.origin,
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: frame.width as f32,
-                    height: frame.height as f32,
-                },
+                viewport,
                 &self.plans,
                 &images.cache,
                 &mut self.flattener,
@@ -1536,8 +1770,12 @@ impl Renderer {
         }
 
         for frame in frames.iter_mut() {
-            frame.blur =
-                self.prepare_blur(&frame.flat, &mut frame.buffers, frame.width, frame.height);
+            frame.blur = self.prepare_blur(
+                &frame.flat,
+                &mut frame.buffers,
+                (frame.width, frame.height),
+                frame.encoded,
+            );
             frame.layer_bind = frame.layer.as_ref().map(|texture| {
                 self.texture_pool.bind_group(
                     &self.device,
@@ -1555,10 +1793,11 @@ impl Renderer {
             let frame = &frames[index];
             let (view, clear) = match &frame.layer {
                 Some(texture) => (self.texture_pool.view(texture), wgpu::Color::TRANSPARENT),
-                None => (output, wgpu::Color::BLACK),
+                None => (output, clear_color(self.background, frame.encoded)),
             };
             let target = EncodeTarget {
                 frame,
+                pipelines: self.pipelines_for(frame.encoded),
                 uniform: match index {
                     0 => &self.viewport_bind_group,
                     i => &self.layer_uniforms[i - 1].1,
@@ -1606,7 +1845,7 @@ impl Renderer {
                 });
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("quark_layer_viewport_bind_group"),
-                    layout: &self.gpu.inner.viewport_bind_group_layout,
+                    layout: &self.gpu.inner.layouts.viewport,
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
                         resource: buffer.as_entire_binding(),
@@ -1618,8 +1857,10 @@ impl Renderer {
             }
             let uniform = ViewportUniform {
                 time: self.time,
+                encoded: f32::from(u8::from(frame.encoded)),
                 ..ViewportUniform::new(frame.width, frame.height)
             };
+            self.layer_viewports[slot].set_encoded(&self.queue, frame.encoded);
             self.queue.write_buffer(
                 &self.layer_uniforms[slot].0,
                 0,
@@ -1669,7 +1910,7 @@ impl Renderer {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("quark_path_segments"),
-                layout: &self.gpu.inner.segment_bind_group_layout,
+                layout: &self.gpu.inner.layouts.segment,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&view),
@@ -1745,18 +1986,27 @@ impl Renderer {
         &mut self,
         flat: &FlattenedScene,
         buffers: &mut FrameBuffers,
-        width: u32,
-        height: u32,
+        (width, height): (u32, u32),
+        encoded: bool,
     ) -> Option<BlurTargets> {
         if !flat.steps.iter().any(|s| matches!(s, DrawStep::Blur(_))) {
             return None;
         }
-        let scene = self.texture_pool.acquire(&self.device, width, height);
+        // The scene in the target's own space; the blur filters linear
+        // light, so its scratch targets hold that.
+        let scene = self
+            .texture_pool
+            .acquire_in(&self.device, width, height, encoded);
         let h = self.texture_pool.acquire(&self.device, width, height);
         let v = self.texture_pool.acquire(&self.device, width, height);
-        // Pooled textures can be larger than the frame; passes on them set a
-        // viewport of the frame size, so UVs divide by the texture size.
-        let (tw, th) = (scene.width as f32, scene.height as f32);
+        let read_scene = if encoded { SOURCE_ENCODED } else { SOURCE_SAME };
+        // Pooled textures can be larger than the frame and than each other;
+        // passes on them set a viewport of the frame size, so each pass's
+        // UVs divide by the size of the texture it reads.
+        let uv_in = |target: &OffscreenTarget, r: Rect| {
+            let (tw, th) = (target.width as f32, target.height as f32);
+            [r.x / tw, r.y / th, r.right() / tw, r.bottom() / th]
+        };
 
         let mut blur_instances = Vec::new();
         let mut blit_instances = Vec::new();
@@ -1766,37 +2016,49 @@ impl Renderer {
             };
             let sigma = (region.blur_radius * 0.5).max(0.5);
             let br = region.rect;
-            let uv = [br.x / tw, br.y / th, br.right() / tw, br.bottom() / th];
             let bounds = [br.x, br.y, br.width, br.height];
-            // The vertical pass samples up to six (scaled) texels above and
+            // The vertical pass samples up to its kernel's reach above and
             // below the region, so the horizontal pass covers that margin
             // too; otherwise the region's top and bottom edges blend with
             // the cleared, transparent texels around it.
-            let reach = 6.0 * (sigma / 6.0).max(1.0) + 1.0;
+            let reach = blur_reach(sigma) + 1.0;
             let top = (br.y - reach).max(0.0);
             let bottom = (br.bottom() + reach).min(height as f32);
+            let band = Rect {
+                y: top,
+                height: bottom - top,
+                ..br
+            };
             blur_instances.push(BlurInstance {
                 bounds: [br.x, top, br.width, bottom - top],
-                uv_rect: [br.x / tw, top / th, br.right() / tw, bottom / th],
-                blur_params: [1.0, 0.0, sigma, 0.0],
+                uv_rect: uv_in(&scene, band),
+                blur_params: [1.0, 0.0, sigma, read_scene],
             });
             blur_instances.push(BlurInstance {
                 bounds,
-                uv_rect: uv,
-                blur_params: [0.0, 1.0, sigma, 0.0],
+                uv_rect: uv_in(&h, br),
+                blur_params: [0.0, 1.0, sigma, SOURCE_SAME],
             });
             blit_instances.push(BlitInstance {
                 bounds,
-                uv_rect: uv,
+                uv_rect: uv_in(&v, br),
                 tint: [1.0; 4],
                 radii: region.corner_radii,
+                space: [source_space(false, encoded), 0.0, 0.0, 0.0],
             });
         }
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+        };
         blit_instances.push(BlitInstance {
             bounds: [0.0, 0.0, width as f32, height as f32],
-            uv_rect: [0.0, 0.0, width as f32 / tw, height as f32 / th],
+            uv_rect: uv_in(&scene, frame),
             tint: [1.0; 4],
             radii: [0.0; 4],
+            space: [SOURCE_SAME; 4],
         });
         let pool = &mut self.instance_buffer_pool;
         buffers.blur = pool.upload(
@@ -1871,7 +2133,7 @@ impl Renderer {
                 if let (Some(b), Some(buf)) = (blur, &buffers.blur_blit)
                     && blurs_done > 0
                 {
-                    pass.set_pipeline(&self.blit_pipeline);
+                    pass.set_pipeline(&t.pipelines.blit);
                     pass.set_bind_group(0, t.uniform, &[]);
                     pass.set_bind_group(1, &b.v_bind, &[]);
                     pass.set_vertex_buffer(0, buf.slice(..));
@@ -1902,7 +2164,8 @@ impl Renderer {
                     wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 );
                 set_viewport(&mut pass);
-                pass.set_pipeline(&self.blur_pipeline);
+                // The scratch targets hold linear light.
+                pass.set_pipeline(&self.pipelines.blur);
                 pass.set_bind_group(0, t.uniform, &[]);
                 pass.set_bind_group(1, source, &[]);
                 pass.set_vertex_buffer(0, buf.slice(..));
@@ -1921,7 +2184,7 @@ impl Renderer {
                 wgpu::LoadOp::Clear(t.clear),
             );
             set_viewport(&mut pass);
-            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_pipeline(&t.pipelines.blit);
             pass.set_bind_group(0, t.uniform, &[]);
             pass.set_bind_group(1, &b.scene_bind, &[]);
             pass.set_vertex_buffer(0, buf.slice(..));
@@ -1944,16 +2207,17 @@ impl Renderer {
         let batches = &t.frame.batches;
         let buffers = &t.frame.buffers;
         let cmds = cmds.start as usize..cmds.end as usize;
+        let pipelines = t.pipelines;
         let (pipeline, buffer) = match kind {
-            PrimKind::Shadow => (&self.shadow_pipeline, &buffers.shadow),
-            PrimKind::Effect => (&self.effect_quad_pipeline, &buffers.effect),
-            PrimKind::Quad => (&self.quad_pipeline, &buffers.quad),
-            PrimKind::Path => (&self.path_pipeline, &buffers.path),
+            PrimKind::Shadow => (&pipelines.shadow, &buffers.shadow),
+            PrimKind::Effect => (&pipelines.effect, &buffers.effect),
+            PrimKind::Quad => (&pipelines.quad, &buffers.quad),
+            PrimKind::Path => (&pipelines.path, &buffers.path),
             PrimKind::Layer => {
                 let Some(buffer) = &buffers.layer else {
                     return Ok(());
                 };
-                pass.set_pipeline(&self.layer_pipeline);
+                pass.set_pipeline(&pipelines.layer);
                 pass.set_bind_group(0, t.uniform, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 for command in &batches.layer_cmds[cmds] {
@@ -1978,7 +2242,7 @@ impl Renderer {
                     return Ok(());
                 };
                 let images = lock_images(&self.images);
-                pass.set_pipeline(&self.blit_pipeline);
+                pass.set_pipeline(&pipelines.blit);
                 pass.set_bind_group(0, t.uniform, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 for command in &batches.image_cmds[cmds] {
@@ -2210,6 +2474,8 @@ struct TargetFrame {
     batches: FrameBatches,
     width: u32,
     height: u32,
+    /// The target holds encoded sRGB values (web-compatible compositing).
+    encoded: bool,
     /// The pooled texture an offscreen layer renders into this frame.
     layer: Option<OffscreenTarget>,
     /// Index of this target's first text run among the frame's.
@@ -2224,6 +2490,8 @@ struct TargetFrame {
 /// What encoding one target needs.
 struct EncodeTarget<'a> {
     frame: &'a TargetFrame,
+    /// The pipelines of the target's format.
+    pipelines: &'a Pipelines,
     uniform: &'a wgpu::BindGroup,
     glyph_viewport: &'a Viewport,
     /// Every target of the frame, for the layers this one composites.
@@ -2243,6 +2511,54 @@ struct BlurTargets {
     scene_bind: wgpu::BindGroup,
     h_bind: wgpu::BindGroup,
     v_bind: wgpu::BindGroup,
+}
+
+/// The alpha mode a transparent window surface uses, from those the
+/// surface offers: premultiplied, which matches the renderer's output;
+/// else post-multiplied (Metal's non-opaque layer), exact for fully
+/// transparent and opaque pixels and slightly dark on antialiased edges
+/// over the desktop; else inherit (the window system's choice). `None`
+/// when the surface can only be opaque (an X11 visual without alpha).
+fn transparent_alpha_mode(
+    offered: &[wgpu::CompositeAlphaMode],
+) -> Option<wgpu::CompositeAlphaMode> {
+    use wgpu::CompositeAlphaMode::{Inherit, PostMultiplied, PreMultiplied};
+    [PreMultiplied, PostMultiplied, Inherit]
+        .into_iter()
+        .find(|mode| offered.contains(mode))
+}
+
+/// How far, in pixels, a blur pass of `sigma` samples from the pixel it
+/// writes: up to the shader's `BLUR_TAPS` samples each side, spread so they
+/// reach three sigma.
+fn blur_reach(sigma: f32) -> f32 {
+    const BLUR_TAPS: f32 = 12.0;
+    let taps = BLUR_TAPS.min((3.0 * sigma).ceil());
+    taps * (3.0 * sigma / BLUR_TAPS).max(1.0)
+}
+
+/// The clear color of a window target showing `background`, premultiplied
+/// in the target's space.
+fn clear_color(background: SurfaceBackground, encoded: bool) -> wgpu::Color {
+    let SurfaceBackground::Opaque(color) = background else {
+        return wgpu::Color::TRANSPARENT;
+    };
+    let [r, g, b, a] = color_to_unit(color).map(f64::from);
+    let decode = |c: f64| {
+        if encoded {
+            c
+        } else if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    wgpu::Color {
+        r: decode(r) * a,
+        g: decode(g) * a,
+        b: decode(b) * a,
+        a,
+    }
 }
 
 fn begin_pass<'e>(
@@ -2394,7 +2710,7 @@ struct ShadowInstance {
     draw_bounds: [f32; 4],
     /// Original shadow-casting rect (x, y, w, h) before expansion.
     shadow_bounds: [f32; 4],
-    /// Shadow color (linear RGBA, premultiplied).
+    /// Shadow color (sRGB-encoded, straight alpha; see `color_to_unit`).
     color: [f32; 4],
     /// [blur_sigma, corner_radius, 0, 0]
     params: [f32; 4],
@@ -2450,9 +2766,9 @@ impl ShadowInstance {
 struct EffectQuadInstance {
     /// Element bounds: [x, y, width, height].
     bounds: [f32; 4],
-    /// First color (linear RGBA, premultiplied).
+    /// First color (sRGB-encoded, straight alpha; see `color_to_unit`).
     color_a: [f32; 4],
-    /// Second color (linear RGBA, premultiplied).
+    /// Second color (sRGB-encoded, straight alpha).
     color_b: [f32; 4],
     /// [effect_type, param1, param2, corner_radius].
     params: [f32; 4],
@@ -2460,7 +2776,13 @@ struct EffectQuadInstance {
     clip_bounds: [f32; 4],
     /// Rounded-clip corner radii [tl, tr, br, bl]. All zero = no rounded clip.
     clip_radii: [f32; 4],
+    /// More effect parameters: stripes keep [duty, 0, 0, 0].
+    extra: [f32; 4],
 }
+
+/// Effect type of [`StripesPrimitive`](crate::scene::StripesPrimitive)
+/// quads in the effect shader.
+const EFFECT_STRIPES: f32 = 6.0;
 
 impl EffectQuadInstance {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -2498,6 +2820,11 @@ impl EffectQuadInstance {
                     shader_location: 5,
                     format: wgpu::VertexFormat::Float32x4,
                 },
+                wgpu::VertexAttribute {
+                    offset: 96,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
             ],
         }
     }
@@ -2514,11 +2841,32 @@ struct BlitInstance {
     tint: [f32; 4],
     /// Rounded mask over `bounds`: [tl, tr, br, bl]. All zero = none.
     radii: [f32; 4],
+    /// [source space, 0, 0, 0]; see [`SOURCE_SAME`].
+    space: [f32; 4],
+}
+
+/// A sampled texture holds values in the target's own space.
+const SOURCE_SAME: f32 = 0.0;
+/// A sampled texture decodes to linear light (sRGB textures): an encoded
+/// target encodes it.
+const SOURCE_LINEAR: f32 = 1.0;
+/// A sampled texture holds encoded values (non-sRGB views of encoded
+/// targets): a linear target decodes it.
+const SOURCE_ENCODED: f32 = 2.0;
+
+/// The space flag for sampling a target that is `source_encoded` into one
+/// that is `target_encoded`.
+fn source_space(source_encoded: bool, target_encoded: bool) -> f32 {
+    match (source_encoded, target_encoded) {
+        (a, b) if a == b => SOURCE_SAME,
+        (true, _) => SOURCE_ENCODED,
+        (false, _) => SOURCE_LINEAR,
+    }
 }
 
 impl BlitInstance {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
+        const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -2535,16 +2883,52 @@ struct LayerInstance {
     linear: [f32; 4],
     /// [tx, ty, layer width, layer height].
     offset_size: [f32; 4],
-    /// [1 / texture width, 1 / texture height, opacity, 0].
+    /// [1 / texture width, 1 / texture height, opacity, source space].
     params: [f32; 4],
     clip_bounds: [f32; 4],
     clip_radii: [f32; 4],
+    /// Alpha mask axis in target pixels, [x0, y0, x1, y1]; all zero for
+    /// no mask (with every stop alpha one).
+    mask_axis: [f32; 4],
+    /// Four stop offsets along the axis, increasing; unused stops repeat
+    /// the last.
+    mask_offsets: [f32; 4],
+    mask_alphas: [f32; 4],
 }
 
 impl LayerInstance {
+    /// Mask fields for `mask` drawn with `shift` added to its points.
+    fn mask_fields(
+        mask: Option<&crate::scene::AlphaMask>,
+        shift: (f32, f32),
+    ) -> ([f32; 4], [f32; 4], [f32; 4]) {
+        let Some(crate::scene::AlphaMask::Linear { start, end, stops }) = mask else {
+            return ([0.0; 4], [0.0; 4], [1.0; 4]);
+        };
+        let stops = stops.as_slice();
+        let (mut offsets, mut alphas) = ([0.0; 4], [1.0; 4]);
+        for i in 0..4 {
+            if let Some(stop) = stops.get(i).or(stops.last()) {
+                offsets[i] = stop.offset;
+                alphas[i] = stop.alpha;
+            }
+        }
+        (
+            [
+                start[0] + shift.0,
+                start[1] + shift.1,
+                end[0] + shift.0,
+                end[1] + shift.1,
+            ],
+            offsets,
+            alphas,
+        )
+    }
+
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4
+        const ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4,
+            5 => Float32x4, 6 => Float32x4, 7 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as u64,
@@ -2591,8 +2975,9 @@ struct BlurInstance {
     bounds: [f32; 4],
     /// Source UV rect: [u_min, v_min, u_max, v_max].
     uv_rect: [f32; 4],
-    /// [direction_x, direction_y, blur_sigma, 0.0]
-    /// direction = (1,0) for horizontal, (0,1) for vertical.
+    /// [direction_x, direction_y, blur_sigma, source space]
+    /// direction = (1,0) for horizontal, (0,1) for vertical. The blur
+    /// filters linear light, so an encoded source decodes as it is read.
     blur_params: [f32; 4],
 }
 
@@ -2627,7 +3012,9 @@ impl BlurInstance {
 struct ViewportUniform {
     resolution: [f32; 2],
     time: f32,
-    _padding: f32,
+    /// 1 when the target holds encoded sRGB values; see `to_target` in
+    /// the shaders.
+    encoded: f32,
 }
 
 impl ViewportUniform {
@@ -2635,7 +3022,7 @@ impl ViewportUniform {
         Self {
             resolution: [width as f32, height as f32],
             time: 0.0,
-            _padding: 0.0,
+            encoded: 0.0,
         }
     }
 }
@@ -2797,6 +3184,97 @@ pub(super) struct ClippedRichText {
     pub(super) alpha: f32,
     /// Id of the innermost chunk it was drawn from, zero outside chunks.
     pub(super) run: u64,
+    /// Fill and coverage of a styled text; default for rich text.
+    pub(super) paint: GlyphPaint,
+}
+
+/// How a styled text's glyphs paint beyond their span colors.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct GlyphPaint {
+    /// Gradient or shimmer, placed in the target's pixels; `None` paints
+    /// the default color.
+    pub(super) fill: Option<glyphon::GlyphFill>,
+    /// sRGB-encoded luminance of the known opaque backdrop, for perceptual
+    /// coverage.
+    pub(super) backdrop: Option<u8>,
+}
+
+impl GlyphPaint {
+    /// Whether glyphs prepared with `self` are the glyphs `other`
+    /// prepares: fill values (a shimmer's phase) live in the run's fill
+    /// uniform, not in the vertices.
+    pub(super) fn same_vertices(&self, other: &Self) -> bool {
+        self.backdrop == other.backdrop && self.fill.is_some() == other.fill.is_some()
+    }
+
+    /// The paint of `text` placed with its layout origin at `origin`, in
+    /// target pixels, under `rendering` policy.
+    fn of(text: &crate::scene::StyledTextPrimitive, origin: Rect, policy: TextRendering) -> Self {
+        use crate::scene::{ShimmerDirection, TextBackdrop, TextFill};
+        let unit = color_to_unit;
+        let fill = match text.fill {
+            TextFill::Solid(_) => None,
+            TextFill::LinearGradient(g) => Some(glyphon::GlyphFill {
+                axis: [
+                    origin.x + g.start[0],
+                    origin.y + g.start[1],
+                    origin.x + g.end[0],
+                    origin.y + g.end[1],
+                ],
+                color_a: unit(g.from),
+                color_b: unit(g.to),
+                params: [1.0, 0.0, 0.0, 0.0],
+            }),
+            TextFill::Shimmer(spec) => {
+                let band = spec.band_width.max(0.0);
+                let width = origin.width.max(0.0);
+                let (start, end) = match spec.direction {
+                    ShimmerDirection::LeftToRight => (origin.x, origin.right()),
+                    ShimmerDirection::RightToLeft => (origin.right(), origin.x),
+                };
+                let phase = if spec.phase.is_finite() {
+                    spec.phase.rem_euclid(1.0)
+                } else {
+                    0.0
+                };
+                Some(glyphon::GlyphFill {
+                    axis: [
+                        start,
+                        origin.y,
+                        end + (end - start).signum() * 1.0e-3,
+                        origin.y,
+                    ],
+                    color_a: unit(spec.base),
+                    color_b: unit(spec.highlight),
+                    // The band enters fully outside the leading edge and
+                    // leaves fully past the trailing one.
+                    params: [2.0, band * 0.5, -band * 0.5 + phase * (width + band), 0.0],
+                })
+            }
+        };
+        let backdrop = match (policy, text.rendering, text.backdrop) {
+            (TextRendering::Perceptual, TextRendering::Perceptual, TextBackdrop::Opaque(c)) => {
+                Some(srgb_luminance(c))
+            }
+            _ => None,
+        };
+        Self { fill, backdrop }
+    }
+}
+
+/// Relative luminance of `c`, encoded back to sRGB as a byte (the form
+/// glyph coverage correction reads).
+fn srgb_luminance(c: quark::Color) -> u8 {
+    let lin = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let l = 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+    linear_to_srgb_byte(l)
 }
 
 #[derive(Clone, Copy)]
@@ -2992,6 +3470,15 @@ struct Flattener {
     path_bands: Vec<PathInstance>,
     /// Flattened chunks kept across frames.
     chunks: chunks::ChunkCache,
+    /// The renderer's coverage policy for styled text.
+    text_rendering: TextRendering,
+    /// The target being flattened holds encoded values.
+    encoded: bool,
+    /// Per isolated group drawn in place, the clip stack depth to return
+    /// to at its end.
+    isolates: Vec<usize>,
+    /// Fonts SVG text in icons draws with.
+    svg_fonts: Option<crate::icons::SvgFonts>,
 }
 
 impl Flattener {
@@ -3137,6 +3624,7 @@ fn flatten_scene(scene: &Scene, viewport: Rect, image_cache: &ImageCache) -> Fla
     plan_layers(
         &scene.primitives,
         viewport,
+        false,
         &mut plans,
         &mut LayerScratch::default(),
     );
@@ -3194,6 +3682,7 @@ fn flatten_scene_into(
     fl.origin = origin;
     fl.alpha = 1.0;
     fl.inline.clear();
+    fl.isolates.clear();
 
     let mut index = range.start;
     while index < range.end {
@@ -3243,6 +3732,8 @@ fn flatten_scene_into(
             | Primitive::Shadow(_)
             | Primitive::TextRun(_)
             | Primitive::RichTextRun(_)
+            | Primitive::StyledText(_)
+            | Primitive::Stripes(_)
             | Primitive::BlurRegion(_)
             | Primitive::EffectQuad(_)
             | Primitive::Image(_)
@@ -3258,7 +3749,7 @@ fn flatten_scene_into(
                 };
                 // Icons already on the GPU skip rasterizing.
                 let rasterize = |key| !image_cache.contains_key(&key);
-                if let Some(drawn) = convert(primitive, rasterize) {
+                if let Some(drawn) = convert(primitive, rasterize, fl.svg_fonts.as_ref()) {
                     emit(drawn, &draw, fl, out);
                 }
             }
@@ -3308,6 +3799,39 @@ fn flatten_scene_into(
                 if let Some((origin, alpha)) = fl.inline.pop() {
                     fl.origin = origin;
                     fl.alpha = alpha;
+                }
+            }
+            Primitive::IsolateStart(isolate) => {
+                let Ok(at) = plans.binary_search_by_key(&(index - 1), |plan| plan.start) else {
+                    continue;
+                };
+                let plan = &plans[at];
+                match plan.mode {
+                    LayerMode::Skip => index = plan.end + 1,
+                    LayerMode::Inline { .. } => {
+                        // In place, clipped to its bounds.
+                        fl.isolates.push(fl.clips.len());
+                        let rect = isolate.bounds.offset(-fl.origin.0, -fl.origin.1);
+                        let next = fl
+                            .clips
+                            .last()
+                            .and_then(|clip| clip.push(rect, [0.0; 4]))
+                            .unwrap_or(ActiveClip {
+                                scissor: Rect::default(),
+                                rounded_rect: Rect::default(),
+                                corner_radii: [0.0; 4],
+                            });
+                        fl.clips.push(next);
+                    }
+                    LayerMode::Offscreen => {
+                        push_layer(plan, fl, &mut out.layers);
+                        index = plan.end + 1;
+                    }
+                }
+            }
+            Primitive::IsolateEnd => {
+                if let Some(depth) = fl.isolates.pop() {
+                    fl.clips.truncate(depth.max(1));
                 }
             }
             Primitive::LayerBoundary => {}
@@ -3371,6 +3895,7 @@ enum Drawn {
     Image(crate::scene::ImagePrimitive),
     Text(TextPrimitive),
     RichText(RichTextPrimitive),
+    StyledText(crate::scene::StyledTextPrimitive),
     /// A path's fill or stroke: every band shares one key, placed with the
     /// bounds of the whole path.
     Path {
@@ -3400,7 +3925,11 @@ struct Draw<'a> {
 /// The draw of a primitive other than a path, a chunk, or a state change,
 /// unclipped and unfaded. `rasterize` says whether an icon's pixels are
 /// needed (its texture is not on the GPU).
-fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option<Drawn> {
+fn convert(
+    primitive: &Primitive,
+    rasterize: impl FnOnce(u64) -> bool,
+    fonts: Option<&crate::icons::SvgFonts>,
+) -> Option<Drawn> {
     let quad = |rect: Rect, background, border_color, corner_radii, border_widths| {
         Drawn::Quad(QuadInstance {
             bounds: [rect.x, rect.y, rect.width, rect.height],
@@ -3415,14 +3944,14 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
     Some(match primitive {
         Primitive::Rect(rect) => quad(
             rect.rect,
-            color_to_linear(rect.color),
+            color_to_unit(rect.color),
             [0.0; 4],
             [0.0; 4],
             [0.0; 4],
         ),
         Primitive::RoundedRect(rect) => quad(
             rect.rect,
-            color_to_linear(rect.color),
+            color_to_unit(rect.color),
             [0.0; 4],
             rect.corner_radii,
             [0.0; 4],
@@ -3430,7 +3959,7 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
         Primitive::Border(border) => quad(
             border.rect,
             [0.0; 4],
-            color_to_linear(border.color),
+            color_to_unit(border.color),
             border.corner_radii,
             border.widths,
         ),
@@ -3452,7 +3981,7 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
                     rect.width,
                     rect.height,
                 ],
-                color: color_to_linear(shadow.color),
+                color: color_to_unit(shadow.color),
                 params: [sigma, shadow.corner_radius, 0.0, 0.0],
                 clip_bounds: [0.0; 4],
                 clip_radii: [0.0; 4],
@@ -3460,6 +3989,7 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
         }
         Primitive::TextRun(text) => Drawn::Text(text.clone()),
         Primitive::RichTextRun(text) => Drawn::RichText(text.clone()),
+        Primitive::StyledText(text) => Drawn::StyledText(text.clone()),
         Primitive::BlurRegion(blur) => Drawn::Blur(FlattenedBlurRegion {
             rect: blur.rect,
             blur_radius: blur.blur_radius,
@@ -3469,8 +3999,8 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
             let rect = effect.rect;
             Drawn::Effect(EffectQuadInstance {
                 bounds: [rect.x, rect.y, rect.width, rect.height],
-                color_a: color_to_linear(effect.color_a),
-                color_b: color_to_linear(effect.color_b),
+                color_a: color_to_unit(effect.color_a),
+                color_b: color_to_unit(effect.color_b),
                 params: [
                     effect.effect_type as u32 as f32,
                     effect.params[0],
@@ -3479,6 +4009,26 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
                 ],
                 clip_bounds: [0.0; 4],
                 clip_radii: [0.0; 4],
+                extra: [0.0; 4],
+            })
+        }
+        Primitive::Stripes(stripes) => {
+            let rect = stripes.rect;
+            let clean = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+            Drawn::Effect(EffectQuadInstance {
+                bounds: [rect.x, rect.y, rect.width, rect.height],
+                color_a: color_to_unit(stripes.colors[0]),
+                color_b: color_to_unit(stripes.colors[1]),
+                params: [
+                    EFFECT_STRIPES,
+                    clean(stripes.angle, 0.0),
+                    // Under a pixel, stripes would alias into noise.
+                    clean(stripes.period, 1.0).max(1.0),
+                    stripes.corner_radii.iter().copied().fold(0.0, f32::max),
+                ],
+                clip_bounds: [0.0; 4],
+                clip_radii: [0.0; 4],
+                extra: [clean(stripes.duty, 0.5).clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             })
         }
         Primitive::Image(img) => Drawn::Image(img.clone()),
@@ -3491,10 +4041,10 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
                 height: icon.rect.height.round(),
             };
             let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
-            let cache_key = crate::icons::cache_key(&icon.name, px_size, icon.color);
+            let cache_key = crate::icons::cache_key_with(&icon.name, px_size, icon.color, fonts);
             // Once uploaded, the cache key alone is enough to draw.
             let (rgba, width, height) = if rasterize(cache_key) {
-                crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
+                crate::icons::rasterize_svg_with(&icon.name, px_size, icon.color, fonts)
             } else {
                 (empty_rgba(), 0, 0)
             };
@@ -3512,6 +4062,8 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
         | Primitive::ClipEnd
         | Primitive::LayerStart(_)
         | Primitive::LayerEnd
+        | Primitive::IsolateStart(_)
+        | Primitive::IsolateEnd
         | Primitive::ZIndexPush(_)
         | Primitive::ZIndexPop
         | Primitive::LayerBoundary => return None,
@@ -3561,7 +4113,7 @@ fn path_parts(
         if !push_bands(&outline, segments, &mut scratch.bands, &mut scratch.points) {
             continue;
         }
-        let color = color_to_linear(color);
+        let color = color_to_unit(color);
         let start = bands.len() as u32;
         bands.extend(scratch.bands.iter().map(|band| {
             let rect = band.rect.offset(origin[0], origin[1]);
@@ -3681,6 +4233,28 @@ fn emit(drawn: Drawn, draw: &Draw<'_>, fl: &mut Flattener, out: &mut FlattenedSc
                 clip: intersection,
                 alpha,
                 run: draw.run,
+                paint: GlyphPaint::default(),
+            });
+        }
+        Drawn::StyledText(text) => {
+            let rect = text.rect.offset(dx, dy);
+            let Some(intersection) = rect.intersection(clip.scissor) else {
+                return;
+            };
+            let key = fl.place(draw.z, PrimKind::Text, intersection);
+            let paint = GlyphPaint::of(&text, rect, fl.text_rendering);
+            out.rich_texts.push(ClippedRichText {
+                key,
+                primitive: RichTextPrimitive {
+                    rect,
+                    layout: text.layout,
+                    default_color: text.fill.base_color(),
+                    span_colors: text.span_colors,
+                },
+                clip: intersection,
+                alpha,
+                run: draw.run,
+                paint,
             });
         }
         Drawn::Blur(blur) => {
@@ -3746,6 +4320,10 @@ fn push_layer(plan: &LayerPlan, fl: &mut Flattener, out: &mut Vec<ClippedLayer>)
         return;
     };
     let key = fl.place(fl.z(), PrimKind::Layer, bounds);
+    // Isolated groups never transform, so the mask only moves with the
+    // target origin.
+    let (mask_axis, mask_offsets, mask_alphas) =
+        LayerInstance::mask_fields(plan.mask.as_ref(), (-fl.origin.0, -fl.origin.1));
     out.push(ClippedLayer {
         key,
         instance: LayerInstance {
@@ -3755,10 +4333,13 @@ fn push_layer(plan: &LayerPlan, fl: &mut Flattener, out: &mut Vec<ClippedLayer>)
                 1.0 / plan.texture.0.max(1) as f32,
                 1.0 / plan.texture.1.max(1) as f32,
                 plan.opacity * fl.alpha,
-                0.0,
+                source_space(plan.encoded, fl.encoded),
             ],
             clip_bounds: clip.clip_bounds_attr(),
             clip_radii: clip.clip_radii_attr(),
+            mask_axis,
+            mask_offsets,
+            mask_alphas,
         },
         clip: clip.scissor,
         target: plan.target,
@@ -3813,6 +4394,17 @@ struct LayerPlan {
     texture: (u32, u32),
     /// Frame index of an offscreen layer's target.
     target: usize,
+    /// The layer's content composites in encoded sRGB (its own target
+    /// holds encoded values).
+    encoded: bool,
+    /// An isolated group's bounds, in its content coordinates (which are
+    /// its parent's): content outside them is clipped away.
+    isolate: Option<Rect>,
+    /// An isolated group's mask, in its content coordinates.
+    mask: Option<crate::scene::AlphaMask>,
+    /// Whether the group must render offscreen whatever its content: a
+    /// mask, or a compositing mode other than its parent's.
+    forced: bool,
 }
 
 impl LayerPlan {
@@ -3840,16 +4432,21 @@ struct LayerScratch {
     clips: Vec<Rect>,
 }
 
-/// Plan every layer of `scene` (in scene order) and number the offscreen
-/// ones' targets from 1. Returns how many render offscreen.
+/// Plan every layer and isolated group of `scene` (in scene order) and
+/// number the offscreen ones' targets from 1. Returns how many render
+/// offscreen. The root target holds encoded values when `encoded`.
 fn plan_layers(
     prims: &[Primitive],
     viewport: Rect,
+    encoded: bool,
     plans: &mut Vec<LayerPlan>,
     scratch: &mut LayerScratch,
 ) -> usize {
     plans.clear();
-    if !prims.iter().any(|p| matches!(p, Primitive::LayerStart(_))) {
+    if !prims
+        .iter()
+        .any(|p| matches!(p, Primitive::LayerStart(_) | Primitive::IsolateStart(_)))
+    {
         return 0;
     }
     let LayerScratch { open, clips } = scratch;
@@ -3869,6 +4466,7 @@ fn plan_layers(
                 } else {
                     layer.opacity.clamp(0.0, 1.0)
                 };
+                let parent_encoded = open.last().map_or(encoded, |l| plans[l.plan].encoded);
                 plans.push(LayerPlan {
                     start: index,
                     end: prims.len(),
@@ -3879,6 +4477,10 @@ fn plan_layers(
                     size: (0, 0),
                     texture: (0, 0),
                     target: 0,
+                    encoded: parent_encoded,
+                    isolate: None,
+                    mask: None,
+                    forced: false,
                 });
                 open.push(OpenLayer {
                     plan: plans.len() - 1,
@@ -3888,7 +4490,36 @@ fn plan_layers(
                 });
                 clips.push(content_clip);
             }
-            Primitive::LayerEnd => {
+            Primitive::IsolateStart(isolate) => {
+                let outer = *clips.last().expect("root clip");
+                let parent_encoded = open.last().map_or(encoded, |l| plans[l.plan].encoded);
+                let own = isolate
+                    .compositing
+                    .map_or(parent_encoded, |mode| mode == UiCompositing::WebCompatible);
+                plans.push(LayerPlan {
+                    start: index,
+                    end: prims.len(),
+                    mode: LayerMode::Skip,
+                    opacity: 1.0,
+                    transform: Transform2D::IDENTITY,
+                    origin: (0.0, 0.0),
+                    size: (0, 0),
+                    texture: (0, 0),
+                    target: 0,
+                    encoded: own,
+                    isolate: Some(isolate.bounds),
+                    mask: isolate.mask,
+                    forced: isolate.mask.is_some() || own != parent_encoded,
+                });
+                open.push(OpenLayer {
+                    plan: plans.len() - 1,
+                    clip_depth: clips.len(),
+                    bounds: None,
+                    drawables: 0,
+                });
+                clips.push(outer.intersection(isolate.bounds).unwrap_or_default());
+            }
+            Primitive::LayerEnd | Primitive::IsolateEnd => {
                 if let Some(layer) = open.pop() {
                     close_layer(layer, index, plans, open, clips);
                 }
@@ -3978,7 +4609,15 @@ fn layer_mode(plan: &mut LayerPlan, bounds: Option<Rect>, drawables: u32) -> Lay
         return LayerMode::Skip;
     }
     let transform = plan.transform;
-    if transform.is_translation() {
+    if plan.isolate.is_some() && !plan.forced {
+        // Nothing to apply at composite time: draw in place, clipped.
+        return LayerMode::Inline {
+            dx: 0.0,
+            dy: 0.0,
+            alpha: 1.0,
+        };
+    }
+    if transform.is_translation() && !plan.forced {
         // Whole-pixel moves keep text and edges as sharp as unmoved ones.
         let (dx, dy) = (transform.tx.round(), transform.ty.round());
         plan.transform = Transform2D::translate(dx, dy);
@@ -4008,11 +4647,11 @@ fn layer_mode(plan: &mut LayerPlan, bounds: Option<Rect>, drawables: u32) -> Lay
 fn needs_expansion(prims: &[Primitive]) -> bool {
     let mut depth = 0u32;
     prims.iter().any(|primitive| match primitive {
-        Primitive::LayerStart(_) => {
+        Primitive::LayerStart(_) | Primitive::IsolateStart(_) => {
             depth += 1;
             false
         }
-        Primitive::LayerEnd => {
+        Primitive::LayerEnd | Primitive::IsolateEnd => {
             depth = depth.saturating_sub(1);
             false
         }
@@ -4025,8 +4664,8 @@ fn needs_expansion(prims: &[Primitive]) -> bool {
 /// sits inside one (`depth` layers deep) with its primitives.
 fn expand(primitive: Primitive, depth: &mut u32, out: &mut Vec<Primitive>) {
     match primitive {
-        Primitive::LayerStart(_) => *depth += 1,
-        Primitive::LayerEnd => *depth = depth.saturating_sub(1),
+        Primitive::LayerStart(_) | Primitive::IsolateStart(_) => *depth += 1,
+        Primitive::LayerEnd | Primitive::IsolateEnd => *depth = depth.saturating_sub(1),
         Primitive::Chunk(ref chunk) if *depth > 0 || chunk.chunk.has_layers() => {
             chunk.for_each_placed(|placed| expand(placed, depth, out));
             return;
@@ -4055,6 +4694,8 @@ fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
         }
         Primitive::TextRun(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
         Primitive::RichTextRun(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
+        Primitive::StyledText(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
+        Primitive::Stripes(p) => Some(p.rect),
         Primitive::Icon(p) => Some(p.rect),
         Primitive::Image(p) => Some(p.rect),
         Primitive::EffectQuad(p) => Some(p.rect),
@@ -4066,6 +4707,8 @@ fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
         | Primitive::ZIndexPop
         | Primitive::LayerStart(_)
         | Primitive::LayerEnd
+        | Primitive::IsolateStart(_)
+        | Primitive::IsolateEnd
         | Primitive::LayerBoundary
         | Primitive::Chunk(_) => None,
     }
@@ -4147,6 +4790,8 @@ fn build_batches(flat: &FlattenedScene, out: &mut FrameBatches) {
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             tint: [item.alpha; 4],
             radii: [0.0; 4],
+            // Images live in sRGB textures, which sample as linear light.
+            space: [SOURCE_LINEAR, 0.0, 0.0, 0.0],
         }
     }));
     out.paths.clear();
@@ -4309,8 +4954,29 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
 }
 
 #[cfg(test)]
+#[path = "blur_tests.rs"]
+mod blur_tests;
+#[cfg(test)]
 #[path = "chunk_tests.rs"]
 mod chunk_tests;
+#[cfg(test)]
+#[path = "compositing_tests.rs"]
+mod compositing_tests;
+#[cfg(test)]
+#[path = "mask_tests.rs"]
+mod mask_tests;
+#[cfg(test)]
+#[path = "pattern_tests.rs"]
+mod pattern_tests;
+#[cfg(test)]
+#[path = "perf_tests.rs"]
+mod perf_tests;
+#[cfg(test)]
+#[path = "svg_text_tests.rs"]
+mod svg_text_tests;
+#[cfg(test)]
+#[path = "text_fill_tests.rs"]
+mod text_fill_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4318,6 +4984,29 @@ mod tests {
     use crate::scene::ShapedText;
     use crate::text::test_text;
     use quark_text::{TextParams, TextStyle};
+
+    // A transparent window must take the alpha mode matching premultiplied
+    // output when offered, and report an opaque fallback when only opaque
+    // composition exists.
+    #[test]
+    fn transparent_surfaces_prefer_premultiplied_alpha() {
+        use wgpu::CompositeAlphaMode::{Inherit, Opaque, PostMultiplied, PreMultiplied};
+        let table: [(
+            &[wgpu::CompositeAlphaMode],
+            Option<wgpu::CompositeAlphaMode>,
+        ); 4] = [
+            (
+                &[Opaque, Inherit, PostMultiplied, PreMultiplied],
+                Some(PreMultiplied),
+            ),
+            (&[Opaque, PostMultiplied], Some(PostMultiplied)),
+            (&[Inherit, Opaque], Some(Inherit)),
+            (&[Opaque], None),
+        ];
+        for (offered, expected) in table {
+            assert_eq!(transparent_alpha_mode(offered), expected, "{offered:?}");
+        }
+    }
 
     #[test]
     fn scissor_rect_clamps_to_target_and_rejects_degenerate_clips() {

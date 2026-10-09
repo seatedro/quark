@@ -364,7 +364,7 @@ pub enum ColorMode {
 
 /// An atlas containing a cache of rasterized glyphs that can be rendered.
 pub struct TextAtlas {
-    cache: Cache,
+    pub(crate) cache: Cache,
     pub(crate) bind_group: BindGroup,
     pub(crate) color_atlas: InnerAtlas,
     pub(crate) mask_atlas: InnerAtlas,
@@ -496,6 +496,14 @@ impl TextAtlas {
     ) -> RenderPipeline {
         self.cache
             .get_or_create_pipeline(device, self.format, multisample, depth_stencil)
+    }
+
+    pub(crate) fn create_fills_bind_group(
+        &self,
+        device: &Device,
+        buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.cache.create_fills_bind_group(device, buffer)
     }
 
     fn rebind(&mut self, device: &wgpu::Device) {

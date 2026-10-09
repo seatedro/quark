@@ -37,11 +37,11 @@ pub fn view(
                 <div class="flex-row items-center">
                     if let Some(project) = project {
                         <txt("What should we build in ", HEADING, p.text) />
-                        <div class="relative" id="headline.project" role="button"
+                        <div id="headline.project" role="button"
                              aria-label={format!("{}?", project.name)}
                              on:click={Msg::Open(Menu::ProjectPicker)}>
-                            <txt(format!("{}?", project.name), HEADING, p.text) />
-                            {dotted(p, 31.0)}
+                            <txt(format!("{}?", project.name), HEADING, p.text)
+                                 underline_style={dotted(p.muted, 3.0).offset(5.0)} />
                         </div>
                     } else {
                         <txt("What should we work on?", HEADING, p.text) />
@@ -52,18 +52,6 @@ pub fn view(
                 {composer::tray(app, p, tray_w)}
             </div>
             <div class="absolute" left={cx} top={card_top}>{card}</div>
-        </div>
-    }
-}
-
-/// A dotted underline across its parent at `y` (the "?" excluded).
-fn dotted(p: &Pal, y: f32) -> AnyElement {
-    view! {
-        <div class="flex-row items-center absolute left-0 right-[14] h-px gap-0.5 overflow-hidden"
-             top={y}>
-            for _ in 0..80 {
-                <div class="w-0.5 h-px shrink-0" bg={p.muted} />
-            }
         </div>
     }
 }

@@ -16,13 +16,14 @@ use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::{Color, ThemeMode};
 
 use crate::data::{self, Block, Glyph, Item, Row, Shell, Span, Step, ThreadId};
-use crate::theme::{BODY, CODE, Pal, SMALL};
+use quark::{FadeEdge, FontWeight, ShimmerSpec, TextFill};
+
+use crate::theme::{BODY, CODE, LINE_PT, Pal, SMALL};
 use crate::widgets::*;
 use crate::{Codex, Menu, Msg, composer, icons};
 
 /// Turn column's widest on wide windows.
 pub const MAX_COLUMN: f32 = 768.0;
-const LINE: f32 = 1.64;
 
 pub fn view(
     app: &mut Codex,
@@ -57,12 +58,6 @@ pub fn view(
     } else {
         (list_h - 160.0).max(0.0)
     };
-    if let Some(dy) = app.take_adjust() {
-        let (_, y) = app.thread_scroll.offset();
-        app.thread_scroll.set_offset(0.0, (y + dy).max(0.0));
-    } else if app.adjust_pending() {
-        vcx.frame.request_frame();
-    }
     if app.stick_bottom {
         // Pending requests: the handle resolves them once laid out.
         match app.scroll_px {
@@ -72,12 +67,13 @@ pub fn view(
                     .iter()
                     .rposition(|i| matches!(i, Item::User { .. }))
                     .unwrap_or(0);
-                app.thread_scroll
-                    .scroll_to_item(&format!("item-{last}"), ScrollAlign::Start);
-                if let Some(dy) = app.scroll_adjust {
-                    app.defer_adjust(dy);
-                    vcx.frame.request_frame();
-                }
+                // A scene's nudge is an inset: a positive one scrolls past
+                // the turn's top, so the prompt starts above the view.
+                let nudge = app.scroll_adjust.unwrap_or(0.0);
+                app.thread_scroll.scroll_to_item_with(
+                    &format!("item-{last}"),
+                    ScrollIntoView::new(ScrollAlign::Start).inset(0.0, -nudge),
+                );
             }
         }
         app.stick_bottom = false;
@@ -92,7 +88,7 @@ pub fn view(
             <div class="absolute left-0 top-0 flex-col items-center overflow-y-scroll" w={w}
                  h={list_h} track_scroll={&app.thread_scroll} scrollbar_auto_hide
                  accessibility_role={Role::Log} aria-label="Transcript">
-                <transcript(&items, p, column, app.now_ms, &mut embed)>
+                <transcript(&items, p, column, &mut embed)>
                     <div h={spacer} />
                 </transcript>
             </div>
@@ -134,7 +130,7 @@ fn edits_open(item: &Item) -> bool {
 }
 
 /// The turns, top to bottom, in a `column`-wide column.
-pub fn transcript(items: &[Item], p: &Pal, column: f32, now_ms: u64, embed: &mut Embed) -> Div {
+pub fn transcript(items: &[Item], p: &Pal, column: f32, embed: &mut Embed) -> Div {
     view! { -> Div,
         <div class="flex-col shrink-0 pt-2" w={column}>
             for (i, item) in items.iter().enumerate() {
@@ -145,7 +141,7 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, now_ms: u64, embed: &mut
                             <div class="px-4 py-[9] rounded-[16]" max_w={(column * 0.7).floor()}
                                  bg={p.bubble} accessibility_role={Role::Group}
                                  aria-label="You said:">
-                                <text size={BODY} color={p.bubble_text} line_height={LINE}>
+                                <text size={BODY} color={p.bubble_text} line_height_points={LINE_PT}>
                                     {body.clone()}
                                 </text>
                             </div>
@@ -158,7 +154,7 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, now_ms: u64, embed: &mut
                         </div>
                     }
                     Item::Thinking => {
-                        <div class="w-full h-10" key={key}>{shimmer("Thinking", p, now_ms, BODY)}</div>
+                        <div class="w-full h-10" key={key}>{shimmer("Thinking", p, BODY)}</div>
                     }
                     Item::Error(msg) => {
                         <div class="w-full flex-col" key={key}>
@@ -192,7 +188,7 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, now_ms: u64, embed: &mut
                         open,
                         steps,
                     } => {
-                        <work(p, i, took, *running, *open, steps, now_ms, embed) key={key} />
+                        <work(p, i, took, *running, *open, steps, embed) key={key} />
                     }
                     Item::Answer { blocks, .. } => {
                         <answer(p, blocks, column) key={key} />
@@ -206,39 +202,19 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, now_ms: u64, embed: &mut
     }
 }
 
-/// Text with a light band sweeping across it: each run's color is mixed
-/// toward the highlight by its distance from the band. quark has no
-/// gradient text fill, so the label is split into runs of equal tone.
-pub fn shimmer(label: &str, p: &Pal, now_ms: u64, size: f32) -> AnyElement {
-    let base = p.faint;
-    let high = p.text;
-    let n = label.chars().count() as f32;
-    // The band crosses the text and a gap as wide again every 1.6 s.
-    let period = 1600.0 + n * 20.0;
-    let phase = (now_ms as f32 % period) / period;
-    let center = phase * (n * 1.6) - n * 0.3;
-    let tone = |d: f32| base.lerp(high, (1.0 - d) * 0.85);
-    let mut runs = Vec::new();
-    let mut run = String::new();
-    let mut run_d = 1.0f32;
-    for (i, ch) in label.chars().enumerate() {
-        let d = ((i as f32 - center).abs() / 3.0).min(1.0);
-        if (d - run_d).abs() > 0.05 && !run.is_empty() {
-            runs.push((std::mem::take(&mut run), tone(run_d)));
-        }
-        if run.is_empty() {
-            run_d = d;
-        }
-        run.push(ch);
-    }
-    if !run.is_empty() {
-        runs.push((run, tone(run_d)));
-    }
+/// Text with a light band sweeping across its glyphs: a shimmer fill,
+/// so the label is shaped once and the renderer moves the band. The band
+/// crosses the label every 1.6 s, a little longer for longer labels.
+pub fn shimmer(label: &str, p: &Pal, size: f32) -> AnyElement {
+    let n = label.chars().count() as u32;
+    let fill = TextFill::Shimmer(
+        ShimmerSpec::new(p.faint, p.faint.lerp(p.text, 0.85))
+            .duration_ms(1600 + n * 20)
+            .key(quark::stable_hash(label)),
+    );
     view! {
         <div class="flex-row items-center" role="status" aria-label={label.to_owned()}>
-            for (run, color) in runs {
-                <txt(run.replace(' ', "\u{a0}"), size, color) />
-            }
+            <txt(label, size, p.faint) fill={fill} />
         </div>
     }
 }
@@ -267,7 +243,6 @@ fn work(
     running: bool,
     open: bool,
     steps: &[Step],
-    now_ms: u64,
     embed: &mut Embed,
 ) -> Div {
     let label = if running {
@@ -293,7 +268,7 @@ fn work(
                     match step {
                         Step::Prose { text, pending } => {
                             <div class="w-full flex-col">
-                                {inline_flow(&parse_spans(text), p, p.text_soft, Some(pending))}
+                                {paragraph(&parse_spans(text), p, p.text_soft, Some(pending))}
                                 <div class="h-3.5" />
                             </div>
                         }
@@ -330,7 +305,7 @@ fn work(
                             <div class="w-full flex-col">
                                 <div class="flex-row items-center w-full h-[22] gap-2 overflow-hidden">
                                     <icon svg={glyph(*g)} size={14.0} color={p.text_soft} />
-                                    {shimmer(text, p, now_ms, BODY)}
+                                    {shimmer(text, p, BODY)}
                                 </div>
                             </div>
                         }
@@ -394,10 +369,7 @@ fn tool_row(
         Row::Read(file) => view! {
             <tool_line(p, icons::BOOK)>
                 <txt("Read", BODY, ink) />
-                <div class="relative">
-                    <txt(*file, BODY, p.muted) />
-                    {dotted_under(p)}
-                </div>
+                <txt(*file, BODY, p.muted) underline_style={dotted(p.muted, 3.0)} />
             </tool_line>
         },
         Row::Edited { file, open } => {
@@ -429,17 +401,6 @@ fn tool_row(
     }
 }
 
-fn dotted_under(p: &Pal) -> AnyElement {
-    view! {
-        <div class="flex-row items-center absolute left-0 right-0 top-[18] h-px gap-0.5
-                    overflow-hidden">
-            for _ in 0..40 {
-                <div class="w-px h-px shrink-0" bg={p.muted} />
-            }
-        </div>
-    }
-}
-
 fn shell_card(p: &Pal, shell: &Shell) -> AnyElement {
     view! {
         <div class="w-full flex-col rounded-[8] overflow-hidden relative" bg={p.shell}
@@ -455,7 +416,10 @@ fn shell_card(p: &Pal, shell: &Shell) -> AnyElement {
                     {shell.command}
                 </text>
             </div>
-            <div class="w-full flex-col px-[10] gap-[3] h-11 overflow-hidden">
+            // Output past the card's height fades out, unless a footer
+            // follows it.
+            <div class="w-full flex-col px-[10] gap-[3] h-11 overflow-hidden"
+                 fade_edge={(FadeEdge::Bottom, if shell.footer.is_some() { 0.0 } else { 30.0 })}>
                 for line in shell.output.lines() {
                     <text size={CODE} color={p.faint} class="font-mono whitespace-nowrap">
                         {line.replace(' ', "\u{a0}")}
@@ -466,14 +430,6 @@ fn shell_card(p: &Pal, shell: &Shell) -> AnyElement {
                 <div class="flex-row items-center h-7 px-[10] justify-end">
                     <txt(footer, SMALL, p.muted) />
                 </div>
-            } else {
-                // Output past the card's height fades out.
-                <div class="absolute left-0 right-0 top-[70] h-[30]"
-                     bg_effect={linear_gradient(
-                         std::f32::consts::FRAC_PI_2,
-                         p.shell.with_alpha(0),
-                         p.shell,
-                     )} />
             }
         </div>
     }
@@ -512,13 +468,38 @@ pub fn parse_inline(s: &'static str) -> Block {
     Block::Para(parse_spans(s))
 }
 
-/// Spans flowed word by word so chips and links wrap with the prose
-/// (quark's text element takes one style per run). `pending`, while a
+/// The spans as one paragraph of rich text: prose, semibold runs, and code
+/// pills wrap as one flow and select and copy as one string. A file chip
+/// starts with an icon tile, which rich text cannot hold inline yet, so a
+/// paragraph with one keeps the word flow below. `pending`, while a
 /// preamble streams, follows in a dimmer tone.
+fn paragraph(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> AnyElement {
+    let mut runs = Vec::with_capacity(spans.len() + 1);
+    for span in spans {
+        runs.push(match *span {
+            Span::Text(t) => StyledSpan::plain(t).color(color),
+            Span::Bold(t) => StyledSpan::plain(t)
+                .weight(FontWeight::Semibold)
+                .color(p.text),
+            Span::Code(c) => StyledSpan::plain(c).code().pill(p.chip).color(p.text),
+            Span::File(..) => return inline_flow(spans, p, color, pending),
+        });
+    }
+    if let Some(pending) = pending.filter(|s| !s.is_empty()) {
+        runs.push(StyledSpan::plain(pending).color(p.faint.lerp(p.bg, 0.3)));
+    }
+    view! {
+        <{rich_text(runs)} size={BODY} line_height_points={LINE_PT} />
+    }
+}
+
+/// Spans flowed word by word so file chips and their icon tiles wrap with
+/// the prose. `pending`, while a preamble streams, follows in a dimmer
+/// tone.
 fn inline_flow(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> AnyElement {
     let word = |w: &str, c: Color, bold: bool| {
         view! {
-            <text size={BODY} color={c} class="whitespace-nowrap" line_height={LINE}
+            <text size={BODY} color={c} class="whitespace-nowrap" line_height_points={LINE_PT}
                   @when {bold} { class="font-semibold" }>
                 {w.replace(' ', "\u{a0}")}
             </text>
@@ -570,16 +551,16 @@ fn answer(p: &Pal, blocks: &[Block], column: f32) -> Div {
             for block in blocks {
                 match block {
                     Block::Para(spans) => {
-                        {inline_flow(spans, p, p.text_soft, None)}
+                        {paragraph(spans, p, p.text_soft, None)}
                         <div class="h-2" />
                     }
                     Block::Bullets(items) => {
                         for spans in items {
                             <div class="flex-row items-center w-full items-start">
                                 <div class="w-7 pl-[5]">
-                                    <text size={BODY} color={p.text_soft} line_height={LINE}>"•"</text>
+                                    <text size={BODY} color={p.text_soft} line_height_points={LINE_PT}>"•"</text>
                                 </div>
-                                <div w={column - 28.0}>{inline_flow(spans, p, p.text_soft, None)}</div>
+                                <div w={column - 28.0}>{paragraph(spans, p, p.text_soft, None)}</div>
                             </div>
                         }
                         <div class="h-2" />

@@ -21,7 +21,7 @@ pub use custom_glyph::{
 };
 pub use error::{PrepareError, RenderError};
 pub use text_atlas::{AtlasStats, ColorMode, TextAtlas};
-pub use text_render::TextRenderer;
+pub use text_render::{GlyphFill, TextRenderer, MAX_GLYPH_FILLS};
 pub use viewport::{Viewport, MAX_DRAW_OFFSETS};
 
 // Re-export all top-level types from `cosmic-text` for convenience.
@@ -64,6 +64,8 @@ pub(crate) struct GlyphToRender {
     color: u32,
     content_type_with_srgb: [u16; 2],
     depth: f32,
+    // quark patch: draw-time paint; see `PositionedGlyph::fill`.
+    paint: u32,
 }
 
 /// The screen resolution to use when rendering text.
@@ -142,6 +144,15 @@ pub struct PositionedGlyph {
     pub color: Color,
     /// Clip rectangle, as [`TextArea::bounds`].
     pub bounds: TextBounds,
+    // quark patch: draw-time paint.
+    /// One plus the index of the renderer's [`GlyphFill`] that colors a
+    /// monochrome glyph in place of `color` (whose alpha still fades it);
+    /// zero for `color` alone. See [`TextRenderer::set_fills`].
+    pub fill: u8,
+    /// Perceptual coverage over a known opaque backdrop: its sRGB-encoded
+    /// luminance. Overrides the correction a cache key's
+    /// `LINEAR_CORRECTED` flag asks for. Ignored on an encoded target.
+    pub backdrop: Option<u8>,
 }
 
 pub(crate) struct State<'a> {

@@ -60,6 +60,8 @@ struct Runner<A> {
     capabilities: PlatformCapabilities,
     started: bool,
     text: AppText,
+    /// Font directory times, compared when a window gains focus.
+    font_dirs: crate::platform::font_watch::FontDirs,
     waker: Waker,
     events: EventSink,
     app_events: Receiver<Posted>,
@@ -96,6 +98,7 @@ impl<A: App> Runner<A> {
             capabilities: PlatformCapabilities::default(),
             started: false,
             text,
+            font_dirs: crate::platform::font_watch::FontDirs::new(),
             waker,
             events,
             app_events,
@@ -122,7 +125,12 @@ impl<A: App> Runner<A> {
         event_loop: &ActiveEventLoop,
         options: &WindowOptions,
     ) -> Result<WindowState, RunError> {
-        let window = Arc::new(event_loop.create_window(window_attributes(options, event_loop))?);
+        crate::platform::material::watch_accessibility(&self.waker);
+        crate::platform::font_watch::watch(&self.waker);
+        let environment = crate::platform::material::environment(event_loop);
+        let wants_alpha = environment.wants_alpha(options.background);
+        let attributes = window_attributes(options, event_loop).with_transparent(wants_alpha);
+        let window = Arc::new(event_loop.create_window(attributes)?);
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
         let accessibility_state = Arc::new(AccessibilityState::default());
@@ -151,11 +159,22 @@ impl<A: App> Runner<A> {
             }
         };
         renderer.resize(size.width, size.height, scale_factor);
+        renderer.set_options(quark_render::renderer::RendererOptions {
+            compositing: options.compositing,
+            text_rendering: options.text_rendering,
+        });
+        let surface_alpha = wants_alpha
+            && renderer.set_surface_background(SurfaceBackground::Transparent)
+                == SurfaceBackground::Transparent;
+        let surface = SurfaceState::resolve(
+            options.background,
+            options.corners,
+            environment,
+            surface_alpha,
+        );
         #[cfg(target_os = "linux")]
         crate::platform::drag_out::window_created(&window);
-        window.set_visible(true);
-        position_traffic_lights(&window, options.traffic_lights);
-        Ok(WindowState {
+        let mut state = WindowState {
             renderer,
             accessibility,
             accessibility_state,
@@ -169,7 +188,16 @@ impl<A: App> Runner<A> {
             persist_key: options.persist_key.clone(),
             saved_placement: saved_placement(options, event_loop),
             position: Default::default(),
-        })
+            min_size: options.min_size,
+            surface_alpha,
+            surface,
+            native: Default::default(),
+        };
+        // Before the window shows, so it never flashes the wrong background.
+        state.apply_surface();
+        state.window.set_visible(true);
+        position_traffic_lights(&state.window, options.traffic_lights);
+        Ok(state)
     }
 
     fn handle_for(&self, id: WindowId) -> Option<WindowHandle> {
@@ -360,6 +388,7 @@ impl<A: App> Runner<A> {
             ime: FrameIme::default(),
             accessibility_active: state.accessibility_state.is_active(),
             last_render: state.last_render,
+            material_regions: None,
         };
 
         // Through subsecond, a hot patch to the app's frame code takes effect
@@ -373,6 +402,11 @@ impl<A: App> Runner<A> {
         };
         let mut scene = scene;
         let ime = cx.ime;
+        if let Some(regions) = cx.material_regions.take() {
+            // Field by field: the renderer stays borrowed for this frame.
+            let shown = shown_material_regions(&state.surface, &regions);
+            state.native.set_regions(&state.window, shown);
+        }
         if ime.reset {
             state.window.set_ime_allowed(false);
         }
@@ -575,10 +609,39 @@ impl<A: App> Runner<A> {
     }
 }
 
+impl<A: App> Runner<A> {
+    /// Rescan the installed fonts after the platform reported a change; a
+    /// new font epoch lays every window's text out again.
+    fn reload_fonts(&mut self) {
+        self.text.system.reload_system_fonts();
+        self.flags.redraw_all = true;
+    }
+
+    /// Re-resolve every open window's surface against the user's current
+    /// accessibility settings, telling the app of each that changed.
+    fn refresh_surfaces(&mut self, event_loop: &ActiveEventLoop) {
+        let changed: Vec<WindowHandle> = self
+            .windows
+            .iter_mut()
+            .filter_map(|(handle, entry)| entry.open_mut()?.refresh_surface().then_some(handle))
+            .collect();
+        for window in changed {
+            let event = AppEvent::WindowSurfaceChanged(window);
+            self.with_event_cx(event_loop, Some(window), |app, cx| app.app_event(event, cx));
+        }
+    }
+}
+
 impl<A: App> ApplicationHandler for Runner<A> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
         self.process_accessibility_actions(event_loop);
         self.process_app_events(event_loop);
+        if crate::platform::material::take_accessibility_change() {
+            self.refresh_surfaces(event_loop);
+        }
+        if crate::platform::font_watch::take_change() {
+            self.reload_fonts();
+        }
         // A worker thread can wake the loop before the first window exists;
         // the app has not seen `init` yet, so it is not told.
         if !self.started {
@@ -683,10 +746,26 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 self.theme_changed(event_loop, Some(handle), theme);
             }
             event => {
+                let mut surface_changed = false;
                 if let WindowEvent::Focused(true) = event {
                     self.focused = Some(handle);
+                    // Accessibility display settings change in the system
+                    // settings app, which takes focus from the window.
+                    surface_changed = state.refresh_surface();
+                    // So do installed fonts, from another app.
+                    if self.font_dirs.changed() {
+                        self.text.system.reload_system_fonts();
+                        self.flags.redraw_all = true;
+                    }
                 }
-                for event in state.input.normalize(event) {
+                let events = state.input.normalize(event);
+                if surface_changed {
+                    let event = AppEvent::WindowSurfaceChanged(handle);
+                    self.with_event_cx(event_loop, Some(handle), |app, cx| {
+                        app.app_event(event, cx)
+                    });
+                }
+                for event in events {
                     self.with_event_cx(event_loop, Some(handle), |app, cx| app.event(event, cx));
                 }
             }

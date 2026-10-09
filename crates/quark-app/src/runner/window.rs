@@ -56,6 +56,12 @@ pub(super) struct WindowState {
     /// window: its normal size and position survive closing it maximized.
     pub(super) saved_placement: Option<PlacementRecord>,
     pub(super) position: CachedPosition,
+    /// The smallest content size in logical points, from the options.
+    pub(super) min_size: Option<(f64, f64)>,
+    /// Whether the renderer's surface composites alpha.
+    pub(super) surface_alpha: bool,
+    pub(super) surface: SurfaceState,
+    pub(super) native: crate::platform::material::NativeMaterial,
 }
 
 impl WindowState {
