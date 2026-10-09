@@ -308,6 +308,9 @@ impl Element for TextInput {
         _engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> Option<HitId> {
+        if let Some(target) = self.focus_target {
+            cx.note_focus_target(target);
+        }
         let mut flags = HitFlags::NONE;
         if self.focus_target.is_some() {
             flags |= HitFlags::TEXT;

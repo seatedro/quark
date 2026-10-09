@@ -17,6 +17,10 @@ pub struct Div {
     transform: PaintTransform,
     bg_effect: Option<BackgroundEffect>,
     blur_radius: Option<f32>,
+    /// Fade lengths at the top, right, bottom, and left edges; zero is no
+    /// fade.
+    fades: [f32; 4],
+    material: Option<MaterialKind>,
     children: pool::ChildList,
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
@@ -38,6 +42,10 @@ pub struct Div {
     scrollbar_visibility: Option<ScrollbarVisibility>,
     clips: bool,
     block_mouse: bool,
+    /// [`HitFlags::WINDOW_DRAG`] or [`HitFlags::WINDOW_DRAG_EXCLUDE`].
+    window_drag: HitFlags,
+    interaction_group: Option<GroupId>,
+    show_when: Option<GroupCondition>,
     focus_target: Option<FocusId>,
     focus_ring_offset: f32,
     tooltip: Option<std::sync::Arc<str>>,
@@ -72,6 +80,8 @@ pub fn div() -> Div {
         transform: PaintTransform::IDENTITY,
         bg_effect: None,
         blur_radius: None,
+        fades: [0.0; 4],
+        material: None,
         children: pool::ChildList::new(),
         on_click: None,
         on_click_handler: None,
@@ -92,6 +102,9 @@ pub fn div() -> Div {
         scrollbar_visibility: None,
         clips: false,
         block_mouse: false,
+        window_drag: HitFlags::NONE,
+        interaction_group: None,
+        show_when: None,
         focus_target: None,
         focus_ring_offset: 0.0,
         tooltip: None,
@@ -229,6 +242,43 @@ impl Div {
     /// clicked where it covers. Use on elevated surfaces and scrims.
     pub fn block_mouse(mut self) -> Self {
         self.block_mouse = true;
+        self
+    }
+
+    /// Make blank parts of this div move the window, for custom title bars:
+    /// a primary press here that no control above takes (buttons, text
+    /// fields, drags, [`Self::window_drag_exclude`]) is a window move; see
+    /// [`InputRouter::window_drag_at`]. Pure hit metadata: no focus stop,
+    /// no semantic role.
+    pub fn window_drag_region(mut self) -> Self {
+        self.window_drag = HitFlags::WINDOW_DRAG;
+        self
+    }
+
+    /// Keep presses on this div from moving the window, inside a
+    /// [`Self::window_drag_region`].
+    pub fn window_drag_exclude(mut self) -> Self {
+        self.window_drag = HitFlags::WINDOW_DRAG_EXCLUDE;
+        self
+    }
+
+    /// Make this div interaction group `id`: descendants marked
+    /// [`Self::show_when`] with this id follow whether it is hovered or
+    /// holds focus. See [the module docs](super::interaction). For keyboard
+    /// users, make the group itself focusable (a stable id with a
+    /// `tab_stop` or click handler), so focusing it reveals its actions
+    /// ahead of them in the Tab order.
+    pub fn interaction_group(mut self, id: impl Into<GroupId>) -> Self {
+        self.interaction_group = Some(id.into());
+        self
+    }
+
+    /// Show this div only under `condition` of its nearest enclosing
+    /// [`Self::interaction_group`] with the condition's id. Hidden, it keeps
+    /// its layout space but paints nothing and takes no input. It always
+    /// shows while it holds the focused element.
+    pub fn show_when(mut self, condition: GroupCondition) -> Self {
+        self.show_when = Some(condition);
         self
     }
 
@@ -569,6 +619,36 @@ impl Div {
         self
     }
 
+    /// Fade the children out over the last `length` points before `edge`,
+    /// revealing whatever lies behind the div (G6). The children render as
+    /// one group, so overlapping text and backgrounds fade once. The div
+    /// clips its children, hits included, to its bounds; the fade itself
+    /// changes no hit target or semantics. Fades on several edges multiply.
+    /// A non-finite or non-positive length removes the edge's fade.
+    pub fn fade_edge(mut self, edge: FadeEdge, length: f32) -> Self {
+        let length = if length.is_finite() {
+            length.max(0.0)
+        } else {
+            0.0
+        };
+        self.fades[fade_index(edge)] = length;
+        self
+    }
+
+    /// Ask the platform for material `kind` behind this div (G3): painting
+    /// it records a [`MaterialRegionRequest`] for the host to place a native
+    /// effect view there. The div still paints whatever it paints; keep its
+    /// background transparent where the material should show. Rotated or
+    /// scaled divs ask for nothing.
+    pub fn material(mut self, kind: MaterialKind) -> Self {
+        self.material = Some(kind);
+        self
+    }
+
+    fn fades(&self) -> bool {
+        self.fades.iter().any(|&length| length > 0.0)
+    }
+
     // -- Internal: input registration --
 
     /// Bind the hit entry to semantic node `node` and register its handlers.
@@ -645,6 +725,25 @@ impl Div {
     }
 
     // -- Internal: scrolling --
+
+    fn prepaint_children(
+        &mut self,
+        engine: &LayoutEngine,
+        cx: &mut ElementContext,
+        translate: (f32, f32),
+        scroll: (f32, f32),
+    ) {
+        let (dx, dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
+        if (dx, dy) != (0.0, 0.0) {
+            for child in self.children.iter_mut() {
+                child.prepaint_with_offset(engine, cx, dx, dy);
+            }
+        } else {
+            for child in self.children.iter_mut() {
+                child.prepaint(engine, cx);
+            }
+        }
+    }
 
     fn scrolls(&self) -> bool {
         self.on_scroll.is_some() || self.on_scroll_x.is_some() || self.scroll_handle.is_some()
@@ -723,6 +822,27 @@ impl Div {
         builder.clone().map(ScrollSink::Builder)
     }
 
+    /// The focus id the div takes Tab focus as: its `focus_ring` target, or
+    /// for a clickable div or tab stop with a stable id, that id
+    /// (`SemanticFrame::focus_id`).
+    fn focus_identity(&self) -> Option<FocusId> {
+        let clickable = self.on_click_handler.is_some()
+            || self
+                .on_click
+                .as_ref()
+                .is_some_and(|a| !a.is::<NoopAction>());
+        self.focus_target.or_else(|| {
+            let id = self
+                .semantic_id
+                .as_ref()
+                .map(UiNodeId::as_str)
+                .or(self.accessibility_id.as_deref())
+                .or(self.test_id.as_ref().map(TestId::as_str));
+            id.filter(|_| clickable || self.tab_stop.is_some())
+                .map(FocusId::from_key)
+        })
+    }
+
     /// Author id of the div's accessibility node: its stable id or key
     /// when it has one, else a hash of its role and label. Equal fallbacks
     /// get `#2`, `#3`, ... in paint order, so ids do not move with layout.
@@ -746,6 +866,8 @@ impl Div {
 /// and its scroll offset and scrollbars.
 pub struct DivPrepaintState {
     hit: Option<HitId>,
+    /// The div's [`Div::show_when`] slot this frame.
+    slot: Option<u32>,
     translate: (f32, f32),
     /// Rotation and scale about the center, when the div has any.
     matrix: Option<Transform2D>,
@@ -790,11 +912,10 @@ impl Element for Div {
             cx.record_scroll_item(key, bounds);
         }
         let content = self.scroll_content(engine, *layout_id);
-        let scroll = match &self.scroll_handle {
+        let mut scroll = match &self.scroll_handle {
             Some(handle) => handle.begin_frame(bounds, content, self.scroll_axes, cx),
             None => (self.scroll_x, self.scroll_y),
         };
-        let (child_dx, child_dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
         let z = self.base_style.z_index;
         if z != 0 {
             cx.push_z_index(z);
@@ -803,7 +924,12 @@ impl Element for Div {
             cx.push_transform(matrix);
         }
 
+        // Before the div's own hit, so the slot's rows include it.
+        let slot = self.show_when.map(|c| cx.begin_interaction_slot(c));
         let mut flags = HitFlags::NONE;
+        if self.interaction_group.is_some() {
+            flags |= HitFlags::HOVER;
+        }
         if self.block_mouse {
             flags |= HitFlags::BLOCKS_MOUSE;
         }
@@ -822,10 +948,19 @@ impl Element for Div {
         if self.scrolls() {
             flags |= HitFlags::SCROLL;
         }
+        flags |= self.window_drag;
         let hit = (!flags.is_empty() || self.hit_identity.is_some())
             .then(|| cx.insert_hit(bounds, flags, self.cursor));
+        let group = self
+            .interaction_group
+            .zip(hit)
+            .map(|(id, hit)| cx.begin_interaction_group(id, hit));
+        if let Some(target) = self.focus_identity() {
+            cx.note_focus_target(target);
+        }
 
         let clips = self.clips
+            || self.fades()
             || self.base_style.layout.overflow.x != taffy::Overflow::Visible
             || self.base_style.layout.overflow.y != taffy::Overflow::Visible;
         if clips {
@@ -835,21 +970,31 @@ impl Element for Div {
             cx.push_scroll_handle(handle);
         }
 
-        if (child_dx, child_dy) != (0.0, 0.0) {
-            for child in self.children.iter_mut() {
-                child.prepaint_with_offset(engine, cx, child_dx, child_dy);
-            }
-        } else {
-            for child in self.children.iter_mut() {
-                child.prepaint(engine, cx);
-            }
-        }
-
-        if let Some(handle) = &self.scroll_handle {
+        let mark = cx.prepaint_mark();
+        self.prepaint_children(engine, cx, translate, scroll);
+        if let Some(handle) = self.scroll_handle.clone() {
             cx.pop_scroll_handle();
-            handle.end_frame(cx);
+            if let Some(corrected) = handle.end_frame(self.scroll_axes, cx) {
+                // A jump to an item lands where this frame's layout put
+                // it, not where the children were just prepainted: do it
+                // again there, so the first frame showing the item shows
+                // it in place.
+                cx.rewind_prepaint(mark);
+                scroll = corrected;
+                handle.restart_items();
+                cx.push_scroll_handle(&handle);
+                self.prepaint_children(engine, cx, translate, scroll);
+                cx.pop_scroll_handle();
+                handle.end_frame(self.scroll_axes, cx);
+            }
         }
         let scrollbars = self.prepaint_scrollbars(bounds, content, scroll, cx);
+        if let Some(group) = group {
+            cx.end_interaction_group(group);
+        }
+        if let Some(slot) = slot {
+            cx.end_interaction_slot(slot);
+        }
         if clips {
             cx.pop_clip();
         }
@@ -862,6 +1007,7 @@ impl Element for Div {
 
         DivPrepaintState {
             hit,
+            slot,
             translate,
             matrix,
             scroll,
@@ -878,6 +1024,14 @@ impl Element for Div {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        // A hidden slot keeps its space and nothing else; its hit rows
+        // were disabled with the hit test.
+        if prepaint_state
+            .slot
+            .is_some_and(|slot| !cx.interaction_slot_visible(slot))
+        {
+            return;
+        }
         let translate = prepaint_state.translate;
         let bounds = offset_bounds(bounds, translate);
         let scroll = prepaint_state.scroll;
@@ -920,6 +1074,17 @@ impl Element for Div {
             cx.push_paint_transform(matrix);
         }
         self.record_geometry(bounds, cx);
+        if let Some(kind) = self.material {
+            let id = self
+                .semantic_id
+                .as_ref()
+                .map(UiNodeId::as_str)
+                .or(self.accessibility_id.as_deref())
+                .or(self.test_id.as_ref().map(TestId::as_str))
+                .or(self.semantic_key.as_ref().map(UiKey::as_str))
+                .map(quark::stable_hash);
+            cx.add_material_region(kind, bounds, r, id);
+        }
 
         // Shadows
         for s in &style.shadows {
@@ -934,43 +1099,7 @@ impl Element for Div {
 
         // Background — effect quad takes priority over solid color.
         if let Some(effect) = self.bg_effect {
-            let (effect_type, params, color_a, color_b) = match effect {
-                BackgroundEffect::NoiseGradient {
-                    scale,
-                    color_a,
-                    color_b,
-                } => (EffectType::NoiseGradient, [scale, 0.0], color_a, color_b),
-                BackgroundEffect::LinearGradient {
-                    angle,
-                    color_a,
-                    color_b,
-                } => (EffectType::LinearGradient, [angle, 0.0], color_a, color_b),
-                BackgroundEffect::RadialGradient { color_a, color_b } => {
-                    (EffectType::RadialGradient, [0.0, 0.0], color_a, color_b)
-                }
-                BackgroundEffect::Shimmer {
-                    base,
-                    highlight,
-                    speed,
-                } => (EffectType::Shimmer, [speed, 0.0], base, highlight),
-                BackgroundEffect::Vignette { color, intensity } => (
-                    EffectType::Vignette,
-                    [intensity, 0.0],
-                    color,
-                    Color::TRANSPARENT,
-                ),
-                BackgroundEffect::ColorTint { color } => {
-                    (EffectType::ColorTint, [0.0, 0.0], color, Color::TRANSPARENT)
-                }
-            };
-            scene.effect_quad(EffectQuadPrimitive {
-                rect: bounds,
-                effect_type,
-                color_a,
-                color_b,
-                params,
-                corner_radius: r,
-            });
+            effect.paint(scene, bounds, radii);
         } else if let Some(bg) = background {
             scene.rounded_rect(RoundedRectPrimitive {
                 rect: bounds,
@@ -983,36 +1112,34 @@ impl Element for Div {
         if let Some(border) = style.border_color
             && style.border_widths != [0.0; 4]
         {
-            scene.border(BorderPrimitive {
-                rect: bounds,
-                widths: style.border_widths,
-                corner_radii: radii,
-                color: border,
-            });
+            if style.border_style == quark::style::BorderStyle::Solid {
+                scene.border(BorderPrimitive {
+                    rect: bounds,
+                    widths: style.border_widths,
+                    corner_radii: radii,
+                    color: border,
+                });
+            } else {
+                let width = style.border_widths.iter().copied().fold(0.0, f32::max);
+                scene.path(quark::scene::PathPrimitive::border(
+                    bounds,
+                    width,
+                    radii,
+                    border,
+                    style.border_style,
+                ));
+            }
         }
 
         let should_clip = self.clips
+            || self.fades()
             || style.layout.overflow.x != taffy::Overflow::Visible
             || style.layout.overflow.y != taffy::Overflow::Visible;
         drop(style);
 
         // A clickable div with a stable id takes Tab focus without a
         // `focus_ring` (`SemanticFrame::focus_id`), so it gets the ring too.
-        let clickable = self.on_click_handler.is_some()
-            || self
-                .on_click
-                .as_ref()
-                .is_some_and(|a| !a.is::<NoopAction>());
-        let ring_target = self.focus_target.or_else(|| {
-            let id = self
-                .semantic_id
-                .as_ref()
-                .map(UiNodeId::as_str)
-                .or(self.accessibility_id.as_deref())
-                .or(self.test_id.as_ref().map(TestId::as_str));
-            id.filter(|_| clickable || self.tab_stop.is_some())
-                .map(FocusId::from_key)
-        });
+        let ring_target = self.focus_identity();
         if let Some(target) = ring_target
             && cx.is_focused(target)
         {
@@ -1218,6 +1345,13 @@ impl Element for Div {
             prepaint_state.scrollbars.register(index, cx);
         }
 
+        let mut masks = 0;
+        for (edge, &length) in FADE_EDGES.iter().zip(&self.fades) {
+            if length > 0.0 {
+                scene.push_mask(bounds, AlphaMask::fade_edge(bounds, *edge, length));
+                masks += 1;
+            }
+        }
         if (child_dx, child_dy) != (0.0, 0.0) {
             for child in self.children.iter_mut() {
                 child.paint_with_offset(engine, scene, cx, child_dx, child_dy);
@@ -1226,6 +1360,9 @@ impl Element for Div {
             for child in self.children.iter_mut() {
                 child.paint(engine, scene, cx);
             }
+        }
+        for _ in 0..masks {
+            scene.pop_isolate();
         }
 
         if semantic_parent.is_some() {
@@ -1329,6 +1466,23 @@ impl Div {
             self.element_handle,
             bounds,
         );
+    }
+}
+
+/// The edges of [`Div::fade_edge`], in the order of `Div::fades`.
+const FADE_EDGES: [FadeEdge; 4] = [
+    FadeEdge::Top,
+    FadeEdge::Right,
+    FadeEdge::Bottom,
+    FadeEdge::Left,
+];
+
+fn fade_index(edge: FadeEdge) -> usize {
+    match edge {
+        FadeEdge::Top => 0,
+        FadeEdge::Right => 1,
+        FadeEdge::Bottom => 2,
+        FadeEdge::Left => 3,
     }
 }
 

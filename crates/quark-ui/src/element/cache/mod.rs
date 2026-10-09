@@ -351,6 +351,8 @@ pub enum CacheIntegrityError {
 /// The window's layout engine, cleared, and the cache's frame state.
 pub(super) fn begin_frame(cx: &mut ElementContext) -> LayoutEngine {
     cx.load_buffers();
+    // Each render resolves its own groups; an earlier root's are painted.
+    cx.interaction.clear();
     let theme = cx.theme;
     let Some(cache) = cx.cache.as_deref_mut() else {
         return LayoutEngine::new();
