@@ -3014,6 +3014,7 @@ dependencies = [
  "quark-webview",
  "raw-window-handle",
  "rfd",
+ "rustls",
  "serde",
  "serde_json",
  "subsecond",
