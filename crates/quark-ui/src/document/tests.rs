@@ -2647,3 +2647,165 @@ fn an_image_hinted_before_its_row_arrives_still_loads() {
 
     assert_eq!(image_block(&md), (100.0, true));
 }
+
+// ---------------------------------------------------------------------------
+// Body line height
+// ---------------------------------------------------------------------------
+
+/// Line tops and baselines of the painted region whose text starts with
+/// `prefix`, with the region's box.
+fn region_lines(
+    regions: &[crate::element::SelectableTextRegion],
+    prefix: &str,
+) -> (Rect, Vec<(f32, f32)>) {
+    let region = regions
+        .iter()
+        .find(|r| r.text.as_str().starts_with(prefix))
+        .unwrap_or_else(|| panic!("no region {prefix:?}"));
+    let lines = region.layout.lines().map(|l| (l.top, l.baseline)).collect();
+    (region.bounds, lines)
+}
+
+// Catches a body line height that reaches only prose: at 22 points over
+// 14-point text, paragraph lines are 22 apart, a level-two heading's
+// (1.3 times the body size) 28.6, table rows are spaced for their scaled
+// line, and a list marker centers on its item's first 22-point line.
+#[test]
+fn body_line_height_spaces_prose_headings_tables_and_markers() {
+    let style = DocumentStyle::for_font_size(14.0).with_line_height(LineHeight::Points(22.0));
+    let mut md = MarkdownDocument::new(style);
+    md.push(MarkdownEntry {
+        row: RowKey(0),
+        chrome: RowChrome::default(),
+        markdown: "Body text that is long enough to wrap onto a second line and then a third line \
+             in a column this narrow.\n\n\
+             ## A heading that is long enough to wrap onto another line\n\n\
+             - item\n\n\
+             | a | b |\n|---|---|\n| 1 | 2 |"
+            .to_owned(),
+    })
+    .unwrap();
+    let (regions, scene) = paint_markdown(&mut md, &Theme::default_dark());
+
+    for (prefix, pitch) in [("Body", 22.0), ("A heading", 28.6)] {
+        let (_, lines) = region_lines(&regions, prefix);
+        assert!(lines.len() > 1, "{prefix}: {lines:?}");
+        for pair in lines.windows(2) {
+            assert!(
+                (pair[1].0 - pair[0].0 - pitch).abs() < 0.01
+                    && (pair[1].1 - pair[0].1 - pitch).abs() < 0.01,
+                "{prefix}: {lines:?}"
+            );
+        }
+    }
+    // Table text is 0.93 times the body size: 20.46-point lines in rows
+    // padded 5 points above and below.
+    let (header, _) = region_lines(&regions, "a");
+    let (cell, _) = region_lines(&regions, "1");
+    assert_eq!(cell.y - header.y, (20.46f32 + 10.0).ceil());
+    let (item, _) = region_lines(&regions, "item");
+    let marker = scene
+        .primitives
+        .iter()
+        .find_map(|p| match p {
+            quark_render::Primitive::TextRun(run) => {
+                let layout = run.layout.downcast_ref::<quark_text::TextLayout>()?;
+                (layout.text() == "\u{2022}").then_some(run.rect)
+            }
+            _ => None,
+        })
+        .expect("marker");
+    // Within the half point layout rounds the marker's box by.
+    let center = marker.y + marker.height / 2.0;
+    assert!((center - (item.y + 11.0)).abs() <= 0.5, "{marker:?} {item:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Row anchors
+// ---------------------------------------------------------------------------
+
+/// Message `i` with a first block that wraps onto `lines` grid lines.
+fn tall_message(i: u64, lines: usize) -> DocumentRow {
+    // 38 columns fit the grid style's 380-pixel column.
+    message_with(i, &[&"x".repeat(38 * lines), &format!("m{i} second")])
+}
+
+// Catches an anchor that drifts as content changes around it: an
+// offscreen row is placed in one prepare, then holds its place through
+// rows prepended, a row above growing, its own text growing, and rows
+// appended below.
+#[test]
+fn an_anchored_row_holds_its_place_as_content_changes() {
+    let mut doc = Doc::rows(40);
+    doc.size.1 = 400.0;
+    doc.frame();
+    doc.view.anchor_row(RowKey(20), 12.0).unwrap();
+    doc.frame();
+    assert_eq!(doc.screen_top(20), 12.0, "placed");
+
+    type Change = fn(&mut Doc);
+    let changes: [(&str, Change); 4] = [
+        ("prepend", |doc| {
+            let older: Vec<DocumentRow> = (100..104).map(message).collect();
+            doc.view.prepend(&older).unwrap();
+            doc.messages.extend(older.into_iter().map(|m| (m.key, m)));
+        }),
+        ("a row above grows", |doc| {
+            let grown = tall_message(19, 6);
+            doc.view.update(&grown).unwrap();
+            doc.messages.insert(grown.key, grown);
+        }),
+        ("its own text grows", |doc| {
+            doc.stream(20, 0, &"y".repeat(38 * 5))
+        }),
+        ("append", |doc| {
+            let newer: Vec<DocumentRow> = (40..44).map(message).collect();
+            doc.view.extend(&newer).unwrap();
+            doc.messages.extend(newer.into_iter().map(|m| (m.key, m)));
+        }),
+    ];
+    for (name, change) in changes {
+        change(&mut doc);
+        doc.frame();
+        assert_eq!(doc.screen_top(20), 12.0, "{name}");
+    }
+}
+
+// Catches an anchor that fights the user: once they scroll, the row moves
+// with the content and the next frame leaves it there.
+#[test]
+fn a_user_scroll_releases_the_anchor() {
+    let mut doc = Doc::rows(40);
+    doc.size.1 = 400.0;
+    doc.view.anchor_row(RowKey(20), 12.0).unwrap();
+    doc.frame();
+
+    doc.scroll_to(doc.view.scroll_offset() + 30.0);
+    let grown = tall_message(25, 4);
+    doc.view.update(&grown).unwrap();
+    doc.messages.insert(grown.key, grown);
+    doc.frame();
+
+    assert_eq!((doc.view.anchor(), doc.screen_top(20)), (None, -18.0));
+}
+
+// Catches removing the anchored row nudging the view over two frames: the
+// row after it takes its place at once and stays there.
+#[test]
+fn removing_the_anchored_row_leaves_the_view_in_place() {
+    let mut doc = Doc::rows(40);
+    doc.size.1 = 400.0;
+    doc.view.anchor_row(RowKey(20), 12.0).unwrap();
+    doc.frame();
+
+    doc.view.remove(RowKey(20)).unwrap();
+    doc.messages.remove(&RowKey(20));
+    doc.frame();
+    let first = doc.screen_top(21);
+    doc.frame();
+
+    assert_eq!(
+        (doc.view.anchor(), first, doc.screen_top(21)),
+        (None, 12.0, 12.0)
+    );
+}
