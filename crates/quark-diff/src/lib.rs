@@ -11,6 +11,8 @@
 //!   tables; [`Projection`] turns it into display rows, unified or side by
 //!   side, with gaps of unchanged lines collapsed per an [`Expansion`] and
 //!   its [`ContextPolicy`].
+//! - [`DiffDocument::hydrate_file`] swaps a patch's fragments for checked
+//!   whole sources.
 //! - [`DiffLimits`] refuses input the model cannot represent and bounds
 //!   per-line detail; [`DiffDocument::facts`] reports metadata-only changes.
 
@@ -21,6 +23,7 @@ mod model;
 pub mod myers;
 mod patch;
 mod projection;
+mod source;
 mod text;
 
 #[cfg(test)]
@@ -41,4 +44,5 @@ pub use projection::{
     ContextPolicy, Expansion, GapId, GapRow, MIN_HIDDEN, Mode, NONE, Projection, ProjectionError,
     REVEAL_STEP, Reveal, RowKind,
 };
+pub use source::{ContextLen, FileSources, HydrationError, SourceCoverage};
 pub use text::TextStore;

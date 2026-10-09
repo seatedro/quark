@@ -335,6 +335,60 @@ impl DiffDocument {
         debug_assert_eq!(self.verify_file(f as u32), Ok(()));
     }
 
+    /// Appends file `file` of `src`. With `full` stores the copy holds the
+    /// whole texts, so its blocks index them by line number; the caller
+    /// has checked that the texts match the hunks.
+    pub(crate) fn push_file_from(
+        &mut self,
+        src: &DiffDocument,
+        file: u32,
+        full: Option<(TextStore, TextStore)>,
+    ) {
+        let f = file as usize;
+        let (h, b) = (&src.hunks, &src.blocks);
+        self.begin_file(
+            src.files.meta[f].clone(),
+            full.is_none() && src.files.partial[f],
+        );
+        let mut blocks = Vec::new();
+        for hunk in src.files.hunks[f].clone() {
+            let hi = hunk as usize;
+            let range = h.blocks[hi].clone();
+            blocks.clear();
+            blocks.extend(range.clone().map(|bi| {
+                let bi = bi as usize;
+                (b.kind[bi], b.old_len[bi], b.new_len[bi])
+            }));
+            let stores = match (&full, range.is_empty()) {
+                (Some(_), _) | (None, true) => (
+                    lines_before(h.old_start[hi], h.old_len[hi]),
+                    lines_before(h.new_start[hi], h.new_len[hi]),
+                ),
+                (None, false) => (
+                    b.old_store[range.start as usize],
+                    b.new_store[range.start as usize],
+                ),
+            };
+            let header = (
+                h.old_start[hi],
+                h.old_len[hi],
+                h.new_start[hi],
+                h.new_len[hi],
+            );
+            self.push_hunk(header, h.section[hi].clone(), stores, &blocks);
+        }
+        let (old, new) =
+            full.unwrap_or_else(|| (src.files.old_text[f].clone(), src.files.new_text[f].clone()));
+        self.finish_file(old, new);
+    }
+
+    /// A one-file document holding file `file`, sharing its texts.
+    pub fn extract_file(&self, file: u32) -> DiffDocument {
+        let mut doc = DiffDocument::default();
+        doc.push_file_from(self, file, None);
+        doc
+    }
+
     /// Appends every file of `other`.
     pub fn append(&mut self, other: DiffDocument) {
         let hunk_base = self.hunk_count();
