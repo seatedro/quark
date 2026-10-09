@@ -11,6 +11,8 @@ use super::*;
 pub struct Div {
     base_style: ElementStyle,
     hover_style: Option<StyleOverride>,
+    /// Applied over the hover style while the div's focus shows.
+    focus_visible_style: Option<StyleOverride>,
     transitions: Transitions,
     /// Paint-time offset, rotation, and scale of the div and its subtree;
     /// layout ignores them.
@@ -76,6 +78,7 @@ pub fn div() -> Div {
     Div {
         base_style: ElementStyle::default(),
         hover_style: None,
+        focus_visible_style: None,
         transitions: Transitions::default(),
         transform: PaintTransform::IDENTITY,
         bg_effect: None,
@@ -335,6 +338,16 @@ impl Div {
     /// Full style override on hover.
     pub fn hover(mut self, f: impl FnOnce(StyleOverride) -> StyleOverride) -> Self {
         self.hover_style = Some(f(StyleOverride::default()));
+        self
+    }
+
+    /// Style override while the div has focus that shows, as CSS
+    /// `:focus-visible`: focus it takes from Tab, arrow keys, a shortcut,
+    /// or assistive tech, but not from a click. Applies over
+    /// [`Self::hover`]. The div's focus is its `focus_ring` target, or the
+    /// stable id of a clickable div.
+    pub fn focus_visible(mut self, f: impl FnOnce(StyleOverride) -> StyleOverride) -> Self {
+        self.focus_visible_style = Some(f(StyleOverride::default()));
         self
     }
 
@@ -715,16 +728,24 @@ impl Div {
 
     // -- Internal: resolve style with overrides --
 
-    /// The base style, copied only when a hover override applies.
-    fn resolve_style(&self, hovered: bool) -> Cow<'_, ElementStyle> {
-        match &self.hover_style {
-            Some(ov) if hovered => {
-                let mut resolved = self.base_style.clone();
-                apply_override(&mut resolved, ov);
-                Cow::Owned(resolved)
-            }
-            _ => Cow::Borrowed(&self.base_style),
+    /// The state overrides that apply, in the order they apply.
+    fn state_overrides(
+        &self,
+        hovered: bool,
+        focus_shown: bool,
+    ) -> impl Iterator<Item = &StyleOverride> {
+        let hover = self.hover_style.as_ref().filter(|_| hovered);
+        let focus = self.focus_visible_style.as_ref().filter(|_| focus_shown);
+        hover.into_iter().chain(focus)
+    }
+
+    /// The base style, copied only when a state override applies.
+    fn resolve_style(&self, hovered: bool, focus_shown: bool) -> Cow<'_, ElementStyle> {
+        let mut style = Cow::Borrowed(&self.base_style);
+        for ov in self.state_overrides(hovered, focus_shown) {
+            apply_override(style.to_mut(), ov);
         }
+        style
     }
 
     // -- Internal: scrolling --
@@ -1040,7 +1061,11 @@ impl Element for Div {
         let scroll = prepaint_state.scroll;
         let (child_dx, child_dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
         let hovered = prepaint_state.hit.is_some_and(|id| cx.is_hovered(id));
-        let mut style = self.resolve_style(hovered);
+        // A clickable div with a stable id takes Tab focus without a
+        // `focus_ring` (`SemanticFrame::focus_id`), so it gets the ring too.
+        let ring_target = self.focus_identity();
+        let focus_shown = ring_target.is_some_and(|target| cx.is_focus_visible(target));
+        let mut style = self.resolve_style(hovered, focus_shown);
         if !self.transitions.is_empty() {
             self.transitions
                 .apply(self.semantic_key.as_ref(), style.to_mut(), cx);
@@ -1140,12 +1165,9 @@ impl Element for Div {
             || style.layout.overflow.y != taffy::Overflow::Visible;
         drop(style);
 
-        // A clickable div with a stable id takes Tab focus without a
-        // `focus_ring` (`SemanticFrame::focus_id`), so it gets the ring too.
-        let ring_target = self.focus_identity();
-        if let Some(target) = ring_target
-            && cx.is_focused(target)
-        {
+        // Only focus that shows rings: a clicked or dragged control keeps
+        // focus without one, as `:focus-visible` in browsers.
+        if focus_shown {
             paint_focus_ring(scene, cx, bounds, radii, self.focus_ring_offset);
         }
 
@@ -1192,9 +1214,7 @@ impl Element for Div {
         if hovered {
             style_state.insert(StyleState::HOVER);
         }
-        if let Some(target) = ring_target
-            && cx.is_focused(target)
-        {
+        if focus_shown {
             style_state.insert(StyleState::FOCUS_VISIBLE);
         }
         if self.accessibility_disabled {
@@ -1326,16 +1346,14 @@ impl Element for Div {
             cx.push_paint_clip(bounds);
         }
 
-        let pushed_text_color = if hovered {
-            self.hover_style.as_ref().and_then(|ov| ov.text_color)
-        } else {
-            None
-        };
-        let pushed_icon_color = if hovered {
-            self.hover_style.as_ref().and_then(|ov| ov.icon_color)
-        } else {
-            None
-        };
+        let pushed_text_color = self
+            .state_overrides(hovered, focus_shown)
+            .filter_map(|ov| ov.text_color)
+            .last();
+        let pushed_icon_color = self
+            .state_overrides(hovered, focus_shown)
+            .filter_map(|ov| ov.icon_color)
+            .last();
         if let Some(tc) = pushed_text_color {
             cx.push_text_color(tc);
         }

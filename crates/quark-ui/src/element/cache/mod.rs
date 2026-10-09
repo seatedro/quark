@@ -138,8 +138,8 @@ struct EntryInputs {
     font: quark_text::FontEpoch,
     /// Whether accessibility nodes were built.
     accessibility: bool,
-    /// The focus the output read, when it read any.
-    focus: Option<Option<FocusId>>,
+    /// The focus and its visibility the output read, when it read any.
+    focus: Option<(Option<FocusId>, bool)>,
     /// The entry holds a complete recording that may replay.
     reusable: bool,
 }
@@ -182,7 +182,7 @@ struct FrameInputs {
     scale: f32,
     font: quark_text::FontEpoch,
     accessibility: bool,
-    focus: Option<FocusId>,
+    focus: (Option<FocusId>, bool),
 }
 
 /// How a boundary may use its row this pass.
@@ -581,7 +581,7 @@ impl<F: FnOnce() -> AnyElement + 'static> Element for Cached<F> {
             scale: cx.scale_factor,
             font: cx.text.font_epoch(),
             accessibility: cx.accessibility_enabled(),
-            focus: cx.focus,
+            focus: (cx.focus, cx.focus_visible),
         };
         let hash = self.frame_hash(cx);
         let claim = match cx.cache.as_deref_mut() {

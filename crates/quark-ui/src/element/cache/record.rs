@@ -417,7 +417,7 @@ impl Recording {
             (Some(extent), Some((x, y))) => extent.offset(ox, oy).contains(x, y),
             _ => false,
         };
-        let focus = (self.focus_reads > 0).then_some(cx.focus);
+        let focus = (self.focus_reads > 0).then_some((cx.focus, cx.focus_visible));
         let (scale, font) = (cx.scale_factor, cx.text.font_epoch());
         let accessibility = cx.accessibility_enabled();
         let row = self.row as usize;

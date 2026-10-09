@@ -1149,6 +1149,11 @@ impl Emit {
             let calls = lowered.hover;
             chain = quote!(#chain.#hover(|__quark_hover| __quark_hover #(#calls)*));
         }
+        if !lowered.focus_visible.is_empty() {
+            let focus = Ident::new("focus_visible", lit.span());
+            let calls = lowered.focus_visible;
+            chain = quote!(#chain.#focus(|__quark_focus| __quark_focus #(#calls)*));
+        }
         chain
     }
 

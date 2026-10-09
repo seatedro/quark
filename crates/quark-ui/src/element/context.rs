@@ -23,6 +23,11 @@ pub struct ElementContext<'a> {
     /// Event handlers keyed by semantic node; registered in paint.
     pub handlers: InputHandlers,
     pub focus: Option<FocusId>,
+    /// Whether focus shows its ring (CSS `:focus-visible`): it came from
+    /// the keyboard, assistive tech, or the app, and no pointer press has
+    /// moved or claimed it since. Text fields show their caret and ring
+    /// either way.
+    pub focus_visible: bool,
     pub signal_store: &'a SignalStore,
     pub clock_ms: u64,
     /// Earliest clock time (ms) an element asked to be painted again at.
@@ -115,6 +120,7 @@ impl<'a> ElementContext<'a> {
             hit_table: HitTable::default(),
             handlers: InputHandlers::default(),
             focus: None,
+            focus_visible: true,
             signal_store,
             clock_ms: 0,
             next_frame_ms: None,
@@ -235,6 +241,12 @@ impl<'a> ElementContext<'a> {
 
     pub fn with_focus(mut self, focus: Option<FocusId>) -> Self {
         self.focus = focus;
+        self
+    }
+
+    /// See [`Self::focus_visible`].
+    pub fn with_focus_visible(mut self, visible: bool) -> Self {
+        self.focus_visible = visible;
         self
     }
 
@@ -401,6 +413,12 @@ impl<'a> ElementContext<'a> {
     pub fn is_focused(&self, target: FocusId) -> bool {
         self.focus_reads.set(self.focus_reads.get().wrapping_add(1));
         self.focus == Some(target)
+    }
+
+    /// Whether `target` is focused and its focus should show
+    /// ([`Self::focus_visible`]): what focus rings paint on.
+    pub fn is_focus_visible(&self, target: FocusId) -> bool {
+        self.is_focused(target) && self.focus_visible
     }
 
     pub fn current_z_index(&self) -> i32 {

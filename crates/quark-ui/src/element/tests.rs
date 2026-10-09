@@ -1339,6 +1339,51 @@ fn focused_text_field_draws_the_same_ring_as_other_controls() {
     assert_eq!(field.rect.height - 60.0, control.rect.height - 20.0);
 }
 
+// Catches focus that should not show (it came from a click) still ringing
+// or restyling its control, and a text field losing its ring with it:
+// fields keep theirs, as on every platform.
+#[test]
+fn hidden_focus_rings_and_restyles_only_text_fields() {
+    let ring = Theme::default_dark().colors.focus_border;
+    let tint = Color::rgba(255, 0, 0, 255);
+    for (visible, want) in [(false, (1, false)), (true, (2, true))] {
+        let mut ts = TestText::new();
+        let mut store = SignalStore::new();
+        let mut cx = test_cx(&mut ts, &mut store)
+            .with_focus(Some(FOCUS_LIST))
+            .with_focus_visible(visible);
+        let mut scene = Scene::default();
+        let mut root = div()
+            .w(300.0)
+            .h(200.0)
+            .p(20.0)
+            .gap(20.0)
+            .flex_col()
+            .child(
+                div()
+                    .w(100.0)
+                    .h(20.0)
+                    .focus_ring(FOCUS_LIST)
+                    .focus_visible(|s| s.bg(tint)),
+            )
+            .child(text_input("City", "").focused(true).w(200.0).h(60.0))
+            .into_any();
+        render_element(&mut root, &mut scene, &mut cx, 300.0, 200.0);
+
+        let rings = scene
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, quark_render::Primitive::Border(b) if b.color == ring))
+            .count();
+        let tinted = scene.primitives.iter().any(|p| match p {
+            quark_render::Primitive::Rect(r) => r.color == tint,
+            quark_render::Primitive::RoundedRect(r) => r.color == tint,
+            _ => false,
+        });
+        assert_eq!((rings, tinted), want, "focus visible: {visible}");
+    }
+}
+
 #[test]
 fn focus_tree_registers_focus_ring_and_text_input_targets() {
     let mut ts = TestText::new();

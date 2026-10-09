@@ -1,4 +1,4 @@
-error: class `focus:opacity-50`: `focus:` is not supported: div has no focus style state; use `@when {cx.is_focused(id)} { .. }`
+error: class `focus:opacity-50`: `focus:` is not supported: div restyles only for focus that shows; use `focus-visible:`, or `@when {cx.is_focused(id)} { .. }` for any focus
  --> tests/ui/class_unsupported_variants.rs:4:32
   |
 4 |     let _ = view! { <div class="focus:opacity-50 md:flex-row" /> };

@@ -585,7 +585,7 @@ pub(super) fn register_link_input(
         };
         let key = format!("link:{source_key}:{}:{}", link.range.start, link.url);
         let focus = FocusId::from_key(&key);
-        if cx.is_focused(focus) {
+        if cx.is_focus_visible(focus) {
             for rect in &link.rects {
                 paint_focus_ring(scene, cx, *rect, [2.0; 4], 0.0);
             }

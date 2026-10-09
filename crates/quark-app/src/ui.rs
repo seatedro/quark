@@ -266,6 +266,7 @@ pub struct ViewContext<'a, 'f> {
     pub frame: &'a mut FrameContext<'f>,
     pub theme: &'a Theme,
     focus: Option<FocusId>,
+    focus_visible: bool,
     animations: &'a mut AnimationTable,
     geometry: &'a LayoutSnapshot,
     handles: &'a mut ElementHandles,
@@ -322,6 +323,14 @@ impl ViewContext<'_, '_> {
 
     pub fn is_focused(&self, target: FocusId) -> bool {
         self.focus == Some(target)
+    }
+
+    /// Whether `target` is focused and its focus shows, as CSS
+    /// `:focus-visible`: it came from the keyboard or assistive tech, not
+    /// a click. Paint custom focus indicators on this; text fields keep
+    /// their caret on [`Self::is_focused`].
+    pub fn is_focus_visible(&self, target: FocusId) -> bool {
+        self.is_focused(target) && self.focus_visible
     }
 }
 
@@ -1060,9 +1069,12 @@ impl<U: UiApp> UiAdapter<U> {
             return;
         };
         let win = &mut *self.win;
-        let before = win.focus;
+        let (before, was_visible) = (win.focus, win.focus_visible);
         let delivery = win.router.pointer_down(x, y, &mut win.focus);
-        if win.focus != before {
+        // A press hides the ring of whatever has focus after it, as
+        // `:focus-visible`: a clicked button or dragged divider shows none.
+        win.focus_visible = false;
+        if win.focus != before || (was_visible && win.focus.is_some()) {
             redraw(Redraw::Focus, self.win_handle, cx);
         }
         // A press nothing else took, on app-drawn title chrome, moves the
@@ -1112,6 +1124,9 @@ impl<U: UiApp> UiAdapter<U> {
     /// bindings on the focus path, then to Tab focus traversal, so an
     /// editor that binds Tab keeps it. Escape first ends a drag session.
     fn key(&mut self, binding: Binding, cx: &mut EventContext) {
+        // Any key shows focus from here on, also where it lands through a
+        // binding or the app's own `set_focus`.
+        self.show_focus(cx);
         if self.shared.drag.is_some() && binding.key == "escape" && binding.mods == Mods::default()
         {
             self.end_session(cx);
@@ -1655,6 +1670,7 @@ impl<U: UiApp> App for UiAdapter<U> {
             frame: cx,
             theme: &self.shared.theme,
             focus: win.focus,
+            focus_visible: win.focus_visible,
             animations: &mut win.animations,
             geometry: &win.router.frame().geometry,
             handles: &mut win.element_handles,
@@ -1675,6 +1691,7 @@ impl<U: UiApp> App for UiAdapter<U> {
             &self.shared.signals,
         )
         .with_focus(win.focus)
+        .with_focus_visible(win.focus_visible)
         .with_clock(clock_ms)
         .with_animations(&mut win.animations)
         .with_element_cache(&mut win.element_cache)
@@ -1943,7 +1960,21 @@ impl<U: UiApp> UiAdapter<U> {
         }
     }
 
+    /// Make focus show its ring from now on (see
+    /// [`WindowUiState::focus_visible`]).
+    fn show_focus(&mut self, cx: &mut EventContext) {
+        if !self.win.focus_visible {
+            self.win.focus_visible = true;
+            if self.win.focus.is_some() {
+                redraw(Redraw::Focus, self.win_handle, cx);
+            }
+        }
+    }
+
     fn handle_accessibility_action(&mut self, request: ActionRequest, cx: &mut EventContext) {
+        // Assistive tech users find their place by the ring, as keyboard
+        // users do.
+        self.show_focus(cx);
         match route_accessibility(&self.win.accessibility, &request) {
             Some(Routed::Dispatch(action)) => self.dispatch(vec![action], cx),
             Some(Routed::Click(action, focus)) => {
@@ -3013,5 +3044,59 @@ mod tests {
         accessibility_click(&mut ui, Role::Button);
         assert_eq!(ui.app().saved, 1);
         assert_eq!(ui.focus(), Some(SAVE));
+    }
+
+    /// Two buttons side by side, each ringing its own focus.
+    struct Pair;
+
+    const LEFT: FocusId = FocusId::from_key("left");
+    const RIGHT: FocusId = FocusId::from_key("right");
+
+    impl UiApp for Pair {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            let button = |focus| div().w(60.0).h(30.0).focus_ring(focus).on_click(Msg::Save);
+            div()
+                .flex_row()
+                .gap(20.0)
+                .p(10.0)
+                .child(button(LEFT))
+                .child(button(RIGHT))
+                .into_any()
+        }
+
+        fn update(&mut self, _: Msg, _: &mut UiContext) {}
+    }
+
+    /// Focus rings painted in the window's last frame: the app draws no
+    /// other border.
+    fn rings<A: UiApp>(ui: &UiTestHarness<A>) -> usize {
+        ui.scene()
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, quark::scene::Primitive::Border(_)))
+            .count()
+    }
+
+    // Regression: a clicked control (or a dragged split divider) kept a
+    // ring, which `:focus-visible` shows only for keyboard focus.
+    #[test]
+    fn a_click_focuses_without_a_ring() {
+        let mut ui = UiTestHarness::new(Pair, (200.0, 60.0), 1.0);
+        ui.click((40.0, 25.0));
+        ui.frame();
+        assert_eq!((ui.focus(), rings(&ui)), (Some(LEFT), 0));
+    }
+
+    // Tab after a click shows focus again where it lands.
+    #[test]
+    fn tab_after_a_click_rings_the_next_control() {
+        let mut ui = UiTestHarness::new(Pair, (200.0, 60.0), 1.0);
+        ui.click((40.0, 25.0));
+        ui.key("tab");
+        ui.frame();
+        assert_eq!((ui.focus(), rings(&ui)), (Some(RIGHT), 1));
     }
 }
