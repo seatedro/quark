@@ -72,8 +72,9 @@ pub(crate) enum Step {
     Equivalent(u32, u32),
 }
 
-/// Display alignment of every change block of one document. See the
-/// [module docs](self).
+/// Display alignment of every change block of one document, computed
+/// once per document revision and options. The document is not changed:
+/// apply and export keep using its exact edits.
 #[derive(Debug, Clone, Default)]
 pub struct Comparison {
     options: ComparisonOptions,
@@ -320,9 +321,9 @@ fn choose_offset(offsets: u32, short: u32, score: impl Fn(u32) -> f32) -> u32 {
             runner_up = runner_up.max(s);
         }
     }
-    // A quarter of a matching line per pair, at least half a line: enough
-    // that a shift needs real resemblance, not shared punctuation.
-    let decisive = best_score - positional >= (0.25 * short as f32).max(0.5);
+    // A fifth of a matching line per pair, at least a quarter line: a
+    // shift needs real resemblance, more than shared punctuation.
+    let decisive = best_score - positional >= (0.2 * short as f32).max(0.25);
     let unambiguous = best_score - runner_up > 0.05;
     if best != 0 && decisive && unambiguous {
         best
