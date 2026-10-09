@@ -21,13 +21,33 @@ pub enum FontKind {
     Mono,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum FontWeight {
     #[default]
     Normal,
+    Light,
     Medium,
     Semibold,
     Bold,
+    /// An OpenType/CSS weight. Valid weights are 1 to 1000; layout clamps
+    /// others into that range at its public boundary.
+    Numeric(u16),
+}
+
+impl FontWeight {
+    /// The OpenType weight the name stands for: Light 300, Normal 400,
+    /// Medium 500, Semibold 600, Bold 700, and a numeric weight clamped to
+    /// 1 to 1000.
+    pub fn value(self) -> u16 {
+        match self {
+            Self::Light => 300,
+            Self::Normal => 400,
+            Self::Medium => 500,
+            Self::Semibold => 600,
+            Self::Bold => 700,
+            Self::Numeric(weight) => weight.clamp(1, 1000),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
