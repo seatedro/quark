@@ -216,6 +216,8 @@ fn compact_separator_height(m: &Metrics) -> f32 {
 /// accessible description, whatever the colors.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DiffColorOverrides {
+    /// Code text without a syntax color, and file header titles.
+    pub text: Option<Color>,
     /// Background of added and removed lines, gutter included.
     pub add_line: Option<Color>,
     pub del_line: Option<Color>,
@@ -320,6 +322,7 @@ impl DiffColors {
         let c = &theme.colors;
         let o = appearance.for_mode(theme.mode);
         let pick = |over: Option<Color>, base: Color| over.unwrap_or(base);
+        let text = pick(o.text, c.text);
         let syntax_base = |kind: HighlightKind| match kind {
             HighlightKind::Keyword | HighlightKind::Preprocessor => c.syntax_keyword,
             HighlightKind::String => c.syntax_string,
@@ -334,9 +337,9 @@ impl DiffColors {
             | HighlightKind::Tag
             | HighlightKind::Label => c.syntax_property,
             HighlightKind::Operator => c.syntax_operator,
-            HighlightKind::Normal | HighlightKind::Punctuation | HighlightKind::Variable => c.text,
+            HighlightKind::Normal | HighlightKind::Punctuation | HighlightKind::Variable => text,
         };
-        let mut syntax = [c.text; HIGHLIGHT_KINDS];
+        let mut syntax = [text; HIGHLIGHT_KINDS];
         for kind in ALL_KINDS {
             syntax[kind as usize] = pick(o.syntax[kind as usize], syntax_base(kind));
         }
@@ -345,7 +348,7 @@ impl DiffColors {
             surface: c.editor_surface,
             empty_side: pick(o.empty_side, c.background),
             hatch: pick(o.hatch, c.border_variant),
-            text: c.text,
+            text,
             muted: c.text_muted,
             border: c.border_variant,
             gutter: pick(o.gutter, c.gutter_bg),
