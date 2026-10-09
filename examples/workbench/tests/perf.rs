@@ -29,10 +29,11 @@ const REPEATED_FRAME_CEILING: u64 = 48;
 const REPEATED_FRAME_CEILING_ACCESSIBLE: u64 = 56;
 /// Design target for one streamed update plus its frame.
 const STREAMED_UPDATE_BUDGET: u64 = 512;
-/// Measured: 245 after the text gap fixes (one glyph record per glyph,
-/// lent shaping storage), the repeated frame plus about 200 for the chunk
-/// (re-shaping the growing block, markdown re-conversion, the row's
-/// rebuild); 337 before them, 686 before the caches.
+/// Measured: 248 (245 before inline code pills kept room in the layout)
+/// after the text gap fixes (one glyph record per glyph, lent shaping
+/// storage), the repeated frame plus about 200 for the chunk (re-shaping
+/// the growing block, markdown re-conversion, the row's rebuild); 337
+/// before them, 686 before the caches.
 const STREAMED_UPDATE_CEILING: u64 = 256;
 /// Design target for a scroll frame: a base plus each row entering.
 const SCROLL_BASE_BUDGET: u64 = 128;

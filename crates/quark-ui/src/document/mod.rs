@@ -323,7 +323,18 @@ impl Block {
 
     /// Prose whose spans take theme colors by [`SpanTone`].
     pub fn toned_prose(key: BlockKey, spans: Vec<(StyledSpan, SpanTone)>) -> Self {
-        let (spans, tones): (Vec<StyledSpan>, Vec<SpanTone>) = spans.into_iter().unzip();
+        let (spans, tones): (Vec<StyledSpan>, Vec<SpanTone>) = spans
+            .into_iter()
+            .map(|(mut span, tone)| {
+                // A pill keeps room in the layout, and measuring reads these
+                // spans rather than the painted ones: without a pill here the
+                // row would be measured (and shaped) without that room.
+                if tone == SpanTone::InlineCode {
+                    span.pill.get_or_insert(Color::TRANSPARENT);
+                }
+                (span, tone)
+            })
+            .unzip();
         Self::prose(key, spans).with_tones(tones)
     }
 

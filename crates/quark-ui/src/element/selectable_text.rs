@@ -1036,22 +1036,30 @@ const PILL_ASCENT: f32 = 1.0;
 const PILL_DESCENT: f32 = 0.38;
 const PILL_RADIUS: f32 = 0.35;
 
-/// The extra advance that makes room for pills: one entry per character
-/// that gets some (a pill's last character, and the character before a
-/// pill on its line), as its byte range, the span that styles it, and
-/// the extra ems of that span's size. Empty without pills.
-fn pill_room(spans: &[StyledSpan]) -> Vec<(std::ops::Range<usize>, &StyledSpan, f32)> {
-    let mut out: Vec<(std::ops::Range<usize>, &StyledSpan, f32)> = Vec::new();
+/// Calls `f` with the extra advance that makes room for pills: once per
+/// character that gets some (a pill's last character, and the character
+/// before a pill on its line), in text order, with its byte range, the
+/// span that styles it, and the extra ems of that span's size. Never
+/// without pills. It allocates nothing: it runs for every layout query.
+fn pill_room<'s>(
+    spans: &'s [StyledSpan],
+    mut f: impl FnMut(std::ops::Range<usize>, &'s StyledSpan, f32),
+) {
     if spans.iter().all(|s| s.pill.is_none()) {
-        return out;
+        return;
     }
     let scale = |span: &StyledSpan| span.font_scale.unwrap_or(1.0);
-    let mut add = |range: std::ops::Range<usize>, owner, ems: f32| match out
-        .iter_mut()
-        .find(|(r, ..)| *r == range)
-    {
-        Some(entry) => entry.2 += ems,
-        None => out.push((range, owner, ems)),
+    // Ranges come in text order, and one repeats only right away (the last
+    // character of a pill that another pill follows), so the latest entry
+    // is held back to merge with a repeat.
+    let mut held: Option<(std::ops::Range<usize>, &StyledSpan, f32)> = None;
+    let mut add = |range: std::ops::Range<usize>, owner, ems: f32| match &mut held {
+        Some(entry) if entry.0 == range => entry.2 += ems,
+        _ => {
+            if let Some((range, owner, ems)) = held.replace((range, owner, ems)) {
+                f(range, owner, ems);
+            }
+        }
     };
     // The span holding the last character so far, and where it ends.
     let mut last: Option<(usize, char, &StyledSpan)> = None;
@@ -1072,7 +1080,9 @@ fn pill_room(spans: &[StyledSpan]) -> Vec<(std::ops::Range<usize>, &StyledSpan, 
         }
         start = end;
     }
-    out
+    if let Some((range, owner, ems)) = held {
+        f(range, owner, ems);
+    }
 }
 
 /// Joins `spans` into `text` and their text spans into `out`: one per
@@ -1085,14 +1095,14 @@ fn join_spans(spans: &[StyledSpan], style: &TextStyle, text: &mut String, out: &
         text.push_str(&span.text);
         out.push(styled_span(span, start..text.len(), style));
     }
-    for (range, owner, ems) in pill_room(spans) {
+    pill_room(spans, |range, owner, ems| {
         // The style's own spacing, in ems of this span's size.
         let own = style.letter_spacing / owner.font_scale.unwrap_or(1.0);
         out.push(TextSpan {
             letter_spacing: Some(own + ems),
             ..styled_span(owner, range, style)
         });
-    }
+    });
 }
 
 /// One layout for the concatenated span texts, each span's font applied to
@@ -1104,7 +1114,9 @@ pub(crate) fn styled_params(
     wrap_width: Option<f32>,
 ) -> TextParams {
     let mut text = String::with_capacity(spans.iter().map(|s| s.text.len()).sum());
-    let mut text_spans = Vec::with_capacity(spans.len());
+    // Each pill adds at most two spans of room.
+    let pills = spans.iter().filter(|s| s.pill.is_some()).count();
+    let mut text_spans = Vec::with_capacity(spans.len() + 2 * pills);
     join_spans(spans, &style, &mut text, &mut text_spans);
     TextParams::new(text, style)
         .spans(text_spans)
@@ -1197,12 +1209,14 @@ pub(super) fn span_colors(
         (None, Some(_)) => link_color,
         (None, None) => default_color,
     };
-    let room = pill_room(spans);
-    spans
-        .iter()
-        .map(color)
-        .chain(room.into_iter().map(|(_, owner, _)| color(owner)))
-        .collect()
+    let pills = spans.iter().filter(|s| s.pill.is_some()).count();
+    if pills == 0 {
+        return spans.iter().map(color).collect();
+    }
+    let mut colors = Vec::with_capacity(spans.len() + 2 * pills);
+    colors.extend(spans.iter().map(color));
+    pill_room(spans, |_, owner, _| colors.push(color(owner)));
+    colors.into()
 }
 
 impl Element for SelectableText {
