@@ -1034,9 +1034,6 @@ mod tests {
     fn a_named_family_reaches_the_painted_glyphs() {
         let mut window = Window::new();
         let named = FontFamily::Named(window.text.family_id("JetBrains Mono"));
-        // Its one variable face is registered at a single weight until
-        // quark-text resolves weights on demand.
-        window.text.fill_family_weights("JetBrains Mono");
         let frame = window.paint(
             div()
                 .flex_col()
