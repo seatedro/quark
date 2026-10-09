@@ -2680,7 +2680,13 @@ struct EffectQuadInstance {
     clip_bounds: [f32; 4],
     /// Rounded-clip corner radii [tl, tr, br, bl]. All zero = no rounded clip.
     clip_radii: [f32; 4],
+    /// More effect parameters: stripes keep [duty, 0, 0, 0].
+    extra: [f32; 4],
 }
+
+/// Effect type of [`StripesPrimitive`](crate::scene::StripesPrimitive)
+/// quads in the effect shader.
+const EFFECT_STRIPES: f32 = 6.0;
 
 impl EffectQuadInstance {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
@@ -2716,6 +2722,11 @@ impl EffectQuadInstance {
                 wgpu::VertexAttribute {
                     offset: 80,
                     shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 96,
+                    shader_location: 6,
                     format: wgpu::VertexFormat::Float32x4,
                 },
             ],
@@ -3896,6 +3907,26 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
                 ],
                 clip_bounds: [0.0; 4],
                 clip_radii: [0.0; 4],
+                extra: [0.0; 4],
+            })
+        }
+        Primitive::Stripes(stripes) => {
+            let rect = stripes.rect;
+            let clean = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+            Drawn::Effect(EffectQuadInstance {
+                bounds: [rect.x, rect.y, rect.width, rect.height],
+                color_a: color_to_unit(stripes.colors[0]),
+                color_b: color_to_unit(stripes.colors[1]),
+                params: [
+                    EFFECT_STRIPES,
+                    clean(stripes.angle, 0.0),
+                    // Under a pixel, stripes would alias into noise.
+                    clean(stripes.period, 1.0).max(1.0),
+                    stripes.corner_radii.iter().copied().fold(0.0, f32::max),
+                ],
+                clip_bounds: [0.0; 4],
+                clip_radii: [0.0; 4],
+                extra: [clean(stripes.duty, 0.5).clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             })
         }
         Primitive::Image(img) => Drawn::Image(img.clone()),
@@ -3924,7 +3955,6 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
             })
         }
         Primitive::Path(_)
-        | Primitive::Stripes(_)
         | Primitive::Chunk(_)
         | Primitive::ClipStart(_)
         | Primitive::ClipEnd
@@ -4830,6 +4860,9 @@ mod compositing_tests;
 #[cfg(test)]
 #[path = "mask_tests.rs"]
 mod mask_tests;
+#[cfg(test)]
+#[path = "pattern_tests.rs"]
+mod pattern_tests;
 #[cfg(test)]
 #[path = "text_fill_tests.rs"]
 mod text_fill_tests;

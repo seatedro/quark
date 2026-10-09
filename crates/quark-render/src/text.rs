@@ -11,7 +11,10 @@ use quark::{Color, FontKind};
 use quark_text::{TextLayout, TextParams, TextStyle, TextSystem, TextSystemId};
 
 use crate::renderer::{ClippedRichText, ClippedText, fade_color};
-use crate::scene::{Rect, RectPrimitive, Scene, TextDecoration, TextDecorationKind};
+use crate::scene::{
+    Path, PathPrimitive, Rect, RectPrimitive, Scene, StrokePattern, StrokeStyle, StyledDecoration,
+    TextDecoration, TextDecorationKind,
+};
 
 /// How text primitives reach glyphon.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -570,16 +573,37 @@ pub fn text_decoration_rects(
     origin: (f32, f32),
     decoration: &TextDecoration,
 ) -> Vec<Rect> {
+    let styled = StyledDecoration::from(decoration.clone());
+    let mut out = Vec::new();
+    decoration_lines(layout, origin, &styled, false, |rect| out.push(rect));
+    out
+}
+
+/// Call `line_rect` with the rect of each line segment `decoration`
+/// covers, one per selection rect of the range on each line, or one per
+/// line from its leftmost to its rightmost glyph when `merge`: its
+/// thickness and its distance from the baseline as the style says, or the
+/// defaults derived from the font size.
+fn decoration_lines(
+    layout: &TextLayout,
+    origin: (f32, f32),
+    decoration: &StyledDecoration,
+    merge: bool,
+    mut line_rect: impl FnMut(Rect),
+) {
     let text = layout.text();
     let size = layout.style().font_size;
-    let thickness = (size * 0.07).max(1.0);
-    let offset = match decoration.kind {
-        // Top of the quad relative to the baseline.
-        TextDecorationKind::Underline => size * 0.12,
-        TextDecorationKind::Strikethrough => -size * 0.28 - thickness * 0.5,
+    let positive = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0);
+    let thickness = positive(decoration.style.thickness).unwrap_or((size * 0.07).max(1.0));
+    // Top of the quad relative to the baseline.
+    let top = match decoration.style.offset.filter(|v| v.is_finite()) {
+        Some(center) => center - thickness * 0.5,
+        None => match decoration.kind {
+            TextDecorationKind::Underline => size * 0.12,
+            TextDecorationKind::Strikethrough => -size * 0.28 - thickness * 0.5,
+        },
     };
     let (a, b) = (decoration.range.start, decoration.range.end.min(text.len()));
-    let mut out = Vec::new();
     for line in layout.lines() {
         let start = a.max(line.byte_range.start);
         let mut end = b.min(line.byte_range.end);
@@ -592,22 +616,33 @@ pub fn text_decoration_rects(
         if start >= end {
             continue;
         }
-        let y = origin.1 + line.baseline + offset;
+        let y = origin.1 + line.baseline + top;
+        let segment = |x0: f32, x1: f32| Rect {
+            x: origin.0 + x0,
+            y,
+            width: x1 - x0,
+            height: thickness,
+        };
+        // Merged, one segment from the leftmost to the rightmost glyph, so
+        // a pattern runs unbroken across the spans of one line.
+        let mut span: Option<(f32, f32)> = None;
         for r in layout.selection_rects(start..end) {
             // selection_rects can return rects of neighbouring lines when the
             // range touches a line break; keep only this line's.
             if (r.y - line.top).abs() > 0.01 {
                 continue;
             }
-            out.push(Rect {
-                x: origin.0 + r.x,
-                y,
-                width: r.width,
-                height: thickness,
-            });
+            if !merge {
+                line_rect(segment(r.x, r.x + r.width));
+                continue;
+            }
+            let (x0, x1) = span.unwrap_or((r.x, r.x + r.width));
+            span = Some((x0.min(r.x), x1.max(r.x + r.width)));
+        }
+        if let Some((x0, x1)) = span {
+            line_rect(segment(x0, x1));
         }
     }
-    out
 }
 
 /// Paints `decorations` as solid quads. Call right after pushing the text
@@ -625,6 +660,41 @@ pub fn push_text_decorations(
                 color: decoration.color,
             });
         }
+    }
+}
+
+/// Paints `decorations` in their styles: solid lines as quads, dashed and
+/// dotted ones as stroked paths along each line's segment, restarting
+/// their pattern at the start of every line. Call right after pushing the
+/// text primitive so the lines draw over the glyphs in paint order.
+// Reached through the crate root once stream F re-exports it.
+#[allow(dead_code)]
+pub fn push_styled_text_decorations(
+    scene: &mut Scene,
+    layout: &TextLayout,
+    origin: (f32, f32),
+    decorations: &[StyledDecoration],
+) {
+    for decoration in decorations {
+        let style = decoration.style;
+        let patterned = style.pattern.validated(1.0) != StrokePattern::Solid;
+        decoration_lines(layout, origin, decoration, patterned, |rect| {
+            let pattern = style.pattern.validated(rect.height);
+            if pattern == StrokePattern::Solid {
+                scene.rect(RectPrimitive {
+                    rect,
+                    color: style.color,
+                });
+                return;
+            }
+            let mut line = Path::builder();
+            line.move_to(0.0, 0.0).line_to(rect.width, 0.0);
+            let stroke = StrokeStyle::new(rect.height).pattern(pattern);
+            scene.path(
+                PathPrimitive::new(Arc::new(line.build()), [rect.x, rect.y + rect.height * 0.5])
+                    .stroke(style.color, stroke),
+            );
+        });
     }
 }
 

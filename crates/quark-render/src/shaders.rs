@@ -358,6 +358,7 @@ struct VertexInput {
     @location(3) params: vec4<f32>,   // [effect_type, param1, param2, corner_radius]
     @location(4) clip_bounds: vec4<f32>,
     @location(5) clip_radii: vec4<f32>,
+    @location(6) extra: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -368,6 +369,7 @@ struct VertexOutput {
     @location(3) @interpolate(flat) params: vec4<f32>,
     @location(4) @interpolate(flat) clip_bounds: vec4<f32>,
     @location(5) @interpolate(flat) clip_radii: vec4<f32>,
+    @location(6) @interpolate(flat) extra: vec4<f32>,
 };
 
 @vertex
@@ -387,6 +389,7 @@ fn vs_effect(input: VertexInput) -> VertexOutput {
     out.params = input.params;
     out.clip_bounds = input.clip_bounds;
     out.clip_radii = input.clip_radii;
+    out.extra = input.extra;
     return out;
 }
 
@@ -560,6 +563,22 @@ fn fs_effect(input: VertexOutput) -> @location(0) vec4<f32> {
         // Type 5: Color tint — flat semi-transparent overlay.
         case 5u: {
             color = input.color_a;
+        }
+        // Type 6: Stripes — bands of color_a covering `duty` of each
+        // period across the stripes, color_b between, from the top-left
+        // corner. Coverage is the band's overlap with the pixel along the
+        // stripe normal, so edges antialias at any angle.
+        case 6u: {
+            let angle = input.params.y;
+            let period = input.params.z;
+            let duty = input.extra.x;
+            let normal = vec2<f32>(cos(angle), sin(angle));
+            let d = dot(input.position.xy - input.bounds.xy, normal);
+            let s = d - period * floor(d / period);
+            let band = period * duty;
+            let coverage = saturate(s + 0.5) - saturate(s - band + 0.5)
+                + saturate(s - period + 0.5);
+            color = mix(input.color_b, input.color_a, saturate(coverage));
         }
         // Fallback: solid color_a.
         default: {
