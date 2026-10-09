@@ -5,7 +5,7 @@
 //! Agent turns follow the update captures (u07 to u46): the "Working for"
 //! / "Worked for" divider that folds the work, preamble prose (its
 //! unsettled tail dim while streaming), grouped and nested tool rows, the
-//! Shell card, the inline diff card with word highlights, the final
+//! Shell card, the inline diff card (`diff::Changes`), the final
 //! answer with its action row, and the file change card.
 
 use accesskit::Role;
@@ -20,7 +20,7 @@ use quark::{FadeEdge, FontWeight, ShimmerSpec, TextFill};
 
 use crate::theme::{BODY, CODE, LINE_PT, Pal, SMALL};
 use crate::widgets::*;
-use crate::{Codex, Menu, Msg, composer, icons, panel};
+use crate::{Codex, Menu, Msg, composer, icons};
 
 /// Turn column's widest on wide windows.
 pub const MAX_COLUMN: f32 = 768.0;
@@ -37,6 +37,7 @@ pub fn view(
     };
     let items = thread.items.clone();
     let pill = thread.pill;
+    let stats = app.changes.stats();
     if app.full_view {
         // The Changes tab fills the window; the thread waits in its tab.
         return view! { <div class="absolute top-0" left={x} w={w} h={h} /> };
@@ -77,17 +78,23 @@ pub fn view(
         }
         app.stick_bottom = false;
     }
+    let inline = items
+        .iter()
+        .any(edits_open)
+        .then(|| app.changes.inline_card(p, column, vcx));
+    let mut embed = Embed { stats, inline };
     view! {
         <div class="absolute top-0" left={x} w={w} h={h}>
             <div class="absolute left-0 top-0 flex-col items-center overflow-y-scroll" w={w}
                  h={list_h} track_scroll={&app.thread_scroll} scrollbar_auto_hide
                  accessibility_role={Role::Log} aria-label="Transcript">
-                <transcript(&items, p, column)>
+                <transcript(&items, p, column, &mut embed)>
                     <div h={spacer} />
                 </transcript>
             </div>
             <div class="absolute" left={cx} top={bottom_top}>{bottom}</div>
-            if let Some((adds, dels)) = pill {
+            if pill {
+                let (adds, dels) = stats;
                 <div class="absolute left-0 flex-row justify-center" top={bottom_top - 42.0} w={w}>
                     <div class="flex-row items-center h-8 px-[14] gap-[5] rounded-[10]" bg={p.shell}
                          border={p.shell_border} role="button" aria-label="View changes"
@@ -102,8 +109,28 @@ pub fn view(
     }
 }
 
+/// What the transcript shows of the shared change: its counts, and the
+/// inline diff card for the open edit row.
+pub struct Embed {
+    pub stats: (u32, u32),
+    pub inline: Option<AnyElement>,
+}
+
+/// Whether `item` has an edit row with its diff open.
+fn edits_open(item: &Item) -> bool {
+    let open = |row: &Row| matches!(row, Row::Edited { open: true, .. });
+    match item {
+        Item::Work { steps, .. } => steps.iter().any(|s| match s {
+            Step::Group { rows, .. } => rows.iter().any(open),
+            Step::Row(row) => open(row),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
 /// The turns, top to bottom, in a `column`-wide column.
-pub fn transcript(items: &[Item], p: &Pal, column: f32) -> Div {
+pub fn transcript(items: &[Item], p: &Pal, column: f32, embed: &mut Embed) -> Div {
     view! { -> Div,
         <div class="flex-col shrink-0 pt-2" w={column}>
             for (i, item) in items.iter().enumerate() {
@@ -161,13 +188,13 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32) -> Div {
                         open,
                         steps,
                     } => {
-                        <work(p, i, took, *running, *open, steps, column) key={key} />
+                        <work(p, i, took, *running, *open, steps, embed) key={key} />
                     }
                     Item::Answer { blocks, .. } => {
                         <answer(p, blocks, column) key={key} />
                     }
-                    Item::FileChange { file, adds, dels } => {
-                        <file_change(p, file, *adds, *dels) key={key} />
+                    Item::FileChange { file } => {
+                        <file_change(p, file, embed.stats) key={key} />
                     }
                 }
             }
@@ -216,7 +243,7 @@ fn work(
     running: bool,
     open: bool,
     steps: &[Step],
-    column: f32,
+    embed: &mut Embed,
 ) -> Div {
     let label = if running {
         format!("Working for {took}")
@@ -262,7 +289,7 @@ fn work(
                                 if *open {
                                     for (r, row) in rows.iter().enumerate() {
                                         <div class="h-[3]" />
-                                        {tool_row(p, row, index, s, r, column)}
+                                        {tool_row(p, row, index, s, r, embed)}
                                     }
                                 }
                                 <div class="h-3.5" />
@@ -270,7 +297,7 @@ fn work(
                         }
                         Step::Row(row) => {
                             <div class="w-full flex-col">
-                                {tool_row(p, row, index, s, 0, column)}
+                                {tool_row(p, row, index, s, 0, embed)}
                                 <div class="h-3.5" />
                             </div>
                         }
@@ -301,7 +328,14 @@ fn tool_line(p: &Pal, glyph: &'static str) -> Div {
 
 /// A finished step: "Ran ...", "Read <file>", "Edited <file> +2 -2", and
 /// its Shell card or diff when expanded.
-fn tool_row(p: &Pal, row: &Row, item: usize, step: usize, index: usize, column: f32) -> AnyElement {
+fn tool_row(
+    p: &Pal,
+    row: &Row,
+    item: usize,
+    step: usize,
+    index: usize,
+    embed: &mut Embed,
+) -> AnyElement {
     let ink = p.text_soft.lerp(p.muted, 0.35);
     match row {
         Row::Ran {
@@ -338,12 +372,10 @@ fn tool_row(p: &Pal, row: &Row, item: usize, step: usize, index: usize, column: 
                 <txt(*file, BODY, p.muted) underline_style={dotted(p.muted, 3.0)} />
             </tool_line>
         },
-        Row::Edited {
-            file,
-            adds,
-            dels,
-            open,
-        } => view! {
+        Row::Edited { file, open } => {
+            let (adds, dels) = embed.stats;
+            let card = if *open { embed.inline.take() } else { None };
+            view! {
             <div class="w-full flex-col">
                 <tool_line(p, icons::PENCIL) role="button"
                            aria-label={format!("Toggle diff for {file}")}
@@ -359,12 +391,13 @@ fn tool_row(p: &Pal, row: &Row, item: usize, step: usize, index: usize, column: 
                     }
                     <icon svg={chevron(*open)} size={12.0} color={p.muted} />
                 </tool_line>
-                if *open {
+                if let Some(card) = card {
                     <div class="h-1.5" />
-                    {diff_card(p, file, *adds, *dels, column)}
+                    {card}
                 }
             </div>
-        },
+            }
+        }
     }
 }
 
@@ -398,34 +431,6 @@ fn shell_card(p: &Pal, shell: &Shell) -> AnyElement {
                     <txt(footer, SMALL, p.muted) />
                 </div>
             }
-        </div>
-    }
-}
-
-/// The inline diff of an edit row: header, two hunks with a separator,
-/// word highlights on the added text.
-fn diff_card(p: &Pal, file: &str, adds: u32, dels: u32, column: f32) -> AnyElement {
-    use data::DiffLine::*;
-    view! {
-        <div class="w-full flex-col rounded-[8] overflow-hidden" bg={p.change_card}
-             border={p.shell_border} accessibility_role={Role::Group}
-             aria-label={format!("{file} diff")}>
-            <div class="flex-row items-center h-7 px-[10] gap-1.5" bg={p.shell}>
-                <txt(file.to_owned(), SMALL, p.text_soft) />
-                <txt(format!("+{adds}"), SMALL, p.success) />
-                <txt(format!("-{dels}"), SMALL, p.error) />
-                <div class="flex-1" />
-                <icon svg={icons::COPY} size={13.0} color={p.muted} />
-            </div>
-            <div class="w-full flex-col">
-                for line in data::cart_diff(false) {
-                    match line {
-                        Context { old: 1, .. } | Context { old: 8, .. } => {}
-                        Context { old: 5, .. } => <div class="w-full h-1" bg={p.fold} />
-                        _ => panel::diff_row(p, column, line, true),
-                    }
-                }
-            </div>
         </div>
     }
 }
@@ -574,7 +579,7 @@ fn answer(p: &Pal, blocks: &[Block], column: f32) -> Div {
     }
 }
 
-fn file_change(p: &Pal, file: &str, adds: u32, dels: u32) -> Div {
+fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32)) -> Div {
     let light = p.mode == ThemeMode::Light;
     view! { -> Div,
         <div class="w-full flex-col">

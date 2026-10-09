@@ -3010,6 +3010,7 @@ dependencies = [
  "quark",
  "quark-app",
  "quark-components",
+ "quark-diff",
  "quark-terminal",
  "quark-text",
  "quark-ui",

@@ -1,48 +1,31 @@
 # Testing
 
-Quark's tests drive real code through public APIs and assert on what a
-user or screen reader would observe: text, offsets, rectangles, tree dumps,
-and pixels at chosen points. [TEST_BIBLE.md](../../TEST_BIBLE.md) is the
-rulebook; a test must name the regression it catches, run
-deterministically in milliseconds, and survive behavior-preserving
-refactors. It bans tests of derives and getters, snapshots of whole
-structs or images, mocks of constructible types, and tests written for
-coverage.
+Drive a `UiApp` from `cargo test` and assert on what a user or screen reader
+sees.
 
-## Commands
+## `UiTestHarness`
 
-```bash
-cargo test --workspace --features quark-ui/integrity-checks   # what CI runs
-cargo test -p quark-ui virtual_list                           # one module, by name filter
-cargo test -p quark-app --example hello_ui                    # an example's test module
-cargo test --doc -p quark-app                                 # doctests
-```
+`quark_app::testing::UiTestHarness`, feature `test-support` (examples and
+tests in `quark-app` get it automatically).
 
-`integrity-checks` makes data structures verify their whole state after
-every mutation instead of the entries it touched; it is quadratic on large
-documents, so local runs usually leave it off.
-
-## Driving an app: `UiTestHarness`
-
-`quark_app::testing::UiTestHarness` (feature `test-support`; examples and
-tests in `quark-app` get it automatically) runs a `UiApp` through the same
-adapter as a real window, with no window, event loop, or GPU:
-
-- Time is a fake clock moved only by `advance(ms)`. A frame an animation
-  asks for is drawn at the time it asked for.
+- Runs the app through the real adapter with no window, event loop, or GPU.
+- Time is a fake clock moved only by `advance(ms)`; an animation's frame
+  draws at the time it asked for.
 - The clipboard is in memory.
-- `UiSender` messages and wakes are delivered on the test's thread. Every
-  input method runs until idle, so after any call the app has handled the
-  input and painted the result.
+- `UiSender` messages and wakes arrive on the test's thread.
+- Every input call runs until idle: after it returns, the app has handled
+  the input and painted.
 
-Tests find nodes the way assistive tech does, with `By::name`, `By::role`,
-`By::role_name`, `By::id` (accessibility id), or `By::test_id`, then
-`click_node`, `type_text`, `key("mod+s")`, `drag`, `wheel`, `ime_preedit`,
-and `ime_commit`. They read back `painted_text()`, `accessibility_tree()`,
-`focused()`, a node's `bounds`, or `hit_test(point)`. `find` panics with
-the whole accessibility tree when no node or several match.
+| Step | API |
+|---|---|
+| Find a node | `By::name`, `By::role`, `By::role_name`, `By::id` (accessibility id), `By::test_id` |
+| Act | `click_node`, `type_text`, `key("mod+s")`, `drag`, `wheel`, `ime_preedit`, `ime_commit` |
+| Read | `painted_text()`, `accessibility_tree()`, `focused()`, a node's `bounds`, `hit_test(point)` |
 
-This test is from [hello_ui.rs](../../crates/quark-app/examples/hello_ui.rs):
+- `find` panics with the whole accessibility tree when no node, or several,
+  match.
+
+From [hello_ui.rs](../../crates/quark-app/examples/hello_ui.rs):
 
 ```rust
 #[test]
@@ -63,37 +46,82 @@ fn greet_shows_the_typed_name() {
 }
 ```
 
-The second doctest in [crates/quark-app/src/lib.rs](../../crates/quark-app/src/lib.rs)
-is a complete harness test that also delivers a `UiSender` message.
+- The second doctest in
+  [crates/quark-app/src/lib.rs](../../crates/quark-app/src/lib.rs) also
+  delivers a `UiSender` message.
 
 ## Pixels
 
-With the `headless-render` feature, `render_rgba()` draws the last frame on
-a headless GPU device and returns `Pixels`; tests probe single pixels with
-`pixel(x, y)`. On a host without a GPU adapter it returns
-`RenderError::NoAdapter` and the test skips, unless `QUARK_REQUIRE_GPU=1`
-turns that into a failure, as CI does (Linux runs on lavapipe, Windows on
-WARP). The bible bans whole-image goldens.
+- Feature `headless-render`: `render_rgba()` draws the last frame on a
+  headless GPU and returns `Pixels`.
+- Probe single pixels with `pixel(x, y)`.
+- No GPU adapter: returns `RenderError::NoAdapter` and the test skips.
+- `QUARK_REQUIRE_GPU=1` turns a missing adapter into a failure.
 
-## Allocation budgets
+## Allocation counts
 
-`quark_ui::test_alloc::Counting` counts allocations per thread; a test
-binary installs it as its `#[global_allocator]`.
-[Performance model](performance.md#allocation-budgets) lists the budgets
-the adapter is held to.
+- `quark_ui::test_alloc::Counting`: a global allocator counting the current
+  thread's allocations. Install it as the test binary's
+  `#[global_allocator]`.
+- `test_alloc::count(f)` returns how many allocations `f` made;
+  `test_alloc::profile(f)` groups them by call site.
+- Count `UiTestHarness::frame` to budget a frame. Example:
+  [examples/workbench/tests/perf.rs](../../examples/workbench/tests/perf.rs).
+- Only the calling thread is counted. The block document measures rows,
+  highlights code, and decodes images on workers the fake clock does not
+  drive; a frame picking up their results rebuilds rows.
+- Before counting a document, call `MarkdownDocument::finish_highlights`,
+  `finish_images`, then `finish_measures` (the first two rebuild rows that
+  then need measuring). Then draw a frame and advance the clock so measured
+  heights settle the scroll anchor.
+- Draw a few frames first and take the least of several counts, so a table
+  growing once does not count:
 
-## Beyond unit tests
+```rust
+fn repeated_frame(ui: &mut UiTestHarness<Workbench>) -> u64 {
+    (0..3)
+        .map(|_| test_alloc::count(|| { ui.frame(); }).1)
+        .min()
+        .unwrap_or(0)
+}
+```
 
-| Tool | Covers | Where |
-|---|---|---|
-| `proptest` | Invariants of pure logic: selection order and copy, caret round trips, spring settling, virtual list offsets | The module's test block; failing cases are kept in `proptest-regressions/` |
-| `cargo-fuzz` | Parsers and decoders of untrusted input: markdown, text layout of arbitrary strings, unified diffs | [fuzz/](../../fuzz), with committed corpora; CI replays the `text_layout` and `markdown` corpora (`-runs=0`) |
-| Miri | Undefined behavior in `quark`'s own `unsafe` and `bytemuck` casts | CI `miri` job, `cargo miri test -p quark` |
-| Kani | Bounded proofs of small cores without `HashMap`: the Fenwick tree | `#[cfg(kani)]` harnesses in [fenwick.rs](../../crates/quark/src/fenwick.rs) |
-| CommonMark examples | Every spec example through the markdown parser and its integrity check | CI `fuzz` job, report only |
-| End-to-end specs | Real example apps through AT-SPI and cua on Xvfb | [e2e/](../../e2e); see [Accessibility and automation](accessibility-and-automation.md#end-to-end-specs-with-cua) |
+## Several windows
 
-A fuzzer crash becomes a unit test with the minimized input. The Linux CI
-job also runs clippy with `-D warnings` and a `cargo check` with every
-optional feature enabled at once (except `profile-tracy`, which conflicts
-with `profile-puffin`).
+- `UiTestHarness` drives several windows.
+- `desktop_move`, `desktop_press`, `desktop_release` move the pointer across
+  the virtual desktop with the pressed window's grab, as X11, Windows, and
+  macOS deliver a drag.
+- `DockWindows::window_stack` takes a `ScriptedStack`
+  (`quark_app::platform::dock_drag`, feature `test-support`) in place of the
+  window system's stacking order.
+- `UiTestHarness::set_capabilities` simulates a desktop without window
+  positions.
+- `UiTestHarness::with_monitor` starts on a display, so placements restore.
+- Examples:
+  [dock_windows/tests.rs](../../crates/quark-app/src/dock_windows/tests.rs).
+
+## Terminals
+
+- A real shell prints whatever the machine's profile prints; script the
+  session instead.
+- With no PTY attached, `TerminalState::feed` writes bytes into the VT as
+  program output.
+- `take_input` returns bytes queued for the program (keys, pastes, query
+  replies).
+- Test backends built on those two:
+  - Replay a captured transcript: the Codex demo's `--terminal scripted`.
+  - Answer typed commands from fixtures: the Workbench's `Shell` in
+    [dock/terminal.rs](../../examples/workbench/src/dock/terminal.rs).
+- Read the user's Ghostty config only for real shells, so tests do not
+  depend on the machine.
+- Real PTY output arrives outside the fake clock. Have the spawn callback
+  also signal a channel the test waits on (as terminal_demo's tests do).
+
+## Smoke runs
+
+- Debug builds exit after N presented frames when
+  `QUARK_EXIT_AFTER_FRAMES=N` is set.
+
+Testing quark itself (CI, budgets, fuzzing, end-to-end specs) is in
+[docs/maintainers/testing.md](../maintainers/testing.md).

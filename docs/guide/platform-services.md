@@ -1,12 +1,15 @@
 # Platform services
 
-Operating system features beyond drawing are calls on the window context
-(`cx.window`, an `EventContext`) and are answered through
-`UiApp::app_event`. Each lives in `quark_app::platform`; services that pull
-in extra dependencies are behind cargo features of `quark-app`.
+Menus, notifications, badges, tray, dialogs, deep links, single instance,
+and window state.
 
-This doctest from [crates/quark-app/src/lib.rs](../../crates/quark-app/src/lib.rs)
-sets a menu bar and a badge, and handles the menu pick:
+- Calls go on the window context (`cx.window`, an `EventContext`); answers
+  come back through `UiApp::app_event`.
+- Everything lives in `quark_app::platform`.
+- Services with extra dependencies sit behind `quark-app` cargo features.
+
+From [crates/quark-app/src/lib.rs](../../crates/quark-app/src/lib.rs), a
+menu bar and badge with the menu pick handled:
 
 ```rust
 use quark::view;
@@ -50,9 +53,10 @@ impl UiApp for Notes {
 }
 ```
 
-[platform_demo.rs](../../crates/quark-app/examples/platform_demo.rs)
-exercises every service below on a live desktop:
-`cargo run -p quark-app --example platform_demo --features notifications`.
+- Every service below on a live desktop:
+  [platform_demo.rs](../../crates/quark-app/examples/platform_demo.rs), run
+  with
+  `cargo run -p quark-app --example platform_demo --features notifications`.
 
 ## Services by platform
 
@@ -69,33 +73,17 @@ exercises every service below on a live desktop:
 | Desktop theme | `AppEvent::ThemeChanged` | | System appearance | System setting | XDG settings portal `color-scheme`; bare window managers report nothing |
 | Clipboard image | `clipboard_image`, `set_clipboard_image` | `clipboard-image` | yes | yes | yes, X11 and Wayland data control |
 
-Window state is saved as JSON per key under `<state dir>/quark/`, in
-logical points, and restored onto a connected monitor. The single instance
-module docs have a startup snippet:
-[platform/single_instance.rs](../../crates/quark-app/src/platform/single_instance.rs).
+- Window state: JSON per key under `<state dir>/quark/`, in logical points,
+  restored onto a connected monitor.
+- Single instance startup snippet: module docs of
+  [platform/single_instance.rs](../../crates/quark-app/src/platform/single_instance.rs).
 
 ## Windows and input
 
-- **Windows.** `open_window` and `close_window` manage extra windows;
-  `AppEvent::WindowClosed` reports closes. `set_exit_when_last_window_closes(false)`
-  keeps a tray app running.
-- **Window verbs.** `minimize`, `toggle_maximized`, `toggle_fullscreen`,
-  `set_always_on_top`, `focus_window`, `request_attention`, `set_title`.
-- **Chrome.** `WindowChrome::Custom` lets the app draw its own title bar:
-  on macOS the title bar turns transparent and the traffic lights stay
-  (`WindowOptions::traffic_lights` moves them); elsewhere decorations are
-  removed.
-- **File drops.** `InputEvent::FileHovered`, `FileHoverCancelled`, and
-  `FileDropped(path)` reach `UiApp::event`.
-- **Crashes.** `WindowOptions::panic_hook` (on by default) logs a panic's
-  message, location, and backtrace through `tracing` and to a crash log in
-  the platform state directory, then runs the previous hook.
-
-## Checks
-
-`crates/quark-app/tests/platform_smoke.rs` opens a real window on macOS
-and Windows CI runners and walks the native menu bar and accelerators, a
-menu pick, the badge, always on top, edit roles, and (macOS) a `kAEGetURL`
-deep link. Linux has no native menu bar and its CI test job no display, so
-it skips there; the `forward_url` end-to-end spec covers single instance
-handoff on Linux.
+| Area | API |
+|---|---|
+| Windows | `open_window`, `close_window`; `AppEvent::WindowClosed` reports closes. `set_exit_when_last_window_closes(false)` keeps a tray app running |
+| Window verbs | `minimize`, `toggle_maximized`, `toggle_fullscreen`, `set_always_on_top`, `focus_window`, `request_attention`, `set_title` |
+| Chrome | `WindowChrome::Custom`: the app draws its own title bar. macOS: transparent title bar, traffic lights stay (`WindowOptions::traffic_lights` moves them). Elsewhere: decorations removed |
+| File drops | `InputEvent::FileHovered`, `FileHoverCancelled`, `FileDropped(path)` reach `UiApp::event` |
+| Crashes | `WindowOptions::panic_hook` (on by default) logs message, location, and backtrace through `tracing` and to a crash log in the platform state directory, then runs the previous hook |

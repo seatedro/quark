@@ -18,4 +18,6 @@ query; the worker sends a newer revision as their packs arrive.
 
 Build packs with `cargo run -p syntax-pack -- build`. The
 [guide](../../docs/guide/syntax-packs.md) covers configuration, the pack
-format, publishing an index, and the threat model.
+format, and the threat model;
+[tools/syntax-pack](../../tools/syntax-pack/README.md) covers publishing an
+index.

@@ -1,35 +1,42 @@
 # Terminal
 
-`quark-terminal` is a terminal element: libghostty-vt, Ghostty's VT
-library, holds the screen and scrollback and encodes keys and mouse
-input; a PTY runs the program; `terminal_view` paints the visible rows
-with `quark-text`. The crate docs in
-[lib.rs](../../crates/quark-terminal/src/lib.rs) list what it supports and
-how input reaches it. [terminal_demo](../../crates/quark-terminal/examples/terminal_demo.rs)
-is a window holding one terminal; the Workbench and Codex demos host
-terminals in panels.
+`quark-terminal`: a terminal element backed by libghostty-vt (Ghostty's VT
+library) and a PTY.
+
+- libghostty-vt holds screen and scrollback and encodes key and mouse input.
+- A PTY runs the program.
+- `terminal_view` paints the visible rows with `quark-text`.
+- Supported features and input paths: crate docs in
+  [lib.rs](../../crates/quark-terminal/src/lib.rs).
+- Examples:
+  [terminal_demo](../../crates/quark-terminal/examples/terminal_demo.rs)
+  (one terminal in a window); the Workbench and Codex demos (terminals in
+  panels).
 
 ## Building
 
-The build script builds libghostty-vt from a pinned Ghostty commit with
-Zig 0.16, downloading the sources with curl, and caches the archive in
-the target directory. Every crate that links `quark-terminal` needs Zig
-to build, tests and e2e binaries included. For offline and Nix builds,
-`QUARK_GHOSTTY_VT_SOURCE_DIR` names pre-fetched packages and
-`QUARK_GHOSTTY_VT_LIB_DIR` a prebuilt archive;
-[build.rs](../../crates/quark-terminal/build.rs) documents both.
+- Every crate linking `quark-terminal` needs Zig 0.16 to build, tests
+  included.
+- The build downloads Ghostty's sources with curl and caches the built
+  library in the target directory.
+- Offline and Nix builds: `QUARK_GHOSTTY_VT_SOURCE_DIR` names pre-fetched
+  packages; `QUARK_GHOSTTY_VT_LIB_DIR` names a prebuilt archive.
+- `ZIG` and `CURL` override the binaries on `PATH`.
+- All variables: [build.rs](../../crates/quark-terminal/build.rs).
 
 ## Wiring
 
-The app owns a `TerminalState` and passes it to `terminal_view` each
-frame. Program output arrives on the PTY's reader thread, which only
-calls the callback given to `TerminalState::spawn`. Point that callback at
-the window's `Waker`; `UiApp::wake` then runs on the UI thread, where
-`read_pty` feeds the output through the VT. The adapter does not redraw
-after a wake, so request one when `read_pty` returns true. This excerpt
-of the Codex demo's [terminal.rs](../../examples/codex/src/terminal.rs)
-does all of it, and starts the shell the first time the terminal is
-shown:
+1. The app owns a `TerminalState` and passes it to `terminal_view` each
+   frame.
+2. `TerminalState::spawn` takes a callback that the PTY reader thread calls
+   on output. Point it at the window's `Waker`.
+3. `UiApp::wake` then runs on the UI thread; call `read_pty` there to feed
+   output through the VT.
+4. No redraw follows a wake: request one when `read_pty` returns true.
+
+Excerpt of the Codex demo's
+[terminal.rs](../../examples/codex/src/terminal.rs), which starts the shell
+the first time the terminal is shown:
 
 ```rust
 pub fn init(&mut self, cx: &mut UiContext) {
@@ -43,8 +50,6 @@ pub fn wake(&mut self, cx: &mut UiContext) {
     }
 }
 
-/// The terminal sized to `w` x `h`; a real shell starts the first
-/// time it is shown, at that size.
 pub fn view(&mut self, w: f32, h: f32, vcx: &mut ViewContext) -> AnyElement {
     self.term.set_viewport(w, h);
     let scale = vcx.frame.scale_factor();
@@ -56,10 +61,7 @@ pub fn view(&mut self, w: f32, h: f32, vcx: &mut ViewContext) -> AnyElement {
         && let Some(waker) = self.waker.clone()
     {
         self.started = true;
-        let command = match std::env::current_dir() {
-            Ok(dir) => PtyCommand::shell().cwd(dir),
-            Err(_) => PtyCommand::shell(),
-        };
+        // ... pick the command (a shell in the current directory)
         if let Err(e) = self.term.spawn(&command, move || waker.wake()) {
             self.term
                 .feed(format!("Could not start the shell: {e}\r\n").as_bytes());
@@ -74,60 +76,41 @@ pub fn view(&mut self, w: f32, h: f32, vcx: &mut ViewContext) -> AnyElement {
 }
 ```
 
-- Spawning after `set_viewport` and `prepare` starts the program at the
-  grid's real size. A shell started at a guessed size redraws its prompt
-  when the first resize arrives.
-- `UiApp::wake` runs after any wake, in the context of whichever window
-  the wake reached. A terminal that can sit in another window (a docked
-  panel) redraws every window with `request_redraw_all`.
-- The id given to `TerminalState::new` is `'static` and names the
-  terminal's cache entries and accessibility node, so each terminal open
-  in a window needs its own.
+- Spawn after `set_viewport` and `prepare`, so the program starts at the
+  grid's real size. A shell started at a guessed size redraws its prompt on
+  the first resize.
+- `UiApp::wake` runs in whichever window the wake reached. A terminal that
+  can sit in another window (a docked panel) needs `request_redraw_all`.
+- The `'static` id passed to `TerminalState::new` names the terminal's cache
+  entries and accessibility node: each terminal in a window needs its own.
 - Dropping a `TerminalState` ends its program: SIGHUP on Unix,
   `TerminateProcess` on Windows.
-
-## Deterministic tests
-
-A real shell prints whatever the machine's profile prints. Without a PTY,
-`TerminalState::feed` writes bytes into the VT as program output, and
-`take_input` returns the bytes queued for the program (typed keys,
-pastes, replies to queries) while no PTY is attached. On those two, a
-test backend can replay a captured transcript (the Codex
-demo's `--terminal scripted`) or answer typed commands from fixtures (the
-Workbench's `Shell`, in [dock/terminal.rs](../../examples/workbench/src/dock/terminal.rs)),
-so tests and e2e specs see the same screen on every run. Both demos run
-a real login shell by default.
-
-The terminal_demo tests run a real shell on Linux and macOS. Its output arrives on the PTY
-thread, outside the harness's fake clock, so the spawn callback also
-signals a channel the test waits on.
+- Scripted sessions without a PTY: [Testing](testing.md#terminals).
 
 ## Appearance
 
 `TerminalStyle` carries Ghostty's options with Ghostty's meanings.
-`TerminalStyle::default()` uses the text system's monospace family at 13
-points; `TerminalStyle::ghostty()` uses JetBrains Mono, Ghostty's default,
-which quark-text bundles. `TerminalStyle::load_ghostty_config()` reads
-the user's Ghostty config over those defaults and returns the style with
-a message per line it did not understand; `None` means there is no
-config. `from_ghostty_config(text)` parses given text. The Workbench
-reads the user's config for real shells only, so its tests do not depend
-on the machine.
 
-- The cell is the font's advance by its line height, each rounded to
-  whole device pixels, so the number of rows and columns that fit depends
-  on the font, its size, and the scale factor. `prepare` remeasures when
-  the scale factor or the fonts change, and resizes the grid and the
-  PTY. `adjust_cell_height` grows or shrinks the cell, keeping the text
-  centered.
-- Box drawing, block elements, braille, powerline, and the legacy
-  computing symbols are drawn to the cell rather than taken from the font
-  (Ghostty's sprite face), so they join without seams in any font.
-- Characters whose default presentation is text, such as `⏺` and `✔`,
-  draw from a monochrome face that has them, and from the color emoji
-  font only when no other face does. Emoji presentation characters, and
-  sequences with the emoji variation selector (VS16), draw in color. This
-  holds for all text quark draws.
-- `alpha_blending` defaults to `LinearCorrected`, which weights glyph
-  edges to look as Ghostty draws them; `Linear` draws dark text on light
-  backgrounds thinner and light text on dark ones heavier.
+| Constructor | Gives |
+|---|---|
+| `TerminalStyle::default()` | The text system's monospace family at 13 points |
+| `TerminalStyle::ghostty()` | JetBrains Mono (Ghostty's default, bundled by quark-text) |
+| `TerminalStyle::load_ghostty_config()` | The user's Ghostty config over those defaults, plus a message per line it did not understand. `None`: no config |
+| `from_ghostty_config(text)` | Parses given text |
+
+- Cell size: the font's advance by its line height, each rounded to whole
+  device pixels. Rows and columns that fit depend on font, size, and scale
+  factor.
+- `prepare` remeasures when the scale factor or fonts change, and resizes
+  the grid and the PTY.
+- `adjust_cell_height` grows or shrinks the cell, keeping text centered.
+- Box drawing, block elements, braille, powerline, and legacy computing
+  symbols are drawn to the cell (Ghostty's sprite face), so they join
+  without seams in any font.
+- Characters with text default presentation (`⏺`, `✔`) draw from a
+  monochrome face that has them; color emoji only when no other face does.
+- Emoji presentation characters, and sequences with VS16, draw in color.
+  This holds for all text quark draws.
+- `alpha_blending` defaults to `LinearCorrected`, weighting glyph edges as
+  Ghostty draws them. `Linear` draws dark text on light backgrounds thinner
+  and light text on dark ones heavier.

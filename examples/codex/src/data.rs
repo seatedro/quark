@@ -27,8 +27,9 @@ pub struct Thread {
     pub title: String,
     pub status: Status,
     pub items: Vec<Item>,
-    /// The floating "N file changed" pill above the composer.
-    pub pill: Option<(u32, u32)>,
+    /// The floating "1 file changed" pill above the composer, counting
+    /// the shared change (`diff::Changes`).
+    pub pill: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,10 +73,9 @@ pub enum Row {
         open: bool,
     },
     Read(&'static str),
+    /// Counts and lines come from the shared change (`diff::Changes`).
     Edited {
         file: &'static str,
-        adds: u32,
-        dels: u32,
         open: bool,
     },
 }
@@ -137,11 +137,10 @@ pub enum Item {
         blocks: Vec<Block>,
         time: &'static str,
     },
-    /// "Edited cart.js +2 -2" with Undo and View changes.
+    /// "Edited cart.js +2 -2" with Undo and View changes; the counts come
+    /// from the shared change.
     FileChange {
         file: &'static str,
-        adds: u32,
-        dels: u32,
     },
 }
 
@@ -178,7 +177,7 @@ fn recent(id: u32, title: &str, status: Status) -> Thread {
             text: title.to_owned(),
             time: "Mar 3",
         }],
-        pill: None,
+        pill: false,
     }
 }
 
@@ -332,8 +331,6 @@ pub fn turn2(work_open: bool, diff_open: bool) -> Vec<Item> {
                     rows: vec![
                         Row::Edited {
                             file: "cart.js",
-                            adds: 2,
-                            dels: 2,
                             open: diff_open,
                         },
                         Row::Ran {
@@ -364,11 +361,7 @@ pub fn turn2(work_open: bool, diff_open: bool) -> Vec<Item> {
             ],
             time: "11:03 PM",
         },
-        Item::FileChange {
-            file: "cart.js",
-            adds: 2,
-            dels: 2,
-        },
+        Item::FileChange { file: "cart.js" },
     ]
 }
 
@@ -567,15 +560,6 @@ export function applyDiscount(total, percent) {
 }
 ";
 
-/// Words the fix added on each changed line (the diff's word highlights).
-pub fn added_words(line: u32) -> &'static [&'static str] {
-    match line {
-        3 => &[" * item.qty"],
-        7 => &["total * ", " / 100"],
-        _ => &[],
-    }
-}
-
 pub const FILES: &[(&str, bool)] = &[
     (".git", true),
     ("cart.js", false),
@@ -583,57 +567,6 @@ pub const FILES: &[(&str, bool)] = &[
     ("package.json", false),
     ("README.md", false),
 ];
-
-/// One line of a two-sided diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiffLine {
-    Context {
-        old: u32,
-        new: u32,
-    },
-    Del {
-        old: u32,
-    },
-    Add {
-        new: u32,
-    },
-    /// "1 unmodified line" fold bar.
-    Fold(u32),
-}
-
-/// The cart.js diff in display order. Each line's text comes from the
-/// old or new file by number.
-pub fn cart_diff(folds: bool) -> Vec<DiffLine> {
-    use DiffLine::*;
-    let mut lines = Vec::new();
-    if folds {
-        lines.push(Fold(1));
-    } else {
-        lines.push(Context { old: 1, new: 1 });
-    }
-    lines.extend([
-        Context { old: 2, new: 2 },
-        Del { old: 3 },
-        Add { new: 3 },
-        Context { old: 4, new: 4 },
-    ]);
-    if folds {
-        lines.push(Fold(1));
-    } else {
-        lines.push(Context { old: 5, new: 5 });
-    }
-    lines.extend([
-        Context { old: 6, new: 6 },
-        Del { old: 7 },
-        Add { new: 7 },
-        Context { old: 8, new: 8 },
-    ]);
-    lines
-}
-
-pub fn line_of(text: &str, n: u32) -> &str {
-    text.lines().nth(n as usize - 1).unwrap_or("")
-}
 
 /// The terminal transcript of capture 38, as a shell would print it.
 pub const TERMINAL_SCENE: &str = "\x1b[32mrohit@macbox\x1b[0m:\x1b[34m/private/tmp/codex-demo\x1b[0m \x1b[33m(main)\x1b[0m % \x1b[32mgit\x1b[0m status --short && \x1b[32mnpm\x1b[0m test\r\n \x1b[31mM\x1b[0m cart.js\r\n\r\n> codex-demo@0.1.0 test\r\n> node --test\r\n\r\n\x1b[32m✔ subtotal multiplies price by quantity \x1b[90m(0.375375ms)\x1b[0m\r\n\x1b[32m✔ applyDiscount takes a percentage off \x1b[90m(0.069833ms)\x1b[0m\r\n\x1b[34mℹ tests 2\x1b[0m\r\n\x1b[34mℹ suites 0\x1b[0m\r\n\x1b[34mℹ pass 2\x1b[0m\r\n\x1b[34mℹ fail 0\x1b[0m\r\n\x1b[34mℹ cancelled 0\x1b[0m\r\n\x1b[34mℹ skipped 0\x1b[0m\r\n\x1b[34mℹ todo 0\x1b[0m\r\n\x1b[34mℹ duration_ms 122.251459\x1b[0m\r\n\x1b[32mrohit@macbox\x1b[0m:\x1b[34m/private/tmp/codex-demo\x1b[0m \x1b[33m(main)\x1b[0m % ";

@@ -182,6 +182,11 @@ impl DiffSyntax {
         self.attach(worker.share(), store);
     }
 
+    /// Whether a worker is attached.
+    pub fn is_enabled(&self) -> bool {
+        self.worker.is_some()
+    }
+
     fn attach(&mut self, worker: HighlightWorker, store: GrammarStore) {
         if let Some(wake) = &self.wake {
             let wake = wake.clone();

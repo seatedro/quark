@@ -186,7 +186,8 @@ cargo test --workspace --features quark-ui/integrity-checks
 - **Fuzzing, Miri, and Kani** run in CI; see the `fuzz`, `miri`, and `kani`
   jobs in [ci.yml](.github/workflows/ci.yml).
 
-[docs/guide/testing.md](docs/guide/testing.md) has the details.
+[docs/maintainers/testing.md](docs/maintainers/testing.md) has the details;
+[docs/guide/testing.md](docs/guide/testing.md) covers testing an app.
 
 ## License
 

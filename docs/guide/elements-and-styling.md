@@ -1,10 +1,12 @@
 # Elements and styling
 
-A view returns an `AnyElement`: a tree of element values built with
-constructor functions and builder methods, rebuilt every frame. Taffy lays
-the tree out as flexbox, and paint emits scene primitives. Elements hold no
-state between frames; what must survive a frame lives in the app or in a
-handle the element is given (a `ScrollHandle`, a `TextField`).
+Element constructors, styling, themes, motion, scrolling, and overlays.
+
+- A view returns an `AnyElement`: a tree of element values, rebuilt every
+  frame.
+- Taffy lays it out as flexbox; paint emits scene primitives.
+- Elements hold no state between frames: keep it in the app or in a handle
+  (`ScrollHandle`, `TextField`).
 
 ## Constructors
 
@@ -14,54 +16,54 @@ From `quark_ui::element`:
 |---|---|
 | `div()` | Container: layout, background, border, events, accessibility |
 | `text(s)` | A run of text |
-| `text_input(label, value)` | A single-line field bound to a `TextField` with `.field(&model)` |
+| `text_input(label, value)` | Single-line field, bound to a `TextField` with `.field(&model)` |
 | `selectable_text(s)` | Text the pointer can select |
 | `code_block(lines)` | Monospaced lines of styled spans |
 | `spacer()` | Flexible space |
-| `canvas(paint)` | A closure that paints scene primitives into the element's bounds |
-| `cached(key, hash, build)` | A cache boundary; see [Performance model](performance.md) |
+| `canvas(paint)` | A closure painting scene primitives into the element's bounds |
+| `cached(key, hash, build)` | A cache boundary ([Performance model](performance.md)) |
 
-`quark-components` builds on these: buttons, checkbox, switch, select,
-combobox, dropdown, picker, radio group, segmented control, slider, search
-field, tabs, breadcrumb, badge, avatar, progress, tooltip, hover card,
-context menu, popover, modal, toast, command palette, split panes, dock,
-tree, table, and diff view. Components
-emit the app's actions through mappings the caller supplies and know
-nothing of the app's types.
+- `quark-components` adds: buttons, checkbox, switch, select, combobox,
+  dropdown, picker, radio group, segmented control, slider, search field,
+  tabs, breadcrumb, badge, avatar, progress, tooltip, hover card, context
+  menu, popover, modal, toast, command palette, split panes, dock, tree,
+  table, diff view.
+- Components emit the app's actions through caller-supplied mappings and
+  know nothing of the app's types.
 
 ## Text wrapping
 
-`text(s)` wraps to the width layout gives it. It is as wide as its
-text, up to the width its container offers, and as tall as the lines it
-wraps into, so in a column it wraps at the column's width, and in a row it
-shrinks beside its siblings down to its widest word. Lines break between
-words; a word wider than a box forced narrower than it breaks between
-characters. Give a fixed-width sibling such as an icon `flex_shrink_0()`
-so the text shrinks instead of it.
+- `text(s)` is as wide as its text, up to the width its container offers,
+  and as tall as its wrapped lines.
+- In a column it wraps at the column width; in a row it shrinks beside
+  siblings down to its widest word.
+- Lines break between words; a word wider than a box forced narrower breaks
+  between characters.
+- Give fixed-width siblings (an icon) `flex_shrink_0()` so the text shrinks
+  instead.
 
-To opt out, `.no_wrap()` (class `whitespace-nowrap`) keeps one line at the
-text's natural width, `.truncate()` keeps one line and ends it with an
-ellipsis where its box is narrower, and `.wrap_width(w)` wraps at `w`
-points whatever the container's width, and can overflow it. Before
-automatic wrapping, text kept its natural width unless given a wrap
-width; code that relied on that needs `.no_wrap()`.
+| Opt-out | Effect |
+|---|---|
+| `.no_wrap()` (class `whitespace-nowrap`) | One line at natural width |
+| `.truncate()` | One line, ellipsis where the box is narrower |
+| `.wrap_width(w)` | Wraps at `w` points regardless of the container; can overflow |
 
-`selectable_text(s)`, `selectable_rich_text(spans)`, and `<p>` wrap the same
-way and take `.no_wrap()`; their `.width(w)` is the explicit wrap width.
+- `selectable_text(s)`, `selectable_rich_text(spans)`, and `<p>` wrap the
+  same way and take `.no_wrap()`. Their `.width(w)` is the explicit wrap
+  width.
 
 ## Styling
 
-`quark_ui::style::Styled` gives every element the same builder methods:
-flex direction (`flex_row`, `flex_col`), alignment (`items_center`,
-`justify_center`), spacing (`gap`, `p`, `px`), size (`w`, `h`, `w_full`),
-colors (`bg`, `border`), and corners (`rounded`). `quark_ui::design` holds
-the tokens: `Sp` for spacing, `Rad` for radii, `Sz`, `Shadow`, and text
-styles. Colors come from the theme.
+- `quark_ui::style::Styled` gives every element the same builders:
+  `flex_row`, `flex_col`, `items_center`, `justify_center`, `gap`, `p`,
+  `px`, `w`, `h`, `w_full`, `bg`, `border`, `rounded`, and more.
+- Tokens in `quark_ui::design`: `Sp` (spacing), `Rad` (radii), `Sz`,
+  `Shadow`, text styles.
+- Colors come from the theme.
+- In `view!`, each attribute is the builder of the same name and each class
+  one builder call ([Writing views](writing-views.md)).
 
-Views write these calls with `view!` ([Writing views](writing-views.md)):
-each attribute is the builder method of the same name, and each class one
-builder call. This doctest from [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs)
-builds a toolbar with one button:
+From [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs):
 
 ```rust
 use quark::view;
@@ -91,141 +93,148 @@ fn toolbar(theme: &Theme) -> AnyElement {
 
 On a `div`:
 
-- `on_click(action)` emits an action; `hover_bg(color)` restyles under the
-  pointer.
-- `focus_ring(focus_id)` makes the div focusable as `focus_id` and a Tab
-  stop. A clickable div with a stable id (`id`, `test_id`,
-  `accessibility_id`) is a Tab stop too. `trap_focus(true)` keeps Tab
-  inside a modal's focus scope.
-- The focus ring is 2 points wide (`Sz::FOCUS_RING_W`) and drawn outside
-  the element, `focus_ring_offset(gap)` points further out; checkboxes,
-  switches, and radio rows use a 2-point gap (`Sz::FOCUS_RING_GAP`). A
-  container that clips, scrolling ones included, cuts off the ring of a
-  control at its edge. Pad the container's content by the ring's reach,
-  or draw the ring just inside with `focus_ring_offset(-Sz::FOCUS_RING_W)`
-  for an element that fills a clipping parent, as dock tabs do.
-- `tooltip(text)` shows a tooltip on hover.
-- `id`, `key`, and `test_id` give the div a stable identity. Keys keep
-  identity when siblings reorder; animations, transitions, and inspector
-  overrides are keyed by it.
+| Builder | Effect |
+|---|---|
+| `on_click(action)` | Emits an action |
+| `hover_bg(color)` | Restyles under the pointer |
+| `focus_ring(focus_id)` | Focusable as `focus_id`, and a Tab stop |
+| `trap_focus(true)` | Keeps Tab inside a modal's focus scope |
+| `tooltip(text)` | Tooltip on hover |
+| `id`, `key`, `test_id` | Stable identity. Keys survive sibling reorders; animations, transitions, and inspector overrides key on it |
+
+- A clickable div with a stable id is also a Tab stop
+  ([Accessibility](accessibility-and-automation.md#ids)).
+- The focus ring is 2 points wide (`Sz::FOCUS_RING_W`), drawn outside the
+  element, `focus_ring_offset(gap)` points further out.
+- Checkboxes, switches, and radio rows use a 2-point gap
+  (`Sz::FOCUS_RING_GAP`).
+- A clipping container (scrolling ones included) cuts off the ring of a
+  control at its edge. Pad its content by the ring's reach, or draw the ring
+  inside with `focus_ring_offset(-Sz::FOCUS_RING_W)` (as dock tabs do).
 
 ## Themes
 
-`quark_ui::theme::Theme` holds `ThemeColors` and `ThemeMetrics`.
-`Theme::default_dark()` and `Theme::default_light()` are the built-in pair.
-`quark_ui::palette` generates 12-step color scales in Oklch for custom
-themes.
+- `quark_ui::theme::Theme` holds `ThemeColors` and `ThemeMetrics`.
+- Built-in pair: `Theme::default_dark()`, `Theme::default_light()`.
+- `quark_ui::palette` generates 12-step Oklch color scales for custom
+  themes.
+- By default the adapter follows the desktop's light or dark preference
+  (dark until the platform reports one) and redraws on change.
 
-By default the adapter follows the desktop's light or dark preference,
-starting dark until the platform reports one, and redraws when it changes.
-To choose themes, build the adapter yourself (a fragment; `app`,
-`my_theme`, and `options` are yours):
+Choose themes by building the adapter yourself (fragment; `app`, `my_theme`,
+`options` are yours):
 
 ```rust
 let adapter = UiAdapter::new(app, "Notes").with_theme(my_theme);
 quark_app::run(adapter, options)
 ```
 
-`with_themes(light, dark)` keeps following the desktop with your pair.
+- `with_themes(light, dark)` keeps following the desktop with your pair.
 
-`Theme::components` (`ComponentMetrics`) sizes components for the whole
-app: heights, radii, padding, gaps, font and icon sizes, and shadows for
-buttons, selects and their options, popovers, tooltips, toasts, modals,
-skeletons, and form fields. Each value is in points at 100% zoom, and
-components multiply it by `ThemeMetrics::ui_scale()` once, as they do
-their own defaults, so a recipe can ask for 13-point control text while
-`ui_font_size` stays at the 16-point zoom anchor. Do not pass scaled
-values. `None` keeps the component's default, and `theme::scaled_or`
-applies the same rule in an app's own components.
+### Component metrics
+
+- `Theme::components` (`ComponentMetrics`) sizes components app-wide:
+  heights, radii, padding, gaps, font and icon sizes, shadows for buttons,
+  selects and options, popovers, tooltips, toasts, modals, skeletons, form
+  fields.
+- Values are points at 100% zoom; components multiply by
+  `ThemeMetrics::ui_scale()` once. Do not pass scaled values.
+- `None` keeps the component's default; `theme::scaled_or` applies the same
+  rule in an app's own components.
 
 ## Colors and blending
 
-The renderer draws into an sRGB surface, so the GPU blends in linear
-light; browsers blend the encoded values. Opaque colors look the same in
-both, translucent ones do not:
+The renderer blends in linear light (sRGB surface); browsers blend encoded
+values. Opaque colors match; translucent ones do not.
 
-- Black at a CSS alpha darkens less. A scrim or shadow from a CSS design
-  matches at alpha `1 - (1 - a)^2.2`: CSS 12% black is about 25% (62 of
-  255), and 50% is about 78% (200).
-- A light color at a low alpha over a dark surface comes out much
-  brighter than its alpha suggests, so a translucent tint that is subtle
-  in a browser is loud on a dark canvas. Mix tints opaque instead, in
-  sRGB as CSS `color-mix` does. The Workbench's helper, from
-  [recipes.rs](../../examples/workbench/src/design/recipes.rs):
+- Black at a CSS alpha darkens less. Match a CSS scrim or shadow with alpha
+  `1 - (1 - a)^2.2`: CSS 12% black is about 25% (62 of 255); 50% is about
+  78% (200).
+- A light color at low alpha over a dark surface comes out much brighter
+  than in a browser. Mix tints opaque instead, in sRGB as CSS `color-mix`
+  does.
+- Black shadows barely show on near-black backgrounds. In dark themes give
+  raised surfaces (menus, popovers, cards) a hairline border lighter than
+  the canvas.
+- `theme::contrast_ratio` composites a translucent foreground the way the
+  renderer does.
 
-  ```rust
-  pub fn tint(base: Color, color: Color, amount: f32) -> Color {
-      base.lerp(color.with_alpha(255), amount).with_alpha(255)
-  }
-  ```
+The Workbench's tint helper
+([recipes.rs](../../examples/workbench/src/design/recipes.rs)):
 
-- Black shadows barely show on a near-black background at any alpha. In
-  dark themes, give raised surfaces (menus, popovers, cards) a hairline
-  border lighter than the canvas so they stand apart.
-
-`theme::contrast_ratio` composites a translucent foreground the way the
-renderer does. A per-window mode that blends as browsers do is planned.
+```rust
+pub fn tint(base: Color, color: Color, amount: f32) -> Color {
+    base.lerp(color.with_alpha(255), amount).with_alpha(255)
+}
+```
 
 ## Points and pixels
 
-Element geometry and scene coordinates are logical points. The window's
-scale factor, physical pixels per point (`ElementContext::scale_factor`,
-`cx.frame.scale_factor()` in a view), applies when the scene is drawn; app
-code needs it only where pixels matter, such as measuring text with
-`TextQuery::scale_factor`. It is separate from the app's zoom,
-`theme.metrics.ui_scale()` (set with `Theme::with_ui_scale`), which
-components, `svg_icon`, and `raster_image` multiply their sizes by.
-
-SVG icons rasterize at the window's device pixels and stay sharp at any
-scale factor. Raster images are drawn into their bounds and filtered, so
-ship them at 2x and size the element in points:
-`animated_image(&image).size(w, h)` takes points, and without `size` it
-uses the pixel size as points, which shows an @2x image twice as large.
-In the block document, `MarkdownDocument::hint_image_size(src, w, h)`
-gives an image's size in points; pixels that are an exact whole multiple
-of it (`DecodedImage::density`) show at the hinted size.
+- Element geometry and scene coordinates are logical points.
+- The scale factor (physical pixels per point:
+  `ElementContext::scale_factor`, `cx.frame.scale_factor()` in a view)
+  applies at draw time. Apps need it only where pixels matter, such as
+  `TextQuery::scale_factor`.
+- App zoom is separate: `theme.metrics.ui_scale()` (set with
+  `Theme::with_ui_scale`); components, `svg_icon`, and `raster_image`
+  multiply sizes by it.
+- SVG icons rasterize at device pixels and stay sharp at any scale.
+- Raster images are filtered into their bounds: ship them at 2x and size the
+  element in points.
+- `animated_image(&image).size(w, h)` takes points. Without `size`, pixel
+  size is used as points, so an @2x image shows twice as large.
+- Block document: `MarkdownDocument::hint_image_size(src, w, h)` gives an
+  image's size in points. Pixels that are a whole multiple of it
+  (`DecodedImage::density`) show at the hinted size.
 
 ## Transitions and animation
 
-`div().transition(props, motion)` animates the listed style properties
-whenever their resolved value changes between frames, from the value on
-screen. Colors interpolate in premultiplied Oklab, so a fade between two
-theme colors does not pass through grey. `ViewContext::animations()`
-exposes the window's `AnimationTable` for values a component animates
-itself, keyed by stable identity; rows still moving schedule the next frame.
-[animation_demo.rs](../../crates/quark-app/examples/animation_demo.rs)
-shows both, including a spring that reverses with its velocity intact.
+- `div().transition(props, motion)` animates the listed style properties
+  whenever their resolved value changes, from the value on screen.
+- Colors interpolate in premultiplied Oklab, so a fade between theme colors
+  skips grey.
+- `ViewContext::animations()` exposes the window's `AnimationTable` for
+  values a component animates itself, keyed by stable identity. Moving rows
+  schedule the next frame.
+- Example:
+  [animation_demo.rs](../../crates/quark-app/examples/animation_demo.rs),
+  including a spring that reverses with velocity intact.
 
 ## Scrolling
 
-A `ScrollHandle` owns a container's offset across frames. Attach it with
-`div().track_scroll(&handle)` plus `overflow_y_scroll()` (or `_x_`, or
-both). The input router moves it on wheel, scrollbar, and keys without a
-round trip through the app; the app can call `set_offset`, `animate_to`, or
-`scroll_to_item`. The module docs in
-[element/scroll.rs](../../crates/quark-ui/src/element/scroll.rs) cover
-the app-owned alternative.
+- A `ScrollHandle` owns a container's offset across frames.
+- Attach with `div().track_scroll(&handle)` plus `overflow_y_scroll()` (or
+  `_x_`, or both).
+- The input router moves it on wheel, scrollbar, and keys with no round trip
+  through the app.
+- The app can call `set_offset`, `animate_to`, `scroll_to_item`.
+- App-owned offsets instead: module docs of
+  [element/scroll.rs](../../crates/quark-ui/src/element/scroll.rs).
 
-Scrollbars always show unless the container asks for
-`scrollbar_auto_hide()`. Then they show while the pointer is over it or a
-thumb is held, and for a second after the offset moves or the container
-gains focus. A handle keeps that state itself. A container whose offset
-the app owns keeps a `ScrollbarVisibility` next to the offset and attaches
-it with `.scrollbar_visibility(&state)`; the tree, table, diff view, and
-document turn this on with `with_scrollbar_auto_hide()` (on the document
-element, `scrollbar_auto_hide()`).
+Scrollbars:
+
+- Always shown unless the container asks for `scrollbar_auto_hide()`.
+- Auto-hide shows them while hovered or a thumb is held, and for a second
+  after the offset moves or the container gains focus.
+- A handle keeps that state itself.
+- With an app-owned offset, keep a `ScrollbarVisibility` beside it and
+  attach `.scrollbar_visibility(&state)`.
+- Tree, table, diff view, and document: `with_scrollbar_auto_hide()` (on the
+  document element, `scrollbar_auto_hide()`).
 
 ## Popovers, modals, and toasts
 
-Overlays are elements the view adds above its content with a z index.
-Layout does not know where an element lands until it has run, so a
-popover placed from bounds recorded on an earlier frame lags a frame: on
-the frame its trigger moves (a resize, a scroll) it draws at the old
-place. `quark_components::popover::anchored` places it after this frame's
-layout instead. Put it as the last child of the anchor element; it puts the
-popover on the preferred side, flips it when it does not fit there and
-the other side has more room, then clamps it inside the viewport (the
-window, from 0,0). A fragment; `open`, `theme`, and `window` are yours:
+- Overlays are elements above the content with a z index.
+- `quark_components::popover::anchored` places a popover after this frame's
+  layout, so it never lags its trigger by a frame. Make it the anchor's last
+  child.
+- It uses the preferred side, flips when that side does not fit and the
+  other has more room, then clamps inside the viewport (the window, from
+  0,0).
+- Select and combobox lists use it; `place_popover` is the same rule as a
+  function.
+
+Fragment (`open`, `theme`, `window` are yours):
 
 ```rust
 view! {
@@ -246,50 +255,48 @@ view! {
 }
 ```
 
-Select and combobox lists use it; `place_popover` is the same rule as a
-function.
-
-- `Modal` and `CommandPalette::render` draw their own scrim over the
-  window size they are given, in `theme.colors.overlay_scrim`. A scrim
-  alpha copied from a CSS design dims less than intended; convert it as
-  [Colors and blending](#colors-and-blending) describes.
-- An overlay positioned with `bottom` or `right` resolves against its
-  parent. A layer holding overlays must itself be window-sized, or a
-  toast stack anchored to the bottom lands above the window's top edge.
-- `ToastQueue::stack` takes a `status_bar_height`: the points kept clear
-  under the stack. Pass the height of a bottom-anchored input such as a
-  chat composer, so toasts rest above its Send button instead of over it.
-  `Toast::new(ToastKind::Success, ..)` shows a check in the success color.
-- `CommandPalette::width(w)` sets the panel's width in points at 100%
-  zoom (default 640), narrowed to fit the window; `keycaps(true)` shows
-  each item's shortcut as one key cap per key instead of a line of text.
+- `Modal` and `CommandPalette::render` draw their own scrim over the given
+  window size, in `theme.colors.overlay_scrim`. Convert CSS scrim alphas
+  ([Colors and blending](#colors-and-blending)).
+- `bottom` and `right` resolve against the parent: a layer holding overlays
+  must be window-sized, or a bottom toast stack lands above the window's top
+  edge.
+- `ToastQueue::stack` takes `status_bar_height`, the points kept clear
+  below. Pass a bottom input's height (a chat composer) so toasts clear its
+  Send button.
+- `Toast::new(ToastKind::Success, ..)` shows a check in the success color.
+- `CommandPalette::width(w)`: panel width in points at 100% zoom (default
+  640), narrowed to fit the window.
+- `CommandPalette::keycaps(true)`: each shortcut as one key cap per key.
 
 ## Disclosures and form fields
 
-Layout has no height transition, so `quark_components::DisclosureState`
-measures its content to animate it open and closed. Keep one per
-disclosure, call `tick(cx.animations(), now_ms, reduced_motion)` in the
-view, and wrap the content in `region(animations, content)` while
-`is_mounted()`, so a closed disclosure's content is not built. The
-content stays mounted, clipped, until it has collapsed. `trigger(label,
-on_toggle, theme)` is the row with the turning chevron.
+`quark_components::DisclosureState` animates content open and closed (layout
+has no height transition, so it measures the content).
 
-`FormField::new(id, label, control)` puts a label over any control, with
-`help(..)` or `error(Some(..))` under it. The field is an accessibility
-group named by its label and described by its error or help, marked
-invalid and required as told, and its error is a polite live region.
-Give the control the same label as its own name.
+- Keep one per disclosure.
+- Call `tick(cx.animations(), now_ms, reduced_motion)` in the view.
+- Wrap the content in `region(animations, content)` while `is_mounted()`, so
+  closed content is not built.
+- Content stays mounted, clipped, until it has collapsed.
+- `trigger(label, on_toggle, theme)` is the row with the turning chevron.
 
-## The `view!` macro
+`FormField::new(id, label, control)` puts a label over any control.
 
-`quark::view!` writes the same builder calls as HTML-like markup, with
-Tailwind-style classes and typed component props. [Writing views](writing-views.md)
-covers the syntax side by side with the builders.
+- `help(..)` or `error(Some(..))` goes under it.
+- The field is an accessibility group named by its label and described by
+  its error or help.
+- Marked invalid and required as told; the error is a polite live region.
+- Give the control the same label as its own name.
 
 ## Developer tools
 
-With the `devtools` feature, `ctrl+shift+h` toggles a frame HUD,
-`ctrl+shift+i` an element inspector that shows bounds, clip, semantics, and
-style and edits padding, gap, colors, and radius live, and `ctrl+shift+l`
-outlines every element's bounds. `QUARK_DEVTOOLS=hud,inspector,layout`
-turns them on at startup.
+Feature `devtools`:
+
+| Key | Tool |
+|---|---|
+| `ctrl+shift+h` | Frame HUD |
+| `ctrl+shift+i` | Element inspector: bounds, clip, semantics, style; live edits of padding, gap, colors, radius |
+| `ctrl+shift+l` | Outline every element's bounds |
+
+- `QUARK_DEVTOOLS=hud,inspector,layout` turns them on at startup.
