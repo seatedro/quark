@@ -692,16 +692,21 @@ pub(crate) struct Window {
 /// it and outside the last inexact window, the lines around the focus are
 /// highlighted on their own and emitted first.
 ///
-/// Returns false when `cancelled` stopped it.
+/// The exact pass starts at `from`: 0, or where an earlier call yielded.
+/// After each exact window it hands off, `yield_after` is asked with the
+/// number handed off in this call, and the call stops when it says so (so a
+/// worker can take turns between long sources).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn highlight_windows(
     root: &Arc<Grammar>,
     source: &str,
     sizes: Windowing,
+    (from, yield_after): (usize, &dyn Fn(usize) -> bool),
     resolve: &(dyn Fn(&LanguageId) -> Tag + Sync),
     cancelled: &(dyn Fn() -> bool + Sync),
     focus: &dyn Fn() -> Option<usize>,
     emit: &mut dyn FnMut(Window),
-) -> bool {
+) -> WindowsEnd {
     // This thread parses windows and finds their cuts; a second one runs
     // the queries of each parsed window meanwhile, in order, so exact
     // windows still arrive in order. A parsed window is handed over only
@@ -739,14 +744,15 @@ pub(crate) fn highlight_windows(
         // Without the second thread, windows are queried here in turn.
         let mut inline = querying.is_none().then_some(query);
         let len = source.len();
-        let mut at = 0;
+        let mut at = from.min(len);
+        let mut handed = 0;
         let mut inexact: Option<std::ops::Range<usize>> = None;
         while at < len {
             for window in done.try_iter() {
                 emit(window);
             }
             if cancelled() {
-                return false;
+                return WindowsEnd::Cancelled;
             }
             if let Some(f) = focus().map(|f| f.min(len))
                 && f >= at + sizes.window
@@ -763,7 +769,7 @@ pub(crate) fn highlight_windows(
                     cancelled,
                 );
                 if cancelled() {
-                    return false;
+                    return WindowsEnd::Cancelled;
                 }
                 emit(Window {
                     range: start..end,
@@ -780,7 +786,7 @@ pub(crate) fn highlight_windows(
                     line_end(source, at + size)
                 };
                 let Some(tree) = root.parse(&source[at..end], &[], cancelled) else {
-                    return false;
+                    return WindowsEnd::Cancelled;
                 };
                 if end == len {
                     break (end, len, tree);
@@ -803,18 +809,37 @@ pub(crate) fn highlight_windows(
                 Some(query) => emit(query((at, cut, end, tree))),
                 None => {
                     if to_query.send((at, cut, end, tree)).is_err() {
-                        return false;
+                        return WindowsEnd::Cancelled;
                     }
                 }
             }
             at = cut;
+            handed += 1;
+            if at < len && yield_after(handed) {
+                break;
+            }
         }
         drop(to_query);
         for window in done {
             emit(window);
         }
-        !cancelled()
+        if cancelled() {
+            WindowsEnd::Cancelled
+        } else if at < len {
+            WindowsEnd::Yielded(at)
+        } else {
+            WindowsEnd::Done
+        }
     })
+}
+
+/// How [`highlight_windows`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsEnd {
+    Done,
+    /// It yielded; the exact pass goes on from this byte.
+    Yielded(usize),
+    Cancelled,
 }
 
 /// Where [`top_level_cut`] would cut a window.

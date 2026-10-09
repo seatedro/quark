@@ -1062,6 +1062,7 @@ fn windowed_parts(
         &language("js"),
         source,
         SMALL_WINDOWS,
+        &crate::store::Slice::WHOLE,
         &|| false,
         &|| focus,
         &mut |part| parts.push(part),
@@ -1190,6 +1191,7 @@ fn report_large_highlights() {
     store.highlight_streamed(
         &language("js"),
         &source,
+        &crate::store::Slice::WHOLE,
         &|| false,
         &|| Some(focus),
         &mut |part| {

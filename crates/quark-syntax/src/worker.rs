@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
-use crate::store::{Outcome, Part};
+use crate::store::{Outcome, Part, Slice};
 use crate::{GrammarStore, HighlightSpan, LanguageId};
 
 /// Which queued request the worker takes next: every [`Priority::Visible`]
@@ -110,6 +110,8 @@ struct Job {
     slot: u64,
     generation: u64,
     request: HighlightRequest,
+    /// Where a streamed highlight that yielded goes on from; 0 to start.
+    resume: usize,
 }
 
 /// Where one handle's results go.
@@ -188,7 +190,7 @@ pub struct WorkerGone;
 /// Highlights a request, stopping early once the callback returns true. A
 /// streamed highlight hands its windows to the last argument and returns
 /// an outcome marked `streamed`.
-type Highlight = dyn Fn(&HighlightRequest, &(dyn Fn() -> bool + Sync), &mut dyn FnMut(Part)) -> Outcome
+type Highlight = dyn Fn(&HighlightRequest, &Slice, &(dyn Fn() -> bool + Sync), &mut dyn FnMut(Part)) -> Outcome
     + Send
     + Sync;
 type HighlightFn = Arc<Highlight>;
@@ -261,7 +263,7 @@ pub struct HighlightWorker {
 impl HighlightWorker {
     pub fn new(store: GrammarStore) -> Self {
         let highlighter = store.clone();
-        let worker = Self::with_highlighter(Arc::new(move |request, cancelled, emit| {
+        let worker = Self::with_highlighter(Arc::new(move |request, slice, cancelled, emit| {
             let HighlightRequest {
                 language,
                 source,
@@ -276,7 +278,7 @@ impl HighlightWorker {
                 // Only a request with a focus expects parts.
                 (None, Some(focus)) => {
                     let focus = || focus.get();
-                    highlighter.highlight_streamed(language, source, cancelled, &focus, emit)
+                    highlighter.highlight_streamed(language, source, slice, cancelled, &focus, emit)
                 }
                 (None, None) => highlighter.highlight_until(language, source, cancelled),
             }
@@ -365,6 +367,7 @@ impl HighlightWorker {
             slot,
             generation,
             request,
+            resume: 0,
         }));
     }
 
@@ -567,10 +570,20 @@ fn run(
                 wake();
             }
         };
+        // A long source takes turns with the jobs waiting behind it: one
+        // window when it starts (so every visible side gets colors early),
+        // then four at a time.
+        let others = !queued.is_empty();
+        let turn = if job.resume == 0 { 1 } else { 4 };
+        let yield_after = move |handed: usize| others && handed >= turn;
+        let slice = Slice {
+            from: job.resume,
+            yield_after: &yield_after,
+        };
         // A grammar bug must not take the thread down: every later block
         // would silently stay plain.
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            highlight(&job.request, &superseded, &mut emit)
+            highlight(&job.request, &slice, &superseded, &mut emit)
         }))
         .unwrap_or_default();
         if superseded() {
@@ -588,18 +601,37 @@ fn run(
             }
         }
         if outcome.streamed {
-            // Its parts are out; a pass with grammars still arriving runs
-            // again when one does.
-            if outcome.pending() {
-                parked.insert(
+            // Languages still arriving over every turn of this pass.
+            let mut unresolved = previous.map_or_else(Vec::new, |p| p.unresolved);
+            for language in outcome.unresolved {
+                if !unresolved.contains(&language) {
+                    unresolved.push(language);
+                }
+            }
+            let carried = Parked {
+                job: Job {
+                    resume: 0,
+                    ..job.clone()
+                },
+                revision: next_revision.saturating_sub(1),
+                spans: Vec::new(),
+                unresolved,
+            };
+            if let Some(at) = outcome.resume {
+                // Its turn is over: back of the line, carrying what it
+                // published.
+                order.push(key);
+                queued.insert(
                     key,
-                    Parked {
-                        job: job.clone(),
-                        revision: next_revision.saturating_sub(1),
-                        spans: Vec::new(),
-                        unresolved: outcome.unresolved,
+                    Queued {
+                        job: Job { resume: at, ..job },
+                        previous: Some(carried),
                     },
                 );
+            } else if !carried.unresolved.is_empty() {
+                // Its parts are out; a pass with grammars still arriving
+                // runs again when one does.
+                parked.insert(key, carried);
             }
             continue;
         }
@@ -659,6 +691,7 @@ mod tests {
 
     fn panics_on_boom(
         request: &HighlightRequest,
+        _: &Slice,
         _: &(dyn Fn() -> bool + Sync),
         _: &mut dyn FnMut(Part),
     ) -> Outcome {
@@ -684,23 +717,24 @@ mod tests {
     // slot's next result is the next request's.
     #[test]
     fn streamed_parts_arrive_with_rising_revisions_and_no_whole_result() {
-        let worker = HighlightWorker::with_highlighter(Arc::new(|request, cancelled, emit| {
-            if &*request.source != "long" {
-                return panics_on_boom(request, cancelled, emit);
-            }
-            for (range, exact) in [(3..4, false), (0..2, true), (2..4, true)] {
-                emit(Part {
-                    range,
-                    exact,
-                    spans: Vec::new(),
-                    unresolved: Vec::new(),
-                });
-            }
-            Outcome {
-                streamed: true,
-                ..Outcome::default()
-            }
-        }));
+        let worker =
+            HighlightWorker::with_highlighter(Arc::new(|request, slice, cancelled, emit| {
+                if &*request.source != "long" {
+                    return panics_on_boom(request, slice, cancelled, emit);
+                }
+                for (range, exact) in [(3..4, false), (0..2, true), (2..4, true)] {
+                    emit(Part {
+                        range,
+                        exact,
+                        spans: Vec::new(),
+                        unresolved: Vec::new(),
+                    });
+                }
+                Outcome {
+                    streamed: true,
+                    ..Outcome::default()
+                }
+            }));
         worker.request(1, 1, rust(), Arc::from("long"));
         worker.request(2, 1, rust(), Arc::from("next"));
         let seen: Vec<_> = (0..4)
@@ -717,6 +751,70 @@ mod tests {
                 (1, 1, Some((0..2, true))),
                 (1, 2, Some((2..4, true))),
                 (2, 0, None),
+            ]
+        );
+    }
+
+    // Catches one long source holding the thread until it is done, so the
+    // other side of a diff stays plain for its whole pass: two long sources
+    // queued together take turns, one window each first, then several.
+    #[test]
+    fn long_sources_take_turns() {
+        let (started_tx, started) = channel();
+        let (resume_tx, resume) = channel::<()>();
+        let resume = Mutex::new(resume);
+        let worker = HighlightWorker::with_highlighter(Arc::new(
+            move |request: &HighlightRequest, slice: &Slice, _: &_, emit: &mut dyn FnMut(Part)| {
+                if &*request.source == "hold" {
+                    started_tx.send(()).unwrap();
+                    resume.lock().unwrap().recv().unwrap();
+                    return Outcome::default();
+                }
+                let mut handed = 0;
+                for k in slice.from as u32..3 {
+                    emit(Part {
+                        range: k..k + 1,
+                        exact: true,
+                        spans: Vec::new(),
+                        unresolved: Vec::new(),
+                    });
+                    handed += 1;
+                    if k + 1 < 3 && (slice.yield_after)(handed) {
+                        return Outcome {
+                            streamed: true,
+                            resume: Some(k as usize + 1),
+                            ..Outcome::default()
+                        };
+                    }
+                }
+                Outcome {
+                    streamed: true,
+                    ..Outcome::default()
+                }
+            },
+        ));
+        worker.request(9, 1, rust(), Arc::from("hold"));
+        started.recv().unwrap();
+        worker.request(1, 1, rust(), Arc::from("a"));
+        worker.request(2, 1, rust(), Arc::from("b"));
+        resume_tx.send(()).unwrap();
+        let seen: Vec<_> = (0..7)
+            .map(|_| {
+                let r = worker.recv().unwrap();
+                (r.slot, r.part.map(|p| p.range.start))
+            })
+            .collect();
+
+        assert_eq!(
+            seen,
+            [
+                (9, None),
+                (1, Some(0)),
+                (2, Some(0)),
+                (1, Some(1)),
+                (1, Some(2)),
+                (2, Some(1)),
+                (2, Some(2)),
             ]
         );
     }
@@ -744,14 +842,14 @@ mod tests {
         let (seen_tx, seen) = channel();
         let resume = Mutex::new(resume);
         let worker =
-            HighlightWorker::with_highlighter(Arc::new(move |request, cancelled, emit| {
+            HighlightWorker::with_highlighter(Arc::new(move |request, slice, cancelled, emit| {
                 if &*request.source == "first" {
                     started_tx.send(()).unwrap();
                     resume.lock().unwrap().recv().unwrap();
                     // The checkpoint a real highlight reaches while parsing.
                     seen_tx.send(cancelled()).unwrap();
                 }
-                panics_on_boom(request, cancelled, emit)
+                panics_on_boom(request, slice, cancelled, emit)
             }));
         worker.request(1, 1, rust(), Arc::from("first"));
         started.recv().unwrap();
@@ -772,12 +870,12 @@ mod tests {
         let (resume_tx, resume) = channel::<()>();
         let resume = Mutex::new(resume);
         let worker =
-            HighlightWorker::with_highlighter(Arc::new(move |request, cancelled, emit| {
+            HighlightWorker::with_highlighter(Arc::new(move |request, slice, cancelled, emit| {
                 if &*request.source == "hold" {
                     started_tx.send(()).unwrap();
                     resume.lock().unwrap().recv().unwrap();
                 }
-                panics_on_boom(request, cancelled, emit)
+                panics_on_boom(request, slice, cancelled, emit)
             }));
         (worker, started, resume_tx)
     }

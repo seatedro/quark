@@ -199,6 +199,7 @@ impl GrammarStore {
         &self,
         language: &LanguageId,
         source: &str,
+        slice: &Slice,
         cancelled: &(dyn Fn() -> bool + Sync),
         focus: &dyn Fn() -> Option<usize>,
         emit: &mut dyn FnMut(Part),
@@ -209,6 +210,7 @@ impl GrammarStore {
                 language,
                 source,
                 crate::engine::Windowing::DEFAULT,
+                slice,
                 cancelled,
                 focus,
                 emit,
@@ -216,18 +218,20 @@ impl GrammarStore {
         }
         #[cfg(not(feature = "engine"))]
         {
-            let _ = (language, source, cancelled, focus, emit);
+            let _ = (language, source, slice, cancelled, focus, emit);
             Outcome::default()
         }
     }
 
     /// [`Self::highlight_streamed`] with explicit window sizes.
     #[cfg(feature = "engine")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn highlight_windowed(
         &self,
         language: &LanguageId,
         source: &str,
         sizes: crate::engine::Windowing,
+        slice: &Slice,
         cancelled: &(dyn Fn() -> bool + Sync),
         focus: &dyn Fn() -> Option<usize>,
         emit: &mut dyn FnMut(Part),
@@ -245,10 +249,11 @@ impl GrammarStore {
                         streamed: true,
                         ..Outcome::default()
                     };
-                    crate::engine::highlight_windows(
+                    let end = crate::engine::highlight_windows(
                         &grammar,
                         source,
                         sizes,
+                        (slice.from, slice.yield_after),
                         &|embedded| inner.lookup(embedded.as_str()),
                         cancelled,
                         focus,
@@ -268,6 +273,9 @@ impl GrammarStore {
                             });
                         },
                     );
+                    if let crate::engine::WindowsEnd::Yielded(at) = end {
+                        out.resume = Some(at);
+                    }
                     out
                 }
                 Tag::Pending => Outcome {
@@ -309,6 +317,7 @@ impl GrammarStore {
                     truncated: found.truncated,
                     work: found.work,
                     streamed: false,
+                    resume: None,
                 }
             }
             Tag::Pending => Outcome {
@@ -337,6 +346,25 @@ pub(crate) struct Outcome {
     pub(crate) work: crate::engine::Work,
     /// The spans went out window by window as [`Part`]s; `spans` is empty.
     pub(crate) streamed: bool,
+    /// A streamed highlight yielded: run it again from this byte.
+    pub(crate) resume: Option<usize>,
+}
+
+/// Where a streamed highlight starts its exact pass, and when it should
+/// stop to let other work run: asked after each window it finishes, with
+/// how many it finished in this call.
+pub(crate) struct Slice<'a> {
+    pub(crate) from: usize,
+    pub(crate) yield_after: &'a dyn Fn(usize) -> bool,
+}
+
+impl Slice<'_> {
+    /// From the start, never yielding.
+    #[cfg(test)]
+    pub(crate) const WHOLE: Slice<'static> = Slice {
+        from: 0,
+        yield_after: &|_| false,
+    };
 }
 
 /// One window of a streamed highlight: spans of `source`, all inside
