@@ -1,4 +1,7 @@
 use super::*;
+use quark_render::scene::{
+    StyledDecoration, TextBackdrop, TextDecorationStyle, TextFill, TextRendering,
+};
 
 // ---------------------------------------------------------------------------
 // TextElement — text with intrinsic sizing
@@ -95,7 +98,10 @@ pub struct TextElement {
     /// Extra advance after every glyph, in ems.
     letter_spacing: f32,
     underline: bool,
+    /// How the underline looks; `None` is solid in the text color.
+    underline_style: Option<TextDecorationStyle>,
     strikethrough: bool,
+    paint: TextPaint,
     align: TextAlign,
     truncate: bool,
     wrap: WrapMode,
@@ -111,7 +117,9 @@ pub fn text(content: impl Into<String>) -> TextElement {
         font_weight: FontWeight::Normal,
         letter_spacing: 0.0,
         underline: false,
+        underline_style: None,
         strikethrough: false,
+        paint: TextPaint::default(),
         align: TextAlign::Left,
         truncate: false,
         wrap: WrapMode::Auto,
@@ -185,6 +193,36 @@ impl TextElement {
     /// A solid line under the text, in its color.
     pub fn underline(mut self) -> Self {
         self.underline = true;
+        self
+    }
+
+    /// A line under the text in `style`: dotted, dashed, or solid, with
+    /// its own thickness, offset, and color.
+    pub fn underline_style(mut self, style: TextDecorationStyle) -> Self {
+        self.underline = true;
+        self.underline_style = Some(style);
+        self
+    }
+
+    /// Fills the glyphs with `fill` (a gradient or a shimmer) in place of
+    /// the text color. A shimmer sweeps with the frame clock and stands
+    /// still under reduced motion. Never reshapes the text.
+    pub fn fill(mut self, fill: TextFill) -> Self {
+        self.paint.fill = Some(fill);
+        self
+    }
+
+    /// How glyph coverage blends; see [`TextRendering`]. The renderer's
+    /// default applies without it.
+    pub fn text_rendering(mut self, rendering: TextRendering) -> Self {
+        self.paint.rendering = Some(rendering);
+        self
+    }
+
+    /// The opaque color behind the text, which perceptual coverage needs;
+    /// see [`TextBackdrop`].
+    pub fn text_backdrop(mut self, backdrop: TextBackdrop) -> Self {
+        self.paint.backdrop = backdrop;
         self
     }
 
@@ -266,19 +304,22 @@ impl TextElement {
         TextQuery::new(content, style).wrap_width(wrap)
     }
 
-    /// The decorations to paint over `len` bytes of text in `color`.
-    fn decorations(&self, len: usize, color: Color) -> impl Iterator<Item = TextDecoration> {
-        [
-            (self.underline, TextDecorationKind::Underline),
-            (self.strikethrough, TextDecorationKind::Strikethrough),
-        ]
-        .into_iter()
-        .filter(|(on, _)| *on)
-        .map(move |(_, kind)| TextDecoration {
+    /// The decorations to paint over `len` bytes of text in `color`. A
+    /// plain [`Self::underline`] takes the text color.
+    fn decorations(&self, len: usize, color: Color) -> Vec<StyledDecoration> {
+        let underline = self.underline.then(|| StyledDecoration {
             range: 0..len,
-            kind,
-            color,
-        })
+            kind: TextDecorationKind::Underline,
+            style: self
+                .underline_style
+                .unwrap_or_else(|| TextDecorationStyle::solid(color)),
+        });
+        let strike = self.strikethrough.then(|| StyledDecoration {
+            range: 0..len,
+            kind: TextDecorationKind::Strikethrough,
+            style: TextDecorationStyle::solid(color),
+        });
+        underline.into_iter().chain(strike).collect()
     }
 
     fn resolve_font_size(&self, theme: &Theme) -> f32 {
@@ -430,24 +471,27 @@ impl Element for TextElement {
         };
 
         if let Some(layout) = layout {
-            let decorated = self.underline || self.strikethrough;
-            scene.text(TextPrimitive {
-                rect: Rect {
-                    x: bounds.x + x_offset,
-                    ..bounds
-                },
-                layout: ShapedText::new(layout.clone()),
-                color,
-            });
-            if decorated {
-                let decorations: Vec<TextDecoration> =
-                    self.decorations(layout.text().len(), color).collect();
-                push_text_decorations(
-                    scene,
-                    &layout,
-                    (bounds.x + x_offset, bounds.y),
-                    &decorations,
-                );
+            let rect = Rect {
+                x: bounds.x + x_offset,
+                ..bounds
+            };
+            if self.paint.is_plain() {
+                scene.text(TextPrimitive {
+                    rect,
+                    layout: ShapedText::new(layout.clone()),
+                    color,
+                });
+            } else {
+                let fill = self.paint.fill_now(color, cx);
+                scene.styled_text(self.paint.primitive(
+                    rect,
+                    ShapedText::new(layout.clone()),
+                    fill,
+                ));
+            }
+            if self.underline || self.strikethrough {
+                let decorations = self.decorations(layout.text().len(), color);
+                paint_decorations(scene, &layout, (rect.x, rect.y), &decorations);
             }
         }
 

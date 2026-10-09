@@ -4,7 +4,134 @@
 use std::cell::RefCell;
 
 use super::*;
+use quark_render::scene::{
+    LineCap, Path, PathPrimitive, StrokePattern, StrokeStyle, StyledDecoration,
+    StyledTextPrimitive, TextBackdrop, TextDecorationStyle, TextFill, TextRendering,
+};
 use quark_text::{TextOffset, TextSource, ToTextOffset};
+
+/// Paint-only text options: glyph fill, coverage policy, and backdrop.
+/// None of them affects shaping, so changing one reuses the layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct TextPaint {
+    pub(crate) fill: Option<TextFill>,
+    pub(crate) rendering: Option<TextRendering>,
+    pub(crate) backdrop: TextBackdrop,
+}
+
+impl TextPaint {
+    /// Whether the text paints as a plain text primitive.
+    pub(crate) fn is_plain(&self) -> bool {
+        self.fill.is_none() && self.rendering.is_none() && self.backdrop == TextBackdrop::Unknown
+    }
+
+    /// The fill to paint this frame, `color` without one. A shimmer takes
+    /// its phase from the frame clock and asks for the next frame; under
+    /// reduced motion it paints its static base color.
+    pub(crate) fn fill_now(&self, color: Color, cx: &mut ElementContext) -> TextFill {
+        match self.fill {
+            None => TextFill::Solid(color),
+            Some(TextFill::Shimmer(spec)) if cx.theme.reduced_motion => TextFill::Solid(spec.base),
+            Some(TextFill::Shimmer(spec)) => {
+                cx.request_frame_at_ms(cx.clock_ms + SHIMMER_FRAME_MS);
+                TextFill::Shimmer(spec.phase(spec.phase_at(0, cx.clock_ms)))
+            }
+            Some(fill) => fill,
+        }
+    }
+
+    /// A styled text primitive for `layout` at `rect` in this paint.
+    pub(crate) fn primitive(
+        &self,
+        rect: Rect,
+        layout: ShapedText,
+        fill: TextFill,
+    ) -> StyledTextPrimitive {
+        StyledTextPrimitive::new(rect, layout, fill)
+            .rendering(self.rendering.unwrap_or_default())
+            .backdrop(self.backdrop)
+    }
+}
+
+/// Frame interval a shimmering text asks for while it is painted.
+const SHIMMER_FRAME_MS: u64 = 16;
+
+/// Paints `decorations` over `layout` at `origin`, after the text. Solid
+/// ones with default metrics are quads, as [`push_text_decorations`]
+/// draws them; the rest are stroked paths, one per line segment, so a
+/// pattern restarts at each wrapped line and runs unbroken along a range
+/// on one line. Thickness defaults to 7% of the font size (at least one
+/// point) and the line sits just below the baseline (underline) or
+/// through the x-height (strikethrough), unless the style sets them.
+pub(crate) fn paint_decorations(
+    scene: &mut Scene,
+    layout: &TextLayout,
+    origin: (f32, f32),
+    decorations: &[StyledDecoration],
+) {
+    let size = layout.style().font_size;
+    let default_thickness = (size * 0.07).max(1.0);
+    let text = layout.text();
+    for decoration in decorations {
+        let style = decoration.style;
+        let plain = style.pattern == StrokePattern::Solid
+            && style.thickness.is_none()
+            && style.offset.is_none();
+        if plain {
+            push_text_decorations(
+                scene,
+                layout,
+                origin,
+                &[TextDecoration {
+                    range: decoration.range.clone(),
+                    kind: decoration.kind,
+                    color: style.color,
+                }],
+            );
+            continue;
+        }
+        let thickness = style
+            .thickness
+            .filter(|t| t.is_finite() && *t > 0.0)
+            .unwrap_or(default_thickness);
+        let center = style
+            .offset
+            .filter(|o| o.is_finite())
+            .unwrap_or(match decoration.kind {
+                TextDecorationKind::Underline => size * 0.12 + default_thickness * 0.5,
+                TextDecorationKind::Strikethrough => -size * 0.28,
+            });
+        let (a, b) = (decoration.range.start, decoration.range.end.min(text.len()));
+        for line in layout.lines() {
+            let start = a.max(line.byte_range.start);
+            let mut end = b.min(line.byte_range.end);
+            // A wrapped line's trailing space is not underlined.
+            if let Some(slice) = text.get(start..end) {
+                end = start + slice.trim_end().len();
+            }
+            if start >= end {
+                continue;
+            }
+            let y = line.baseline + center;
+            for r in layout.selection_rects(start..end) {
+                // Rects of a neighbouring line can come back when the range
+                // touches a line break.
+                if (r.y - line.top).abs() > 0.01 || r.width <= 0.0 {
+                    continue;
+                }
+                let mut path = Path::builder();
+                path.move_to(r.x, y).line_to(r.x + r.width, y);
+                let mut stroke = StrokeStyle::new(thickness);
+                stroke.pattern = style.pattern;
+                stroke.cap = LineCap::Butt;
+                scene.path(
+                    PathPrimitive::new(Arc::new(path.build()), [origin.0, origin.1])
+                        .stroke(style.color, stroke),
+                );
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SelectableText — multi-line, mouse-selectable static text
@@ -24,6 +151,10 @@ pub struct StyledSpan {
     /// `Some(bg)` paints a rounded background pill behind the run (inline code).
     pub pill: Option<Color>,
     pub underline: bool,
+    /// How the underline looks (dotted, dashed, thickness, offset, color);
+    /// `None` draws a solid line in the span's color. Setting it underlines
+    /// the span.
+    pub underline_style: Option<TextDecorationStyle>,
     pub strikethrough: bool,
     /// Link target. Adjacent spans with the same URL form one link: one
     /// click target, underlined together on hover. Without an explicit
@@ -41,6 +172,7 @@ impl StyledSpan {
             color: None,
             pill: None,
             underline: false,
+            underline_style: None,
             strikethrough: false,
             link: None,
         }
@@ -67,8 +199,23 @@ impl StyledSpan {
         self
     }
 
+    /// Underlines the span in `style`: a dotted or dashed pattern,
+    /// thickness, offset, and color. Adjacent spans with the same style
+    /// share one line, so a link split across spans underlines unbroken.
+    pub fn underline_style(mut self, style: TextDecorationStyle) -> Self {
+        self.underline = true;
+        self.underline_style = Some(style);
+        self
+    }
+
     pub fn strikethrough(mut self) -> Self {
         self.strikethrough = true;
+        self
+    }
+
+    /// Weight of the span's glyphs.
+    pub fn weight(mut self, weight: FontWeight) -> Self {
+        self.font_weight = weight;
         self
     }
 
@@ -330,34 +477,49 @@ pub(super) fn register_link_hits(
         .collect()
 }
 
-/// Decorations for spans that ask for them plus hovered links.
+/// Decorations for spans that ask for them plus hovered links. Adjacent
+/// spans with the same decoration style share one decoration; a hovered
+/// link already underlined by its spans gets no second line.
 pub(super) fn span_decorations(
     spans: &[StyledSpan],
     layout: &TextLayout,
     colors: &[Color],
     links: &[LinkHits],
     cx: &ElementContext,
-) -> Vec<TextDecoration> {
-    let mut out = Vec::new();
+) -> Vec<StyledDecoration> {
+    let mut out: Vec<StyledDecoration> = Vec::new();
+    let mut push = |range: std::ops::Range<usize>, kind, style| match out.last_mut() {
+        Some(last) if last.kind == kind && last.style == style && last.range.end == range.start => {
+            last.range.end = range.end;
+        }
+        _ => out.push(StyledDecoration { range, kind, style }),
+    };
     for ((span, text_span), color) in spans.iter().zip(layout.spans().iter()).zip(colors) {
         let range = text_span.range.clone();
         if span.underline {
-            out.push(TextDecoration {
-                range: range.clone(),
-                kind: TextDecorationKind::Underline,
-                color: *color,
-            });
+            let style = span
+                .underline_style
+                .unwrap_or_else(|| TextDecorationStyle::solid(*color));
+            push(range.clone(), TextDecorationKind::Underline, style);
         }
         if span.strikethrough {
-            out.push(TextDecoration {
+            push(
                 range,
-                kind: TextDecorationKind::Strikethrough,
-                color: *color,
-            });
+                TextDecorationKind::Strikethrough,
+                TextDecorationStyle::solid(*color),
+            );
         }
     }
     for link in links {
         if !link.hits.iter().any(|hit| cx.is_hovered(*hit)) {
+            continue;
+        }
+        let underlined = out.iter().any(|d| {
+            d.kind == TextDecorationKind::Underline
+                && d.range.start <= link.range.start
+                && d.range.end >= link.range.end
+        });
+        if underlined {
             continue;
         }
         let color = layout
@@ -366,10 +528,10 @@ pub(super) fn span_decorations(
             .position(|s| s.range.start == link.range.start)
             .and_then(|i| colors.get(i).copied())
             .unwrap_or(cx.theme.colors.text_accent);
-        out.push(TextDecoration {
+        out.push(StyledDecoration {
             range: link.range.clone(),
             kind: TextDecorationKind::Underline,
-            color,
+            style: TextDecorationStyle::solid(color),
         });
     }
     out
@@ -580,6 +742,7 @@ pub struct SelectableText {
     source_key: u64,
     selection: Option<(usize, usize)>,
     state: Option<RichTextState>,
+    paint: TextPaint,
     on_link: LinkHandler,
 }
 
@@ -600,6 +763,7 @@ pub fn selectable_rich_text(spans: impl Into<Arc<[StyledSpan]>>) -> SelectableTe
         source_key: 0,
         selection: None,
         state: None,
+        paint: TextPaint::default(),
         on_link: LinkHandler::default(),
     }
 }
@@ -663,6 +827,25 @@ impl SelectableText {
     /// Extra advance after every glyph, in ems (zero by default).
     pub fn letter_spacing(mut self, ems: f32) -> Self {
         self.paragraph = self.paragraph.letter_spacing(ems);
+        self
+    }
+    /// Fills every glyph with `fill` (a gradient or a shimmer) in place of
+    /// the text and span colors. A shimmer sweeps with the frame clock and
+    /// stands still under reduced motion. Never reshapes the text.
+    pub fn fill(mut self, fill: TextFill) -> Self {
+        self.paint.fill = Some(fill);
+        self
+    }
+    /// How glyph coverage blends; see [`TextRendering`]. The renderer's
+    /// default applies without it.
+    pub fn text_rendering(mut self, rendering: TextRendering) -> Self {
+        self.paint.rendering = Some(rendering);
+        self
+    }
+    /// The opaque color behind the text, which perceptual coverage needs;
+    /// see [`TextBackdrop`].
+    pub fn text_backdrop(mut self, backdrop: TextBackdrop) -> Self {
+        self.paint.backdrop = backdrop;
         self
     }
     /// Shows at most `n` lines; the rest is laid out but clipped. Unlimited by
@@ -1012,16 +1195,33 @@ impl Element for SelectableText {
         // the renderer clips to) so the last glyph of a line is not shaved.
         let colors = span_colors(&self.spans, default_color, cx.theme.colors.text_accent);
         let decorations = span_decorations(&self.spans, &layout, &colors, links, cx);
-        scene.rich_text(RichTextPrimitive {
-            rect: Rect {
-                width: bounds.width + self.paragraph.font_size * 0.5,
-                ..bounds
-            },
-            layout: ShapedText::new(layout.clone()),
-            default_color,
-            span_colors: colors,
-        });
-        push_text_decorations(scene, &layout, origin, &decorations);
+        let rect = Rect {
+            width: bounds.width + self.paragraph.font_size * 0.5,
+            ..bounds
+        };
+        if self.paint.is_plain() {
+            scene.rich_text(RichTextPrimitive {
+                rect,
+                layout: ShapedText::new(layout.clone()),
+                default_color,
+                span_colors: colors,
+            });
+        } else {
+            // A fill covers every glyph; without one, spans keep their
+            // colors under the chosen coverage.
+            let fill = self.paint.fill_now(default_color, cx);
+            let span_colors = if self.paint.fill.is_some() {
+                Arc::from([])
+            } else {
+                colors
+            };
+            scene.styled_text(
+                self.paint
+                    .primitive(rect, ShapedText::new(layout.clone()), fill)
+                    .span_colors(span_colors),
+            );
+        }
+        paint_decorations(scene, &layout, origin, &decorations);
 
         if clipped {
             scene.pop_clip();
