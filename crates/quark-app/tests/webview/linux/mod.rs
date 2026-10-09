@@ -34,6 +34,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::fixture::{Fixture, Site, leaf_der};
 
+pub mod evidence;
+
 const TITLE: &str = "linux smoke sign in";
 
 pub fn run() -> ExitCode {
