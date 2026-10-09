@@ -1195,7 +1195,8 @@ diff --git a/f.txt b/f.txt
     #[test]
     fn a_selection_follows_unchanged_lines_and_clears_on_replaced_ones() {
         // (line replaced by the update, selection copied after it)
-        for (replaced, expected) in [(None, "line 150\nline 151"), (Some(151), "")] {
+        // An edit inside the selection clears it, ends unchanged or not.
+        for (replaced, expected) in [(None, "line 150\nline 151\nline 152"), (Some(151), "")] {
             let (a, b, remap) = revisions(replaced);
             let mut ui = session_ui(vec![a]);
             scroll_to(&mut ui, 148);
