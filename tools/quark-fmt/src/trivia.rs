@@ -82,6 +82,8 @@ pub struct Comment {
     pub line: bool,
     /// Newlines between the previous leaf or comment and this one.
     pub newlines_before: usize,
+    /// Whitespace separates it from what precedes it.
+    pub spaced_before: bool,
 }
 
 /// The trivia between two consecutive leaves.
@@ -92,6 +94,8 @@ pub struct Gap {
     pub newlines_after: usize,
     /// The gap is not empty: the leaves around it were not touching.
     pub spaced: bool,
+    /// Whitespace follows the last comment.
+    pub spaced_after: bool,
 }
 
 impl Gap {
@@ -111,12 +115,16 @@ pub fn gap(source: &str, range: Range<usize>) -> Result<Gap, usize> {
     for lexeme in lex(&source[range.clone()], range.start) {
         let text = &source[lexeme.range.clone()];
         match lexeme.kind {
-            LexKind::Whitespace => out.newlines_after += text.matches('\n').count(),
+            LexKind::Whitespace => {
+                out.newlines_after += text.matches('\n').count();
+                out.spaced_after = true;
+            }
             LexKind::LineComment | LexKind::BlockComment => {
                 out.comments.push(Comment {
                     range: lexeme.range,
                     line: lexeme.kind == LexKind::LineComment,
                     newlines_before: std::mem::take(&mut out.newlines_after),
+                    spaced_before: std::mem::take(&mut out.spaced_after),
                 });
             }
             _ => return Err(lexeme.range.start),

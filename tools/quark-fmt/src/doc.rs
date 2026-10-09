@@ -44,6 +44,10 @@ pub enum Doc {
     Concat(Vec<Doc>),
     /// Embedded Rust, by id in the view's [`Embeds`].
     Embed(usize),
+    /// A space and the content on the same line when the content fits
+    /// there flat or must span lines anyway; otherwise the content on the
+    /// next line, one unit deeper. A match arm's markup body.
+    Hang(Box<Doc>),
     /// Width that counts when measuring but prints nothing: text after the
     /// invocation on its last line.
     Phantom(usize),
@@ -117,6 +121,7 @@ pub fn propagate(doc: &mut Doc, embeds: &dyn Embeds) -> bool {
             .iter_mut()
             .fold(false, |acc, d| propagate(d, embeds) | acc),
         Doc::Embed(id) => embeds.flat(*id).is_none(),
+        Doc::Hang(d) => propagate(d, embeds),
     }
 }
 
@@ -130,6 +135,7 @@ pub fn is_flat(doc: &Doc, embeds: &dyn Embeds) -> bool {
         Doc::Group { doc, broken } => !broken && is_flat(doc, embeds),
         Doc::Concat(v) => v.iter().all(|d| is_flat(d, embeds)),
         Doc::Embed(id) => embeds.flat(*id).is_some(),
+        Doc::Hang(d) => is_flat(d, embeds),
     }
 }
 
@@ -149,6 +155,10 @@ pub fn print_flat(doc: &Doc, embeds: &dyn Embeds) -> Option<String> {
                 }
             }
             Doc::Embed(id) => out.push_str(embeds.flat(*id)?),
+            Doc::Hang(d) => {
+                out.push(' ');
+                go(d, embeds, out)?;
+            }
             _ => return None,
         }
         Some(())
@@ -216,6 +226,19 @@ pub fn print(
                 cmds.push((ind, if flat { Mode::Flat } else { Mode::Break }, doc));
             }
             Doc::Embed(id) => p.embed(*id, ind, mode, &cmds),
+            Doc::Hang(d) => {
+                let room = cfg.max_width as isize - p.column as isize - 1;
+                if !is_flat(d, embeds) {
+                    p.text(" ", ind);
+                    cmds.push((ind, Mode::Break, d));
+                } else if mode == Mode::Flat || p.fits((ind, Mode::Flat, d), &cmds, room) {
+                    p.text(" ", ind);
+                    cmds.push((ind, Mode::Flat, d));
+                } else {
+                    p.newline(ind + cfg.tab_spaces);
+                    cmds.push((ind + cfg.tab_spaces, Mode::Break, d));
+                }
+            }
         }
     }
     p.lines
@@ -253,6 +276,11 @@ impl Printer<'_> {
             return;
         }
         if self.must_newline {
+            // A separator space after a line comment would start the next
+            // line with trailing whitespace.
+            if s.trim().is_empty() {
+                return;
+            }
             self.newline(indent);
         }
         self.column += self.width(s);
@@ -344,6 +372,10 @@ impl Printer<'_> {
                     Some(s) => width += self.width(s),
                     None => return width,
                 },
+                Doc::Hang(d) => {
+                    width += 1;
+                    stack.push((ind, mode, d));
+                }
             }
         }
     }
@@ -388,6 +420,10 @@ impl Printer<'_> {
                     Some(s) => room -= self.width(s) as isize,
                     None => return true,
                 },
+                Doc::Hang(d) => {
+                    room -= 1;
+                    stack.push((ind, mode, d));
+                }
             }
         }
     }
@@ -395,13 +431,15 @@ impl Printer<'_> {
 
 /// Joins printed lines into text: indentation in the configured style,
 /// `newline` between lines, a bare `\n` before verbatim lines (whose
-/// literal keeps its own `\r`), and no indentation on empty lines.
+/// literal keeps its own `\r`), and no indentation on empty lines except
+/// the last.
 pub fn render(lines: &[LayoutLine], tab_spaces: usize, hard_tabs: bool, newline: &str) -> String {
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             out.push_str(if line.verbatim { "\n" } else { newline });
-            if !line.verbatim && !line.text.is_empty() {
+            // The last line indents the closing delimiter that follows.
+            if !line.verbatim && (!line.text.is_empty() || i + 1 == lines.len()) {
                 out.push_str(&crate::source::indent_string(
                     line.indent,
                     tab_spaces,
