@@ -498,6 +498,7 @@ impl ChunkEntry {
         chunk: &ChunkPrimitive,
         cache: &mut ChunkCache,
         scratch: &mut BandScratch,
+        fonts: Option<&crate::icons::SvgFonts>,
     ) {
         self.generation = Some(chunk.chunk.generation());
         self.scale = chunk.scale;
@@ -543,7 +544,11 @@ impl ChunkEntry {
                     }
                 }
                 // Chunks with layers are expanded before flattening.
-                Primitive::LayerStart(_) | Primitive::LayerEnd | Primitive::LayerBoundary => {}
+                Primitive::LayerStart(_)
+                | Primitive::LayerEnd
+                | Primitive::IsolateStart(_)
+                | Primitive::IsolateEnd
+                | Primitive::LayerBoundary => {}
                 Primitive::Path(_) => {
                     let Primitive::Path(path) = chunk.place(primitive) else {
                         unreachable!("placing keeps the kind");
@@ -563,7 +568,7 @@ impl ChunkEntry {
                 _ => {
                     // An entry outlives the GPU copy of its icons, so it
                     // keeps their pixels.
-                    if let Some(drawn) = convert(&chunk.place(primitive), |_| true) {
+                    if let Some(drawn) = convert(&chunk.place(primitive), |_| true, fonts) {
                         self.items.push(item(ItemDraw::Drawn(drawn)));
                     }
                 }
@@ -609,6 +614,7 @@ fn items_bounds(items: &[Item]) -> Option<Rect> {
                 Drawn::Image(image) => image.rect,
                 Drawn::Text(text) => text.rect,
                 Drawn::RichText(text) => text.rect,
+                Drawn::StyledText(text) => text.rect,
                 Drawn::Path { area, .. } => *area,
                 Drawn::Blur(blur) => blur.rect,
             },
@@ -644,7 +650,12 @@ fn draw(
     let (dx, dy) = match entry.moved(chunk) {
         Some(moved) => moved,
         None => {
-            entry.convert(chunk, &mut fl.chunks, &mut fl.band_scratch);
+            entry.convert(
+                chunk,
+                &mut fl.chunks,
+                &mut fl.band_scratch,
+                fl.svg_fonts.as_ref(),
+            );
             (0.0, 0.0)
         }
     };

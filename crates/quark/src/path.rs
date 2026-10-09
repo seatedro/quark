@@ -52,6 +52,46 @@ impl Path {
     pub fn is_empty(&self) -> bool {
         self.verbs.is_empty()
     }
+
+    /// The closed outline of `rect` with per-corner radii [top-left,
+    /// top-right, bottom-right, bottom-left], clockwise from the end of the
+    /// top-left corner. Radii shrink as CSS shrinks them so adjacent
+    /// corners never overlap.
+    pub fn rounded_rect(rect: Rect, corner_radii: [f32; 4]) -> Self {
+        let (w, h) = (rect.width.max(0.0), rect.height.max(0.0));
+        let mut r = corner_radii.map(|r| if r.is_finite() { r.max(0.0) } else { 0.0 });
+        let sides = [
+            (r[0] + r[1], w),
+            (r[1] + r[2], h),
+            (r[2] + r[3], w),
+            (r[3] + r[0], h),
+        ];
+        let shrink = sides
+            .iter()
+            .filter(|(sum, _)| *sum > 0.0)
+            .fold(1.0f32, |f, (sum, len)| f.min(len / sum));
+        r = r.map(|v| v * shrink);
+        let (x0, y0, x1, y1) = (rect.x, rect.y, rect.x + w, rect.y + h);
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let mut b = Self::builder();
+        b.move_to(x0 + r[0], y0).line_to(x1 - r[1], y0);
+        if r[1] > 0.0 {
+            b.arc(x1 - r[1], y0 + r[1], r[1], -FRAC_PI_2, FRAC_PI_2);
+        }
+        b.line_to(x1, y1 - r[2]);
+        if r[2] > 0.0 {
+            b.arc(x1 - r[2], y1 - r[2], r[2], 0.0, FRAC_PI_2);
+        }
+        b.line_to(x0 + r[3], y1);
+        if r[3] > 0.0 {
+            b.arc(x0 + r[3], y1 - r[3], r[3], FRAC_PI_2, FRAC_PI_2);
+        }
+        b.line_to(x0, y0 + r[0]);
+        if r[0] > 0.0 {
+            b.arc(x0 + r[0], y0 + r[0], r[0], PI, FRAC_PI_2);
+        }
+        b.close().build()
+    }
 }
 
 /// Builds a [`Path`]. A drawing command without a current point starts a
@@ -208,6 +248,90 @@ pub enum LineCap {
     Square,
 }
 
+/// Where a stroke is drawn along its path. Lengths are in path units (so
+/// logical points for painters), scale with the stroke, and keep their
+/// phase across scale factors. Each subpath starts the pattern afresh.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum StrokePattern {
+    #[default]
+    Solid,
+    /// `dash` drawn, `gap` skipped, repeating; `offset` shifts the start
+    /// along the pattern. Caps apply to every dash.
+    Dashed { dash: f32, gap: f32, offset: f32 },
+    /// Round dots as wide as the stroke, centers `spacing` apart, the first
+    /// `offset` along the path. Overrides the cap with a round one.
+    Dotted { spacing: f32, offset: f32 },
+}
+
+/// Fewest path units a dash, gap, or dot spacing may be. Shorter or
+/// non-finite lengths make the pattern draw solid, so hostile values can
+/// neither hide a stroke nor generate unbounded segments.
+pub const MIN_PATTERN_LENGTH: f32 = 0.25;
+
+/// Most dashes or dots a pattern generates per stroke; past it the stroke
+/// draws solid.
+pub const MAX_PATTERN_SEGMENTS: usize = 4096;
+
+impl StrokePattern {
+    pub fn dashed(dash: f32, gap: f32) -> Self {
+        Self::Dashed {
+            dash,
+            gap,
+            offset: 0.0,
+        }
+    }
+
+    pub fn dotted(spacing: f32) -> Self {
+        Self::Dotted {
+            spacing,
+            offset: 0.0,
+        }
+    }
+
+    /// The pattern with its start shifted `offset` along the path.
+    pub fn with_offset(self, offset: f32) -> Self {
+        match self {
+            Self::Solid => Self::Solid,
+            Self::Dashed { dash, gap, .. } => Self::Dashed { dash, gap, offset },
+            Self::Dotted { spacing, .. } => Self::Dotted { spacing, offset },
+        }
+    }
+
+    /// The pattern a renderer draws: `Solid` when any length is non-finite
+    /// or shorter than [`MIN_PATTERN_LENGTH`] (a non-finite offset becomes
+    /// zero), for a stroke of `width`. Dots closer than their width merge
+    /// into a solid line, so they draw solid too.
+    pub fn validated(self, width: f32) -> Self {
+        let ok = |v: f32| v.is_finite() && v >= MIN_PATTERN_LENGTH;
+        let offset = |v: f32| if v.is_finite() { v } else { 0.0 };
+        match self {
+            Self::Dashed {
+                dash,
+                gap,
+                offset: o,
+            } if ok(dash) && ok(gap) => Self::Dashed {
+                dash,
+                gap,
+                offset: offset(o),
+            },
+            Self::Dotted { spacing, offset: o } if ok(spacing) && spacing > width => Self::Dotted {
+                spacing,
+                offset: offset(o),
+            },
+            _ => Self::Solid,
+        }
+    }
+
+    /// One repeat of the pattern along the path, or `None` for solid.
+    pub fn period(&self) -> Option<f32> {
+        match *self {
+            Self::Solid => None,
+            Self::Dashed { dash, gap, .. } => Some(dash + gap),
+            Self::Dotted { spacing, .. } => Some(spacing),
+        }
+    }
+}
+
 /// How a stroke outlines a path. `width` is in path units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StrokeStyle {
@@ -216,6 +340,7 @@ pub struct StrokeStyle {
     pub cap: LineCap,
     /// Miter joins longer than `miter_limit * width / 2` become bevels.
     pub miter_limit: f32,
+    pub pattern: StrokePattern,
 }
 
 impl Default for StrokeStyle {
@@ -225,6 +350,7 @@ impl Default for StrokeStyle {
             join: LineJoin::Miter,
             cap: LineCap::Butt,
             miter_limit: 4.0,
+            pattern: StrokePattern::Solid,
         }
     }
 }
@@ -249,6 +375,11 @@ impl StrokeStyle {
 
     pub fn miter_limit(mut self, limit: f32) -> Self {
         self.miter_limit = limit;
+        self
+    }
+
+    pub fn pattern(mut self, pattern: StrokePattern) -> Self {
+        self.pattern = pattern;
         self
     }
 

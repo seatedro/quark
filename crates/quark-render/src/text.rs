@@ -11,7 +11,10 @@ use quark::{Color, FontKind};
 use quark_text::{TextLayout, TextParams, TextStyle, TextSystem, TextSystemId};
 
 use crate::renderer::{ClippedRichText, ClippedText, fade_color};
-use crate::scene::{Rect, RectPrimitive, Scene, TextDecoration, TextDecorationKind};
+use crate::scene::{
+    Path, PathPrimitive, Rect, RectPrimitive, Scene, StrokePattern, StrokeStyle, StyledDecoration,
+    TextDecoration, TextDecorationKind,
+};
 
 /// How text primitives reach glyphon.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,6 +75,18 @@ pub(super) fn push_positioned_glyphs(
     );
 }
 
+/// The fills of `rich_texts`' glyphs, in the order
+/// [`push_positioned_glyphs`] numbers them, into `out`.
+pub(super) fn run_fills(rich_texts: &[ClippedRichText], out: &mut Vec<glyphon::GlyphFill>) {
+    out.clear();
+    out.extend(
+        rich_texts
+            .iter()
+            .filter_map(|text| text.paint.fill)
+            .take(glyphon::MAX_GLYPH_FILLS),
+    );
+}
+
 /// Call `visit` with the glyphs of `texts` then `rich_texts` until it
 /// breaks, in glyphon's order for the same primitives as text areas, so
 /// overlapping glyphs blend the same way. Nothing is shaped or copied;
@@ -102,15 +117,31 @@ fn visit_glyphs(
                 text.clip,
                 &mut visit,
                 rows,
-                |glyph| glyph.color_opt.unwrap_or(color),
+                |glyph| (glyph.color_opt.unwrap_or(color), 0),
+                None,
             )?;
         }
         rows.end_text();
     }
+    // Fills number from one within the run, in order; past the renderer's
+    // capacity texts draw in their base color.
+    let mut fills = 0usize;
     for text in rich_texts {
         let primitive = &text.primitive;
+        let fill = match text.paint.fill {
+            Some(_) if fills < glyphon::MAX_GLYPH_FILLS => {
+                fills += 1;
+                fills as u8
+            }
+            _ => 0,
+        };
         if let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() {
             let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+            // A filled glyph's color only carries the fade.
+            let faded = glyphon_color(fade_color(
+                quark::Color::rgba(255, 255, 255, 255),
+                text.alpha,
+            ));
             visit_layout_glyphs(
                 layout,
                 primitive.rect,
@@ -118,11 +149,20 @@ fn visit_glyphs(
                 &mut visit,
                 rows,
                 |glyph| {
-                    let color = span_color(glyph.metadata as u32, default_color, span_colors);
-                    glyph
-                        .color_opt
-                        .unwrap_or(glyphon_color(fade_color(color, text.alpha)))
+                    let span = glyph.metadata as u32;
+                    if let Some(color) = glyph.color_opt {
+                        return (color, 0);
+                    }
+                    let own = span
+                        .checked_sub(1)
+                        .is_some_and(|i| (i as usize) < span_colors.len());
+                    if fill > 0 && !own {
+                        return (faded, fill);
+                    }
+                    let color = span_color(span, default_color, span_colors);
+                    (glyphon_color(fade_color(color, text.alpha)), 0)
                 },
+                text.paint.backdrop,
             )?;
         }
         rows.end_text();
@@ -148,7 +188,8 @@ fn visit_layout_glyphs(
     clip: Rect,
     visit: &mut impl FnMut(PositionedGlyph) -> ControlFlow<()>,
     rows: &mut impl RowSink,
-    color: impl Fn(&LayoutGlyph) -> GlyphonColor,
+    paint: impl Fn(&LayoutGlyph) -> (GlyphonColor, u8),
+    backdrop: Option<u8>,
 ) -> ControlFlow<()> {
     // The layout's hit-testing and carets already include this shift.
     let (left, top) = (origin.x + layout.buffer_x(), origin.y);
@@ -172,12 +213,15 @@ fn visit_layout_glyphs(
             rows.offset(glyph.y - glyph.font_size * glyph.y_offset);
             // The buffer is already shaped at physical size.
             let physical = glyph.physical((left, top), 1.0);
+            let (color, fill) = paint(glyph);
             visit(PositionedGlyph {
                 cache_key: physical.cache_key,
                 x: physical.x,
                 y: physical.y + line_y,
-                color: color(glyph),
+                color,
                 bounds,
+                fill,
+                backdrop,
             })?;
         }
     }
@@ -529,16 +573,37 @@ pub fn text_decoration_rects(
     origin: (f32, f32),
     decoration: &TextDecoration,
 ) -> Vec<Rect> {
+    let styled = StyledDecoration::from(decoration.clone());
+    let mut out = Vec::new();
+    decoration_lines(layout, origin, &styled, false, |rect| out.push(rect));
+    out
+}
+
+/// Call `line_rect` with the rect of each line segment `decoration`
+/// covers, one per selection rect of the range on each line, or one per
+/// line from its leftmost to its rightmost glyph when `merge`: its
+/// thickness and its distance from the baseline as the style says, or the
+/// defaults derived from the font size.
+fn decoration_lines(
+    layout: &TextLayout,
+    origin: (f32, f32),
+    decoration: &StyledDecoration,
+    merge: bool,
+    mut line_rect: impl FnMut(Rect),
+) {
     let text = layout.text();
     let size = layout.style().font_size;
-    let thickness = (size * 0.07).max(1.0);
-    let offset = match decoration.kind {
-        // Top of the quad relative to the baseline.
-        TextDecorationKind::Underline => size * 0.12,
-        TextDecorationKind::Strikethrough => -size * 0.28 - thickness * 0.5,
+    let positive = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0);
+    let thickness = positive(decoration.style.thickness).unwrap_or((size * 0.07).max(1.0));
+    // Top of the quad relative to the baseline.
+    let top = match decoration.style.offset.filter(|v| v.is_finite()) {
+        Some(center) => center - thickness * 0.5,
+        None => match decoration.kind {
+            TextDecorationKind::Underline => size * 0.12,
+            TextDecorationKind::Strikethrough => -size * 0.28 - thickness * 0.5,
+        },
     };
     let (a, b) = (decoration.range.start, decoration.range.end.min(text.len()));
-    let mut out = Vec::new();
     for line in layout.lines() {
         let start = a.max(line.byte_range.start);
         let mut end = b.min(line.byte_range.end);
@@ -551,22 +616,33 @@ pub fn text_decoration_rects(
         if start >= end {
             continue;
         }
-        let y = origin.1 + line.baseline + offset;
+        let y = origin.1 + line.baseline + top;
+        let segment = |x0: f32, x1: f32| Rect {
+            x: origin.0 + x0,
+            y,
+            width: x1 - x0,
+            height: thickness,
+        };
+        // Merged, one segment from the leftmost to the rightmost glyph, so
+        // a pattern runs unbroken across the spans of one line.
+        let mut span: Option<(f32, f32)> = None;
         for r in layout.selection_rects(start..end) {
             // selection_rects can return rects of neighbouring lines when the
             // range touches a line break; keep only this line's.
             if (r.y - line.top).abs() > 0.01 {
                 continue;
             }
-            out.push(Rect {
-                x: origin.0 + r.x,
-                y,
-                width: r.width,
-                height: thickness,
-            });
+            if !merge {
+                line_rect(segment(r.x, r.x + r.width));
+                continue;
+            }
+            let (x0, x1) = span.unwrap_or((r.x, r.x + r.width));
+            span = Some((x0.min(r.x), x1.max(r.x + r.width)));
+        }
+        if let Some((x0, x1)) = span {
+            line_rect(segment(x0, x1));
         }
     }
-    out
 }
 
 /// Paints `decorations` as solid quads. Call right after pushing the text
@@ -587,6 +663,41 @@ pub fn push_text_decorations(
     }
 }
 
+/// Paints `decorations` in their styles: solid lines as quads, dashed and
+/// dotted ones as stroked paths along each line's segment, restarting
+/// their pattern at the start of every line. Call right after pushing the
+/// text primitive so the lines draw over the glyphs in paint order.
+// Reached through the crate root once stream F re-exports it.
+#[allow(dead_code)]
+pub fn push_styled_text_decorations(
+    scene: &mut Scene,
+    layout: &TextLayout,
+    origin: (f32, f32),
+    decorations: &[StyledDecoration],
+) {
+    for decoration in decorations {
+        let style = decoration.style;
+        let patterned = style.pattern.validated(1.0) != StrokePattern::Solid;
+        decoration_lines(layout, origin, decoration, patterned, |rect| {
+            let pattern = style.pattern.validated(rect.height);
+            if pattern == StrokePattern::Solid {
+                scene.rect(RectPrimitive {
+                    rect,
+                    color: style.color,
+                });
+                return;
+            }
+            let mut line = Path::builder();
+            line.move_to(0.0, 0.0).line_to(rect.width, 0.0);
+            let stroke = StrokeStyle::new(rect.height).pattern(pattern);
+            scene.path(
+                PathPrimitive::new(Arc::new(line.build()), [rect.x, rect.y + rect.height * 0.5])
+                    .stroke(style.color, stroke),
+            );
+        });
+    }
+}
+
 /// Average advance of a digit in the monospace face, in physical pixels.
 pub(super) fn measure_mono_char_width(text: &mut TextSystem, font_size: f32) -> f32 {
     let params = TextParams::new("0000000000", TextStyle::new(font_size).kind(FontKind::Mono));
@@ -604,22 +715,11 @@ pub(super) fn glyphon_color(color: Color) -> GlyphonColor {
     GlyphonColor::rgba(color.r, color.g, color.b, color.a)
 }
 
-pub(super) fn color_to_linear(color: Color) -> [f32; 4] {
-    [
-        srgb_to_linear(color.r),
-        srgb_to_linear(color.g),
-        srgb_to_linear(color.b),
-        color.a as f32 / 255.0,
-    ]
-}
-
-fn srgb_to_linear(channel: u8) -> f32 {
-    let value = channel as f32 / 255.0;
-    if value <= 0.04045 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
+/// `color`'s channels in 0..1, still sRGB-encoded and straight alpha. The
+/// shaders decode them for a linear target, so cached draws suit targets
+/// of either compositing mode.
+pub(super) fn color_to_unit(color: Color) -> [f32; 4] {
+    [color.r, color.g, color.b, color.a].map(|c| f32::from(c) / 255.0)
 }
 
 /// One vendored-only system shared by the tests that shape and render;

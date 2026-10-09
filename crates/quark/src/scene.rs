@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::color::Color;
 use crate::geometry::Rect;
-use crate::path::{FillRule, Path, StrokeStyle};
+use crate::path::{FillRule, Path, StrokePattern, StrokeStyle};
 use crate::transform::Transform2D;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -95,6 +95,14 @@ impl Scene {
         self.push(Primitive::Image(image));
     }
 
+    pub fn styled_text(&mut self, text: StyledTextPrimitive) {
+        self.push(Primitive::StyledText(text));
+    }
+
+    pub fn stripes(&mut self, stripes: StripesPrimitive) {
+        self.push(Primitive::Stripes(stripes));
+    }
+
     pub fn blur_region(&mut self, blur: BlurRegionPrimitive) {
         self.push(Primitive::BlurRegion(blur));
     }
@@ -118,6 +126,38 @@ impl Scene {
 
     pub fn pop_layer(&mut self) {
         self.push(Primitive::LayerEnd);
+    }
+
+    /// Start an isolated group: everything pushed until the matching
+    /// [`Self::pop_isolate`] renders together into `isolate.bounds` (and
+    /// nowhere else), then composites once through its mask and in its
+    /// compositing mode; see [`IsolatePrimitive`].
+    pub fn push_isolate(&mut self, isolate: IsolatePrimitive) {
+        self.push(Primitive::IsolateStart(isolate));
+    }
+
+    /// [`Self::push_isolate`] fading its content by `mask`.
+    pub fn push_mask(&mut self, bounds: Rect, mask: AlphaMask) {
+        self.push_isolate(IsolatePrimitive {
+            bounds,
+            mask: Some(mask),
+            compositing: None,
+        });
+    }
+
+    /// [`Self::push_isolate`] rendering its content in `compositing`
+    /// whatever the surface's mode, e.g. a terminal that keeps linear
+    /// blending inside a web-compatible window.
+    pub fn push_compositing_island(&mut self, bounds: Rect, compositing: UiCompositing) {
+        self.push_isolate(IsolatePrimitive {
+            bounds,
+            mask: None,
+            compositing: Some(compositing),
+        });
+    }
+
+    pub fn pop_isolate(&mut self) {
+        self.push(Primitive::IsolateEnd);
     }
 
     pub fn clip(&mut self, rect: Rect) {
@@ -179,6 +219,9 @@ pub enum Primitive {
     Shadow(ShadowPrimitive),
     TextRun(TextPrimitive),
     RichTextRun(RichTextPrimitive),
+    /// Text with a coordinate-dependent fill, an explicit coverage policy,
+    /// and per-span colors; see [`StyledTextPrimitive`].
+    StyledText(StyledTextPrimitive),
     Icon(IconPrimitive),
     Image(ImagePrimitive),
     EffectQuad(EffectQuadPrimitive),
@@ -188,6 +231,8 @@ pub enum Primitive {
     BlurRegion(BlurRegionPrimitive),
     /// A filled and/or stroked vector path.
     Path(PathPrimitive),
+    /// Diagonal or straight stripes filling a rounded rect.
+    Stripes(StripesPrimitive),
     ClipStart(ClipPrimitive),
     ClipEnd,
     /// Start a group that fades and transforms as one; see
@@ -195,6 +240,9 @@ pub enum Primitive {
     /// only, as a CSS stacking context does.
     LayerStart(LayerPrimitive),
     LayerEnd,
+    /// Start an isolated group; see [`Scene::push_isolate`].
+    IsolateStart(IsolatePrimitive),
+    IsolateEnd,
     /// Push a z-index context. Primitives inside render on top of lower z-indices.
     ZIndexPush(i32),
     /// Pop the current z-index context.
@@ -214,11 +262,14 @@ impl Primitive {
             Self::Shadow(p) => p.rect = p.rect.offset(dx, dy),
             Self::TextRun(p) => p.rect = p.rect.offset(dx, dy),
             Self::RichTextRun(p) => p.rect = p.rect.offset(dx, dy),
+            Self::StyledText(p) => p.rect = p.rect.offset(dx, dy),
             Self::Icon(p) => p.rect = p.rect.offset(dx, dy),
             Self::Image(p) => p.rect = p.rect.offset(dx, dy),
             Self::EffectQuad(p) => p.rect = p.rect.offset(dx, dy),
             Self::BlurRegion(p) => p.rect = p.rect.offset(dx, dy),
+            Self::Stripes(p) => p.rect = p.rect.offset(dx, dy),
             Self::ClipStart(p) => p.rect = p.rect.offset(dx, dy),
+            Self::IsolateStart(p) => p.offset(dx, dy),
             Self::Path(p) => {
                 p.origin[0] += dx;
                 p.origin[1] += dy;
@@ -234,7 +285,8 @@ impl Primitive {
             | Self::ZIndexPush(_)
             | Self::ZIndexPop
             | Self::LayerBoundary
-            | Self::LayerEnd => {}
+            | Self::LayerEnd
+            | Self::IsolateEnd => {}
         }
     }
 
@@ -279,6 +331,19 @@ impl Primitive {
             }
             Self::TextRun(p) => p.rect = snapped(p.rect),
             Self::RichTextRun(p) => p.rect = snapped(p.rect),
+            Self::StyledText(p) => {
+                p.rect = snapped(p.rect);
+                p.fill = p.fill.scaled(s);
+            }
+            Self::Stripes(p) => {
+                p.rect = snapped(p.rect);
+                p.corner_radii = p.corner_radii.map(|r| r * s);
+                p.period *= s;
+            }
+            Self::IsolateStart(p) => {
+                p.bounds = snapped(p.bounds);
+                p.mask = p.mask.map(|mask| mask.to_physical(s, shift));
+            }
             Self::Icon(p) => p.rect = snapped(p.rect),
             Self::Image(p) => p.rect = snapped(p.rect),
             Self::EffectQuad(p) => {
@@ -312,6 +377,7 @@ impl Primitive {
             | Self::ZIndexPush(_)
             | Self::ZIndexPop
             | Self::LayerEnd
+            | Self::IsolateEnd
             | Self::LayerBoundary => {}
         }
     }
@@ -380,7 +446,8 @@ pub struct SceneChunk {
     id: u64,
     generation: u64,
     primitives: Vec<Primitive>,
-    /// Whether any primitive, nested chunks included, starts a layer.
+    /// Whether any primitive, nested chunks included, starts a layer or an
+    /// isolated group.
     has_layers: bool,
 }
 
@@ -429,7 +496,7 @@ impl SceneChunk {
         self.primitives.clear();
         self.primitives.extend(primitives);
         self.has_layers = self.primitives.iter().any(|p| match p {
-            Primitive::LayerStart(_) => true,
+            Primitive::LayerStart(_) | Primitive::IsolateStart(_) => true,
             Primitive::Chunk(chunk) => chunk.chunk.has_layers,
             _ => false,
         });
@@ -636,6 +703,334 @@ pub struct TextDecoration {
     pub color: Color,
 }
 
+// ---------------------------------------------------------------------------
+// Color and blending policy
+// ---------------------------------------------------------------------------
+
+/// How a render surface blends UI paint. Chosen per window or offscreen
+/// render, never per element; a subtree can only switch through an isolated
+/// group ([`Scene::push_compositing_island`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum UiCompositing {
+    /// Authored sRGB colors are decoded and composited in linear light.
+    /// The framework default: gradients and translucency stay physically
+    /// even, and a 50% black scrim over white encodes to about 188.
+    #[default]
+    Linear,
+    /// Source-over on encoded sRGB values, as browsers and Electron blend
+    /// CSS: the same scrim encodes to about 128. Images, layers, and blur
+    /// convert at their boundaries; glyph coverage is not corrected.
+    WebCompatible,
+}
+
+/// How monochrome glyph coverage blends on a [`UiCompositing::Linear`]
+/// surface. A web-compatible surface always uses plain coverage, since
+/// blending encoded values already gives text its sRGB weight.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TextRendering {
+    /// Coverage used as alpha in linear light: thin, light strokes on dark
+    /// text over light backgrounds. The appearance before perceptual
+    /// coverage existed.
+    Linear,
+    /// Coverage adjusted so a glyph has the weight sRGB blending would give
+    /// it, without its color fringes, when the backdrop is a known opaque
+    /// color ([`TextBackdrop::Opaque`]). Falls back to `Linear` over an
+    /// unknown backdrop.
+    #[default]
+    Perceptual,
+}
+
+/// What a text primitive draws over, for [`TextRendering::Perceptual`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TextBackdrop {
+    /// Images, gradients, layers, or materials may lie behind the text.
+    #[default]
+    Unknown,
+    /// An opaque color the painter knows lies behind every glyph (the
+    /// nearest opaque background, with nothing painted between).
+    Opaque(Color),
+}
+
+/// What a window's surface shows where the app paints nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceBackground {
+    /// Cleared to this color every frame.
+    Opaque(Color),
+    /// Cleared to transparent, with premultiplied output, so the window
+    /// system composites what lies behind (a native material or the
+    /// desktop). Needs a surface alpha mode the platform may not offer.
+    Transparent,
+}
+
+impl Default for SurfaceBackground {
+    fn default() -> Self {
+        Self::Opaque(Color::rgba(0, 0, 0, 255))
+    }
+}
+
+/// Semantic kind of a native window material (G3). The native adapter maps
+/// it to the platform's closest material; renderer-free so element code can
+/// request regions without depending on the app crate.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MaterialKind {
+    #[default]
+    WindowBackground,
+    Sidebar,
+    Content,
+    Titlebar,
+    HeaderView,
+    Popover,
+    Menu,
+    Tooltip,
+    Hud,
+    Sheet,
+    UnderWindow,
+}
+
+// ---------------------------------------------------------------------------
+// Text fill
+// ---------------------------------------------------------------------------
+
+/// The color of a text primitive's monochrome glyphs, evaluated per pixel in
+/// paragraph coordinates (relative to the primitive's `rect` origin) and
+/// multiplied by glyph coverage. Color glyphs (emoji) keep their colors.
+/// Fills never affect shaping, so changing one (or a shimmer's phase)
+/// reuses the same layout and glyph rasters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextFill {
+    Solid(Color),
+    LinearGradient(TextGradient),
+    Shimmer(ShimmerSpec),
+}
+
+impl Default for TextFill {
+    fn default() -> Self {
+        Self::Solid(Color::TRANSPARENT)
+    }
+}
+
+impl TextFill {
+    /// The fill with its lengths and points multiplied by `s`.
+    pub fn scaled(self, s: f32) -> Self {
+        match self {
+            Self::Solid(color) => Self::Solid(color),
+            Self::LinearGradient(g) => Self::LinearGradient(TextGradient {
+                start: g.start.map(|v| v * s),
+                end: g.end.map(|v| v * s),
+                ..g
+            }),
+            Self::Shimmer(spec) => Self::Shimmer(ShimmerSpec {
+                band_width: spec.band_width * s,
+                ..spec
+            }),
+        }
+    }
+
+    /// The color drawn where no gradient or highlight applies: what reduced
+    /// motion or a renderer without fills shows.
+    pub fn base_color(&self) -> Color {
+        match self {
+            Self::Solid(color) => *color,
+            Self::LinearGradient(g) => g.from,
+            Self::Shimmer(spec) => spec.base,
+        }
+    }
+}
+
+/// A two-stop linear gradient from `start` (in `from`) to `end` (in `to`),
+/// in paragraph coordinates, clamped beyond both ends. Interpolates in the
+/// surface's compositing space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextGradient {
+    pub start: [f32; 2],
+    pub end: [f32; 2],
+    pub from: Color,
+    pub to: Color,
+}
+
+/// Which way a shimmer highlight sweeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ShimmerDirection {
+    #[default]
+    LeftToRight,
+    RightToLeft,
+}
+
+/// A highlight band sweeping across text in `base` color. At `phase` 0 the
+/// band sits just before the paragraph's leading edge, at 1 just past its
+/// trailing edge, so a looping phase sweeps continuously. The painter
+/// resolves `phase` from its animation clock (keyed by `key`) and paints
+/// the static `base` color under reduced motion; the renderer keeps no time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShimmerSpec {
+    pub base: Color,
+    pub highlight: Color,
+    /// Full width of the highlight band, in logical points.
+    pub band_width: f32,
+    /// One sweep, for [`Self::phase_at`]. 1.5 seconds by default, an example
+    /// value rather than a measured platform one.
+    pub duration_ms: u32,
+    pub direction: ShimmerDirection,
+    /// Stable identity of the animation, for the painter's clock.
+    pub key: u64,
+    /// Sweep progress in `[0, 1)`.
+    pub phase: f32,
+}
+
+impl ShimmerSpec {
+    pub fn new(base: Color, highlight: Color) -> Self {
+        Self {
+            base,
+            highlight,
+            band_width: 48.0,
+            duration_ms: 1500,
+            direction: ShimmerDirection::LeftToRight,
+            key: 0,
+            phase: 0.0,
+        }
+    }
+
+    pub fn band_width(mut self, width: f32) -> Self {
+        self.band_width = width;
+        self
+    }
+
+    pub fn duration_ms(mut self, duration_ms: u32) -> Self {
+        self.duration_ms = duration_ms;
+        self
+    }
+
+    pub fn direction(mut self, direction: ShimmerDirection) -> Self {
+        self.direction = direction;
+        self
+    }
+
+    pub fn key(mut self, key: u64) -> Self {
+        self.key = key;
+        self
+    }
+
+    pub fn phase(mut self, phase: f32) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    /// The phase at `now_ms` of a sweep that started at `start_ms` and
+    /// repeats every `duration_ms`.
+    pub fn phase_at(&self, start_ms: u64, now_ms: u64) -> f32 {
+        let duration = u64::from(self.duration_ms.max(1));
+        (now_ms.saturating_sub(start_ms) % duration) as f32 / duration as f32
+    }
+}
+
+/// Text whose glyphs take a [`TextFill`], with an explicit coverage policy.
+/// `span_colors[i]` overrides the fill for span `i + 1`'s glyphs as in
+/// [`RichTextPrimitive`]; an empty slice fills every glyph. `rect.x`/`rect.y`
+/// is the layout origin and the origin of the fill's coordinates; the
+/// shimmer sweeps across `rect.width`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledTextPrimitive {
+    pub rect: Rect,
+    pub layout: ShapedText,
+    pub fill: TextFill,
+    pub span_colors: Arc<[Color]>,
+    pub rendering: TextRendering,
+    pub backdrop: TextBackdrop,
+}
+
+impl StyledTextPrimitive {
+    /// Every glyph in `fill`, perceptual over an unknown backdrop (so
+    /// linear until [`Self::backdrop`] names one).
+    pub fn new(rect: Rect, layout: ShapedText, fill: TextFill) -> Self {
+        Self {
+            rect,
+            layout,
+            fill,
+            span_colors: Arc::from([]),
+            rendering: TextRendering::default(),
+            backdrop: TextBackdrop::Unknown,
+        }
+    }
+
+    pub fn span_colors(mut self, colors: Arc<[Color]>) -> Self {
+        self.span_colors = colors;
+        self
+    }
+
+    pub fn rendering(mut self, rendering: TextRendering) -> Self {
+        self.rendering = rendering;
+        self
+    }
+
+    pub fn backdrop(mut self, backdrop: TextBackdrop) -> Self {
+        self.backdrop = backdrop;
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decoration patterns
+// ---------------------------------------------------------------------------
+
+/// How a decoration line looks. `None` lengths take the defaults derived
+/// from the font size (as solid [`TextDecoration`]s use).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextDecorationStyle {
+    pub pattern: StrokePattern,
+    /// Line thickness in the layout's units.
+    pub thickness: Option<f32>,
+    /// Distance from the baseline to the line's center, positive below.
+    pub offset: Option<f32>,
+    pub color: Color,
+}
+
+impl TextDecorationStyle {
+    pub fn solid(color: Color) -> Self {
+        Self {
+            pattern: StrokePattern::Solid,
+            thickness: None,
+            offset: None,
+            color,
+        }
+    }
+
+    pub fn pattern(mut self, pattern: StrokePattern) -> Self {
+        self.pattern = pattern;
+        self
+    }
+
+    pub fn thickness(mut self, thickness: f32) -> Self {
+        self.thickness = Some(thickness);
+        self
+    }
+
+    pub fn offset(mut self, offset: f32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+}
+
+/// A [`TextDecoration`] with a full [`TextDecorationStyle`]. A pattern
+/// restarts at the start of each wrapped line and runs unbroken across a
+/// range's spans on one line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledDecoration {
+    pub range: Range<usize>,
+    pub kind: TextDecorationKind,
+    pub style: TextDecorationStyle,
+}
+
+impl From<TextDecoration> for StyledDecoration {
+    fn from(decoration: TextDecoration) -> Self {
+        Self {
+            range: decoration.range,
+            kind: decoration.kind,
+            style: TextDecorationStyle::solid(decoration.color),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IconPrimitive {
     pub rect: Rect,
@@ -684,6 +1079,224 @@ pub struct LayerPrimitive {
     /// Maps the layer's content, painted in untransformed scene
     /// coordinates, to where it lands; see [`Transform2D`].
     pub transform: Transform2D,
+}
+
+// ---------------------------------------------------------------------------
+// Isolated groups: masks and compositing islands
+// ---------------------------------------------------------------------------
+
+/// Most stops an [`AlphaMask`] carries; more are dropped.
+pub const MAX_MASK_STOPS: usize = 4;
+
+/// Mask opacity `alpha` at `offset` along a mask's axis (0 at its start, 1
+/// at its end).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MaskStop {
+    pub offset: f32,
+    pub alpha: f32,
+}
+
+/// Up to [`MAX_MASK_STOPS`] stops in increasing offset, inline so a mask
+/// never allocates.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MaskStops {
+    stops: [MaskStop; MAX_MASK_STOPS],
+    len: u8,
+}
+
+impl MaskStops {
+    /// The first [`MAX_MASK_STOPS`] of `stops`, sanitized: non-finite
+    /// values become 0, offsets and alphas clamp to `[0, 1]`, and each
+    /// offset is at least the previous one.
+    pub fn new(stops: &[MaskStop]) -> Self {
+        let mut out = Self::default();
+        let mut floor = 0.0f32;
+        for stop in stops.iter().take(MAX_MASK_STOPS) {
+            let clean = |v: f32| {
+                if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            };
+            let offset = clean(stop.offset).max(floor);
+            floor = offset;
+            out.stops[out.len as usize] = MaskStop {
+                offset,
+                alpha: clean(stop.alpha),
+            };
+            out.len += 1;
+        }
+        out
+    }
+
+    pub fn as_slice(&self) -> &[MaskStop] {
+        &self.stops[..self.len as usize]
+    }
+
+    /// The mask opacity at `t` along the axis: the stops interpolated
+    /// linearly, the first and last held beyond the ends, and fully opaque
+    /// with no stops.
+    pub fn alpha_at(&self, t: f32) -> f32 {
+        let stops = self.as_slice();
+        let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+            return 1.0;
+        };
+        if t <= first.offset {
+            return first.alpha;
+        }
+        for pair in stops.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if t <= b.offset {
+                let span = b.offset - a.offset;
+                let f = if span > 0.0 {
+                    (t - a.offset) / span
+                } else {
+                    1.0
+                };
+                return a.alpha + (b.alpha - a.alpha) * f;
+            }
+        }
+        last.alpha
+    }
+}
+
+/// Which edge of a box a fade runs out at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FadeEdge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// Opacity applied to an isolated group's premultiplied color and alpha
+/// as it composites, so overlapping content fades once, as a whole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AlphaMask {
+    /// Stops along the axis from `start` to `end`, in scene coordinates
+    /// like the group's bounds.
+    Linear {
+        start: [f32; 2],
+        end: [f32; 2],
+        stops: MaskStops,
+    },
+}
+
+impl AlphaMask {
+    /// Opaque inside `bounds`, fading to transparent over the last `length`
+    /// points before `edge`. A zero, negative, or non-finite length is no
+    /// fade: opaque everywhere.
+    pub fn fade_edge(bounds: Rect, edge: FadeEdge, length: f32) -> Self {
+        if !(length.is_finite() && length > 0.0) {
+            return Self::Linear {
+                start: [bounds.x, bounds.y],
+                end: [bounds.x, bounds.y],
+                stops: MaskStops::new(&[MaskStop {
+                    offset: 0.0,
+                    alpha: 1.0,
+                }]),
+            };
+        }
+        let (x0, y0, x1, y1) = (bounds.x, bounds.y, bounds.right(), bounds.bottom());
+        let (start, end) = match edge {
+            FadeEdge::Right => ([x1 - length, y0], [x1, y0]),
+            FadeEdge::Left => ([x0 + length, y0], [x0, y0]),
+            FadeEdge::Bottom => ([x0, y1 - length], [x0, y1]),
+            FadeEdge::Top => ([x0, y0 + length], [x0, y0]),
+        };
+        Self::Linear {
+            start,
+            end,
+            stops: MaskStops::new(&[
+                MaskStop {
+                    offset: 0.0,
+                    alpha: 1.0,
+                },
+                MaskStop {
+                    offset: 1.0,
+                    alpha: 0.0,
+                },
+            ]),
+        }
+    }
+
+    /// The mask's opacity at scene point `p`. Degenerate axes (start equal
+    /// to end) use the last stop everywhere past the start.
+    pub fn alpha_at(&self, p: [f32; 2]) -> f32 {
+        match self {
+            Self::Linear { start, end, stops } => {
+                let axis = [end[0] - start[0], end[1] - start[1]];
+                let len2 = axis[0] * axis[0] + axis[1] * axis[1];
+                let t = if len2 > 0.0 {
+                    ((p[0] - start[0]) * axis[0] + (p[1] - start[1]) * axis[1]) / len2
+                } else {
+                    1.0
+                };
+                stops.alpha_at(t)
+            }
+        }
+    }
+
+    /// The mask in physical pixels, as [`Primitive::to_physical`] converts
+    /// the group's bounds (without snapping, so the ramp keeps its length).
+    pub fn to_physical(self, s: f32, shift: [f32; 2]) -> Self {
+        match self {
+            Self::Linear { start, end, stops } => Self::Linear {
+                start: [start[0] * s + shift[0], start[1] * s + shift[1]],
+                end: [end[0] * s + shift[0], end[1] * s + shift[1]],
+                stops,
+            },
+        }
+    }
+
+    fn offset(self, dx: f32, dy: f32) -> Self {
+        match self {
+            Self::Linear { start, end, stops } => Self::Linear {
+                start: [start[0] + dx, start[1] + dy],
+                end: [end[0] + dx, end[1] + dy],
+                stops,
+            },
+        }
+    }
+}
+
+/// An isolated group ([`Primitive::IsolateStart`] to
+/// [`Primitive::IsolateEnd`]). Its content renders on its own, clipped to
+/// `bounds`, then composites once: multiplied by `mask` when there is one,
+/// and blended by `compositing` (the surface's mode when `None`). Only the
+/// visible part of `bounds` takes a pooled texture. Hit testing and
+/// semantics are the painter's; a mask hides nothing from them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IsolatePrimitive {
+    pub bounds: Rect,
+    pub mask: Option<AlphaMask>,
+    pub compositing: Option<UiCompositing>,
+}
+
+impl IsolatePrimitive {
+    fn offset(&mut self, dx: f32, dy: f32) {
+        self.bounds = self.bounds.offset(dx, dy);
+        self.mask = self.mask.map(|mask| mask.offset(dx, dy));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stripes
+// ---------------------------------------------------------------------------
+
+/// Parallel stripes filling a rounded rect: bands of `colors[0]` covering
+/// `duty` of every `period` (logical points, measured across the stripes),
+/// `colors[1]` between them. `angle` turns the stripes from vertical,
+/// clockwise in radians; phase zero is at the rect's top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripesPrimitive {
+    pub rect: Rect,
+    pub corner_radii: [f32; 4],
+    pub angle: f32,
+    pub period: f32,
+    pub duty: f32,
+    pub colors: [Color; 2],
 }
 
 /// How a [`PathPrimitive`] fills its interior.
@@ -745,6 +1358,30 @@ impl PathPrimitive {
         self
     }
 
+    /// A border of `width` along `rect`'s rounded perimeter drawn in
+    /// `pattern`, staying inside `rect` like a [`BorderPrimitive`]: the
+    /// path runs `width / 2` in, with radii reduced to match.
+    pub fn border(
+        rect: Rect,
+        width: f32,
+        corner_radii: [f32; 4],
+        color: Color,
+        pattern: StrokePattern,
+    ) -> Self {
+        let half = width.max(0.0) * 0.5;
+        let inner = Rect {
+            x: half,
+            y: half,
+            width: (rect.width - width).max(0.0),
+            height: (rect.height - width).max(0.0),
+        };
+        let radii = corner_radii.map(|r| (r - half).max(0.0));
+        let style = StrokeStyle::new(width)
+            .join(crate::path::LineJoin::Round)
+            .pattern(pattern);
+        Self::new(Arc::new(Path::rounded_rect(inner, radii)), [rect.x, rect.y]).stroke(color, style)
+    }
+
     /// Scene bounds of everything the primitive can paint.
     pub fn bounds(&self) -> Rect {
         let b = self.path.bounds();
@@ -794,6 +1431,36 @@ pub struct EffectQuadPrimitive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hostile mask stops (NaN, out of order, out of range, too many) must
+    // sanitize to a bounded, monotonic ramp, so a renderer never reads an
+    // unbounded or unordered stop list.
+    #[test]
+    fn mask_stops_sanitize_hostile_input() {
+        let stop = |offset, alpha| MaskStop { offset, alpha };
+        let stops = MaskStops::new(&[
+            stop(0.5, f32::NAN),
+            stop(0.2, 2.0),
+            stop(f32::INFINITY, 0.5),
+            stop(0.9, 0.0),
+            stop(1.0, 1.0),
+        ]);
+        let got: Vec<(f32, f32)> = stops
+            .as_slice()
+            .iter()
+            .map(|s| (s.offset, s.alpha))
+            .collect();
+        assert_eq!(got, [(0.5, 0.0), (0.5, 1.0), (0.5, 0.5), (0.9, 0.0)]);
+        // Held beyond both ends, interpolated between.
+        let table = [(-1.0, 0.0), (0.5, 0.0), (0.7, 0.25), (2.0, 0.0)];
+        for (t, alpha) in table {
+            assert!(
+                (stops.alpha_at(t) - alpha).abs() < 1e-6,
+                "{t}: {}",
+                stops.alpha_at(t)
+            );
+        }
+    }
 
     // A chunk paints what its primitives pushed where it lands paint. It
     // snaps them around its own whole-pixel origin, so a rounding that

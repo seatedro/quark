@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use quark::Color;
+use quark_text::{FontEpoch, TextSystem};
 
 /// Largest side an icon is rasterized at. Bigger requests (a NaN or huge
 /// rect turned into a pixel size) render at this size and scale up.
@@ -81,7 +82,70 @@ fn lock_cache() -> MutexGuard<'static, IconCache> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The fonts SVG `<text>` resolves against: an immutable copy of one text
+/// system's font database (its faces, generic families, and loaded data
+/// shared, not reloaded) at one font epoch. Build one per epoch, not per
+/// icon. Only these faces are reachable: SVG text loads no external or
+/// network fonts.
+#[derive(Clone)]
+pub struct SvgFonts {
+    epoch: FontEpoch,
+    db: Arc<resvg::usvg::fontdb::Database>,
+    /// Family of text with no `font-family`: the system's UI family.
+    family: String,
+}
+
+impl std::fmt::Debug for SvgFonts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SvgFonts")
+            .field("epoch", &self.epoch)
+            .field("faces", &self.db.len())
+            .field("family", &self.family)
+            .finish()
+    }
+}
+
+impl SvgFonts {
+    /// A snapshot of `text`'s fonts as they are now.
+    pub fn new(text: &TextSystem) -> Self {
+        let db = text.font_system().db().clone();
+        let family = db
+            .family_name(&resvg::usvg::fontdb::Family::SansSerif)
+            .to_owned();
+        Self {
+            epoch: text.font_epoch(),
+            db: Arc::new(db),
+            family,
+        }
+    }
+
+    /// The epoch of the fonts the snapshot holds.
+    pub fn epoch(&self) -> FontEpoch {
+        self.epoch
+    }
+
+    fn options(&self) -> resvg::usvg::Options<'static> {
+        resvg::usvg::Options {
+            fontdb: self.db.clone(),
+            font_family: self.family.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Whether `svg` can draw text, which makes its pixels depend on fonts.
+fn has_text(svg: &str) -> bool {
+    svg.contains("<text")
+}
+
 pub fn cache_key(svg: &str, size: u32, color: Color) -> u64 {
+    cache_key_with(svg, size, color, None)
+}
+
+/// [`cache_key`] for an SVG rasterized with `fonts`. Text-free SVGs key
+/// alike whatever the fonts; ones with text key by the fonts' epoch, so
+/// two text systems never share a raster.
+pub fn cache_key_with(svg: &str, size: u32, color: Color, fonts: Option<&SvgFonts>) -> u64 {
     use std::hash::{Hash, Hasher};
     // Hash the FULL svg: every lucide icon shares the same `<svg xmlns=…>` prefix,
     // so hashing only a prefix + length collides any two same-length icons (e.g.
@@ -93,6 +157,9 @@ pub fn cache_key(svg: &str, size: u32, color: Color) -> u64 {
     color.g.hash(&mut h);
     color.b.hash(&mut h);
     color.a.hash(&mut h);
+    if has_text(svg) {
+        fonts.map(|fonts| fonts.epoch).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -102,25 +169,45 @@ pub fn cache_key(svg: &str, size: u32, color: Color) -> u64 {
 /// cached, and the shared bytes make repeat calls a refcount bump instead of
 /// a copy.
 pub fn rasterize_svg(svg: &str, size: u32, color: Color) -> (Arc<[u8]>, u32, u32) {
-    let key = cache_key(svg, size, color);
+    rasterize_svg_with(svg, size, color, None)
+}
+
+/// [`rasterize_svg`] with `<text>` drawn in `fonts`; without fonts SVG text
+/// draws nothing.
+pub fn rasterize_svg_with(
+    svg: &str,
+    size: u32,
+    color: Color,
+    fonts: Option<&SvgFonts>,
+) -> (Arc<[u8]>, u32, u32) {
+    let key = cache_key_with(svg, size, color, fonts);
     if let Some(hit) = lock_cache().get(key) {
         return hit;
     }
     // Rasterize outside the lock so one large icon does not stall others.
-    let (rgba, w, h) =
-        render(svg, size.clamp(1, MAX_ICON_PX), color).unwrap_or_else(|| (Arc::from([]), 0, 0));
+    let (rgba, w, h) = render(svg, size.clamp(1, MAX_ICON_PX), color, fonts)
+        .unwrap_or_else(|| (Arc::from([]), 0, 0));
     lock_cache().insert(key, rgba.clone(), w, h);
     (rgba, w, h)
 }
 
-fn render(svg: &str, size: u32, color: Color) -> Option<(Arc<[u8]>, u32, u32)> {
+fn render(
+    svg: &str,
+    size: u32,
+    color: Color,
+    fonts: Option<&SvgFonts>,
+) -> Option<(Arc<[u8]>, u32, u32)> {
     let color_hex = format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
     let colored_svg = svg
         .replace("currentColor", &color_hex)
         .replace("stroke=\"#000\"", &format!("stroke=\"{color_hex}\""))
         .replace("fill=\"#000\"", &format!("fill=\"{color_hex}\""));
 
-    let tree = resvg::usvg::Tree::from_str(&colored_svg, &resvg::usvg::Options::default()).ok()?;
+    let options = match fonts {
+        Some(fonts) if has_text(svg) => fonts.options(),
+        _ => resvg::usvg::Options::default(),
+    };
+    let tree = resvg::usvg::Tree::from_str(&colored_svg, &options).ok()?;
     let svg_size = tree.size();
     let scale = size as f32 / svg_size.width().max(svg_size.height());
     // The longer side scales to `size`, so both sides stay within it.
