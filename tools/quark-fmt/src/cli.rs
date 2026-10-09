@@ -5,13 +5,16 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::config::{Overrides, Resolver, Settings};
+use crate::config::{self, Overrides, Resolver, Settings};
 use crate::workspace::{self, Selected};
+use crate::{
+    Coverage, Diagnostic, FormatOptions, Invocation, NewlineStyle, PassThrough, Severity,
+    apply_edits,
+};
 
 /// Composed transformations tried before giving up on a fixed point.
 const MAX_TRANSFORMS: usize = 3;
@@ -219,80 +222,67 @@ fn run_stdin(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
+    let name = opts
+        .stdin_filepath
+        .as_deref()
+        .unwrap_or(Path::new("<stdin>"));
     let mut source = String::new();
     if let Err(e) = stdin.read_to_string(&mut source) {
-        let _ = writeln!(stderr, "error: <stdin>: {e}");
+        let _ = writeln!(stderr, "error: {}: {e}", name.display());
         return 2;
     }
     let context = match &opts.stdin_filepath {
         Some(p) => absolute(p),
         None => std::env::current_dir().map(|d| d.join("<stdin>")),
     };
-    let context = match context {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = writeln!(stderr, "error: {e}");
-            return 2;
-        }
-    };
-    let name = opts
-        .stdin_filepath
+    let dir = context
         .as_deref()
-        .unwrap_or(Path::new("<stdin>"));
-    let mut resolver = Resolver::new(opts.overrides.clone());
-    let dir = context.parent().unwrap_or(Path::new("/"));
-    let settings = match resolver.settings(dir, None) {
+        .ok()
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("/"));
+    let settings = match Resolver::new(opts.overrides.clone()).settings(dir, None) {
         Ok(s) => s,
         Err(e) => {
             let _ = writeln!(stderr, "error: {e}");
             return 2;
         }
     };
-    let formatted = if settings.quark.excludes(&context) {
-        source.clone()
+    let excluded = context.as_deref().is_ok_and(|c| settings.quark.excludes(c));
+    let formatted = if excluded {
+        Formatted::unchanged(&source)
     } else {
         match format_source(&source, &settings, opts.view_only, dir) {
             Ok(f) => f,
-            Err(problem) => {
-                let _ = writeln!(stderr, "{}", problem.render(name, &source));
+            Err(problems) => {
+                report(stderr, name, &problems, opts.verbose);
                 return 2;
             }
         }
     };
+    report(stderr, name, &formatted.notes, opts.verbose);
     if opts.check {
-        if formatted == source {
+        if strict_failure(&formatted.notes) {
+            return 2;
+        }
+        if formatted.text == source {
             return 0;
         }
-        let _ = stdout.write_all(diff(name, &source, &formatted).as_bytes());
+        let _ = stdout.write_all(diff(name, &source, &formatted.text).as_bytes());
         return 1;
     }
-    let _ = stdout.write_all(formatted.as_bytes());
+    let _ = stdout.write_all(formatted.text.as_bytes());
     0
 }
 
 /// What happened to one file.
 enum Outcome {
-    Unchanged,
     Excluded,
-    /// Reformatted: written, or reported with its diff under `--check`.
-    Changed {
+    Done {
         original: String,
-        formatted: String,
+        formatted: Formatted,
     },
-    /// Left unchanged; `source` locates the problem's offset.
-    Failed {
-        problem: Problem,
-        source: String,
-    },
-}
-
-impl Outcome {
-    fn failed(message: impl Into<String>) -> Self {
-        Self::Failed {
-            problem: Problem::new(message),
-            source: String::new(),
-        }
-    }
+    /// Left unchanged.
+    Failed(Vec<Problem>),
 }
 
 fn run_files(opts: &Options, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
@@ -328,37 +318,53 @@ fn run_files(opts: &Options, stdout: &mut dyn Write, stderr: &mut dyn Write) -> 
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut code = 0;
+    let mut files = [0usize; 4]; // changed, unchanged, excluded, failed
+    let mut views = Coverage::default();
     for ((file, _), outcome) in work.iter().zip(outcomes) {
         let name = file.path.strip_prefix(&cwd).unwrap_or(&file.path);
         match outcome {
-            Outcome::Unchanged if opts.emit_stdout => {
-                let _ = stdout.write_all(fs::read(&file.path).unwrap_or_default().as_slice());
+            Outcome::Excluded => {
+                files[2] += 1;
+                if opts.verbose {
+                    let _ = writeln!(stderr, "excluded by quark-fmt.toml: {}", name.display());
+                }
             }
-            Outcome::Unchanged if opts.verbose => {
-                let _ = writeln!(stderr, "unchanged {}", name.display());
+            Outcome::Failed(problems) => {
+                files[3] += 1;
+                report(stderr, name, &problems, opts.verbose);
+                code = 2;
             }
-            Outcome::Excluded if opts.verbose => {
-                let _ = writeln!(stderr, "excluded by quark-fmt.toml: {}", name.display());
-            }
-            Outcome::Unchanged | Outcome::Excluded => {}
-            Outcome::Changed {
+            Outcome::Done {
                 original,
                 formatted,
             } => {
-                if opts.check {
-                    let _ = stdout.write_all(diff(name, &original, &formatted).as_bytes());
+                report(stderr, name, &formatted.notes, opts.verbose);
+                add_coverage(&mut views, formatted.coverage);
+                let changed = formatted.text != original;
+                files[usize::from(!changed)] += 1;
+                if opts.check && strict_failure(&formatted.notes) {
+                    code = 2;
+                }
+                if opts.emit_stdout {
+                    let _ = stdout.write_all(formatted.text.as_bytes());
+                } else if changed && opts.check {
+                    let _ = stdout.write_all(diff(name, &original, &formatted.text).as_bytes());
                     code = code.max(1);
-                } else if opts.emit_stdout {
-                    let _ = stdout.write_all(formatted.as_bytes());
-                } else if opts.verbose {
+                } else if changed && opts.verbose {
                     let _ = writeln!(stderr, "formatted {}", name.display());
                 }
             }
-            Outcome::Failed { problem, source } => {
-                let _ = writeln!(stderr, "{}", problem.render(name, &source));
-                code = 2;
-            }
         }
+    }
+    if opts.verbose {
+        let [changed, unchanged, excluded, failed] = files;
+        let verb = if opts.check { "to format" } else { "formatted" };
+        let _ = writeln!(
+            stderr,
+            "files: {changed} {verb}, {unchanged} unchanged, {excluded} excluded, {failed} failed; \
+             views: {} found, {} printed, {} skipped, {} failed",
+            views.discovered, views.formatted, views.skipped, views.failed
+        );
     }
     code
 }
@@ -370,31 +376,24 @@ fn process(opts: &Options, file: &Selected, settings: &Settings) -> Outcome {
     }
     let bytes = match fs::read(&file.path) {
         Ok(b) => b,
-        Err(e) => return Outcome::failed(e.to_string()),
+        Err(e) => return Outcome::Failed(vec![Problem::error(e.to_string())]),
     };
     let Ok(original) = String::from_utf8(bytes) else {
-        return Outcome::failed("not UTF-8");
+        return Outcome::Failed(vec![Problem::error("not UTF-8")]);
     };
     let dir = file.path.parent().unwrap_or(Path::new("/"));
     let formatted = match format_source(&original, settings, opts.view_only, dir) {
         Ok(f) => f,
-        Err(problem) => {
-            return Outcome::Failed {
-                problem,
-                source: original,
-            };
-        }
+        Err(problems) => return Outcome::Failed(problems),
     };
-    if formatted == original {
-        return Outcome::Unchanged;
-    }
-    if !opts.check
+    if formatted.text != original
+        && !opts.check
         && !opts.emit_stdout
-        && let Err(e) = write_atomic(&file.path, original.as_bytes(), formatted.as_bytes())
+        && let Err(e) = write_atomic(&file.path, original.as_bytes(), formatted.text.as_bytes())
     {
-        return Outcome::failed(format!("{e}; file left unchanged"));
+        return Outcome::Failed(vec![Problem::error(format!("{e}; file left unchanged"))]);
     }
-    Outcome::Changed {
+    Outcome::Done {
         original,
         formatted,
     }
@@ -460,32 +459,92 @@ fn diff(name: &Path, original: &str, formatted: &str) -> String {
         .to_string()
 }
 
-/// Why a file was left unchanged.
-#[derive(Debug)]
+fn add_coverage(total: &mut Coverage, file: Coverage) {
+    total.discovered += file.discovered;
+    total.formatted += file.formatted;
+    total.skipped += file.skipped;
+    total.failed += file.failed;
+}
+
+/// A diagnostic for the user, located in the text it was found in.
+#[derive(Clone, Debug)]
 pub struct Problem {
-    /// Byte offset in the source the message refers to, when known.
-    pub offset: Option<usize>,
+    pub severity: Severity,
+    /// 1-based line and column.
+    pub location: Option<(usize, usize)>,
     pub message: String,
 }
 
 impl Problem {
-    fn new(message: impl Into<String>) -> Self {
+    fn error(message: impl Into<String>) -> Self {
         Self {
-            offset: None,
+            severity: Severity::Error,
+            location: None,
             message: message.into(),
         }
     }
 
-    fn render(&self, name: &Path, source: &str) -> String {
-        let name = name.display();
-        match self.offset {
-            Some(offset) => {
-                let before = &source[..offset.min(source.len())];
-                let line = before.matches('\n').count() + 1;
-                let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-                format!("error: {name}:{line}:{column}: {}", self.message)
+    fn from_diagnostic(d: &Diagnostic, text: &str) -> Self {
+        let location = d.range.as_ref().map(|r| {
+            let before = &text[..r.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            (line, column)
+        });
+        Self {
+            severity: d.severity,
+            location,
+            message: d.message.clone(),
+        }
+    }
+}
+
+/// Prints errors and warnings; informational notes (skips) only when verbose.
+fn report(out: &mut dyn Write, name: &Path, problems: &[Problem], verbose: bool) {
+    for p in problems {
+        let label = match p.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info if verbose => "note",
+            Severity::Info => continue,
+        };
+        let _ = match p.location {
+            Some((line, col)) => {
+                writeln!(
+                    out,
+                    "{label}: {}:{line}:{col}: {}",
+                    name.display(),
+                    p.message
+                )
             }
-            None => format!("error: {name}: {}", self.message),
+            None => writeln!(out, "{label}: {}: {}", name.display(), p.message),
+        };
+    }
+}
+
+/// `--check` is strict: a warning means part of the file was kept as
+/// written for a reason the formatter could not resolve (a view hidden in
+/// another macro, embedded Rust it could not place), and CI must not report
+/// that file as clean.
+fn strict_failure(notes: &[Problem]) -> bool {
+    notes.iter().any(|p| p.severity == Severity::Warning)
+}
+
+/// A successfully formatted file.
+#[derive(Debug)]
+struct Formatted {
+    text: String,
+    /// Warnings and notes about parts kept as written.
+    notes: Vec<Problem>,
+    coverage: Coverage,
+}
+
+impl Formatted {
+    fn unchanged(source: &str) -> Self {
+        Self {
+            text: source.to_owned(),
+            notes: Vec::new(),
+            coverage: Coverage::default(),
         }
     }
 }
@@ -498,81 +557,135 @@ fn format_source(
     settings: &Settings,
     view_only: bool,
     dir: &Path,
-) -> Result<String, Problem> {
+) -> Result<Formatted, Vec<Problem>> {
     if view_only {
-        let once = engine::view_pass(source, settings)?;
-        let twice = engine::view_pass(&once, settings)?;
-        if twice != once {
-            return Err(Problem::new(
+        let once = view_pass(source, settings)?;
+        let twice = view_pass(&once.text, settings)?;
+        if twice.text != once.text {
+            return Err(vec![Problem::error(
                 "view formatting is not idempotent; file left unchanged",
-            ));
+            )]);
         }
         return Ok(once);
     }
-    // Rustfmt's own output can move a view, which changes the width the view
+    // Rustfmt's output can move a view, which changes the width the view
     // printer sees, which can change rustfmt's next decision. Accept only a
     // state that one more round leaves alone, within a fixed budget.
     let mut seen = vec![source.to_owned()];
-    let mut current = compose(source, settings, dir)?;
+    let mut current = compose(source, settings, dir, true)?;
     for _ in 1..MAX_TRANSFORMS {
-        let next = compose(&current, settings, dir)?;
-        if next == current {
-            return Ok(current);
+        let next = compose(&current.text, settings, dir, false)?;
+        if next.text == current.text {
+            // The verifying round's notes are located in the final text.
+            return Ok(next);
         }
-        if seen.contains(&next) {
+        if seen.contains(&next.text) {
             break;
         }
-        seen.push(std::mem::replace(&mut current, next));
+        seen.push(std::mem::replace(&mut current, next).text);
     }
-    Err(Problem::new(format!(
+    Err(vec![Problem::error(format!(
         "rustfmt and the view printer did not converge within {MAX_TRANSFORMS} passes; \
          file left unchanged"
-    )))
+    ))])
 }
 
 /// One round: rustfmt the whole file, put each view body back exactly as it
 /// was (rustfmt's macro heuristics must not touch templates), then format the
-/// views.
-fn compose(source: &str, settings: &Settings, dir: &Path) -> Result<String, Problem> {
-    let before = engine::view_bodies(source, settings)?;
-    let rustfmt = rustfmt(source, settings, dir)?;
-    let after = engine::view_bodies(&rustfmt, settings)?;
+/// views. `first` marks the round whose input is the user's source.
+fn compose(
+    source: &str,
+    settings: &Settings,
+    dir: &Path,
+    first: bool,
+) -> Result<Formatted, Vec<Problem>> {
+    let before = discover(source, settings)?;
+    let rustfmt = rustfmt(source, settings, dir).map_err(|p| vec![p])?;
+    let after = discover(&rustfmt, settings)?;
     let restored = restore_bodies(source, &before, &rustfmt, &after)?;
-    engine::view_pass(&restored, settings)
+    view_pass(&restored, settings).map_err(|problems| {
+        // These positions are in rustfmt's output, which the user never
+        // sees. On the first round the views alone usually fail the same way
+        // on the original, which gives positions in the user's file.
+        match first.then(|| view_pass(source, settings)) {
+            Some(Err(original)) => original,
+            _ => problems
+                .into_iter()
+                .map(|p| Problem {
+                    location: None,
+                    ..p
+                })
+                .collect(),
+        }
+    })
+}
+
+fn discover(source: &str, settings: &Settings) -> Result<Vec<Invocation>, Vec<Problem>> {
+    crate::discover(source, &settings.quark.macro_names)
+        .map(|d| d.invocations)
+        .map_err(|d| vec![Problem::from_diagnostic(&d, source)])
 }
 
 /// Copies each original view body over its counterpart in rustfmt's output.
-/// Both lists are outermost invocations in source order; ranges cover the
-/// body including its delimiters.
+/// Both lists are outermost invocations in source order.
 fn restore_bodies(
     original: &str,
-    before: &[Range<usize>],
+    before: &[Invocation],
     formatted: &str,
-    after: &[Range<usize>],
-) -> Result<String, Problem> {
-    if before.len() != after.len() {
-        return Err(Problem::new(format!(
-            "rustfmt changed the number of view! invocations ({} before, {} after)",
-            before.len(),
-            after.len()
-        )));
+    after: &[Invocation],
+) -> Result<String, Vec<Problem>> {
+    let changed = before.len() != after.len()
+        || before
+            .iter()
+            .zip(after)
+            .any(|(old, new)| old.path != new.path || old.delimiter != new.delimiter);
+    if changed {
+        return Err(vec![Problem::error(
+            "rustfmt changed which view! invocations the file has; file left unchanged",
+        )]);
     }
     let mut out = String::with_capacity(formatted.len());
     let mut copied = 0;
     for (old, new) in before.iter().zip(after) {
-        let (old_text, new_text) = (&original[old.clone()], &formatted[new.clone()]);
-        if old_text.chars().next() != new_text.chars().next() {
-            return Err(Problem {
-                offset: Some(old.start),
-                message: "rustfmt changed a view! delimiter".into(),
-            });
-        }
-        out.push_str(&formatted[copied..new.start]);
-        out.push_str(old_text);
-        copied = new.end;
+        out.push_str(&formatted[copied..new.body.start]);
+        out.push_str(&original[old.body.clone()]);
+        copied = new.body.end;
     }
     out.push_str(&formatted[copied..]);
     Ok(out)
+}
+
+/// The view printer over a whole file.
+fn view_pass(source: &str, settings: &Settings) -> Result<Formatted, Vec<Problem>> {
+    let r = &settings.rustfmt;
+    let newline_style = match r.newline_style {
+        config::NewlineStyle::Auto => NewlineStyle::Auto,
+        config::NewlineStyle::Unix => NewlineStyle::Unix,
+        config::NewlineStyle::Windows => NewlineStyle::Windows,
+        config::NewlineStyle::Native if cfg!(windows) => NewlineStyle::Windows,
+        config::NewlineStyle::Native => NewlineStyle::Unix,
+    };
+    let options = FormatOptions {
+        max_width: r.max_width,
+        tab_spaces: r.tab_spaces,
+        hard_tabs: r.hard_tabs,
+        newline_style,
+        macro_names: settings.quark.macro_names.clone(),
+    };
+    let outcome = crate::format_source(source, &options, &PassThrough);
+    let notes = outcome
+        .diagnostics
+        .iter()
+        .map(|d| Problem::from_diagnostic(d, source))
+        .collect();
+    if outcome.has_errors() {
+        return Err(notes);
+    }
+    Ok(Formatted {
+        text: apply_edits(source, &outcome.edits),
+        notes,
+        coverage: outcome.coverage,
+    })
 }
 
 /// Runs the toolchain's rustfmt on the whole file through stdin, so it never
@@ -602,7 +715,7 @@ fn rustfmt(source: &str, settings: &Settings, dir: &Path) -> Result<String, Prob
     let program = program.to_string_lossy();
     let mut child = cmd
         .spawn()
-        .map_err(|e| Problem::new(format!("{program}: {e}")))?;
+        .map_err(|e| Problem::error(format!("{program}: {e}")))?;
     let mut input = child.stdin.take().expect("piped stdin");
     // Write from another thread: a large file can fill the stdout pipe
     // before rustfmt has read all of stdin.
@@ -610,30 +723,15 @@ fn rustfmt(source: &str, settings: &Settings, dir: &Path) -> Result<String, Prob
     let writer = std::thread::spawn(move || input.write_all(source.as_bytes()));
     let out = child
         .wait_with_output()
-        .map_err(|e| Problem::new(format!("{program}: {e}")))?;
+        .map_err(|e| Problem::error(format!("{program}: {e}")))?;
     let _ = writer.join();
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(Problem::new(format!("{program} failed: {}", stderr.trim())));
+        return Err(Problem::error(format!(
+            "{program} failed: {}",
+            stderr.trim()
+        )));
     }
-    String::from_utf8(out.stdout).map_err(|_| Problem::new(format!("{program}: output not UTF-8")))
-}
-
-/// The seam to the formatter library.
-mod engine {
-    use std::ops::Range;
-
-    use super::Problem;
-    use crate::config::Settings;
-
-    /// Outermost selected view invocations, in source order, as byte ranges
-    /// of their delimited bodies.
-    pub fn view_bodies(_source: &str, _settings: &Settings) -> Result<Vec<Range<usize>>, Problem> {
-        Ok(Vec::new())
-    }
-
-    /// The view printer over a whole file.
-    pub fn view_pass(source: &str, _settings: &Settings) -> Result<String, Problem> {
-        Ok(source.to_owned())
-    }
+    String::from_utf8(out.stdout)
+        .map_err(|_| Problem::error(format!("{program}: output not UTF-8")))
 }

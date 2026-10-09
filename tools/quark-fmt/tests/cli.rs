@@ -210,17 +210,17 @@ fn edition_comes_from_the_workspace_when_the_package_inherits_it() {
     let fx = Fixture::new();
     fx.write(
         "Cargo.toml",
-        "[workspace]\nmembers = [\"p\"]\n[workspace.package]\nedition = \"2015\"\n",
+        "[workspace]\nmembers = [\"p\"]\n[workspace.package]\nedition = \"2021\"\n",
     );
     fx.write(
         "p/Cargo.toml",
         "[package]\nname = \"p\"\nedition.workspace = true\n",
     );
-    // `async` is an identifier only in edition 2015.
-    fx.write("p/src/lib.rs", "fn f(async: u8){}\n");
+    // `gen` is reserved from edition 2024 on, the fallback edition.
+    fx.write("p/src/lib.rs", "fn gen(){}\n");
     let run = fx.run(&["p/src/lib.rs"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert_eq!(fx.read("p/src/lib.rs"), "fn f(async: u8) {}\n");
+    assert_eq!(fx.read("p/src/lib.rs"), "fn gen() {}\n");
 }
 
 #[test]
