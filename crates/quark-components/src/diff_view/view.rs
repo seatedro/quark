@@ -506,9 +506,11 @@ fn paint_text(
     } else {
         colors.add_word
     };
+    // A long line's layout holds only its window, which starts this far in.
+    let window_x = line.window.map_or(0.0, |w| w.x);
     paint::line(
         scene,
-        (bounds.x + pad, bounds.y),
+        (bounds.x + pad + window_x, bounds.y),
         &line.layout,
         line.tones.iter().map(|&k| colors.tone(k)).collect(),
         &line.words,

@@ -734,29 +734,197 @@ mod tests {
         assert!(copy(CopySide::New).len() < "new alpha one\nnew beta two".len());
     }
 
-    // Catches a megabyte line reaching shaping whole, a selection copying
-    // more than it shows, or whole-line copy reading the shown prefix.
-    #[test]
-    fn a_huge_line_shapes_a_prefix_and_copies_whole_on_request() {
-        let long = "x".repeat(1 << 20);
+    /// A 1 MiB line of numbered eight-byte cells (`0000000 0000001 ...`)
+    /// below a short line, and the long line.
+    fn huge_line() -> (DiffDocument, String) {
+        let long: String = (0..1u32 << 17).map(|i| format!("{i:07} ")).collect();
         let doc = diff_texts(None, Some("f"), None, Some(&format!("short\n{long}\n")), 3);
-        let mut ui = harness(doc);
-        let shown = names(&ui, Role::ListItem)
+        (doc, long)
+    }
+
+    /// The long line's row label: the text its layout holds.
+    fn long_label(ui: &UiTestHarness<Demo>) -> String {
+        names(ui, Role::ListItem)
             .into_iter()
-            .find(|n| n.starts_with('x'))
+            .find(|n| n.len() > 100)
+            .unwrap()
+    }
+
+    /// Scrolls the new column sideways to `x` and paints the frame that
+    /// applies it and the one after.
+    fn scroll_sideways(ui: &mut UiTestHarness<Demo>, x: f32) {
+        ui.app()
+            .diff
+            .horizontal_scroll(Side::New)
+            .set_offset(x, 0.0);
+        ui.frame();
+        ui.frame();
+    }
+
+    fn char_w(ui: &UiTestHarness<Demo>) -> f32 {
+        ui.app().diff.frame().unwrap().metrics.char_w
+    }
+
+    // Catches a huge line reaching shaping whole, or shaping only a prefix
+    // that scrolling cannot get past: the layout holds the columns around
+    // the view, at the start and 900,000 columns in.
+    #[test]
+    fn a_huge_line_shapes_the_window_in_view() {
+        let (doc, long) = huge_line();
+        let mut ui = harness(doc);
+        let at_start = long_label(&ui);
+        let x = 900_000.0 * char_w(&ui);
+        scroll_sideways(&mut ui, x);
+        let scrolled = long_label(&ui);
+
+        assert_eq!(at_start, long[..512]);
+        // Grid steps of 256 columns, one either side of the view.
+        let from = (900_000 / 256 - 1) * 256;
+        assert!(
+            scrolled.starts_with(&long[from..from + 64]),
+            "{}",
+            &scrolled[..64]
+        );
+        assert!(scrolled.len() < 1_024, "{}", scrolled.len());
+    }
+
+    // Catches a window painted where its bytes are not: the run of the
+    // scrolled window starts at its column, less the scroll.
+    #[test]
+    fn a_window_paints_at_its_column() {
+        let (doc, long) = huge_line();
+        let mut ui = harness(doc);
+        let scroll = 500_000.0 * char_w(&ui);
+        scroll_sideways(&mut ui, scroll);
+        let window = long_label(&ui);
+        let start = long.find(&window).unwrap();
+        let run = ui
+            .painted_texts()
+            .into_iter()
+            .find(|t| t.text == window)
             .unwrap();
-        assert_eq!(shown.len(), 4096);
+        let line = ui.find(line("short")).bounds;
+        let pad = ui.app().diff.frame().unwrap().metrics.text_pad;
+
+        // The cell's bounds are in the scrolled content.
+        let expected = line.x + pad + start as f32 * char_w(&ui);
+        assert!(
+            (run.bounds.x - expected).abs() < 1.0,
+            "{} vs {expected}",
+            run.bounds.x
+        );
+    }
+
+    // Catches hit-testing a scrolled window as if it started the line: a
+    // drag over cells 100,000 and 100,001 copies exactly them.
+    #[test]
+    fn dragging_in_a_scrolled_window_copies_its_source_bytes() {
+        let (doc, _) = huge_line();
+        let mut ui = harness(doc);
+        let w = char_w(&ui);
+        let cell = 100_000.0 * 8.0;
+        scroll_sideways(&mut ui, (cell - 20.0) * w);
+        // Bounds in the scrolled content: the text starts one pad in.
+        let row = ui.find(line("short")).bounds;
+        let long_y = row.y + row.height + 5.0;
+        let pad = ui.app().diff.frame().unwrap().metrics.text_pad;
+        // Just right of where a column starts.
+        let x = |column: f32| row.x + pad + column * w + 1.0;
+        ui.drag((x(cell), long_y), (x(cell + 16.0), long_y));
+        ui.key("ctrl+c");
+
+        assert_eq!(ui.clipboard_text().as_deref(), Some("0100000 0100001 "));
+    }
+
+    // Catches long pairs losing word highlights (they stopped at 2,000
+    // bytes) or computing them on the UI thread: a 160 KB pair shows none
+    // at first, then, once the word thread wakes the app, its one changed
+    // word on each side.
+    #[test]
+    fn a_long_pair_gets_its_changed_words_from_the_word_thread() {
+        let line: String = (0..20_000u32).map(|i| format!("{i:07} ")).collect();
+        let edited = line.replacen("0000003 ", "changed ", 1);
+        let doc = diff_texts(Some("f"), Some("f"), Some(&line), Some(&edited), 3);
+        let mut demo = Demo::new(doc, "test".into());
+        let (woke, wake) = std::sync::mpsc::channel();
+        demo.diff.set_syntax_wake(move || {
+            let _ = woke.send(());
+        });
+        let mut ui = UiTestHarness::new(demo, SIZE, 1.0);
+        let words = |ui: &UiTestHarness<Demo>| -> Vec<String> {
+            let frame = ui.app().diff.frame().unwrap().clone();
+            frame
+                .rows
+                .iter()
+                .flat_map(|row| row.paint.sides.iter().flatten())
+                .flat_map(|l| {
+                    let text = l.layout.text().to_owned();
+                    l.words.iter().map(move |w| text[w.clone()].to_owned())
+                })
+                .collect()
+        };
+        let before = words(&ui);
+        wake.recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the word thread finishes");
+        ui.frame();
+
+        assert_eq!(before, Vec::<String>::new());
+        assert_eq!(words(&ui), ["0000003", "changed"]);
+    }
+
+    // Catches select-all copying the shaped part of a huge line: it copies
+    // the whole line, and whole-line copy reads it exactly.
+    #[test]
+    fn a_huge_line_copies_whole() {
+        let (doc, long) = huge_line();
+        let mut ui = harness(doc);
         ui.click_node(line("short"));
         ui.key("ctrl+a");
         ui.key("ctrl+c");
         let selected = ui.clipboard_text().unwrap();
-        assert_eq!(selected.len(), "short\n".len() + 4096);
         let full = ui.app().diff.copy(CopyContent::Line {
             file: FILE,
             side: Side::New,
             line: 1,
         });
-        assert_eq!(full.map(|l| l.len()), Some(1 << 20));
+
+        assert_eq!(selected, format!("short\n{long}"));
+        assert_eq!(full.as_deref(), Some(long.as_str()));
+    }
+
+    // Catches a search hit far along a long line staying out of view (or
+    // marked at window bytes as if they were line bytes): moving to it
+    // scrolls the line there and marks exactly the hit.
+    #[test]
+    fn a_search_hit_far_along_a_long_line_scrolls_into_view_and_is_marked() {
+        let (doc, _) = huge_line();
+        let mut ui = harness(doc);
+        ui.app_mut()
+            .diff
+            .set_find_query("0123456 ", FindOptions::default());
+        ui.app_mut().diff.next_match(SearchDirection::Forward);
+        ui.frame();
+        ui.frame();
+        let frame = ui.app().diff.frame().unwrap().clone();
+        let marked: Vec<String> = frame
+            .rows
+            .iter()
+            .flat_map(|row| {
+                let text = row.paint.sides[Side::New as usize]
+                    .as_ref()
+                    .map(|l| l.layout.text().to_owned());
+                row.search[Side::New as usize]
+                    .iter()
+                    .map(move |m| text.as_deref().unwrap_or("")[m.range.clone()].to_owned())
+            })
+            .collect();
+
+        assert_eq!(marked, ["0123456 "]);
+        let scrolled = ui.app().diff.horizontal_scroll(Side::New).offset().0;
+        assert!(
+            scrolled > 123_456.0 * 8.0 * char_w(&ui) - 600.0,
+            "{scrolled}"
+        );
     }
 
     // Catches mode, binary, rename-only, and final-newline changes showing

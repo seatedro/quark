@@ -238,6 +238,12 @@ impl DiffSyntax {
         self.wake = Some(wake);
     }
 
+    /// The wake callback [`Self::set_wake`] set, for other background work
+    /// of the view to share.
+    pub(crate) fn wake(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        self.wake.clone()
+    }
+
     /// Bounds what is parsed; takes effect at the next [`Self::request`].
     pub fn set_budget(&mut self, budget: SyntaxBudget) {
         self.budget = budget;

@@ -10,7 +10,8 @@
 //! - Byte ranges are half-open UTF-8 byte ranges into the text of the
 //!   line's layout ([`LinePaint::layout`]), on char boundaries. That text
 //!   is the source line without its line ending, or a prefix of it when
-//!   [`LinePaint::detail`] says so.
+//!   [`LinePaint::detail`] says so, or for a long line the part of it
+//!   [`LinePaint::window`] names (add its `start` for line bytes).
 //! - Geometry is in logical points: `top` is relative to the viewport's top
 //!   edge, x positions to the view's left edge.
 //!
@@ -152,6 +153,24 @@ pub struct LinePaint {
     /// Changed words, as byte ranges of the layout's text.
     pub words: Vec<Range<usize>>,
     pub detail: LineDetail,
+    /// For a line too long to shape whole (without wrap), the part of it
+    /// around where its column is scrolled, which is all the layout holds.
+    pub window: Option<LineWindow>,
+}
+
+/// The part of a long line a [`LinePaint`]'s layout holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineWindow {
+    /// Bytes of the shown line the layout's text covers, half open, on
+    /// grapheme boundaries.
+    pub start: usize,
+    pub end: usize,
+    /// Where the layout's text starts, from the start of the line's text,
+    /// in points: paint and hit-test the layout this far right.
+    pub x: f32,
+    /// Width of the whole shown line in points, estimated from column
+    /// counts beyond the window.
+    pub width: f32,
 }
 
 /// An app annotation's identity, unique within a view.

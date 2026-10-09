@@ -345,10 +345,12 @@ impl DiffViewState {
                     .0
             };
             let tx = x - column.text_x - frame.metrics.text_pad + scroll;
+            // A long line's layout holds only its window.
+            let (start, window_x) = paint.window.map_or((0, 0.0), |w| (w.start, w.x));
             let byte = if x < column.text_x {
                 0
             } else {
-                paint.layout.hit(tx, y - row.top).get()
+                start + paint.layout.hit(tx - window_x, y - row.top).get()
             };
             return Some(SelectionPoint::new(key_of(seg, r, line_side, index), byte));
         }
