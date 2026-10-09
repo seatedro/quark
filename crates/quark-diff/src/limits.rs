@@ -171,3 +171,76 @@ pub fn line_detail(line: &str, max_bytes: usize) -> LineDetail {
         total_bytes: line.len() as u32,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DiffError, DiffLimits, LimitKind, LineDetail, line_detail, parse_unified_checked};
+
+    #[test]
+    fn oversized_input_is_refused_before_parsing() {
+        let patch = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
+        let limits = |input_bytes, input_lines| DiffLimits {
+            input_bytes,
+            input_lines,
+            ..DiffLimits::default()
+        };
+        let too_large = |kind, actual, limit| {
+            Some(DiffError::InputTooLarge {
+                kind,
+                actual,
+                limit,
+            })
+        };
+        let cases = [
+            (limits(30, 100), too_large(LimitKind::Bytes, 34, 30)),
+            (limits(100, 4), too_large(LimitKind::Lines, 5, 4)),
+            // Limits above what the model represents are capped, not obeyed.
+            (limits(u64::MAX, u64::MAX), None),
+        ];
+        for (limits, expected) in cases {
+            assert_eq!(parse_unified_checked(patch, &limits).err(), expected);
+        }
+    }
+
+    #[test]
+    fn an_overlong_line_shapes_a_grapheme_safe_prefix() {
+        let mib = "x".repeat(1 << 20);
+        let accent_across_cap = format!("{}e\u{301}tail", "a".repeat(9));
+        let combining = format!("e{}", "\u{301}".repeat(100));
+        let cases = [
+            ("short line", "short", 10, LineDetail::Complete),
+            (
+                "one mebibyte",
+                mib.as_str(),
+                4_096,
+                LineDetail::Prefix {
+                    shown_bytes: 4_096,
+                    total_bytes: 1 << 20,
+                },
+            ),
+            // The cap falls inside `e` + accent at bytes 9..12.
+            (
+                "accent across the cap",
+                accent_across_cap.as_str(),
+                11,
+                LineDetail::Prefix {
+                    shown_bytes: 9,
+                    total_bytes: 16,
+                },
+            ),
+            // One cluster longer than the cap: nothing whole fits.
+            (
+                "long combining sequence",
+                combining.as_str(),
+                50,
+                LineDetail::Prefix {
+                    shown_bytes: 0,
+                    total_bytes: 201,
+                },
+            ),
+        ];
+        for (name, line, cap, expected) in cases {
+            assert_eq!(line_detail(line, cap), expected, "{name}");
+        }
+    }
+}
