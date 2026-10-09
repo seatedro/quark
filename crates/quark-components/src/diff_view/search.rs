@@ -179,7 +179,7 @@ fn find_in(
 /// Store lines of `file`'s `side` a search reads.
 fn searched_lines(doc: &DiffDocument, file: u32, side: Side, unchanged: bool) -> Vec<Range<u32>> {
     if unchanged {
-        return vec![0..doc.text(file, side).line_count()];
+        return std::iter::once(0..doc.text(file, side).line_count()).collect();
     }
     let (h, b) = (doc.hunks(), doc.blocks());
     doc.files().hunks[file as usize]

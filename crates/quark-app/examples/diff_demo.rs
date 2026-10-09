@@ -177,7 +177,7 @@ impl UiApp for Demo {
 }
 
 /// Two versions of a small crate: a modified source file, a renamed and
-/// edited README, a new file, and a deleted one.
+/// edited README, a new file, a deleted one, and a script made executable.
 fn sample() -> DiffDocument {
     let old_lib = r#"//! A tiny tokenizer.
 
@@ -290,6 +290,9 @@ mod tests {
         None,
         3,
     ));
+    // A change with no text: the view shows it as a metadata row.
+    let mode_only = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n";
+    doc.append(parse_unified(mode_only).expect("valid mode-only patch"));
     doc
 }
 

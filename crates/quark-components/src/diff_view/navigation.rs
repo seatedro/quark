@@ -117,8 +117,8 @@ impl DiffViewState {
                 .find(|&i| rows.offset_of_index(i as usize) > current + 0.5)
         } else {
             starts
-                .filter(|&i| rows.offset_of_index(i as usize) < current - 0.5)
-                .last()
+                .rev()
+                .find(|&i| rows.offset_of_index(i as usize) < current - 0.5)
         };
         match target {
             Some(index) => {
