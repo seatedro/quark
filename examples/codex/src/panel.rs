@@ -109,8 +109,15 @@ pub fn view(
         }
     });
     view! {
-        <div class="absolute top-0" left={x} w={w} h={h} bg={p.bg}
-             accessibility_role={Role::Complementary} aria-label="Side panel">
+        <div
+            class="absolute top-0"
+            left={x}
+            w={w}
+            h={h}
+            bg={p.bg}
+            accessibility_role={Role::Complementary}
+            aria-label="Side panel"
+        >
             {body}
             {?composer}
         </div>
@@ -124,10 +131,16 @@ pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
     let left = if full { 232.0 } else { f.panel_x + 7.0 };
     let tab = |icon: AnyElement, label: String, active: bool, w: f32, msg: Msg| {
         view! { -> Div,
-            <div class="flex-row items-center h-[30] pl-[10] pr-1.5 gap-2 rounded-[8]" w={w}
-                 hover_bg={p.rail_tile.with_alpha(120)} role="tab" aria-label={label.clone()}
-                 aria-selected={active} on:click={msg}
-                 @when {active} { bg={p.rail_tile} border={p.frame_border.lerp(p.text, 0.08)} }>
+            <div
+                class="flex-row items-center h-[30] pl-[10] pr-1.5 gap-2 rounded-[8]"
+                w={w}
+                hover_bg={p.rail_tile.with_alpha(120)}
+                role="tab"
+                aria-label={label.clone()}
+                aria-selected={active}
+                on:click={msg}
+                @when {active} { bg={p.rail_tile} border={p.frame_border.lerp(p.text, 0.08)} }
+            >
                 {icon}
                 <div class="flex-1 min-w-0 overflow-hidden">
                     <txt(label, SMALL, if active { p.text } else { p.muted }) class="truncate" />
@@ -146,8 +159,14 @@ pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
         <div>
             <div class="flex-row items-center absolute top-[7] h-[30] gap-1.5" left={left}>
                 if full && let Some(t) = app.current_thread() {
-                    <tab(view! { <icon svg={icons::CHAT} size={14.0} color={p.muted} /> },
-                         t.title.clone(), false, 230.0, Msg::FullView)>
+                    <tab(
+                        view! { <icon svg={icons::CHAT} size={14.0} color={p.muted} /> },
+                        t.title.clone(),
+                        false,
+                        230.0,
+                        Msg::FullView
+                    )
+                    >
                         <icon svg={icons::ELLIPSIS} size={13.0} color={p.muted} />
                     </tab>
                     <div class="w-0.5" />
@@ -168,25 +187,76 @@ pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
                         ),
                     };
                     <tab(icon, label, *t == app.tab, tab_w, Msg::ShowTab(*t))>
-                        <icon_button(p, icons::CLOSE, 20.0, 11.0, p.muted, "Close tab",
-                                     Msg::CloseTab(*t)) />
+                        <icon_button(
+                            p,
+                            icons::CLOSE,
+                            20.0,
+                            11.0,
+                            p.muted,
+                            "Close tab",
+                            Msg::CloseTab(*t)
+                        )
+                        />
                     </tab>
                 }
                 <div class="w-1.5" />
-                <icon_button(p, icons::PLUS, 28.0, 16.0, p.icon, "New tab",
-                             Msg::Open(Menu::PanelTab)) id="panel.newtab" />
+                <icon_button(
+                    p,
+                    icons::PLUS,
+                    28.0,
+                    16.0,
+                    p.icon,
+                    "New tab",
+                    Msg::Open(Menu::PanelTab)
+                )
+                    id="panel.newtab"
+                />
             </div>
-            <div class="flex-row items-center absolute top-2 gap-1.5 w-[121] justify-end"
-                 left={f.w - 129.0}>
+            <div
+                class="flex-row items-center absolute top-2 gap-1.5 w-[121] justify-end"
+                left={f.w - 129.0}
+            >
                 if full {
-                    <icon_button(p, icons::SUMMARY, 28.0, 16.0, p.icon, "Toggle summary",
-                                 Msg::Open(Menu::Summary)) id="header.summary" />
+                    <icon_button(
+                        p,
+                        icons::SUMMARY,
+                        28.0,
+                        16.0,
+                        p.icon,
+                        "Toggle summary",
+                        Msg::Open(Menu::Summary)
+                    )
+                        id="header.summary"
+                    />
                 }
-                <icon_button(p, if full { icons::COLLAPSE } else { icons::EXPAND }, 28.0, 14.0,
-                             p.icon, if full { "Exit full view" } else { "Enter full view" },
-                             Msg::FullView) bg={if full { p.rail_tile }} />
-                <icon_button(p, icons::PANEL_RIGHT, 28.0, 16.0, p.text, "Hide tabs",
-                             Msg::ToggleSidePanel) bg={p.rail_tile} />
+                <icon_button(
+                    p,
+                    if full { icons::COLLAPSE } else { icons::EXPAND },
+                    28.0,
+                    14.0,
+                    p.icon,
+                    if full {
+                        "Exit full view"
+                    } else {
+                        "Enter full view"
+                    },
+                    Msg::FullView
+                )
+                    bg={if full {
+                        p.rail_tile
+                    }}
+                />
+                <icon_button(
+                    p,
+                    icons::PANEL_RIGHT,
+                    28.0,
+                    16.0,
+                    p.text,
+                    "Hide tabs",
+                    Msg::ToggleSidePanel
+                )
+                    bg={p.rail_tile}
+                />
             </div>
         </div>
     }
@@ -214,9 +284,14 @@ fn changes(app: &mut Codex, p: &Pal, w: f32, h: f32, vcx: &mut ViewContext) -> A
         <div class="flex-col" w={w} h={h}>
             <div class="h-1" />
             <div class="flex-row items-center h-12 px-2" w={w} role="toolbar" aria-label="Changes">
-                <div class="flex-row items-center h-8 pl-[14] pr-[10] gap-1.5 rounded-[16]"
-                     bg={p.tray} id="changes.scope" role="button" aria-label={SCOPES[app.scope]}
-                     on:click={Msg::Open(Menu::ChangesScope)}>
+                <div
+                    class="flex-row items-center h-8 pl-[14] pr-[10] gap-1.5 rounded-[16]"
+                    bg={p.tray}
+                    id="changes.scope"
+                    role="button"
+                    aria-label={SCOPES[app.scope]}
+                    on:click={Msg::Open(Menu::ChangesScope)}
+                >
                     <txt(SCOPES[app.scope], SMALL, p.text) />
                     <icon svg={icons::CHEVRON_DOWN} size={11.0} color={p.text} />
                     <div class="w-1" />
@@ -226,16 +301,30 @@ fn changes(app: &mut Codex, p: &Pal, w: f32, h: f32, vcx: &mut ViewContext) -> A
                 <div class="flex-1" />
                 <div class="flex-row items-center h-8 px-1 gap-0.5 rounded-[16]" bg={p.tray}>
                     <tool(icons::ELLIPSIS, "Options", Msg::Open(Menu::ChangesOptions))
-                          id="changes.options" />
+                        id="changes.options"
+                    />
                     <tool(icons::FILE_SEARCH, "Find in changes", Msg::Diff(DiffMsg::Find(true))) />
                     if full {
                         <tool(icons::REFRESH_CW, "Refresh", Msg::Noop) />
                         <tool(icons::WRAP, "Word wrap", Msg::Diff(DiffMsg::ToggleWrap))
-                              aria-pressed={wrap} bg={if wrap { p.panel_tile }} />
-                        <tool(icons::LIST_FILTER, "Expand all diffs", Msg::Diff(DiffMsg::ExpandAll)) />
-                        <div class="w-7 h-7 items-center justify-center rounded-[7]" role="button"
-                             aria-label="Toggle split diff" hover_bg={p.row_hover.with_alpha(110)}
-                             on:click={Msg::Diff(DiffMsg::ToggleSplit)}>
+                            aria-pressed={wrap}
+                            bg={if wrap {
+                                p.panel_tile
+                            }}
+                        />
+                        <tool(
+                            icons::LIST_FILTER,
+                            "Expand all diffs",
+                            Msg::Diff(DiffMsg::ExpandAll)
+                        )
+                        />
+                        <div
+                            class="w-7 h-7 items-center justify-center rounded-[7]"
+                            role="button"
+                            aria-label="Toggle split diff"
+                            hover_bg={p.row_hover.with_alpha(110)}
+                            on:click={Msg::Diff(DiffMsg::ToggleSplit)}
+                        >
                             {split_glyph(p)}
                         </div>
                     }
@@ -339,10 +428,19 @@ pub fn tokens<'a>(code: &'a str, p: &Pal) -> Vec<(&'a str, Color)> {
 /// never shows through it, with the filter field and one row per entry.
 fn file_tree(p: &Pal, w: f32, h: f32, selected: Option<&str>) -> AnyElement {
     view! {
-        <div class="flex-col shrink-0 px-2 pt-2 overflow-hidden" w={w} h={h} bg={p.bg}
-             border_l={p.hairline} role="tree" aria-label="Files">
-            <div class="flex-row items-center shrink-0 h-7 px-[9] gap-[7] rounded-[7] overflow-hidden"
-                 border={p.hairline}>
+        <div
+            class="flex-col shrink-0 px-2 pt-2 overflow-hidden"
+            w={w}
+            h={h}
+            bg={p.bg}
+            border_l={p.hairline}
+            role="tree"
+            aria-label="Files"
+        >
+            <div
+                class="flex-row items-center shrink-0 h-7 px-[9] gap-[7] rounded-[7] overflow-hidden"
+                border={p.hairline}
+            >
                 <icon svg={icons::SEARCH} size={14.0} color={p.muted} />
                 <div class="flex-1 min-w-0 overflow-hidden">
                     <txt("Filter files...", BODY, p.muted) class="truncate" />
@@ -351,10 +449,17 @@ fn file_tree(p: &Pal, w: f32, h: f32, selected: Option<&str>) -> AnyElement {
             <div class="h-1.5 shrink-0" />
             for &(name, dir) in data::FILES {
                 let sel = Some(name) == selected;
-                <div class="flex-row items-center shrink-0 h-7 px-[7] gap-[10] rounded-[6]"
-                     bg={if sel { p.panel_tile }} hover_bg={p.panel_tile} role="treeitem"
-                     aria-label={name.to_owned()} aria-selected={sel}
-                     on:click={if dir { Msg::Noop } else { Msg::OpenFile(name) }}>
+                <div
+                    class="flex-row items-center shrink-0 h-7 px-[7] gap-[10] rounded-[6]"
+                    bg={if sel {
+                        p.panel_tile
+                    }}
+                    hover_bg={p.panel_tile}
+                    role="treeitem"
+                    aria-label={name.to_owned()}
+                    aria-selected={sel}
+                    on:click={if dir { Msg::Noop } else { Msg::OpenFile(name) }}
+                >
                     <div class="w-[15] shrink-0 items-center">
                         if dir {
                             <icon svg={icons::CHEVRON_RIGHT} size={14.0} color={p.muted} />
@@ -416,8 +521,12 @@ fn file_viewer(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
     };
     view! {
         <div class="flex-col" w={w} h={h}>
-            <div class="flex-row items-center shrink-0 pl-4 pr-2 gap-1.5 overflow-hidden" w={w}
-                 h={HEADER_H} border_b={p.hairline}>
+            <div
+                class="flex-row items-center shrink-0 pl-4 pr-2 gap-1.5 overflow-hidden"
+                w={w}
+                h={HEADER_H}
+                border_b={p.hairline}
+            >
                 // The project name gives way first, so the file's name stays.
                 <div class="flex-row items-center flex-1 min-w-0 gap-1.5 overflow-hidden">
                     <div class="min-w-0 overflow-hidden">
@@ -430,29 +539,49 @@ fn file_viewer(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
                 </div>
                 <icon_button(p, icons::ELLIPSIS, 28.0, 15.0, p.icon, "More", Msg::Noop) />
                 <div class="w-1.5 shrink-0" />
-                <div class="flex-row items-center shrink-0 h-7 px-[9] gap-2 rounded-[8]"
-                     border={p.hairline}>
+                <div
+                    class="flex-row items-center shrink-0 h-7 px-[9] gap-2 rounded-[8]"
+                    border={p.hairline}
+                >
                     <icon svg={icons::APP_FINDER} size={15.0} />
                     <txt("Open", BODY, p.text) />
                     <icon svg={icons::CHEVRON_DOWN} size={13.0} color={p.muted} />
                 </div>
                 <div class="w-1.5 shrink-0" />
                 <icon_button(p, icons::FILES, 28.0, 15.0, p.text, "Toggle file tree", Msg::Noop)
-                             bg={p.panel_tile} />
+                    bg={p.panel_tile}
+                />
             </div>
             <div class="flex-row shrink-0" w={w} h={body_h}>
-                <div class="shrink-0 overflow-y-scroll" w={code_w} h={body_h}
-                     track_scroll={&app.file_scroll} scrollbar_auto_hide
-                     accessibility_role={Role::Document} aria-label={file.to_owned()}>
+                <div
+                    class="shrink-0 overflow-y-scroll"
+                    w={code_w}
+                    h={body_h}
+                    track_scroll={&app.file_scroll}
+                    scrollbar_auto_hide
+                    accessibility_role={Role::Document}
+                    aria-label={file.to_owned()}
+                >
                     <div class="flex-row items-start pt-1" w={code_w}>
                         <div class="flex-col shrink-0" w={MARKER_W + NUMBERS_W}>
                             for (i, _) in lines.iter().enumerate() {
                                 <div class="flex-row items-center shrink-0" h={ROW_H}>
-                                    <div class="shrink-0" w={MARKER_W} h={ROW_H} bg={marker(i + 1)} />
-                                    <div class="flex-row items-center justify-end shrink-0"
-                                         w={NUMBERS_W} test-id="file.line-number">
-                                        <text size={CODE} color={p.line_num}
-                                              class="font-mono whitespace-nowrap">
+                                    <div
+                                        class="shrink-0"
+                                        w={MARKER_W}
+                                        h={ROW_H}
+                                        bg={marker(i + 1)}
+                                    />
+                                    <div
+                                        class="flex-row items-center justify-end shrink-0"
+                                        w={NUMBERS_W}
+                                        test-id="file.line-number"
+                                    >
+                                        <text
+                                            size={CODE}
+                                            color={p.line_num}
+                                            class="font-mono whitespace-nowrap"
+                                        >
                                             {(i + 1).to_string()}
                                         </text>
                                     </div>
@@ -460,9 +589,12 @@ fn file_viewer(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
                             }
                         </div>
                         <div class="shrink-0" w={GUTTER_GAP} />
-                        <div class="flex-col overflow-x-scroll scrollbar-none"
-                             w={(code_w - MARKER_W - NUMBERS_W - GUTTER_GAP).max(0.0)}
-                             track_scroll={&app.file_scroll_x} test-id="file.code">
+                        <div
+                            class="flex-col overflow-x-scroll scrollbar-none"
+                            w={(code_w - MARKER_W - NUMBERS_W - GUTTER_GAP).max(0.0)}
+                            track_scroll={&app.file_scroll_x}
+                            test-id="file.code"
+                        >
                             for line in &lines {
                                 <div class="flex-row items-center shrink-0" h={ROW_H}>
                                     {highlight(line, p)}

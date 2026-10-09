@@ -222,12 +222,27 @@ fn menu_panel(
         ContextMenuEntry::Separator => false,
     });
     view! {
-        <div class="absolute flex-col" left={rect.x} top={rect.y} w={rect.width}
-             z_index={250 + level as i32} py={metrics.pad_y} px={metrics.pad_y}
-             bg={tc.elevated_surface} border={tc.border} rounded={m.panel_radius}
-             shadow_preset={Shadow::CONTEXT_MENU} on:click={NoopAction} id={id.clone()}
-             test_id="context-menu" role="menu" accessibility_role={accesskit::Role::Menu}
-             accessibility_id={id.clone()} focus_scope={id.clone()} key_context="context-menu">
+        <div
+            class="absolute flex-col"
+            left={rect.x}
+            top={rect.y}
+            w={rect.width}
+            z_index={250 + level as i32}
+            py={metrics.pad_y}
+            px={metrics.pad_y}
+            bg={tc.elevated_surface}
+            border={tc.border}
+            rounded={m.panel_radius}
+            shadow_preset={Shadow::CONTEXT_MENU}
+            on:click={NoopAction}
+            id={id.clone()}
+            test_id="context-menu"
+            role="menu"
+            accessibility_role={accesskit::Role::Menu}
+            accessibility_id={id.clone()}
+            focus_scope={id.clone()}
+            key_context="context-menu"
+        >
             for (index, entry) in entries.iter().enumerate() {
                 match entry {
                     ContextMenuEntry::Separator => {
@@ -235,7 +250,14 @@ fn menu_panel(
                             <div class="w-full" h={Sz::SEPARATOR_W} bg={tc.border_variant} />
                         </div>
                     }
-                    _ => menu_row(entry, &id, highlighted == Some(index), leading, metrics, theme),
+                    _ => menu_row(
+                        entry,
+                        &id,
+                        highlighted == Some(index),
+                        leading,
+                        metrics,
+                        theme
+                    ),
                 }
             }
         </div>
@@ -312,32 +334,50 @@ fn menu_row(
         }
     );
     view! {
-        <div class="flex-row items-center shrink-0" h={metrics.item_h} gap={m.spacing_sm}
-             px={m.spacing_sm} rounded={m.spacing_xs}
-             bg={if highlighted { tc.sidebar_row_hover } else { Color::TRANSPARENT }}
-             id={accessibility_id.clone()} key={label} test_id="context-menu-item"
-             accessibility_id={accessibility_id} aria-label={label} aria-disabled={disabled}
-             aria-selected={highlighted} role="menuitem"
-             @when {checkable} { accessibility_role={accesskit::Role::MenuItemCheckBox} }
-             @when {!checkable} { accessibility_role={accesskit::Role::MenuItem} }
-             @when {let ContextMenuEntry::Item { checked: Some(on), .. } = entry} {
-                 aria-checked={*on}
-             }
-             @when {let ContextMenuEntry::Item { action, .. } = entry && !disabled} {
-                 on:click={action.clone()} hover_bg={tc.sidebar_row_hover}
-             }
-             @when {matches!(entry, ContextMenuEntry::Submenu { .. })} {
-                 aria-expanded={highlighted} on:click={NoopAction}
-             }>
+        <div
+            class="flex-row items-center shrink-0"
+            h={metrics.item_h}
+            gap={m.spacing_sm}
+            px={m.spacing_sm}
+            rounded={m.spacing_xs}
+            bg={if highlighted {
+                tc.sidebar_row_hover
+            } else {
+                Color::TRANSPARENT
+            }}
+            id={accessibility_id.clone()}
+            key={label}
+            test_id="context-menu-item"
+            accessibility_id={accessibility_id}
+            aria-label={label}
+            aria-disabled={disabled}
+            aria-selected={highlighted}
+            role="menuitem"
+            @when {checkable} { accessibility_role={accesskit::Role::MenuItemCheckBox} }
+            @when {!checkable} { accessibility_role={accesskit::Role::MenuItem} }
+            @when {let ContextMenuEntry::Item {
+                checked: Some(on), ..
+            } = entry} { aria-checked={*on} }
+            @when {let ContextMenuEntry::Item { action, .. } = entry
+                && !disabled} { on:click={action.clone()} hover_bg={tc.sidebar_row_hover} }
+            @when {matches!(entry, ContextMenuEntry::Submenu { .. })} {
+                aria-expanded={highlighted}
+                on:click={NoopAction}
+            }
+        >
             match leading {
                 Some(svg) => <icon svg={svg} size={Ico::SM} color={icon_color} />
-                None if leading_slot => <div class="shrink-0" w={Ico::SM * scale} h={Ico::SM * scale} />
+                None if leading_slot =>
+                    <div class="shrink-0" w={Ico::SM * scale} h={Ico::SM * scale} />
                 None => {}
             }
             <div class="flex-1">
                 <text class="text-sm" color={fg}>{label}</text>
             </div>
-            if let ContextMenuEntry::Item { shortcut: Some(key), .. } = entry {
+            if let ContextMenuEntry::Item {
+                shortcut: Some(key),
+                ..
+            } = entry {
                 <text class="text-xs" color={tc.text_muted}>{key.as_str()}</text>
             }
             if let ContextMenuEntry::Submenu { .. } = entry {

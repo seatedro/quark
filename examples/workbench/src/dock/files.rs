@@ -203,13 +203,21 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
             focused={vcx.is_focused(SOURCE_FOCUS)}
             text_color={colors.text}
             w={source_w}
-            h={source_h} />
+            h={source_h}
+        />
     };
     let header = view! {
-        <div w={source_w} h={HEADER_H} class="flex-row items-center shrink-0"
-             px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border_variant}
-             bg={colors.panel} role="status"
-             aria-label={format!("{}{}", state.open, if modified { ", modified" } else { "" })}>
+        <div
+            w={source_w}
+            h={HEADER_H}
+            class="flex-row items-center shrink-0"
+            px={tokens::SPACE_8}
+            gap={tokens::SPACE_8}
+            border_b={colors.border_variant}
+            bg={colors.panel}
+            role="status"
+            aria-label={format!("{}{}", state.open, if modified { ", modified" } else { "" })}
+        >
             <icon svg={lucide::FILE_CODE} size={tokens::ICON} color={colors.icon} />
             <div class="flex-1" min_w={0.0}>
                 <text size={12.0} class="truncate font-medium" color={colors.text_strong}>
@@ -223,16 +231,25 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
         </div>
     };
     let tree_box = view! {
-        <div w={tree_w} h={tree_h} class="shrink-0 overflow-clip"
-             @when {side} { border_r={colors.border_variant} }
-             @when {!side} { border_b={colors.border_variant} }>
+        <div
+            w={tree_w}
+            h={tree_h}
+            class="shrink-0 overflow-clip"
+            @when {side} { border_r={colors.border_variant} }
+            @when {!side} { border_b={colors.border_variant} }
+        >
             {tree}
         </div>
     };
     view! {
-        <div w={width} h={height} bg={colors.editor_surface} test_id="dock.files"
-             @when {side} { class="flex-row" }
-             @when {!side} { class="flex-col" }>
+        <div
+            w={width}
+            h={height}
+            bg={colors.editor_surface}
+            test_id="dock.files"
+            @when {side} { class="flex-row" }
+            @when {!side} { class="flex-col" }
+        >
             {tree_box}
             <div w={source_w} class="flex-col flex-1" min_h={0.0}>
                 {header}

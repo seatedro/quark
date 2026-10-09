@@ -147,31 +147,54 @@ impl UiApp for Visuals {
         view! {
             <div w={width} h={height} class="p-6 gap-6 flex-col bg-[colors.background]">
                 <div class="flex-row gap-6 items-center">
-                    <div accessibility_id="visuals.fade" accessibility_role={Role::Button}
-                         aria-label="Fade" on:click={Msg::ToggleFade} key="visuals.fade"
-                         class="w-[180] h-[120] p-4 gap-2 flex-col rounded-[12]
+                    <div
+                        accessibility_id="visuals.fade"
+                        accessibility_role={Role::Button}
+                        aria-label="Fade"
+                        on:click={Msg::ToggleFade}
+                        key="visuals.fade"
+                        class="w-[180] h-[120] p-4 gap-2 flex-col rounded-[12]
                                 bg-[colors.surface] border-[colors.border]"
-                         opacity={if self.faded { 0.35 } else { 1.0 }}
-                         transition={(Prop::Opacity, Motion::tween(220, Curve::EaseOutCubic))}>
+                        opacity={if self.faded { 0.35 } else { 1.0 }}
+                        transition={(Prop::Opacity, Motion::tween(220, Curve::EaseOutCubic))}
+                    >
                         <text class="font-semibold">"Group opacity"</text>
-                        <div test_id="visuals.swatch" class="w-[60] h-6 rounded-[6] bg-[colors.accent]" />
+                        <div
+                            test_id="visuals.swatch"
+                            class="w-[60] h-6 rounded-[6] bg-[colors.accent]"
+                        />
                         <text color={colors.text_muted}>"click to fade"</text>
                     </div>
-                    <div accessibility_id="visuals.turn" accessibility_role={Role::Button}
-                         aria-label="Turn" on:click={Msg::Turn} key="visuals.turn"
-                         class="w-[90] h-[90] items-center justify-center rounded-[10] bg-[colors.accent]"
-                         rotate={self.turns as f32 * FRAC_PI_4}
-                         transition={(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))}>
+                    <div
+                        accessibility_id="visuals.turn"
+                        accessibility_role={Role::Button}
+                        aria-label="Turn"
+                        on:click={Msg::Turn}
+                        key="visuals.turn"
+                        class="w-[90] h-[90] items-center justify-center rounded-[10] bg-[colors.accent]"
+                        rotate={self.turns as f32 * FRAC_PI_4}
+                        transition={(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))}
+                    >
                         <text color={colors.on_accent} class="font-semibold">"Turn"</text>
                     </div>
                     <div class="relative w-[180] h-[120] flex-row">
                         for i in 0..6 {
-                            <div w={30.0} class="h-full"
-                                 bg={if i % 2 == 0 { colors.accent } else { colors.surface }} />
+                            <div
+                                w={30.0}
+                                class="h-full"
+                                bg={if i % 2 == 0 {
+                                    colors.accent
+                                } else {
+                                    colors.surface
+                                }}
+                            />
                         }
-                        <div class="absolute top-5 left-5 w-[140] h-20"
-                             rounded_corners={[28.0, 4.0, 28.0, 4.0]} blur={10.0}
-                             class="items-center justify-center">
+                        <div
+                            class="absolute top-5 left-5 w-[140] h-20"
+                            rounded_corners={[28.0, 4.0, 28.0, 4.0]}
+                            blur={10.0}
+                            class="items-center justify-center"
+                        >
                             <text color={colors.text_strong}>"Frosted"</text>
                         </div>
                     </div>
@@ -188,8 +211,14 @@ impl UiApp for Visuals {
                         for row in 0..6 {
                             <div class="flex-row h-4">
                                 for col in 0..6 {
-                                    <div class="w-4 h-4"
-                                         bg={if (row + col) % 2 == 0 { colors.accent } else { colors.surface }} />
+                                    <div
+                                        class="w-4 h-4"
+                                        bg={if (row + col) % 2 == 0 {
+                                            colors.accent
+                                        } else {
+                                            colors.surface
+                                        }}
+                                    />
                                 }
                             </div>
                         }

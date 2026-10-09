@@ -112,14 +112,20 @@ impl RenderOnce for Modal {
             <div class="flex-col" gap={Sp::SM}>
                 <div class="flex-row shrink-0 items-center" gap={Sp::SM}>
                     <icon svg={self.icon} size={Ico::LG} color={tc.accent} />
-                    <text class="text-lg font-semibold" color={tc.text_strong}
-                          @when {title_size.is_some()} { size={title_size.unwrap()} }>
+                    <text
+                        class="text-lg font-semibold"
+                        color={tc.text_strong}
+                        @when {title_size.is_some()} { size={title_size.unwrap()} }
+                    >
                         {&self.title}
                     </text>
                 </div>
                 if !self.subtitle.is_empty() {
-                    <text class="text-sm" color={tc.text_muted}
-                          @when {subtitle_size.is_some()} { size={subtitle_size.unwrap()} }>
+                    <text
+                        class="text-sm"
+                        color={tc.text_muted}
+                        @when {subtitle_size.is_some()} { size={subtitle_size.unwrap()} }
+                    >
                         {&self.subtitle}
                     </text>
                 }
@@ -127,43 +133,54 @@ impl RenderOnce for Modal {
         };
 
         let panel = view! { scale,
-            <div class="flex-col overflow-hidden"
-                 w={panel_width} px={padding_x} py={padding_y} gap={gap}
-                 bg={tc.elevated_surface} rounded={radius}
-                 border_b={tc.border} shadow_preset={shadows.layers()}
-                 on:click={quark_ui::element::NoopAction}
-                 id={format!("modal:{accessibility_label}")}
-                 test-id="modal"
-                 role="dialog"
-                 focus_scope={accessibility_label.clone()}
-                 trap_focus={true}
-                 accessibility_id={format!("modal:{accessibility_label}")}
-                 aria-label={accessibility_label}
-                 @when {self.height.is_some()} { h={(self.height.unwrap() * scale).round().min(max_h)} }>
+            <div
+                class="flex-col overflow-hidden"
+                w={panel_width}
+                px={padding_x}
+                py={padding_y}
+                gap={gap}
+                bg={tc.elevated_surface}
+                rounded={radius}
+                border_b={tc.border}
+                shadow_preset={shadows.layers()}
+                on:click={quark_ui::element::NoopAction}
+                id={format!("modal:{accessibility_label}")}
+                test-id="modal"
+                role="dialog"
+                focus_scope={accessibility_label.clone()}
+                trap_focus={true}
+                accessibility_id={format!("modal:{accessibility_label}")}
+                aria-label={accessibility_label}
+                @when {self.height.is_some()} {
+                    h={(self.height.unwrap() * scale).round().min(max_h)}
+                }
+            >
                 {header}
                 {...self.body}
                 if !self.footer.is_empty() {
                     <spacer />
-                    <div class="flex-row" gap={Sp::LG}>
-                        {...self.footer}
-                    </div>
+                    <div class="flex-row" gap={Sp::LG}>{...self.footer}</div>
                 }
             </div>
         };
 
         view! { scale,
-            <div class="absolute flex-col items-center"
-                 top={0.0} left={0.0}
-                 w={self.window_width} h={self.window_height}
-                 z_index={100}
-                 bg={tc.overlay_scrim}
-                 id="overlay.backdrop"
-                 test-id="modal-backdrop"
-                 on:click={self.on_dismiss}
-                 block_mouse
-                 hit_identity={HitIdentity::OverlayBackdrop}
-                 @when {self.align == ModalAlign::Center} { justify_center }
-                 @when {self.align == ModalAlign::Top} { pt={Sz::MODAL_TOP_OFFSET} }>
+            <div
+                class="absolute flex-col items-center"
+                top={0.0}
+                left={0.0}
+                w={self.window_width}
+                h={self.window_height}
+                z_index={100}
+                bg={tc.overlay_scrim}
+                id="overlay.backdrop"
+                test-id="modal-backdrop"
+                on:click={self.on_dismiss}
+                block_mouse
+                hit_identity={HitIdentity::OverlayBackdrop}
+                @when {self.align == ModalAlign::Center} { justify_center }
+                @when {self.align == ModalAlign::Top} { pt={Sz::MODAL_TOP_OFFSET} }
+            >
                 {panel}
             </div>
         }

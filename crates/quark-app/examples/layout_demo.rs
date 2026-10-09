@@ -156,32 +156,58 @@ impl Demo {
         let dragged = self.reorder.dragged();
         let shift = self.reorder.dragged_shift().unwrap_or(0.0);
         view! {
-            <div h={viewport} class="flex-col" track_scroll={&self.task_scroll}
-                 class="overflow-y-scroll" key_context="task-list">
+            <div
+                h={viewport}
+                class="flex-col"
+                track_scroll={&self.task_scroll}
+                class="overflow-y-scroll"
+                key_context="task-list"
+            >
                 for (i, task) in self.tasks.iter().enumerate() {
-                    <div key={task.as_str()}
-                         class="flex-row items-center gap-[6] px-2 h-[TASK_ROW] shrink-0
+                    <div
+                        key={task.as_str()}
+                        class="flex-row items-center gap-[6] px-2 h-[TASK_ROW] shrink-0
                                 bg-[theme.colors.surface] border-b-[theme.colors.border_variant]"
-                         focus_ring={FocusId::from_key(task)}
-                         accessibility_role={accesskit::Role::ListItem} aria-label={task.as_str()}
-                         on_key={(KEY_MOVE_UP, Msg::Reorder(ReorderMsg::Step { index: i, delta: -1 }))}
-                         on_key={(KEY_MOVE_DOWN, Msg::Reorder(ReorderMsg::Step { index: i, delta: 1 }))}
-                         @when {dragged == Some(i)} {
-                             translate={(0.0, shift)} z_index={1} opacity={0.9}
-                         }>
-                        <div class="w-[18] h-[TASK_ROW] shrink-0 flex-row items-center justify-center
+                        focus_ring={FocusId::from_key(task)}
+                        accessibility_role={accesskit::Role::ListItem}
+                        aria-label={task.as_str()}
+                        on_key={(
+                            KEY_MOVE_UP,
+                            Msg::Reorder(ReorderMsg::Step {
+                                index: i,
+                                delta: -1
+                            })
+                        )}
+                        on_key={(
+                            KEY_MOVE_DOWN,
+                            Msg::Reorder(ReorderMsg::Step { index: i, delta: 1 })
+                        )}
+                        @when {dragged == Some(i)} {
+                            translate={(0.0, shift)}
+                            z_index={1}
+                            opacity={0.9}
+                        }
+                    >
+                        <div
+                            class="w-[18] h-[TASK_ROW] shrink-0 flex-row items-center justify-center
                                     cursor-grab"
-                             tooltip="Drag to reorder"
-                             on:drag={Reorder::drag_start(i, Msg::Reorder)}>
-                            <icon svg={lucide::GRIP_VERTICAL} size={Ico::SM}
-                                  color={theme.colors.text_muted} />
+                            tooltip="Drag to reorder"
+                            on:drag={Reorder::drag_start(i, Msg::Reorder)}
+                        >
+                            <icon
+                                svg={lucide::GRIP_VERTICAL}
+                                size={Ico::SM}
+                                color={theme.colors.text_muted}
+                            />
                         </div>
                         <text class="text-sm">{task.as_str()}</text>
                     </div>
                 }
                 if let Some(y) = self.reorder.drop_indicator(&rows) {
-                    <div class="absolute left-0 right-0 h-0.5 bg-[theme.colors.text_accent]"
-                         top={y - 1.0} />
+                    <div
+                        class="absolute left-0 right-0 h-0.5 bg-[theme.colors.text_accent]"
+                        top={y - 1.0}
+                    />
                 }
             </div>
         }
@@ -195,10 +221,14 @@ impl Demo {
             <div class="flex-1 min-h-0 overflow-y-scroll" track_scroll={&self.gallery_scroll}>
                 <div class="w-full" grid_cols={[repeat_fill([px(120.0)])]} gap={gap}>
                     for i in 0..14 {
-                        <div class="flex-col gap-1 p-[6] rounded-[6] bg-[theme.colors.elevated_surface]"
-                             @when {i % 5 == 0} { col_span={2} }>
-                            <div class="w-full rounded-[4] bg-[theme.colors.border]"
-                                 aspect_ratio={if i % 5 == 0 { 2.0 } else { 1.0 }} />
+                        <div
+                            class="flex-col gap-1 p-[6] rounded-[6] bg-[theme.colors.elevated_surface]"
+                            @when {i % 5 == 0} { col_span={2} }
+                        >
+                            <div
+                                class="w-full rounded-[4] bg-[theme.colors.border]"
+                                aspect_ratio={if i % 5 == 0 { 2.0 } else { 1.0 }}
+                            />
                             <text class="text-xs">"Card {i}"</text>
                         </div>
                     }
@@ -211,8 +241,11 @@ impl Demo {
     fn files(&self, cx: &ViewContext) -> AnyElement {
         let theme = cx.theme;
         view! {
-            <div class="h-full flex-col" track_scroll={&self.files_scroll}
-                 class="overflow-y-scroll flex-1">
+            <div
+                class="h-full flex-col"
+                track_scroll={&self.files_scroll}
+                class="overflow-y-scroll flex-1"
+            >
                 for (folder, files) in FOLDERS {
                     {Self::folder(folder, files, theme)}
                 }
@@ -222,22 +255,26 @@ impl Demo {
 
     fn folder(folder: &str, files: &[&'static str], theme: &Theme) -> AnyElement {
         let header = view! {
-            <div class="h-7 px-2 flex-row items-center bg-[theme.colors.title_bar_background]
-                        border-b-[theme.colors.border]">
+            <div
+                class="h-7 px-2 flex-row items-center bg-[theme.colors.title_bar_background]
+                        border-b-[theme.colors.border]"
+            >
                 <text class="text-sm">{folder}</text>
             </div>
         };
         let body = view! {
             <div class="flex-col">
                 for &file in files {
-                    <div class="h-11 px-4 flex-row items-center border-b-[theme.colors.border_variant]"
-                         // Where there is no drag source (the BSDs, see
-                         // `drag_out`), rows are plain.
-                         @when {drag_out::supported()} {
-                             class="cursor-grab"
-                             tooltip="Drag onto the desktop or a file manager"
-                             on:drag={move |_| Box::new(DragOutRow::new(file))}
-                         }>
+                    <div
+                        class="h-11 px-4 flex-row items-center border-b-[theme.colors.border_variant]"
+                        // Where there is no drag source (the BSDs, see
+                        // `drag_out`), rows are plain.
+                        @when {drag_out::supported()} {
+                            class="cursor-grab"
+                            tooltip="Drag onto the desktop or a file manager"
+                            on:drag={move |_| Box::new(DragOutRow::new(file))}
+                        }
+                    >
                         <text class="text-sm">{file}</text>
                     </div>
                 }
@@ -320,15 +357,20 @@ impl UiApp for Demo {
         view! {
             <div class="size-full flex-col bg-[theme.colors.background]">
                 {?menu}
-                <div class="flex-1 min-h-0 p-3"
-                     grid_cols={[px(260.0), fr(1.0), minmax(px(220.0), fr(1.0))]}
-                     grid_rows={[fr(1.0)]} class="gap-3">
+                <div
+                    class="flex-1 min-h-0 p-3"
+                    grid_cols={[px(260.0), fr(1.0), minmax(px(220.0), fr(1.0))]}
+                    grid_rows={[fr(1.0)]}
+                    class="gap-3"
+                >
                     {column("Tasks", tasks)}
                     {column("Gallery", self.gallery(cx))}
                     {column("Files", self.files(cx))}
                 </div>
-                <div class="h-6 px-3 flex-row items-center border-t-[theme.colors.border]
-                            bg-[theme.colors.status_bar_background]">
+                <div
+                    class="h-6 px-3 flex-row items-center border-t-[theme.colors.border]
+                            bg-[theme.colors.status_bar_background]"
+                >
                     <text class="text-xs">{self.status.clone()}</text>
                 </div>
             </div>

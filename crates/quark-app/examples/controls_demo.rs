@@ -146,7 +146,9 @@ impl ControlsDemo {
         view! {
             <div class="flex-row items-center gap-4">
                 <div class="w-24">
-                    <text class="text-sm" color={cx.theme.colors.text_muted}>{label.to_owned()}</text>
+                    <text class="text-sm" color={cx.theme.colors.text_muted}>
+                        {label.to_owned()}
+                    </text>
                 </div>
                 {control}
             </div>
@@ -168,11 +170,15 @@ impl UiApp for ControlsDemo {
         let colors = &cx.theme.colors;
         let fruit = view! {
             <select(&self.fruit, self.fruits.clone(), |m| Msg::Fruit(m).into())
-                label="Fruit" viewport={viewport} />
+                label="Fruit"
+                viewport={viewport}
+            />
         };
         let city = view! {
             <combobox(&self.city, "City", |m| Msg::City(m).into())
-                placeholder="Search cities" viewport={viewport} />
+                placeholder="Search cities"
+                viewport={viewport}
+            />
         };
         let sizes = SIZES
             .iter()
@@ -188,11 +194,14 @@ impl UiApp for ControlsDemo {
             .collect();
         let volume = view! {
             <slider("controls.volume", "Volume", self.volume, 0.0, 100.0, |v| Msg::Volume(v).into())
-                step={5.0} />
+                step={5.0}
+            />
         };
         let theme = view! {
             <select(&self.theme, self.themes.clone(), |m| Msg::Theme(m).into())
-                label="Theme" viewport={viewport} />
+                label="Theme"
+                viewport={viewport}
+            />
         };
         // Builder values and markup mix freely: rows take either.
         view! {

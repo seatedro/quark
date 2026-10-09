@@ -69,9 +69,7 @@ impl<'a> M<'a> {
 
     /// The menu at `(x, y)`, for callers that restyle the panel.
     fn panel(self, (x, y): (f32, f32)) -> Div {
-        view! { -> Div,
-            <menu_panel(self.p, x, y, self.w) h={self.h}>{...self.rows}</menu_panel>
-        }
+        view! { -> Div, <menu_panel(self.p, x, y, self.w) h={self.h}>{...self.rows}</menu_panel> }
     }
 
     fn at(self, at: (f32, f32)) -> AnyElement {
@@ -188,7 +186,11 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
                     <div class="flex-row items-center h-10" w={w - 24.0}>
                         <icon svg={icons::BOLT} size={15.0} color={p.muted} />
                         <div class="flex-1 flex-col items-center">
-                            <text size={BODY} color={p.accent} class="font-medium whitespace-nowrap">
+                            <text
+                                size={BODY}
+                                color={p.accent}
+                                class="font-medium whitespace-nowrap"
+                            >
                                 {EFFORTS[app.effort]}
                             </text>
                             <div class="flex-row items-center gap-0.5">
@@ -199,12 +201,20 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
                         <icon svg={icons::ROTATE} size={14.0} color={p.muted} />
                     </div>
                     <div class="h-2" />
-                    <div class="flex-row items-center h-[26] rounded-[13] px-0.5 justify-between relative"
-                         w={w - 24.0} bg={p.menu_hi}>
+                    <div
+                        class="flex-row items-center h-[26] rounded-[13] px-0.5 justify-between relative"
+                        w={w - 24.0}
+                        bg={p.menu_hi}
+                    >
                         for (i, effort) in EFFORTS.iter().enumerate() {
                             let knob = i == app.effort;
-                            <div class="w-6 h-6 items-center justify-center" role="radio"
-                                 aria-label={*effort} aria-selected={knob} on:click={Msg::Effort(i)}>
+                            <div
+                                class="w-6 h-6 items-center justify-center"
+                                role="radio"
+                                aria-label={*effort}
+                                aria-selected={knob}
+                                on:click={Msg::Effort(i)}
+                            >
                                 if knob {
                                     <div class="w-6 h-6 rounded-[12] bg-white" />
                                 } else {
@@ -253,8 +263,10 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
             m.custom(
                 view! {
                     <div class="flex-row items-center h-10 px-2 gap-[10]">
-                        <div class="w-[18] h-[18] rounded-[9] items-center justify-center"
-                             bg={p.avatar}>
+                        <div
+                            class="w-[18] h-[18] rounded-[9] items-center justify-center"
+                            bg={p.avatar}
+                        >
                             <txt("SE", 7.0, Color::rgba(255, 255, 255, 255)) />
                         </div>
                         <div class="flex-col">
@@ -548,7 +560,10 @@ fn summary(p: &Pal, r: Rect, win: (f32, f32)) -> AnyElement {
     let row = |icon: &'static str, label: &str, chevron: bool, dim: bool| {
         let c = if dim { p.menu_desc } else { p.menu_title };
         view! { -> Div,
-            <div class="flex-row items-center h-[30] px-4 gap-[10] rounded-[6]" hover_bg={p.menu_hi}>
+            <div
+                class="flex-row items-center h-[30] px-4 gap-[10] rounded-[6]"
+                hover_bg={p.menu_hi}
+            >
                 <icon svg={icon} size={16.0} color={c} />
                 <txt(label, BODY, c) />
                 if chevron {
@@ -667,9 +682,7 @@ fn add_menu(p: &Pal, r: Rect, _win: (f32, f32), hi: Option<usize>, query: &str) 
     // Taller lists scroll inside a 320-point menu (u74).
     let h = m.h.min(320.0).min(r.y - 50.0).max(80.0);
     let y = r.y - h - 6.0;
-    view! {
-        <menu_panel(p, r.x, y, w) h={h} class="overflow-hidden">{...m.rows}</menu_panel>
-    }
+    view! { <menu_panel(p, r.x, y, w) h={h} class="overflow-hidden">{...m.rows}</menu_panel> }
 }
 
 /// The slash and `@` lists the draft opens, above the composer and as

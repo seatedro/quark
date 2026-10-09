@@ -62,22 +62,36 @@ pub fn picker_list<T: PickerItem>(
     let scroll = scroll_top_px.min((total_h - list_h).max(0.0));
 
     view! { scale,
-        <div class="w-full flex-col" gap={Sp::XS} h={list_h}
-             id="picker-list"
-             test-id="picker-list"
-             semantic_role={SemanticRole::ScrollArea}
-             accessibility_role={accesskit::Role::ListBox}
-             accessibility_id={"picker-list"}
-             overflow_hidden scroll_y={scroll} scroll_total={total_h}
-             on_scroll={on_scroll}
-             hide_scrollbar>
+        <div
+            class="w-full flex-col"
+            gap={Sp::XS}
+            h={list_h}
+            id="picker-list"
+            test-id="picker-list"
+            semantic_role={SemanticRole::ScrollArea}
+            accessibility_role={accesskit::Role::ListBox}
+            accessibility_id={"picker-list"}
+            overflow_hidden
+            scroll_y={scroll}
+            scroll_total={total_h}
+            on_scroll={on_scroll}
+            hide_scrollbar
+        >
             for (i, entry) in entries.iter().enumerate() {
                 if entry.is_section_header() {
                     <div class="w-full flex-row items-center" h={row_h} px={Sp::MD}>
                         <text class="text-xs truncate" color={tc.text_muted}>{entry.label()}</text>
                     </div>
                 } else {
-                    {picker_row(i, entry, selected_index, row_h, icon_size, theme, on_select(i))}
+                    {picker_row(
+                        i,
+                        entry,
+                        selected_index,
+                        row_h,
+                        icon_size,
+                        theme,
+                        on_select(i)
+                    )}
                 }
             }
         </div>
@@ -103,21 +117,26 @@ fn picker_row<T: PickerItem>(
     };
     let disabled = entry.is_disabled();
     view! { scale,
-        <div class="w-full shrink-0 flex-row items-center"
-             id={format!("picker-row:{i}:{}", entry.label())}
-             key={format!("{i}:{}", entry.label())}
-             test-id="picker-row"
-             role="option"
-             h={row_h} gap={Sp::SM} px={Sp::MD} rounded={Rad::MD}
-             bg={row_bg}
-             @when {!selected && !disabled} { hover_bg={tc.sidebar_row_hover} }
-             on:click={on_select}
-             hit_identity={HitIdentity::OverlayEntry(i)}
-             accessibility_id={format!("picker-row:{i}:{}", entry.label())}
-             aria-label={entry.label()}
-             aria-selected={selected}
-             aria-disabled={disabled}
-             cursor={CursorHint::Pointer}>
+        <div
+            class="w-full shrink-0 flex-row items-center"
+            id={format!("picker-row:{i}:{}", entry.label())}
+            key={format!("{i}:{}", entry.label())}
+            test-id="picker-row"
+            role="option"
+            h={row_h}
+            gap={Sp::SM}
+            px={Sp::MD}
+            rounded={Rad::MD}
+            bg={row_bg}
+            @when {!selected && !disabled} { hover_bg={tc.sidebar_row_hover} }
+            on:click={on_select}
+            hit_identity={HitIdentity::OverlayEntry(i)}
+            accessibility_id={format!("picker-row:{i}:{}", entry.label())}
+            aria-label={entry.label()}
+            aria-selected={selected}
+            aria-disabled={disabled}
+            cursor={CursorHint::Pointer}
+        >
             if let Some(svg) = entry.icon_svg() {
                 <icon svg={svg} size={icon_size} color={tc.icon} />
             }

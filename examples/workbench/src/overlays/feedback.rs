@@ -199,11 +199,21 @@ fn tooltip(label: &str, bounds: Rect, window: (f32, f32), theme: &Theme) -> AnyE
         below
     };
     view! {
-        <div class="absolute" left={left} top={top} max_w={max_w} z_index={500}
-             px={pad_x} py={pad_y} rounded={pt(tokens::RADIUS_ROW)}
-             bg={colors.elevated_surface} border={colors.border}
-             accessibility_role={accesskit::Role::Tooltip} aria-label={label.to_owned()}
-             test_id="tooltip">
+        <div
+            class="absolute"
+            left={left}
+            top={top}
+            max_w={max_w}
+            z_index={500}
+            px={pad_x}
+            py={pad_y}
+            rounded={pt(tokens::RADIUS_ROW)}
+            bg={colors.elevated_surface}
+            border={colors.border}
+            accessibility_role={accesskit::Role::Tooltip}
+            aria-label={label.to_owned()}
+            test_id="tooltip"
+        >
             <text size={size} color={colors.text}>{label.to_owned()}</text>
         </div>
     }

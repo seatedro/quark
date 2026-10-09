@@ -148,26 +148,41 @@ fn header(tool: ToolId, call: ToolCall, expanded: bool) -> RowAdornment {
             });
             let control = (tokens::TYPE_CONTROL.0, tokens::ICON);
             view! {
-            <div w={cx.width} h={cx.height} class="flex-row items-center gap-[8] px-[4]"
-                 bg={c.surface} border={c.border_variant} class="rounded-[8]">
-                <div id={disclosure_id(tool).as_str()} class="flex-row items-center gap-[8] grow h-full px-[6] rounded-[6]"
-                     hover_bg={c.element_hover} on:click={toggle}
-                     track_focus={disclosure_focus(tool)}
-                     accessibility_role={AccessibilityRole::Button} aria-label={name}
-                     aria-expanded={expanded}>
-                    <icon svg={chevron} size={control.1} color={c.text_muted} />
-                    <icon svg={icon(call.kind)} size={control.1} color={c.icon} />
-                    <text size={control.0} class="font-medium" color={c.text_strong}>{call.verb.clone()}</text>
-                    <div class="grow flex-row items-center overflow-hidden">
-                        <text size={control.0} color={c.text_muted} class="truncate">{call.target.clone()}</text>
+                <div
+                    w={cx.width}
+                    h={cx.height}
+                    class="flex-row items-center gap-[8] px-[4]"
+                    bg={c.surface}
+                    border={c.border_variant}
+                    class="rounded-[8]"
+                >
+                    <div
+                        id={disclosure_id(tool).as_str()}
+                        class="flex-row items-center gap-[8] grow h-full px-[6] rounded-[6]"
+                        hover_bg={c.element_hover}
+                        on:click={toggle}
+                        track_focus={disclosure_focus(tool)}
+                        accessibility_role={AccessibilityRole::Button}
+                        aria-label={name}
+                        aria-expanded={expanded}
+                    >
+                        <icon svg={chevron} size={control.1} color={c.text_muted} />
+                        <icon svg={icon(call.kind)} size={control.1} color={c.icon} />
+                        <text size={control.0} class="font-medium" color={c.text_strong}>
+                            {call.verb.clone()}
+                        </text>
+                        <div class="grow flex-row items-center overflow-hidden">
+                            <text size={control.0} color={c.text_muted} class="truncate">
+                                {call.target.clone()}
+                            </text>
+                        </div>
+                        <icon svg={status_icon} size={control.1} color={status_color} />
+                        <text size={tokens::TYPE_META.0} color={status_color}>{detail}</text>
                     </div>
-                    <icon svg={status_icon} size={control.1} color={status_color} />
-                    <text size={tokens::TYPE_META.0} color={status_color}>{detail}</text>
+                    {?retry}
                 </div>
-                {?retry}
-            </div>
-        }
-        .into_any()
+            }
+            .into_any()
         },
     )
 }

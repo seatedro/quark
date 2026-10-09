@@ -178,8 +178,13 @@ impl RowDecorator for TimelineChrome {
                         <icon svg={lucide::ALERT_CIRCLE} size={14.0} color={c.status_error} />
                     }
                     {text_color(author_color, author)}
-                    <text size={tokens::TYPE_META.0} line_height={tokens::TYPE_META.1 / tokens::TYPE_META.0}
-                          color={c.text_muted}>{at.to_owned()}</text>
+                    <text
+                        size={tokens::TYPE_META.0}
+                        line_height={tokens::TYPE_META.1 / tokens::TYPE_META.0}
+                        color={c.text_muted}
+                    >
+                        {at.to_owned()}
+                    </text>
                 </div>
             }
             .into_any(),

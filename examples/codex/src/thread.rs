@@ -89,10 +89,16 @@ pub fn view(
     let mut embed = Embed { stats, inline };
     view! {
         <div class="absolute top-0" left={x} w={w} h={h}>
-            <div class="absolute left-0 top-0 flex-col items-center overflow-y-scroll" w={w}
-                 h={h} track_scroll={&app.thread_scroll} scrollbar_auto_hide
-                 fade_edge={(FadeEdge::Bottom, 16.0)} accessibility_role={Role::Log}
-                 aria-label="Transcript">
+            <div
+                class="absolute left-0 top-0 flex-col items-center overflow-y-scroll"
+                w={w}
+                h={h}
+                track_scroll={&app.thread_scroll}
+                scrollbar_auto_hide
+                fade_edge={(FadeEdge::Bottom, 16.0)}
+                accessibility_role={Role::Log}
+                aria-label="Transcript"
+            >
                 <transcript(&items, p, column, &mut embed)>
                     <div h={spacer} />
                 </transcript>
@@ -101,9 +107,15 @@ pub fn view(
             if pill {
                 let (adds, dels) = stats;
                 <div class="absolute left-0 flex-row justify-center" top={bottom_top - 42.0} w={w}>
-                    <div class="flex-row items-center h-8 px-[14] gap-[5] rounded-[10]" bg={p.shell}
-                         border={p.shell_border} role="button" aria-label="View changes" block_mouse
-                         on:click={Msg::OpenTab(crate::Tab::Changes)}>
+                    <div
+                        class="flex-row items-center h-8 px-[14] gap-[5] rounded-[10]"
+                        bg={p.shell}
+                        border={p.shell_border}
+                        role="button"
+                        aria-label="View changes"
+                        block_mouse
+                        on:click={Msg::OpenTab(crate::Tab::Changes)}
+                    >
                         <txt("1 file changed", BODY, p.text_soft) />
                         <txt(format!("+{adds}"), BODY, p.success) />
                         <txt(format!("-{dels}"), BODY, p.error) />
@@ -143,10 +155,18 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, embed: &mut Embed) -> Di
                 match item {
                     Item::User { text: body, .. } => {
                         <div class="w-full flex-col items-end pt-[33]" key={key}>
-                            <div class="px-4 py-[9] rounded-[16]" max_w={(column * 0.7).floor()}
-                                 bg={p.bubble} accessibility_role={Role::Group}
-                                 aria-label="You said:">
-                                <text size={BODY} color={p.bubble_text} line_height_points={LINE_PT}>
+                            <div
+                                class="px-4 py-[9] rounded-[16]"
+                                max_w={(column * 0.7).floor()}
+                                bg={p.bubble}
+                                accessibility_role={Role::Group}
+                                aria-label="You said:"
+                            >
+                                <text
+                                    size={BODY}
+                                    color={p.bubble_text}
+                                    line_height_points={LINE_PT}
+                                >
                                     {body.clone()}
                                 </text>
                             </div>
@@ -163,13 +183,19 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, embed: &mut Embed) -> Di
                     }
                     Item::Error(msg) => {
                         <div class="w-full flex-col" key={key}>
-                            <div class="flex-row items-center w-full px-[13] py-[10] gap-3 rounded-[11]"
-                                 bg={p.notice} border={p.notice_border} role="alert">
+                            <div
+                                class="flex-row items-center w-full px-[13] py-[10] gap-3 rounded-[11]"
+                                bg={p.notice}
+                                border={p.notice_border}
+                                role="alert"
+                            >
                                 <div class="self-start pt-0.5">
                                     <icon svg={icons::ALERT} size={17.0} color={p.text} />
                                 </div>
                                 <div class="flex-1 min-w-0">
-                                    <text size={BODY} color={p.text} line_height={1.5}>{msg.clone()}</text>
+                                    <text size={BODY} color={p.text} line_height={1.5}>
+                                        {msg.clone()}
+                                    </text>
                                 </div>
                             </div>
                             <div class="h-5" />
@@ -180,7 +206,12 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, embed: &mut Embed) -> Di
                             <div class="flex-row items-center w-full h-[22] gap-2">
                                 <div class="flex-1 h-px" bg={p.hairline} />
                                 <icon svg={icons::CUBE} size={14.0} color={p.divider_text} />
-                                <txt(format!("Model changed from {from} to {to}."), BODY, p.divider_text) />
+                                <txt(
+                                    format!("Model changed from {from} to {to}."),
+                                    BODY,
+                                    p.divider_text
+                                )
+                                />
                                 <icon svg={icons::INFO} size={12.0} color={p.divider_text} />
                                 <div class="flex-1 h-px" bg={p.hairline} />
                             </div>
@@ -257,9 +288,13 @@ fn work(
     };
     view! { -> Div,
         <div class="w-full flex-col">
-            <div class="flex-row items-center h-[22] gap-1.5" role="button"
-                 aria-label={label.clone()} aria-expanded={open || running}
-                 on:click={Msg::ToggleWork(index)}>
+            <div
+                class="flex-row items-center h-[22] gap-1.5"
+                role="button"
+                aria-label={label.clone()}
+                aria-expanded={open || running}
+                on:click={Msg::ToggleWork(index)}
+            >
                 <txt(label, BODY, p.muted) />
                 if !running {
                     <icon svg={chevron(open)} size={13.0} color={p.muted} />
@@ -284,9 +319,13 @@ fn work(
                             rows,
                         } => {
                             <div class="w-full flex-col">
-                                <div class="flex-row items-center h-[22] gap-2" role="button"
-                                     aria-label={(*label).to_owned()} aria-expanded={*open}
-                                     on:click={Msg::ToggleGroup(index, s)}>
+                                <div
+                                    class="flex-row items-center h-[22] gap-2"
+                                    role="button"
+                                    aria-label={(*label).to_owned()}
+                                    aria-expanded={*open}
+                                    on:click={Msg::ToggleGroup(index, s)}
+                                >
                                     <icon svg={glyph(*g)} size={14.0} color={p.muted} />
                                     <txt(*label, BODY, p.muted) />
                                     <icon svg={chevron(*open)} size={12.0} color={p.muted} />
@@ -308,7 +347,9 @@ fn work(
                         }
                         Step::Live { glyph: g, text } => {
                             <div class="w-full flex-col">
-                                <div class="flex-row items-center w-full h-[22] gap-2 overflow-hidden">
+                                <div
+                                    class="flex-row items-center w-full h-[22] gap-2 overflow-hidden"
+                                >
                                     <icon svg={glyph(*g)} size={14.0} color={p.text_soft} />
                                     {shimmer(text, p, BODY)}
                                 </div>
@@ -355,8 +396,11 @@ fn tool_row(
             }
             view! {
                 <div class="w-full flex-col">
-                    <tool_line(p, icons::TERMINAL) role="button" aria-label={label.clone()}
-                               on:click={Msg::ToggleRow(item, step, index)}>
+                    <tool_line(p, icons::TERMINAL)
+                        role="button"
+                        aria-label={label.clone()}
+                        on:click={Msg::ToggleRow(item, step, index)}
+                    >
                         <div class="flex-1 min-w-0 overflow-hidden">
                             <txt(label, BODY, ink) class="truncate" />
                         </div>
@@ -381,26 +425,28 @@ fn tool_row(
             let (adds, dels) = embed.stats;
             let card = if *open { embed.inline.take() } else { None };
             view! {
-            <div class="w-full flex-col">
-                <tool_line(p, icons::PENCIL) role="button"
-                           aria-label={format!("Toggle diff for {file}")}
-                           on:click={Msg::ToggleRow(item, step, index)}>
-                    if *open {
-                        <txt("Edited file", BODY, ink) />
-                        <div />
-                        <div />
-                    } else {
-                        <txt(format!("Edited {file}"), BODY, ink) />
-                        <txt(format!("+{adds}"), BODY, p.success) />
-                        <txt(format!("-{dels}"), BODY, p.error) />
+                <div class="w-full flex-col">
+                    <tool_line(p, icons::PENCIL)
+                        role="button"
+                        aria-label={format!("Toggle diff for {file}")}
+                        on:click={Msg::ToggleRow(item, step, index)}
+                    >
+                        if *open {
+                            <txt("Edited file", BODY, ink) />
+                            <div />
+                            <div />
+                        } else {
+                            <txt(format!("Edited {file}"), BODY, ink) />
+                            <txt(format!("+{adds}"), BODY, p.success) />
+                            <txt(format!("-{dels}"), BODY, p.error) />
+                        }
+                        <icon svg={chevron(*open)} size={12.0} color={p.muted} />
+                    </tool_line>
+                    if let Some(card) = card {
+                        <div class="h-1.5" />
+                        {card}
                     }
-                    <icon svg={chevron(*open)} size={12.0} color={p.muted} />
-                </tool_line>
-                if let Some(card) = card {
-                    <div class="h-1.5" />
-                    {card}
-                }
-            </div>
+                </div>
             }
         }
     }
@@ -408,23 +454,34 @@ fn tool_row(
 
 fn shell_card(p: &Pal, shell: &Shell) -> AnyElement {
     view! {
-        <div class="w-full flex-col rounded-[8] overflow-hidden relative" bg={p.shell}
-             border={p.shell_border} accessibility_role={Role::Group}
-             aria-label={format!("Shell: {}", shell.command)}
-             h={if shell.footer.is_some() { 128.0 } else { 100.0 }}>
+        <div
+            class="w-full flex-col rounded-[8] overflow-hidden relative"
+            bg={p.shell}
+            border={p.shell_border}
+            accessibility_role={Role::Group}
+            aria-label={format!("Shell: {}", shell.command)}
+            h={if shell.footer.is_some() { 128.0 } else { 100.0 }}
+        >
             <div class="flex-row items-center h-7 px-2">
                 <txt("Shell", SMALL, p.text_soft) />
             </div>
             <div class="flex-row items-center h-[26] px-2 gap-2">
-                <text size={CODE + 1.0} color={p.muted} class="font-mono whitespace-nowrap">"$"</text>
+                <text size={CODE + 1.0} color={p.muted} class="font-mono whitespace-nowrap">
+                    "$"
+                </text>
                 <text size={CODE + 1.0} color={p.text} class="font-mono whitespace-nowrap">
                     {shell.command}
                 </text>
             </div>
             // Output past the card's height fades out, unless a footer
             // follows it.
-            <div class="w-full flex-col px-[10] gap-[3] h-11 overflow-hidden"
-                 fade_edge={(FadeEdge::Bottom, if shell.footer.is_some() { 0.0 } else { 30.0 })}>
+            <div
+                class="w-full flex-col px-[10] gap-[3] h-11 overflow-hidden"
+                fade_edge={(
+                    FadeEdge::Bottom,
+                    if shell.footer.is_some() { 0.0 } else { 30.0 }
+                )}
+            >
                 for line in shell.output.lines() {
                     <text size={CODE} color={p.faint} class="font-mono whitespace-nowrap">
                         {line.replace(' ', "\u{a0}")}
@@ -497,9 +554,7 @@ fn paragraph(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> An
     if let Some(pending) = pending.filter(|s| !s.is_empty()) {
         runs.push(StyledSpan::plain(pending).color(p.faint.lerp(p.bg, 0.3)));
     }
-    view! {
-        <{rich_text(runs)} size={BODY} line_height_points={LINE_PT} />
-    }
+    view! { <{rich_text(runs)} size={BODY} line_height_points={LINE_PT} /> }
 }
 
 /// Spans flowed word by word so file chips and their icon tiles wrap with
@@ -508,8 +563,13 @@ fn paragraph(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> An
 fn inline_flow(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> AnyElement {
     let word = |w: &str, c: Color, bold: bool| {
         view! {
-            <text size={BODY} color={c} class="whitespace-nowrap" line_height_points={LINE_PT}
-                  @when {bold} { class="font-semibold" }>
+            <text
+                size={BODY}
+                color={c}
+                class="whitespace-nowrap"
+                line_height_points={LINE_PT}
+                @when {bold} { class="font-semibold" }
+            >
                 {w.replace(' ', "\u{a0}")}
             </text>
         }
@@ -526,16 +586,28 @@ fn inline_flow(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> 
                     }
                     Span::Code(c) => {
                         <div class="flex-row items-center px-[5] h-5 rounded-[5]" bg={p.chip}>
-                            <text size={CODE + 0.5} color={p.text} class="font-mono whitespace-nowrap">
+                            <text
+                                size={CODE + 0.5}
+                                color={p.text}
+                                class="font-mono whitespace-nowrap"
+                            >
                                 {*c}
                             </text>
                         </div>
                     }
                     Span::File(name, line) => {
-                        <div class="flex-row items-center gap-[5]" role="link"
-                             aria-label={(*name).to_owned()} on:click={Msg::OpenFile("cart.js")}>
-                            <div class="w-[13] h-[13] rounded-[3] bg-[#2f6fd8] items-center justify-center">
-                                <text size={6.5} class="font-bold text-white whitespace-nowrap">"js"</text>
+                        <div
+                            class="flex-row items-center gap-[5]"
+                            role="link"
+                            aria-label={(*name).to_owned()}
+                            on:click={Msg::OpenFile("cart.js")}
+                        >
+                            <div
+                                class="w-[13] h-[13] rounded-[3] bg-[#2f6fd8] items-center justify-center"
+                            >
+                                <text size={6.5} class="font-bold text-white whitespace-nowrap">
+                                    "js"
+                                </text>
                             </div>
                             {word(name, p.link, false)}
                             if let Some(n) = line {
@@ -567,9 +639,17 @@ fn answer(p: &Pal, blocks: &[Block], column: f32) -> Div {
                         for spans in items {
                             <div class="flex-row items-center w-full items-start">
                                 <div class="w-7 pl-[5]">
-                                    <text size={BODY} color={p.text_soft} line_height_points={LINE_PT}>"•"</text>
+                                    <text
+                                        size={BODY}
+                                        color={p.text_soft}
+                                        line_height_points={LINE_PT}
+                                    >
+                                        "•"
+                                    </text>
                                 </div>
-                                <div w={column - 28.0}>{paragraph(spans, p, p.text_soft, None)}</div>
+                                <div w={column - 28.0}>
+                                    {paragraph(spans, p, p.text_soft, None)}
+                                </div>
                             </div>
                         }
                         <div class="h-2" />
@@ -580,8 +660,16 @@ fn answer(p: &Pal, blocks: &[Block], column: f32) -> Div {
                 <icon_button(p, icons::COPY, 26.0, 14.0, p.muted, "Copy", Msg::Noop) />
                 <icon_button(p, icons::READ_ALOUD, 26.0, 14.0, p.muted, "Read aloud", Msg::Noop) />
                 <icon_button(p, icons::RATE, 26.0, 14.0, p.muted, "Rate response", Msg::Noop) />
-                <icon_button(p, icons::FORK_CHAT, 26.0, 14.0, p.muted, "Fork chat from here",
-                             Msg::Noop) />
+                <icon_button(
+                    p,
+                    icons::FORK_CHAT,
+                    26.0,
+                    14.0,
+                    p.muted,
+                    "Fork chat from here",
+                    Msg::Noop
+                )
+                />
             </div>
             <div class="h-[15]" />
         </div>
@@ -592,9 +680,13 @@ fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32)) -> Div {
     let light = p.mode == ThemeMode::Light;
     view! { -> Div,
         <div class="w-full flex-col">
-            <div class="flex-row items-center w-full h-16 px-3 gap-3 rounded-[10]" bg={p.change_card}
-                 border={p.change_border} accessibility_role={Role::Group}
-                 aria-label={format!("Edited {file}")}>
+            <div
+                class="flex-row items-center w-full h-16 px-3 gap-3 rounded-[10]"
+                bg={p.change_card}
+                border={p.change_border}
+                accessibility_role={Role::Group}
+                aria-label={format!("Edited {file}")}
+            >
                 <div class="w-10 h-10 rounded-[8] items-center justify-center" bg={p.tile}>
                     <icon svg={icons::REVIEW} size={17.0} color={p.text_soft} />
                 </div>
@@ -610,9 +702,17 @@ fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32)) -> Div {
                     <txt("Undo", SMALL, p.text_soft) />
                     <icon svg={icons::UNDO} size={13.0} color={p.text_soft} />
                 </div>
-                <div class="flex-row items-center h-7 px-[10] rounded-[8]"
-                     border={if light { p.change_border } else { p.shell_border }} role="button"
-                     aria-label="View changes" on:click={Msg::OpenTab(crate::Tab::Changes)}>
+                <div
+                    class="flex-row items-center h-7 px-[10] rounded-[8]"
+                    border={if light {
+                        p.change_border
+                    } else {
+                        p.shell_border
+                    }}
+                    role="button"
+                    aria-label="View changes"
+                    on:click={Msg::OpenTab(crate::Tab::Changes)}
+                >
                     <txt("View changes", SMALL, p.text_soft) />
                 </div>
             </div>
@@ -626,15 +726,29 @@ fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32)) -> Div {
 fn approval_card(p: &Pal, a: &data::Approval, w: f32) -> (AnyElement, f32) {
     let h = 183.0;
     let card = view! {
-        <div w={w} h={h} class="flex-col px-4 pt-[14] gap-[10] rounded-[20]"
-             bg={p.composer.lerp(p.bg, 0.15)} border={p.composer_border}
-             accessibility_role={Role::AlertDialog} aria-label={a.question} block_mouse>
+        <div
+            w={w}
+            h={h}
+            class="flex-col px-4 pt-[14] gap-[10] rounded-[20]"
+            bg={p.composer.lerp(p.bg, 0.15)}
+            border={p.composer_border}
+            accessibility_role={Role::AlertDialog}
+            aria-label={a.question}
+            block_mouse
+        >
             <div class="flex-row items-center gap-2">
                 <icon svg={icons::TERMINAL} size={15.0} color={p.muted} />
                 <txt(a.category, SMALL, p.muted) />
             </div>
-            <text size={BODY} color={p.text} class="font-medium" line_height={1.5}
-                  wrap_width={w - 32.0}>{a.question}</text>
+            <text
+                size={BODY}
+                color={p.text}
+                class="font-medium"
+                line_height={1.5}
+                wrap_width={w - 32.0}
+            >
+                {a.question}
+            </text>
             <div margin_left={-4.0}>
                 <div class="flex-row items-center h-9 px-[9] rounded-[8]" w={w - 24.0} bg={p.tray}>
                     <text size={CODE + 0.5} color={p.muted} class="font-mono whitespace-nowrap">
@@ -644,25 +758,42 @@ fn approval_card(p: &Pal, a: &data::Approval, w: f32) -> (AnyElement, f32) {
             </div>
             <div class="flex-row items-center gap-2">
                 <div class="flex-1" />
-                <div class="flex-row items-center h-7 pl-[10] pr-1 gap-1.5 rounded-[14]"
-                     border={p.composer_border.lerp(p.text, 0.1)} role="button" aria-label="Deny"
-                     on:click={Msg::Decide(false)}>
+                <div
+                    class="flex-row items-center h-7 pl-[10] pr-1 gap-1.5 rounded-[14]"
+                    border={p.composer_border.lerp(p.text, 0.1)}
+                    role="button"
+                    aria-label="Deny"
+                    on:click={Msg::Decide(false)}
+                >
                     <txt("Deny", SMALL, p.text) />
                     {kbd(p, "Esc")}
                 </div>
-                <div class="flex-row items-center h-[30] pl-[10] pr-2 gap-2 rounded-[15]"
-                     bg={p.send_active}>
-                    <div class="flex-row items-center gap-1.5" role="button" aria-label="Allow once"
-                         on:click={Msg::Decide(true)}>
+                <div
+                    class="flex-row items-center h-[30] pl-[10] pr-2 gap-2 rounded-[15]"
+                    bg={p.send_active}
+                >
+                    <div
+                        class="flex-row items-center gap-1.5"
+                        role="button"
+                        aria-label="Allow once"
+                        on:click={Msg::Decide(true)}
+                    >
                         <txt("Allow once", SMALL, p.send_active_glyph) />
                         <div class="px-[3] rounded-[4]" bg={p.send_active_glyph.with_alpha(30)}>
                             <icon svg={icons::RETURN_KEY} size={13.0} color={p.send_active_glyph} />
                         </div>
                     </div>
-                    <div id="approval.options" role="button" aria-label="More options"
-                         on:click={Msg::Open(Menu::ApprovalOptions)}>
-                        <icon svg={icons::CHEVRON_DOWN} size={12.0}
-                              color={p.send_active_glyph.with_alpha(160)} />
+                    <div
+                        id="approval.options"
+                        role="button"
+                        aria-label="More options"
+                        on:click={Msg::Open(Menu::ApprovalOptions)}
+                    >
+                        <icon
+                            svg={icons::CHEVRON_DOWN}
+                            size={12.0}
+                            color={p.send_active_glyph.with_alpha(160)}
+                        />
                     </div>
                 </div>
             </div>

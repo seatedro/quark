@@ -100,13 +100,21 @@ const ACCENT: Color = Color::rgba(51, 102, 153, 255);
 #[test]
 fn attributes_match_builder_calls() {
     let from_macro = view! {
-        <div flex-row gap={8.0} p={4.0} min-w={0.0}
-             bg={ACCENT}
-             shadow={(4.0, 2.0, Color::rgba(0, 0, 0, 80))}
-             id="save" test-id="save-button"
-             role="button" aria-label="Save" aria-selected={true}
-             on:click={Pick("save")}
-             on:key:mod+s={Pick("save")}>
+        <div
+            flex-row
+            gap={8.0}
+            p={4.0}
+            min-w={0.0}
+            bg={ACCENT}
+            shadow={(4.0, 2.0, Color::rgba(0, 0, 0, 80))}
+            id="save"
+            test-id="save-button"
+            role="button"
+            aria-label="Save"
+            aria-selected={true}
+            on:click={Pick("save")}
+            on:key:mod+s={Pick("save")}
+        >
             <text color={Color::rgba(255, 255, 255, 255)}>"Save"</text>
         </div>
     };
@@ -132,8 +140,10 @@ fn attributes_match_builder_calls() {
 #[test]
 fn classes_match_builder_calls() {
     let from_macro = view! {
-        <div class="flex-col items-center p-4 gap-x-2 w-[320px] h-40 rounded-lg
-                    bg-[#336699] border-[ACCENT] opacity-50 hover:bg-[#ffffff]">
+        <div
+            class="flex-col items-center p-4 gap-x-2 w-[320px] h-40 rounded-lg
+                    bg-[#336699] border-[ACCENT] opacity-50 hover:bg-[#ffffff]"
+        >
             <text class="text-sm font-semibold truncate text-[Color::rgba(1, 2, 3, 255)]">"x"</text>
             <icon svg={lucide::X} size={12.0} class="fill-[ACCENT]" />
         </div>
@@ -169,7 +179,12 @@ fn text_interpolation_matches_format() {
     let from_macro = view! {
         <div class="flex-col">
             <text>"Hello, {name}!"</text>
-            <text>{count} " unread, " {count * 2} " total"</text>
+            <text>
+                {count}
+                " unread, "
+                {count * 2}
+                " total"
+            </text>
             "{count} left"
         </div>
     };
@@ -186,8 +201,17 @@ fn text_interpolation_matches_format() {
 fn rich_text_matches_styled_spans() {
     let url = "https://quark.dev";
     let from_macro = view! {
-        <p size={14.0} width={300.0}>"Run " <code>"cargo test"</code> ", then " <b>"read " <i>"the docs"</i></b>
-           <br/> <a href={url}>"online"</a></p>
+        <p size={14.0} width={300.0}>
+            "Run "
+            <code>"cargo test"</code>
+            ", then "
+            <b>
+                "read "
+                <i>"the docs"</i>
+            </b>
+            <br />
+            <a href={url}>"online"</a>
+        </p>
     };
     let from_builders = selectable_rich_text(vec![
         StyledSpan::plain("Run "),
@@ -215,8 +239,14 @@ fn control_flow_matches_builder_children() {
     let build = |show: bool, status: Status, label: Option<&str>| {
         let from_macro = view! {
             <div class="flex-col">
-                if show { <text>"shown"</text> } else { <spacer /> }
-                if let Some(label) = label { <text>{label}</text> }
+                if show {
+                    <text>"shown"</text>
+                } else {
+                    <spacer />
+                }
+                if let Some(label) = label {
+                    <text>{label}</text>
+                }
                 match status {
                     Status::Idle => <text>"idle"</text>
                     Status::Busy(n) => {
@@ -270,14 +300,14 @@ fn control_flow_allocates_like_builder_children() {
             <div>
                 for item in items {
                     <text>{item}</text>
-                    <spacer/>
+                    <spacer />
                 }
                 if items.len() > 1 {
                     <text>"x"</text>
                     <text>"y"</text>
                 }
                 match items.len() {
-                    0 => <spacer/>
+                    0 => <spacer />
                     _ => {
                         <text>"m"</text>
                         <text>"n"</text>
@@ -336,8 +366,13 @@ fn builders_and_macro_output_nest_in_each_other() {
 fn props_components_match_their_builders() {
     let from_macro = view! {
         <div class="flex-col">
-            <Button on:click={Pick("send")} icon={lucide::CHECK} label="Send"
-                    variant={ButtonStyle::Filled} active />
+            <Button
+                on:click={Pick("send")}
+                icon={lucide::CHECK}
+                label="Send"
+                variant={ButtonStyle::Filled}
+                active
+            />
             <Badge label="New" variant={BadgeVariant::Success} />
             <Checkbox checked={true} label="Wrap" on:toggle={Pick("wrap")} />
             <ProgressBar value={0.4} show_label />

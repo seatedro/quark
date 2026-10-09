@@ -75,12 +75,17 @@ impl RenderOnce for FormField {
         let invalid = self.error.is_some();
         let id = self.id;
         view! {
-            <div class="flex-col w-full" gap={gap}
-                 test_id="form-field" accessibility_id={format!("field:{id}")}
-                 accessibility_role={accesskit::Role::Group}
-                 aria-label={self.label.clone()}
-                 aria-description={description.unwrap_or_default()}
-                 aria-invalid={invalid} aria-required={self.required}>
+            <div
+                class="flex-col w-full"
+                gap={gap}
+                test_id="form-field"
+                accessibility_id={format!("field:{id}")}
+                accessibility_role={accesskit::Role::Group}
+                aria-label={self.label.clone()}
+                aria-description={description.unwrap_or_default()}
+                aria-invalid={invalid}
+                aria-required={self.required}
+            >
                 <div class="flex-row items-center" gap={(2.0 * scale).round()}>
                     <text class="font-medium" size={label_size} color={tc.text}>{self.label}</text>
                     if self.required {
@@ -89,11 +94,15 @@ impl RenderOnce for FormField {
                 </div>
                 {self.control}
                 if let Some(error) = self.error {
-                    <div class="flex-row items-center" gap={(4.0 * scale).round()}
-                         test_id="form-field-error"
-                         accessibility_id={format!("field:{id}:error")}
-                         accessibility_role={accesskit::Role::Status}
-                         aria-label={error.clone()} live={Politeness::Polite}>
+                    <div
+                        class="flex-row items-center"
+                        gap={(4.0 * scale).round()}
+                        test_id="form-field-error"
+                        accessibility_id={format!("field:{id}:error")}
+                        accessibility_role={accesskit::Role::Status}
+                        aria-label={error.clone()}
+                        live={Politeness::Polite}
+                    >
                         {svg_icon(lucide::ALERT_CIRCLE, label_size).color(tc.status_error)}
                         <text size={message_size} color={tc.status_error}>{error}</text>
                     </div>

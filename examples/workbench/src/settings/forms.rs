@@ -73,8 +73,12 @@ pub fn options(labels: impl IntoIterator<Item = &'static str>) -> Rc<[SelectOpti
 pub fn section(title: &str, fields: Vec<AnyElement>, theme: &Theme) -> AnyElement {
     let (size, line) = tokens::TYPE_META;
     view! {
-        <div class="flex-col w-full" gap={tokens::SPACE_12}
-             accessibility_role={accesskit::Role::Group} aria-label={title.to_owned()}>
+        <div
+            class="flex-col w-full"
+            gap={tokens::SPACE_12}
+            accessibility_role={accesskit::Role::Group}
+            aria-label={title.to_owned()}
+        >
             <text size={size} line_height={line / size} semibold color={theme.colors.text_muted}>
                 {title.to_uppercase()}
             </text>

@@ -946,7 +946,9 @@ pub fn table_view<D: TableData>(
     let hash = inputs_hash(&(inner.revision, data.revision(), env, on_event as usize));
     view! {
         <cached(inner.id, hash, move || build_table(&inner, &data, colors, env, on_event))
-                w={width} h={height} />
+            w={width}
+            h={height}
+        />
     }
 }
 
@@ -962,38 +964,63 @@ fn build_table<D: TableData>(
     let columns = t.column_window();
     let reorder_target = t.header.and_then(|h| h.target.map(|to| (h.column, to)));
     view! {
-        <div w={width} h={height} class="flex-col overflow-clip" track_focus={t.focus}
-             @when {env.accessible} {
-                 accessibility_id={t.id} accessibility_role={Role::Table} aria-label={t.label}
-                 accessibility_table_size={(t.view.len() + 1, t.order.len())}
-                 aria-multiselectable={true}
-             }
-             @for &(binding, key) in KEYS { on_key={(binding, on_event(TableEvent::Key(key)))} }>
+        <div
+            w={width}
+            h={height}
+            class="flex-col overflow-clip"
+            track_focus={t.focus}
+            @when {env.accessible} {
+                accessibility_id={t.id}
+                accessibility_role={Role::Table}
+                aria-label={t.label}
+                accessibility_table_size={(t.view.len() + 1, t.order.len())}
+                aria-multiselectable={true}
+            }
+            @for &(binding, key) in KEYS { on_key={(binding, on_event(TableEvent::Key(key)))} }
+        >
             <div class="w-full" h={t.header_height} class="shrink-0 overflow-clip">
                 // The header stays put vertically and follows the body
                 // horizontally.
-                <div w={t.total_width()} h={t.header_height} class="flex-row shrink-0"
-                     translate={(-t.scroll_x, 0.0)} bg={colors.header} border_b={colors.border}
-                     @when {env.accessible} {
-                         accessibility_id={format!("{}.header", t.id)}
-                         accessibility_role={Role::Row} aria-rowindex={0}
-                     }>
+                <div
+                    w={t.total_width()}
+                    h={t.header_height}
+                    class="flex-row shrink-0"
+                    translate={(-t.scroll_x, 0.0)}
+                    bg={colors.header}
+                    border_b={colors.border}
+                    @when {env.accessible} {
+                        accessibility_id={format!("{}.header", t.id)}
+                        accessibility_role={Role::Row}
+                        aria-rowindex={0}
+                    }
+                >
                     <div w={t.column_left(columns.start)} class="shrink-0" />
                     for pos in columns.clone() {
                         {header_cell(t, pos, reorder_target, colors, env, on_event)}
                     }
                 </div>
             </div>
-            <div class="w-full" h={t.body_height()} class="flex-col" scroll_y={t.scroll_y}
-                 scroll_total={window.total_extent}
-                 on:scroll={ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))
-                     .with_to_px(move |px| on_event(TableEvent::ScrollTo(px as f32)))}
-                 scroll_x={t.scroll_x} scroll_total_x={t.total_width()}
-                 on:scroll_x={ScrollActionBuilder::new(move |lines| on_event(TableEvent::ScrollX(lines)))
-                     .with_to_px(move |px| on_event(TableEvent::ScrollXTo(px as f32)))}
-                 @when {t.scrollbar_auto_hide} {
-                     scrollbar_visibility={&t.scrollbar} class="scrollbar-auto-hide"
-                 }>
+            <div
+                class="w-full"
+                h={t.body_height()}
+                class="flex-col"
+                scroll_y={t.scroll_y}
+                scroll_total={window.total_extent}
+                on:scroll={
+                    ScrollActionBuilder::new(move |lines| on_event(TableEvent::Scroll(lines)))
+                        .with_to_px(move |px| on_event(TableEvent::ScrollTo(px as f32)))
+                }
+                scroll_x={t.scroll_x}
+                scroll_total_x={t.total_width()}
+                on:scroll_x={
+                    ScrollActionBuilder::new(move |lines| on_event(TableEvent::ScrollX(lines)))
+                        .with_to_px(move |px| on_event(TableEvent::ScrollXTo(px as f32)))
+                }
+                @when {t.scrollbar_auto_hide} {
+                    scrollbar_visibility={&t.scrollbar}
+                    class="scrollbar-auto-hide"
+                }
+            >
                 <div class="w-full shrink-0" h={window.top_spacer} />
                 for display in window.range {
                     {table_row(t, data, display, columns.clone(), colors, env, on_event)}
@@ -1018,51 +1045,71 @@ fn header_cell(
     let sort = t.sort.filter(|(s, _)| *s == column).map(|(_, d)| d);
     let start_width = width;
     view! {
-        <div w={width} h={t.header_height} class="shrink-0 relative flex-row items-center"
-             gap={4.0} px={CELL_PAD_PX} border_r={colors.border} class="cursor-pointer"
-             on:drag={move |press: ClickEvent| {
-                 Box::new(HeaderDrag {
-                     column,
-                     press_x: press.x,
-                     on_event,
-                 }) as Box<dyn DragHandler>
-             }}
-             @when {env.accessible} {
-                 accessibility_id={format!("{}.col.{column}", t.id)}
-                 accessibility_role={Role::ColumnHeader} aria-label={&*t.titles[c]}
-                 aria-colindex={pos} aria-rowindex={0}
-                 @when {let Some(direction) = sort} { aria-sort={direction} }
-             }>
+        <div
+            w={width}
+            h={t.header_height}
+            class="shrink-0 relative flex-row items-center"
+            gap={4.0}
+            px={CELL_PAD_PX}
+            border_r={colors.border}
+            class="cursor-pointer"
+            on:drag={move |press: ClickEvent| {
+                Box::new(HeaderDrag {
+                    column,
+                    press_x: press.x,
+                    on_event,
+                }) as Box<dyn DragHandler>
+            }}
+            @when {env.accessible} {
+                accessibility_id={format!("{}.col.{column}", t.id)}
+                accessibility_role={Role::ColumnHeader}
+                aria-label={&*t.titles[c]}
+                aria-colindex={pos}
+                aria-rowindex={0}
+                @when {let Some(direction) = sort} { aria-sort={direction} }
+            }
+        >
             <text class="text-sm font-semibold" color={colors.text} class="truncate">
                 {&*t.titles[c]}
             </text>
             if let Some(direction) = sort {
-                <icon svg={if direction == SortDirection::Descending {
-                          lucide::ARROW_DOWN
-                      } else {
-                          lucide::ARROW_UP
-                      }}
-                      size={12.0} color={colors.muted} />
+                <icon
+                    svg={if direction == SortDirection::Descending {
+                        lucide::ARROW_DOWN
+                    } else {
+                        lucide::ARROW_UP
+                    }}
+                    size={12.0}
+                    color={colors.muted}
+                />
             }
             // Where a dragged column would land.
             if let Some((dragged, to)) = reorder_target
                 && to == pos
-                && dragged != column
-            {
-                <div class="absolute top-0" w={2.0} h={t.header_height} bg={colors.accent}
-                     @when {t.position_of(dragged) < to} { class="right-0" }
-                     @when {t.position_of(dragged) >= to} { class="left-0" } />
+                && dragged != column {
+                <div
+                    class="absolute top-0"
+                    w={2.0}
+                    h={t.header_height}
+                    bg={colors.accent}
+                    @when {t.position_of(dragged) < to} { class="right-0" }
+                    @when {t.position_of(dragged) >= to} { class="left-0" }
+                />
             }
-            <div class="absolute top-0 right-0" w={RESIZE_HANDLE_PX} h={t.header_height}
-                 class="cursor-col-resize"
-                 on:drag={move |press: ClickEvent| {
-                     Box::new(ResizeDrag {
-                         column,
-                         press_x: press.x,
-                         start_width,
-                         on_event,
-                     }) as Box<dyn DragHandler>
-                 }} />
+            <div
+                class="absolute top-0 right-0"
+                w={RESIZE_HANDLE_PX}
+                h={t.header_height}
+                class="cursor-col-resize"
+                on:drag={move |press: ClickEvent| {
+                    Box::new(ResizeDrag {
+                        column,
+                        press_x: press.x,
+                        start_width,
+                        on_event,
+                    }) as Box<dyn DragHandler>
+                }}
+            />
         </div>
     }
 }
@@ -1100,26 +1147,37 @@ fn table_row<D: TableData>(
             selected,
         };
         view! {
-            <div w={t.total_width()} h={t.row_height} class="shrink-0 flex-row"
-                 border_b={colors.border} on:click={on_event(TableEvent::PressRow(row))}
-                 @when {selected} { bg={colors.selected} }
-                 @when {!selected} { hover_bg={colors.hover} }
-                 @when {env.accessible} {
-                     accessibility_id={format!("{}.row.{row}", t.id)}
-                     accessibility_role={Role::Row} aria-rowindex={display + 1}
-                     aria-selected={selected}
-                 }>
+            <div
+                w={t.total_width()}
+                h={t.row_height}
+                class="shrink-0 flex-row"
+                border_b={colors.border}
+                on:click={on_event(TableEvent::PressRow(row))}
+                @when {selected} { bg={colors.selected} }
+                @when {!selected} { hover_bg={colors.hover} }
+                @when {env.accessible} {
+                    accessibility_id={format!("{}.row.{row}", t.id)}
+                    accessibility_role={Role::Row}
+                    aria-rowindex={display + 1}
+                    aria-selected={selected}
+                }
+            >
                 <div w={t.column_left(columns.start)} class="shrink-0" />
                 for pos in columns {
-                    <div w={t.widths[t.order[pos] as usize]} h={t.row_height}
-                         class="shrink-0 flex-row items-center" px={CELL_PAD_PX}
-                         @when {cursor_col == Some(pos as u32)} { border={colors.focus} }
-                         @when {env.accessible} {
-                             accessibility_id={format!("{}.cell.{row}.{}", t.id, t.order[pos])}
-                             accessibility_role={Role::Cell}
-                             aria-label={data.cell_text(row, t.order[pos] as usize).into_owned()}
-                             aria-rowindex={display + 1} aria-colindex={pos}
-                         }>
+                    <div
+                        w={t.widths[t.order[pos] as usize]}
+                        h={t.row_height}
+                        class="shrink-0 flex-row items-center"
+                        px={CELL_PAD_PX}
+                        @when {cursor_col == Some(pos as u32)} { border={colors.focus} }
+                        @when {env.accessible} {
+                            accessibility_id={format!("{}.cell.{row}.{}", t.id, t.order[pos])}
+                            accessibility_role={Role::Cell}
+                            aria-label={data.cell_text(row, t.order[pos] as usize).into_owned()}
+                            aria-rowindex={display + 1}
+                            aria-colindex={pos}
+                        }
+                    >
                         {data.render_cell(row, t.order[pos] as usize, &style)}
                     </div>
                 }

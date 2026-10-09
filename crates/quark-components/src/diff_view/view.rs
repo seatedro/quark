@@ -127,7 +127,9 @@ pub fn diff_view_with(
     BoundsProbe {
         child: view! {
             <cached(state.id, hash, move || build(&frame, look, &deco, on_event))
-                    w={width} h={height} />
+                w={width}
+                h={height}
+            />
         },
         bounds: state.bounds.clone(),
         autoscrolling: state.wants_frame(),
@@ -181,41 +183,68 @@ fn build(
         )
     });
     view! {
-        <div w={width} h={height} bg={colors.surface} track_focus={frame.focus}
-             // The body below is moved back by the offset, so this only
-             // feeds the wheel and the scrollbar.
-             scroll_y={frame.scroll} scroll_total={frame.total}
-             on:scroll={ScrollActionBuilder::new(move |lines| on_event(DiffEvent::Scroll(lines)))
-                 .with_to_px(move |px| on_event(DiffEvent::ScrollTo(px as f32)))}
-             @when {frame.scrollbar_auto_hide} {
-                 scrollbar_visibility={&frame.scrollbar} class="scrollbar-auto-hide"
-             }
-             @for &(binding, key) in KEYS { on_key={(binding, on_event(DiffEvent::Key(key)))} }
-             @when {env.accessible} {
-                 accessibility_id={frame.id} accessibility_role={Role::List}
-                 aria-label={frame.label}
-             }>
-            <div w={width} h={height} class="relative" translate={(0.0, frame.scroll)}
-                 class="cursor-text"
-                 on:drag={move |press: ClickEvent| {
-                     Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
-                 }}>
+        <div
+            w={width}
+            h={height}
+            bg={colors.surface}
+            track_focus={frame.focus}
+            // The body below is moved back by the offset, so this only
+            // feeds the wheel and the scrollbar.
+            scroll_y={frame.scroll}
+            scroll_total={frame.total}
+            on:scroll={ScrollActionBuilder::new(move |lines| on_event(DiffEvent::Scroll(lines)))
+                .with_to_px(move |px| on_event(DiffEvent::ScrollTo(px as f32)))}
+            @when {frame.scrollbar_auto_hide} {
+                scrollbar_visibility={&frame.scrollbar}
+                class="scrollbar-auto-hide"
+            }
+            @for &(binding, key) in KEYS { on_key={(binding, on_event(DiffEvent::Key(key)))} }
+            @when {env.accessible} {
+                accessibility_id={frame.id}
+                accessibility_role={Role::List}
+                aria-label={frame.label}
+            }
+        >
+            <div
+                w={width}
+                h={height}
+                class="relative"
+                translate={(0.0, frame.scroll)}
+                class="cursor-text"
+                on:drag={move |press: ClickEvent| {
+                    Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
+                }}
+            >
                 for (slot, column, side, content_w) in columns {
-                    <div class="absolute" left={column.gutter_x} class="top-0" w={column.gutter_w}
-                         h={height} class="overflow-clip" bg={colors.gutter}>
+                    <div
+                        class="absolute"
+                        left={column.gutter_x}
+                        class="top-0"
+                        w={column.gutter_w}
+                        h={height}
+                        class="overflow-clip"
+                        bg={colors.gutter}
+                    >
                         <div w={column.gutter_w} class="flex-col" translate={(0.0, first_top)}>
                             for row in &frame.rows {
                                 {gutter_cell(frame, row, side, column.gutter_w, look)}
                             }
                         </div>
                     </div>
-                    <div class="absolute" left={column.text_x} class="top-0" w={column.text_w}
-                         h={height}
-                         @when {frame.wrap} { class="overflow-clip" }
-                         @when {!frame.wrap} {
-                             track_scroll={&frame.hscroll[slot]} class="overflow-x-scroll"
-                             scroll_total_x={content_w} class="scrollbar-auto-hide"
-                         }>
+                    <div
+                        class="absolute"
+                        left={column.text_x}
+                        class="top-0"
+                        w={column.text_w}
+                        h={height}
+                        @when {frame.wrap} { class="overflow-clip" }
+                        @when {!frame.wrap} {
+                            track_scroll={&frame.hscroll[slot]}
+                            class="overflow-x-scroll"
+                            scroll_total_x={content_w}
+                            class="scrollbar-auto-hide"
+                        }
+                    >
                         <div w={content_w} class="flex-col" translate={(0.0, first_top)}>
                             for row in &frame.rows {
                                 {text_cell(frame, row, side, content_w, look)}
@@ -228,16 +257,27 @@ fn build(
                 }
                 if let Some((x, w)) = divider {
                     <div class="absolute top-0" left={x} w={w} h={height}>
-                        <canvas(move |bounds, scene, cx| {
-                            paint::vertical_hairline(
-                                scene, bounds.x, bounds.y, bounds.height, colors.border,
-                                cx.scale_factor,
-                            );
-                        })
-                            w={w} h={height} />
+                        <canvas(
+                            move |bounds, scene, cx| {
+                                paint::vertical_hairline(
+                                    scene,
+                                    bounds.x,
+                                    bounds.y,
+                                    bounds.height,
+                                    colors.border,
+                                    cx.scale_factor,
+                                );
+                            }
+                        )
+                            w={w}
+                            h={height}
+                        />
                     </div>
                 }
-                for row in frame.rows.iter().filter(|r| !r.paint.kind.is_line() && r.height > 0.0) {
+                for row in frame
+                    .rows
+                    .iter()
+                    .filter(|r| !r.paint.kind.is_line() && r.height > 0.0) {
                     <div class="absolute left-0" top={row.top} w={width} h={row.height}>
                         {band(frame, row, look, deco, on_event)}
                     </div>
@@ -324,15 +364,29 @@ fn gutter_cell(
     ));
     let build = move || {
         view! {
-            <div w={width} h={height} class="shrink-0"
-                 @when {let Some(bg) = colors.line(kind, shown)} { bg={bg} }>
-                <canvas(move |bounds, scene, cx| {
-                    paint_gutter(
-                        bounds, scene, cx, &m, presentation.markers, &numbers[..count],
-                        cue(kind, shown), colors,
-                    );
-                })
-                    w={width} h={height} />
+            <div
+                w={width}
+                h={height}
+                class="shrink-0"
+                @when {let Some(bg) = colors.line(kind, shown)} { bg={bg} }
+            >
+                <canvas(
+                    move |bounds, scene, cx| {
+                        paint_gutter(
+                            bounds,
+                            scene,
+                            cx,
+                            &m,
+                            presentation.markers,
+                            &numbers[..count],
+                            cue(kind, shown),
+                            colors,
+                        );
+                    }
+                )
+                    w={width}
+                    h={height}
+                />
             </div>
         }
     };
@@ -459,29 +513,45 @@ fn text_cell(frame: &ViewFrame, row: &FrameRow, side: Side, width: f32, look: Lo
         let line = paint.sides[shown as usize].as_ref().expect("shown line");
         let canvas_paint = paint.clone();
         view! {
-            <div w={width} h={height} class="shrink-0"
-                 @when {let Some(bg) = colors.line(kind, shown)} { bg={bg} }
-                 @when {env.accessible} {
-                     accessibility_role={Role::ListItem}
-                     aria-label={line.layout.text().to_string()}
-                     aria-description={kind.description()}
-                     aria-valuetext={match (mode, paint.numbers()) {
-                         (Mode::Unified, [o, n]) if o != 0 && n != 0 => {
-                             format!("old line {o}, new line {n}")
-                         }
-                         (_, [o, _]) if shown == Side::Old => format!("old line {o}"),
-                         (_, [_, n]) => format!("new line {n}"),
-                     }}
-                 }>
-                <canvas(move |bounds, scene, cx| {
-                    if let Some(line) = &canvas_paint.sides[shown as usize] {
-                        paint_text(
-                            bounds, scene, line, shown, &search, selected, pad, font_size,
-                            colors, cx.scale_factor,
-                        );
+            <div
+                w={width}
+                h={height}
+                class="shrink-0"
+                @when {let Some(bg) = colors.line(kind, shown)} { bg={bg} }
+                @when {env.accessible} {
+                    accessibility_role={Role::ListItem}
+                    aria-label={line.layout.text().to_string()}
+                    aria-description={kind.description()}
+                    aria-valuetext={match (mode, paint.numbers()) {
+                        (Mode::Unified, [o, n]) if o != 0 && n != 0 => {
+                            format!("old line {o}, new line {n}")
+                        }
+                        (_, [o, _]) if shown == Side::Old => format!("old line {o}"),
+                        (_, [_, n]) => format!("new line {n}"),
+                    }}
+                }
+            >
+                <canvas(
+                    move |bounds, scene, cx| {
+                        if let Some(line) = &canvas_paint.sides[shown as usize] {
+                            paint_text(
+                                bounds,
+                                scene,
+                                line,
+                                shown,
+                                &search,
+                                selected,
+                                pad,
+                                font_size,
+                                colors,
+                                cx.scale_factor,
+                            );
+                        }
                     }
-                })
-                    w={width} h={height} />
+                )
+                    w={width}
+                    h={height}
+                />
             </div>
         }
     };
@@ -547,17 +617,31 @@ fn empty_side(frame: &ViewFrame, row: &FrameRow, side: Side, look: Look) -> AnyE
     ));
     let build = move || {
         view! {
-            <canvas(move |bounds, scene, cx| {
-                scene.rect(RectPrimitive {
-                    rect: Rect { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-                    color: colors.empty_side,
-                });
-                if fill == EmptySideFill::Hatch {
-                    let rect = Rect { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
-                    paint::hatch(scene, rect, phase, colors.hatch, cx.scale_factor);
+            <canvas(
+                move |bounds, scene, cx| {
+                    scene.rect(RectPrimitive {
+                        rect: Rect {
+                            x: bounds.x,
+                            y: bounds.y,
+                            width: bounds.width,
+                            height: bounds.height
+                        },
+                        color: colors.empty_side,
+                    });
+                    if fill == EmptySideFill::Hatch {
+                        let rect = Rect {
+                            x: bounds.x,
+                            y: bounds.y,
+                            width: bounds.width,
+                            height: bounds.height
+                        };
+                        paint::hatch(scene, rect, phase, colors.hatch, cx.scale_factor);
+                    }
                 }
-            })
-                w={width} h={height} />
+            )
+                w={width}
+                h={height}
+            />
         }
     };
     view! {
@@ -600,11 +684,20 @@ fn focus_overlay(frame: &ViewFrame, row: &FrameRow, look: Look, deco: &Deco) -> 
         });
     view! {
         <div class="absolute left-0" top={row.top} w={width} h={height}>
-            <canvas(move |bounds, scene, cx| {
-                let rect = Rect { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
-                paint::focus_outline(scene, rect, color, cx.scale_factor);
-            })
-                w={width} h={height} />
+            <canvas(
+                move |bounds, scene, cx| {
+                    let rect = Rect {
+                        x: bounds.x,
+                        y: bounds.y,
+                        width: bounds.width,
+                        height: bounds.height
+                    };
+                    paint::focus_outline(scene, rect, color, cx.scale_factor);
+                }
+            )
+                w={width}
+                h={height}
+            />
             if let Some((column, element)) = utility {
                 <div class="absolute top-0" left={column.gutter_x} w={column.gutter_w} h={height}>
                     {element}
@@ -666,8 +759,13 @@ fn band(
             let label = fact_label(fact);
             let colors = look.colors;
             view! {
-                <div w={width} h={height} class="flex-row items-center" px={pad}
-                     bg={colors.separator}>
+                <div
+                    w={width}
+                    h={height}
+                    class="flex-row items-center"
+                    px={pad}
+                    bg={colors.separator}
+                >
                     <text size={font_size * 0.9} color={colors.muted}>{label}</text>
                 </div>
             }
@@ -684,7 +782,9 @@ fn band(
             });
             view! {
                 <div w={width} h={height} class="overflow-clip">
-                    if let Some(content) = content { {content} }
+                    if let Some(content) = content {
+                        {content}
+                    }
                 </div>
             }
         }
@@ -694,18 +794,29 @@ fn band(
             let rows = if *hidden_rows == 1 { "row" } else { "rows" };
             let label = format!("{hidden_rows} more {rows}");
             view! {
-                <div w={width} h={height} class="flex-row items-center" px={pad}
-                     bg={colors.separator}
-                     @when {env.accessible} {
-                         accessibility_role={Role::Status} aria-label={label.clone()}
-                     }>
+                <div
+                    w={width}
+                    h={height}
+                    class="flex-row items-center"
+                    px={pad}
+                    bg={colors.separator}
+                    @when {env.accessible} {
+                        accessibility_role={Role::Status}
+                        aria-label={label.clone()}
+                    }
+                >
                     <text size={font_size * 0.9} color={colors.muted}>{label}</text>
                     <div class="flex-1" />
-                    <div class="flex-row items-center h-full cursor-pointer" px={pad * 0.5}
-                         hover_bg={colors.hover} on:click={on_event(DiffEvent::OpenFull)}
-                         @when {env.accessible} {
-                             accessibility_role={Role::Button} aria-label="Open full diff"
-                         }>
+                    <div
+                        class="flex-row items-center h-full cursor-pointer"
+                        px={pad * 0.5}
+                        hover_bg={colors.hover}
+                        on:click={on_event(DiffEvent::OpenFull)}
+                        @when {env.accessible} {
+                            accessibility_role={Role::Button}
+                            aria-label="Open full diff"
+                        }
+                    >
                         <text size={font_size * 0.9} color={colors.text}>"Open full diff"</text>
                     </div>
                 </div>
@@ -764,26 +875,39 @@ fn file_header(
     let colors = look.colors;
     let env = look.env;
     view! {
-        <div w={width} h={height} class="flex-row items-center" gap={pad * 0.5} px={pad}
-             border_b={colors.border} bg={colors.file_header}
-             @when {env.accessible} {
-                 accessibility_id={format!("{id}.file.{}", paint.file)}
-                 accessibility_role={Role::Heading}
-                 aria-label={format!("{}, {status}, {adds} added, {dels} removed", paint.title)}
-             }>
-            if let Some(prefix) = prefix { {prefix} }
+        <div
+            w={width}
+            h={height}
+            class="flex-row items-center"
+            gap={pad * 0.5}
+            px={pad}
+            border_b={colors.border}
+            bg={colors.file_header}
+            @when {env.accessible} {
+                accessibility_id={format!("{id}.file.{}", paint.file)}
+                accessibility_role={Role::Heading}
+                aria-label={format!("{}, {status}, {adds} added, {dels} removed", paint.title)}
+            }
+        >
+            if let Some(prefix) = prefix {
+                {prefix}
+            }
             <text size={font_size * 0.85} color={colors.muted}>{status}</text>
             <text size={font_size} class="font-semibold truncate" color={colors.text}>
                 {&*paint.title}
             </text>
-            if let Some(metadata) = metadata { {metadata} }
+            if let Some(metadata) = metadata {
+                {metadata}
+            }
             <div class="flex-1" />
             if paint.binary {
                 <text size={font_size * 0.85} color={colors.muted}>"binary"</text>
             }
             <text size={font_size} color={colors.add_text}>"+{adds}"</text>
             <text size={font_size} color={colors.del_text}>"-{dels}"</text>
-            if let Some(actions) = actions { {actions} }
+            if let Some(actions) = actions {
+                {actions}
+            }
         </div>
     }
 }
@@ -803,12 +927,19 @@ fn separator(
     let gap = (paint.kind.diff() == Some(RowKind::Gap)).then(|| paint.gap.expect("gap row"));
     match (look.presentation.separators, gap) {
         (HunkSeparator::Compact, Some(gap)) => view! {
-            <div w={width} h={height} bg={colors.separator} hover_bg={colors.hover}
-                 class="cursor-pointer" on:click={on_event(DiffEvent::Expand(gap, Reveal::All))}
-                 @when {env.accessible} {
-                     accessibility_role={Role::Button} aria-label={"Show all unchanged lines"}
-                     aria-description={&*paint.title}
-                 } />
+            <div
+                w={width}
+                h={height}
+                bg={colors.separator}
+                hover_bg={colors.hover}
+                class="cursor-pointer"
+                on:click={on_event(DiffEvent::Expand(gap, Reveal::All))}
+                @when {env.accessible} {
+                    accessibility_role={Role::Button}
+                    aria-label={"Show all unchanged lines"}
+                    aria-description={&*paint.title}
+                }
+            />
         },
         (HunkSeparator::Compact, None) => view! {
             <div w={width} h={height} bg={colors.separator} />
@@ -816,8 +947,15 @@ fn separator(
         (separators, gap) => {
             let controls = gap.filter(|_| separators == HunkSeparator::ContextControls);
             view! {
-                <div w={width} h={height} class="flex-row items-center" gap={pad * 0.5}
-                     px={pad} border_b={colors.border} bg={colors.separator}>
+                <div
+                    w={width}
+                    h={height}
+                    class="flex-row items-center"
+                    gap={pad * 0.5}
+                    px={pad}
+                    border_b={colors.border}
+                    bg={colors.separator}
+                >
                     if let Some(gap) = controls {
                         for (reveal, icon, label) in gap_controls(gap) {
                             {expand_button(gap, reveal, icon, label, height, colors, env, on_event)}
@@ -869,9 +1007,15 @@ fn expand_button(
 ) -> AnyElement {
     let size = (height - 6.0).max(12.0);
     view! {
-        <div w={size} h={size} rounded={4.0} class="flex-row items-center justify-center"
-             hover_bg={colors.hover} on:click={on_event(DiffEvent::Expand(gap, reveal))}
-             @when {env.accessible} { accessibility_role={Role::Button} aria-label={label} }>
+        <div
+            w={size}
+            h={size}
+            rounded={4.0}
+            class="flex-row items-center justify-center"
+            hover_bg={colors.hover}
+            on:click={on_event(DiffEvent::Expand(gap, reveal))}
+            @when {env.accessible} { accessibility_role={Role::Button} aria-label={label} }
+        >
             <icon svg={icon} size={(size * 0.7).round()} color={colors.muted} />
         </div>
     }

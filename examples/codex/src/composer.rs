@@ -194,14 +194,28 @@ pub fn card(
     let light = p.mode == quark_app::quark_ui::theme::ThemeMode::Light;
     let scroll = ScrollActionBuilder::new(|lines| Msg::ComposerScroll(lines).into());
     let card = view! {
-        <div w={w} h={h} class="flex-col pt-[14] rounded-[20]" bg={p.composer}
-             border={p.composer_border} @when {light} { shadow={(10.0, 2.0, p.shadow)} }
-             id={CARD_ID} test-id={CARD_ID} block_mouse>
+        <div
+            w={w}
+            h={h}
+            class="flex-col pt-[14] rounded-[20]"
+            bg={p.composer}
+            border={p.composer_border}
+            @when {light} { shadow={(10.0, 2.0, p.shadow)} }
+            id={CARD_ID}
+            test-id={CARD_ID}
+            block_mouse
+        >
             <div class="px-3" h={text_h}>
                 <text_editor_element(COMPOSER_FOCUS, scroll)
-                    editor_snapshot={&app.composer.editor} label={placeholder.to_owned()}
-                    placeholder={placeholder.to_owned()} focused={vcx.is_focused(COMPOSER_FOCUS)}
-                    font_size={BODY} text_color={p.text} w={text_w} h={text_h} />
+                    editor_snapshot={&app.composer.editor}
+                    label={placeholder.to_owned()}
+                    placeholder={placeholder.to_owned()}
+                    focused={vcx.is_focused(COMPOSER_FOCUS)}
+                    font_size={BODY}
+                    text_color={p.text}
+                    w={text_w}
+                    h={text_h}
+                />
             </div>
             <div class="h-1" />
             {controls(app, p, density)}
@@ -212,9 +226,17 @@ pub fn card(
 
 fn pill(p: &Pal, id: &str, label: &str, msg: Msg, open: bool) -> Div {
     view! { -> Div,
-        <div class="flex-row items-center h-7 px-[7] gap-1.5 rounded-[14]" hover_bg={p.menu_hi}
-             bg={if open { p.menu_hi }} id={id.to_owned()} role="button"
-             aria-label={label.to_owned()} on:click={msg} />
+        <div
+            class="flex-row items-center h-7 px-[7] gap-1.5 rounded-[14]"
+            hover_bg={p.menu_hi}
+            bg={if open {
+                p.menu_hi
+            }}
+            id={id.to_owned()}
+            role="button"
+            aria-label={label.to_owned()}
+            on:click={msg}
+        />
     }
 }
 
@@ -231,9 +253,13 @@ pub fn send_button(app: &Codex, p: &Pal) -> AnyElement {
         (icons::VOICE, "Start voice chat", 16.0)
     };
     view! {
-        <div class="w-7 h-7 shrink-0 rounded-[14] items-center justify-center"
-             bg={p.send_active} role="button" aria-label={label}
-             on:click={if running { Msg::Stop } else { Msg::Send }}>
+        <div
+            class="w-7 h-7 shrink-0 rounded-[14] items-center justify-center"
+            bg={p.send_active}
+            role="button"
+            aria-label={label}
+            on:click={if running { Msg::Stop } else { Msg::Send }}
+        >
             <icon svg={svg} size={size} color={p.send_active_glyph} />
         </div>
     }
@@ -248,10 +274,25 @@ fn controls(app: &Codex, p: &Pal, density: Density) -> AnyElement {
     let model_label = format!("{} {}", crate::MODEL, crate::EFFORTS[app.effort]);
     view! {
         <div class="flex-row items-center h-7 pl-2 pr-2 gap-[5]">
-            <icon_button(p, icons::PLUS, 28.0, 16.0, p.text_soft, "Add files and more",
-                         Msg::Open(Menu::Add)) id="pill.add" />
-            <pill(p, "pill.permissions", "Change permissions", Msg::Open(Menu::Permissions),
-                  app.menu == Some(Menu::Permissions))>
+            <icon_button(
+                p,
+                icons::PLUS,
+                28.0,
+                16.0,
+                p.text_soft,
+                "Add files and more",
+                Msg::Open(Menu::Add)
+            )
+                id="pill.add"
+            />
+            <pill(
+                p,
+                "pill.permissions",
+                "Change permissions",
+                Msg::Open(Menu::Permissions),
+                app.menu == Some(Menu::Permissions)
+            )
+            >
                 <icon svg={approval_icon} size={15.0} color={tint} />
                 if full {
                     <txt(approval, SMALL, tint) />
@@ -259,8 +300,9 @@ fn controls(app: &Codex, p: &Pal, density: Density) -> AnyElement {
             </pill>
             <div class="flex-1" />
             <pill(p, "pill.model", &model_label, Msg::Open(Menu::Model), model_open)
-                  @when {full && model_open} { class="w-[146] justify-center" }
-                  @when {full && !model_open} { class="gap-1" }>
+                @when {full && model_open} { class="w-[146] justify-center" }
+                @when {full && !model_open} { class="gap-1" }
+            >
                 if !full {
                     <icon svg={icons::BRAIN} size={15.0} color={p.muted} />
                 } else if model_open {
@@ -287,21 +329,57 @@ pub fn compact(app: &mut Codex, p: &Pal, w: f32, vcx: &mut ViewContext) -> AnyEl
     app.composer.fit(vcx, text_w, LINE_H);
     let scroll = ScrollActionBuilder::new(|lines| Msg::ComposerScroll(lines).into());
     view! {
-        <div class="flex-row items-center h-11 pl-2 pr-2 gap-1 rounded-[22]" w={w}
-             bg={p.composer} border={p.composer_border} id={CARD_ID} block_mouse>
-            <icon_button(p, icons::PLUS, 28.0, 16.0, p.text_soft, "Add files and more",
-                         Msg::Open(Menu::Add)) />
+        <div
+            class="flex-row items-center h-11 pl-2 pr-2 gap-1 rounded-[22]"
+            w={w}
+            bg={p.composer}
+            border={p.composer_border}
+            id={CARD_ID}
+            block_mouse
+        >
+            <icon_button(
+                p,
+                icons::PLUS,
+                28.0,
+                16.0,
+                p.text_soft,
+                "Add files and more",
+                Msg::Open(Menu::Add)
+            )
+            />
             <div class="pl-1">
                 <text_editor_element(COMPOSER_FOCUS, scroll)
-                    editor_snapshot={&app.composer.editor} label="Work with Codex"
-                    placeholder="Work with Codex" focused={vcx.is_focused(COMPOSER_FOCUS)}
-                    font_size={BODY} text_color={p.text} w={text_w} h={LINE_H} />
+                    editor_snapshot={&app.composer.editor}
+                    label="Work with Codex"
+                    placeholder="Work with Codex"
+                    focused={vcx.is_focused(COMPOSER_FOCUS)}
+                    font_size={BODY}
+                    text_color={p.text}
+                    w={text_w}
+                    h={LINE_H}
+                />
             </div>
             <div class="flex-1" />
-            <icon_button(p, icons::BRAIN, 28.0, 15.0, p.muted, "Select effort",
-                         Msg::Open(Menu::Model)) />
-            <icon_button(p, icons::HAND, 28.0, 15.0, p.muted, "Change permissions",
-                         Msg::Open(Menu::Permissions)) />
+            <icon_button(
+                p,
+                icons::BRAIN,
+                28.0,
+                15.0,
+                p.muted,
+                "Select effort",
+                Msg::Open(Menu::Model)
+            )
+            />
+            <icon_button(
+                p,
+                icons::HAND,
+                28.0,
+                15.0,
+                p.muted,
+                "Change permissions",
+                Msg::Open(Menu::Permissions)
+            )
+            />
             <icon_button(p, icons::MIC, 28.0, 15.0, p.text_soft, "Dictate", Msg::Noop) />
             <div class="w-1" />
             {send_button(app, p)}
@@ -314,8 +392,14 @@ pub fn compact(app: &mut Codex, p: &Pal, w: f32, vcx: &mut ViewContext) -> AnyEl
 pub fn tray(app: &Codex, p: &Pal, w: f32) -> AnyElement {
     let item = |id: &str, svg: &'static str, label: &str, msg: Msg| {
         view! {
-            <div class="flex-row items-center h-7 px-1.5 gap-[7] rounded-[7]" hover_bg={p.menu_hi}
-                 id={id.to_owned()} role="button" aria-label={label.to_owned()} on:click={msg}>
+            <div
+                class="flex-row items-center h-7 px-1.5 gap-[7] rounded-[7]"
+                hover_bg={p.menu_hi}
+                id={id.to_owned()}
+                role="button"
+                aria-label={label.to_owned()}
+                on:click={msg}
+            >
                 <icon svg={svg} size={15.0} color={p.text_soft} />
                 <txt(label, SMALL, p.text_soft) />
             </div>
@@ -328,11 +412,29 @@ pub fn tray(app: &Codex, p: &Pal, w: f32) -> AnyElement {
     view! {
         <div w={w} class="h-[42]" bg={p.tray} rounded_corners={[12.0, 12.0, 0.0, 0.0]}>
             <div class="flex-row items-center h-[38] pl-1 pr-1 gap-[10]" w={w}>
-                {item("tray.project", icons::FOLDER, project, Msg::Open(Menu::ProjectPicker))}
-                {item("tray.location", icons::LAPTOP, "This computer", Msg::Open(Menu::WorkIn))}
+                {item(
+                    "tray.project",
+                    icons::FOLDER,
+                    project,
+                    Msg::Open(Menu::ProjectPicker)
+                )}
+                {item(
+                    "tray.location",
+                    icons::LAPTOP,
+                    "This computer",
+                    Msg::Open(Menu::WorkIn)
+                )}
                 <div class="flex-1" />
-                <icon_button(p, icons::SETTINGS, 28.0, 15.0, p.muted,
-                             "Configure local environment", Msg::Noop) />
+                <icon_button(
+                    p,
+                    icons::SETTINGS,
+                    28.0,
+                    15.0,
+                    p.muted,
+                    "Configure local environment",
+                    Msg::Noop
+                )
+                />
             </div>
         </div>
     }

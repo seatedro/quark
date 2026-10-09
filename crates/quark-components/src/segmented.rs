@@ -81,39 +81,61 @@ impl RenderOnce for SegmentedControl {
         let tab_stop = selected.or((len > 0).then_some(0));
 
         view! {
-            <div class="flex-row min-w-0 items-center overflow-hidden" id={self.id.clone()}
-                 test_id="segmented-control" role="radiogroup"
-                 accessibility_role={accesskit::Role::RadioGroup}
-                 accessibility_id={self.id.clone()} bg={tc.element_background}
-                 rounded={Rad::XL * scale} p={Sp::XXS * scale} gap={Sp::XXS * scale}
-                 @when {let Some(to) = list_nav::step(len, current, 1, true, |_| false)} {
-                     on_key={("arrowright", self.items[to].action.clone())}
-                 }
-                 @when {let Some(to) = list_nav::step(len, current, -1, true, |_| false)} {
-                     on_key={("arrowleft", self.items[to].action.clone())}
-                 }>
+            <div
+                class="flex-row min-w-0 items-center overflow-hidden"
+                id={self.id.clone()}
+                test_id="segmented-control"
+                role="radiogroup"
+                accessibility_role={accesskit::Role::RadioGroup}
+                accessibility_id={self.id.clone()}
+                bg={tc.element_background}
+                rounded={Rad::XL * scale}
+                p={Sp::XXS * scale}
+                gap={Sp::XXS * scale}
+                @when {let Some(to) = list_nav::step(len, current, 1, true, |_| false)} {
+                    on_key={("arrowright", self.items[to].action.clone())}
+                }
+                @when {let Some(to) = list_nav::step(len, current, -1, true, |_| false)} {
+                    on_key={("arrowleft", self.items[to].action.clone())}
+                }
+            >
                 for (i, item) in self.items.into_iter().enumerate() {
                     // Segments keep their natural widths and give way in a
                     // narrow container: first their side padding, then their
                     // labels, which truncate rather than spill past it.
-                    <div class="flex-auto min-w-0 flex-row items-center justify-center"
-                         id={format!("segmented:{:?}:{}", item.action, item.label)}
-                         key={item.label.clone()} test_id="segmented-item" role="radio"
-                         py={Sp::XXS * scale} rounded={Rad::LG * scale}
-                         focus_ring={list_nav::item_focus(base, i)}
-                         accessibility_role={accesskit::Role::RadioButton}
-                         accessibility_id={format!("segmented:{:?}:{}", item.action, item.label)}
-                         aria-label={item.label.clone()} aria-selected={item.selected}
-                         aria-checked={item.selected} class="cursor-pointer" on:click={item.action}
-                         @when {item.selected} { bg={tc.ghost_element_hover} }
-                         @when {!item.selected} {
-                             hover_bg={tc.ghost_element_hover} hover_text_color={tc.text}
-                         }
-                         @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
-                         @when {let Some(tip) = item.tooltip_text} { tooltip={tip} }>
+                    <div
+                        class="flex-auto min-w-0 flex-row items-center justify-center"
+                        id={format!("segmented:{:?}:{}", item.action, item.label)}
+                        key={item.label.clone()}
+                        test_id="segmented-item"
+                        role="radio"
+                        py={Sp::XXS * scale}
+                        rounded={Rad::LG * scale}
+                        focus_ring={list_nav::item_focus(base, i)}
+                        accessibility_role={accesskit::Role::RadioButton}
+                        accessibility_id={format!("segmented:{:?}:{}", item.action, item.label)}
+                        aria-label={item.label.clone()}
+                        aria-selected={item.selected}
+                        aria-checked={item.selected}
+                        class="cursor-pointer"
+                        on:click={item.action}
+                        @when {item.selected} { bg={tc.ghost_element_hover} }
+                        @when {!item.selected} {
+                            hover_bg={tc.ghost_element_hover}
+                            hover_text_color={tc.text}
+                        }
+                        @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
+                        @when {let Some(tip) = item.tooltip_text} { tooltip={tip} }
+                    >
                         <div w={Sp::MD * scale} flex_shrink_val={PAD_SHRINK} />
-                        <text class="text-sm font-medium truncate"
-                              color={if item.selected { tc.text } else { tc.text_muted }}>
+                        <text
+                            class="text-sm font-medium truncate"
+                            color={if item.selected {
+                                tc.text
+                            } else {
+                                tc.text_muted
+                            }}
+                        >
                             {item.label}
                         </text>
                         <div w={Sp::MD * scale} flex_shrink_val={PAD_SHRINK} />

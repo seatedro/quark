@@ -99,17 +99,23 @@ impl UiApp for Demo {
         let toolbar = move || {
             let toggle = |label: &'static str, on: bool, msg: Msg| {
                 view! {
-                    <div class="px-[10] h-6 rounded-[4] flex-row items-center"
-                         hover_bg={colors.element_hover} on:click={msg}
-                         @when {on} { bg={colors.element_selected} }>
+                    <div
+                        class="px-[10] h-6 rounded-[4] flex-row items-center"
+                        hover_bg={colors.element_hover}
+                        on:click={msg}
+                        @when {on} { bg={colors.element_selected} }
+                    >
                         <text class="text-sm" color={colors.text}>{label}</text>
                     </div>
                 }
             };
             view! {
-                <div w={width} h={TOOLBAR_H}
-                     class="flex-row items-center gap-[6] px-[10] bg-[colors.title_bar_background]
-                            border-b-[colors.border]">
+                <div
+                    w={width}
+                    h={TOOLBAR_H}
+                    class="flex-row items-center gap-[6] px-[10] bg-[colors.title_bar_background]
+                            border-b-[colors.border]"
+                >
                     <text class="text-sm font-semibold" color={colors.text}>{&*title}</text>
                     <div class="flex-1" />
                     {toggle("Unified", mode == Mode::Unified, Msg::Mode(Mode::Unified))}
@@ -121,13 +127,21 @@ impl UiApp for Demo {
         let files = self.files.clone();
         let list = move || {
             view! {
-                <div w={sidebar} h={height - TOOLBAR_H}
-                     class="flex-col overflow-clip bg-[colors.sidebar_background] border-r-[colors.border]">
+                <div
+                    w={sidebar}
+                    h={height - TOOLBAR_H}
+                    class="flex-col overflow-clip bg-[colors.sidebar_background] border-r-[colors.border]"
+                >
                     for (i, (path, status, adds, dels)) in files.iter().enumerate() {
-                        <div class="w-full h-7 flex-row items-center gap-[6] px-[10]"
-                             hover_bg={colors.sidebar_row_hover} on:click={Msg::OpenFile(i as u32)}>
+                        <div
+                            class="w-full h-7 flex-row items-center gap-[6] px-[10]"
+                            hover_bg={colors.sidebar_row_hover}
+                            on:click={Msg::OpenFile(i as u32)}
+                        >
                             <text class="text-xs" color={colors.text_muted}>{*status}</text>
-                            <text class="text-sm" color={colors.text} class="truncate">{path.as_str()}</text>
+                            <text class="text-sm" color={colors.text} class="truncate">
+                                {path.as_str()}
+                            </text>
                             <div class="flex-1" />
                             <text class="text-xs" color={colors.line_add_text}>"+{adds}"</text>
                             <text class="text-xs" color={colors.line_del_text}>"-{dels}"</text>
@@ -139,11 +153,19 @@ impl UiApp for Demo {
         view! {
             <div w={width} h={height} class="flex-col bg-[colors.background]">
                 <cached("demo.toolbar", inputs_hash(&(mode, wrap, width.to_bits())), toolbar)
-                        w={width} h={TOOLBAR_H} />
+                    w={width}
+                    h={TOOLBAR_H}
+                />
                 <div w={width} h={height - TOOLBAR_H} class="flex-row">
                     if sidebar > 0.0 {
-                        <cached("demo.files", inputs_hash(&(sidebar.to_bits(), height.to_bits())), list)
-                                w={sidebar} h={height - TOOLBAR_H} />
+                        <cached(
+                            "demo.files",
+                            inputs_hash(&(sidebar.to_bits(), height.to_bits())),
+                            list
+                        )
+                            w={sidebar}
+                            h={height - TOOLBAR_H}
+                        />
                     }
                     {view}
                 </div>

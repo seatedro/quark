@@ -97,49 +97,78 @@ impl RenderOnce for RadioGroup {
         let size = (m.ui_font_size * 1.125).round();
         let dot = (size * 0.45).round();
         view! {
-            <div class="flex-col" gap={m.spacing_sm} accessibility_id={self.id.clone()}
-                 test_id="radio-group" accessibility_role={accesskit::Role::RadioGroup}
-                 aria-label={self.label.clone()}
-                 @when {self.horizontal} { class="flex-row" gap={m.spacing_lg} }
-                 @when {let Some(action) =
-                     list_nav::step(options.len(), current, 1, true, disabled).map(&self.on_select)}
-                 {
-                     on_key={("arrowdown", action.clone())} on_key={("arrowright", action)}
-                 }
-                 @when {let Some(action) =
-                     list_nav::step(options.len(), current, -1, true, disabled).map(&self.on_select)}
-                 {
-                     on_key={("arrowup", action.clone())} on_key={("arrowleft", action)}
-                 }>
+            <div
+                class="flex-col"
+                gap={m.spacing_sm}
+                accessibility_id={self.id.clone()}
+                test_id="radio-group"
+                accessibility_role={accesskit::Role::RadioGroup}
+                aria-label={self.label.clone()}
+                @when {self.horizontal} { class="flex-row" gap={m.spacing_lg} }
+                @when {let Some(action) =
+                    list_nav::step(options.len(), current, 1, true, disabled).map(&self.on_select)} {
+                    on_key={("arrowdown", action.clone())}
+                    on_key={("arrowright", action)}
+                }
+                @when {let Some(action) =
+                    list_nav::step(options.len(), current, -1, true, disabled).map(&self.on_select)} {
+                    on_key={("arrowup", action.clone())}
+                    on_key={("arrowleft", action)}
+                }
+            >
                 for (i, option) in options.iter().enumerate() {
-                    <div class="flex-row items-center" gap={m.spacing_sm}
-                         focus_ring_offset={Sz::FOCUS_RING_GAP}
-                         accessibility_id={format!("{}-{i}", self.id)} test_id="radio"
-                         accessibility_role={accesskit::Role::RadioButton}
-                         aria-label={option.label.clone()} aria-checked={self.selected == Some(i)}
-                         aria-disabled={option.disabled}
-                         @when {!option.disabled} {
-                             focus_ring={list_nav::item_focus(base, i)} class="cursor-pointer"
-                             on:click={(self.on_select)(i)}
-                             @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
-                         }>
-                        <div class="shrink-0 items-center justify-center" w={size} h={size}
-                             rounded={size / 2.0}
-                             // Filled when disabled, as a disabled checkbox is,
-                             // so the state does not rest on color alone.
-                             @when {option.disabled} { bg={tc.element_background} }
-                             border={match (option.disabled, self.selected == Some(i)) {
-                                 (true, _) => tc.border_variant,
-                                 (false, true) => tc.accent,
-                                 (false, false) => tc.control_border,
-                             }}>
+                    <div
+                        class="flex-row items-center"
+                        gap={m.spacing_sm}
+                        focus_ring_offset={Sz::FOCUS_RING_GAP}
+                        accessibility_id={format!("{}-{i}", self.id)}
+                        test_id="radio"
+                        accessibility_role={accesskit::Role::RadioButton}
+                        aria-label={option.label.clone()}
+                        aria-checked={self.selected == Some(i)}
+                        aria-disabled={option.disabled}
+                        @when {!option.disabled} {
+                            focus_ring={list_nav::item_focus(base, i)}
+                            class="cursor-pointer"
+                            on:click={(self.on_select)(i)}
+                            @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
+                        }
+                    >
+                        <div
+                            class="shrink-0 items-center justify-center"
+                            w={size}
+                            h={size}
+                            rounded={size / 2.0}
+                            // Filled when disabled, as a disabled checkbox is,
+                            // so the state does not rest on color alone.
+                            @when {option.disabled} { bg={tc.element_background} }
+                            border={match (option.disabled, self.selected == Some(i)) {
+                                (true, _) => tc.border_variant,
+                                (false, true) => tc.accent,
+                                (false, false) => tc.control_border,
+                            }}
+                        >
                             if self.selected == Some(i) {
-                                <div w={dot} h={dot} rounded={dot / 2.0}
-                                     bg={if option.disabled { tc.text_disabled } else { tc.accent }} />
+                                <div
+                                    w={dot}
+                                    h={dot}
+                                    rounded={dot / 2.0}
+                                    bg={if option.disabled {
+                                        tc.text_disabled
+                                    } else {
+                                        tc.accent
+                                    }}
+                                />
                             }
                         </div>
-                        <text class="text-sm"
-                              color={if option.disabled { tc.text_disabled } else { tc.text }}>
+                        <text
+                            class="text-sm"
+                            color={if option.disabled {
+                                tc.text_disabled
+                            } else {
+                                tc.text
+                            }}
+                        >
                             {option.label.clone()}
                         </text>
                     </div>

@@ -209,42 +209,54 @@ impl RenderOnce for Button {
         let accessibility_id = format!("button:{action:?}:{accessibility_label}");
 
         view! { scale,
-            <div class="shrink-0" bg={bg}
-                 cursor={cursor}
-                 id={accessibility_id.clone()}
-                 test-id="button"
-                 role="button"
-                 aria-label={accessibility_label}
-                 accessibility_id={accessibility_id}
-                 aria-selected={self.active}
-                 aria-disabled={disabled}
-                 @when { !disabled } { on:click={action} }
-                 @when { fixed.is_some() } {
-                     items_center justify_center
-                     w={fixed.unwrap()} h={fixed.unwrap()}
-                     rounded={m.radius.unwrap_or(Rad::SM)}
-                 }
-                 @when { fixed.is_none() } {
-                     class="flex-row items-center"
-                     gap={gap} px={actual_px} py={unscaled_py}
-                     rounded={m.radius.unwrap_or(Rad::XL)}
-                 }
-                 @when { fixed.is_none() && height.is_some() } {
-                     h={height.unwrap()} pt={0.0} pb={0.0}
-                 }
-                 @when { !disabled && icon_only } { hover_icon_color={tc.text} }
-                 @when { !disabled && !icon_only } { hover_bg={hover_bg} }
-                 @when { tooltip_text.is_some() } {
-                     tooltip={tooltip_text.clone().unwrap_or_default()}
-                 }>
+            <div
+                class="shrink-0"
+                bg={bg}
+                cursor={cursor}
+                id={accessibility_id.clone()}
+                test-id="button"
+                role="button"
+                aria-label={accessibility_label}
+                accessibility_id={accessibility_id}
+                aria-selected={self.active}
+                aria-disabled={disabled}
+                @when {!disabled} { on:click={action} }
+                @when {fixed.is_some()} {
+                    items_center
+                    justify_center
+                    w={fixed.unwrap()}
+                    h={fixed.unwrap()}
+                    rounded={m.radius.unwrap_or(Rad::SM)}
+                }
+                @when {fixed.is_none()} {
+                    class="flex-row items-center"
+                    gap={gap}
+                    px={actual_px}
+                    py={unscaled_py}
+                    rounded={m.radius.unwrap_or(Rad::XL)}
+                }
+                @when {fixed.is_none() && height.is_some()} {
+                    h={height.unwrap()}
+                    pt={0.0}
+                    pb={0.0}
+                }
+                @when {!disabled && icon_only} { hover_icon_color={tc.text} }
+                @when {!disabled && !icon_only} { hover_bg={hover_bg} }
+                @when {tooltip_text.is_some()} {
+                    tooltip={tooltip_text.clone().unwrap_or_default()}
+                }
+            >
                 if icon.is_some() {
                     <icon svg={icon.unwrap()} size={icon_size} color={icon_color} />
                 }
                 if let Some(label) = label_text {
-                    <text class="font-medium" color={text_color}
-                          @when {self.size == ButtonSize::Default} { class="text-sm" }
-                          @when {self.size == ButtonSize::Compact} { class="text-xs" }
-                          @when {font_size.is_some()} { size={font_size.unwrap()} }>
+                    <text
+                        class="font-medium"
+                        color={text_color}
+                        @when {self.size == ButtonSize::Default} { class="text-sm" }
+                        @when {self.size == ButtonSize::Compact} { class="text-xs" }
+                        @when {font_size.is_some()} { size={font_size.unwrap()} }
+                    >
                         {label}
                     </text>
                 }

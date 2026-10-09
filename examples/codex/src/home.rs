@@ -37,11 +37,15 @@ pub fn view(
                 <div class="flex-row items-center">
                     if let Some(project) = project {
                         <txt("What should we build in ", HEADING, p.text) />
-                        <div id="headline.project" role="button"
-                             aria-label={format!("{}?", project.name)}
-                             on:click={Msg::Open(Menu::ProjectPicker)}>
+                        <div
+                            id="headline.project"
+                            role="button"
+                            aria-label={format!("{}?", project.name)}
+                            on:click={Msg::Open(Menu::ProjectPicker)}
+                        >
                             <txt(format!("{}?", project.name), HEADING, p.text)
-                                 underline_style={dotted(p.muted, 3.0).offset(5.0)} />
+                                underline_style={dotted(p.muted, 3.0).offset(5.0)}
+                            />
                         </div>
                     } else {
                         <txt("What should we work on?", HEADING, p.text) />

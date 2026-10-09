@@ -1904,12 +1904,16 @@ impl<'a> Dock<'a> {
         .build(theme);
 
         view! {
-            <div w={width} h={height} bg={theme.colors.background}
-                 @when {let Some(handle) = self.handle} { element_handle={handle} }
-                 @when {self.handle.is_none()} { id={DOCK_ID} }
-                 @for (r, binding) in &self.toggle_keys {
-                     on_key={(binding.clone(), (self.map)(DockEvent::Toggle(*r)))}
-                 }>
+            <div
+                w={width}
+                h={height}
+                bg={theme.colors.background}
+                @when {let Some(handle) = self.handle} { element_handle={handle} }
+                @when {self.handle.is_none()} { id={DOCK_ID} }
+                @for (r, binding) in &self.toggle_keys {
+                    on_key={(binding.clone(), (self.map)(DockEvent::Toggle(*r)))}
+                }
+            >
                 {body}
             </div>
         }
@@ -1960,9 +1964,13 @@ impl<'a> Dock<'a> {
             )
         });
         view! {
-            <div w={width} h={height} bg={theme.colors.background}
-                 @when {let Some(handle) = self.handle} { element_handle={handle} }
-                 @when {self.handle.is_none()} { id={DOCK_ID} }>
+            <div
+                w={width}
+                h={height}
+                bg={theme.colors.background}
+                @when {let Some(handle) = self.handle} { element_handle={handle} }
+                @when {self.handle.is_none()} { id={DOCK_ID} }
+            >
                 if let Some(body) = body {
                     {body}
                 }
@@ -2014,19 +2022,30 @@ impl<'a> Dock<'a> {
         let extent = if horizontal { width } else { height };
         let sizes = child_sizes(&split.weights, extent);
         view! {
-            <div @when {horizontal} { class="flex-row" } @when {!horizontal} { class="flex-col" }
-                 w={width} h={height}>
+            <div
+                @when {horizontal} { class="flex-row" }
+                @when {!horizontal} { class="flex-col" }
+                w={width}
+                h={height}
+            >
                 for (i, (child, &size)) in split.children.iter().zip(&sizes).enumerate() {
                     if i > 0 {
                         {self.pane_divider(theme, region, split, i - 1, &sizes, extent)}
                     }
-                    <div class="flex-none overflow-clip" w={if horizontal { size } else { width }}
-                         h={if horizontal { height } else { size }}>
+                    <div
+                        class="flex-none overflow-clip"
+                        w={if horizontal { size } else { width }}
+                        h={if horizontal { height } else { size }}
+                    >
                         {self.node(
                             theme,
                             region,
                             child,
-                            if horizontal { (size, height) } else { (width, size) },
+                            if horizontal {
+                                (size, height)
+                            } else {
+                                (width, size)
+                            },
                             drag,
                             title,
                             content,
@@ -2095,51 +2114,61 @@ impl<'a> Dock<'a> {
         let grip = 8.0;
         let offset = -(grip - DIVIDER_THICKNESS) / 2.0;
         view! {
-            <div class="flex-none relative" bg={colors.border_variant}
-                 @when {horizontal} { w={DIVIDER_THICKNESS} class="h-full" }
-                 @when {!horizontal} { h={DIVIDER_THICKNESS} class="w-full" }>
-                <div class="absolute" z_index={1}
-                     accessibility_id={format!("dock:split:{}:{divider}", id.0)}
-                     accessibility_role={Role::Splitter} role="separator"
-                     aria-label={quark_ui::i18n::tr_args(
-                         "quark-resize-named",
-                         [("name", self.area_label(region).into())],
-                     )}
-                     aria-valuetext={format!("{at:.0}")}
-                     accessibility_numeric={NumericValue {
-                         value: f64::from(at),
-                         min: f64::from(lo),
-                         max: f64::from(hi),
-                         step: Some(f64::from(NUDGE_STEP)),
-                     }}
-                     accessibility_numeric_actions={numeric_actions}
-                     // A line between side by side groups stands upright.
-                     accessibility_orientation={if horizontal {
-                         Orientation::Vertical
-                     } else {
-                         Orientation::Horizontal
-                     }}
-                     focus_ring={Self::divider_focus(id, divider)}
-                     on_key={(back, nudge(-NUDGE_STEP))}
-                     on_key={(forward, nudge(NUDGE_STEP))}
-                     on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
-                     on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
-                     // Home and End: the ends of the range it may move in.
-                     on_key={("home", to(lo))} on_key={("end", to(hi))}
-                     test_id="dock-pane-divider" cursor={cursor} hover_bg={colors.accent}
-                     on:drag={move |press: ClickEvent| {
-                         Box::new(PaneDividerDrag {
-                             map: drag_map.clone(),
-                             split: id,
-                             divider,
-                             horizontal,
-                             origin: if horizontal { press.x } else { press.y },
-                             extent,
-                             cursor,
-                         }) as Box<dyn DragHandler>
-                     }}
-                     @when {horizontal} { class="top-0 bottom-0" left={offset} w={grip} }
-                     @when {!horizontal} { class="left-0 right-0" top={offset} h={grip} } />
+            <div
+                class="flex-none relative"
+                bg={colors.border_variant}
+                @when {horizontal} { w={DIVIDER_THICKNESS} class="h-full" }
+                @when {!horizontal} { h={DIVIDER_THICKNESS} class="w-full" }
+            >
+                <div
+                    class="absolute"
+                    z_index={1}
+                    accessibility_id={format!("dock:split:{}:{divider}", id.0)}
+                    accessibility_role={Role::Splitter}
+                    role="separator"
+                    aria-label={quark_ui::i18n::tr_args(
+                        "quark-resize-named",
+                        [("name", self.area_label(region).into())],
+                    )}
+                    aria-valuetext={format!("{at:.0}")}
+                    accessibility_numeric={NumericValue {
+                        value: f64::from(at),
+                        min: f64::from(lo),
+                        max: f64::from(hi),
+                        step: Some(f64::from(NUDGE_STEP)),
+                    }}
+                    accessibility_numeric_actions={numeric_actions}
+                    // A line between side by side groups stands upright.
+                    accessibility_orientation={if horizontal {
+                        Orientation::Vertical
+                    } else {
+                        Orientation::Horizontal
+                    }}
+                    focus_ring={Self::divider_focus(id, divider)}
+                    on_key={(back, nudge(-NUDGE_STEP))}
+                    on_key={(forward, nudge(NUDGE_STEP))}
+                    on_key={(format!("shift+{back}"), nudge(-NUDGE_STEP_LARGE))}
+                    on_key={(format!("shift+{forward}"), nudge(NUDGE_STEP_LARGE))}
+                    // Home and End: the ends of the range it may move in.
+                    on_key={("home", to(lo))}
+                    on_key={("end", to(hi))}
+                    test_id="dock-pane-divider"
+                    cursor={cursor}
+                    hover_bg={colors.accent}
+                    on:drag={move |press: ClickEvent| {
+                        Box::new(PaneDividerDrag {
+                            map: drag_map.clone(),
+                            split: id,
+                            divider,
+                            horizontal,
+                            origin: if horizontal { press.x } else { press.y },
+                            extent,
+                            cursor,
+                        }) as Box<dyn DragHandler>
+                    }}
+                    @when {horizontal} { class="top-0 bottom-0" left={offset} w={grip} }
+                    @when {!horizontal} { class="left-0 right-0" top={offset} h={grip} }
+                />
             </div>
         }
     }
@@ -2187,17 +2216,29 @@ impl<'a> Dock<'a> {
                     {self.tab_strip(theme, region, group, (width, strip_height), drag, title)}
                 }
                 if let Some(active) = group.active_panel() {
-                    <div w={width} h={body_height} class="overflow-clip"
-                         accessibility_id={pane_panel_id(group.id)}
-                         accessibility_role={Role::TabPanel} role="tabpanel"
-                         aria-label={quark::intern(title(active).as_ref())}>
+                    <div
+                        w={width}
+                        h={body_height}
+                        class="overflow-clip"
+                        accessibility_id={pane_panel_id(group.id)}
+                        accessibility_role={Role::TabPanel}
+                        role="tabpanel"
+                        aria-label={quark::intern(title(active).as_ref())}
+                    >
                         {content(active, (width, body_height))}
                     </div>
                 }
                 if let Some((x, y, w, h)) = preview {
-                    <div class="absolute" z_index={10} left={x} top={y} w={w} h={h}
-                         bg={colors.accent.with_alpha(if w > 2.0 { 56 } else { 255 })}
-                         test_id="dock-drop-preview" />
+                    <div
+                        class="absolute"
+                        z_index={10}
+                        left={x}
+                        top={y}
+                        w={w}
+                        h={h}
+                        bg={colors.accent.with_alpha(if w > 2.0 { 56 } else { 255 })}
+                        test_id="dock-drop-preview"
+                    />
                 }
             </div>
         }
@@ -2452,11 +2493,17 @@ impl StripView {
         let colors = &self.colors;
         let grip = data.grips.then(|| self.grip());
         view! {
-            <div class="flex-row w-full" h={data.height} class="flex-none overflow-clip"
-                 border_b={colors.border_variant}
-                 accessibility_id={format!("dock:pane:{}:tabs", data.pane.0)}
-                 accessibility_role={Role::TabList} role="tablist"
-                 aria-label={data.label.clone()} test_id="dock-tabs">
+            <div
+                class="flex-row w-full"
+                h={data.height}
+                class="flex-none overflow-clip"
+                border_b={colors.border_variant}
+                accessibility_id={format!("dock:pane:{}:tabs", data.pane.0)}
+                accessibility_role={Role::TabList}
+                role="tablist"
+                aria-label={data.label.clone()}
+                test_id="dock-tabs"
+            >
                 for index in 0..data.panels.len() {
                     {self.tab(index)}
                 }
@@ -2483,27 +2530,35 @@ impl StripView {
             n => format!("{name} +{}", n - 1),
         };
         view! {
-            <div class="flex-none items-center justify-center" w={GRIP_WIDTH} class="h-full"
-                 // Pointer only: the keyboard moves groups through the app's
-                 // menu ("Move group to new window").
-                 id={format!("dock:grip:{}", pane.0)}
-                 test_id="dock-group-grip" cursor={CursorHint::Grab}
-                 hover_bg={colors.ghost_element_hover}
-                 on:drag={move |press: ClickEvent| {
-                     Box::new(GroupDrag {
-                         map: map.clone(),
-                         ctx: ctx.clone(),
-                         pane,
-                         region,
-                         press: (press.x, press.y),
-                         dock: None,
-                         target: None,
-                         out: false,
-                         preview: tab_preview(PanelId(u64::MAX), &label, (120.0, height)),
-                     }) as Box<dyn DragHandler>
-                 }}>
-                <icon svg={lucide::GRIP_VERTICAL} size={m.ui_small_font_size}
-                      color={colors.text_muted} />
+            <div
+                class="flex-none items-center justify-center"
+                w={GRIP_WIDTH}
+                class="h-full"
+                // Pointer only: the keyboard moves groups through the app's
+                // menu ("Move group to new window").
+                id={format!("dock:grip:{}", pane.0)}
+                test_id="dock-group-grip"
+                cursor={CursorHint::Grab}
+                hover_bg={colors.ghost_element_hover}
+                on:drag={move |press: ClickEvent| {
+                    Box::new(GroupDrag {
+                        map: map.clone(),
+                        ctx: ctx.clone(),
+                        pane,
+                        region,
+                        press: (press.x, press.y),
+                        dock: None,
+                        target: None,
+                        out: false,
+                        preview: tab_preview(PanelId(u64::MAX), &label, (120.0, height)),
+                    }) as Box<dyn DragHandler>
+                }}
+            >
+                <icon
+                    svg={lucide::GRIP_VERTICAL}
+                    size={m.ui_small_font_size}
+                    color={colors.text_muted}
+                />
             </div>
         }
     }
@@ -2549,72 +2604,99 @@ impl StripView {
         };
         let (hover_fill, hover_icon) = (colors.ghost_element_hover, colors.text_muted);
         view! {
-            <div class="flex-row flex-none items-center" gap={m.spacing_xs} px={m.spacing_sm}
-                 w={tab_width} class="h-full" border_r={colors.border_variant}
-                 accessibility_id={Dock::tab_id(panel)} accessibility_role={Role::Tab}
-                 role="tab" aria-label={name.clone()} aria-selected={selected} test_id="dock-tab"
-                 // For assistive tech and Enter: a pointer press starts the
-                 // drag below, which selects the tab itself.
-                 on:click={select(index)} cursor={CursorHint::Default}
-                 on:middle_click={close.clone()}
-                 on:drag={move |press: ClickEvent| {
-                     Box::new(TabDrag {
-                         map: map.clone(),
-                         ctx: ctx.clone(),
-                         panel,
-                         confined,
-                         from: Origin {
-                             region,
-                             pane,
-                             index,
-                             count,
-                         },
-                         target: None,
-                         allowed: true,
-                         press: (press.x, press.y),
-                         dock: None,
-                         held: false,
-                         out: false,
-                         preview: tab_preview(panel, &drag_title, (tab_width, tab_height)),
-                     }) as Box<dyn DragHandler>
-                 }}
-                 // The strip clips to its height and regions to their
-                 // edges, so the ring is drawn inside the tab.
-                 focus_ring_offset={-Sz::FOCUS_RING_W}
-                 @when {selected} {
-                     bg={colors.background} focus_ring={Dock::tab_focus(pane)}
-                     on_key={("left", select(prev))} on_key={("right", select(next))}
-                     on_key={("home", select(0))} on_key={("end", select(count - 1))}
-                     // Mac keyboards label Backspace "Delete".
-                     on_key={("delete", close.clone())} on_key={("backspace", close.clone())}
-                 }
-                 @for (key, action) in moves {
-                     on_key={(key.clone(), action.clone())}
-                 }
-                 // A click makes an inactive tab focusable without making it
-                 // a Tab stop: a press focuses it, and the selection then
-                 // hands focus to the group (`DockOutcome::focus`).
-                 @when {!selected && !hidden_close} {
-                     hover_bg={colors.ghost_element_hover} tab_stop={TabStop::disabled(0)}
-                 }
-                 @when {hidden_close} {
-                     hover={move |s| s.bg(hover_fill).icon_color(hover_icon)}
-                     tab_stop={TabStop::disabled(0)}
-                 }>
+            <div
+                class="flex-row flex-none items-center"
+                gap={m.spacing_xs}
+                px={m.spacing_sm}
+                w={tab_width}
+                class="h-full"
+                border_r={colors.border_variant}
+                accessibility_id={Dock::tab_id(panel)}
+                accessibility_role={Role::Tab}
+                role="tab"
+                aria-label={name.clone()}
+                aria-selected={selected}
+                test_id="dock-tab"
+                // For assistive tech and Enter: a pointer press starts the
+                // drag below, which selects the tab itself.
+                on:click={select(index)}
+                cursor={CursorHint::Default}
+                on:middle_click={close.clone()}
+                on:drag={move |press: ClickEvent| {
+                    Box::new(TabDrag {
+                        map: map.clone(),
+                        ctx: ctx.clone(),
+                        panel,
+                        confined,
+                        from: Origin {
+                            region,
+                            pane,
+                            index,
+                            count,
+                        },
+                        target: None,
+                        allowed: true,
+                        press: (press.x, press.y),
+                        dock: None,
+                        held: false,
+                        out: false,
+                        preview: tab_preview(panel, &drag_title, (tab_width, tab_height)),
+                    }) as Box<dyn DragHandler>
+                }}
+                // The strip clips to its height and regions to their
+                // edges, so the ring is drawn inside the tab.
+                focus_ring_offset={-Sz::FOCUS_RING_W}
+                @when {selected} {
+                    bg={colors.background}
+                    focus_ring={Dock::tab_focus(pane)}
+                    on_key={("left", select(prev))}
+                    on_key={("right", select(next))}
+                    on_key={("home", select(0))}
+                    on_key={("end", select(count - 1))}
+                    // Mac keyboards label Backspace "Delete".
+                    on_key={("delete", close.clone())}
+                    on_key={("backspace", close.clone())}
+                }
+                @for (key, action) in moves { on_key={(key.clone(), action.clone())} }
+                // A click makes an inactive tab focusable without making it
+                // a Tab stop: a press focuses it, and the selection then
+                // hands focus to the group (`DockOutcome::focus`).
+                @when {!selected && !hidden_close} {
+                    hover_bg={colors.ghost_element_hover}
+                    tab_stop={TabStop::disabled(0)}
+                }
+                @when {hidden_close} {
+                    hover={move |s| s.bg(hover_fill).icon_color(hover_icon)}
+                    tab_stop={TabStop::disabled(0)}
+                }
+            >
                 // Let a long title shrink and truncate instead of pushing the
                 // close button out of the tab.
                 <div class="flex-1 min-w-0 overflow-clip">
                     <text class="text-sm" color={label_color} class="truncate">{name}</text>
                 </div>
-                <div class="flex-none items-center justify-center" rounded={m.control_radius * 0.5}
-                     p={2.0} hover_bg={colors.ghost_element_hover}
-                     accessibility_id={format!("dock:close:{}", panel.0)}
-                     accessibility_role={Role::Button} aria-label={close_label} on:click={close}>
+                <div
+                    class="flex-none items-center justify-center"
+                    rounded={m.control_radius * 0.5}
+                    p={2.0}
+                    hover_bg={colors.ghost_element_hover}
+                    accessibility_id={format!("dock:close:{}", panel.0)}
+                    accessibility_role={Role::Button}
+                    aria-label={close_label}
+                    on:click={close}
+                >
                     <icon svg={lucide::X} size={m.ui_small_font_size} color={close_color} />
                 </div>
                 if data.indicator && selected {
-                    <div class="absolute" left={0.0} bottom={0.0} w={tab_width} h={2.0}
-                         bg={colors.accent} test_id="dock-tab-indicator" />
+                    <div
+                        class="absolute"
+                        left={0.0}
+                        bottom={0.0}
+                        w={tab_width}
+                        h={2.0}
+                        bg={colors.accent}
+                        test_id="dock-tab-indicator"
+                    />
                 }
             </div>
         }
@@ -2632,13 +2714,17 @@ fn tab_preview(panel: PanelId, title: &str, size: (f32, f32)) -> DragPreview {
         let colors = &theme.colors;
         let m = &theme.metrics;
         view! {
-            <div class="flex-row items-center" w={width} h={height} px={m.spacing_sm}
-                 bg={colors.elevated_surface} rounded={m.control_radius}
-                 shadow_preset={Shadow::POPOVER}>
+            <div
+                class="flex-row items-center"
+                w={width}
+                h={height}
+                px={m.spacing_sm}
+                bg={colors.elevated_surface}
+                rounded={m.control_radius}
+                shadow_preset={Shadow::POPOVER}
+            >
                 <div class="flex-1 min-w-0 overflow-clip">
-                    <text class="text-sm truncate" color={colors.text_strong}>
-                        {title.clone()}
-                    </text>
+                    <text class="text-sm truncate" color={colors.text_strong}>{title.clone()}</text>
                 </div>
             </div>
         }

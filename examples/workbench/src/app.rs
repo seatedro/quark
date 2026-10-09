@@ -529,11 +529,24 @@ impl UiApp for Workbench {
             let panel = content(panels::SIDEBAR, (w, h));
             view! {
                 <div class="absolute" left={0.0} top={top} w={size.0} h={h} z_index={30}>
-                    <div class="absolute" left={0.0} top={0.0} w={size.0} h={h}
-                         bg={theme.colors.overlay_scrim}
-                         on:click={shell::Action::DismissOverlay} />
-                    <div class="absolute" left={0.0} top={0.0} w={w} h={h}
-                         border_r={theme.colors.border} aria-label="Sidebar">
+                    <div
+                        class="absolute"
+                        left={0.0}
+                        top={0.0}
+                        w={size.0}
+                        h={h}
+                        bg={theme.colors.overlay_scrim}
+                        on:click={shell::Action::DismissOverlay}
+                    />
+                    <div
+                        class="absolute"
+                        left={0.0}
+                        top={0.0}
+                        w={w}
+                        h={h}
+                        border_r={theme.colors.border}
+                        aria-label="Sidebar"
+                    >
                         {panel}
                     </div>
                 </div>
@@ -553,9 +566,17 @@ impl UiApp for Workbench {
                 <div w={dock_size.0} h={dock_size.1} class="shrink-0">{dock_el}</div>
                 {?sidebar_overlay}
                 if let Some(note) = notice {
-                    <div class="absolute px-3 py-2" left={0.0} top={size.1 - 36.0} w={size.0}
-                         h={36.0} z_index={20} bg={theme.colors.elevated_surface}
-                         role="alert" aria-label={note.clone()}>
+                    <div
+                        class="absolute px-3 py-2"
+                        left={0.0}
+                        top={size.1 - 36.0}
+                        w={size.0}
+                        h={36.0}
+                        z_index={20}
+                        bg={theme.colors.elevated_surface}
+                        role="alert"
+                        aria-label={note.clone()}
+                    >
                         <text size={13.0} color={theme.colors.text_strong}>{note}</text>
                     </div>
                 }

@@ -366,16 +366,18 @@ fn basic_element_emit() {
 #[test]
 fn attribute_forms_lower_to_builder_calls() {
     let el = view! {
-        <div hidden
-             min-w={0.0}
-             test-id="row"
-             id={"r".to_string()}
-             shadow={(2.0, 1.0, "black")}
-             aria-label="Close"
-             aria-selected={false}
-             aria-disabled
-             role="button"
-             on:key:mod+s={"save"} />
+        <div
+            hidden
+            min-w={0.0}
+            test-id="row"
+            id={"r".to_string()}
+            shadow={(2.0, 1.0, "black")}
+            aria-label="Close"
+            aria-selected={false}
+            aria-disabled
+            role="button"
+            on:key:mod+s={"save"}
+        />
     };
     assert_eq!(
         el.calls,
@@ -406,9 +408,7 @@ fn nested_children_expression_forms_and_fragment() {
 
     let el = view! {
         <div>
-            <div flex_row>
-                {badge(0)}
-            </div>
+            <div flex_row>{badge(0)}</div>
             {?present}
             {?absent}
             {...extras}
@@ -461,7 +461,11 @@ fn text_interpolates_and_joins_parts() {
     let el = view! {
         <div>
             <text>"Hello, {name}! {{braces}}"</text>
-            <text>"n=" {n} " ratio={1.0 / 3.0:.2}"</text>
+            <text>
+                "n="
+                {n}
+                " ratio={1.0 / 3.0:.2}"
+            </text>
             "{n} items"
         </div>
     };
@@ -475,8 +479,17 @@ fn text_interpolates_and_joins_parts() {
 fn rich_text_inline_tags_style_spans() {
     let url = "https://x.dev";
     let el = view! {
-        <p>"Run " <code>"cargo test"</code> ", " <b>"then " <i>"read"</i></b> <br/>
-           <a href={url}>"docs"</a></p>
+        <p>
+            "Run "
+            <code>"cargo test"</code>
+            ", "
+            <b>
+                "then "
+                <i>"read"</i>
+            </b>
+            <br />
+            <a href={url}>"docs"</a>
+        </p>
     };
     assert_eq!(
         el.value.as_deref(),
@@ -489,7 +502,9 @@ fn if_without_else_is_optional_child() {
     let make = |cond: bool| {
         view! {
             <div>
-                if cond { <text>"shown"</text> }
+                if cond {
+                    <text>"shown"</text>
+                }
             </div>
         }
     };
@@ -503,9 +518,13 @@ fn if_else_and_else_if_chain_pick_one_branch() {
     let pick = |a: bool, b: bool| {
         view! {
             <div>
-                if a { <text>"a"</text> }
-                else if b { "b" }
-                else { <text>"c"</text> }
+                if a {
+                    <text>"a"</text>
+                } else if b {
+                    "b"
+                } else {
+                    <text>"c"</text>
+                }
             </div>
         }
     };
@@ -520,7 +539,11 @@ fn if_let_binds_into_its_branch() {
     let make = |opt: Option<&str>| {
         view! {
             <div>
-                if let Some(label) = opt { <text>{label}</text> } else { <spacer/> }
+                if let Some(label) = opt {
+                    <text>{label}</text>
+                } else {
+                    <spacer />
+                }
             </div>
         }
     };
@@ -535,8 +558,11 @@ fn else_if_without_final_else_adds_no_child() {
     let pick = |a: bool, b: bool| {
         view! {
             <div>
-                if a { <text>"a"</text> }
-                else if b { <text>"b"</text> }
+                if a {
+                    <text>"a"</text>
+                } else if b {
+                    <text>"b"</text>
+                }
             </div>
         }
     };
@@ -552,8 +578,9 @@ fn multi_child_else_if_branch_spreads_into_parent() {
     let pick = |a: bool| {
         view! {
             <div>
-                if a { <text>"a"</text> }
-                else if !a {
+                if a {
+                    <text>"a"</text>
+                } else if !a {
                     <text>"b1"</text>
                     <text>"b2"</text>
                 }
@@ -627,7 +654,11 @@ fn keyed_for_keys_the_root_of_each_branch() {
                     0 => <div test-id="zero" />
                     9 => {}
                     _ => {
-                        if let Some(1) = item { <div test-id="one" /> } else { <div test-id="two" /> }
+                        if let Some(1) = item {
+                            <div test-id="one" />
+                        } else {
+                            <div test-id="two" />
+                        }
                     }
                 }
             }
@@ -704,7 +735,9 @@ fn lowercase_tag_with_arguments_calls_the_function() {
     let el = view! {
         <panel("inbox") gap={2.0}>
             <text>"a"</text>
-            if true { "b" }
+            if true {
+                "b"
+            }
         </panel>
     };
     assert_eq!(el.calls, ["test_id(\"inbox\")", "gap(2.0)"]);
@@ -744,7 +777,9 @@ fn typed_root_returns_the_builder_for_callers_to_extend() {
         view! { -> El,
             <div gap={gap}>
                 <text>"a"</text>
-                if gap > 1.0 { "b" }
+                if gap > 1.0 {
+                    "b"
+                }
             </div>
         }
     }
@@ -883,7 +918,13 @@ fn event_handler_attribute_binds_closure() {
 #[test]
 fn conditional_event_handler_is_set_only_when_present() {
     let make = |handler: Option<fn()>| {
-        view! { <div on:click={if let Some(h) = handler { h }} /> }
+        view! {
+            <div
+                on:click={if let Some(h) = handler {
+                    h
+                }}
+            />
+        }
     };
     assert_eq!(make(Some(|| {})).calls, ["on_click"]);
     assert!(make(None).calls.is_empty());

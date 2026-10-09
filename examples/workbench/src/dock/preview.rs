@@ -112,9 +112,16 @@ pub fn view(state: &mut State, scx: &SurfaceCx, _vcx: &mut ViewContext) -> AnyEl
             let pad = tokens::SPACE_16;
             let (w, h) = image_size(state.zoom, (body.0 - 2.0 * pad, body.1 - 2.0 * pad));
             let picture = view! {
-                <div w={w} h={h} class="shrink-0" bg={colors.surface} border={colors.border_variant}
-                     accessibility_role={accesskit::Role::Image}
-                     aria-label="Snapshot of the Atlas app" test_id="preview.image">
+                <div
+                    w={w}
+                    h={h}
+                    class="shrink-0"
+                    bg={colors.surface}
+                    border={colors.border_variant}
+                    accessibility_role={accesskit::Role::Image}
+                    aria-label="Snapshot of the Atlas app"
+                    test_id="preview.image"
+                >
                     {animated_image(image).size(w, h)}
                 </div>
             };
@@ -126,8 +133,14 @@ pub fn view(state: &mut State, scx: &SurfaceCx, _vcx: &mut ViewContext) -> AnyEl
                 }
                 .into_any(),
                 Zoom::Actual => view! {
-                    <div w={body.0} h={body.1} class="overflow-scroll" track_scroll={&state.scroll} scrollbar_auto_hide
-                         aria-label="Snapshot at 100%">
+                    <div
+                        w={body.0}
+                        h={body.1}
+                        class="overflow-scroll"
+                        track_scroll={&state.scroll}
+                        scrollbar_auto_hide
+                        aria-label="Snapshot at 100%"
+                    >
                         <div class="flex-col" p={pad}>{picture}</div>
                     </div>
                 }
@@ -135,31 +148,57 @@ pub fn view(state: &mut State, scx: &SurfaceCx, _vcx: &mut ViewContext) -> AnyEl
             }
         }
         None => view! {
-            <div w={body.0} h={body.1} class="flex-col items-center justify-center gap-[8]"
-                 role="alert" aria-label="Could not load the snapshot">
+            <div
+                w={body.0}
+                h={body.1}
+                class="flex-col items-center justify-center gap-[8]"
+                role="alert"
+                aria-label="Could not load the snapshot"
+            >
                 <icon svg={lucide::ALERT_CIRCLE} size={20.0} color={colors.status_error} />
                 <text size={13.0} color={colors.text}>"Could not load the snapshot"</text>
-                <Button on:click={super::Action::Preview(Action::Retry)} label="Retry"
-                        icon={lucide::REFRESH} size={ButtonSize::Compact} />
+                <Button
+                    on:click={super::Action::Preview(Action::Retry)}
+                    label="Retry"
+                    icon={lucide::REFRESH}
+                    size={ButtonSize::Compact}
+                />
             </div>
         }
         .into_any(),
     };
     view! {
         <div w={width} h={height} class="flex-col" bg={colors.canvas} test_id="dock.preview">
-            <div w={width} h={TOOLBAR_H} class="flex-row items-center shrink-0"
-                 px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border_variant}
-                 bg={colors.panel} accessibility_role={accesskit::Role::Toolbar}
-                 aria-label="Preview controls">
+            <div
+                w={width}
+                h={TOOLBAR_H}
+                class="flex-row items-center shrink-0"
+                px={tokens::SPACE_8}
+                gap={tokens::SPACE_8}
+                border_b={colors.border_variant}
+                bg={colors.panel}
+                accessibility_role={accesskit::Role::Toolbar}
+                aria-label="Preview controls"
+            >
                 <Badge label="Snapshot preview" icon={lucide::EYE} />
                 <div class="flex-1" />
                 {zoom}
             </div>
             {content}
-            <div w={width} h={STATUS_H} class="flex-row items-center shrink-0 gap-[6]"
-                 px={tokens::SPACE_8} border_t={colors.border_variant} role="status" aria-label={status}>
-                <icon svg={if updated { lucide::CHECK } else { lucide::INFO }} size={12.0}
-                      color={colors.text_muted} />
+            <div
+                w={width}
+                h={STATUS_H}
+                class="flex-row items-center shrink-0 gap-[6]"
+                px={tokens::SPACE_8}
+                border_t={colors.border_variant}
+                role="status"
+                aria-label={status}
+            >
+                <icon
+                    svg={if updated { lucide::CHECK } else { lucide::INFO }}
+                    size={12.0}
+                    color={colors.text_muted}
+                />
                 <text size={11.0} color={colors.text_muted}>{status}</text>
             </div>
         </div>

@@ -200,12 +200,17 @@ fn jump_to_latest(theme: &Theme, width: f32, height: f32) -> AnyElement {
         (label.chars().count() as f32 * FONT_SIZE * 0.55 + FONT_SIZE * 2.0).max(FONT_SIZE * 10.0);
     let h = FONT_SIZE * 2.4;
     view! {
-        <div class="absolute" left={((width - w) * 0.5).max(0.0)}
-             top={(height - h - FONT_SIZE).max(0.0)}
-             class="w-[w] h-[h] rounded-[h * 0.5] items-center justify-center bg-[theme.colors.accent]"
-             hover_bg={theme.colors.accent_strong}
-             accessibility_id="chat.jump-to-latest" accessibility_role={accesskit::Role::Button}
-             aria-label={label.clone()} on:click={Msg::JumpToLatest}>
+        <div
+            class="absolute"
+            left={((width - w) * 0.5).max(0.0)}
+            top={(height - h - FONT_SIZE).max(0.0)}
+            class="w-[w] h-[h] rounded-[h * 0.5] items-center justify-center bg-[theme.colors.accent]"
+            hover_bg={theme.colors.accent_strong}
+            accessibility_id="chat.jump-to-latest"
+            accessibility_role={accesskit::Role::Button}
+            aria-label={label.clone()}
+            on:click={Msg::JumpToLatest}
+        >
             <text size={FONT_SIZE * 0.9} class="font-semibold" color={theme.colors.on_accent}>
                 {label}
             </text>
@@ -632,8 +637,11 @@ impl UiApp for Demo {
         );
         view! {
             <div w={width} h={height} class="flex-col bg-[colors.background]">
-                <div w={width} h={header_h}
-                     class="shrink-0 px-3 items-center bg-[colors.panel] flex-row justify-between">
+                <div
+                    w={width}
+                    h={header_h}
+                    class="shrink-0 px-3 items-center bg-[colors.panel] flex-row justify-between"
+                >
                     <text size={12.0} color={colors.text_muted}>{status}</text>
                     {?find}
                 </div>

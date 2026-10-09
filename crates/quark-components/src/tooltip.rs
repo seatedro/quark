@@ -40,14 +40,18 @@ pub fn tooltip_layer(
 
     let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::TOOLTIP, scale);
     view! {
-        <div class="absolute"
-             left={x + offset_x} top={y + offset_y}
-             z_index={500}
-             px={px} py={py}
-             bg={tc.elevated_surface}
-             border={tc.border}
-             rounded={radius}
-             shadow_preset={shadows.layers()}>
+        <div
+            class="absolute"
+            left={x + offset_x}
+            top={y + offset_y}
+            z_index={500}
+            px={px}
+            py={py}
+            bg={tc.elevated_surface}
+            border={tc.border}
+            rounded={radius}
+            shadow_preset={shadows.layers()}
+        >
             <text size={font} color={tc.text}>{content}</text>
         </div>
     }

@@ -46,10 +46,15 @@ impl A11yDemo {
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
         view! {
-            <div accessibility_id={id} accessibility_role={Role::Button} aria-label={label}
-                 focus_ring={FocusId::from_key(id)} on:click={msg}
-                 class="px-4 h-9 items-center justify-center rounded-[8] bg-[colors.accent]"
-                 hover_bg={colors.accent_strong}>
+            <div
+                accessibility_id={id}
+                accessibility_role={Role::Button}
+                aria-label={label}
+                focus_ring={FocusId::from_key(id)}
+                on:click={msg}
+                class="px-4 h-9 items-center justify-center rounded-[8] bg-[colors.accent]"
+                hover_bg={colors.accent_strong}
+            >
                 <text color={colors.on_accent} class="font-semibold">{label}</text>
             </div>
         }
@@ -78,12 +83,20 @@ impl UiApp for A11yDemo {
         let colors = &cx.theme.colors;
         view! {
             <div w={width} h={height} class="bg-[colors.background] items-center justify-center">
-                <div accessibility_id="a11y.dialog" accessibility_role={Role::Dialog}
-                     aria-label="Settings"
-                     class="w-[420] p-6 gap-4 flex-col rounded-[16] bg-[colors.surface]">
-                    <text_input("Name", "") field={&self.name} placeholder="Your name"
-                                focus_target={NAME_FIELD} focused={cx.is_focused(NAME_FIELD)}
-                                class="w-full" h={52.0} />
+                <div
+                    accessibility_id="a11y.dialog"
+                    accessibility_role={Role::Dialog}
+                    aria-label="Settings"
+                    class="w-[420] p-6 gap-4 flex-col rounded-[16] bg-[colors.surface]"
+                >
+                    <text_input("Name", "")
+                        field={&self.name}
+                        placeholder="Your name"
+                        focus_target={NAME_FIELD}
+                        focused={cx.is_focused(NAME_FIELD)}
+                        class="w-full"
+                        h={52.0}
+                    />
                     <checkbox(self.remember) label="Remember me" on:toggle={Msg::Remember} />
                     <toggle(self.notify) label="Notifications" on:toggle={Msg::Notify} />
                     <div class="flex-row gap-2">

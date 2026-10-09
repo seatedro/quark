@@ -270,19 +270,34 @@ impl Changes {
         let (adds, dels) = self.stats;
         let path = self.path.to_string();
         view! {
-            <div class="w-full flex-col rounded-[8] overflow-hidden" bg={p.change_card}
-                 border={p.shell_border} accessibility_role={Role::Group}
-                 aria-label={format!("{path} diff")}>
+            <div
+                class="w-full flex-col rounded-[8] overflow-hidden"
+                bg={p.change_card}
+                border={p.shell_border}
+                accessibility_role={Role::Group}
+                aria-label={format!("{path} diff")}
+            >
                 <div class="flex-row items-center h-7 pl-[10] pr-1 gap-1.5" bg={p.shell}>
-                    <div role="link" aria-label={format!("Open {path} in Changes")}
-                         on:click={Msg::OpenTab(Tab::Changes)}>
+                    <div
+                        role="link"
+                        aria-label={format!("Open {path} in Changes")}
+                        on:click={Msg::OpenTab(Tab::Changes)}
+                    >
                         <txt(path.clone(), SMALL, p.text_soft) />
                     </div>
                     <txt(format!("+{adds}"), SMALL, p.success) />
                     <txt(format!("-{dels}"), SMALL, p.error) />
                     <div class="flex-1" />
-                    <icon_button(p, icons::COPY, 22.0, 13.0, p.muted, "Copy diff",
-                                 Msg::Diff(DiffMsg::CopyPatch)) />
+                    <icon_button(
+                        p,
+                        icons::COPY,
+                        22.0,
+                        13.0,
+                        p.muted,
+                        "Copy diff",
+                        Msg::Diff(DiffMsg::CopyPatch)
+                    )
+                    />
                 </div>
                 {body}
             </div>
@@ -327,22 +342,58 @@ impl Changes {
             (n, None) => format!("{n} results"),
         };
         Some(view! {
-            <div class="flex-row items-center px-3 gap-2" w={w} h={FIND_H} border_b={p.hairline}
-                 accessibility_role={Role::Search} aria-label="Find in changes">
+            <div
+                class="flex-row items-center px-3 gap-2"
+                w={w}
+                h={FIND_H}
+                border_b={p.hairline}
+                accessibility_role={Role::Search}
+                aria-label="Find in changes"
+            >
                 <icon svg={icons::SEARCH} size={14.0} color={p.muted} />
-                <text_input("Find in changes", "") placeholder="Find in changes"
-                    focus_target={FIND_FOCUS} focused={vcx.is_focused(FIND_FOCUS)} field={field}
-                    bare w={(w - 170.0).max(60.0)} class="h-5" />
+                <text_input("Find in changes", "")
+                    placeholder="Find in changes"
+                    focus_target={FIND_FOCUS}
+                    focused={vcx.is_focused(FIND_FOCUS)}
+                    field={field}
+                    bare
+                    w={(w - 170.0).max(60.0)}
+                    class="h-5"
+                />
                 <div class="flex-1" />
                 <div role="status" aria-label={count.clone()}>
                     <txt(count, SMALL, p.muted) />
                 </div>
-                <icon_button(p, lucide::CHEVRON_UP, 22.0, 13.0, p.icon, "Previous match",
-                             Msg::Diff(DiffMsg::FindStep(false))) />
-                <icon_button(p, icons::CHEVRON_DOWN, 22.0, 13.0, p.icon, "Next match",
-                             Msg::Diff(DiffMsg::FindStep(true))) />
-                <icon_button(p, icons::CLOSE, 22.0, 11.0, p.icon, "Close find",
-                             Msg::Diff(DiffMsg::Find(false))) />
+                <icon_button(
+                    p,
+                    lucide::CHEVRON_UP,
+                    22.0,
+                    13.0,
+                    p.icon,
+                    "Previous match",
+                    Msg::Diff(DiffMsg::FindStep(false))
+                )
+                />
+                <icon_button(
+                    p,
+                    icons::CHEVRON_DOWN,
+                    22.0,
+                    13.0,
+                    p.icon,
+                    "Next match",
+                    Msg::Diff(DiffMsg::FindStep(true))
+                )
+                />
+                <icon_button(
+                    p,
+                    icons::CLOSE,
+                    22.0,
+                    11.0,
+                    p.icon,
+                    "Close find",
+                    Msg::Diff(DiffMsg::Find(false))
+                )
+                />
             </div>
         })
     }
@@ -580,17 +631,32 @@ impl DiffDecorator for Review {
         let p = self.p;
         let title = cx.title.to_owned();
         Some(view! {
-            <div class="flex-row items-center pl-4 pr-[10] gap-[9]" w={cx.width} h={cx.height}
-                 bg={p.bg} border_b={p.hairline} border_t={p.hairline} role="heading"
-                 aria-label={title.clone()}>
+            <div
+                class="flex-row items-center pl-4 pr-[10] gap-[9]"
+                w={cx.width}
+                h={cx.height}
+                bg={p.bg}
+                border_b={p.hairline}
+                border_t={p.hairline}
+                role="heading"
+                aria-label={title.clone()}
+            >
                 {js_badge()}
                 <txt(title, BODY, p.text_soft) />
                 <div class="flex-1" />
                 <txt(format!("+{}", cx.additions), BODY, p.add_num) />
                 <txt(format!("-{}", cx.deletions), BODY, p.del_num) />
                 <div class="w-0.5" />
-                <icon_button(p, icons::OPEN_EXTERNAL, 24.0, 13.0, p.icon, "Open in",
-                             Msg::OpenFile("cart.js")) />
+                <icon_button(
+                    p,
+                    icons::OPEN_EXTERNAL,
+                    24.0,
+                    13.0,
+                    p.icon,
+                    "Open in",
+                    Msg::OpenFile("cart.js")
+                )
+                />
                 <icon_button(p, icons::ELLIPSIS, 24.0, 13.0, p.icon, "File options", Msg::Noop) />
             </div>
         })
@@ -615,12 +681,23 @@ impl DiffDecorator for Review {
             .collect();
         let h = (cx.height - 4.0).max(0.0);
         Some(view! {
-            <div class="relative" w={cx.width} h={cx.height} role="button"
-                 aria-label={format!("Show {label}")}
-                 on:click={Msg::Diff(DiffMsg::Review(DiffEvent::Expand(gap, Reveal::All)))}>
+            <div
+                class="relative"
+                w={cx.width}
+                h={cx.height}
+                role="button"
+                aria-label={format!("Show {label}")}
+                on:click={Msg::Diff(DiffMsg::Review(DiffEvent::Expand(gap, Reveal::All)))}
+            >
                 for (x, w, first) in bars {
-                    <div class="absolute top-0.5 flex-row items-center pl-2" left={x} w={w} h={h}
-                         bg={p.fold} hover_bg={p.fold.lerp(p.text, 0.06)}>
+                    <div
+                        class="absolute top-0.5 flex-row items-center pl-2"
+                        left={x}
+                        w={w}
+                        h={h}
+                        bg={p.fold}
+                        hover_bg={p.fold.lerp(p.text, 0.06)}
+                    >
                         if first {
                             <txt(label.clone(), SMALL, p.muted) />
                         }
@@ -639,13 +716,23 @@ impl DiffDecorator for Review {
         if c.resolved {
             return Some(view! {
                 <div class="flex-row items-center px-3 py-1" w={cx.width}>
-                    <div class="flex-row items-center px-3 gap-2 rounded-[8]" w={w} h={28.0}
-                         bg={p.shell} border={p.shell_border} accessibility_role={Role::Group}
-                         aria-label={format!("Resolved comment on line {line}")}>
+                    <div
+                        class="flex-row items-center px-3 gap-2 rounded-[8]"
+                        w={w}
+                        h={28.0}
+                        bg={p.shell}
+                        border={p.shell_border}
+                        accessibility_role={Role::Group}
+                        aria-label={format!("Resolved comment on line {line}")}
+                    >
                         <icon svg={icons::CHECK} size={13.0} color={p.success} />
                         <txt(format!("Resolved comment on line {line}"), SMALL, p.muted) />
                         <div class="flex-1" />
-                        <div role="button" aria-label="Reopen" on:click={Msg::Diff(DiffMsg::Resolve(id))}>
+                        <div
+                            role="button"
+                            aria-label="Reopen"
+                            on:click={Msg::Diff(DiffMsg::Resolve(id))}
+                        >
                             <txt("Reopen", SMALL, p.text_soft) />
                         </div>
                     </div>
@@ -655,9 +742,14 @@ impl DiffDecorator for Review {
         let messages = c.messages.clone();
         Some(view! {
             <div class="flex-row px-3 py-2" w={cx.width}>
-                <div class="flex-col px-3 py-1 rounded-[10]" w={w} bg={p.shell}
-                     border={p.shell_border} accessibility_role={Role::Group}
-                     aria-label={format!("Comment thread on line {line}")}>
+                <div
+                    class="flex-col px-3 py-1 rounded-[10]"
+                    w={w}
+                    bg={p.shell}
+                    border={p.shell_border}
+                    accessibility_role={Role::Group}
+                    aria-label={format!("Comment thread on line {line}")}
+                >
                     for (author, body) in messages {
                         <div class="flex-col justify-center gap-0.5 overflow-hidden" h={42.0}>
                             <txt(author, SMALL, p.text) class="font-semibold" />
@@ -665,14 +757,22 @@ impl DiffDecorator for Review {
                         </div>
                     }
                     <div class="flex-row items-center h-[30] gap-1.5">
-                        <div class="flex-row items-center h-6 px-2.5 rounded-[7]"
-                             border={p.shell_border} role="button" aria-label="Reply"
-                             on:click={Msg::Diff(DiffMsg::Reply(id))}>
+                        <div
+                            class="flex-row items-center h-6 px-2.5 rounded-[7]"
+                            border={p.shell_border}
+                            role="button"
+                            aria-label="Reply"
+                            on:click={Msg::Diff(DiffMsg::Reply(id))}
+                        >
                             <txt("Reply", SMALL, p.text_soft) />
                         </div>
-                        <div class="flex-row items-center h-6 px-2.5 rounded-[7]"
-                             border={p.shell_border} role="button" aria-label="Resolve"
-                             on:click={Msg::Diff(DiffMsg::Resolve(id))}>
+                        <div
+                            class="flex-row items-center h-6 px-2.5 rounded-[7]"
+                            border={p.shell_border}
+                            role="button"
+                            aria-label="Resolve"
+                            on:click={Msg::Diff(DiffMsg::Resolve(id))}
+                        >
                             <txt("Resolve", SMALL, p.text_soft) />
                         </div>
                     </div>
@@ -690,9 +790,13 @@ impl DiffDecorator for Review {
         };
         Some(view! {
             <div class="flex-row items-center justify-start pl-1.5" w={cx.width} h={cx.height}>
-                <div class="w-4 h-4 rounded-[4] items-center justify-center" bg={p.accent}
-                     role="button" aria-label={format!("Add comment on line {}", cx.line + 1)}
-                     on:click={Msg::Diff(DiffMsg::Review(event))}>
+                <div
+                    class="w-4 h-4 rounded-[4] items-center justify-center"
+                    bg={p.accent}
+                    role="button"
+                    aria-label={format!("Add comment on line {}", cx.line + 1)}
+                    on:click={Msg::Diff(DiffMsg::Review(event))}
+                >
                     <icon svg={icons::PLUS} size={11.0} color={Color::rgba(255, 255, 255, 255)} />
                 </div>
             </div>

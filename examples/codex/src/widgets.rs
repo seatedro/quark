@@ -37,9 +37,15 @@ pub fn icon_button(
     action: impl Into<Action>,
 ) -> Div {
     view! { -> Div,
-        <div w={box_size} h={box_size} class="shrink-0 items-center justify-center rounded-[7]"
-             hover_bg={p.row_hover.with_alpha(110)} role="button" aria-label={label.to_owned()}
-             on:click={action}>
+        <div
+            w={box_size}
+            h={box_size}
+            class="shrink-0 items-center justify-center rounded-[7]"
+            hover_bg={p.row_hover.with_alpha(110)}
+            role="button"
+            aria-label={label.to_owned()}
+            on:click={action}
+        >
             <icon svg={svg} size={icon_size} color={color} />
         </div>
     }
@@ -53,9 +59,17 @@ pub fn menu_panel(p: &Pal, x: f32, y: f32, w: f32) -> Div {
     // role too), so a caller's `accessibility_role` (the palette's Dialog)
     // still sets both.
     view! { -> Div,
-        <div class="absolute flex-col p-1 rounded-[10] blur-[18] z-60" left={x} top={y} w={w}
-             bg={p.menu} border={p.menu_border} shadow={(16.0, 6.0, p.shadow)}
-             accessibility_role={Role::Menu} block_mouse />
+        <div
+            class="absolute flex-col p-1 rounded-[10] blur-[18] z-60"
+            left={x}
+            top={y}
+            w={w}
+            bg={p.menu}
+            border={p.menu_border}
+            shadow={(16.0, 6.0, p.shadow)}
+            accessibility_role={Role::Menu}
+            block_mouse
+        />
     }
 }
 
@@ -108,9 +122,17 @@ pub fn menu_item(p: &Pal, item: Item, action: impl Into<Action>) -> Div {
         .tint
         .unwrap_or(if item.dim { p.menu_desc } else { p.menu_title });
     view! { -> Div,
-        <div class="flex-row items-center w-full shrink-0 px-2 gap-[9] rounded-[6]"
-             h={if tall { 48.0 } else { 29.0 }} hover_bg={p.menu_hi} role="menuitem"
-             aria-label={item.title.to_owned()} on:click={action} bg={if item.hi { p.menu_hi }}>
+        <div
+            class="flex-row items-center w-full shrink-0 px-2 gap-[9] rounded-[6]"
+            h={if tall { 48.0 } else { 29.0 }}
+            hover_bg={p.menu_hi}
+            role="menuitem"
+            aria-label={item.title.to_owned()}
+            on:click={action}
+            bg={if item.hi {
+                p.menu_hi
+            }}
+        >
             if let Some(svg) = item.icon {
                 <div class="self-start" pt={if tall { 7.0 } else { 6.5 }}>
                     if item.icon_colored {
@@ -124,7 +146,8 @@ pub fn menu_item(p: &Pal, item: Item, action: impl Into<Action>) -> Div {
                 <div class="flex-1 min-w-0 overflow-hidden flex-col">
                     <txt(item.title, BODY, title_color) />
                     <txt(item.desc.unwrap_or(""), SMALL, item.tint.unwrap_or(p.menu_desc))
-                         class="truncate" />
+                        class="truncate"
+                    />
                 </div>
             } else {
                 <div class="flex-1 min-w-0 overflow-hidden flex-row items-center gap-[7]">
@@ -177,8 +200,11 @@ pub fn click_catcher(w: f32, h: f32, action: impl Into<Action>) -> Div {
 /// A toggle switch.
 pub fn toggle(p: &Pal, on: bool) -> Div {
     view! { -> Div,
-        <div class="w-8 h-5 shrink-0 rounded-[10] flex-row items-center px-0.5"
-             bg={if on { p.toggle_on } else { p.menu_hi }} @when {on} { class="justify-end" }>
+        <div
+            class="w-8 h-5 shrink-0 rounded-[10] flex-row items-center px-0.5"
+            bg={if on { p.toggle_on } else { p.menu_hi }}
+            @when {on} { class="justify-end" }
+        >
             <div class="w-4 h-4 rounded-[8] bg-white" />
         </div>
     }

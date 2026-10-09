@@ -27,8 +27,13 @@ pub fn leading_zone() -> f32 {
 
 fn icon_button(icon: &'static str, label: &'static str, command: CommandId) -> AnyElement {
     view! {
-        <Button on:click={command} icon={icon} tooltip={label}
-                size={ButtonSize::Compact} fixed_size={tokens::ICON_BUTTON} />
+        <Button
+            on:click={command}
+            icon={icon}
+            tooltip={label}
+            size={ButtonSize::Compact}
+            fixed_size={tokens::ICON_BUTTON}
+        />
     }
     .into_any()
 }
@@ -85,9 +90,16 @@ pub fn view(state: &mut super::State, scx: &SurfaceCx, _vcx: &mut ViewContext) -
             lucide::PANEL_LEFT_OPEN
         };
         view! {
-            <div w={width} h={height} class="flex-row items-center gap-[8] pr-2"
-                 pl={leading_zone()} bg={bg} border_b={border}
-                 accessibility_role={accesskit::Role::Toolbar} aria-label="Workbench toolbar">
+            <div
+                w={width}
+                h={height}
+                class="flex-row items-center gap-[8] pr-2"
+                pl={leading_zone()}
+                bg={bg}
+                border_b={border}
+                accessibility_role={accesskit::Role::Toolbar}
+                aria-label="Workbench toolbar"
+            >
                 {icon_button(sidebar_icon, "Toggle sidebar", CommandId::ToggleSidebar)}
                 <div class="flex-row items-center gap-[6] flex-1" min-w={0.0}>
                     <text size={13.0} color={muted}>{data.project.clone()}</text>
@@ -98,13 +110,21 @@ pub fn view(state: &mut super::State, scx: &SurfaceCx, _vcx: &mut ViewContext) -
                         </text>
                     </div>
                 </div>
-                <div class="flex-row items-center px-2 h-[22] rounded-[4] shrink-0"
-                     border={border} role="status" aria-label="Demo workspace: simulated backend">
+                <div
+                    class="flex-row items-center px-2 h-[22] rounded-[4] shrink-0"
+                    border={border}
+                    role="status"
+                    aria-label="Demo workspace: simulated backend"
+                >
                     <text size={11.0} color={muted}>{data.workspace}</text>
                 </div>
                 {icon_button(lucide::COMMAND, "Command palette", CommandId::OpenPalette)}
                 {icon_button(lucide::SETTINGS, "Settings", CommandId::OpenSettings)}
-                {icon_button(lucide::SPLIT, "Toggle right dock", CommandId::ToggleRightDock)}
+                {icon_button(
+                    lucide::SPLIT,
+                    "Toggle right dock",
+                    CommandId::ToggleRightDock
+                )}
             </div>
         }
     })

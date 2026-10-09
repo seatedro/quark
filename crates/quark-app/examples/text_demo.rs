@@ -267,10 +267,18 @@ impl TextDemo {
         let label = label.into();
         let colors = &theme.colors;
         view! {
-            <div accessibility_role={Role::Button} aria-label={label.clone()} on:click={msg}
-                 class="px-[10] h-[ROW_H] items-center justify-center rounded-[6]"
-                 bg={if on { colors.accent } else { colors.element_background }}
-                 hover_bg={colors.element_hover}>
+            <div
+                accessibility_role={Role::Button}
+                aria-label={label.clone()}
+                on:click={msg}
+                class="px-[10] h-[ROW_H] items-center justify-center rounded-[6]"
+                bg={if on {
+                    colors.accent
+                } else {
+                    colors.element_background
+                }}
+                hover_bg={colors.element_hover}
+            >
                 <text class="text-sm" color={if on { colors.on_accent } else { colors.text }}>
                     {label}
                 </text>
@@ -279,9 +287,7 @@ impl TextDemo {
     }
 
     fn row(children: Vec<AnyElement>) -> AnyElement {
-        view! {
-            <div class="flex-row items-center gap-[GAP] h-[ROW_H]">{...children}</div>
-        }
+        view! { <div class="flex-row items-center gap-[GAP] h-[ROW_H]">{...children}</div> }
     }
 
     fn toolbar(&self, theme: &Theme) -> Vec<AnyElement> {
@@ -402,7 +408,8 @@ impl UiApp for TextDemo {
                         text_color={colors.text}
                         font_size={self.font_size}
                         w={editor_w}
-                        h={editor_h} />
+                        h={editor_h}
+                    />
                 </div>
                 if let Some(menu) = self.menu.render((width, height), theme) {
                     {menu}

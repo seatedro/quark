@@ -40,10 +40,17 @@ fn button(
     msg: Option<Msg>,
 ) -> AnyElement {
     view! {
-        <div key={key} test_id={key} class="px-4 h-9 items-center justify-center rounded-[8] bg-[idle]"
-             hover_bg={hover} hover_text_color={hover_ink}
-             transition={(Prop::Background, Motion::tween(180, Curve::EaseOutCubic))}
-             on:click={if let Some(msg) = msg { msg }}>
+        <div
+            key={key}
+            test_id={key}
+            class="px-4 h-9 items-center justify-center rounded-[8] bg-[idle]"
+            hover_bg={hover}
+            hover_text_color={hover_ink}
+            transition={(Prop::Background, Motion::tween(180, Curve::EaseOutCubic))}
+            on:click={if let Some(msg) = msg {
+                msg
+            }}
+        >
             <text class="font-semibold" color={ink}>{label}</text>
         </div>
     }
@@ -84,12 +91,15 @@ impl UiApp for AnimationDemo {
         };
         view! {
             <div w={width} h={height} class="bg-[colors.background]">
-                <div key="demo.panel" test_id="demo.panel"
-                     class="absolute top-0 left-0 w-[PANEL_W] h-[height] p-6 flex-col gap-3
+                <div
+                    key="demo.panel"
+                    test_id="demo.panel"
+                    class="absolute top-0 left-0 w-[PANEL_W] h-[height] p-6 flex-col gap-3
                             bg-[colors.surface] overflow-clip"
-                     translate={(panel_x, 0.0)}
-                     // Underdamped so the slide settles with a small overshoot.
-                     transition={(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))}>
+                    translate={(panel_x, 0.0)}
+                    // Underdamped so the slide settles with a small overshoot.
+                    transition={(Prop::Transform, Motion::spring(260.0, 22.0, 1.0))}
+                >
                     <text class="text-lg font-bold">"Panel"</text>
                     <text color={colors.text_muted}>"Sprung with stiffness 260, damping 22."</text>
                 </div>

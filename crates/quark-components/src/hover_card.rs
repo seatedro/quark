@@ -231,12 +231,26 @@ impl HoverCardState {
         self.card = Some(rect);
         let tc = &theme.colors;
         Some(view! {
-            <div class="absolute" left={rect.x} top={rect.y} w={rect.width} h={rect.height}
-                 z_index={450} class="flex-col" p={m.spacing_md} bg={tc.elevated_surface}
-                 border={tc.border} rounded={m.panel_radius} shadow_preset={Shadow::POPOVER}
-                 class="overflow-hidden" id="hover-card" test_id="hover-card" role="group"
-                 accessibility_role={accesskit::Role::Tooltip}
-                 accessibility_id={format!("hover-card:{}", self.key)}>
+            <div
+                class="absolute"
+                left={rect.x}
+                top={rect.y}
+                w={rect.width}
+                h={rect.height}
+                z_index={450}
+                class="flex-col"
+                p={m.spacing_md}
+                bg={tc.elevated_surface}
+                border={tc.border}
+                rounded={m.panel_radius}
+                shadow_preset={Shadow::POPOVER}
+                class="overflow-hidden"
+                id="hover-card"
+                test_id="hover-card"
+                role="group"
+                accessibility_role={accesskit::Role::Tooltip}
+                accessibility_id={format!("hover-card:{}", self.key)}
+            >
                 {content}
             </div>
         })

@@ -270,13 +270,24 @@ fn empty_state(scx: &SurfaceCx) -> AnyElement {
     let colors = &scx.theme.colors;
     let (width, height) = scx.size;
     view! {
-        <div w={width} h={height} class="flex-col items-center justify-center gap-[12]"
-             bg={colors.background}>
-            <text size={tokens::TYPE_EMPTY_HEADING.0} class="font-semibold" color={colors.text_strong}>
+        <div
+            w={width}
+            h={height}
+            class="flex-col items-center justify-center gap-[12]"
+            bg={colors.background}
+        >
+            <text
+                size={tokens::TYPE_EMPTY_HEADING.0}
+                class="font-semibold"
+                color={colors.text_strong}
+            >
                 "Start a thread"
             </text>
-            <Button on:click={Action::ReviewChanges} variant={ButtonStyle::Subtle}
-                    label="Review changes" />
+            <Button
+                on:click={Action::ReviewChanges}
+                variant={ButtonStyle::Subtle}
+                label="Review changes"
+            />
         </div>
     }
     .into_any()
@@ -329,10 +340,20 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
     // Jump to latest appears without moving the view.
     let jump = tv.doc.document().has_content_below().then(|| {
         view! {
-            <div class="absolute" left={(doc_width - 150.0) * 0.5} top={height - 52.0}
-                 w={150.0} h={36.0} z_index={5}>
-                <Button on:click={Action::JumpToLatest} icon={lucide::ARROW_DOWN}
-                        variant={ButtonStyle::Filled} label="Jump to latest" />
+            <div
+                class="absolute"
+                left={(doc_width - 150.0) * 0.5}
+                top={height - 52.0}
+                w={150.0}
+                h={36.0}
+                z_index={5}
+            >
+                <Button
+                    on:click={Action::JumpToLatest}
+                    icon={lucide::ARROW_DOWN}
+                    variant={ButtonStyle::Filled}
+                    label="Jump to latest"
+                />
             </div>
         }
         .into_any()
@@ -351,8 +372,13 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
             scx.theme,
         );
         view! {
-            <div class="absolute" left={(doc_width - 320.0).max(0.0)} top={8.0} w={320.0}
-                 z_index={6}>
+            <div
+                class="absolute"
+                left={(doc_width - 320.0).max(0.0)}
+                top={8.0}
+                w={320.0}
+                z_index={6}
+            >
                 {bar}
             </div>
         }

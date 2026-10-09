@@ -28,13 +28,16 @@ pub fn skeleton(width: f32, height: f32, theme: &Theme) -> AnyElement {
     let radius = theme.components.skeleton.radius.unwrap_or(Rad::SM);
     let still = theme.reduced_motion;
     view! { scale,
-        <div w={width} h={height}
-             rounded={radius}
-             @when {still} { bg={tc.element_background} }
-             @when {!still} {
-                 bg={Color::TRANSPARENT}
-                 bg_effect={shimmer(tc.element_background, tc.ghost_element_hover, 1.0)}
-             } />
+        <div
+            w={width}
+            h={height}
+            rounded={radius}
+            @when {still} { bg={tc.element_background} }
+            @when {!still} {
+                bg={Color::TRANSPARENT}
+                bg_effect={shimmer(tc.element_background, tc.ghost_element_hover, 1.0)}
+            }
+        />
     }
 }
 
@@ -53,10 +56,12 @@ pub fn skeleton_lines(count: usize, theme: &Theme) -> AnyElement {
         .collect();
     // Unscaled: the view scales padding and gap.
     view! { scale,
-        <div class="flex-col w-full"
-             px={recipe.padding_x.unwrap_or(Sp::MD)}
-             py={recipe.padding_y.unwrap_or(Sp::MD)}
-             gap={recipe.gap.unwrap_or(Sp::MD)}>
+        <div
+            class="flex-col w-full"
+            px={recipe.padding_x.unwrap_or(Sp::MD)}
+            py={recipe.padding_y.unwrap_or(Sp::MD)}
+            gap={recipe.gap.unwrap_or(Sp::MD)}
+        >
             {...lines}
         </div>
     }

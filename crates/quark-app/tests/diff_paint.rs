@@ -514,8 +514,12 @@ impl DiffDecorator for StageAction {
         let file = cx.file;
         (slot == HeaderSlot::Actions).then(|| {
             view! {
-                <div class="px-[6]" on:click={Action::from(Msg::Stage(file))}
-                     accessibility_role={Role::Button} aria-label={"Stage"}>
+                <div
+                    class="px-[6]"
+                    on:click={Action::from(Msg::Stage(file))}
+                    accessibility_role={Role::Button}
+                    aria-label={"Stage"}
+                >
                     <text>"Stage"</text>
                 </div>
             }
@@ -550,7 +554,9 @@ impl DiffDecorator for Banner {
         *self.0.borrow_mut() += 1;
         let label = format!("Banner for {}", cx.title);
         Some(view! {
-            <div accessibility_role={Role::Heading} aria-label={label}><text>"banner"</text></div>
+            <div accessibility_role={Role::Heading} aria-label={label}>
+                <text>"banner"</text>
+            </div>
         })
     }
 }

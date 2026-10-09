@@ -40,24 +40,38 @@ impl RenderOnce for Breadcrumb {
                 for (i, segment) in self.segments.into_iter().enumerate() {
                     <>
                         if i > 0 {
-                            <icon svg={lucide::CHEVRON_RIGHT} size={icon_size} color={tc.text_muted} />
+                            <icon
+                                svg={lucide::CHEVRON_RIGHT}
+                                size={icon_size}
+                                color={tc.text_muted}
+                            />
                         }
-                        <div px={m.spacing_xs}
-                             py={Sp::XXS}
-                             rounded={m.control_radius - Sp::XS * scale}
-                             @when {i != last && self.on_click_segment.is_some()} { on:click={(self.on_click_segment.as_ref().unwrap())(i)} }
-                             @when {i != last && self.on_click_segment.is_some()} {
-                                 id={format!("breadcrumb:{i}:{segment}")}
-                                 key={segment.clone()}
-                                 test-id="breadcrumb-segment"
-                                 role="button"
-                                 accessibility_id={format!("breadcrumb:{i}:{segment}")}
-                                 aria-label={segment.clone()}
-                             }
-                             @when {i != last} { hover_bg={tc.ghost_element_hover} }>
-                            <text class="text-sm"
-                                  color={if i == last { tc.text_strong } else { tc.text_muted }}
-                                  @when {i == last} { medium }>
+                        <div
+                            px={m.spacing_xs}
+                            py={Sp::XXS}
+                            rounded={m.control_radius - Sp::XS * scale}
+                            @when {i != last && self.on_click_segment.is_some()} {
+                                on:click={(self.on_click_segment.as_ref().unwrap())(i)}
+                            }
+                            @when {i != last && self.on_click_segment.is_some()} {
+                                id={format!("breadcrumb:{i}:{segment}")}
+                                key={segment.clone()}
+                                test-id="breadcrumb-segment"
+                                role="button"
+                                accessibility_id={format!("breadcrumb:{i}:{segment}")}
+                                aria-label={segment.clone()}
+                            }
+                            @when {i != last} { hover_bg={tc.ghost_element_hover} }
+                        >
+                            <text
+                                class="text-sm"
+                                color={if i == last {
+                                    tc.text_strong
+                                } else {
+                                    tc.text_muted
+                                }}
+                                @when {i == last} { medium }
+                            >
                                 {segment}
                             </text>
                         </div>

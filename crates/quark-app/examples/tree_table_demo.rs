@@ -182,8 +182,11 @@ impl UiApp for Demo {
         let colors = &cx.theme.colors;
         view! {
             <div w={width} h={height} class="flex-row bg-[colors.background]">
-                <div w={TREE_WIDTH} h={height}
-                     class="shrink-0 bg-[colors.sidebar_background] border-r-[colors.border]">
+                <div
+                    w={TREE_WIDTH}
+                    h={height}
+                    class="shrink-0 bg-[colors.sidebar_background] border-r-[colors.border]"
+                >
                     {tree}
                 </div>
                 {table}

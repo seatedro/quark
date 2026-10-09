@@ -104,8 +104,14 @@ pub fn view(app: &mut Codex, page: Page, p: &Pal, f: &Frame, vcx: &mut ViewConte
             if f.sidebar_w > 0.0 {
                 {nav(page, p, f.sidebar_w, h)}
             }
-            <div class="absolute top-0 flex-col pl-5 overflow-y-scroll" left={local} w={f.main_w}
-                 h={h} track_scroll={&app.settings_handle} scrollbar_auto_hide>
+            <div
+                class="absolute top-0 flex-col pl-5 overflow-y-scroll"
+                left={local}
+                w={f.main_w}
+                h={h}
+                track_scroll={&app.settings_handle}
+                scrollbar_auto_hide
+            >
                 <div class="flex-col shrink-0 pt-[74] pb-[60]" w={content_w}>
                     <text size={26.0} color={p.text} class="font-medium whitespace-nowrap">
                         {title(page)}
@@ -120,37 +126,64 @@ pub fn view(app: &mut Codex, page: Page, p: &Pal, f: &Frame, vcx: &mut ViewConte
 
 fn nav(page: Page, p: &Pal, w: f32, h: f32) -> AnyElement {
     view! {
-        <div class="absolute left-0 top-0" w={w} h={h} bg={p.sidebar}
-             border_r={p.frame_border.lerp(p.text, 0.06)} accessibility_role={Role::Navigation}
-             aria-label="Settings">
+        <div
+            class="absolute left-0 top-0"
+            w={w}
+            h={h}
+            bg={p.sidebar}
+            border_r={p.frame_border.lerp(p.text, 0.06)}
+            accessibility_role={Role::Navigation}
+            aria-label="Settings"
+        >
             <div class="absolute left-4 top-[14]">
-                <text size={18.0} color={p.text} class="font-semibold whitespace-nowrap">"Settings"</text>
+                <text size={18.0} color={p.text} class="font-semibold whitespace-nowrap">
+                    "Settings"
+                </text>
             </div>
-            <div class="flex-row items-center absolute left-2 top-[52] w-[272] h-9 pl-[13] gap-[9]
+            <div
+                class="flex-row items-center absolute left-2 top-[52] w-[272] h-9 pl-[13] gap-[9]
                         rounded-[18]"
-                 bg={p.rail_tile.lerp(p.sidebar, 0.45)}>
+                bg={p.rail_tile.lerp(p.sidebar, 0.45)}
+            >
                 <icon svg={icons::SEARCH} size={15.0} color={p.sidebar_muted} />
                 <txt("Search", BODY, p.sidebar_muted) />
             </div>
             <div class="absolute left-2 top-[104] overflow-hidden" h={h - 104.0}>
                 <div class="flex-col w-[272]">
                     for (i, (section, pages)) in SECTIONS.iter().enumerate() {
-                        <div class="flex-row items-center shrink-0 pl-2"
-                             h={if i == 0 { 30.0 } else { 46.0 }} pt={if i == 0 { 0.0 } else { 16.0 }}>
+                        <div
+                            class="flex-row items-center shrink-0 pl-2"
+                            h={if i == 0 { 30.0 } else { 46.0 }}
+                            pt={if i == 0 { 0.0 } else { 16.0 }}
+                        >
                             <txt(*section, BODY, p.sidebar_muted) />
                         </div>
                         for (pg, label, icon) in pages.iter() {
                             let selected = *pg == page;
-                            <div class="flex-row items-center h-[30] shrink-0 pl-2 pr-[10] gap-2 rounded-[8]"
-                                 bg={if selected { p.row_selected }}
-                                 hover_bg={if selected { p.row_selected } else { p.row_hover }}
-                                 role="button" aria-label={label.to_string()} aria-selected={selected}
-                                 on:click={Msg::Show(Screen::Settings(*pg))}>
+                            <div
+                                class="flex-row items-center h-[30] shrink-0 pl-2 pr-[10] gap-2 rounded-[8]"
+                                bg={if selected {
+                                    p.row_selected
+                                }}
+                                hover_bg={if selected {
+                                    p.row_selected
+                                } else {
+                                    p.row_hover
+                                }}
+                                role="button"
+                                aria-label={label.to_string()}
+                                aria-selected={selected}
+                                on:click={Msg::Show(Screen::Settings(*pg))}
+                            >
                                 <icon svg={icon} size={15.0} color={p.sidebar_text} />
                                 <txt(*label, BODY, p.sidebar_text) />
                                 if *pg == Page::Profile {
                                     <div class="flex-1" />
-                                    <icon svg={icons::OPEN_EXTERNAL} size={13.0} color={p.sidebar_muted} />
+                                    <icon
+                                        svg={icons::OPEN_EXTERNAL}
+                                        size={13.0}
+                                        color={p.sidebar_muted}
+                                    />
                                 }
                             </div>
                             <div class="h-px" />
@@ -241,8 +274,12 @@ fn setting_row_wrap(
 
 fn toggle_for(app: &Codex, p: &Pal, key: &'static str) -> AnyElement {
     view! {
-        <div role="switch" aria-checked={app.toggles.contains(&key)} aria-label={key}
-             on:click={Msg::SetToggle(key)}>
+        <div
+            role="switch"
+            aria-checked={app.toggles.contains(&key)}
+            aria-label={key}
+            on:click={Msg::SetToggle(key)}
+        >
             {toggle(p, app.toggles.contains(&key))}
         </div>
     }
@@ -250,8 +287,10 @@ fn toggle_for(app: &Codex, p: &Pal, key: &'static str) -> AnyElement {
 
 fn dropdown(p: &Pal, label: &str, icon: Option<&'static str>) -> AnyElement {
     view! {
-        <div class="flex-row items-center h-7 px-[10] gap-2 rounded-[9]"
-             border={settings_border(p).lerp(p.text, 0.08)}>
+        <div
+            class="flex-row items-center h-7 px-[10] gap-2 rounded-[9]"
+            border={settings_border(p).lerp(p.text, 0.08)}
+        >
             if let Some(icon) = icon {
                 <icon svg={icon} size={14.0} />
             }
@@ -309,14 +348,18 @@ fn general(app: &Codex, p: &Pal, w: f32) -> AnyElement {
                     setting_row(
                         p,
                         "Default permissions",
-                        Some("By default, ChatGPT can read and edit files in its workspace. It can ask for additional access when needed"),
+                        Some(
+                            "By default, ChatGPT can read and edit files in its workspace. It can ask for additional access when needed"
+                        ),
                         view! { <div class="opacity-60">{toggle(p, true)}</div> },
                         w,
                     ),
                     setting_row(
                         p,
                         "Full access",
-                        Some("When ChatGPT runs with full access, it can edit any file on your computer and run commands with network, without your approval. This significantly increases the risk of data loss, leaks, or unexpected behavior. Learn more about elevated risks."),
+                        Some(
+                            "When ChatGPT runs with full access, it can edit any file on your computer and run commands with network, without your approval. This significantly increases the risk of data loss, leaks, or unexpected behavior. Learn more about elevated risks."
+                        ),
                         toggle_for(app, p, "full-access"),
                         w,
                     ),
@@ -330,7 +373,9 @@ fn general(app: &Codex, p: &Pal, w: f32) -> AnyElement {
                     setting_row_wrap(
                         p,
                         "Projectless task folder",
-                        Some("The location where tasks started outside of projects store their data by default."),
+                        Some(
+                            "The location where tasks started outside of projects store their data by default."
+                        ),
                         view! {
                             <div class="flex-row items-center gap-3">
                                 <text size={12.5} color={p.muted} class="font-mono whitespace-nowrap">
@@ -344,9 +389,27 @@ fn general(app: &Codex, p: &Pal, w: f32) -> AnyElement {
                         },
                         250.0,
                     ),
-                    setting_row(p, "Default file open destination", Some("Where files and folders open by default"), dropdown(p, "Default app", Some(icons::APP_FINDER)), w),
-                    setting_row(p, "Language", Some("Language for the app UI"), dropdown(p, "Auto detect", None), w),
-                    setting_row(p, "Show in menu bar", Some("Keep ChatGPT in the menu bar when its window is closed"), toggle_for(app, p, "menu-bar"), w),
+                    setting_row(
+                        p,
+                        "Default file open destination",
+                        Some("Where files and folders open by default"),
+                        dropdown(p, "Default app", Some(icons::APP_FINDER)),
+                        w
+                    ),
+                    setting_row(
+                        p,
+                        "Language",
+                        Some("Language for the app UI"),
+                        dropdown(p, "Auto detect", None),
+                        w
+                    ),
+                    setting_row(
+                        p,
+                        "Show in menu bar",
+                        Some("Keep ChatGPT in the menu bar when its window is closed"),
+                        toggle_for(app, p, "menu-bar"),
+                        w
+                    ),
                 ],
             )}
         </div>
@@ -355,10 +418,14 @@ fn general(app: &Codex, p: &Pal, w: f32) -> AnyElement {
 
 fn swatch(p: &Pal, dot: Color, label: &str) -> AnyElement {
     view! {
-        <div class="flex-row items-center h-[30] pl-[9] pr-[10] gap-2 rounded-[15]"
-             border={settings_border(p).lerp(p.text, 0.08)}>
+        <div
+            class="flex-row items-center h-[30] pl-[9] pr-[10] gap-2 rounded-[15]"
+            border={settings_border(p).lerp(p.text, 0.08)}
+        >
             <div class="w-[14] h-[14] rounded-[7]" bg={dot} border={p.muted.with_alpha(90)} />
-            <text size={12.5} color={p.text} class="font-mono whitespace-nowrap">{label.to_owned()}</text>
+            <text size={12.5} color={p.text} class="font-mono whitespace-nowrap">
+                {label.to_owned()}
+            </text>
         </div>
     }
 }
@@ -367,11 +434,20 @@ fn appearance(app: &Codex, p: &Pal, w: f32) -> AnyElement {
     let preview = |choice: ThemeChoice, left: Color, right: Color| {
         let selected = app.theme_choice == choice;
         view! {
-            <div class="flex-row items-center w-20 h-[58] rounded-[8] overflow-hidden" bg={left}
-                 role="radio" aria-label={format!("{choice:?}")} aria-selected={selected}
-                 on:click={Msg::SetTheme(choice)}
-                 border={if selected { p.accent } else { settings_border(p) }}
-                 @when {selected} { class="border-2" }>
+            <div
+                class="flex-row items-center w-20 h-[58] rounded-[8] overflow-hidden"
+                bg={left}
+                role="radio"
+                aria-label={format!("{choice:?}")}
+                aria-selected={selected}
+                on:click={Msg::SetTheme(choice)}
+                border={if selected {
+                    p.accent
+                } else {
+                    settings_border(p)
+                }}
+                @when {selected} { class="border-2" }
+            >
                 <div class="w-10 h-[58] flex-col p-2 gap-1" bg={left}>
                     <div class="w-5 h-[3]" bg={p.muted} />
                     <div class="w-7 h-[3]" bg={p.muted} />
@@ -404,9 +480,14 @@ fn appearance(app: &Codex, p: &Pal, w: f32) -> AnyElement {
         <div class="flex-row items-center gap-[14]">
             <icon svg={icons::DOWNLOAD} size={15.0} color={p.muted} />
             <icon svg={icons::COPY} size={15.0} color={p.muted} />
-            <div class="flex-row items-center h-[30] pl-1.5 pr-[10] gap-2 rounded-[15] w-44" bg={p.bg}>
+            <div
+                class="flex-row items-center h-[30] pl-1.5 pr-[10] gap-2 rounded-[15] w-44"
+                bg={p.bg}
+            >
                 <div class="w-5 h-5 rounded-[5] items-center justify-center" bg={p.badge}>
-                    <text size={10.0} color={p.badge_text} class="font-semibold whitespace-nowrap">"Aa"</text>
+                    <text size={10.0} color={p.badge_text} class="font-semibold whitespace-nowrap">
+                        "Aa"
+                    </text>
                 </div>
                 <txt("ChatGPT", SMALL, p.text) />
                 <div class="flex-1" />
@@ -434,7 +515,13 @@ fn appearance(app: &Codex, p: &Pal, w: f32) -> AnyElement {
                 p,
                 vec![
                     setting_row(p, "Theme", None, theme_picker, w),
-                    setting_row(p, "Accent", None, swatch(p, Color::rgba(255, 255, 255, 255), "White"), w),
+                    setting_row(
+                        p,
+                        "Accent",
+                        None,
+                        swatch(p, Color::rgba(255, 255, 255, 255), "White"),
+                        w
+                    ),
                     setting_row(p, "Background", None, swatch(p, bg, bg_hex), w),
                     setting_row(p, "Foreground", None, swatch(p, fg, fg_hex), w),
                     setting_row(p, "Font", None, dropdown(p, "System", None), w),

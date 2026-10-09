@@ -98,11 +98,20 @@ impl RenderOnce for Avatar {
         let font_size = (px * 0.4).round();
 
         view! {
-            <div class="shrink-0 items-center justify-center"
-                 w={px} h={px}
-                 bg={bg} rounded={px / 2.0}>
-                <text class="font-bold text-center" size={font_size}
-                      color={Color::rgba(255, 255, 255, 255)}>{inits}</text>
+            <div
+                class="shrink-0 items-center justify-center"
+                w={px}
+                h={px}
+                bg={bg}
+                rounded={px / 2.0}
+            >
+                <text
+                    class="font-bold text-center"
+                    size={font_size}
+                    color={Color::rgba(255, 255, 255, 255)}
+                >
+                    {inits}
+                </text>
             </div>
         }
     }
@@ -150,23 +159,26 @@ impl RenderOnce for AvatarGroup {
         view! {
             <div class="flex-row items-center">
                 for (i, name) in self.names.into_iter().take(shown).enumerate() {
-                    <div class="shrink-0"
-                         border={tc.background}
-                         rounded={px / 2.0}
-                         @when {i > 0} { margin_left={overlap} }>
+                    <div
+                        class="shrink-0"
+                        border={tc.background}
+                        rounded={px / 2.0}
+                        @when {i > 0} { margin_left={overlap} }
+                    >
                         {avatar(name).size(self.size)}
                     </div>
                 }
                 if remaining > 0 {
-                    <div class="shrink-0 items-center justify-center"
-                         w={count_size} h={count_size}
-                         bg={tc.element_background}
-                         border={tc.background}
-                         rounded={count_size / 2.0}
-                         margin_left={overlap}>
-                        <text color={tc.text_muted}
-                              size={font_size}
-                              medium>
+                    <div
+                        class="shrink-0 items-center justify-center"
+                        w={count_size}
+                        h={count_size}
+                        bg={tc.element_background}
+                        border={tc.background}
+                        rounded={count_size / 2.0}
+                        margin_left={overlap}
+                    >
+                        <text color={tc.text_muted} size={font_size} medium>
                             {format!("+{remaining}")}
                         </text>
                     </div>

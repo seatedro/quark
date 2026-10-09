@@ -691,16 +691,36 @@ impl UiApp for Codex {
         let vibrant = self.vibrant && f.sidebar_w > 0.0;
         let card_w = w - f.left - FRAME_INSET;
         let root = view! {
-            <div class="relative overflow-hidden" w={w} h={h}
-                 bg={if !vibrant { p.frame }} accessibility_role={Role::Window}
-                 aria-label={APP_TITLE}>
+            <div
+                class="relative overflow-hidden"
+                w={w}
+                h={h}
+                bg={if !vibrant {
+                    p.frame
+                }}
+                accessibility_role={Role::Window}
+                aria-label={APP_TITLE}
+            >
                 {rail(self, p, h)}
-                <div class="absolute rounded-[10] overflow-hidden" left={f.left} top={f.top}
-                     w={card_w} h={f.card_h()} border={p.frame_border}
-                     bg={if !vibrant { p.bg }}>
+                <div
+                    class="absolute rounded-[10] overflow-hidden"
+                    left={f.left}
+                    top={f.top}
+                    w={card_w}
+                    h={f.card_h()}
+                    border={p.frame_border}
+                    bg={if !vibrant {
+                        p.bg
+                    }}
+                >
                     if vibrant {
-                        <div class="absolute top-0" left={f.sidebar_w} w={card_w - f.sidebar_w}
-                             h={f.card_h()} bg={p.bg} />
+                        <div
+                            class="absolute top-0"
+                            left={f.sidebar_w}
+                            w={card_w - f.sidebar_w}
+                            h={f.card_h()}
+                            bg={p.bg}
+                        />
                     }
                     {...cards}
                 </div>
@@ -1030,9 +1050,17 @@ impl UiApp for Codex {
 fn rail(app: &Codex, p: &Pal, h: f32) -> AnyElement {
     let item = |svg: &'static str, label: &str, y: f32, selected: bool, dot: bool, msg: Msg| {
         view! {
-            <div class="absolute left-2 w-9 h-9 items-center justify-center rounded-[9]" top={y}
-                 hover_bg={p.rail_tile.with_alpha(150)} role="button"
-                 aria-label={label.to_owned()} on:click={msg} bg={if selected { p.rail_tile }}>
+            <div
+                class="absolute left-2 w-9 h-9 items-center justify-center rounded-[9]"
+                top={y}
+                hover_bg={p.rail_tile.with_alpha(150)}
+                role="button"
+                aria-label={label.to_owned()}
+                on:click={msg}
+                bg={if selected {
+                    p.rail_tile
+                }}
+            >
                 <icon svg={svg} size={19.0} color={if selected { p.text } else { p.rail_icon }} />
                 if dot {
                     <div class="absolute left-6 top-[5] w-[7] h-[7] rounded-[4]" bg={p.accent} />
@@ -1042,8 +1070,13 @@ fn rail(app: &Codex, p: &Pal, h: f32) -> AnyElement {
     };
     let home = matches!(app.screen, Screen::Home | Screen::Thread(_));
     view! {
-        <div class="absolute left-0 top-0" w={RAIL_W} h={h} accessibility_role={Role::Navigation}
-             aria-label="Rail">
+        <div
+            class="absolute left-0 top-0"
+            w={RAIL_W}
+            h={h}
+            accessibility_role={Role::Navigation}
+            aria-label="Rail"
+        >
             {item(icons::HOME, "Home", 52.0, home, true, Msg::NewChat)}
             {item(icons::SPACE, "Space", 96.0, false, false, Msg::Noop)}
             {item(icons::CLOCK, "Scheduled", 140.0, false, false, Msg::Noop)}
@@ -1052,9 +1085,15 @@ fn rail(app: &Codex, p: &Pal, h: f32) -> AnyElement {
             <div class="absolute left-[14] top-[272] w-6 h-px" bg={p.frame_border} />
             {item(icons::PR, "Code Review", 281.0, false, false, Msg::Noop)}
             {item(icons::SITES, "Sites", 325.0, false, false, Msg::Noop)}
-            <div class="absolute left-[14] w-6 h-6 rounded-[12] items-center justify-center"
-                 top={h - 38.0} bg={p.avatar} id="rail.profile" role="button"
-                 aria-label="Open profile menu" on:click={Msg::Open(Menu::Profile)}>
+            <div
+                class="absolute left-[14] w-6 h-6 rounded-[12] items-center justify-center"
+                top={h - 38.0}
+                bg={p.avatar}
+                id="rail.profile"
+                role="button"
+                aria-label="Open profile menu"
+                on:click={Msg::Open(Menu::Profile)}
+            >
                 <txt("SE", 9.0, Color::rgba(255, 255, 255, 255)) />
             </div>
         </div>
@@ -1080,12 +1119,28 @@ fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
         <div class="absolute left-0 top-0 z-20" w={f.w} h={TITLE_H} window_drag_region>
             <div class="flex-row items-center absolute left-[88] top-2 h-7 gap-1">
                 <icon_button(p, icons::ARROW_LEFT, 28.0, 16.0, p.icon, "Back", Msg::Noop) />
-                <icon_button(p, icons::ARROW_RIGHT, 28.0, 16.0, p.icon_faint, "Forward",
-                             Msg::Noop) />
+                <icon_button(
+                    p,
+                    icons::ARROW_RIGHT,
+                    28.0,
+                    16.0,
+                    p.icon_faint,
+                    "Forward",
+                    Msg::Noop
+                )
+                />
                 if !settings {
                     <div class="w-2" />
-                    <icon_button(p, icons::SIDEBAR, 28.0, 16.0, p.icon, "Hide sidebar",
-                                 Msg::ToggleSidebar) />
+                    <icon_button(
+                        p,
+                        icons::SIDEBAR,
+                        28.0,
+                        16.0,
+                        p.icon,
+                        "Hide sidebar",
+                        Msg::ToggleSidebar
+                    )
+                    />
                 }
                 if collapsed && !settings {
                     <div class="w-4" />
@@ -1095,32 +1150,68 @@ fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
                 }
             </div>
             if let Some(t) = thread {
-                <div class="flex-row items-center absolute top-2 h-7 pl-2" left={toolbar_x}
-                     w={right_edge - toolbar_x} role="toolbar" aria-label="Chat toolbar">
+                <div
+                    class="flex-row items-center absolute top-2 h-7 pl-2"
+                    left={toolbar_x}
+                    w={right_edge - toolbar_x}
+                    role="toolbar"
+                    aria-label="Chat toolbar"
+                >
                     <div class="w-7 h-7 items-center justify-center">
                         <icon svg={icons::FOLDER} size={16.0} color={p.text} />
                     </div>
                     <div class="w-2" />
                     <div class="min-w-0 overflow-hidden" max_w={title_w}>
-                        <text size={theme::BODY} color={p.text}
-                              class="font-medium whitespace-nowrap truncate">{t.title.clone()}</text>
+                        <text
+                            size={theme::BODY}
+                            color={p.text}
+                            class="font-medium whitespace-nowrap truncate"
+                        >
+                            {t.title.clone()}
+                        </text>
                     </div>
                     <div class="flex-1 min-w-2" />
-                    <icon_button(p, icons::ELLIPSIS, 28.0, 16.0, p.icon, "Chat actions",
-                                 Msg::Open(Menu::ChatActions)) id="header.actions" />
+                    <icon_button(
+                        p,
+                        icons::ELLIPSIS,
+                        28.0,
+                        16.0,
+                        p.icon,
+                        "Chat actions",
+                        Msg::Open(Menu::ChatActions)
+                    )
+                        id="header.actions"
+                    />
                     <div class="w-1.5" />
-                    <icon_button(p, icons::SUMMARY, 28.0, 16.0, p.icon, "Toggle summary",
-                                 Msg::Open(Menu::Summary)) id="header.summary" />
+                    <icon_button(
+                        p,
+                        icons::SUMMARY,
+                        28.0,
+                        16.0,
+                        p.icon,
+                        "Toggle summary",
+                        Msg::Open(Menu::Summary)
+                    )
+                        id="header.summary"
+                    />
                     <div class="w-1.5" />
                 </div>
             }
-            if settings {
-            } else if f.panel_w > 0.0 || app.full_view {
+            if settings {} else if f.panel_w > 0.0 || app.full_view {
                 {panel::tab_strip(app, p, f)}
             } else {
                 <div class="absolute top-2" left={f.w - 36.0}>
-                    <icon_button(p, icons::NEW_TAB, 28.0, 16.0, p.icon, "New tab",
-                                 Msg::Open(Menu::PanelTab)) id="panel.newtab" />
+                    <icon_button(
+                        p,
+                        icons::NEW_TAB,
+                        28.0,
+                        16.0,
+                        p.icon,
+                        "New tab",
+                        Msg::Open(Menu::PanelTab)
+                    )
+                        id="panel.newtab"
+                    />
                 </div>
             }
         </div>

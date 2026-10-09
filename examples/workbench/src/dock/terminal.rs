@@ -391,17 +391,27 @@ fn header(state: &State, width: f32, scx: &SurfaceCx) -> AnyElement {
         .collect();
     let room = state.sessions.len() < IDS.len();
     view! {
-        <div w={width} h={HEADER_H} class="flex-row items-end shrink-0 overflow-hidden"
-             px={tokens::SPACE_4} border_b={colors.border_variant} bg={colors.panel}>
+        <div
+            w={width}
+            h={HEADER_H}
+            class="flex-row items-end shrink-0 overflow-hidden"
+            px={tokens::SPACE_4}
+            border_b={colors.border_variant}
+            bg={colors.panel}
+        >
             {tab_bar(tabs).label("Terminal sessions")}
             <div class="flex-1" />
             if room {
                 <div h={HEADER_H} class="flex-row items-center shrink-0">
-                    <div id="workbench.terminal.new" accessibility_role={Role::Button}
-                         aria-label="New terminal" tooltip="New terminal"
-                         class="w-[24] h-[24] items-center justify-center rounded-[6]"
-                         hover_bg={colors.element_hover}
-                         on:click={super::Action::Terminal(Action::New)}>
+                    <div
+                        id="workbench.terminal.new"
+                        accessibility_role={Role::Button}
+                        aria-label="New terminal"
+                        tooltip="New terminal"
+                        class="w-[24] h-[24] items-center justify-center rounded-[6]"
+                        hover_bg={colors.element_hover}
+                        on:click={super::Action::Terminal(Action::New)}
+                    >
                         {svg_icon(lucide::PLUS, 14.0).color(colors.text_muted)}
                     </div>
                 </div>
@@ -414,14 +424,25 @@ fn header(state: &State, width: f32, scx: &SurfaceCx) -> AnyElement {
 fn exited_bar(why: String, width: f32, scx: &SurfaceCx) -> AnyElement {
     let colors = &scx.theme.colors;
     view! {
-        <div w={width} h={EXITED_H} class="flex-row items-center shrink-0 gap-[8]"
-             px={tokens::SPACE_8} border_t={colors.border_variant} bg={colors.panel}
-             role="alert" aria-label={why.clone()}>
+        <div
+            w={width}
+            h={EXITED_H}
+            class="flex-row items-center shrink-0 gap-[8]"
+            px={tokens::SPACE_8}
+            border_t={colors.border_variant}
+            bg={colors.panel}
+            role="alert"
+            aria-label={why.clone()}
+        >
             <icon svg={lucide::INFO} size={12.0} color={colors.text_muted} />
             <text size={12.0} color={colors.text_muted}>{why}</text>
             <div class="flex-1" />
-            <Button on:click={super::Action::Terminal(Action::Restart)} label="Restart shell"
-                    icon={lucide::REFRESH} size={ButtonSize::Compact} />
+            <Button
+                on:click={super::Action::Terminal(Action::Restart)}
+                label="Restart shell"
+                icon={lucide::REFRESH}
+                size={ButtonSize::Compact}
+            />
         </div>
     }
     .into_any()

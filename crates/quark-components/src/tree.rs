@@ -1401,7 +1401,9 @@ pub fn tree_view(
     let hash = inputs_hash(&(data.revision, env, on_event as usize));
     view! {
         <cached(data.id, hash, move || build_tree(&data, colors, env, on_event))
-                class="w-full" h={height} />
+            class="w-full"
+            h={height}
+        />
     }
 }
 
@@ -1420,21 +1422,33 @@ fn build_tree(
         OVERSCAN,
     );
     view! {
-        <div class="w-full" h={d.viewport_height} class="flex-col" track_focus={d.focus}
-             scroll_y={d.scroll} scroll_total={window.total_extent}
-             on:scroll={ScrollActionBuilder::new(move |lines| on_event(TreeEvent::Scroll(lines)))
-                 .with_to_px(move |px| on_event(TreeEvent::ScrollTo(px as f32)))}
-             @when {d.scrollbar_auto_hide} {
-                 scrollbar_visibility={&d.scrollbar} class="scrollbar-auto-hide"
-             }
-             @when {env.accessible} {
-                 accessibility_id={d.id} accessibility_role={Role::Tree} aria-label={d.label}
-                 aria-multiselectable={d.mode == SelectionMode::Multi}
-             }
-             @for &(binding, key) in KEYS { on_key={(binding, on_event(TreeEvent::Key(key)))} }
-             @for (i, ch) in TYPE_AHEAD_KEYS.char_indices() {
-                 on_key={(&TYPE_AHEAD_KEYS[i..i + 1], on_event(TreeEvent::TypeAhead(ch)))}
-             }>
+        <div
+            class="w-full"
+            h={d.viewport_height}
+            class="flex-col"
+            track_focus={d.focus}
+            scroll_y={d.scroll}
+            scroll_total={window.total_extent}
+            on:scroll={ScrollActionBuilder::new(move |lines| on_event(TreeEvent::Scroll(lines)))
+                .with_to_px(move |px| on_event(TreeEvent::ScrollTo(px as f32)))}
+            @when {d.scrollbar_auto_hide} {
+                scrollbar_visibility={&d.scrollbar}
+                class="scrollbar-auto-hide"
+            }
+            @when {env.accessible} {
+                accessibility_id={d.id}
+                accessibility_role={Role::Tree}
+                aria-label={d.label}
+                aria-multiselectable={d.mode == SelectionMode::Multi}
+            }
+            @for &(binding, key) in KEYS { on_key={(binding, on_event(TreeEvent::Key(key)))} }
+            @for (i, ch) in TYPE_AHEAD_KEYS.char_indices() {
+                on_key={(
+                    &TYPE_AHEAD_KEYS[i..i + 1],
+                    on_event(TreeEvent::TypeAhead(ch))
+                )}
+            }
+        >
             <div class="w-full shrink-0" h={window.top_spacer} />
             for row in window.range {
                 {visible_row(d, row, colors, env, on_event)}
@@ -1502,38 +1516,61 @@ fn tree_row(
         let indent = f32::from_bits(spec.indent);
         let depth = f32::from(spec.depth);
         view! {
-            <div class="w-full" h={h} class="shrink-0 flex-row items-center relative" gap={4.0}
-                 pr={8.0} on:click={on_event(TreeEvent::Press(node))}
-                 on:drag={move |press: ClickEvent| {
-                     Box::new(RowDrag {
-                         node,
-                         press_y: press.y,
-                         on_event,
-                     }) as Box<dyn DragHandler>
-                 }}
-                 @when {spec.selected} { bg={colors.selected} }
-                 @when {!spec.selected} { hover_bg={colors.hover} }
-                 @when {spec.cursor} { border={colors.focus} }
-                 @when {spec.accessible} {
-                     accessibility_id={format!("{id}.item.{}", spec.node)}
-                     accessibility_role={Role::TreeItem} aria-label={&*label}
-                     aria-level={usize::from(spec.depth) + 1}
-                     accessibility_position_in_set={(spec.pos as usize, spec.set_size as usize)}
-                     aria-selected={spec.selected}
-                     @when {spec.expandable} { aria-expanded={spec.expanded} }
-                 }>
+            <div
+                class="w-full"
+                h={h}
+                class="shrink-0 flex-row items-center relative"
+                gap={4.0}
+                pr={8.0}
+                on:click={on_event(TreeEvent::Press(node))}
+                on:drag={move |press: ClickEvent| {
+                    Box::new(RowDrag {
+                        node,
+                        press_y: press.y,
+                        on_event,
+                    }) as Box<dyn DragHandler>
+                }}
+                @when {spec.selected} { bg={colors.selected} }
+                @when {!spec.selected} { hover_bg={colors.hover} }
+                @when {spec.cursor} { border={colors.focus} }
+                @when {spec.accessible} {
+                    accessibility_id={format!("{id}.item.{}", spec.node)}
+                    accessibility_role={Role::TreeItem}
+                    aria-label={&*label}
+                    aria-level={usize::from(spec.depth) + 1}
+                    accessibility_position_in_set={(spec.pos as usize, spec.set_size as usize)}
+                    aria-selected={spec.selected}
+                    @when {spec.expandable} { aria-expanded={spec.expanded} }
+                }
+            >
                 // Indent guides: one hairline per ancestor level, through the
                 // chevron column of that level.
                 for level in 0..spec.depth {
-                    <div class="absolute top-0" left={f32::from(level) * indent + 4.0 + 8.0}
-                         w={1.0} h={h} bg={colors.guide} />
+                    <div
+                        class="absolute top-0"
+                        left={f32::from(level) * indent + 4.0 + 8.0}
+                        w={1.0}
+                        h={h}
+                        bg={colors.guide}
+                    />
                 }
                 <div w={depth * indent} h={h} class="shrink-0" />
-                <div w={16.0} h={16.0} class="shrink-0 items-center justify-center"
-                     @when {spec.expandable} { on:click={on_event(TreeEvent::Toggle(node))} }>
+                <div
+                    w={16.0}
+                    h={16.0}
+                    class="shrink-0 items-center justify-center"
+                    @when {spec.expandable} { on:click={on_event(TreeEvent::Toggle(node))} }
+                >
                     if spec.expandable {
-                        <icon svg={if spec.expanded { lucide::CHEVRON_DOWN } else { lucide::CHEVRON_RIGHT }}
-                              size={12.0} color={colors.icon} />
+                        <icon
+                            svg={if spec.expanded {
+                                lucide::CHEVRON_DOWN
+                            } else {
+                                lucide::CHEVRON_RIGHT
+                            }}
+                            size={12.0}
+                            color={colors.icon}
+                        />
                     }
                 </div>
                 if let Some(svg) = icon {
@@ -1542,12 +1579,24 @@ fn tree_row(
                 <text class="text-sm" color={colors.text} class="truncate">{&*label}</text>
                 match spec.drop {
                     Some(DropPosition::Before) => {
-                        <div class="absolute" left={depth * indent + 4.0} class="right-0"
-                             h={2.0} bg={colors.accent} class="top-0" />
+                        <div
+                            class="absolute"
+                            left={depth * indent + 4.0}
+                            class="right-0"
+                            h={2.0}
+                            bg={colors.accent}
+                            class="top-0"
+                        />
                     }
                     Some(DropPosition::After) => {
-                        <div class="absolute" left={depth * indent + 4.0} class="right-0"
-                             h={2.0} bg={colors.accent} class="bottom-0" />
+                        <div
+                            class="absolute"
+                            left={depth * indent + 4.0}
+                            class="right-0"
+                            h={2.0}
+                            bg={colors.accent}
+                            class="bottom-0"
+                        />
                     }
                     Some(DropPosition::Inside) => {
                         <div class="absolute inset-0" rounded={4.0} border={colors.accent} />

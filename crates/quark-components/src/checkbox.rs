@@ -63,10 +63,15 @@ impl RenderOnce for Checkbox {
 
         let can_hover = !self.disabled && !self.checked;
         let check_box = view! {
-            <div class="shrink-0 items-center justify-center"
-                 w={size} h={size}
-                 bg={box_bg} border={box_border} rounded={radius}
-                 @when {can_hover} { hover_bg={tc.ghost_element_hover} }>
+            <div
+                class="shrink-0 items-center justify-center"
+                w={size}
+                h={size}
+                bg={box_bg}
+                border={box_border}
+                rounded={radius}
+                @when {can_hover} { hover_bg={tc.ghost_element_hover} }
+            >
                 if self.checked {
                     <icon svg={lucide::CHECK} size={icon_size} color={check_color} />
                 }
@@ -84,17 +89,20 @@ impl RenderOnce for Checkbox {
         };
 
         view! {
-            <div class="flex-row items-center" gap={m.spacing_sm}
-                 focus_ring_offset={Sz::FOCUS_RING_GAP}
-                 id={accessibility_id.clone()}
-                 key={accessibility_label.clone()}
-                 test-id="checkbox"
-                 role="checkbox"
-                 accessibility_id={accessibility_id}
-                 aria-label={accessibility_label}
-                 aria-checked={self.checked}
-                 aria-disabled={self.disabled}
-                 @when {click_action.is_some()} { on:click={click_action.unwrap()} }>
+            <div
+                class="flex-row items-center"
+                gap={m.spacing_sm}
+                focus_ring_offset={Sz::FOCUS_RING_GAP}
+                id={accessibility_id.clone()}
+                key={accessibility_label.clone()}
+                test-id="checkbox"
+                role="checkbox"
+                accessibility_id={accessibility_id}
+                aria-label={accessibility_label}
+                aria-checked={self.checked}
+                aria-disabled={self.disabled}
+                @when {click_action.is_some()} { on:click={click_action.unwrap()} }
+            >
                 {check_box}
                 if let Some(label_text) = label_text {
                     <text class="text-sm" color={label_color}>{label_text}</text>
@@ -185,20 +193,42 @@ impl RenderOnce for Switch {
         // Keyed by the switch, so the slide animates across frames.
         let thumb_key = format!("{accessibility_id}:thumb");
         view! {
-            <div class="flex-row items-center" gap={m.spacing_sm}
-                 focus_ring_offset={Sz::FOCUS_RING_GAP}
-                 id={accessibility_id.clone()} key={accessibility_label.clone()} test_id="switch"
-                 role="switch" accessibility_role={accesskit::Role::Switch}
-                 accessibility_id={accessibility_id} aria-label={accessibility_label}
-                 aria-checked={self.on} aria-disabled={self.disabled}
-                 @when {let Some(action) = click_action} { on:click={action} }>
-                <div class="shrink-0" w={track_w} h={track_h} bg={track_bg} rounded={track_h / 2.0}
-                     @when {!self.disabled} { hover_bg={hover_bg} }>
-                    <div class="absolute" top={thumb_inset} left={thumb_inset} w={thumb_size}
-                         h={thumb_size} rounded={thumb_size / 2.0} bg={thumb_bg}
-                         shadow_preset={Shadow::SUBTLE} key={thumb_key}
-                         translate={(if self.on { travel } else { 0.0 }, 0.0)}
-                         transition={(Prop::Transform, Motion::tween(140, Curve::EaseOutCubic))} />
+            <div
+                class="flex-row items-center"
+                gap={m.spacing_sm}
+                focus_ring_offset={Sz::FOCUS_RING_GAP}
+                id={accessibility_id.clone()}
+                key={accessibility_label.clone()}
+                test_id="switch"
+                role="switch"
+                accessibility_role={accesskit::Role::Switch}
+                accessibility_id={accessibility_id}
+                aria-label={accessibility_label}
+                aria-checked={self.on}
+                aria-disabled={self.disabled}
+                @when {let Some(action) = click_action} { on:click={action} }
+            >
+                <div
+                    class="shrink-0"
+                    w={track_w}
+                    h={track_h}
+                    bg={track_bg}
+                    rounded={track_h / 2.0}
+                    @when {!self.disabled} { hover_bg={hover_bg} }
+                >
+                    <div
+                        class="absolute"
+                        top={thumb_inset}
+                        left={thumb_inset}
+                        w={thumb_size}
+                        h={thumb_size}
+                        rounded={thumb_size / 2.0}
+                        bg={thumb_bg}
+                        shadow_preset={Shadow::SUBTLE}
+                        key={thumb_key}
+                        translate={(if self.on { travel } else { 0.0 }, 0.0)}
+                        transition={(Prop::Transform, Motion::tween(140, Curve::EaseOutCubic))}
+                    />
                 </div>
                 if let Some(label) = label_text {
                     <text class="text-sm" color={label_color}>{label}</text>

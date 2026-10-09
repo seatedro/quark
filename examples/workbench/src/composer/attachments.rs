@@ -190,22 +190,34 @@ pub fn chips(attachments: &Attachments, theme: &Theme) -> AnyElement {
     view! {
         <div class="flex-row gap-[6]">
             for a in &attachments.items {
-                <div accessibility_role={Role::Group} aria-label={a.name.clone()}
-                     class="flex-row items-center gap-[6] pl-2 pr-1 h-7 rounded-[6]"
-                     bg={colors.element_background} border={colors.border_variant}>
-                    {svg_icon(match a.kind {
-                        Kind::Image => lucide::EYE,
-                        Kind::File => lucide::FILE,
-                        Kind::Text => lucide::FILE_CODE,
-                    }, 14.0).color(colors.text_muted)}
+                <div
+                    accessibility_role={Role::Group}
+                    aria-label={a.name.clone()}
+                    class="flex-row items-center gap-[6] pl-2 pr-1 h-7 rounded-[6]"
+                    bg={colors.element_background}
+                    border={colors.border_variant}
+                >
+                    {svg_icon(
+                        match a.kind {
+                            Kind::Image => lucide::EYE,
+                            Kind::File => lucide::FILE,
+                            Kind::Text => lucide::FILE_CODE,
+                        },
+                        14.0
+                    )
+                    .color(colors.text_muted)}
                     <text class="text-xs" color={colors.text}>{a.name.clone()}</text>
-                    <text class="text-xs" color={colors.text_muted}>{size_label(a.bytes.len())}</text>
-                    <div id={format!("composer.attachment.remove.{}", a.id.0)}
-                         accessibility_role={Role::Button}
-                         aria-label={format!("Remove {}", a.name)}
-                         class="w-[20] h-[20] items-center justify-center rounded-[4]"
-                         hover_bg={colors.element_hover}
-                         on:click={Action::RemoveAttachment(a.id)}>
+                    <text class="text-xs" color={colors.text_muted}>
+                        {size_label(a.bytes.len())}
+                    </text>
+                    <div
+                        id={format!("composer.attachment.remove.{}", a.id.0)}
+                        accessibility_role={Role::Button}
+                        aria-label={format!("Remove {}", a.name)}
+                        class="w-[20] h-[20] items-center justify-center rounded-[4]"
+                        hover_bg={colors.element_hover}
+                        on:click={Action::RemoveAttachment(a.id)}
+                    >
                         {svg_icon(lucide::X, 12.0).color(colors.text_muted)}
                     </div>
                 </div>

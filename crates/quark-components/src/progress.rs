@@ -57,16 +57,27 @@ impl RenderOnce for ProgressBar {
         let v = self.value.clamp(0.0, 1.0);
 
         let track = view! {
-            <div class="w-full" h={h} class="flex-row" bg={bg_color} rounded={h / 2.0}
-                 class="overflow-hidden" accessibility_role={accesskit::Role::ProgressIndicator}
-                 accessibility_numeric={NumericValue {
-                     value: f64::from((v * 100.0).round()),
-                     min: 0.0,
-                     max: 100.0,
-                     step: None,
-                 }}>
-                <div class="h-full" bg={fill_color} rounded={h / 2.0}
-                     flex_grow_val={if v > 0.001 { v } else { 0.001 }} />
+            <div
+                class="w-full"
+                h={h}
+                class="flex-row"
+                bg={bg_color}
+                rounded={h / 2.0}
+                class="overflow-hidden"
+                accessibility_role={accesskit::Role::ProgressIndicator}
+                accessibility_numeric={NumericValue {
+                    value: f64::from((v * 100.0).round()),
+                    min: 0.0,
+                    max: 100.0,
+                    step: None,
+                }}
+            >
+                <div
+                    class="h-full"
+                    bg={fill_color}
+                    rounded={h / 2.0}
+                    flex_grow_val={if v > 0.001 { v } else { 0.001 }}
+                />
                 <div class="h-full" flex_grow_val={(1.0 - v).max(0.001)} />
             </div>
         };
@@ -75,9 +86,7 @@ impl RenderOnce for ProgressBar {
             let pct = (v * 100.0).round() as u32;
             view! {
                 <div class="flex-row items-center w-full" gap={Sp::SM}>
-                    <div class="flex-1">
-                        {track}
-                    </div>
+                    <div class="flex-1">{track}</div>
                     <text class="text-xs" color={tc.text_muted}>{format!("{pct}%")}</text>
                 </div>
             }
@@ -131,11 +140,20 @@ impl RenderOnce for SegmentBar {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let h = self.height;
         view! {
-            <div class="flex-row" h={h} gap={Sz::SEPARATOR_W} class="overflow-hidden"
-                 rounded={h / 2.0}
-                 bg={self.track_color.unwrap_or(cx.theme.colors.element_background)}
-                 w={if let Some(w) = self.width { w }}
-                 @when {self.width.is_none()} { class="w-full" }>
+            <div
+                class="flex-row"
+                h={h}
+                gap={Sz::SEPARATOR_W}
+                class="overflow-hidden"
+                rounded={h / 2.0}
+                bg={self
+                    .track_color
+                    .unwrap_or(cx.theme.colors.element_background)}
+                w={if let Some(w) = self.width {
+                    w
+                }}
+                @when {self.width.is_none()} { class="w-full" }
+            >
                 // Flex grow splits the width left after the gaps by weight.
                 for (weight, color) in self.segments {
                     <div class="h-full" bg={color} flex_grow_val={weight} />

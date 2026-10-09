@@ -96,61 +96,86 @@ impl RenderOnce for Dropdown {
 
         view! {
             <div class="flex-col">
-                <div class="flex-row items-center"
-                     id={trigger_id.clone()}
-                     test-id="dropdown-trigger"
-                     role="combobox"
-                     focus_scope={trigger_label.clone()}
-                     key_context={"dropdown"}
-                     gap={m.spacing_sm} px={m.spacing_md} py={trigger_py}
-                     bg={tc.element_background} border={tc.border_variant}
-                     rounded={m.control_radius} hover_bg={tc.element_hover}
-                     accessibility_id={trigger_id}
-                     aria-label={trigger_label.clone()}
-                     aria-expanded={self.open}
-                     @when {self.width.is_some()} { w={self.width.unwrap()} }
-                     @when {self.on_toggle.is_some()} { on:click={self.on_toggle.unwrap()} }>
+                <div
+                    class="flex-row items-center"
+                    id={trigger_id.clone()}
+                    test-id="dropdown-trigger"
+                    role="combobox"
+                    focus_scope={trigger_label.clone()}
+                    key_context={"dropdown"}
+                    gap={m.spacing_sm}
+                    px={m.spacing_md}
+                    py={trigger_py}
+                    bg={tc.element_background}
+                    border={tc.border_variant}
+                    rounded={m.control_radius}
+                    hover_bg={tc.element_hover}
+                    accessibility_id={trigger_id}
+                    aria-label={trigger_label.clone()}
+                    aria-expanded={self.open}
+                    @when {self.width.is_some()} { w={self.width.unwrap()} }
+                    @when {self.on_toggle.is_some()} { on:click={self.on_toggle.unwrap()} }
+                >
                     <div class="flex-1">
                         <text class="text-sm" color={tc.text}>{self.label}</text>
                     </div>
                     <icon svg={chevron} size={icon_size - Sp::XXS * scale} color={tc.text_muted} />
                 </div>
                 if self.open {
-                    <div class="flex-col w-full"
-                         id={format!("dropdown-menu:{trigger_label}")}
-                         test-id="dropdown-menu"
-                         role="menu"
-                         accessibility_id={format!("dropdown-menu:{trigger_label}")}
-                         focus_scope={trigger_label.clone()}
-                         key_context={"dropdown"}
-                         py={m.spacing_xs}
-                         bg={tc.elevated_surface}
-                         border={tc.border}
-                         rounded={m.control_radius}
-                         shadow_preset={Shadow::DROPDOWN}>
+                    <div
+                        class="flex-col w-full"
+                        id={format!("dropdown-menu:{trigger_label}")}
+                        test-id="dropdown-menu"
+                        role="menu"
+                        accessibility_id={format!("dropdown-menu:{trigger_label}")}
+                        focus_scope={trigger_label.clone()}
+                        key_context={"dropdown"}
+                        py={m.spacing_xs}
+                        bg={tc.elevated_surface}
+                        border={tc.border}
+                        rounded={m.control_radius}
+                        shadow_preset={Shadow::DROPDOWN}
+                    >
                         for item in self.items {
-                            <div class="flex-row items-center"
-                                 id={format!("dropdown-item:{:?}:{}", item.action, item.label)}
-                                 key={item.label.clone()}
-                                 test-id="dropdown-item"
-                                 role="menuitem"
-                                 gap={m.spacing_sm} px={m.spacing_md}
-                                 py={m.spacing_xs + (Sp::XXS * scale).round()}
-                                 bg={if item.selected { tc.ghost_element_selected } else { Color::TRANSPARENT }}
-                                 hover_bg={tc.ghost_element_hover}
-                                 accessibility_id={format!("dropdown-item:{:?}:{}", item.action, item.label)}
-                                 aria-label={item.label.clone()}
-                                 @when {item.description.is_some()} {
-                                     aria-description={item.description.as_deref().unwrap_or_default()}
-                                 }
-                                 aria-selected={item.selected}
-                                 on:click={item.action}>
+                            <div
+                                class="flex-row items-center"
+                                id={format!("dropdown-item:{:?}:{}", item.action, item.label)}
+                                key={item.label.clone()}
+                                test-id="dropdown-item"
+                                role="menuitem"
+                                gap={m.spacing_sm}
+                                px={m.spacing_md}
+                                py={m.spacing_xs + (Sp::XXS * scale).round()}
+                                bg={if item.selected {
+                                    tc.ghost_element_selected
+                                } else {
+                                    Color::TRANSPARENT
+                                }}
+                                hover_bg={tc.ghost_element_hover}
+                                accessibility_id={
+                                    format!("dropdown-item:{:?}:{}", item.action, item.label)
+                                }
+                                aria-label={item.label.clone()}
+                                @when {item.description.is_some()} {
+                                    aria-description={
+                                        item.description.as_deref().unwrap_or_default()
+                                    }
+                                }
+                                aria-selected={item.selected}
+                                on:click={item.action}
+                            >
                                 if let Some(svg) = item.icon {
                                     <icon svg={svg} size={icon_size} color={tc.icon} />
                                 }
                                 <div class="flex-col flex-1">
-                                    <text class="text-sm"
-                                          color={if item.selected { tc.text_strong } else { tc.text }}>
+                                    <text
+                                        class="text-sm"
+                                        color={if item.selected {
+                                            tc.text_strong
+                                        } else {
+                                            tc.text
+                                        }}
+                                    >
                                         {item.label}
                                     </text>
                                     if let Some(desc) = item.description {

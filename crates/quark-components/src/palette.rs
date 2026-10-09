@@ -868,47 +868,92 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
 
         let end = (self.scroll_top + PALETTE_VISIBLE_ROWS).min(self.rows.len());
         Some(view! {
-            <div class="absolute top-0 left-0" w={width} h={height} z_index={400}
-                 class="flex-col items-center" pt={(Sz::MODAL_TOP_OFFSET * scale).round()}
-                 bg={tc.overlay_scrim} id="palette.backdrop" test_id="palette-backdrop"
-                 on:click={on_event(PaletteEvent::Dismiss)} block_mouse>
-                <div class="flex-col" w={panel_w} bg={tc.elevated_surface} border={tc.border}
-                     rounded={Rad::XL} shadow_preset={shadows.layers()} class="overflow-hidden"
-                     on:click={NoopAction} id="palette" test_id="palette" role="dialog"
-                     focus_scope="quark.palette" trap_focus={true}
-                     accessibility_role={accesskit::Role::Dialog} accessibility_id="palette"
-                     aria-label={quark_ui::i18n::tr("quark-command-palette")}>
-                    <div class="flex-row items-center" gap={(Sp::SM * scale).round()}
-                         px={(Sp::MD * scale).round()} border_b={tc.border_variant}>
-                        <icon svg={quark_ui::icons::lucide::SEARCH} size={Ico::SM} color={tc.icon} />
+            <div
+                class="absolute top-0 left-0"
+                w={width}
+                h={height}
+                z_index={400}
+                class="flex-col items-center"
+                pt={(Sz::MODAL_TOP_OFFSET * scale).round()}
+                bg={tc.overlay_scrim}
+                id="palette.backdrop"
+                test_id="palette-backdrop"
+                on:click={on_event(PaletteEvent::Dismiss)}
+                block_mouse
+            >
+                <div
+                    class="flex-col"
+                    w={panel_w}
+                    bg={tc.elevated_surface}
+                    border={tc.border}
+                    rounded={Rad::XL}
+                    shadow_preset={shadows.layers()}
+                    class="overflow-hidden"
+                    on:click={NoopAction}
+                    id="palette"
+                    test_id="palette"
+                    role="dialog"
+                    focus_scope="quark.palette"
+                    trap_focus={true}
+                    accessibility_role={accesskit::Role::Dialog}
+                    accessibility_id="palette"
+                    aria-label={quark_ui::i18n::tr("quark-command-palette")}
+                >
+                    <div
+                        class="flex-row items-center"
+                        gap={(Sp::SM * scale).round()}
+                        px={(Sp::MD * scale).round()}
+                        border_b={tc.border_variant}
+                    >
+                        <icon
+                            svg={quark_ui::icons::lucide::SEARCH}
+                            size={Ico::SM}
+                            color={tc.icon}
+                        />
                         <div class="flex-1 min-w-0">
                             <text_input(quark_ui::i18n::tr("quark-command-palette"), "")
-                                field={&self.query} placeholder={self.placeholder.clone()}
-                                focus_target={PALETTE_INPUT} focused={focused} search={true} bare
-                                class="w-full" h={(Sz::INPUT * scale).round()} />
+                                field={&self.query}
+                                placeholder={self.placeholder.clone()}
+                                focus_target={PALETTE_INPUT}
+                                focused={focused}
+                                search={true}
+                                bare
+                                class="w-full"
+                                h={(Sz::INPUT * scale).round()}
+                            />
                         </div>
                     </div>
                     <div p={(Sp::XS * scale).round()}>
-                        <div class="flex-col w-full" h={list_h} class="overflow-hidden"
-                             id="palette-results" test_id="palette-results" role="scrollarea"
-                             accessibility_role={accesskit::Role::ListBox}
-                             accessibility_id="palette-results"
-                             aria-label={quark_ui::i18n::tr("quark-results")}
-                             on:scroll={ScrollActionBuilder::new({
-                                 let scroll = on_event(PaletteEvent::Scroll(1));
-                                 let up = on_event(PaletteEvent::Scroll(-1));
-                                 // The callback must be 'static, so the two actions are
-                                 // built up front; a multi-line delta moves one row.
-                                 move |lines| {
-                                     if lines < 0 {
-                                         up.clone()
-                                     } else {
-                                         scroll.clone()
-                                     }
-                                 }
-                             })}>
+                        <div
+                            class="flex-col w-full"
+                            h={list_h}
+                            class="overflow-hidden"
+                            id="palette-results"
+                            test_id="palette-results"
+                            role="scrollarea"
+                            accessibility_role={accesskit::Role::ListBox}
+                            accessibility_id="palette-results"
+                            aria-label={quark_ui::i18n::tr("quark-results")}
+                            on:scroll={ScrollActionBuilder::new({
+                                let scroll = on_event(PaletteEvent::Scroll(1));
+                                let up = on_event(PaletteEvent::Scroll(-1));
+                                // The callback must be 'static, so the two actions are
+                                // built up front; a multi-line delta moves one row.
+                                move |lines| {
+                                    if lines < 0 {
+                                        up.clone()
+                                    } else {
+                                        scroll.clone()
+                                    }
+                                }
+                            })}
+                        >
                             if self.rows.is_empty() {
-                                <div h={row_h} px={(Sp::MD * scale).round()} class="items-center flex-row">
+                                <div
+                                    h={row_h}
+                                    px={(Sp::MD * scale).round()}
+                                    class="items-center flex-row"
+                                >
                                     <text class="text-sm" color={tc.text_muted}>
                                         {quark_ui::i18n::tr("quark-no-results")}
                                     </text>
@@ -917,8 +962,11 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                             for row in self.scroll_top..end {
                                 match self.rows[row] {
                                     Row::Header(section) => {
-                                        <div class="flex-row items-center shrink-0" h={row_h}
-                                             px={(Sp::MD * scale).round()}>
+                                        <div
+                                            class="flex-row items-center shrink-0"
+                                            h={row_h}
+                                            px={(Sp::MD * scale).round()}
+                                        >
                                             <text class="text-xs font-medium" color={tc.text_muted}>
                                                 {match section {
                                                     Some(s) => self.sections[s as usize].title.as_str(),
@@ -928,7 +976,13 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                                         </div>
                                     }
                                     Row::Item(m) => {
-                                        {self.item_row(row, self.matches[m as usize], row_h, theme, &on_event)}
+                                        {self.item_row(
+                                            row,
+                                            self.matches[m as usize],
+                                            row_h,
+                                            theme,
+                                            &on_event
+                                        )}
                                     }
                                 }
                             }
@@ -963,14 +1017,27 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         let base = if selected { tc.text_strong } else { tc.text };
 
         view! {
-            <div class="flex-row items-center shrink-0 w-full" h={row_h}
-                 gap={(Sp::SM * scale).round()} px={(Sp::MD * scale).round()} rounded={Rad::MD}
-                 bg={if selected { tc.sidebar_row_selected } else { Color::TRANSPARENT }}
-                 on:click={on_event(PaletteEvent::Activate(row))} class="cursor-pointer"
-                 key={item.key.to_string()} test_id="palette-item" role="option"
-                 accessibility_role={accesskit::Role::ListBoxOption}
-                 aria-label={item.title.clone()} aria-selected={selected}
-                 @when {!selected} { hover_bg={tc.sidebar_row_hover} }>
+            <div
+                class="flex-row items-center shrink-0 w-full"
+                h={row_h}
+                gap={(Sp::SM * scale).round()}
+                px={(Sp::MD * scale).round()}
+                rounded={Rad::MD}
+                bg={if selected {
+                    tc.sidebar_row_selected
+                } else {
+                    Color::TRANSPARENT
+                }}
+                on:click={on_event(PaletteEvent::Activate(row))}
+                class="cursor-pointer"
+                key={item.key.to_string()}
+                test_id="palette-item"
+                role="option"
+                accessibility_role={accesskit::Role::ListBoxOption}
+                aria-label={item.title.clone()}
+                aria-selected={selected}
+                @when {!selected} { hover_bg={tc.sidebar_row_hover} }
+            >
                 if let Some(svg) = item.icon {
                     <icon svg={svg} size={Ico::SM} color={tc.icon} />
                 }

@@ -167,50 +167,70 @@ impl RenderOnce for Slider {
         let page = self.page.unwrap_or(range.step * 10.0);
         let change = &self.on_change;
         let track = view! {
-            <div class="flex-row items-center" w={width} min_w={thumb * 3.0} h={thumb + 4.0 * scale}
-                 rounded={thumb / 2.0} accessibility_id={self.id.clone()} test_id="slider"
-                 accessibility_role={accesskit::Role::Slider} aria-label={self.label.clone()}
-                 aria-valuetext={value_text.clone()}
-                 accessibility_numeric={NumericValue {
-                     value: f64::from(value),
-                     min: f64::from(range.min),
-                     max: f64::from(range.max),
-                     step: Some(f64::from(range.step)),
-                 }}
-                 aria-disabled={self.disabled}
-                 @when {!self.disabled} {
-                     on_key={("arrowright", change(range.snap(value + range.step)))}
-                     on_key={("arrowup", change(range.snap(value + range.step)))}
-                     on_key={("arrowleft", change(range.snap(value - range.step)))}
-                     on_key={("arrowdown", change(range.snap(value - range.step)))}
-                     on_key={("pageup", change(range.snap(value + page)))}
-                     on_key={("pagedown", change(range.snap(value - page)))}
-                     on_key={("home", change(range.snap(range.min)))}
-                     on_key={("end", change(range.snap(range.max)))}
-                     focus_ring={slider_focus_id(&self.id)} class="cursor-pointer"
-                     on:drag={{
-                         let on_change = self.on_change.clone();
-                         let bounds = probe.clone();
-                         move |press: ClickEvent| {
-                             Box::new(SliderDrag {
-                                 track: bounds.get(),
-                                 thumb,
-                                 range,
-                                 on_change: on_change.clone(),
-                                 last: None,
-                                 press_x: press.x,
-                             }) as Box<dyn DragHandler>
-                         }
-                     }}
-                 }>
+            <div
+                class="flex-row items-center"
+                w={width}
+                min_w={thumb * 3.0}
+                h={thumb + 4.0 * scale}
+                rounded={thumb / 2.0}
+                accessibility_id={self.id.clone()}
+                test_id="slider"
+                accessibility_role={accesskit::Role::Slider}
+                aria-label={self.label.clone()}
+                aria-valuetext={value_text.clone()}
+                accessibility_numeric={NumericValue {
+                    value: f64::from(value),
+                    min: f64::from(range.min),
+                    max: f64::from(range.max),
+                    step: Some(f64::from(range.step)),
+                }}
+                aria-disabled={self.disabled}
+                @when {!self.disabled} {
+                    on_key={("arrowright", change(range.snap(value + range.step)))}
+                    on_key={("arrowup", change(range.snap(value + range.step)))}
+                    on_key={("arrowleft", change(range.snap(value - range.step)))}
+                    on_key={("arrowdown", change(range.snap(value - range.step)))}
+                    on_key={("pageup", change(range.snap(value + page)))}
+                    on_key={("pagedown", change(range.snap(value - page)))}
+                    on_key={("home", change(range.snap(range.min)))}
+                    on_key={("end", change(range.snap(range.max)))}
+                    focus_ring={slider_focus_id(&self.id)}
+                    class="cursor-pointer"
+                    on:drag={{
+                        let on_change = self.on_change.clone();
+                        let bounds = probe.clone();
+                        move |press: ClickEvent| {
+                            Box::new(SliderDrag {
+                                track: bounds.get(),
+                                thumb,
+                                range,
+                                on_change: on_change.clone(),
+                                last: None,
+                                press_x: press.x,
+                            }) as Box<dyn DragHandler>
+                        }
+                    }}
+                }
+            >
                 // The thumb sits between the filled and empty parts of the
                 // bar, which split the width less the thumb by `t`; a pointer
                 // at x maps back through the same span (`SliderDrag::value_at`).
                 <div class="flex-1" flex_grow_val={t} h={bar_h} rounded={bar_h / 2.0} bg={fill} />
-                <div class="shrink-0" w={thumb} h={thumb} rounded={thumb / 2.0} bg={knob}
-                     border={fill} />
-                <div class="flex-1" flex_grow_val={1.0 - t} h={bar_h} rounded={bar_h / 2.0}
-                     bg={rest} />
+                <div
+                    class="shrink-0"
+                    w={thumb}
+                    h={thumb}
+                    rounded={thumb / 2.0}
+                    bg={knob}
+                    border={fill}
+                />
+                <div
+                    class="flex-1"
+                    flex_grow_val={1.0 - t}
+                    h={bar_h}
+                    rounded={bar_h / 2.0}
+                    bg={rest}
+                />
             </div>
         };
         // `width` is the track's preferred width: in a narrower container the
@@ -222,7 +242,14 @@ impl RenderOnce for Slider {
                     bounds: probe,
                 }}
                 if self.show_value {
-                    <text class="text-sm" color={if self.disabled { tc.text_disabled } else { tc.text }}>
+                    <text
+                        class="text-sm"
+                        color={if self.disabled {
+                            tc.text_disabled
+                        } else {
+                            tc.text
+                        }}
+                    >
                         {value_text}
                     </text>
                 }

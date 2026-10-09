@@ -130,10 +130,15 @@ impl RenderOnce for TabBar {
         let fill = self.fill;
 
         view! {
-            <div class="flex-row items-end" border_b={tc.border_variant}
-                 id="tab-bar" test-id="tab-bar"
-                 role="tablist" accessibility_id={"tab-bar"}
-                 @when {let Some(label) = self.label} { aria-label={label} }>
+            <div
+                class="flex-row items-end"
+                border_b={tc.border_variant}
+                id="tab-bar"
+                test-id="tab-bar"
+                role="tablist"
+                accessibility_id={"tab-bar"}
+                @when {let Some(label) = self.label} { aria-label={label} }
+            >
                 for item in self.items {
                     {Self::tab(item, fill, cx)}
                 }
@@ -155,39 +160,63 @@ impl TabBar {
             )
         });
         view! {
-            <div class="flex-col items-center"
-                 id={key.clone()}
-                 key={key.clone()}
-                 test-id="tab"
-                 role="tab"
-                 on:click={item.action.clone()}
-                 accessibility_id={key.clone()}
-                 aria-label={item.label.clone()}
-                 aria-selected={item.active}
-                 // An explicit target, so a press focuses the tab (as a
-                 // Dock's does) and Delete then closes it.
-                 focus_ring={FocusId::from_key(&key)}
-                 @when {let Some(close) = &item.on_close} {
-                     // Mac keyboards label Backspace "Delete".
-                     on:middle_click={close.clone()} on_key={("delete", close.clone())}
-                     on_key={("backspace", close.clone())}
-                 }
-                 @when {!item.active} { hover_bg={tc.ghost_element_hover} }
-                 @when {fill} { flex_1 }>
-                <div class="flex-row items-center"
-                     gap={m.spacing_xs} px={m.spacing_md} py={m.spacing_sm}>
+            <div
+                class="flex-col items-center"
+                id={key.clone()}
+                key={key.clone()}
+                test-id="tab"
+                role="tab"
+                on:click={item.action.clone()}
+                accessibility_id={key.clone()}
+                aria-label={item.label.clone()}
+                aria-selected={item.active}
+                // An explicit target, so a press focuses the tab (as a
+                // Dock's does) and Delete then closes it.
+                focus_ring={FocusId::from_key(&key)}
+                @when {let Some(close) = &item.on_close} {
+                    // Mac keyboards label Backspace "Delete".
+                    on:middle_click={close.clone()}
+                    on_key={("delete", close.clone())}
+                    on_key={("backspace", close.clone())}
+                }
+                @when {!item.active} { hover_bg={tc.ghost_element_hover} }
+                @when {fill} { flex_1 }
+            >
+                <div
+                    class="flex-row items-center"
+                    gap={m.spacing_xs}
+                    px={m.spacing_md}
+                    py={m.spacing_sm}
+                >
                     if let Some(svg) = item.icon {
-                        <icon svg={svg} size={icon_size}
-                              color={if item.active { tc.accent } else { tc.text_muted }} />
+                        <icon
+                            svg={svg}
+                            size={icon_size}
+                            color={if item.active {
+                                tc.accent
+                            } else {
+                                tc.text_muted
+                            }}
+                        />
                     }
-                    <text class="text-sm"
-                          color={if item.active { tc.text_strong } else { tc.text_muted }}
-                          @when {item.active} { medium }>
+                    <text
+                        class="text-sm"
+                        color={if item.active {
+                            tc.text_strong
+                        } else {
+                            tc.text_muted
+                        }}
+                        @when {item.active} { medium }
+                    >
                         {item.label}
                     </text>
                     if let Some(count_text) = item.count {
-                        <div px={m.spacing_xs} py={Sz::TAB_BADGE_PY}
-                             bg={tc.element_background} rounded={Rad::XL}>
+                        <div
+                            px={m.spacing_xs}
+                            py={Sz::TAB_BADGE_PY}
+                            bg={tc.element_background}
+                            rounded={Rad::XL}
+                        >
                             <text class="text-xs" color={tc.text_muted}>{count_text}</text>
                         </div>
                     }
@@ -195,19 +224,31 @@ impl TabBar {
                         // Its own node, so assistive tech and Tab reach it
                         // apart from the tab, and a click on it is not a
                         // click on the tab.
-                        <div class="flex-none items-center justify-center"
-                             rounded={m.control_radius * 0.5} p={2.0}
-                             hover_bg={tc.ghost_element_hover}
-                             id={format!("{key}:close")} accessibility_id={format!("{key}:close")}
-                             test-id="tab-close" accessibility_role={accesskit::Role::Button}
-                             aria-label={label}
-                             on:click={close}>
+                        <div
+                            class="flex-none items-center justify-center"
+                            rounded={m.control_radius * 0.5}
+                            p={2.0}
+                            hover_bg={tc.ghost_element_hover}
+                            id={format!("{key}:close")}
+                            accessibility_id={format!("{key}:close")}
+                            test-id="tab-close"
+                            accessibility_role={accesskit::Role::Button}
+                            aria-label={label}
+                            on:click={close}
+                        >
                             <icon svg={lucide::X} size={icon_size} color={tc.text_muted} />
                         </div>
                     }
                 </div>
-                <div w_full h={Sz::TAB_INDICATOR_H}
-                     bg={if item.active { tc.accent } else { Color::TRANSPARENT }} />
+                <div
+                    w_full
+                    h={Sz::TAB_INDICATOR_H}
+                    bg={if item.active {
+                        tc.accent
+                    } else {
+                        Color::TRANSPARENT
+                    }}
+                />
             </div>
         }
     }
@@ -230,29 +271,42 @@ impl RenderOnce for SegmentedTabs {
         let inner_radius = m.control_radius - seg_gap;
 
         view! {
-            <div class="flex-row items-center"
-                 id="segmented-tabs"
-                 test-id="segmented-tabs"
-                 role="tablist"
-                 accessibility_id={"segmented-tabs"}
-                 gap={seg_gap} p={seg_gap}
-                 bg={tc.element_background} rounded={m.control_radius}>
+            <div
+                class="flex-row items-center"
+                id="segmented-tabs"
+                test-id="segmented-tabs"
+                role="tablist"
+                accessibility_id={"segmented-tabs"}
+                gap={seg_gap}
+                p={seg_gap}
+                bg={tc.element_background}
+                rounded={m.control_radius}
+            >
                 for item in self.items {
-                    <div class="flex-row flex-1 items-center justify-center"
-                         id={format!("segmented-tab:{:?}:{}", item.action, item.label)}
-                         key={item.label.clone()}
-                         test-id="segmented-tab"
-                         role="tab"
-                         px={m.spacing_md} py={m.spacing_xs}
-                         rounded={inner_radius}
-                         on:click={item.action.clone()}
-                         accessibility_id={format!("segmented-tab:{:?}:{}", item.action, item.label)}
-                         aria-label={item.label.clone()}
-                         aria-selected={item.active}
-                         @when {item.active} { bg={tc.surface} shadow_preset={Shadow::SUBTLE} }
-                         @when {!item.active} { hover_bg={tc.ghost_element_hover} }>
-                        <text class="text-sm font-medium"
-                              color={if item.active { tc.text_strong } else { tc.text_muted }}>
+                    <div
+                        class="flex-row flex-1 items-center justify-center"
+                        id={format!("segmented-tab:{:?}:{}", item.action, item.label)}
+                        key={item.label.clone()}
+                        test-id="segmented-tab"
+                        role="tab"
+                        px={m.spacing_md}
+                        py={m.spacing_xs}
+                        rounded={inner_radius}
+                        on:click={item.action.clone()}
+                        accessibility_id={format!("segmented-tab:{:?}:{}", item.action, item.label)}
+                        aria-label={item.label.clone()}
+                        aria-selected={item.active}
+                        @when {item.active} { bg={tc.surface} shadow_preset={Shadow::SUBTLE} }
+                        @when {!item.active} { hover_bg={tc.ghost_element_hover} }
+                    >
+                        <text
+                            class="text-sm font-medium"
+                            color={if item.active {
+                                tc.text_strong
+                            } else {
+                                tc.text_muted
+                            }}
+                        >
                             {item.label}
                         </text>
                     </div>

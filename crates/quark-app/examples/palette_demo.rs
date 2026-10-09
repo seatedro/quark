@@ -213,11 +213,15 @@ impl PaletteDemo {
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
         view! {
-            <div accessibility_id={id} accessibility_role={Role::Button} aria-label={label}
-                 on:click={msg}
-                 class="px-[14] h-8 items-center justify-center rounded-[8]
+            <div
+                accessibility_id={id}
+                accessibility_role={Role::Button}
+                aria-label={label}
+                on:click={msg}
+                class="px-[14] h-8 items-center justify-center rounded-[8]
                         bg-[colors.element_background]"
-                 hover_bg={colors.element_hover}>
+                hover_bg={colors.element_hover}
+            >
                 <text color={colors.text}>{label}</text>
             </div>
         }
@@ -330,18 +334,28 @@ impl UiApp for PaletteDemo {
                 <text class="text-sm" wrap_width={window.0 - 80.0} color={colors.text_muted}>
                     {hint}
                 </text>
-                <text_input("Notes", "") field={&self.notes} placeholder="Type a note"
-                            focus_target={NOTES_FIELD} focused={cx.is_focused(NOTES_FIELD)}
-                            w={360.0} h={44.0} />
+                <text_input("Notes", "")
+                    field={&self.notes}
+                    placeholder="Type a note"
+                    focus_target={NOTES_FIELD}
+                    focused={cx.is_focused(NOTES_FIELD)}
+                    w={360.0}
+                    h={44.0}
+                />
                 <text color={colors.text}>{self.status.clone()}</text>
                 <text color={colors.text_muted}>{note}</text>
                 <div class="flex-row gap-2">
                     {Self::button("demo.delete", "Delete note", Msg::DeleteNote, cx)}
                     {Self::button(OPTIONS_ID, "Options", Msg::OpenMenu, cx)}
                 </div>
-                <div class="absolute" left={HOVER_ANCHOR.x} top={HOVER_ANCHOR.y}
-                     w={HOVER_ANCHOR.width} h={HOVER_ANCHOR.height}
-                     class="items-center justify-center rounded-[6] border-[colors.border]">
+                <div
+                    class="absolute"
+                    left={HOVER_ANCHOR.x}
+                    top={HOVER_ANCHOR.y}
+                    w={HOVER_ANCHOR.width}
+                    h={HOVER_ANCHOR.height}
+                    class="items-center justify-center rounded-[6] border-[colors.border]"
+                >
                     <text color={colors.text}>"Hover me"</text>
                 </div>
                 {toasts}
@@ -351,9 +365,9 @@ impl UiApp for PaletteDemo {
                 if let Some(card) = self.card.render(card_content, window, theme) {
                     {card}
                 }
-                if let Some(palette) =
-                    self.palette.render(window, theme, focused, |event| Msg::Palette(event).into())
-                {
+                if let Some(palette) = self
+                    .palette
+                    .render(window, theme, focused, |event| Msg::Palette(event).into()) {
                     {palette}
                 }
             </div>

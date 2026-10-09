@@ -347,9 +347,19 @@ impl PanelsDemo {
     fn notice(note: &str, (width, height): (f32, f32), theme: &Theme) -> AnyElement {
         let colors = &theme.colors;
         view! {
-            <div class="absolute px-3 py-2" left={0.0} top={height - 36.0} w={width} h={36.0}
-                 z_index={20} bg={colors.elevated_surface} border_t={colors.border}
-                 role="alert" aria-label={note.to_owned()} test_id="dock-close-notice">
+            <div
+                class="absolute px-3 py-2"
+                left={0.0}
+                top={height - 36.0}
+                w={width}
+                h={36.0}
+                z_index={20}
+                bg={colors.elevated_surface}
+                border_t={colors.border}
+                role="alert"
+                aria-label={note.to_owned()}
+                test_id="dock-close-notice"
+            >
                 <text class="text-sm" color={colors.text_strong}>{note.to_owned()}</text>
             </div>
         }

@@ -315,13 +315,26 @@ impl ComposerDemo {
     fn button(label: &str, msg: Msg, enabled: bool, theme: &Theme) -> AnyElement {
         let colors = &theme.colors;
         view! {
-            <div accessibility_role={Role::Button} aria-label={label} aria-disabled={!enabled}
-                 class="px-3 h-7 items-center justify-center rounded-[6]"
-                 @when {enabled} {
-                     on:click={msg} bg={colors.accent} hover_bg={colors.accent_strong}
-                 }
-                 @when {!enabled} { bg={colors.border_soft} }>
-                <text class="text-sm" color={if enabled { colors.on_accent } else { colors.text_strong }}>
+            <div
+                accessibility_role={Role::Button}
+                aria-label={label}
+                aria-disabled={!enabled}
+                class="px-3 h-7 items-center justify-center rounded-[6]"
+                @when {enabled} {
+                    on:click={msg}
+                    bg={colors.accent}
+                    hover_bg={colors.accent_strong}
+                }
+                @when {!enabled} { bg={colors.border_soft} }
+            >
+                <text
+                    class="text-sm"
+                    color={if enabled {
+                        colors.on_accent
+                    } else {
+                        colors.text_strong
+                    }}
+                >
                     {label}
                 </text>
             </div>
@@ -331,8 +344,11 @@ impl ComposerDemo {
     fn approval_panel(theme: &Theme) -> AnyElement {
         let colors = &theme.colors;
         view! {
-            <div accessibility_role={Role::Group} aria-label="Approval"
-                 class="flex-row items-center gap-2 p-2 rounded-[8] bg-[colors.background]">
+            <div
+                accessibility_role={Role::Group}
+                aria-label="Approval"
+                class="flex-row items-center gap-2 p-2 rounded-[8] bg-[colors.background]"
+            >
                 <div class="flex-1">
                     <text class="text-sm" color={colors.text}>"Run `cargo test`?"</text>
                 </div>
@@ -347,8 +363,11 @@ impl ComposerDemo {
         view! {
             <div class="flex-row gap-[6]">
                 for a in &self.attachments.items {
-                    <div accessibility_role={Role::Group} aria-label={a.name.clone()}
-                         class="flex-row items-center gap-[6] px-2 h-6 rounded-[6] bg-[colors.background]">
+                    <div
+                        accessibility_role={Role::Group}
+                        aria-label={a.name.clone()}
+                        class="flex-row items-center gap-[6] px-2 h-6 rounded-[6] bg-[colors.background]"
+                    >
                         <text class="text-xs" color={colors.text_muted}>
                             {match a.kind {
                                 AttachmentKind::Image => "image",
@@ -357,8 +376,11 @@ impl ComposerDemo {
                             }}
                         </text>
                         <text class="text-xs" color={colors.text}>{a.name.clone()}</text>
-                        <div accessibility_role={Role::Button} aria-label={format!("Remove {}", a.name)}
-                             on:click={Msg::RemoveAttachment(a.id)}>
+                        <div
+                            accessibility_role={Role::Button}
+                            aria-label={format!("Remove {}", a.name)}
+                            on:click={Msg::RemoveAttachment(a.id)}
+                        >
                             <text class="text-xs" color={colors.text_muted}>"x"</text>
                         </div>
                     </div>
@@ -406,8 +428,7 @@ impl UiApp for ComposerDemo {
                         {Self::approval_panel(theme)}
                     }
                     if let Some(list) =
-                        completion_list(&self.completion, theme, |i| Msg::Pick(i).into())
-                    {
+                        completion_list(&self.completion, theme, |i| Msg::Pick(i).into()) {
                         {list}
                     }
                     if !self.attachments.items.is_empty() {
@@ -422,7 +443,8 @@ impl UiApp for ComposerDemo {
                         focused={cx.is_focused(INPUT)}
                         text_color={colors.text}
                         w={input_w}
-                        h={72.0} />
+                        h={72.0}
+                    />
                     <div class="flex-row items-center">
                         <div class="flex-1">
                             <text class="text-xs" color={colors.text_muted}>

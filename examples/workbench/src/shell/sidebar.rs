@@ -290,8 +290,7 @@ pub fn view(state: &mut super::State, scx: &SurfaceCx, _vcx: &mut ViewContext) -
     });
     let search = div().relative().w_full().child(search).children(ring);
     view! {
-        <div w={width} h={height} class="flex-col" bg={colors.sidebar_background}
-             test_id="sidebar">
+        <div w={width} h={height} class="flex-col" bg={colors.sidebar_background} test_id="sidebar">
             <div w={width} h={SEARCH_AREA} class="shrink-0 px-2 py-2">{search}</div>
             {body}
         </div>
@@ -305,7 +304,9 @@ fn no_results(query: &str, scx: &SurfaceCx) -> AnyElement {
     view! {
         <div class="flex-col items-center p-4 gap-[8]" role="status" aria-label={message.clone()}>
             <text size={13.0} color={colors.text_muted}>{message}</text>
-            <Button on:click={Action::ClearSearch} size={ButtonSize::Compact}>"Clear search"</Button>
+            <Button on:click={Action::ClearSearch} size={ButtonSize::Compact}>
+                "Clear search"
+            </Button>
         </div>
     }
     .into_any()
@@ -415,16 +416,26 @@ impl ListView {
         let scroll = ScrollActionBuilder::new(|lines| Action::ScrollLines(lines).into())
             .with_to_px(|px| Action::ScrollTo(px).into());
         view! {
-            <div w={self.width} h={self.list_h} class="flex-col px-2" scroll_y={self.scroll}
-                 scroll_total={self.total} on:scroll={scroll} track_focus={LIST}
-                 scrollbar_visibility={&self.scrollbar} scrollbar_auto_hide
-                 // The list fills the panel, which clips: ring it inside.
-                 focus_ring={LIST} focus_ring_offset={-tokens::FOCUS_RING}
-                 on_key={("up", QAction::from(Action::Step(-1)))}
-                 on_key={("down", QAction::from(Action::Step(1)))}
-                 on_key={("home", QAction::from(Action::Step(i32::MIN)))}
-                 on_key={("end", QAction::from(Action::Step(i32::MAX)))}
-                 accessibility_role={AccessibilityRole::List} aria-label="Threads">
+            <div
+                w={self.width}
+                h={self.list_h}
+                class="flex-col px-2"
+                scroll_y={self.scroll}
+                scroll_total={self.total}
+                on:scroll={scroll}
+                track_focus={LIST}
+                scrollbar_visibility={&self.scrollbar}
+                scrollbar_auto_hide
+                // The list fills the panel, which clips: ring it inside.
+                focus_ring={LIST}
+                focus_ring_offset={-tokens::FOCUS_RING}
+                on_key={("up", QAction::from(Action::Step(-1)))}
+                on_key={("down", QAction::from(Action::Step(1)))}
+                on_key={("home", QAction::from(Action::Step(i32::MIN)))}
+                on_key={("end", QAction::from(Action::Step(i32::MAX)))}
+                accessibility_role={AccessibilityRole::List}
+                aria-label="Threads"
+            >
                 <div class="w-full shrink-0" h={self.top} />
                 for data in self.rows.iter() {
                     {row_view(data, self.colors)}
@@ -595,33 +606,59 @@ fn row_view(data: &Rc<RowData>, colors: RowColors) -> AnyElement {
 fn build_row(data: &RowData, colors: RowColors) -> AnyElement {
     match data.row {
         RowKind::Header { section, open } => view! {
-            <div class="w-full flex-row items-center gap-[6] px-2 rounded-[6]" h={ROW}
-                 hover_bg={colors.hover}
-                 on:click={Action::ToggleSection(section)}
-                 accessibility_role={AccessibilityRole::Button} aria-label={data.label.clone()}
-                 accessibility_expanded={open}>
-                <icon svg={if open { lucide::CHEVRON_DOWN } else { lucide::CHEVRON_RIGHT }}
-                      size={12.0} color={colors.muted} />
-                <text size={11.0} class="font-semibold" color={colors.muted}>{data.label.clone()}</text>
+            <div
+                class="w-full flex-row items-center gap-[6] px-2 rounded-[6]"
+                h={ROW}
+                hover_bg={colors.hover}
+                on:click={Action::ToggleSection(section)}
+                accessibility_role={AccessibilityRole::Button}
+                aria-label={data.label.clone()}
+                accessibility_expanded={open}
+            >
+                <icon
+                    svg={if open {
+                        lucide::CHEVRON_DOWN
+                    } else {
+                        lucide::CHEVRON_RIGHT
+                    }}
+                    size={12.0}
+                    color={colors.muted}
+                />
+                <text size={11.0} class="font-semibold" color={colors.muted}>
+                    {data.label.clone()}
+                </text>
             </div>
         }
         .into_any(),
         RowKind::Thread(id) => {
             let selected = data.selected;
-            let bg = if selected { colors.selected } else { colors.background };
+            let bg = if selected {
+                colors.selected
+            } else {
+                colors.background
+            };
             let title_color = if selected { colors.strong } else { colors.text };
             let status = data.status.map(|s| match s {
                 Status::Running => (lucide::LOADER, colors.accent),
                 Status::Failed => (lucide::ALERT_CIRCLE, colors.error),
             });
             view! {
-                <div class="w-full flex-row items-center gap-[8] px-2 rounded-[6]" h={ROW}
-                     bg={bg} hover_bg={if selected { bg } else { colors.hover }}
-                     on:click={Action::SelectThread(id)} id={thread_row_id(id)}
-                     accessibility_role={AccessibilityRole::ListItem} aria-label={data.name.clone()}
-                     accessibility_selected={selected} tooltip={data.label.clone()}>
-                    <div class="w-[6] h-[6] rounded-[3] shrink-0"
-                         bg={if data.unread { colors.accent } else { bg }} />
+                <div
+                    class="w-full flex-row items-center gap-[8] px-2 rounded-[6]"
+                    h={ROW}
+                    bg={bg}
+                    hover_bg={if selected { bg } else { colors.hover }}
+                    on:click={Action::SelectThread(id)}
+                    id={thread_row_id(id)}
+                    accessibility_role={AccessibilityRole::ListItem}
+                    aria-label={data.name.clone()}
+                    accessibility_selected={selected}
+                    tooltip={data.label.clone()}
+                >
+                    <div
+                        class="w-[6] h-[6] rounded-[3] shrink-0"
+                        bg={if data.unread { colors.accent } else { bg }}
+                    />
                     <div class="flex-1" min-w={0.0}>
                         if selected {
                             <text size={13.0} class="truncate" color={title_color} semibold>

@@ -40,8 +40,12 @@ impl RenderOnce for Toolbar {
         let scale = cx.theme.metrics.ui_scale();
 
         view! { scale,
-            <div class="w-full flex-row items-center" h={cx.theme.metrics.ui_row_height} px={Sp::MD}
-                 border_b={tc.border_variant}>
+            <div
+                class="w-full flex-row items-center"
+                h={cx.theme.metrics.ui_row_height}
+                px={Sp::MD}
+                border_b={tc.border_variant}
+            >
                 <div class="flex-row items-center" gap_1>{...self.left}</div>
                 <spacer />
                 <div class="flex-row items-center" gap_1>{...self.right}</div>

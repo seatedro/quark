@@ -382,7 +382,8 @@ impl RenderOnce for ToastVisuals {
         };
         let toast_id = self.id;
         view! { scale,
-            <div class="absolute"
+            <div
+                class="absolute"
                 h={self.height}
                 w={self.width}
                 bottom={self.bottom}
@@ -402,14 +403,17 @@ impl RenderOnce for ToastVisuals {
                 live={politeness}
             >
                 // Main row: leading badge | stacked title/description | close.
-                <div class="flex-row items-center h-full w-full"
+                <div
+                    class="flex-row items-center h-full w-full"
                     pl={Sp::MD}
                     pr={Sp::MD}
                     py={PAD_Y}
                     gap={Sp::MD}
                 >
-                    <div class="flex-row items-center justify-center shrink-0"
-                        w={BADGE_SIZE} h={BADGE_SIZE}
+                    <div
+                        class="flex-row items-center justify-center shrink-0"
+                        w={BADGE_SIZE}
+                        h={BADGE_SIZE}
                         rounded={BADGE_SIZE / 2.0}
                         bg={badge_bg}
                     >
@@ -418,14 +422,24 @@ impl RenderOnce for ToastVisuals {
 
                     <div class="flex-1 flex-col" min-w={0.0}>
                         for line in self.title_lines {
-                            <text class="font-medium truncate" size={title_size} color={tc.text_strong}>
+                            <text
+                                class="font-medium truncate"
+                                size={title_size}
+                                color={tc.text_strong}
+                            >
                                 {line}
                             </text>
                         }
                         if has_description {
                             <div class="flex-col" pt={DESC_GAP} min-w={0.0}>
                                 for line in self.description_lines {
-                                    <text class="truncate" size={description_size} color={tc.text_muted}>{line}</text>
+                                    <text
+                                        class="truncate"
+                                        size={description_size}
+                                        color={tc.text_muted}
+                                    >
+                                        {line}
+                                    </text>
                                 }
                             </div>
                         }
@@ -434,19 +448,26 @@ impl RenderOnce for ToastVisuals {
                     for (label, action) in self.actions {
                         // Classes, not `px`/`rounded` attributes: this view scales
                         // spatial attributes, and the action buttons are unscaled.
-                        <div class="flex-row items-center shrink-0" h={ACTION_H}
-                             class="px-[Sp::SM] rounded-[Rad::MD]" border={tc.border}
-                             hover_bg={tc.ghost_element_hover}
-                             on:click={action} cursor={CursorHint::Pointer}
-                             accessibility_id={format!("toast-action:{toast_id}:{label}")}
-                             accessibility_role={accesskit::Role::Button}
-                             aria-label={label.clone()}>
+                        <div
+                            class="flex-row items-center shrink-0"
+                            h={ACTION_H}
+                            class="px-[Sp::SM] rounded-[Rad::MD]"
+                            border={tc.border}
+                            hover_bg={tc.ghost_element_hover}
+                            on:click={action}
+                            cursor={CursorHint::Pointer}
+                            accessibility_id={format!("toast-action:{toast_id}:{label}")}
+                            accessibility_role={accesskit::Role::Button}
+                            aria-label={label.clone()}
+                        >
                             <text class="text-xs font-medium" color={tc.text_strong}>{label}</text>
                         </div>
                     }
 
-                    <div class="flex-row items-center justify-center shrink-0"
-                        w={CLOSE_SIZE} h={CLOSE_SIZE}
+                    <div
+                        class="flex-row items-center justify-center shrink-0"
+                        w={CLOSE_SIZE}
+                        h={CLOSE_SIZE}
                         rounded={Rad::MD}
                         hover_bg={tc.ghost_element_hover}
                         on:click={self.dismiss.clone()}
@@ -461,8 +482,10 @@ impl RenderOnce for ToastVisuals {
                 </div>
 
                 // Time-remaining progress bar — fills left→right.
-                <div class="absolute"
-                    bottom={3.0} left={progress_inset}
+                <div
+                    class="absolute"
+                    bottom={3.0}
+                    left={progress_inset}
                     h={PROGRESS_H}
                     w={progress_track_w}
                     rounded={PROGRESS_H / 2.0}

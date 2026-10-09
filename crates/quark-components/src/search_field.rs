@@ -21,10 +21,12 @@ pub fn search_field(
     let trailing = if has_value {
         on_clear.map(|action| {
             view! {
-                <Button on:click={action}
-                        tooltip={quark_ui::i18n::tr("quark-clear")}
-                        size={ButtonSize::Compact}
-                        icon={lucide::X} />
+                <Button
+                    on:click={action}
+                    tooltip={quark_ui::i18n::tr("quark-clear")}
+                    size={ButtonSize::Compact}
+                    icon={lucide::X}
+                />
             }
         })
     } else {
@@ -32,16 +34,16 @@ pub fn search_field(
     };
 
     view! {
-        <div class="w-full flex-row items-center"
-             gap={m.spacing_sm}
-             px={m.spacing_sm + Sp::XXS}
-             py={m.spacing_xs}
-             rounded={m.control_radius}
-             border={tc.border_variant}>
+        <div
+            class="w-full flex-row items-center"
+            gap={m.spacing_sm}
+            px={m.spacing_sm + Sp::XXS}
+            py={m.spacing_xs}
+            rounded={m.control_radius}
+            border={tc.border_variant}
+        >
             <icon svg={lucide::SEARCH} size={Ico::XS} color={tc.text_muted} />
-            <div class="flex-1" min-w={0.0}>
-                {input}
-            </div>
+            <div class="flex-1" min-w={0.0}>{input}</div>
             {?trailing}
         </div>
     }
@@ -52,10 +54,12 @@ pub fn filter_bar(theme: &Theme) -> AnyElement {
     let m = &theme.metrics;
 
     view! {
-        <div class="flex-row items-center"
-             gap={m.spacing_sm}
-             px={m.spacing_sm}
-             py={m.spacing_xs}
-             border_b={tc.border_variant} />
+        <div
+            class="flex-row items-center"
+            gap={m.spacing_sm}
+            px={m.spacing_sm}
+            py={m.spacing_xs}
+            border_b={tc.border_variant}
+        />
     }
 }

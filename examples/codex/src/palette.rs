@@ -62,15 +62,28 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> AnyElement {
             .zip([icons::COMPOSE, icons::FOLDER_OPEN, icons::SETTINGS]);
     view! {
         <div class="absolute left-0 top-0 z-65" w={app.size.0} h={app.size.1}>
-            <div class="absolute left-0 top-0" w={app.size.0} h={app.size.1}
-                 on:click={Msg::Palette(false)} block_mouse />
-            <menu_panel(p, x, 118.0, w) class="rounded-[14] p-1 z-70"
-                        accessibility_role={Role::Dialog} aria-label="Search">
+            <div
+                class="absolute left-0 top-0"
+                w={app.size.0}
+                h={app.size.1}
+                on:click={Msg::Palette(false)}
+                block_mouse
+            />
+            <menu_panel(p, x, 118.0, w)
+                class="rounded-[14] p-1 z-70"
+                accessibility_role={Role::Dialog}
+                aria-label="Search"
+            >
                 <div class="flex-row items-center h-10 px-[10]">
                     <text_input("Search chats or run a command", "")
-                        placeholder="Search chats or run a command" focus_target={PALETTE_FOCUS}
-                        focused={vcx.is_focused(PALETTE_FOCUS)} field={&state.field} bare
-                        w={w - 28.0} class="h-5" />
+                        placeholder="Search chats or run a command"
+                        focus_target={PALETTE_FOCUS}
+                        focused={vcx.is_focused(PALETTE_FOCUS)}
+                        field={&state.field}
+                        bare
+                        w={w - 28.0}
+                        class="h-5"
+                    />
                 </div>
                 {menu_header(p, "Chats")}
                 if matches.is_empty() {
@@ -83,9 +96,16 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> AnyElement {
                         .project
                         .and_then(|id| app.data.project(id))
                         .map_or("", |p| p.name);
-                    <div class="flex-row items-center h-[31] pl-9 pr-2 gap-[10] rounded-[7]"
-                         bg={if i == 0 { p.menu_hi }} hover_bg={p.menu_hi} role="option"
-                         aria-label={t.title.clone()} on:click={Msg::Select(t.id)}>
+                    <div
+                        class="flex-row items-center h-[31] pl-9 pr-2 gap-[10] rounded-[7]"
+                        bg={if i == 0 {
+                            p.menu_hi
+                        }}
+                        hover_bg={p.menu_hi}
+                        role="option"
+                        aria-label={t.title.clone()}
+                        on:click={Msg::Select(t.id)}
+                    >
                         <div class="flex-1 min-w-0 overflow-hidden">
                             <txt(t.title.clone(), BODY, p.menu_title) class="truncate" />
                         </div>
@@ -100,9 +120,13 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> AnyElement {
                         "Settings" => Msg::Show(crate::Screen::Settings(crate::settings::Page::General)),
                         _ => Msg::Palette(false),
                     };
-                    <div class="flex-row items-center h-[31] px-2 gap-[10] rounded-[7]"
-                         hover_bg={p.menu_hi} role="option" aria-label={label.to_string()}
-                         on:click={msg}>
+                    <div
+                        class="flex-row items-center h-[31] px-2 gap-[10] rounded-[7]"
+                        hover_bg={p.menu_hi}
+                        role="option"
+                        aria-label={label.to_string()}
+                        on:click={msg}
+                    >
                         <icon svg={icon} size={16.0} color={p.menu_title} />
                         <txt(*label, BODY, p.menu_title) />
                         <div class="flex-1" />

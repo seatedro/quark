@@ -215,16 +215,23 @@ impl DisclosureState {
             .transition(Prop::Transform, motion())
             .child(svg_icon(lucide::CHEVRON_RIGHT, (16.0 * scale).round()).color(tc.text_muted));
         view! {
-            <div class="flex-row items-center w-full cursor-pointer"
-                 gap={m.spacing_sm} px={m.spacing_sm} py={m.spacing_xs}
-                 rounded={m.control_radius}
-                 hover_bg={tc.ghost_element_hover}
-                 role="button" aria-label={label.to_owned()} aria-expanded={self.open}
-                 accessibility_id={format!("{}-trigger", self.id)} test_id="disclosure-trigger"
-                 focus_ring={self.focus}
-                 on:click={on_toggle.clone()}
-                 on_key={("enter", on_toggle.clone())}
-                 on_key={("space", on_toggle)}>
+            <div
+                class="flex-row items-center w-full cursor-pointer"
+                gap={m.spacing_sm}
+                px={m.spacing_sm}
+                py={m.spacing_xs}
+                rounded={m.control_radius}
+                hover_bg={tc.ghost_element_hover}
+                role="button"
+                aria-label={label.to_owned()}
+                aria-expanded={self.open}
+                accessibility_id={format!("{}-trigger", self.id)}
+                test_id="disclosure-trigger"
+                focus_ring={self.focus}
+                on:click={on_toggle.clone()}
+                on_key={("enter", on_toggle.clone())}
+                on_key={("space", on_toggle)}
+            >
                 {chevron}
                 <text class="text-sm font-medium" color={tc.text}>{label.to_owned()}</text>
             </div>

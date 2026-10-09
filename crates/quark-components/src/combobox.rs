@@ -447,24 +447,37 @@ impl RenderOnce for Combobox {
         );
 
         view! {
-            <div class="relative flex-col" w={width} accessibility_id={&*self.id}
-                 test_id="combobox" accessibility_role={accesskit::Role::ComboBox}
-                 aria-label={self.label.clone()} aria-expanded={open}
-                 on_key={("alt+arrowdown", msg(ComboboxMsg::Open))}
-                 @when {open} {
-                     on_key={("enter", msg(ComboboxMsg::CommitHighlighted))}
-                     on_key={("escape", msg(ComboboxMsg::Close))}
-                 }>
-                <{self.input} placeholder={self.placeholder} focused={focused} class="w-full"
-                              h={field_h} />
+            <div
+                class="relative flex-col"
+                w={width}
+                accessibility_id={&*self.id}
+                test_id="combobox"
+                accessibility_role={accesskit::Role::ComboBox}
+                aria-label={self.label.clone()}
+                aria-expanded={open}
+                on_key={("alt+arrowdown", msg(ComboboxMsg::Open))}
+                @when {open} {
+                    on_key={("enter", msg(ComboboxMsg::CommitHighlighted))}
+                    on_key={("escape", msg(ComboboxMsg::Close))}
+                }
+            >
+                <{self.input}
+                    placeholder={self.placeholder}
+                    focused={focused}
+                    class="w-full"
+                    h={field_h}
+                />
                 if open {
                     <anchored(
                         view! {
-                            <popover_panel(theme) w={width} py={list_padding(theme)}
+                            <popover_panel(theme)
+                                w={width}
+                                py={list_padding(theme)}
                                 accessibility_id={format!("{}-listbox", self.id)}
                                 test_id="combobox-listbox"
                                 accessibility_role={accesskit::Role::ListBox}
-                                aria-label={self.label.clone()}>
+                                aria-label={self.label.clone()}
+                            >
                                 for (i, &option) in self.matches.options.iter().enumerate() {
                                     {match_row(
                                         &self.options[option],
@@ -482,7 +495,8 @@ impl RenderOnce for Combobox {
                         },
                         PopoverSide::Bottom,
                         self.viewport,
-                    ) />
+                    )
+                    />
                 }
             </div>
         }
@@ -498,8 +512,12 @@ fn status_row(loading: bool, theme: &Theme) -> AnyElement {
         "quark-find-no-matches"
     });
     view! {
-        <div px={sz.px} py={sz.py}
-             accessibility_role={accesskit::Role::Label} aria-label={note.clone()}>
+        <div
+            px={sz.px}
+            py={sz.py}
+            accessibility_role={accesskit::Role::Label}
+            aria-label={note.clone()}
+        >
             <text size={sz.font} color={theme.colors.text_muted}>{note}</text>
         </div>
     }
@@ -524,12 +542,23 @@ fn match_row(
     });
     let tail = ranges.last().map_or(0, |&(_, end)| end);
     view! {
-        <div class="flex-row items-center w-full" px={sz.px} py={sz.py}
-             @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
-             accessibility_role={accesskit::Role::ListBoxOption}
-             aria-label={label.to_owned()} aria-selected={highlighted || selected}
-             bg={if highlighted { tc.ghost_element_selected } else { Color::TRANSPARENT }}
-             hover_bg={tc.ghost_element_hover} class="cursor-pointer" on:click={commit}>
+        <div
+            class="flex-row items-center w-full"
+            px={sz.px}
+            py={sz.py}
+            @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
+            accessibility_role={accesskit::Role::ListBoxOption}
+            aria-label={label.to_owned()}
+            aria-selected={highlighted || selected}
+            bg={if highlighted {
+                tc.ghost_element_selected
+            } else {
+                Color::TRANSPARENT
+            }}
+            hover_bg={tc.ghost_element_hover}
+            class="cursor-pointer"
+            on:click={commit}
+        >
             <div class="flex-row flex-1 overflow-hidden">
                 for (at, start, end) in runs {
                     if start > at {

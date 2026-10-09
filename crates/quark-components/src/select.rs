@@ -339,59 +339,96 @@ impl RenderOnce for Select {
 
         let closed_keys = ["enter", "space", "arrowdown", "arrowup", "alt+arrowdown"];
         view! {
-            <div class="relative flex-col" w={width}
-                 @when {!self.disabled && !open} {
-                     @for key in closed_keys { on_key={(key, msg(SelectMsg::Open))} }
-                 }
-                 @when {!self.disabled && open} {
-                     on_key={("arrowdown", msg(SelectMsg::Move(1)))}
-                     on_key={("arrowup", msg(SelectMsg::Move(-1)))}
-                     on_key={("pagedown", msg(SelectMsg::Move(10)))}
-                     on_key={("pageup", msg(SelectMsg::Move(-10)))}
-                     on_key={("home", msg(SelectMsg::First))}
-                     on_key={("end", msg(SelectMsg::Last))}
-                     on_key={("enter", msg(SelectMsg::CommitHighlighted))}
-                     on_key={("space", msg(SelectMsg::CommitHighlighted))}
-                     on_key={("alt+arrowup", msg(SelectMsg::CommitHighlighted))}
-                     on_key={("escape", msg(SelectMsg::Close))}
-                     on_key={("tab", msg(SelectMsg::Close))}
-                     on_key={("shift+tab", msg(SelectMsg::Close))}
-                 }
-                 @when {!self.disabled && (open || cx.focus == Some(self.focus))} {
-                     @for key in TYPE_AHEAD_KEYS {
-                         on_key={(key, msg(SelectMsg::TypeAhead(key.chars().next().unwrap_or_default())))}
-                     }
-                 }>
-                <div class="flex-row items-center w-full" gap={sz.gap} px={sz.px}
-                     py={sz.py} rounded={sz.radius}
-                     @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
-                     bg={tc.element_background}
-                     border={if open { tc.focus_border } else { tc.border_variant }}
-                     accessibility_id={&*self.id} test_id="select-trigger" focus_ring={self.focus}
-                     accessibility_role={accesskit::Role::ComboBox} aria-label={self.label.clone()}
-                     aria-valuetext={shown.to_owned()} aria-expanded={open}
-                     aria-disabled={self.disabled}
-                     @when {!self.disabled} {
-                         hover_bg={tc.element_hover} class="cursor-pointer"
-                         on:click={msg(SelectMsg::Toggle)}
-                     }>
+            <div
+                class="relative flex-col"
+                w={width}
+                @when {!self.disabled && !open} {
+                    @for key in closed_keys { on_key={(key, msg(SelectMsg::Open))} }
+                }
+                @when {!self.disabled && open} {
+                    on_key={("arrowdown", msg(SelectMsg::Move(1)))}
+                    on_key={("arrowup", msg(SelectMsg::Move(-1)))}
+                    on_key={("pagedown", msg(SelectMsg::Move(10)))}
+                    on_key={("pageup", msg(SelectMsg::Move(-10)))}
+                    on_key={("home", msg(SelectMsg::First))}
+                    on_key={("end", msg(SelectMsg::Last))}
+                    on_key={("enter", msg(SelectMsg::CommitHighlighted))}
+                    on_key={("space", msg(SelectMsg::CommitHighlighted))}
+                    on_key={("alt+arrowup", msg(SelectMsg::CommitHighlighted))}
+                    on_key={("escape", msg(SelectMsg::Close))}
+                    on_key={("tab", msg(SelectMsg::Close))}
+                    on_key={("shift+tab", msg(SelectMsg::Close))}
+                }
+                @when {!self.disabled && (open || cx.focus == Some(self.focus))} {
+                    @for key in TYPE_AHEAD_KEYS {
+                        on_key={(
+                            key,
+                            msg(SelectMsg::TypeAhead(key.chars().next().unwrap_or_default()))
+                        )}
+                    }
+                }
+            >
+                <div
+                    class="flex-row items-center w-full"
+                    gap={sz.gap}
+                    px={sz.px}
+                    py={sz.py}
+                    rounded={sz.radius}
+                    @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
+                    bg={tc.element_background}
+                    border={if open {
+                        tc.focus_border
+                    } else {
+                        tc.border_variant
+                    }}
+                    accessibility_id={&*self.id}
+                    test_id="select-trigger"
+                    focus_ring={self.focus}
+                    accessibility_role={accesskit::Role::ComboBox}
+                    aria-label={self.label.clone()}
+                    aria-valuetext={shown.to_owned()}
+                    aria-expanded={open}
+                    aria-disabled={self.disabled}
+                    @when {!self.disabled} {
+                        hover_bg={tc.element_hover}
+                        class="cursor-pointer"
+                        on:click={msg(SelectMsg::Toggle)}
+                    }
+                >
                     <div class="flex-1">
-                        <text class="truncate" size={sz.font}
-                              color={if chosen.is_some() && !self.disabled { tc.text } else { tc.text_muted }}>
+                        <text
+                            class="truncate"
+                            size={sz.font}
+                            color={if chosen.is_some() && !self.disabled {
+                                tc.text
+                            } else {
+                                tc.text_muted
+                            }}
+                        >
                             {shown.to_owned()}
                         </text>
                     </div>
-                    <icon svg={if open { lucide::CHEVRON_UP } else { lucide::CHEVRON_DOWN }}
-                          size={sz.icon} color={tc.text_muted} />
+                    <icon
+                        svg={if open {
+                            lucide::CHEVRON_UP
+                        } else {
+                            lucide::CHEVRON_DOWN
+                        }}
+                        size={sz.icon}
+                        color={tc.text_muted}
+                    />
                 </div>
                 if open {
                     <anchored(
                         view! {
-                            <popover_panel(theme) w={width} py={list_padding(theme)}
+                            <popover_panel(theme)
+                                w={width}
+                                py={list_padding(theme)}
                                 accessibility_id={format!("{}-listbox", self.id)}
                                 test_id="select-listbox"
                                 accessibility_role={accesskit::Role::ListBox}
-                                aria-label={self.label.clone()}>
+                                aria-label={self.label.clone()}
+                            >
                                 {...option_rows(
                                     &self.id,
                                     &self.options,
@@ -405,7 +442,8 @@ impl RenderOnce for Select {
                         },
                         PopoverSide::Bottom,
                         self.viewport,
-                    ) />
+                    )
+                    />
                 }
             </div>
         }
@@ -462,8 +500,12 @@ fn group_box(
     let m = &theme.metrics;
     let sz = RowSizes::resolve(theme.components.option, theme);
     view! {
-        <div class="flex-col w-full" accessibility_id={format!("{id}-group-{first}")}
-             accessibility_role={accesskit::Role::Group} aria-label={name.to_owned()}>
+        <div
+            class="flex-col w-full"
+            accessibility_id={format!("{id}-group-{first}")}
+            accessibility_role={accesskit::Role::Group}
+            aria-label={name.to_owned()}
+        >
             <div px={sz.px} pt={m.spacing_xs} pb={(Sp::XXS * m.ui_scale()).round()}>
                 <text class="text-xs font-semibold" color={theme.colors.text_muted}>
                     {name.to_owned()}
@@ -488,26 +530,43 @@ fn option_row(
     let tc = &theme.colors;
     let sz = RowSizes::resolve(theme.components.option, theme);
     view! {
-        <div class="flex-row items-center w-full" gap={sz.gap} px={sz.px} py={sz.py}
-             @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
-             accessibility_id={format!("{id}-option-{index}")} test_id="select-option"
-             accessibility_role={accesskit::Role::ListBoxOption}
-             aria-label={option.label.clone()} aria-selected={selected}
-             aria-disabled={option.disabled}
-             bg={if highlighted { tc.ghost_element_selected } else { Color::TRANSPARENT }}
-             @when {!option.disabled} {
-                 focus_ring={focus} tab_stop={TabStop::disabled(0)}
-                 hover_bg={tc.ghost_element_hover} class="cursor-pointer" on:click={commit}
-             }>
+        <div
+            class="flex-row items-center w-full"
+            gap={sz.gap}
+            px={sz.px}
+            py={sz.py}
+            @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
+            accessibility_id={format!("{id}-option-{index}")}
+            test_id="select-option"
+            accessibility_role={accesskit::Role::ListBoxOption}
+            aria-label={option.label.clone()}
+            aria-selected={selected}
+            aria-disabled={option.disabled}
+            bg={if highlighted {
+                tc.ghost_element_selected
+            } else {
+                Color::TRANSPARENT
+            }}
+            @when {!option.disabled} {
+                focus_ring={focus}
+                tab_stop={TabStop::disabled(0)}
+                hover_bg={tc.ghost_element_hover}
+                class="cursor-pointer"
+                on:click={commit}
+            }
+        >
             <div class="flex-1">
-                <text class="truncate" size={sz.font}
-                      color={if option.disabled {
-                          tc.text_disabled
-                      } else if selected {
-                          tc.text_strong
-                      } else {
-                          tc.text
-                      }}>
+                <text
+                    class="truncate"
+                    size={sz.font}
+                    color={if option.disabled {
+                        tc.text_disabled
+                    } else if selected {
+                        tc.text_strong
+                    } else {
+                        tc.text
+                    }}
+                >
                     {option.label.clone()}
                 </text>
             </div>

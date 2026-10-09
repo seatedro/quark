@@ -47,9 +47,14 @@ impl HelloUi {
     fn button(id: &str, label: &str, msg: Msg, cx: &ViewContext) -> AnyElement {
         let colors = &cx.theme.colors;
         view! {
-            <div accessibility_id={id} role="button" aria-label={label} on:click={msg}
-                 class="px-4 h-9 items-center justify-center rounded-[8]
-                        bg-[colors.accent] hover:bg-[colors.accent_strong]">
+            <div
+                accessibility_id={id}
+                role="button"
+                aria-label={label}
+                on:click={msg}
+                class="px-4 h-9 items-center justify-center rounded-[8]
+                        bg-[colors.accent] hover:bg-[colors.accent_strong]"
+            >
                 <text class="font-semibold" color={colors.on_accent}>{label}</text>
             </div>
         }
@@ -70,14 +75,27 @@ impl UiApp for HelloUi {
         };
         view! {
             <div w={width} h={height} class="items-center justify-center bg-[colors.background]">
-                <div accessibility_id="hello.dialog" role="dialog" aria-label="Hello Quark"
-                     class="w-[420px] p-6 gap-4 flex-col rounded-[16] bg-[colors.surface]">
-                    <div accessibility_id="hello.heading" role="heading" aria-label="Hello from Quark">
+                <div
+                    accessibility_id="hello.dialog"
+                    role="dialog"
+                    aria-label="Hello Quark"
+                    class="w-[420px] p-6 gap-4 flex-col rounded-[16] bg-[colors.surface]"
+                >
+                    <div
+                        accessibility_id="hello.heading"
+                        role="heading"
+                        aria-label="Hello from Quark"
+                    >
                         <text class="text-lg font-bold">"Hello from Quark"</text>
                     </div>
-                    <text_input("Name", "") field={&self.name} placeholder="Your name"
-                                focus_target={NAME_FIELD} focused={cx.is_focused(NAME_FIELD)}
-                                class="w-full" h={52.0} />
+                    <text_input("Name", "")
+                        field={&self.name}
+                        placeholder="Your name"
+                        focus_target={NAME_FIELD}
+                        focused={cx.is_focused(NAME_FIELD)}
+                        class="w-full"
+                        h={52.0}
+                    />
                     <text color={colors.text}>{greeting}</text>
                     <div class="flex-row gap-2">
                         {Self::button("hello.greet", "Greet", Msg::Greet, cx)}

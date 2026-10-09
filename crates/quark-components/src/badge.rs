@@ -85,10 +85,14 @@ impl RenderOnce for Badge {
         let icon_size = (m.ui_small_font_size - Sp::XXS * scale).max(Sz::ICON_MIN * scale);
 
         view! { scale,
-            <div class="flex-row shrink-0 items-center"
-                 gap={m.spacing_xs} px={m.spacing_sm}
-                 py={Sp::XXS} bg={bg}
-                 rounded={Rad::PILL}>
+            <div
+                class="flex-row shrink-0 items-center"
+                gap={m.spacing_xs}
+                px={m.spacing_sm}
+                py={Sp::XXS}
+                bg={bg}
+                rounded={Rad::PILL}
+            >
                 if let Some(svg) = self.icon {
                     <icon svg={svg} size={icon_size} color={fg} />
                 }

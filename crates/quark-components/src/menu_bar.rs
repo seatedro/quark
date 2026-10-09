@@ -295,27 +295,52 @@ impl MenuBar {
             x += width;
         }
         view! {
-            <div class="flex-row items-center" w={viewport.0} h={height} class="shrink-0"
-                 px={m.spacing_xs} bg={tc.title_bar_background} border_b={tc.border}
-                 test_id="menu-bar" role="menu" accessibility_role={accesskit::Role::MenuBar}
-                 aria-label="Menu bar" key_context="menu-bar">
+            <div
+                class="flex-row items-center"
+                w={viewport.0}
+                h={height}
+                class="shrink-0"
+                px={m.spacing_xs}
+                bg={tc.title_bar_background}
+                border_b={tc.border}
+                test_id="menu-bar"
+                role="menu"
+                accessibility_role={accesskit::Role::MenuBar}
+                aria-label="Menu bar"
+                key_context="menu-bar"
+            >
                 for (index, menu) in self.menus.iter().enumerate() {
-                    <div class="flex-row items-center justify-center" w={self.titles[index].width}
-                         h={height - 4.0} class="shrink-0" rounded={m.spacing_xs}
-                         bg={if self.active_title() == Some(index) {
-                             tc.sidebar_row_hover
-                         } else {
-                             Color::TRANSPARENT
-                         }}
-                         key={menu.label.as_str()} test_id={format!("menu-bar:{}", menu.label)}
-                         role="menuitem" accessibility_role={accesskit::Role::MenuItem}
-                         aria-label={menu.label.as_str()}
-                         aria-expanded={self.mode == Mode::Open(index)}
-                         aria-disabled={!menu.enabled}
-                         @when {menu.enabled} {
-                             on:click={on_title(index)} hover_bg={tc.sidebar_row_hover}
-                         }>
-                        <text class="text-sm" color={if menu.enabled { tc.text } else { tc.text_disabled }}>
+                    <div
+                        class="flex-row items-center justify-center"
+                        w={self.titles[index].width}
+                        h={height - 4.0}
+                        class="shrink-0"
+                        rounded={m.spacing_xs}
+                        bg={if self.active_title() == Some(index) {
+                            tc.sidebar_row_hover
+                        } else {
+                            Color::TRANSPARENT
+                        }}
+                        key={menu.label.as_str()}
+                        test_id={format!("menu-bar:{}", menu.label)}
+                        role="menuitem"
+                        accessibility_role={accesskit::Role::MenuItem}
+                        aria-label={menu.label.as_str()}
+                        aria-expanded={self.mode == Mode::Open(index)}
+                        aria-disabled={!menu.enabled}
+                        @when {menu.enabled} {
+                            on:click={on_title(index)}
+                            hover_bg={tc.sidebar_row_hover}
+                        }
+                    >
+                        <text
+                            class="text-sm"
+                            color={if menu.enabled {
+                                tc.text
+                            } else {
+                                tc.text_disabled
+                            }}
+                        >
                             {menu.label.as_str()}
                         </text>
                     </div>

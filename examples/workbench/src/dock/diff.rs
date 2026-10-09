@@ -242,20 +242,42 @@ fn find_bar(
 ) -> AnyElement {
     let step = |icon: &'static str, label: &str, action: Action| {
         view! {
-            <Button on:click={super::Action::Diff(action)} icon={icon} tooltip={label}
-                    size={ButtonSize::Compact} />
+            <Button
+                on:click={super::Action::Diff(action)}
+                icon={icon}
+                tooltip={label}
+                size={ButtonSize::Compact}
+            />
         }
     };
     view! {
-        <div w={width} h={FIND_H} class="flex-row items-center shrink-0" px={tokens::SPACE_8}
-             gap={tokens::SPACE_8} border_b={colors.border_variant} bg={colors.panel}
-             accessibility_role={accesskit::Role::Search} aria-label="Find in diff">
-            <text_input("Find in diff", "") placeholder="Find in diff" focus_target={FIND_FIELD}
-                focused={focused} field={field} class="flex-1 h-6" min_w={0.0} />
+        <div
+            w={width}
+            h={FIND_H}
+            class="flex-row items-center shrink-0"
+            px={tokens::SPACE_8}
+            gap={tokens::SPACE_8}
+            border_b={colors.border_variant}
+            bg={colors.panel}
+            accessibility_role={accesskit::Role::Search}
+            aria-label="Find in diff"
+        >
+            <text_input("Find in diff", "")
+                placeholder="Find in diff"
+                focus_target={FIND_FIELD}
+                focused={focused}
+                field={field}
+                class="flex-1 h-6"
+                min_w={0.0}
+            />
             <div role="status" aria-label={count.clone()}>
                 <text size={12.0} color={colors.text_muted}>{count}</text>
             </div>
-            {step(lucide::CHEVRON_UP, "Previous match", Action::FindStep(false))}
+            {step(
+                lucide::CHEVRON_UP,
+                "Previous match",
+                Action::FindStep(false)
+            )}
             {step(lucide::CHEVRON_DOWN, "Next match", Action::FindStep(true))}
             {step(lucide::X, "Close find", Action::Find(false))}
         </div>
@@ -305,41 +327,89 @@ impl Header {
         });
         let tool = |icon: &'static str, tip: &str, action: Action, on: bool| {
             view! {
-                <Button on:click={super::Action::Diff(action)} icon={icon} tooltip={tip}
-                        size={ButtonSize::Compact} active={on} />
+                <Button
+                    on:click={super::Action::Diff(action)}
+                    icon={icon}
+                    tooltip={tip}
+                    size={ButtonSize::Compact}
+                    active={on}
+                />
             }
         };
         view! {
-            <div w={width} h={HEADER_H} class="flex-col shrink-0" border_b={colors.border_variant}
-                 bg={colors.panel}>
-                <div w={width} h={TOOLBAR_H} class="flex-row items-center shrink-0"
-                     px={tokens::SPACE_8} gap={tokens::SPACE_8}
-                     accessibility_role={accesskit::Role::Toolbar} aria-label="Diff actions">
+            <div
+                w={width}
+                h={HEADER_H}
+                class="flex-col shrink-0"
+                border_b={colors.border_variant}
+                bg={colors.panel}
+            >
+                <div
+                    w={width}
+                    h={TOOLBAR_H}
+                    class="flex-row items-center shrink-0"
+                    px={tokens::SPACE_8}
+                    gap={tokens::SPACE_8}
+                    accessibility_role={accesskit::Role::Toolbar}
+                    aria-label="Diff actions"
+                >
                     <Badge label={badge} variant={variant} />
-                    <div class="flex-row items-center gap-[6] flex-1" min_w={0.0} role="status"
-                         aria-label={format!("{summary}, {adds} additions, {dels} deletions")}>
-                        <text size={12.0} class="truncate" color={colors.text_muted}>{summary}</text>
+                    <div
+                        class="flex-row items-center gap-[6] flex-1"
+                        min_w={0.0}
+                        role="status"
+                        aria-label={format!("{summary}, {adds} additions, {dels} deletions")}
+                    >
+                        <text size={12.0} class="truncate" color={colors.text_muted}>
+                            {summary}
+                        </text>
                         <text size={12.0} color={colors.line_add_text}>{format!("+{adds}")}</text>
                         <text size={12.0} color={colors.line_del_text}>{format!("-{dels}")}</text>
                     </div>
-                    <Button on:click={super::Action::Diff(Action::Apply)} label="Apply"
-                            icon={lucide::CHECK} variant={ButtonStyle::Filled}
-                            size={ButtonSize::Compact} disabled={applied}
-                            tooltip="Apply the proposed changes to the demo files" />
-                    <Button on:click={super::Action::Diff(Action::Undo)} label="Undo"
-                            icon={lucide::CORNER_UP_LEFT} size={ButtonSize::Compact}
-                            disabled={!applied} tooltip="Restore the files from before Apply" />
+                    <Button
+                        on:click={super::Action::Diff(Action::Apply)}
+                        label="Apply"
+                        icon={lucide::CHECK}
+                        variant={ButtonStyle::Filled}
+                        size={ButtonSize::Compact}
+                        disabled={applied}
+                        tooltip="Apply the proposed changes to the demo files"
+                    />
+                    <Button
+                        on:click={super::Action::Diff(Action::Undo)}
+                        label="Undo"
+                        icon={lucide::CORNER_UP_LEFT}
+                        size={ButtonSize::Compact}
+                        disabled={!applied}
+                        tooltip="Restore the files from before Apply"
+                    />
                 </div>
-                <div w={width} h={TOOLS_H} class="flex-row items-center shrink-0"
-                     px={tokens::SPACE_8} gap={tokens::SPACE_4}
-                     accessibility_role={accesskit::Role::Toolbar} aria-label="Diff view">
+                <div
+                    w={width}
+                    h={TOOLS_H}
+                    class="flex-row items-center shrink-0"
+                    px={tokens::SPACE_8}
+                    gap={tokens::SPACE_4}
+                    accessibility_role={accesskit::Role::Toolbar}
+                    aria-label="Diff view"
+                >
                     if let Some(segmented) = segmented {
                         {segmented}
                     }
                     <div class="flex-1" />
-                    {tool(lucide::SEARCH, "Find in diff", Action::Find(!finding), finding)}
+                    {tool(
+                        lucide::SEARCH,
+                        "Find in diff",
+                        Action::Find(!finding),
+                        finding
+                    )}
                     {tool(lucide::WRAP_TEXT, "Wrap lines", Action::Wrap, wrap)}
-                    {tool(lucide::LIST, "Expand all unchanged lines", Action::ExpandAll, false)}
+                    {tool(
+                        lucide::LIST,
+                        "Expand all unchanged lines",
+                        Action::ExpandAll,
+                        false
+                    )}
                     {tool(lucide::COPY, "Copy patch", Action::Copy, false)}
                 </div>
             </div>
