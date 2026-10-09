@@ -543,7 +543,11 @@ impl ChunkEntry {
                     }
                 }
                 // Chunks with layers are expanded before flattening.
-                Primitive::LayerStart(_) | Primitive::LayerEnd | Primitive::LayerBoundary => {}
+                Primitive::LayerStart(_)
+                | Primitive::LayerEnd
+                | Primitive::IsolateStart(_)
+                | Primitive::IsolateEnd
+                | Primitive::LayerBoundary => {}
                 Primitive::Path(_) => {
                     let Primitive::Path(path) = chunk.place(primitive) else {
                         unreachable!("placing keeps the kind");
