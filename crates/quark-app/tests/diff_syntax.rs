@@ -10,7 +10,12 @@
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
-use quark_app::quark_ui::quark_syntax::{GrammarStore, HighlightKind, testing};
+use std::ops::Range;
+
+use quark_app::quark_ui::quark_syntax::{
+    GrammarStore, HighlightKind, HighlightPart, HighlightSpan, HighlightWorker, Highlighted,
+    testing,
+};
 use quark_components::diff_view::syntax::{DiffSyntax, SyntaxBudget, SyntaxStatus};
 use quark_diff::{DiffDocument, FileSources, Side, TextStore, diff_texts, parse_unified};
 
@@ -360,4 +365,80 @@ fn file_status_names_how_far_colors_can_be_trusted() {
 
         assert_eq!(syntax.file_status(0), Some(expected), "{name}");
     }
+}
+
+// Catches streamed parts replacing each other (only the last window
+// would keep colors), the focus's inexact colors outliving the exact
+// ones, or the status claiming Ready mid-stream: exact parts add up in
+// order, the inexact window colors only past them, and the progress
+// counts exact bytes.
+#[test]
+fn streamed_parts_add_up_and_the_focus_colors_ahead() {
+    let Some(store) = testing::store_with("rust") else {
+        return;
+    };
+    let doc = diff_texts(
+        Some("a.rs"),
+        Some("a.rs"),
+        Some("x\n"),
+        Some("aaaa\nbbbb\ncccc\ndddd\n"),
+        3,
+    );
+    let mut syntax = DiffSyntax::default();
+    syntax.enable_shared(&HighlightWorker::gone(), store);
+    syntax.request(&doc, 1);
+    let source = doc.text(0, Side::New).shared().clone();
+    let mut revision = 0;
+    let mut feed =
+        |syntax: &mut DiffSyntax, range: Range<u32>, exact, span: (u32, HighlightKind)| {
+            syntax.take(
+                Highlighted {
+                    slot: 1,
+                    generation: 2,
+                    revision,
+                    source: source.clone(),
+                    spans: vec![HighlightSpan {
+                        offset: span.0,
+                        length: 4,
+                        kind: span.1,
+                    }],
+                    pending: false,
+                    unresolved: Vec::new(),
+                    part: Some(HighlightPart { range, exact }),
+                },
+                1,
+            );
+            revision += 1;
+        };
+    let dump = |syntax: &DiffSyntax| {
+        let (spans, tones) = syntax.spans(0, Side::New, 0..20);
+        let colored: Vec<String> = spans
+            .iter()
+            .zip(tones.iter())
+            .filter(|(_, kind)| **kind != HighlightKind::Normal)
+            .map(|(s, kind)| format!("{}:{:?}", kind.name(), s.range))
+            .collect();
+        (colored.join(" "), syntax.status(0, Side::New))
+    };
+
+    feed(&mut syntax, 10..20, false, (10, HighlightKind::Keyword));
+    feed(&mut syntax, 0..5, true, (0, HighlightKind::String));
+    let midway = dump(&syntax);
+    feed(&mut syntax, 5..20, true, (15, HighlightKind::Comment));
+    let done = dump(&syntax);
+
+    assert_eq!(
+        midway,
+        (
+            "string:0..4 keyword:10..14".to_owned(),
+            Some(SyntaxStatus::Streaming { permille: 250 })
+        )
+    );
+    assert_eq!(
+        done,
+        (
+            "string:0..4 comment:15..19".to_owned(),
+            Some(SyntaxStatus::Ready)
+        )
+    );
 }

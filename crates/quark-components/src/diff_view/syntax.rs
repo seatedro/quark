@@ -22,7 +22,15 @@
 //! Each side picks its language from its own path (a rename from `.js` to
 //! `.ts` highlights the old side as JavaScript), unless
 //! [`DiffSyntax::set_language`] overrides it. Sides larger than the
-//! [`SyntaxBudget`] are not parsed ([`SyntaxStatus::Limited`]).
+//! [`SyntaxBudget`] (64 MiB unless lowered) are not parsed
+//! ([`SyntaxStatus::Limited`]).
+//!
+//! A whole side longer than a couple of mebibytes is highlighted window by
+//! window on the worker, with bounded memory. The lines around its focus
+//! ([`DiffSyntax::set_focus`], the top visible line) are colored first, on
+//! their own, then exact windows arrive in order from the start; the side
+//! reports [`SyntaxStatus::Streaming`] with its progress until the last
+//! one lands.
 //!
 //! Every request carries a generation unique to this bridge, and a side
 //! keeps a result only when it answers that side's newest request with a
@@ -45,8 +53,8 @@ use std::sync::Arc;
 
 use quark_diff::{DiffDocument, Side, SourceCoverage, TextStore};
 use quark_syntax::{
-    GrammarStore, HighlightKind, HighlightRequest, HighlightSpan, HighlightWorker, Highlighted,
-    LanguageId, LanguageStatus, Priority,
+    GrammarStore, HighlightFocus, HighlightKind, HighlightRequest, HighlightSpan, HighlightWorker,
+    Highlighted, LanguageId, LanguageStatus, Priority,
 };
 use quark_text::TextSpan;
 
@@ -55,6 +63,10 @@ use quark_text::TextSpan;
 pub enum SyntaxStatus {
     /// Requested, or waiting for its grammar to arrive; plain until then.
     Pending,
+    /// A long side arriving window by window: exact colors cover the first
+    /// `permille` thousandths of it, and the lines around its focus may be
+    /// colored ahead of them.
+    Streaming { permille: u16 },
     /// Highlighted from the whole file.
     Ready,
     /// No grammar for the side's language (or its path names none); plain.
@@ -70,11 +82,19 @@ impl SyntaxStatus {
     /// A short description for a file header or accessibility status.
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Pending => "Highlighting",
+            Self::Pending | Self::Streaming { .. } => "Highlighting",
             Self::Ready => "Highlighted",
             Self::MissingGrammar => "No grammar, plain text",
             Self::PartialSource => "Best-effort colors, partial source",
             Self::Limited => "Too large to highlight",
+        }
+    }
+
+    /// How much of the side has exact colors, 0 to 1, while it streams.
+    pub fn progress(self) -> Option<f32> {
+        match self {
+            Self::Streaming { permille } => Some(f32::from(permille) / 1000.0),
+            _ => None,
         }
     }
 
@@ -83,10 +103,11 @@ impl SyntaxStatus {
     fn worst(self, other: Self) -> Self {
         let rank = |status| match status {
             Self::Ready => 0,
-            Self::Pending => 1,
-            Self::PartialSource => 2,
-            Self::MissingGrammar => 3,
-            Self::Limited => 4,
+            Self::Streaming { permille } => 1 + u32::from(1000 - permille.min(1000)),
+            Self::Pending => 1002,
+            Self::PartialSource => 1003,
+            Self::MissingGrammar => 1004,
+            Self::Limited => 1005,
         };
         if rank(other) > rank(self) {
             other
@@ -107,7 +128,7 @@ pub struct SyntaxBudget {
 impl Default for SyntaxBudget {
     fn default() -> Self {
         Self {
-            side_bytes: 8 << 20,
+            side_bytes: quark_diff::DETAIL_SIDE_BYTES,
         }
     }
 }
@@ -131,6 +152,14 @@ struct SideSyntax {
     status: Option<SyntaxStatus>,
     spans: Option<Arc<[HighlightSpan]>>,
     revision: Option<u32>,
+    /// Where a streamed highlight colors first; shared with the worker.
+    focus: HighlightFocus,
+    /// A streamed side's exact parts, in order from byte 0 without gaps,
+    /// each with its start; `exact_end` is where the last one ends.
+    parts: Vec<(u32, Arc<[HighlightSpan]>)>,
+    exact_end: u32,
+    /// Its focus colored on its own, ahead of the exact parts.
+    inexact: Option<(Range<u32>, Arc<[HighlightSpan]>)>,
 }
 
 impl SideSyntax {
@@ -320,6 +349,9 @@ impl DiffSyntax {
         held.fragments = fragments.clone();
         held.status = status;
         held.spans = None;
+        held.parts.clear();
+        held.exact_end = 0;
+        held.inexact = None;
         held.revision = None;
         held.answered = false;
         held.request = 0;
@@ -334,7 +366,9 @@ impl DiffSyntax {
         } else {
             Priority::Background
         };
-        let mut request = HighlightRequest::new(language, source.clone()).priority(held.priority);
+        let mut request = HighlightRequest::new(language, source.clone())
+            .priority(held.priority)
+            .focus(held.focus.clone());
         if let Some(fragments) = fragments {
             request = request.fragments(fragments);
         }
@@ -367,6 +401,15 @@ impl DiffSyntax {
         }
     }
 
+    /// The byte of `file`'s `side` the reader is at (the top visible line),
+    /// which a long side still streaming colors first. Cheap to call every
+    /// frame.
+    pub fn set_focus(&self, file: u32, side: Side, byte: usize) {
+        if let Some(held) = self.sides.get(file as usize).map(|s| &s[side as usize]) {
+            held.focus.set(Some(byte));
+        }
+    }
+
     fn is_visible(&self, file: u32) -> bool {
         self.visible.as_ref().is_none_or(|v| v.contains(&file))
     }
@@ -387,18 +430,18 @@ impl DiffSyntax {
         changed
     }
 
-    /// Blocks until every side with a request has its first result, then
-    /// takes it. For tests and screenshots, which need the colored state
-    /// at once; a side whose grammar is still arriving counts as answered
-    /// once its plain result is in.
+    /// Blocks until every side with a request has its first result (all of
+    /// its exact parts, when it streams), then takes it. For tests and
+    /// screenshots, which need the colored state at once; a side whose
+    /// grammar is still arriving counts as answered once its plain result
+    /// is in.
     pub fn finish_pending(&mut self) -> bool {
         let mut changed = self.poll(self.document);
         loop {
-            let waiting = self
-                .sides
-                .iter()
-                .flatten()
-                .any(|s| s.request != 0 && !s.answered);
+            let waiting = self.sides.iter().flatten().any(|s| {
+                s.request != 0
+                    && (!s.answered || matches!(s.status, Some(SyntaxStatus::Streaming { .. })))
+            });
             let Some(worker) = self.worker.as_ref().filter(|_| waiting) else {
                 return changed;
             };
@@ -431,17 +474,47 @@ impl DiffSyntax {
         };
         held.answered = true;
         held.revision = Some(done.revision);
+        let len = held.source.as_ref().map_or(0, |s| s.len());
+        let streaming = match &done.part {
+            None => {
+                held.spans = Some(done.spans.into());
+                held.parts.clear();
+                held.inexact = None;
+                false
+            }
+            Some(part) if part.exact => {
+                if part.range.start == 0 {
+                    // A new pass (a grammar arrived) replaces the old one.
+                    held.parts.clear();
+                } else if part.range.start != held.exact_end {
+                    return false;
+                }
+                held.parts.push((part.range.start, done.spans.into()));
+                held.exact_end = part.range.end;
+                held.spans = None;
+                (part.range.end as usize) < len
+            }
+            Some(part) => {
+                held.inexact = Some((part.range.clone(), done.spans.into()));
+                (held.exact_end as usize) < len
+            }
+        };
         held.status = Some(if done.unresolved.contains(language) {
             SyntaxStatus::Pending
         } else if self.store.status(language) == LanguageStatus::Unavailable {
             // Resolved by the worker already, so this is a map lookup.
             SyntaxStatus::MissingGrammar
+        } else if streaming {
+            let permille = (u64::from(held.exact_end) * 1000 / len.max(1) as u64) as u16;
+            SyntaxStatus::Streaming { permille }
         } else if held.fragments.is_some() {
             SyntaxStatus::PartialSource
         } else {
             SyntaxStatus::Ready
         });
-        held.spans = Some(done.spans.into());
+        if !streaming {
+            held.inexact = None;
+        }
         self.generations[file] += 1;
         true
     }
@@ -477,11 +550,7 @@ impl DiffSyntax {
         side: Side,
         range: Range<usize>,
     ) -> (Vec<TextSpan>, Arc<[HighlightKind]>) {
-        let Some(spans) = self
-            .sides
-            .get(file as usize)
-            .and_then(|h| h[side as usize].spans.as_ref())
-        else {
+        let Some(held) = self.sides.get(file as usize).map(|h| &h[side as usize]) else {
             return (Vec::new(), Arc::from([]));
         };
         let mut out = Vec::new();
@@ -499,18 +568,52 @@ impl DiffSyntax {
             }
         };
         let mut at = range.start;
-        let first = spans.partition_point(|s| s.range().end <= range.start);
-        for span in &spans[first..] {
-            let r = span.range();
-            if r.start >= range.end {
+        let mut colored = false;
+        // Sorted, disjoint span lists covering `range` in order: the whole
+        // result, or the exact parts it touches, then the inexact window
+        // past them.
+        let exact_end = held.exact_end as usize;
+        let first_part = held
+            .parts
+            .partition_point(|(start, _)| (*start as usize) <= range.start)
+            .saturating_sub(1);
+        // Each list with where it starts counting.
+        let lists = held
+            .spans
+            .iter()
+            .map(|spans| (spans, 0))
+            .chain(
+                held.parts[first_part..]
+                    .iter()
+                    .map(|(start, spans)| (spans, *start as usize)),
+            )
+            .chain(
+                held.inexact
+                    .iter()
+                    .map(|(r, spans)| (spans, exact_end.max(r.start as usize))),
+            );
+        for (spans, start) in lists {
+            let from = range.start.max(start);
+            if from >= range.end {
                 break;
             }
-            let (from, to) = (r.start.max(range.start), r.end.min(range.end));
-            push(at, from, HighlightKind::Normal);
-            push(from, to, span.kind);
-            at = to;
+            let first = spans.partition_point(|s| s.range().end <= from);
+            for span in &spans[first..] {
+                let r = span.range();
+                if r.start >= range.end {
+                    break;
+                }
+                let (from, to) = (r.start.max(from).max(at), r.end.min(range.end));
+                if from >= to {
+                    continue;
+                }
+                push(at, from, HighlightKind::Normal);
+                push(from, to, span.kind);
+                at = to;
+                colored = true;
+            }
         }
-        if at > range.start {
+        if colored {
             push(at, range.end, HighlightKind::Normal);
         }
         (out, tones.into())
@@ -631,6 +734,7 @@ mod tests {
                     }],
                     pending: false,
                     unresolved: Vec::new(),
+                    part: None,
                 },
                 1,
             );
