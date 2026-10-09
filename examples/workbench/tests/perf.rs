@@ -29,18 +29,20 @@ const REPEATED_FRAME_CEILING: u64 = 48;
 const REPEATED_FRAME_CEILING_ACCESSIBLE: u64 = 56;
 /// Design target for one streamed update plus its frame.
 const STREAMED_UPDATE_BUDGET: u64 = 512;
-/// Measured: 337, the repeated frame plus about 290 for the chunk
+/// Measured: 245 after the text gap fixes (one glyph record per glyph,
+/// lent shaping storage), the repeated frame plus about 200 for the chunk
 /// (re-shaping the growing block, markdown re-conversion, the row's
-/// rebuild); 686 before.
-const STREAMED_UPDATE_CEILING: u64 = 360;
+/// rebuild); 337 before them, 686 before the caches.
+const STREAMED_UPDATE_CEILING: u64 = 256;
 /// Design target for a scroll frame: a base plus each row entering.
 const SCROLL_BASE_BUDGET: u64 = 128;
 const SCROLL_ROW_BUDGET: u64 = 64;
-/// Measured: a sidebar wheel step costs a repeated frame plus about 151
-/// per entering row, over budget. Each row shapes three text layouts for
-/// the first time, and a cold quark_text::TextLayout allocates every glyph
-/// column on its own (the layout pool only recycles evicted layouts, which
-/// a fresh app has none of).
+/// Measured: a sidebar wheel step costs a repeated frame plus about 86
+/// per entering row (257 for 3), still over budget; 151 before the text
+/// gap fixes. Each row shapes three text layouts for the first time
+/// (about 10 allocations each now); the rest is element construction,
+/// recording, action/tooltip/label strings, and layout nodes. The ceiling
+/// stays until a row meets the budget.
 const SCROLL_ROW_CEILING: u64 = 160;
 /// Measured: a warm wheel step up the stress transcript costs 55 with two
 /// rows entering (their cached row elements replay).
