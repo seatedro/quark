@@ -1133,3 +1133,7 @@ unsafe extern "C" {
         count: isize,
     ) -> bool;
 }
+
+#[cfg(test)]
+#[path = "../../../tests/native_text/macos/raster_tests.rs"]
+mod tests;
