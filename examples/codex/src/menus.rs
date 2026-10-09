@@ -16,6 +16,8 @@ use crate::widgets::*;
 use crate::{APPROVALS, Codex, EFFORTS, MODEL, Menu, Msg, SCOPES, Tab, composer, data, icons};
 
 /// A menu under construction: rows and the height they add up to.
+// view!: placement needs the menu's height before it is drawn, so rows
+// are pushed here with their heights; each row's markup is built by view!.
 struct M<'a> {
     p: &'a Pal,
     w: f32,

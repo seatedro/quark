@@ -182,6 +182,7 @@ pub trait TintAll {
 
 impl TintAll for Div {
     fn text_color_all(mut self, color: Color) -> Self {
+        // view!: Div has no setter for the inherited text and icon colors.
         let style = self.element_style_mut();
         style.text_color = Some(color);
         style.icon_color = Some(color);

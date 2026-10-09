@@ -108,7 +108,10 @@ pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
                             view! { <icon svg={icons::TERMINAL} size={14.0} color={p.text_soft} /> },
                             data::DEMO_PROJECT.into(),
                         ),
-                        Tab::File => (js_badge().into_any(), app.open_file.unwrap_or("cart.js").into()),
+                        Tab::File => (
+                            view! { <js_badge() /> },
+                            app.open_file.unwrap_or("cart.js").into(),
+                        ),
                     };
                     <tab(icon, label, *t == app.tab, tab_w, Msg::ShowTab(*t))>
                         <icon_button(p, icons::CLOSE, 20.0, 11.0, p.muted, "Close tab",
@@ -295,8 +298,9 @@ fn fold_bar(p: &Pal, w: f32, n: u32) -> AnyElement {
 fn split_diff(p: &Pal, w: f32) -> AnyElement {
     let half = (w / 2.0).floor();
     let lines = data::cart_diff(true);
-    // Pair each deletion with the addition after it; the pairing walks the
-    // lines by hand, so the rows are built here and placed by the view.
+    // view!: pairing each deletion with the addition after it looks ahead
+    // and skips lines, which markup's `for` cannot; the cells are built
+    // here and the view places the rows.
     let mut rows = Vec::new();
     let mut i = 0;
     while i < lines.len() {
