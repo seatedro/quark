@@ -1125,12 +1125,18 @@ mod tests {
 
     // Catches a tab's focus ring cut off: the strip clips to its height and
     // the sidebar's tab sits against the window's left edge, which hid the
-    // ring's top and left sides.
+    // ring's top and left sides. Focus comes from assistive tech, which
+    // shows the ring; a click would focus the tab without one.
     #[test]
     fn a_focused_tabs_ring_lies_inside_the_tab() {
-        for name in ["Threads", "Files"] {
+        for (panel, name) in [(THREADS, "Threads"), (FILES, "Files")] {
             let mut ui = harness();
-            ui.click_node(By::role_name(Role::Tab, name));
+            ax_action(
+                &mut ui,
+                &Dock::tab_id(panel),
+                accesskit::Action::Focus,
+                None,
+            );
             let tab = ui.find(By::role_name(Role::Tab, name)).bounds;
             let ring_color = ui.theme().colors.focus_border;
             let ring = ui
