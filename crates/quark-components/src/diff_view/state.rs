@@ -32,7 +32,6 @@ use super::prepared::{
     Columns, FileFact, FrameRow, LineDetail, LinePaint, Metrics, PreparedKind, RowPaint, ViewFrame,
     row_height,
 };
-use super::presentation::DiffLayout;
 use super::{DiffViewState, PrepareKey};
 
 /// No row, slot, or segment.
@@ -483,33 +482,20 @@ impl DiffViewState {
         )
     }
 
-    /// Picks unified or split for an automatic layout from the usable
-    /// text width each side would get, with hysteresis around the
-    /// threshold, keeping the top source line in place.
+    /// Follows an automatic layout across the viewport width (see
+    /// [`super::presentation::auto_mode`]), keeping the top source line in
+    /// place. Explicit layouts stay put.
     fn resolve_layout(&mut self) {
-        let DiffLayout::Auto {
-            min_text_columns,
-            hysteresis_columns,
-        } = self.presentation.layout
-        else {
-            return;
-        };
         let m = self.metrics();
-        let split = Columns::new(Mode::Split, self.viewport.0, &m, &self.presentation);
-        let usable = split
-            .sides
-            .iter()
-            .flatten()
-            .map(|c| (c.text_w - m.text_pad * 2.0) / m.char_w)
-            .fold(f32::MAX, f32::min);
-        let threshold = f32::from(min_text_columns);
-        let slack = f32::from(hysteresis_columns);
-        let mode = match self.mode {
-            Mode::Unified if usable >= threshold + slack => Mode::Split,
-            Mode::Split if usable < threshold => Mode::Unified,
-            mode => mode,
-        };
-        self.switch_mode(mode);
+        if let Some(mode) = super::presentation::auto_mode(
+            self.presentation.layout,
+            self.mode,
+            self.viewport.0,
+            &m,
+            &self.presentation,
+        ) {
+            self.switch_mode(mode);
+        }
     }
 
     pub(crate) fn build_frame(

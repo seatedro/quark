@@ -33,7 +33,9 @@
 //! ([`DiffViewState::enable_syntax`]); rows repaint as files finish.
 
 mod annotations;
+pub mod decorator;
 mod navigation;
+mod paint;
 pub mod prepared;
 pub mod presentation;
 mod search;
@@ -64,7 +66,7 @@ pub use prepared::{AnnotationId, DiffPreviewLimit};
 pub use search::{FindOptions, SearchCoverage, SearchDirection, SearchSides, SearchSummary};
 pub use selection::CopyContent;
 pub use session::{DiffSessionViewState, diff_session_view};
-pub use view::diff_view;
+pub use view::{diff_view, diff_view_with};
 
 use annotations::AnnotationTable;
 use prepared::{Metrics, RowPaint, ViewFrame};

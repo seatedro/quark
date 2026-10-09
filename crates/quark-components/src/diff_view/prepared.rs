@@ -30,9 +30,7 @@ use quark_text::TextLayout;
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility};
 
-use super::presentation::{
-    DiffAppearance, DiffMarkers, DiffNumbers, DiffPresentation, FileHeaders, HunkSeparator,
-};
+use super::presentation::{DiffAppearance, DiffMarkers, DiffNumbers, DiffPresentation};
 
 /// Width of a [`DiffMarkers::Bars`] strip, in points.
 pub const MARKER_BAR_W: f32 = 4.0;
@@ -249,28 +247,18 @@ impl RowPaint {
     /// Height of the row: its kind's, or its tallest wrapped line's.
     pub fn height(&self, m: &Metrics, presentation: &DiffPresentation) -> f32 {
         let lines = self.sides.iter().flatten();
-        let base = self
-            .kind
-            .diff()
-            .map_or(m.line_h, |k| row_height(k, m, presentation));
-        lines.map(|l| l.layout.size().1.ceil()).fold(base, f32::max)
+        lines.map(|l| l.layout.size().1.ceil()).fold(
+            self.kind
+                .diff()
+                .map_or(m.line_h, |k| row_height(k, m, presentation)),
+            f32::max,
+        )
     }
 }
 
-/// Height of a row of `kind` before its text is measured: hidden file
-/// headers take none, compact separators a thin bar.
+/// Height of a row of `kind` before its text is measured.
 pub fn row_height(kind: RowKind, m: &Metrics, presentation: &DiffPresentation) -> f32 {
-    match kind {
-        RowKind::FileHeader => match presentation.headers {
-            FileHeaders::Hidden => 0.0,
-            FileHeaders::BuiltIn | FileHeaders::Custom => (m.line_h * 2.0).round(),
-        },
-        RowKind::HunkHeader | RowKind::Gap if presentation.separators == HunkSeparator::Compact => {
-            (m.line_h * 0.3).round().max(4.0)
-        }
-        RowKind::HunkHeader | RowKind::Gap => (m.line_h * 1.4).round(),
-        _ => m.line_h,
-    }
+    super::presentation::band_height(kind, m, presentation)
 }
 
 /// A search match on one side of a row.
