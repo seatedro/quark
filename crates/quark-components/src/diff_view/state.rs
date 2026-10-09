@@ -181,6 +181,8 @@ pub(crate) enum RowRef {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Anchor {
     pub key: u64,
+    /// Its list index, where a search for the key starts.
+    pub index: u32,
     pub delta: f64,
     /// `(unit, side, store index)`.
     pub line: Option<(u32, Side, u32)>,
@@ -420,6 +422,7 @@ impl DiffViewState {
         };
         Some(Anchor {
             key: self.ref_key(self.refs[index]),
+            index: index as u32,
             delta: self.list.scroll_offset() - rows.offset_of_index(index),
             line,
         })
@@ -437,48 +440,63 @@ impl DiffViewState {
             .filter(|&i| i != NONE)
     }
 
-    /// List index of the row keyed `key`. Line, file header, metadata, and
-    /// annotation rows are found from the key's parts; others (and keys
-    /// that no longer match) by a pass over the rows.
-    pub(crate) fn index_of_key(&self, key: u64) -> Option<u32> {
+    /// List index of the row keyed `key`, if it is shown. Line, file
+    /// header, metadata, annotation, and preview rows are found from the
+    /// key's parts; hunk header and gap rows by a pass over the rows
+    /// outward from list index `near`, where it was before the rows
+    /// changed.
+    pub(crate) fn index_of_key(&self, key: u64, near: u32) -> Option<u32> {
         let unit = ((key >> UNIT_SHIFT) & UNIT_MASK) as u32;
-        let tag = key >> 60;
-        let line_row = |side, index| {
+        let index = (key & 0x3F_FFFF_FFFF) as u32;
+        // The list index of `unit`'s header (no `side`) or of the row
+        // showing line `index` of `side`.
+        let row_of = |side: Option<Side>| {
             let (seg, file) = self.locate(unit)?;
             let segment = &self.segments[seg];
+            let p = &segment.projection;
             let row = match side {
-                Some(side) => segment.projection.row_of(file, side, index)?,
-                None => *segment.projection.file_rows.get(file as usize)?,
+                Some(side) => p.row_of(file, side, index)?,
+                None => *p.file_rows.get(file as usize)?,
             };
             segment.list_rows.get(row as usize).copied()
-        };
-        let index = (key & 0x3F_FFFF_FFFF) as u32;
-        let guess = match tag {
-            t if t == FACT_TAG >> 60 => line_row(None, 0).map(|header| header + 1 + index),
-            t if t == ANNOTATION_TAG >> 60 => self
-                .annotation_rows
-                .iter()
-                .copied()
-                .find(|&i| i != NONE && self.ref_key(self.refs[i as usize]) == key),
-            t if t == MORE_TAG >> 60 => self.refs.len().checked_sub(1).map(|i| i as u32),
-            t if t == RowKind::FileHeader as u64 => line_row(None, 0),
-            t if t == RowKind::Removed as u64 || t == RowKind::Modified as u64 => {
-                line_row(Some(Side::Old), index)
-            }
-            t if t == RowKind::Context as u64 || t == RowKind::Added as u64 => {
-                line_row(Some(Side::New), index)
-            }
-            _ => None,
         };
         let matches = |i: u32| {
             self.refs
                 .get(i as usize)
                 .is_some_and(|&r| self.ref_key(r) == key)
         };
-        match guess.filter(|&i| i != NONE) {
-            Some(i) if matches(i) => Some(i),
-            _ => (0..self.refs.len() as u32).find(|&i| matches(i)),
-        }
+        let guess = match key >> 60 {
+            t if t == FACT_TAG >> 60 => row_of(None).map(|header| header.saturating_add(1 + index)),
+            t if t == ANNOTATION_TAG >> 60 => {
+                let rows = self.annotation_rows.iter().copied();
+                rows.filter(|&i| i != NONE).find(|&i| matches(i))
+            }
+            t if t == MORE_TAG >> 60 => self.refs.len().checked_sub(1).map(|i| i as u32),
+            t if t == RowKind::FileHeader as u64 => row_of(None),
+            t if t == RowKind::Removed as u64 || t == RowKind::Modified as u64 => {
+                row_of(Some(Side::Old))
+            }
+            t if t == RowKind::Context as u64 || t == RowKind::Added as u64 => {
+                row_of(Some(Side::New))
+            }
+            _ => {
+                // Outward from `near`: rows move little when a gap opens.
+                let len = self.refs.len() as u32;
+                for d in 0..len {
+                    let below = near.checked_add(d).filter(|&i| i < len);
+                    let above = near.checked_sub(d + 1);
+                    if below.is_none() && above.is_none() {
+                        break;
+                    }
+                    if let Some(i) = below.into_iter().chain(above).find(|&i| matches(i)) {
+                        return Some(i);
+                    }
+                }
+                return None;
+            }
+        };
+        // A row these parts name is the only one the key can be.
+        guess.filter(|&i| matches(i))
     }
 
     /// Rebuilds the row table from the segments' projections, keeping
@@ -556,13 +574,14 @@ impl DiffViewState {
                 let index = a
                     .line
                     .and_then(|(unit, side, index)| self.list_index_of_line(unit, side, index))
-                    .or_else(|| self.index_of_key(a.key))?;
+                    .or_else(|| self.index_of_key(a.key, a.index))?;
                 Some(list.rows().offset_of_index(index as usize) + a.delta)
             })
             .unwrap_or_else(|| self.list.scroll_offset());
         list.set_scroll_offset(offset);
         self.list = list;
-        self.focused_index = self.focused.and_then(|key| self.index_of_key(key));
+        let near = self.focused_index.unwrap_or(0);
+        self.focused_index = self.focused.and_then(|key| self.index_of_key(key, near));
         self.revision += 1;
     }
 
@@ -1284,7 +1303,7 @@ mod tests {
     use quark_ui::FocusId;
 
     use super::*;
-    use crate::diff_view::{DiffEvent, DiffStyle};
+    use crate::diff_view::{DiffEvent, DiffStyle, DiffTarget, FileId, RevealAlign, SourcePoint};
 
     // Catches rows shaped and wrapped before a font change being kept: a
     // wrapped diff must lay out as a fresh view does in the new fonts.
@@ -1371,6 +1390,32 @@ mod tests {
         state.prepare(&mut text, &mut layouts, 1.0, 0);
 
         assert_eq!(state.content_height(), before);
+    }
+
+    // Catches the keyboard focus losing its row when rows above it open:
+    // the view keeps the focused row's list index beside its key, and
+    // revealing hidden lines moves every index below them.
+    #[test]
+    fn focus_keeps_its_line_when_rows_open_above_it() {
+        let old: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        let new = old
+            .replace("line 10\n", "changed 10\n")
+            .replace("line 30\n", "changed 30\n");
+        let doc = quark_diff::diff_texts(Some("a.txt"), Some("a.txt"), Some(&old), Some(&new), 3);
+        let mut state = DiffViewState::new("test.diff", FocusId::new(1), doc);
+        state.set_viewport(600.0, 400.0);
+        let line_30 = DiffTarget::Source(SourcePoint {
+            file: FileId(0),
+            side: Side::New,
+            line: 29,
+            byte: 0,
+        });
+        state.reveal_target(line_30, RevealAlign::Top);
+        assert_eq!(state.focused_target(), Some(line_30));
+
+        assert!(state.expand_all());
+
+        assert_eq!(state.focused_target(), Some(line_30));
     }
 
     /// Each prepared line row as `old | new`, changed words in brackets.
