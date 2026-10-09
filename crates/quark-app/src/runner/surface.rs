@@ -338,15 +338,23 @@ impl WindowState {
     }
 
     pub(super) fn set_material_regions(&mut self, regions: &[MaterialRect]) {
-        // Over an opaque surface a region's view would never show.
-        let shows = matches!(
-            self.surface.effective.background,
-            EffectiveBackground::Material {
-                scope: MaterialScope::Regions,
-                ..
-            } | EffectiveBackground::Transparent
-        );
-        self.native
-            .set_regions(&self.window, if shows { regions } else { &[] });
+        let shown = shown_material_regions(&self.surface, regions);
+        self.native.set_regions(&self.window, shown);
     }
+}
+
+/// The regions a window with `surface` can show: none over an opaque
+/// surface, where their views would never be seen.
+pub(super) fn shown_material_regions<'a>(
+    surface: &SurfaceState,
+    regions: &'a [MaterialRect],
+) -> &'a [MaterialRect] {
+    let shows = matches!(
+        surface.effective.background,
+        EffectiveBackground::Material {
+            scope: MaterialScope::Regions,
+            ..
+        } | EffectiveBackground::Transparent
+    );
+    if shows { regions } else { &[] }
 }

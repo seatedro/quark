@@ -823,6 +823,12 @@ impl<U: UiApp> UiWindow<'_, U> {
         self.ui.open(self.window).window_drags
     }
 
+    /// The native material regions the window's frames last asked for
+    /// ([`crate::EventContext::set_material_regions`]).
+    pub fn material_regions(&self) -> &[crate::platform::material::MaterialRect] {
+        &self.ui.open(self.window).material_regions
+    }
+
     /// How many title bar double-click actions were asked of the window
     /// ([`crate::EventContext::title_double_click`]).
     pub fn title_double_clicks(&self) -> u32 {

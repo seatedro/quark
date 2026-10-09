@@ -85,6 +85,8 @@ pub(crate) struct WindowUiState {
     pub(super) spare_tooltip_regions: Vec<TooltipRegion>,
     /// The last press on window drag chrome, to tell a double-click.
     pub(super) title_press: TitlePress,
+    /// The material regions last handed to the window.
+    pub(super) material_regions: Vec<crate::platform::material::MaterialRect>,
     #[cfg(feature = "devtools")]
     pub(super) devtools: quark_ui::inspector::Devtools,
 }
@@ -185,6 +187,7 @@ impl WindowUiState {
             spare_ime_targets: Vec::new(),
             spare_tooltip_regions: Vec::new(),
             title_press: TitlePress::default(),
+            material_regions: Vec::new(),
             #[cfg(feature = "devtools")]
             devtools: quark_ui::inspector::Devtools::from_env(),
         }

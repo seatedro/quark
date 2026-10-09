@@ -1067,8 +1067,7 @@ impl<U: UiApp> UiAdapter<U> {
         }
         // A press nothing else took, on app-drawn title chrome, moves the
         // window natively; it must start now, while the press is current.
-        let unclaimed = delivery.node.is_none() && delivery.actions.is_empty();
-        if unclaimed && win.router.window_drag_at(x, y) {
+        if delivery.window_drag {
             self.chrome_pressed((x, y), cx);
         } else {
             win.title_press.reset();
@@ -1710,6 +1709,7 @@ impl<U: UiApp> App for UiAdapter<U> {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
         let (scene, ime) = self.finish_frame(painted);
+        self.forward_material_regions(cx);
         if ime.reset {
             cx.reset_ime();
         }
@@ -1875,6 +1875,31 @@ impl<U: UiApp> UiAdapter<U> {
         let mut update = state.accessibility.tree_update(name, state.focus);
         state.announcer.publish(&mut update);
         Some(update)
+    }
+
+    /// Hand the frame's `Div::material` regions to the window when they
+    /// changed, so their native views follow the layout.
+    fn forward_material_regions(&mut self, cx: &mut FrameContext) {
+        use crate::platform::material::MaterialRect;
+
+        let win = &mut *self.win;
+        let requests = &win.router.frame().material_regions;
+        let same = requests.len() == win.material_regions.len()
+            && requests.iter().zip(&win.material_regions).all(|(r, m)| {
+                (r.id, r.rect, r.corner_radius, r.kind) == (m.id, m.rect, m.corner_radius, m.kind)
+            });
+        if same {
+            return;
+        }
+        win.material_regions.clear();
+        win.material_regions
+            .extend(requests.iter().map(|r| MaterialRect {
+                id: r.id,
+                rect: r.rect,
+                corner_radius: r.corner_radius,
+                kind: r.kind,
+            }));
+        cx.set_material_regions(win.material_regions.clone());
     }
 
     /// Keep `painted`'s input state for routing until the next frame, and
@@ -2717,6 +2742,65 @@ mod tests {
             (drags, 1),
             "content below the chrome does nothing"
         );
+    }
+
+    /// A sidebar of a given width that asks for the sidebar material.
+    struct Panes {
+        sidebar: f32,
+    }
+
+    impl UiApp for Panes {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            div()
+                .w(400.0)
+                .h(300.0)
+                .flex_row()
+                .child(
+                    div()
+                        .w(self.sidebar)
+                        .h(300.0)
+                        .material(quark::scene::MaterialKind::Sidebar),
+                )
+                .into_any()
+        }
+
+        fn update(&mut self, _msg: Msg, _cx: &mut UiContext) {}
+    }
+
+    // Catches Div::material regions that never reach the window's native
+    // views, or keep their old rectangle after the layout moves.
+    #[test]
+    fn material_regions_reach_the_window_and_follow_the_layout() {
+        let mut ui = UiTestHarness::new(Panes { sidebar: 200.0 }, (400.0, 300.0), 1.0);
+        let main = ui.main_window();
+        let regions = |ui: &mut UiTestHarness<Panes>| {
+            ui.window(main)
+                .material_regions()
+                .iter()
+                .map(|r| (r.rect, r.kind))
+                .collect::<Vec<_>>()
+        };
+        let sidebar = |width| {
+            vec![(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height: 300.0,
+                },
+                quark::scene::MaterialKind::Sidebar,
+            )]
+        };
+
+        ui.frame();
+        assert_eq!(regions(&mut ui), sidebar(200.0));
+
+        ui.app_mut().sidebar = 240.0;
+        ui.frame();
+        assert_eq!(regions(&mut ui), sidebar(240.0));
     }
 
     /// The published text field as assistive tech sees it, without its id.

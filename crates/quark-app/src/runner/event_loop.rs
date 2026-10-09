@@ -380,6 +380,7 @@ impl<A: App> Runner<A> {
             ime: FrameIme::default(),
             accessibility_active: state.accessibility_state.is_active(),
             last_render: state.last_render,
+            material_regions: None,
         };
 
         // Through subsecond, a hot patch to the app's frame code takes effect
@@ -393,6 +394,11 @@ impl<A: App> Runner<A> {
         };
         let mut scene = scene;
         let ime = cx.ime;
+        if let Some(regions) = cx.material_regions.take() {
+            // Field by field: the renderer stays borrowed for this frame.
+            let shown = shown_material_regions(&state.surface, &regions);
+            state.native.set_regions(&state.window, shown);
+        }
         if ime.reset {
             state.window.set_ime_allowed(false);
         }

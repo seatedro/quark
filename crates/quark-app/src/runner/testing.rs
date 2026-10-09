@@ -53,6 +53,8 @@ pub(crate) struct VirtualWindow {
     pub(crate) window_drags: u32,
     /// Title bar double-clicks on it ([`EventContext::title_double_click`]).
     pub(crate) title_double_clicks: u32,
+    /// The material regions its frames last asked for.
+    pub(crate) material_regions: Vec<crate::platform::material::MaterialRect>,
     /// Times frames were requested for, in ms since launch, sorted and
     /// deduplicated. One frame serves every request due by then, as the
     /// real frame clock does. A vector so a frame that schedules the next
@@ -83,6 +85,7 @@ impl VirtualWindow {
             surface: SurfaceState::headless(Default::default(), Default::default()),
             window_drags: 0,
             title_double_clicks: 0,
+            material_regions: Vec::new(),
             frames: Vec::new(),
             last_frame_ms: None,
             frames_drawn: 0,
@@ -744,9 +747,13 @@ impl HeadlessRunner {
             ime: FrameIme::default(),
             accessibility_active: self.accessibility_active,
             last_render: Default::default(),
+            material_regions: None,
         };
         let scene = app.frame(&mut cx);
         let ime = cx.ime;
+        if let Some(regions) = cx.material_regions.take() {
+            virtual_window.material_regions = regions;
+        }
         virtual_window.ime.apply(ime);
         self.text.end_frame();
         virtual_window.frames_drawn += 1;

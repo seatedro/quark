@@ -132,6 +132,8 @@ pub struct FrameContext<'a> {
     /// Assistive tech listens to this window.
     pub(super) accessibility_active: bool,
     pub(super) last_render: quark_render::FrameStats,
+    /// Material regions to show once the frame is built, when they changed.
+    pub(super) material_regions: Option<Vec<crate::platform::material::MaterialRect>>,
 }
 
 /// IME requests made while building a frame. The runner applies them to
@@ -173,6 +175,13 @@ impl FrameContext<'_> {
     /// the next one.
     pub fn reset_ime(&mut self) {
         self.ime.reset = true;
+    }
+
+    /// Replace this window's native material regions once the frame is
+    /// built; see [`EventContext::set_material_regions`]. Call it only when
+    /// they change.
+    pub fn set_material_regions(&mut self, regions: Vec<crate::platform::material::MaterialRect>) {
+        self.material_regions = Some(regions);
     }
 
     /// Place this window's IME candidate window, in logical points, once

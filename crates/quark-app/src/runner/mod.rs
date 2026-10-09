@@ -63,6 +63,7 @@ pub use placement::{DesktopPoint, PlatformCapabilities, WindowPlacement, restore
 use platform::PlatformState;
 pub use scale::scene_to_physical;
 pub(crate) use surface::SurfaceState;
+use surface::shown_material_regions;
 pub use table::WindowHandle;
 use table::WindowTable;
 #[cfg(feature = "test-support")]
