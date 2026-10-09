@@ -52,6 +52,15 @@ pub enum SemanticRole {
     ScrollArea,
     Group,
     Label,
+    /// ARIA landmarks: a navigation region (a sidebar of links) and a
+    /// region that complements the main content (a side panel).
+    Navigation,
+    Complementary,
+    /// A region where new entries are appended, such as a transcript.
+    Log,
+    AlertDialog,
+    /// A window-like container inside the app's window. Not an ARIA role.
+    Window,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]

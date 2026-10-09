@@ -97,14 +97,19 @@ the call.
 | `key={..}`, `id="..."`, `test-id="..."` | `.key(..)`, `.id(..)`, `.test_id(..)` |
 | `track_scroll={&handle}`, `scrollbar_visibility={&state}` | `.track_scroll(&handle)`, `.scrollbar_visibility(&state)`: the only handle-style attributes, because they are the only ones the builders have |
 
-`role` takes the ARIA names `alert`, `button`, `cell`, `checkbox`,
-`combobox`, `dialog`, `document`, `grid`, `gridcell`, `group`, `heading`,
-`img`, `label`, `link`, `list`, `listbox`, `listitem`, `menu`, `menubar`,
-`menuitem`, `option`, `progressbar`, `radio`, `radiogroup`, `row`,
-`separator`, `slider`, `spinbutton`, `status`, `switch`, `tab`, `table`,
-`tablist`, `tabpanel`, `textbox`, `toolbar`, `tooltip`, `tree`, and
-`treeitem`, plus quark's `scrollarea`, or `role={expr}` for a
-`SemanticRole`.
+`role` takes the ARIA names `alert`, `alertdialog`, `button`, `cell`,
+`checkbox`, `combobox`, `complementary`, `dialog`, `document`, `grid`,
+`gridcell`, `group`, `heading`, `img`, `label`, `link`, `list`, `listbox`,
+`listitem`, `log`, `menu`, `menubar`, `menuitem`, `navigation`, `option`,
+`progressbar`, `radio`, `radiogroup`, `row`, `separator`, `slider`,
+`spinbutton`, `status`, `switch`, `tab`, `table`, `tablist`, `tabpanel`,
+`textbox`, `toolbar`, `tooltip`, `tree`, and `treeitem`, plus quark's
+`scrollarea` and `window`, or `role={expr}` for a `SemanticRole`.
+
+`role=` sets the platform role only when none is set yet, so an earlier
+`accessibility_role={..}` (from a helper, say) keeps its platform role
+while `role=` changes the semantic role. `group` and `scrollarea` publish
+no platform node; use `accessibility_role={Role::Group}` for one.
 
 `on:hover` expands to `.on_hover(..)`, which no builder has yet; hover is a
 style state in quark, written with `hover:` classes or `hover_bg={..}`.

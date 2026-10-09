@@ -111,10 +111,12 @@ const SPATIAL_ATTRS: &[&str] = &[
 /// `role="..."` values: ARIA role names and the `SemanticRole` they set.
 const ROLES: &[(&str, &str)] = &[
     ("alert", "Alert"),
+    ("alertdialog", "AlertDialog"),
     ("button", "Button"),
     ("cell", "Cell"),
     ("checkbox", "CheckBox"),
     ("combobox", "ComboBox"),
+    ("complementary", "Complementary"),
     ("dialog", "Dialog"),
     ("document", "Document"),
     ("grid", "Grid"),
@@ -127,9 +129,11 @@ const ROLES: &[(&str, &str)] = &[
     ("list", "List"),
     ("listbox", "ListBox"),
     ("listitem", "ListItem"),
+    ("log", "Log"),
     ("menu", "Menu"),
     ("menubar", "MenuBar"),
     ("menuitem", "MenuItem"),
+    ("navigation", "Navigation"),
     ("option", "ListBoxOption"),
     ("progressbar", "ProgressIndicator"),
     ("radio", "RadioButton"),
@@ -150,6 +154,8 @@ const ROLES: &[(&str, &str)] = &[
     ("tooltip", "Tooltip"),
     ("tree", "Tree"),
     ("treeitem", "TreeItem"),
+    // Not ARIA: a window-like container inside the app window.
+    ("window", "Window"),
 ];
 
 /// `aria-*` attributes and the accessibility builder each calls.
