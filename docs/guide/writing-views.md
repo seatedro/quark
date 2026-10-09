@@ -1,19 +1,17 @@
 # Writing views
 
-`quark::view!` writes element trees as HTML-like markup and expands, at
-compile time, to the same builder calls you would write by hand. The
-builders stay the only API: every attribute is a builder method, every
-class is a builder call, and markup and builder values nest in each other
-freely. [crates/quark-components/tests/view_equivalence.rs](../../crates/quark-components/tests/view_equivalence.rs)
-paints each construct both ways and checks the scenes and accessibility
-trees match.
+`quark::view!` writes element trees as HTML-like markup that expands at
+compile time to the same builder calls you would write by hand.
 
-The macro calls whatever `div()`, `text()`, `svg_icon()`,
-`selectable_rich_text()`, `StyledSpan`, and component types are in scope,
-plus the `IntoAnyElement` and `Styled` traits; importing
-`quark_ui::element::*` and `quark_ui::style::Styled` covers them. Roles,
-hex colors, and cursor classes expand to `::quark::` paths, so the crate
-needs `quark` as a direct dependency.
+- The builders stay the only API: every attribute is a builder method, every
+  class a builder call.
+- Markup and builder values nest in each other freely.
+- The macro calls whatever `div()`, `text()`, `svg_icon()`,
+  `selectable_rich_text()`, `StyledSpan`, and component types are in scope,
+  plus the `IntoAnyElement` and `Styled` traits.
+- `use quark_ui::element::*;` and `use quark_ui::style::Styled;` cover them.
+- Roles, hex colors, and cursor classes expand to `::quark::` paths: the
+  crate needs `quark` as a direct dependency.
 
 ## Side by side
 
@@ -64,19 +62,20 @@ div()
 | `<name(a, b) attr=..>` | A function returning a builder: `name(a, b)` then one call per attribute, as in `<canvas(paint)/>` or `<popover_panel(theme)>` |
 | `<.method>` | Inside a component: each child becomes `.method(child)` |
 
-Lowercase names without arguments are built-in tags; anything else is an
-error that suggests the closest one. Components start with an uppercase letter or are paths
-(`<widgets::Card>`). A closing tag must match its opening tag; `</Card>`
-may close `<widgets::Card>`.
+- Lowercase names without arguments are built-in tags; any other lowercase
+  name is an error suggesting the closest one.
+- Components start uppercase or are paths (`<widgets::Card>`).
+- A closing tag must match its opening tag; `</Card>` may close
+  `<widgets::Card>`.
 
 ## Attributes
 
-Every builder method is an attribute. The method name carries the
-attribute's span, so an unknown attribute is rustc's "no method named `x`"
-error at that attribute (with rustc's own "a method with a similar name"
-hint), a wrongly typed value is a type error at the value, and
-rust-analyzer resolves hover, go to definition, and completion through
-the call.
+- Every builder method is an attribute.
+- Unknown attribute: rustc's "no method named `x`" at that attribute, with
+  its "similar name" hint.
+- Wrong value type: a type error at the value.
+- rust-analyzer hover, go to definition, and completion work through the
+  call.
 
 | Written | Expands to |
 |---|---|
@@ -95,54 +94,50 @@ the call.
 | `aria-selected`, `aria-checked`/`aria-pressed`, `aria-expanded`, `aria-disabled` | `.accessibility_selected`, `_toggled`, `_expanded`, `_disabled`; alone they mean `true` |
 | `aria-invalid`, `aria-required`, `aria-readonly`, `aria-multiselectable`, `aria-level`, `aria-rowindex`, `aria-colindex`, `aria-sort`, `aria-live` | The matching `accessibility_*` builder, or `.live` |
 | `key={..}`, `id="..."`, `test-id="..."` | `.key(..)`, `.id(..)`, `.test_id(..)` |
-| `track_scroll={&handle}`, `scrollbar_visibility={&state}` | `.track_scroll(&handle)`, `.scrollbar_visibility(&state)`: the only handle-style attributes, because they are the only ones the builders have |
+| `track_scroll={&handle}`, `scrollbar_visibility={&state}` | `.track_scroll(&handle)`, `.scrollbar_visibility(&state)`: the only handle attributes, because the builders have no others |
 
-`role` takes the ARIA names `alert`, `button`, `cell`, `checkbox`,
-`combobox`, `dialog`, `document`, `grid`, `gridcell`, `group`, `heading`,
-`img`, `label`, `link`, `list`, `listbox`, `listitem`, `menu`, `menubar`,
-`menuitem`, `option`, `progressbar`, `radio`, `radiogroup`, `row`,
-`separator`, `slider`, `spinbutton`, `status`, `switch`, `tab`, `table`,
-`tablist`, `tabpanel`, `textbox`, `toolbar`, `tooltip`, `tree`, and
-`treeitem`, plus quark's `scrollarea`, or `role={expr}` for a
-`SemanticRole`.
-
-`on:hover` expands to `.on_hover(..)`, which no builder has yet; hover is a
-style state in quark, written with `hover:` classes or `hover_bg={..}`.
-
-Inside `view! { scale, ... }`, `gap`, `p`, `px`, `py`, `pt`, `pb`, `pl`, `pr`,
-and `rounded` values on a `div` are multiplied by `scale` and rounded.
+- `role` names: `alert`, `button`, `cell`, `checkbox`, `combobox`, `dialog`,
+  `document`, `grid`, `gridcell`, `group`, `heading`, `img`, `label`,
+  `link`, `list`, `listbox`, `listitem`, `menu`, `menubar`, `menuitem`,
+  `option`, `progressbar`, `radio`, `radiogroup`, `row`, `separator`,
+  `slider`, `spinbutton`, `status`, `switch`, `tab`, `table`, `tablist`,
+  `tabpanel`, `textbox`, `toolbar`, `tooltip`, `tree`, `treeitem`, plus
+  quark's `scrollarea`.
+- `role={expr}` takes a `SemanticRole`.
+- `on:hover` expands to `.on_hover(..)`, which no builder has. Hover is a
+  style state: use `hover:` classes or `hover_bg={..}`.
+- In `view! { scale, ... }`, `gap`, `p`, `px`, `py`, `pt`, `pb`, `pl`, `pr`,
+  and `rounded` on a `div` are multiplied by `scale` and rounded.
 
 ## Classes
 
-`class="..."` is a list of Tailwind-style names, each expanded at compile
-time to one builder call. There is no CSS at runtime.
+`class="..."` lists Tailwind-style names, each expanded at compile time to
+one builder call. No CSS at runtime.
 
 - Spacing and sizes use Tailwind's 4-point scale: `p-4` is `.p(16.0)`,
   `gap-0.5` is `.gap(2.0)`, `h-px` is `.h(1.0)`.
 - Brackets take an exact value or any Rust expression: `w-[320px]`,
   `gap-[6]`, `w-[sidebar_w]`, `bg-[#336699]`, `bg-[colors.surface]`,
-  `aspect-[16/9]`. Spaces inside brackets are allowed. A bracketed
-  expression after `text-` or `border-` is a color; a number there is a
-  size or width.
-- `hover:` gathers every hover class of the element into one
-  `.hover(|s| ...)`: `hover:bg-[c] hover:opacity-80`. It covers background,
-  border color, text and icon color, opacity, and `rounded-[..]`, which is
-  what `StyleOverride` holds. A `hover_bg={..}` attribute after the class
-  replaces it, since each `.hover` call replaces the last.
-- `focus:`, `focus-visible:`, `active:`, `disabled:`, `dark:`, and
-  `group-hover:` fail to compile with the alternative: div has no such
-  style state, so use `@when {cond} { .. }`, or theme colors for dark mode.
-  Breakpoints (`sm:` to `2xl:`) fail too: there are no viewport media
-  queries, so branch on the window size in the view.
-- An unknown class fails to compile with the closest known class, and a
-  class for another element kind (`text-sm` on a `div`) says which element
-  it styles. The error spans the whole `class` literal, since stable Rust
-  cannot point inside a string; the message names the class.
+  `aspect-[16/9]`. Spaces inside brackets are allowed.
+- After `text-` or `border-`, a bracketed expression is a color; a number is
+  a size or width.
+- `hover:` gathers all hover classes of an element into one
+  `.hover(|s| ...)`: `hover:bg-[c] hover:opacity-80`.
+- `hover:` covers what `StyleOverride` holds: background, border color, text
+  and icon color, opacity, `rounded-[..]`.
+- A `hover_bg={..}` after the class replaces it (each `.hover` call replaces
+  the last).
+- `focus:`, `focus-visible:`, `active:`, `disabled:`, `dark:`,
+  `group-hover:` fail to compile and name the alternative:
+  `@when {cond} { .. }`, or theme colors for dark mode.
+- Breakpoints (`sm:` to `2xl:`) fail too: no viewport media queries; branch
+  on the window size in the view.
+- An unknown class fails with the closest known class. A class for another
+  element kind (`text-sm` on a `div`) says which element it styles.
+- The error spans the whole `class` literal (stable Rust cannot point inside
+  a string); the message names the class.
 
-Every entry below is compiled against the real builders by
-`class_vocabulary_names_real_builder_methods` in
-`tests/view_equivalence.rs`, and the table is generated from the macro's
-tables (`QUARK_BLESS=1 cargo test -p quark-macros --lib` rewrites it).
+The tables below are generated from the macro's own tables.
 
 <!-- class-reference:start -->
 | Class | Builder call | On |
@@ -284,16 +279,18 @@ tables (`QUARK_BLESS=1 cargo test -p quark-macros --lib` rewrites it).
 
 ## Text
 
-A string literal is text, and `{expr}` inside it is interpolated:
-`"Hello, {name}!"` is `format!("Hello, {}!", name)`, `{ratio:.2}` passes a
-format spec, and `{{`/`}}` are literal braces. A literal without braces is
-passed as is.
+- A string literal is text; `{expr}` inside it is interpolated:
+  `"Hello, {name}!"` is `format!("Hello, {}!", name)`.
+- `{ratio:.2}` passes a format spec; `{{` and `}}` are literal braces.
+- A literal without braces is passed as is.
+- `<text>` holds plain text. One `{expr}` child goes to `text()` unchanged
+  (`impl Into<String>`).
+- Several literal and `{expr}` children are joined with `format!`:
+  `<text>{count} " unread"</text>`.
+- Text must be quoted: Rust's tokenizer drops whitespace and rejects stray
+  apostrophes. `<div>Send</div>` is an error suggesting `"Send"`.
 
-`<text>` holds plain text. One `{expr}` child is passed to `text()`
-unchanged (it takes `impl Into<String>`); several literal and `{expr}`
-children are joined with `format!`: `<text>{count} " unread"</text>`.
-
-`<p>` is selectable rich text. Inline tags style runs of it:
+`<p>` is selectable rich text; inline tags style runs:
 
 ```rust
 view! {
@@ -315,10 +312,9 @@ view! {
 | `<span>` | none; its attributes are span calls: `<span color={c}>` |
 | `<br/>` | a `"\n"` span |
 
-Nested tags combine. `{expr}` in `<p>` is formatted with `Display`, and
-`{...spans}` adds ready-made `StyledSpan`s. Text must be quoted: Rust's
-tokenizer drops whitespace and rejects stray apostrophes, so `<div>Send</div>`
-is an error that suggests `"Send"`.
+- Nested tags combine.
+- `{expr}` in `<p>` is formatted with `Display`; `{...spans}` adds
+  ready-made `StyledSpan`s.
 
 ## Children and control flow
 
@@ -335,18 +331,20 @@ is an error that suggests `"Send"`.
 | `for x in xs key={x.id} { <div>..</div> }` | Adds `.key(..)` to each iteration's single root |
 | `let name = expr;` | Binds `name` for the children after it in the same list, branch, or loop body |
 
-A branch or arm with several children adds them to the parent directly;
-no wrapper `div` changes the layout. Inside an element, `if`, `match`, and
-`for` lower to the same Rust statements around `.child(..)` calls that you
-would write by hand, so they allocate nothing beyond the children. `view!` returns the root element; a
-root fragment becomes a `div`.
+- A branch or arm with several children adds them to the parent directly; no
+  wrapper `div`.
+- `if`, `match`, and `for` lower to plain Rust around `.child(..)` calls,
+  allocating nothing beyond the children.
+- `view!` returns the root element; a root fragment becomes a `div`.
 
 ## Returning a builder
 
-`view!` returns an `AnyElement`. A helper whose callers keep styling its
-result (adding children, an `id`, a fill) needs the builder itself:
-`view! { -> Type, <root> }` returns the root element's builder, checked
-against `Type`, so the helper can be used as a function tag.
+- `view!` returns an `AnyElement`.
+- `view! { -> Type, <root> }` returns the root's builder instead, checked
+  against `Type`, so callers can keep styling it and use the helper as a
+  function tag.
+- The root must be one element: a fragment, control flow, or `{expr}` at the
+  root is an error.
 
 ```rust
 fn menu_panel(p: &Pal, x: f32, y: f32) -> Div {
@@ -358,16 +356,12 @@ fn menu_panel(p: &Pal, x: f32, y: f32) -> Div {
 view! { <menu_panel(p, x, y) h={h}>{...rows}</menu_panel> }
 ```
 
-The root must be one element; a fragment, control flow, or `{expr}` at
-the root is an error.
-
 ## Components with typed props
 
-`#[derive(Props)]` gives a component a typed builder, so
-`<Button on:click={msg} icon={lucide::CHECK} label="Send" />` works and
-`Button::builder().on_click(msg).icon(..).label("Send").build()` is the
-same thing spelled with builders. Components keep their existing
-constructors and builder methods.
+`#[derive(Props)]` gives a component a typed builder:
+`<Button on:click={msg} icon={lucide::CHECK} label="Send" />` is
+`Button::builder().on_click(msg).icon(..).label("Send").build()`. Existing
+constructors and builder methods stay.
 
 ```rust
 #[derive(Props)]
@@ -386,16 +380,15 @@ pub struct Card {
 }
 ```
 
-- Leaving out a required prop is "missing required prop `title` on
-  `<Card>`" at the tag. A wrongly typed value is a type error at the value,
-  and an unknown prop is "no method named `x`" at the attribute.
-- Children reach `children` through `Into`, so text stays text until then:
-  a `Vec<Child>` (from quark-components) keeps strings, and `Button` uses
-  them as its accessible name when it has no label or tooltip.
+- Missing required prop: "missing required prop `title` on `<Card>`" at the
+  tag.
+- Wrong type: a type error at the value. Unknown prop: "no method named `x`"
+  at the attribute.
+- Children reach `children` through `Into`, so text stays text until then. A
+  `Vec<Child>` (quark-components) keeps strings; `Button` uses them as its
+  accessible name when it has no label or tooltip.
 - Slots work as for builder components: `<.icon>{lucide::X}</.icon>`.
-- Enum props take values, not strings: `variant={ButtonStyle::Filled}`.
-  A string cannot name an enum variant without knowing the prop's type,
-  and the macro does not know it.
-
-`Button`, `Badge`, `Avatar`, `ProgressBar`, `Checkbox`, and `Switch` derive
-`Props`; other components use the constructor form `<Name(args) ..>`.
+- Enum props take values, not strings: `variant={ButtonStyle::Filled}` (the
+  macro does not know the prop's type).
+- `Button`, `Badge`, `Avatar`, `ProgressBar`, `Checkbox`, `Switch` derive
+  `Props`; other components use `<Name(args) ..>`.
