@@ -155,6 +155,10 @@ impl<A: App> Runner<A> {
             }
         };
         renderer.resize(size.width, size.height, scale_factor);
+        renderer.set_options(quark_render::renderer::RendererOptions {
+            compositing: options.compositing,
+            text_rendering: options.text_rendering,
+        });
         let surface_alpha = wants_alpha
             && renderer.set_surface_background(SurfaceBackground::Transparent)
                 == SurfaceBackground::Transparent;

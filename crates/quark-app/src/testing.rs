@@ -627,6 +627,7 @@ impl<U: UiApp> UiTestHarness<U> {
         let main = self.open(self.main_window());
         let scale = main.scale_factor;
         let (width, height) = main.size;
+        let options = main.renderer_options;
         let mut scene = main.scene.clone();
         let width = (f64::from(width) * scale).round() as u32;
         let height = (f64::from(height) * scale).round() as u32;
@@ -637,6 +638,7 @@ impl<U: UiApp> UiTestHarness<U> {
                 .insert(quark_render::Renderer::new_headless(width, height, scale)?),
         };
         renderer.resize(width, height, scale);
+        renderer.set_options(options);
         crate::scene_to_physical(&mut scene, scale as f32);
         let rgba =
             renderer.render_to_rgba(&scene, &mut self.runner.text().system, width, height)?;

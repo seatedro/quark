@@ -1,4 +1,6 @@
 use super::*;
+use quark::scene::{TextRendering, UiCompositing};
+
 use crate::platform::material::{WindowBackground, WindowCorners};
 
 /// An application driven by [`run`]. Scene, size, and pointer coordinates
@@ -104,6 +106,12 @@ pub struct WindowOptions {
     pub background: WindowBackground,
     /// The window's corner shape, as far as the platform allows.
     pub corners: WindowCorners,
+    /// How the window's UI paint blends: linear light (the default) or as
+    /// browsers blend CSS ([`UiCompositing::WebCompatible`]). See
+    /// [`quark::scene::UiCompositing`].
+    pub compositing: UiCompositing,
+    /// How glyph coverage blends on a linear window.
+    pub text_rendering: TextRendering,
 }
 
 impl Default for WindowOptions {
@@ -123,6 +131,8 @@ impl Default for WindowOptions {
             maximized: false,
             background: WindowBackground::default(),
             corners: WindowCorners::default(),
+            compositing: UiCompositing::default(),
+            text_rendering: TextRendering::default(),
         }
     }
 }

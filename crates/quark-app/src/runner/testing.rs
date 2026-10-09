@@ -53,6 +53,8 @@ pub(crate) struct VirtualWindow {
     pub(crate) window_drags: u32,
     /// Title bar double-clicks on it ([`EventContext::title_double_click`]).
     pub(crate) title_double_clicks: u32,
+    /// The renderer options its window options asked for.
+    pub(crate) renderer_options: quark_render::renderer::RendererOptions,
     /// The material regions its frames last asked for.
     pub(crate) material_regions: Vec<crate::platform::material::MaterialRect>,
     /// Times frames were requested for, in ms since launch, sorted and
@@ -86,6 +88,7 @@ impl VirtualWindow {
             window_drags: 0,
             title_double_clicks: 0,
             material_regions: Vec::new(),
+            renderer_options: Default::default(),
             frames: Vec::new(),
             last_frame_ms: None,
             frames_drawn: 0,
@@ -615,6 +618,10 @@ impl HeadlessRunner {
                 opened.monitor = self.window(self.main).and_then(|w| w.monitor.clone());
                 opened.min_size = options.min_size;
                 opened.surface = SurfaceState::headless(options.background, options.corners);
+                opened.renderer_options = quark_render::renderer::RendererOptions {
+                    compositing: options.compositing,
+                    text_rendering: options.text_rendering,
+                };
                 if let Some(entry) = self.windows.get_mut(window) {
                     *entry = WindowEntry::Virtual(Box::new(opened));
                 }
