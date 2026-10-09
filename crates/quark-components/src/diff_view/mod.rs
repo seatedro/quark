@@ -24,6 +24,9 @@
 //! Syntax colors come from a `quark-syntax` worker thread
 //! ([`DiffViewState::enable_syntax`]); rows repaint as files finish.
 
+pub mod prepared;
+pub mod presentation;
+mod syntax;
 mod view;
 
 use std::cell::Cell;
@@ -35,20 +38,23 @@ use std::sync::Arc;
 
 use quark::selection::{BlockKey, Selection, SelectionPoint};
 use quark_diff::{
-    BlockKind, DiffDocument, Expansion, FileStatus, GapId, Mode, Projection, Reveal, RowKind, Side,
-    inline_diff,
+    BlockKind, DiffDocument, Expansion, GapId, Mode, Projection, Reveal, RowKind, Side, inline_diff,
 };
 use quark_render::FontKind;
 use quark_render::scene::Rect;
-use quark_syntax::{
-    GrammarStore, HighlightKind, HighlightSpan, HighlightWorker, Highlighted, LanguageId,
-};
-use quark_text::{FontEpoch, LayoutCache, TextLayout, TextParams, TextSpan, TextStyle, TextSystem};
+use quark_syntax::GrammarStore;
+use quark_text::{FontEpoch, LayoutCache, TextParams, TextStyle, TextSystem};
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX};
 use quark_ui::virtual_list::{RowKey, VariableList};
 
 pub use view::diff_view;
+
+use prepared::{
+    Columns, FrameRow, LinePaint, Metrics, PreparedKind, RowPaint, ViewFrame, row_height,
+};
+use presentation::{DiffAppearance, DiffLayout, DiffPresentation};
+use syntax::DiffSyntax;
 
 /// Lines one click on an expand control reveals.
 pub const REVEAL_STEP: u32 = 20;
@@ -134,156 +140,6 @@ pub enum DiffOutcome {
     Copy(String),
 }
 
-/// One side of a materialized line row.
-#[derive(Debug)]
-pub(crate) struct LinePaint {
-    pub layout: Arc<TextLayout>,
-    /// Highlight kind of each layout span.
-    pub tones: Arc<[HighlightKind]>,
-    /// Changed words, as byte ranges of the line.
-    pub words: Vec<Range<usize>>,
-}
-
-/// A materialized row: its lines or its header text. Kept while the row
-/// stays in the window and its inputs (`stamp`) stay the same.
-#[derive(Debug)]
-pub(crate) struct RowPaint {
-    pub stamp: u64,
-    pub kind: RowKind,
-    pub file: u32,
-    pub sides: [Option<LinePaint>; 2],
-    /// One-based line number on each side, or zero.
-    pub numbers: [u32; 2],
-    /// File, hunk, or gap header text.
-    pub title: Arc<str>,
-    pub gap: Option<GapId>,
-    pub status: FileStatus,
-    pub stats: (u32, u32),
-    pub binary: bool,
-}
-
-impl RowPaint {
-    fn height(&self, m: &Metrics) -> f32 {
-        let lines = self.sides.iter().flatten();
-        lines
-            .map(|l| l.layout.size().1.ceil())
-            .fold(row_height(self.kind, m), f32::max)
-    }
-}
-
-/// Sizes derived from the style and the font, in logical points.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Metrics {
-    pub font_size: f32,
-    pub line_h: f32,
-    pub char_w: f32,
-    /// Width of one line number column.
-    pub number_w: f32,
-    /// Width of the `+`/`-` column.
-    pub sign_w: f32,
-    /// Space left of the text inside its column.
-    pub text_pad: f32,
-}
-
-/// Where the gutters and text columns sit, from the left of the view.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ColumnBox {
-    pub gutter_x: f32,
-    pub gutter_w: f32,
-    pub text_x: f32,
-    pub text_w: f32,
-}
-
-/// The columns of one layout: side by side has one per side, unified one
-/// shared column stored under [`Side::New`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Columns {
-    pub mode: Mode,
-    pub sides: [Option<ColumnBox>; 2],
-}
-
-impl Columns {
-    fn new(mode: Mode, width: f32, m: &Metrics) -> Self {
-        match mode {
-            Mode::Unified => {
-                let gutter_w = m.number_w * 2.0 + m.sign_w;
-                let text = ColumnBox {
-                    gutter_x: 0.0,
-                    gutter_w,
-                    text_x: gutter_w,
-                    text_w: (width - gutter_w).max(1.0),
-                };
-                Self {
-                    mode,
-                    sides: [None, Some(text)],
-                }
-            }
-            Mode::Split => {
-                let gutter_w = m.number_w + m.sign_w;
-                let half = (width / 2.0).floor();
-                let side = |x: f32, w: f32| ColumnBox {
-                    gutter_x: x,
-                    gutter_w,
-                    text_x: x + gutter_w,
-                    text_w: (w - gutter_w).max(1.0),
-                };
-                Self {
-                    mode,
-                    sides: [Some(side(0.0, half - 1.0)), Some(side(half, width - half))],
-                }
-            }
-        }
-    }
-
-    /// The column showing `side` of a row.
-    pub fn of(&self, side: Side) -> ColumnBox {
-        match self.mode {
-            Mode::Unified => self.sides[1].expect("unified column"),
-            Mode::Split => self.sides[side as usize].expect("split column"),
-        }
-    }
-
-    /// Wrap width of `side`'s text.
-    fn wrap_width(&self, side: Side, m: &Metrics) -> f32 {
-        (self.of(side).text_w - m.text_pad * 2.0).max(m.char_w)
-    }
-}
-
-/// A row in the frame the view paints.
-#[derive(Debug, Clone)]
-pub(crate) struct FrameRow {
-    pub key: u64,
-    /// Position among all rows, for accessibility.
-    pub index: u32,
-    pub top: f32,
-    pub height: f32,
-    pub paint: Rc<RowPaint>,
-    /// Selected byte range of each side's line.
-    pub selected: [Option<(usize, usize)>; 2],
-}
-
-/// Everything [`diff_view`] reads, built by [`DiffViewState::prepare`]
-/// and shared with the cached build closures.
-#[derive(Debug)]
-pub(crate) struct ViewFrame {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub focus: FocusId,
-    pub viewport: (f32, f32),
-    pub metrics: Metrics,
-    pub columns: Columns,
-    pub wrap: bool,
-    pub rows: Vec<FrameRow>,
-    /// Width of each side's widest line seen, padding included.
-    pub content_w: [f32; 2],
-    pub scroll: f32,
-    pub total: f32,
-    pub row_count: u32,
-    pub hscroll: [ScrollHandle; 2],
-    pub scrollbar_auto_hide: bool,
-    pub scrollbar: ScrollbarVisibility,
-}
-
 /// What the last prepare materialized from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PrepareKey {
@@ -335,12 +191,9 @@ pub struct DiffViewState {
     frame: Option<Rc<ViewFrame>>,
     prepared: Option<PrepareKey>,
     content_w: [f32; 2],
-    syntax: Option<HighlightWorker>,
-    highlights: Vec<[Option<Arc<[HighlightSpan]>>; 2]>,
-    /// Revision of each held highlight, which a newer result of the same
-    /// document must exceed (grammars arriving recolor it).
-    highlight_rev: Vec<[Option<u32>; 2]>,
-    highlight_gen: Vec<u32>,
+    syntax: DiffSyntax,
+    presentation: DiffPresentation,
+    appearance: DiffAppearance,
     revision: u64,
     /// Bumped with every frame `prepare` builds.
     frame_id: u64,
@@ -377,14 +230,13 @@ impl DiffViewState {
             frame: None,
             prepared: None,
             content_w: [0.0; 2],
-            syntax: None,
-            highlights: Vec::new(),
-            highlight_rev: Vec::new(),
-            highlight_gen: Vec::new(),
+            syntax: DiffSyntax::default(),
+            presentation: DiffPresentation::default(),
+            appearance: DiffAppearance::default(),
             revision: 0,
             frame_id: 0,
         };
-        state.reset_highlights();
+        state.syntax.reset(state.doc.file_count() as usize);
         state.rebuild_rows(None);
         state
     }
@@ -450,6 +302,16 @@ impl DiffViewState {
             .map(|i| i as u32)
     }
 
+    pub fn presentation(&self) -> DiffPresentation {
+        self.presentation
+    }
+
+    /// The frame the last [`Self::prepare`] built, as the renderer reads
+    /// it.
+    pub fn frame(&self) -> Option<&Rc<ViewFrame>> {
+        self.frame.as_ref()
+    }
+
     pub fn horizontal_scroll(&self, side: Side) -> &ScrollHandle {
         &self.hscroll[side as usize]
     }
@@ -464,16 +326,18 @@ impl DiffViewState {
         self.selection = None;
         self.painted.clear();
         self.content_w = [0.0; 2];
-        self.reset_highlights();
+        self.syntax.reset(self.doc.file_count() as usize);
         let mode = self.projection.mode;
         self.projection.rebuild(&self.doc, mode, &self.expansion);
         self.rebuild_rows(None);
-        if self.syntax.is_some() {
-            self.request_highlights();
-        }
+        self.syntax.request(&self.doc, self.doc_generation);
     }
 
     pub fn set_mode(&mut self, mode: Mode) {
+        self.presentation.layout = match mode {
+            Mode::Unified => DiffLayout::Unified,
+            Mode::Split => DiffLayout::Split,
+        };
         if mode == self.projection.mode {
             return;
         }
@@ -494,6 +358,35 @@ impl DiffViewState {
         self.rebuild_rows(anchor);
     }
 
+    /// Changes how the diff is drawn; see [`DiffPresentation`]. An explicit
+    /// layout switches the mode as [`Self::set_mode`] does.
+    pub fn set_presentation(&mut self, presentation: DiffPresentation) {
+        if presentation == self.presentation {
+            return;
+        }
+        let columns_moved = (presentation.numbers, presentation.markers)
+            != (self.presentation.numbers, self.presentation.markers);
+        self.presentation = presentation;
+        match presentation.layout {
+            DiffLayout::Unified => self.set_mode(Mode::Unified),
+            DiffLayout::Split => self.set_mode(Mode::Split),
+            DiffLayout::Auto { .. } => {}
+        }
+        if columns_moved && self.style.wrap {
+            // Wrapped rows were measured for the old text width.
+            self.painted.clear();
+        }
+        self.revision += 1;
+    }
+
+    /// Local color overrides over the theme's.
+    pub fn set_appearance(&mut self, appearance: DiffAppearance) {
+        if appearance != self.appearance {
+            self.appearance = appearance;
+            self.revision += 1;
+        }
+    }
+
     /// The view's size in points.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         if self.viewport != (width, height) {
@@ -510,8 +403,8 @@ impl DiffViewState {
     /// with `store`'s grammars. Files whose language has no grammar (or
     /// whose grammar is still downloading) stay plain until it arrives.
     pub fn enable_syntax(&mut self, store: GrammarStore) {
-        self.syntax = Some(HighlightWorker::new(store));
-        self.request_highlights();
+        self.syntax.enable(store);
+        self.syntax.request(&self.doc, self.doc_generation);
     }
 
     pub fn set_selection(&mut self, selection: Option<Selection>, side: Side) {
@@ -807,7 +700,12 @@ impl DiffViewState {
     /// The side a press at view-local `x` selects.
     fn side_at(&self, x: f32) -> Side {
         let m = self.metrics();
-        let columns = Columns::new(self.projection.mode, self.viewport.0, &m);
+        let columns = Columns::new(
+            self.projection.mode,
+            self.viewport.0,
+            &m,
+            &self.presentation,
+        );
         match self.projection.mode {
             Mode::Unified => Side::New,
             Mode::Split if x < columns.of(Side::New).gutter_x => Side::Old,
@@ -964,7 +862,9 @@ impl DiffViewState {
         scale: f32,
         now_ms: u64,
     ) {
-        self.poll_highlights();
+        if self.syntax.poll(self.doc_generation) {
+            self.revision += 1;
+        }
         let scrolled = self.autoscroll(now_ms);
         self.build_frame(text, layouts, scale);
         // Rows moved under the held pointer: its selection end follows.
@@ -979,7 +879,12 @@ impl DiffViewState {
             self.measure_font(text, layouts, scale);
         }
         let m = self.metrics();
-        let columns = Columns::new(self.projection.mode, self.viewport.0, &m);
+        let columns = Columns::new(
+            self.projection.mode,
+            self.viewport.0,
+            &m,
+            &self.presentation,
+        );
         if self.style.wrap {
             self.measure_window(text, layouts, scale, &columns);
         }
@@ -1031,6 +936,8 @@ impl DiffViewState {
                 height: rows_table.height_of(RowKey(key)).unwrap_or(m.line_h),
                 paint: paint.clone(),
                 selected,
+                search: Default::default(),
+                focused: false,
             });
             kept.insert(key, paint);
         }
@@ -1042,6 +949,8 @@ impl DiffViewState {
             viewport: self.viewport,
             metrics: m,
             columns,
+            presentation: self.presentation,
+            appearance: self.appearance,
             wrap: self.style.wrap,
             rows,
             content_w: self.content_w,
@@ -1092,7 +1001,7 @@ impl DiffViewState {
         let file = self.projection.file[row as usize];
         (
             self.doc_generation,
-            self.highlight_gen.get(file as usize),
+            self.syntax.file_generation(file),
             scale.to_bits(),
             self.style.font_size.to_bits(),
             self.style.line_height.to_bits(),
@@ -1161,10 +1070,10 @@ impl DiffViewState {
         let meta = &doc.files().meta[file as usize];
         let mut paint = RowPaint {
             stamp,
-            kind,
+            kind: PreparedKind::Diff(kind),
             file,
             sides: [None, None],
-            numbers: [0, 0],
+            source_lines: [None, None],
             title: Arc::from(""),
             gap: None,
             status: meta.status,
@@ -1200,7 +1109,7 @@ impl DiffViewState {
                     let Some(index) = p.line(row, side) else {
                         continue;
                     };
-                    paint.numbers[side as usize] = line_number(doc, p, row, side, index);
+                    paint.source_lines[side as usize] = Some(source_line(doc, p, row, side, index));
                     if p.mode == Mode::Unified && kind == RowKind::Context && side == Side::Old {
                         // Unified context shows the new side's text.
                         continue;
@@ -1208,7 +1117,7 @@ impl DiffViewState {
                     let store = doc.text(file, side);
                     let line = store.display_line(index).unwrap_or("");
                     let range = store.display_range(index).unwrap_or(0..0);
-                    let (spans, tones) = self.syntax_spans(file, side, range);
+                    let (spans, tones) = self.syntax.spans(file, side, range);
                     let params = TextParams::new(line, self.text_style())
                         .spans(spans)
                         .scale_factor(scale)
@@ -1220,6 +1129,7 @@ impl DiffViewState {
                         layout,
                         tones,
                         words: words[side as usize].clone(),
+                        detail: prepared::LineDetail::Complete,
                     });
                 }
             }
@@ -1249,53 +1159,6 @@ impl DiffViewState {
                 .collect()
         };
         [bytes(d.old), bytes(d.new)]
-    }
-
-    /// Layout spans splitting `range` of a store at highlight boundaries,
-    /// with each span's kind.
-    fn syntax_spans(
-        &self,
-        file: u32,
-        side: Side,
-        range: Range<usize>,
-    ) -> (Vec<TextSpan>, Arc<[HighlightKind]>) {
-        let Some(spans) = self
-            .highlights
-            .get(file as usize)
-            .and_then(|h| h[side as usize].as_ref())
-        else {
-            return (Vec::new(), Arc::from([]));
-        };
-        let mut out = Vec::new();
-        let mut tones = Vec::new();
-        let base = range.start;
-        let mut push = |from: usize, to: usize, kind: HighlightKind| {
-            if from < to {
-                out.push(TextSpan {
-                    range: from - base..to - base,
-                    weight: None,
-                    style: None,
-                    kind: None,
-                });
-                tones.push(kind);
-            }
-        };
-        let mut at = range.start;
-        let first = spans.partition_point(|s| s.range().end <= range.start);
-        for span in &spans[first..] {
-            let r = span.range();
-            if r.start >= range.end {
-                break;
-            }
-            let (from, to) = (r.start.max(range.start), r.end.min(range.end));
-            push(at, from, HighlightKind::Normal);
-            push(from, to, span.kind);
-            at = to;
-        }
-        if at > range.start {
-            push(at, range.end, HighlightKind::Normal);
-        }
-        (out, tones.into())
     }
 
     // ---- Rows ----------------------------------------------------------
@@ -1336,63 +1199,6 @@ impl DiffViewState {
         self.list = list;
         self.revision += 1;
     }
-
-    // ---- Syntax --------------------------------------------------------
-
-    fn reset_highlights(&mut self) {
-        let files = self.doc.file_count() as usize;
-        self.highlights = vec![[None, None]; files];
-        self.highlight_rev = vec![[None, None]; files];
-        self.highlight_gen = vec![0; files];
-    }
-
-    fn request_highlights(&self) {
-        let Some(worker) = &self.syntax else {
-            return;
-        };
-        for file in 0..self.doc.file_count() {
-            let Some(language) = LanguageId::from_path(self.doc.path(file)) else {
-                continue;
-            };
-            for side in [Side::Old, Side::New] {
-                let source = self.doc.text(file, side).shared().clone();
-                if !source.is_empty() {
-                    let slot = u64::from(file) * 2 + side as u64;
-                    worker.request(slot, self.doc_generation, language.clone(), source);
-                }
-            }
-        }
-    }
-
-    fn poll_highlights(&mut self) {
-        let Some(worker) = &self.syntax else {
-            return;
-        };
-        let mut results = Vec::new();
-        while let Ok(Some(done)) = worker.try_recv() {
-            results.push(done);
-        }
-        for done in results {
-            self.take_highlight(done);
-        }
-    }
-
-    /// Keeps a result for the current document unless the file side holds
-    /// the same or a later revision; results for earlier documents are
-    /// dropped.
-    fn take_highlight(&mut self, done: Highlighted) {
-        let (file, side) = ((done.slot / 2) as usize, (done.slot % 2) as usize);
-        if done.generation != self.doc_generation || file >= self.highlights.len() {
-            return;
-        }
-        if self.highlight_rev[file][side].is_some_and(|held| held >= done.revision) {
-            return;
-        }
-        self.highlight_rev[file][side] = Some(done.revision);
-        self.highlights[file][side] = Some(done.spans.into());
-        self.highlight_gen[file] += 1;
-        self.revision += 1;
-    }
 }
 
 /// Sizes for a font of `font_size` points whose digits are `char_w` wide.
@@ -1413,15 +1219,6 @@ fn metrics_for(font_size: f32, line_height: f32, char_w: f32, doc: &DiffDocument
         number_w: (digits * char_w + char_w * 2.0).ceil(),
         sign_w: (char_w * 2.0).ceil(),
         text_pad: (char_w * 0.5).ceil(),
-    }
-}
-
-/// Height of a row of `kind` before its text is measured.
-fn row_height(kind: RowKind, m: &Metrics) -> f32 {
-    match kind {
-        RowKind::FileHeader => (m.line_h * 2.0).round(),
-        RowKind::HunkHeader | RowKind::Gap => (m.line_h * 1.4).round(),
-        _ => m.line_h,
     }
 }
 
@@ -1447,11 +1244,11 @@ fn hunk_title(doc: &DiffDocument, hunk: u32) -> String {
     )
 }
 
-/// One-based line number of store line `index` shown on `row`.
-fn line_number(doc: &DiffDocument, p: &Projection, row: u32, side: Side, index: u32) -> u32 {
+/// Zero-based source line of store line `index` shown on `row`.
+fn source_line(doc: &DiffDocument, p: &Projection, row: u32, side: Side, index: u32) -> u32 {
     let file = p.file[row as usize];
     if !doc.files().partial[file as usize] {
-        return index + 1;
+        return index;
     }
     let hunk = p.hunk[row as usize];
     let (h, b) = (doc.hunks(), doc.blocks());
@@ -1463,10 +1260,10 @@ fn line_number(doc: &DiffDocument, p: &Projection, row: u32, side: Side, index: 
         };
         if (store..store + len).contains(&index) {
             debug_assert!(b.kind[bi] == BlockKind::Context || len > 0);
-            return line + index - store;
+            return (line + index - store).saturating_sub(1);
         }
     }
-    index + 1
+    index
 }
 
 const SIDE_BIT: u64 = 1 << 63;
@@ -1498,14 +1295,6 @@ fn floor_boundary(text: &str, byte: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const PATCH: &str = "diff --git a/a.rs b/a.rs
---- a/a.rs
-+++ b/a.rs
-@@ -1 +1 @@
--fn a() {}
-+fn b() {}
-";
 
     // Catches rows shaped and wrapped before a font change being kept: a
     // wrapped diff must lay out as a fresh view does in the new fonts.
@@ -1561,42 +1350,5 @@ mod tests {
         let expected = layout(&mut open(), &mut text, &mut layouts);
         assert_ne!(before, expected, "the fonts lay the rows out differently");
         assert_eq!(after, expected);
-    }
-
-    // Catches progressive highlights being dropped or stale ones winning:
-    // later revisions for the shown document recolor it, while earlier
-    // revisions and results for a replaced document do not.
-    #[test]
-    fn highlights_replace_only_when_newer_for_the_shown_document() {
-        let doc = || quark_diff::parse_unified(PATCH).unwrap();
-        let mut state = DiffViewState::new("test.diff", FocusId::new(1), doc());
-        state.set_document(doc());
-        let slot = Side::New as u64;
-        let mut held = Vec::new();
-        // (document generation, revision, highlighted length)
-        for (generation, revision, length) in
-            [(1, 0, 2), (1, 1, 5), (1, 0, 1), (0, 2, 9), (1, 1, 7)]
-        {
-            state.take_highlight(Highlighted {
-                slot,
-                generation,
-                revision,
-                source: Arc::from("fn b() {}\n"),
-                spans: vec![HighlightSpan {
-                    offset: 0,
-                    length,
-                    kind: HighlightKind::Keyword,
-                }],
-                pending: false,
-                unresolved: Vec::new(),
-            });
-            let (spans, _) = state.syntax_spans(0, Side::New, 0..9);
-            held.push(spans.first().map(|span| span.range.clone()));
-        }
-
-        assert_eq!(
-            held,
-            [Some(0..2), Some(0..5), Some(0..5), Some(0..5), Some(0..5)]
-        );
     }
 }

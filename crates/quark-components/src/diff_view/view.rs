@@ -25,10 +25,8 @@ use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
 use quark_ui::theme::{Color, Theme};
 
-use super::{
-    AUTOSCROLL_FRAME_MS, DiffEvent, DiffKey, DiffViewState, FrameRow, Metrics, REVEAL_STEP,
-    ViewFrame,
-};
+use super::prepared::{FrameRow, LinePaint, Metrics, ViewFrame};
+use super::{AUTOSCROLL_FRAME_MS, DiffEvent, DiffKey, DiffViewState, REVEAL_STEP};
 use crate::tree::CollectionEnv;
 
 const KEYS: &[(&str, DiffKey)] = &[
@@ -260,15 +258,16 @@ fn gutter_cell(
     width: f32,
     colors: DiffColors,
 ) -> AnyElement {
-    let (height, kind) = (row.height, row.paint.kind);
-    if !kind.is_line() {
+    let height = row.height;
+    let Some(kind) = row.paint.kind.diff().filter(|k| k.is_line()) else {
         return view! { <div w={width} h={height} class="shrink-0" /> };
-    }
+    };
     let mode = frame.columns.mode;
+    let all = row.paint.numbers();
     let numbers = match mode {
-        Mode::Unified => row.paint.numbers,
-        Mode::Split if side == Side::Old => [row.paint.numbers[0], 0],
-        Mode::Split => [0, row.paint.numbers[1]],
+        Mode::Unified => all,
+        Mode::Split if side == Side::Old => [all[0], 0],
+        Mode::Split => [0, all[1]],
     };
     let shown = shown_side(mode, kind, side);
     if mode == Mode::Split && numbers[side as usize] == 0 {
@@ -373,12 +372,12 @@ fn text_cell(
     colors: DiffColors,
     env: CollectionEnv,
 ) -> AnyElement {
-    let (height, kind) = (row.height, row.paint.kind);
+    let height = row.height;
     let mode = frame.columns.mode;
-    let shown = shown_side(mode, kind, side);
-    if !kind.is_line() {
+    let Some(kind) = row.paint.kind.diff().filter(|k| k.is_line()) else {
         return view! { <div w={width} h={height} class="shrink-0" /> };
-    }
+    };
+    let shown = shown_side(mode, kind, side);
     if row.paint.sides[shown as usize].is_none() {
         return view! { <div w={width} h={height} class="shrink-0" bg={colors.filler} /> };
     }
@@ -406,7 +405,7 @@ fn text_cell(
                      accessibility_role={Role::ListItem}
                      aria-label={line.layout.text().to_string()}
                      aria-description={kind.description()}
-                     aria-valuetext={match (mode, paint.numbers) {
+                     aria-valuetext={match (mode, paint.numbers()) {
                          (Mode::Unified, [o, n]) if o != 0 && n != 0 => {
                              format!("old line {o}, new line {n}")
                          }
@@ -430,7 +429,7 @@ fn text_cell(
 fn paint_line(
     bounds: Bounds,
     scene: &mut Scene,
-    line: &super::LinePaint,
+    line: &LinePaint,
     side: Side,
     selected: Option<(usize, usize)>,
     pad: f32,
@@ -502,8 +501,9 @@ fn band(
     let build = move || {
         let (adds, dels) = paint.stats;
         let status = paint.status.name();
-        let gap = (paint.kind == RowKind::Gap).then(|| paint.gap.expect("gap row"));
-        let header = paint.kind == RowKind::FileHeader;
+        let kind = paint.kind.diff();
+        let gap = (kind == Some(RowKind::Gap)).then(|| paint.gap.expect("gap row"));
+        let header = kind == Some(RowKind::FileHeader);
         view! {
             <div w={width} h={height} class="flex-row items-center" gap={pad * 0.5} px={pad}
                  border_b={colors.border}
