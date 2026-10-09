@@ -31,8 +31,8 @@ use quark_text::{LayoutCache, TextParams, TextStyle, TextSystem};
 use quark_ui::virtual_list::{RowKey, VariableList};
 
 use super::prepared::{
-    Columns, FileFact, FrameRow, LineDetail, LinePaint, Metrics, PreparedKind, RowPaint, ViewFrame,
-    row_height,
+    Columns, FileFact, FrameRow, LineDetail, LinePaint, LineWindow, Metrics, PreparedKind,
+    RowPaint, ViewFrame, WordDetail, row_height,
 };
 use super::{DiffViewState, PrepareKey};
 
@@ -231,6 +231,12 @@ pub(crate) fn fact_title(fact: &FileFact) -> String {
         FileFact::NoNewlineAtEof(Side::New) => "No newline at end of the new file".to_owned(),
     }
 }
+
+/// With wrap on, lines longer than this wrap only a prefix of this many
+/// bytes (reported as [`LineDetail::Prefix`]): wrapping lays a line out in
+/// full, and a line of megabytes would wrap into a row of millions of
+/// points.
+pub(crate) const WRAP_LINE_BYTES: usize = 64 << 10;
 
 /// Bytes of `text` a line limited to `limit` bytes shows; see
 /// [`quark_diff::line_detail`].
@@ -571,11 +577,16 @@ impl DiffViewState {
             self.measure_window(text, layouts, scale, &columns);
         }
         let window = self.list.window(self.overscan()).range;
+        let grid = super::long_lines::GRID_COLUMNS as f32 * m.char_w;
         let key = PrepareKey {
             window: (window.start, window.end),
             scroll: self.list.scroll_offset().to_bits(),
             revision: self.revision,
             scale: scale.to_bits(),
+            hgrid: [0, 1].map(|slot| {
+                let scroll = self.long_lines.expected_scroll(slot, self.frame_id);
+                (scroll.unwrap_or_else(|| self.hscroll[slot].offset().0) / grid) as u32
+            }),
         };
         if self.prepared == Some(key) && self.frame.is_some() {
             return;
@@ -587,6 +598,7 @@ impl DiffViewState {
         let ordered = self.ordered_selection();
         let mut kept = HashMap::with_capacity(window.len());
         let mut rows = Vec::with_capacity(window.len());
+        let mut next_top: Option<f32> = None;
         for index in window {
             let r = self.refs[index];
             let key = self.ref_key(r);
@@ -600,26 +612,38 @@ impl DiffViewState {
                     continue;
                 };
                 let slot = column_slot(self.mode, side);
-                self.content_w[slot] = self.content_w[slot]
-                    .max((line.layout.size().0 + m.text_pad * 2.0 + m.char_w).ceil());
+                let width = line.window.map_or(line.layout.size().0, |w| w.width);
+                self.content_w[slot] =
+                    self.content_w[slot].max((width + m.text_pad * 2.0 + m.char_w).ceil());
             }
             let (selected, search) = match r {
                 RowRef::Line { seg, row } => {
                     let selected = [Side::Old, Side::New].map(|side| {
                         let line = paint.sides[side as usize].as_ref()?;
+                        // In line bytes, then in the bytes of a window's text.
+                        let start = line.window.map_or(0, |w| w.start);
                         let len = line.layout.text().len();
-                        self.row_selection(ordered, (seg, row), side, len)
+                        let (lo, hi) =
+                            self.row_selection(ordered, (seg, row), side, start + len)?;
+                        let (lo, hi) = (lo.max(start) - start, hi.saturating_sub(start));
+                        (lo < hi).then_some((lo, hi))
                     });
                     (selected, self.search_marks(seg as usize, row, &paint))
                 }
                 _ => Default::default(),
             };
             let rows_table = self.list.rows();
+            let height = rows_table.height_of(RowKey(key)).unwrap_or(m.line_h);
+            // Rows stack from the first row's top: offsets tens of millions
+            // of points down lose whole points to f32 rounding, and each
+            // row rounding on its own would overlap or gap its neighbors.
+            let top = *next_top.get_or_insert_with(|| rows_table.offset_of_index(index) - scroll);
+            next_top = Some(top + height);
             rows.push(FrameRow {
                 key,
                 index: index as u32,
-                top: rows_table.offset_of_index(index) - scroll,
-                height: rows_table.height_of(RowKey(key)).unwrap_or(m.line_h),
+                top,
+                height,
                 paint: paint.clone(),
                 selected,
                 search,
@@ -710,6 +734,26 @@ impl DiffViewState {
     /// move in or out of view.
     fn prioritize_syntax(&mut self, window: Range<usize>) {
         let refs = &self.refs[window];
+        // A long side still streaming colors the surroundings of its top
+        // line on screen first (headers and the other side's rows have
+        // none).
+        for side in [Side::Old, Side::New] {
+            let top = refs.iter().find_map(|r| match *r {
+                RowRef::Line { seg, row } => {
+                    let p = &self.segments[seg as usize].projection;
+                    Some((seg as usize, row, p.line(row, side)?))
+                }
+                _ => None,
+            });
+            if let Some((seg, row, index)) = top {
+                let segment = &self.segments[seg];
+                let file = segment.projection.file[row as usize];
+                let start = segment.doc.text(file, side).line_range(index);
+                if let (Some((bridge, file)), Some(start)) = (self.syntax_of(seg, file), start) {
+                    bridge.set_focus(file, side, start.start);
+                }
+            }
+        }
         let seg_file = |r: &RowRef| match *r {
             RowRef::Line { seg, row } => Some((
                 seg,
@@ -797,6 +841,24 @@ impl DiffViewState {
                     for side in [Side::Old, Side::New] {
                         columns.wrap_width(side, &m).to_bits().hash(&mut h);
                     }
+                } else if p.kind[row as usize].is_line() {
+                    for side in [Side::Old, Side::New] {
+                        let Some(index) = p.line(row, side) else {
+                            continue;
+                        };
+                        let store = segment.doc.text(file, side);
+                        let range = store.display_range(index).unwrap_or(0..0);
+                        if range.len() > super::long_lines::WINDOW_LINE_BYTES {
+                            let window = self.line_window(store, range, side, columns);
+                            window.map(|w| w.start).hash(&mut h);
+                        }
+                    }
+                }
+                if matches!(
+                    p.kind[row as usize],
+                    RowKind::Modified | RowKind::Removed | RowKind::Added
+                ) {
+                    self.long_lines.generation().hash(&mut h);
                 }
                 if p.kind[row as usize] == RowKind::FileHeader {
                     let unit = segment.unit(file);
@@ -979,7 +1041,7 @@ impl DiffViewState {
             }
             _ => {
                 let m = self.metrics();
-                let words = self.word_ranges(segment, row);
+                let (words, word_detail) = self.word_ranges(segment, row);
                 for side in [Side::Old, Side::New] {
                     let Some(index) = p.line(row, side) else {
                         continue;
@@ -991,11 +1053,22 @@ impl DiffViewState {
                     }
                     let store = doc.text(file, side);
                     let line = store.display_line(index).unwrap_or("");
-                    let detail = line_detail(line, self.limits.shaped_line_bytes);
-                    let shown = shown_len(line, self.limits.shaped_line_bytes);
-                    let line = &line[..shown];
+                    // Wrapping lays out a line in full, so a huge one wraps
+                    // only a prefix (and says so); without wrap a long line
+                    // shapes the window in view.
+                    let cap = if self.style.wrap {
+                        self.limits.shaped_line_bytes.min(WRAP_LINE_BYTES)
+                    } else {
+                        self.limits.shaped_line_bytes
+                    };
+                    let detail = line_detail(line, cap);
+                    let shown = shown_len(line, cap);
                     let range = store.display_range(index).unwrap_or(0..0);
-                    let range = range.start..range.start + shown;
+                    let window =
+                        self.line_window(store, range.start..range.start + shown, side, columns);
+                    let (from, to) = window.map_or((0, shown), |w| (w.start, w.end));
+                    let line = &line[from..to];
+                    let range = range.start + from..range.start + to;
                     let (spans, tones) = match self.syntax_of(seg, file) {
                         Some((syntax, file)) => syntax.spans(file, side, range),
                         None => (Vec::new(), Arc::from([])),
@@ -1007,12 +1080,17 @@ impl DiffViewState {
                     let Ok(layout) = layouts.layout(text, &params) else {
                         continue;
                     };
-                    let words = clip_ranges(&words[side as usize], shown);
+                    let words = match &window {
+                        Some(w) => super::long_lines::clip_to_window(&words[side as usize], w),
+                        None => clip_ranges(&words[side as usize], shown),
+                    };
                     paint.sides[side as usize] = Some(LinePaint {
                         layout,
                         tones,
                         words,
                         detail,
+                        word_detail,
+                        window,
                     });
                 }
             }
@@ -1020,11 +1098,12 @@ impl DiffViewState {
         paint
     }
 
-    /// Changed words of `row`'s lines, by side: the pair's inline diff,
-    /// shared by both unified rows that show it.
-    fn word_ranges(&self, segment: &Segment, row: u32) -> [Vec<Range<usize>>; 2] {
+    /// Changed words of `row`'s lines, by side, and how complete they are:
+    /// the pair's inline diff, shared by both unified rows that show it. A
+    /// long pair's comes from the word thread; none until it lands.
+    fn word_ranges(&self, segment: &Segment, row: u32) -> ([Vec<Range<usize>>; 2], WordDetail) {
         let Some(pair) = segment.projection.line_pair(row) else {
-            return Default::default();
+            return (Default::default(), WordDetail::Unpaired);
         };
         let options = InlineOptions {
             max_line_bytes: self
@@ -1033,11 +1112,86 @@ impl DiffViewState {
                 .min(self.limits.inline_line_bytes),
             ..self.inline_options
         };
+        let line = |side, i| {
+            let store = segment.doc.text(pair.file, side);
+            (store.shared(), store.display_range(i).unwrap_or(0..0))
+        };
+        let (a, b) = (line(Side::Old, pair.old), line(Side::New, pair.new));
+        let long = a.1.len() + b.1.len() > super::long_lines::SYNC_PAIR_BYTES;
+        if long && a.1.len().max(b.1.len()) <= options.max_line_bytes {
+            let wake = self.syntax_wake.clone();
+            return match self.long_lines.words(a, b, &options, wake) {
+                Some(words) => (words.0.clone(), WordDetail::Done(words.1)),
+                None => (Default::default(), WordDetail::Pending),
+            };
+        }
         let d = segment.inline_diff(pair, &options);
         let bytes = |v: &[Range<u32>]| -> Vec<Range<usize>> {
             v.iter().map(|r| r.start as usize..r.end as usize).collect()
         };
-        [bytes(&d.old), bytes(&d.new)]
+        ([bytes(&d.old), bytes(&d.new)], WordDetail::Done(d.detail))
+    }
+
+    /// Scrolls the column showing `side` sideways so byte `byte` of a long
+    /// line (store index `index` of `file`) is in view, unless it is. Short
+    /// lines, and wrapped ones, stay put.
+    pub(crate) fn reveal_byte(
+        &mut self,
+        seg: usize,
+        file: u32,
+        side: Side,
+        index: u32,
+        byte: usize,
+    ) {
+        if self.style.wrap {
+            return;
+        }
+        let store = self.segments[seg].doc.text(file, side);
+        let Some(range) = store.display_range(index) else {
+            return;
+        };
+        if range.len() <= super::long_lines::WINDOW_LINE_BYTES {
+            return;
+        }
+        let m = self.metrics();
+        let x = self.long_lines.x_of(store.shared(), range, byte, m.char_w);
+        let columns = Columns::new(self.mode, self.viewport.0, &m, &self.presentation);
+        let view_w = columns.of(side).text_w - m.text_pad * 2.0;
+        let handle = &self.hscroll[column_slot(self.mode, side)];
+        let (at, _) = handle.offset();
+        if x < at || x > at + view_w - m.char_w * 8.0 {
+            let to = (x - view_w / 3.0).max(0.0);
+            handle.set_offset(to, 0.0);
+            // The handle moves only as the next frame paints; windows built
+            // before then must already be the ones it will show.
+            self.long_lines
+                .expect_scroll(column_slot(self.mode, side), to, self.frame_id);
+            self.revision += 1;
+        }
+    }
+
+    /// The window of a long line (`line`, a range of `store`'s text) to
+    /// shape at its column's sideways scroll; `None` with wrap on or for a
+    /// line short enough to shape whole.
+    fn line_window(
+        &self,
+        store: &quark_diff::TextStore,
+        line: Range<usize>,
+        side: Side,
+        columns: &Columns,
+    ) -> Option<LineWindow> {
+        if self.style.wrap {
+            return None;
+        }
+        let m = self.metrics();
+        let slot = column_slot(self.mode, side);
+        let scroll = self
+            .long_lines
+            .expected_scroll(slot, self.frame_id)
+            .unwrap_or_else(|| self.hscroll[slot].offset().0);
+        let view_w = columns.of(side).text_w;
+        self.long_lines
+            .window(store.shared(), line, scroll, view_w, m.char_w)
     }
 }
 

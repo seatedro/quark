@@ -453,6 +453,7 @@ mod imp {
                     spans: Vec::new(),
                     pending: false,
                     unresolved: Vec::new(),
+                    part: None,
                 };
                 take(&mut slots, &mut version, result);
                 let done = slots[&key].done.as_ref().unwrap();

@@ -27,9 +27,13 @@ impl TextStore {
         if !text.is_empty() {
             starts.push(0);
         }
-        for (i, byte) in text.bytes().enumerate() {
-            if byte == b'\n' && i + 1 < text.len() {
-                starts.push(i as u32 + 1);
+        // `find` scans with core's word-at-a-time memchr, several times
+        // faster than a byte loop over a large text.
+        let mut at = 0;
+        while let Some(i) = text[at..].find('\n') {
+            at += i + 1;
+            if at < text.len() {
+                starts.push(at as u32);
             }
         }
         Self {
