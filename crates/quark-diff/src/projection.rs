@@ -5,6 +5,7 @@
 //! mode or the [`Expansion`] changes. Rows refer to lines by store index,
 //! so an app reads the text from the document.
 
+use crate::compare::{Comparison, LinePair, Step};
 use crate::model::{BlockKind, DiffDocument, Side, lines_before};
 
 /// No line on this side.
@@ -273,8 +274,41 @@ impl Projection {
         p
     }
 
+    /// Rows of `doc` with change blocks aligned by `comparison`, which
+    /// must have been computed for `doc`.
+    pub fn with_comparison(
+        doc: &DiffDocument,
+        mode: Mode,
+        expansion: &Expansion,
+        comparison: &Comparison,
+    ) -> Self {
+        let mut p = Self {
+            mode,
+            ..Self::default()
+        };
+        p.rebuild_with(doc, mode, expansion, comparison);
+        p
+    }
+
     pub fn len(&self) -> u32 {
         self.kind.len() as u32
+    }
+
+    /// The changed line pair a row shows or belongs to: a side-by-side
+    /// modified row, or a unified removed or added row with a partner.
+    pub fn line_pair(&self, row: u32) -> Option<LinePair> {
+        let r = row as usize;
+        let (old, new) = match *self.kind.get(r)? {
+            RowKind::Modified => (self.old[r], self.new[r]),
+            RowKind::Removed => (self.old[r], self.pair[r]),
+            RowKind::Added => (self.pair[r], self.new[r]),
+            _ => return None,
+        };
+        (old != NONE && new != NONE).then_some(LinePair {
+            file: self.file[r],
+            old,
+            new,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -328,8 +362,35 @@ impl Projection {
         (tag << 60) | (file << 38) | (index & 0x3F_FFFF_FFFF)
     }
 
-    /// Rebuilds the rows in place, reusing the columns' memory.
+    /// Rebuilds the rows in place, reusing the columns' memory. Changed
+    /// lines pair by position; see [`Self::rebuild_with`].
     pub fn rebuild(&mut self, doc: &DiffDocument, mode: Mode, expansion: &Expansion) {
+        self.rebuild_inner(doc, mode, expansion, None);
+    }
+
+    /// [`Self::rebuild`] with change blocks aligned by `comparison`, which
+    /// must have been computed for `doc`.
+    pub fn rebuild_with(
+        &mut self,
+        doc: &DiffDocument,
+        mode: Mode,
+        expansion: &Expansion,
+        comparison: &Comparison,
+    ) {
+        assert!(
+            comparison.fits(doc),
+            "comparison computed for another document"
+        );
+        self.rebuild_inner(doc, mode, expansion, Some(comparison));
+    }
+
+    fn rebuild_inner(
+        &mut self,
+        doc: &DiffDocument,
+        mode: Mode,
+        expansion: &Expansion,
+        comparison: Option<&Comparison>,
+    ) {
         self.mode = mode;
         for column in [
             &mut self.file,
@@ -372,6 +433,10 @@ impl Projection {
                     let bi = block as usize;
                     let (os, ns) = (b.old_store[bi], b.new_store[bi]);
                     let (ol, nl) = (b.old_len[bi], b.new_len[bi]);
+                    if let (BlockKind::Change, Some(c)) = (b.kind[bi], comparison) {
+                        self.push_steps(c.block(block), file, hunk, mode);
+                        continue;
+                    }
                     match (b.kind[bi], mode) {
                         (BlockKind::Context, _) => {
                             for k in 0..ol {
@@ -414,6 +479,49 @@ impl Projection {
             }
         }
         debug_assert_eq!(self.verify_integrity(doc), Ok(()));
+    }
+
+    /// Rows of one aligned change block. Unified rows list each run's
+    /// removed lines, then its added lines; lines equal under the
+    /// whitespace policy split runs and show as context.
+    fn push_steps(&mut self, steps: &[Step], file: u32, hunk: u32, mode: Mode) {
+        if mode == Mode::Split {
+            for &step in steps {
+                let (old, new) = step.lines();
+                let kind = match step {
+                    Step::Removed(_) => RowKind::Removed,
+                    Step::Added(_) => RowKind::Added,
+                    Step::Paired(..) => RowKind::Modified,
+                    Step::Equivalent(..) => RowKind::Context,
+                };
+                self.push(kind, file, hunk, old, new, NONE);
+            }
+            return;
+        }
+        let mut start = 0;
+        while start < steps.len() {
+            let end = steps[start..]
+                .iter()
+                .position(|s| matches!(s, Step::Equivalent(..)))
+                .map_or(steps.len(), |at| start + at);
+            let run = &steps[start..end];
+            for &step in run {
+                let (old, pair) = step.lines();
+                if old != NONE {
+                    self.push(RowKind::Removed, file, hunk, old, NONE, pair);
+                }
+            }
+            for &step in run {
+                let (pair, new) = step.lines();
+                if new != NONE {
+                    self.push(RowKind::Added, file, hunk, NONE, new, pair);
+                }
+            }
+            if let Some(&Step::Equivalent(old, new)) = steps.get(end) {
+                self.push(RowKind::Context, file, hunk, old, new, NONE);
+            }
+            start = end + 1;
+        }
     }
 
     fn push(&mut self, kind: RowKind, file: u32, hunk: u32, old: u32, new: u32, pair: u32) {

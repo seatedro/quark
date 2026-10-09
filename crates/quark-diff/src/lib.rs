@@ -11,11 +11,15 @@
 //!   tables; [`Projection`] turns it into display rows, unified or side by
 //!   side, with gaps of unchanged lines collapsed per an [`Expansion`] and
 //!   its [`ContextPolicy`].
+//! - [`Comparison`] aligns changed lines for display (similarity pairing,
+//!   whitespace policies) without touching the exact document;
+//!   [`paired_inline_diff`] finds changed words or graphemes of a pair.
 //! - [`DiffDocument::hydrate_file`] swaps a patch's fragments for checked
 //!   whole sources.
 //! - [`DiffLimits`] refuses input the model cannot represent and bounds
 //!   per-line detail; [`DiffDocument::facts`] reports metadata-only changes.
 
+mod compare;
 mod compute;
 mod inline;
 mod limits;
@@ -29,8 +33,15 @@ mod text;
 #[cfg(test)]
 mod tests;
 
+pub use compare::{
+    Comparison, ComparisonError, ComparisonOptions, LinePair, MAX_PAIRING_COMPARISONS,
+    PairingMode, SIMILARITY_SCAN_BYTES, WhitespaceMode,
+};
 pub use compute::{DEFAULT_CONTEXT, diff_texts};
-pub use inline::{InlineDiff, MAX_INLINE_LINE_BYTES, inline_diff};
+pub use inline::{
+    InlineDetail, InlineDiff, InlineMode, InlineOptions, MAX_INLINE_LINE_BYTES, MIN_KEPT_SHARE,
+    PairedInlineDiff, inline_diff, paired_inline_diff,
+};
 pub use limits::{
     DiffError, DiffLimits, LimitKind, LineDetail, MAX_REPRESENTABLE, diff_texts_checked,
     line_detail, parse_unified_checked,
