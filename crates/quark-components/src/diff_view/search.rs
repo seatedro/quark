@@ -300,6 +300,7 @@ impl DiffViewState {
         if let Some(index) = self.list_index_of_line(unit, hit.side, hit.index) {
             self.reveal_list_row(index);
         }
+        self.reveal_byte(seg, hit.file, hit.side, hit.index, hit.range.start as usize);
         let segment = &self.segments[seg];
         Some(SourcePoint {
             file: self.file_id(unit),
@@ -341,16 +342,20 @@ impl DiffViewState {
             } else {
                 continue;
             };
-            let len = paint.sides[slot as usize]
-                .as_ref()
-                .map_or(0, |l| l.layout.text().len());
+            // Line bytes the layout covers: all of a short line, the window
+            // of a long one.
+            let (start, len) = paint.sides[slot as usize].as_ref().map_or((0, 0), |l| {
+                (l.window.map_or(0, |w| w.start), l.layout.text().len())
+            });
             let key = (seg as u32, file, side, index);
             let first = hits.partition_point(|h| h.order() < key);
             for (i, hit) in hits[first..].iter().enumerate() {
                 if hit.order() != key {
                     break;
                 }
-                let range = hit.range.start as usize..(hit.range.end as usize).min(len);
+                let (from, to) = (hit.range.start as usize, hit.range.end as usize);
+                let range =
+                    from.clamp(start, start + len) - start..to.clamp(start, start + len) - start;
                 if range.start < range.end && !marks[slot as usize].iter().any(|m| m.range == range)
                 {
                     marks[slot as usize].push(SearchMark {

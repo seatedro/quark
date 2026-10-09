@@ -8,7 +8,8 @@
 //! [`CopyContent`] names each copy policy. Selection copies represent the
 //! rows the user sees: hidden lines, headers, metadata, annotations, and
 //! the preview's count row never contribute, lines join with `\n`, and a
-//! line limited to a prefix contributes only the bytes it shows. Exact
+//! line limited to a prefix (`DiffLimits::shaped_line_bytes`, lowered by
+//! the app) contributes only the bytes it shows. Exact
 //! copies of a whole file, a whole line, or the patch are separate
 //! policies that read the source.
 
@@ -345,10 +346,12 @@ impl DiffViewState {
                     .0
             };
             let tx = x - column.text_x - frame.metrics.text_pad + scroll;
+            // A long line's layout holds only its window.
+            let (start, window_x) = paint.window.map_or((0, 0.0), |w| (w.start, w.x));
             let byte = if x < column.text_x {
                 0
             } else {
-                paint.layout.hit(tx, y - row.top).get()
+                start + paint.layout.hit(tx - window_x, y - row.top).get()
             };
             return Some(SelectionPoint::new(key_of(seg, r, line_side, index), byte));
         }

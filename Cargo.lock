@@ -3047,6 +3047,7 @@ dependencies = [
  "glob",
  "proc-macro2",
  "proptest",
+ "quark-view-syntax",
  "ra-ap-rustc_lexer",
  "serde",
  "serde_json",
@@ -3075,6 +3076,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quark",
+ "quark-view-syntax",
  "quote",
  "syn 2.0.119",
  "trybuild",
@@ -3188,6 +3190,15 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "quark-view-syntax"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quark-view-syntax",
+ "syn 2.0.119",
 ]
 
 [[package]]
