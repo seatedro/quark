@@ -163,7 +163,8 @@ fn format_once(
         },
     };
     let mut views = Vec::new();
-    for (inv, tokens) in found.invocations.iter().zip(tokens) {
+    let starts: Vec<usize> = found.invocations.iter().map(|i| i.range.start).collect();
+    for (k, (inv, tokens)) in found.invocations.iter().zip(tokens).enumerate() {
         outcome.coverage.discovered += 1;
         if inv.skipped {
             outcome.coverage.skipped += 1;
@@ -183,7 +184,8 @@ fn format_once(
             ));
             continue;
         }
-        let suffix = closing_suffix(source, inv.body.end, options.tab_spaces);
+        let next = starts.get(k + 1).copied();
+        let suffix = closing_suffix(source, inv.body.end, next, options.tab_spaces);
         match printer::build_view(
             source,
             tokens,
@@ -220,9 +222,18 @@ fn format_once(
         },
         diagnostics: Default::default(),
     };
+    // The end of the previous body and the output column there, for a view
+    // that shares a line with the one before it.
+    let mut prev: Option<(usize, usize)> = None;
     for (inv, mut view) in views {
         printer::resolve(&mut view, &ctx);
-        let (indent, column) = line_position(source, inv.body.start, options.tab_spaces);
+        let (indent, mut column) = line_position(source, inv.body.start, options.tab_spaces);
+        if let Some((end, col)) = prev {
+            let between = &source[end..inv.body.start];
+            if !between.contains('\n') {
+                column = col + source::columns(between, options.tab_spaces);
+            }
+        }
         let lines = printer::print(&view, &ctx, indent, column);
         let text = doc::render(&lines, options.tab_spaces, options.hard_tabs, newline);
         let original = &source[inv.body.clone()];
@@ -236,6 +247,11 @@ fn format_once(
             continue;
         }
         outcome.coverage.formatted += 1;
+        let end_col = match text.rfind('\n') {
+            Some(i) => source::columns(&text[i + 1..], options.tab_spaces),
+            None => column + source::columns(&text, options.tab_spaces),
+        };
+        prev = Some((inv.body.end, end_col));
         if text != original {
             outcome.edits.push(TextEdit {
                 range: inv.body.clone(),
@@ -261,9 +277,11 @@ fn line_position(source: &str, offset: usize, tab_spaces: usize) -> (usize, usiz
     )
 }
 
-/// Width of the closing delimiter at `offset` and the rest of its line.
-fn closing_suffix(source: &str, offset: usize, tab_spaces: usize) -> usize {
-    let rest = &source[offset..];
+/// Width of the closing delimiter at `offset` and the rest of its line, up
+/// to the next view on that line, whose own width depends on this one.
+fn closing_suffix(source: &str, offset: usize, next: Option<usize>, tab_spaces: usize) -> usize {
+    let limit = next.map_or(source.len(), |n| n.max(offset));
+    let rest = &source[offset..limit];
     let end = rest.find('\n').unwrap_or(rest.len());
     source::columns(rest[..end].trim_end(), tab_spaces)
 }
