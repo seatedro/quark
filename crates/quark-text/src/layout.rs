@@ -1963,6 +1963,28 @@ mod tests {
         }
     }
 
+    // Regression: a built layout handed its lines' shaping back for reuse
+    // and left them without one, so the buffer the renderer paints from
+    // yielded no layout runs and every text drew nothing.
+    #[test]
+    fn built_layouts_still_yield_the_runs_painting_reads() {
+        let mut system = test_system();
+        for text in ["first build lends its shaping", "hello\nمرحبا بالعالم"] {
+            let params = TextParams::new(text, TextStyle::new(14.0));
+            let layout = system.layout(&params).expect("layout");
+            let runs: Vec<(bool, usize)> = layout
+                .buffer()
+                .layout_runs()
+                .map(|run| (run.rtl, run.glyphs.len()))
+                .collect();
+            assert_eq!(runs.len(), layout.line_count(), "{text:?}: {runs:?}");
+            assert!(runs.iter().all(|&(_, glyphs)| glyphs > 0), "{text:?}: {runs:?}");
+            if text.contains('\n') {
+                assert_eq!(runs.iter().map(|r| r.0).collect::<Vec<_>>(), [false, true]);
+            }
+        }
+    }
+
     #[test]
     fn layout_at_2x_scale_reports_same_logical_size() {
         let params = TextParams::new(LOREM, TextStyle::new(14.0)).wrap_width(Some(200.0));
