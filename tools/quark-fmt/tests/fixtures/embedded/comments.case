@@ -43,3 +43,13 @@ suffix: }
                     ),
                     size
                 )}
+=== a call rustfmt cannot fit keeps its lines' shape
+context: expr
+prefix: on:click={
+suffix: }
+--- input
+            on:click={foo(bar,
+                    baz(a_name_so_long_that_no_layout_of_this_call_can_fit_inside_the_width_at_all_not_even_on_its_own_line, qux))}
+--- expected
+            on:click={foo(bar,
+                    baz(a_name_so_long_that_no_layout_of_this_call_can_fit_inside_the_width_at_all_not_even_on_its_own_line, qux))}
