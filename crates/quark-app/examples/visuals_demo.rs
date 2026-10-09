@@ -2,6 +2,12 @@
 //! (and is still clicked where it is drawn), a frosted panel with uneven
 //! corners, path charts drawn on the GPU, and an animated image that plays
 //! on the frame clock. Click the card and the tile; Escape quits.
+//!
+//! Beside the charts, two equal-radius blurs over a centered
+//! impulse and a checker show the blur kernel on its own: the impulse
+//! spreads evenly in every direction, and the checker's light cells bleed
+//! further into the dark ones than an sRGB average would because the blur
+//! filters in linear light.
 
 use std::f32::consts::{FRAC_PI_4, TAU};
 
@@ -174,6 +180,21 @@ impl UiApp for Visuals {
                     <path_canvas(chart) class="w-[260] h-[110] overflow-clip" />
                     <path_canvas(shapes) class="w-[200] h-[110]" />
                     <animated_image(&self.spinner) size={(48.0, 48.0)} />
+                    <div aria-label="Blur impulse" class="relative w-24 h-24 bg-[colors.surface]">
+                        <div class="absolute top-[42] left-[42] w-3 h-3 bg-[colors.accent]" />
+                        <div class="absolute top-2 left-2 w-[80] h-[80] rounded-[12]" blur={10.0} />
+                    </div>
+                    <div aria-label="Blur checker" class="relative w-24 h-24 flex-col">
+                        for row in 0..6 {
+                            <div class="flex-row h-4">
+                                for col in 0..6 {
+                                    <div class="w-4 h-4"
+                                         bg={if (row + col) % 2 == 0 { colors.accent } else { colors.surface }} />
+                                }
+                            </div>
+                        }
+                        <div class="absolute top-2 left-2 w-[80] h-[80] rounded-[12]" blur={10.0} />
+                    </div>
                 </div>
             </div>
         }
@@ -202,7 +223,7 @@ fn main() -> Result<(), quark_app::RunError> {
         Visuals::new(),
         WindowOptions {
             title: "Quark visuals".into(),
-            size: (760.0, 360.0),
+            size: (880.0, 360.0),
             ..WindowOptions::default()
         },
     )
@@ -215,7 +236,7 @@ mod tests {
     use super::*;
 
     fn harness() -> UiTestHarness<Visuals> {
-        UiTestHarness::new(Visuals::new(), (760.0, 360.0), 2.0)
+        UiTestHarness::new(Visuals::new(), (880.0, 360.0), 2.0)
     }
 
     /// The tile's center and half side, in points.
