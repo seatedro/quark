@@ -61,7 +61,7 @@ profiling = "1.0"
 proptest = { version = "1", default-features = false, features = ["std"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 raw-window-handle = "0.6"
-resvg = { version = "0.45", default-features = false }
+resvg = { version = "0.45", default-features = false, features = ["text"] }
 serde = { version = "1.0", features = ["derive"] }
 subsecond = "0.7"
 taffy = "0.9.2"
