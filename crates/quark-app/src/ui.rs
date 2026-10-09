@@ -1084,7 +1084,15 @@ impl<U: UiApp> UiAdapter<U> {
         };
         if self.win.title_press.press(cx.elapsed(), at) {
             cx.title_double_click(window);
-        } else if let Err(error) = cx.start_window_drag(window) {
+        } else if window::DEFER_CHROME_DRAG {
+            self.win.title_press.hold(at);
+        } else {
+            Self::start_chrome_drag(window, cx);
+        }
+    }
+
+    fn start_chrome_drag(window: WindowHandle, cx: &mut EventContext) {
+        if let Err(error) = cx.start_window_drag(window) {
             tracing::debug!("no window drag from the title chrome: {error}");
         }
     }
@@ -1186,6 +1194,11 @@ impl<U: UiApp> UiAdapter<U> {
         match input {
             UiInput::PointerMove { x, y } => {
                 self.win.pointer = Some((x, y));
+                if self.win.title_press.moved((x, y))
+                    && let Some(window) = self.win_handle.or(cx.window_handle())
+                {
+                    Self::start_chrome_drag(window, cx);
+                }
                 let delivery = self.win.router.pointer_move(x, y);
                 self.deliver(delivery, cx);
                 self.update_hover(cx);
@@ -1198,6 +1211,7 @@ impl<U: UiApp> UiAdapter<U> {
             }
             UiInput::PointerDown(PointerButton::Primary) => self.pointer_pressed(cx),
             UiInput::PointerUp(PointerButton::Primary) => {
+                self.win.title_press.release();
                 let delivery = self.win.router.pointer_up();
                 self.deliver(delivery, cx);
                 // A release the app's hook did not finish the session on
@@ -2670,33 +2684,37 @@ mod tests {
             (window.window_drags(), window.title_double_clicks())
         };
 
-        ui.click((200.0, 20.0));
+        // Pressed and moved, as a drag is on every platform.
+        let drag = |ui: &mut UiTestHarness<TitleBarApp>, at: (f32, f32)| {
+            ui.pointer_down(at);
+            ui.pointer_move((at.0 + 30.0, at.1 + 10.0));
+            ui.pointer_up((at.0 + 30.0, at.1 + 10.0));
+            ui.advance(1_000);
+        };
+
+        drag(&mut ui, (200.0, 20.0));
         assert_eq!(counts(&mut ui), (1, 0), "blank chrome moves the window");
 
-        ui.advance(1_000);
         ui.click((40.0, 20.0));
-        assert_eq!(ui.app().saved, 1, "the button clicks");
+        drag(&mut ui, (40.0, 20.0));
+        assert_eq!(ui.app().saved, 2, "the button clicks");
         assert_eq!(
             counts(&mut ui),
             (1, 0),
             "the button does not move the window"
         );
 
-        ui.advance(1_000);
         ui.click((200.0, 20.0));
         ui.advance(100);
         ui.click((201.0, 20.0));
-        assert_eq!(
-            counts(&mut ui),
-            (2, 1),
-            "the second press is the title action"
-        );
+        assert_eq!(counts(&mut ui).1, 1, "the second press is the title action");
+        let drags = counts(&mut ui).0;
 
         ui.advance(1_000);
-        ui.click((200.0, 200.0));
+        drag(&mut ui, (200.0, 200.0));
         assert_eq!(
             counts(&mut ui),
-            (2, 1),
+            (drags, 1),
             "content below the chrome does nothing"
         );
     }

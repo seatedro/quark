@@ -94,7 +94,18 @@ pub(crate) struct WindowUiState {
 #[derive(Debug, Default)]
 pub(super) struct TitlePress {
     last: Option<(Duration, (f32, f32))>,
+    /// A press held on the chrome whose window move waits for the pointer
+    /// to move ([`DEFER_CHROME_DRAG`]).
+    held: Option<(f32, f32)>,
 }
+
+/// Whether a press on title chrome moves the window only once the pointer
+/// moves. X11 window managers grab the pointer for a move as soon as asked
+/// and, when the release beat the request there, keep moving until the
+/// next one, swallowing a double-click's second press; GTK waits for the
+/// drag threshold on Wayland and X11 alike. AppKit and Windows want the
+/// press itself.
+pub(super) const DEFER_CHROME_DRAG: bool = cfg!(target_os = "linux");
 
 impl TitlePress {
     /// The longest gap between a double-click's presses: the default on
@@ -118,6 +129,29 @@ impl TitlePress {
     /// A press elsewhere: the next press on the chrome is a first one.
     pub(super) fn reset(&mut self) {
         self.last = None;
+        self.held = None;
+    }
+
+    /// Wait for the pointer to move before moving the window.
+    pub(super) fn hold(&mut self, at: (f32, f32)) {
+        self.held = Some(at);
+    }
+
+    /// The pointer moved to `at`: whether a held press has now moved far
+    /// enough to be a window move.
+    pub(super) fn moved(&mut self, at: (f32, f32)) -> bool {
+        let far = self
+            .held
+            .is_some_and(|(x, y)| (x - at.0).abs() > Self::SLOP || (y - at.1).abs() > Self::SLOP);
+        if far {
+            self.held = None;
+        }
+        far
+    }
+
+    /// The button was released.
+    pub(super) fn release(&mut self) {
+        self.held = None;
     }
 }
 
