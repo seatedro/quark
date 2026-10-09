@@ -17,6 +17,10 @@ pub struct Div {
     transform: PaintTransform,
     bg_effect: Option<BackgroundEffect>,
     blur_radius: Option<f32>,
+    /// Fade lengths at the top, right, bottom, and left edges; zero is no
+    /// fade.
+    fades: [f32; 4],
+    material: Option<MaterialKind>,
     children: pool::ChildList,
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
@@ -76,6 +80,8 @@ pub fn div() -> Div {
         transform: PaintTransform::IDENTITY,
         bg_effect: None,
         blur_radius: None,
+        fades: [0.0; 4],
+        material: None,
         children: pool::ChildList::new(),
         on_click: None,
         on_click_handler: None,
@@ -613,6 +619,36 @@ impl Div {
         self
     }
 
+    /// Fade the children out over the last `length` points before `edge`,
+    /// revealing whatever lies behind the div (G6). The children render as
+    /// one group, so overlapping text and backgrounds fade once. The div
+    /// clips its children, hits included, to its bounds; the fade itself
+    /// changes no hit target or semantics. Fades on several edges multiply.
+    /// A non-finite or non-positive length removes the edge's fade.
+    pub fn fade_edge(mut self, edge: FadeEdge, length: f32) -> Self {
+        let length = if length.is_finite() {
+            length.max(0.0)
+        } else {
+            0.0
+        };
+        self.fades[fade_index(edge)] = length;
+        self
+    }
+
+    /// Ask the platform for material `kind` behind this div (G3): painting
+    /// it records a [`MaterialRegionRequest`] for the host to place a native
+    /// effect view there. The div still paints whatever it paints; keep its
+    /// background transparent where the material should show. Rotated or
+    /// scaled divs ask for nothing.
+    pub fn material(mut self, kind: MaterialKind) -> Self {
+        self.material = Some(kind);
+        self
+    }
+
+    fn fades(&self) -> bool {
+        self.fades.iter().any(|&length| length > 0.0)
+    }
+
     // -- Internal: input registration --
 
     /// Bind the hit entry to semantic node `node` and register its handlers.
@@ -689,6 +725,25 @@ impl Div {
     }
 
     // -- Internal: scrolling --
+
+    fn prepaint_children(
+        &mut self,
+        engine: &LayoutEngine,
+        cx: &mut ElementContext,
+        translate: (f32, f32),
+        scroll: (f32, f32),
+    ) {
+        let (dx, dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
+        if (dx, dy) != (0.0, 0.0) {
+            for child in self.children.iter_mut() {
+                child.prepaint_with_offset(engine, cx, dx, dy);
+            }
+        } else {
+            for child in self.children.iter_mut() {
+                child.prepaint(engine, cx);
+            }
+        }
+    }
 
     fn scrolls(&self) -> bool {
         self.on_scroll.is_some() || self.on_scroll_x.is_some() || self.scroll_handle.is_some()
@@ -857,11 +912,10 @@ impl Element for Div {
             cx.record_scroll_item(key, bounds);
         }
         let content = self.scroll_content(engine, *layout_id);
-        let scroll = match &self.scroll_handle {
+        let mut scroll = match &self.scroll_handle {
             Some(handle) => handle.begin_frame(bounds, content, self.scroll_axes, cx),
             None => (self.scroll_x, self.scroll_y),
         };
-        let (child_dx, child_dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
         let z = self.base_style.z_index;
         if z != 0 {
             cx.push_z_index(z);
@@ -906,6 +960,7 @@ impl Element for Div {
         }
 
         let clips = self.clips
+            || self.fades()
             || self.base_style.layout.overflow.x != taffy::Overflow::Visible
             || self.base_style.layout.overflow.y != taffy::Overflow::Visible;
         if clips {
@@ -915,19 +970,23 @@ impl Element for Div {
             cx.push_scroll_handle(handle);
         }
 
-        if (child_dx, child_dy) != (0.0, 0.0) {
-            for child in self.children.iter_mut() {
-                child.prepaint_with_offset(engine, cx, child_dx, child_dy);
-            }
-        } else {
-            for child in self.children.iter_mut() {
-                child.prepaint(engine, cx);
-            }
-        }
-
-        if let Some(handle) = &self.scroll_handle {
+        let mark = cx.prepaint_mark();
+        self.prepaint_children(engine, cx, translate, scroll);
+        if let Some(handle) = self.scroll_handle.clone() {
             cx.pop_scroll_handle();
-            handle.end_frame(cx);
+            if let Some(corrected) = handle.end_frame(self.scroll_axes, cx) {
+                // A jump to an item lands where this frame's layout put
+                // it, not where the children were just prepainted: do it
+                // again there, so the first frame showing the item shows
+                // it in place.
+                cx.rewind_prepaint(mark);
+                scroll = corrected;
+                handle.restart_items();
+                cx.push_scroll_handle(&handle);
+                self.prepaint_children(engine, cx, translate, scroll);
+                cx.pop_scroll_handle();
+                handle.end_frame(self.scroll_axes, cx);
+            }
         }
         let scrollbars = self.prepaint_scrollbars(bounds, content, scroll, cx);
         if let Some(group) = group {
@@ -1015,6 +1074,17 @@ impl Element for Div {
             cx.push_paint_transform(matrix);
         }
         self.record_geometry(bounds, cx);
+        if let Some(kind) = self.material {
+            let id = self
+                .semantic_id
+                .as_ref()
+                .map(UiNodeId::as_str)
+                .or(self.accessibility_id.as_deref())
+                .or(self.test_id.as_ref().map(TestId::as_str))
+                .or(self.semantic_key.as_ref().map(UiKey::as_str))
+                .map(quark::stable_hash);
+            cx.add_material_region(kind, bounds, r, id);
+        }
 
         // Shadows
         for s in &style.shadows {
@@ -1029,43 +1099,7 @@ impl Element for Div {
 
         // Background — effect quad takes priority over solid color.
         if let Some(effect) = self.bg_effect {
-            let (effect_type, params, color_a, color_b) = match effect {
-                BackgroundEffect::NoiseGradient {
-                    scale,
-                    color_a,
-                    color_b,
-                } => (EffectType::NoiseGradient, [scale, 0.0], color_a, color_b),
-                BackgroundEffect::LinearGradient {
-                    angle,
-                    color_a,
-                    color_b,
-                } => (EffectType::LinearGradient, [angle, 0.0], color_a, color_b),
-                BackgroundEffect::RadialGradient { color_a, color_b } => {
-                    (EffectType::RadialGradient, [0.0, 0.0], color_a, color_b)
-                }
-                BackgroundEffect::Shimmer {
-                    base,
-                    highlight,
-                    speed,
-                } => (EffectType::Shimmer, [speed, 0.0], base, highlight),
-                BackgroundEffect::Vignette { color, intensity } => (
-                    EffectType::Vignette,
-                    [intensity, 0.0],
-                    color,
-                    Color::TRANSPARENT,
-                ),
-                BackgroundEffect::ColorTint { color } => {
-                    (EffectType::ColorTint, [0.0, 0.0], color, Color::TRANSPARENT)
-                }
-            };
-            scene.effect_quad(EffectQuadPrimitive {
-                rect: bounds,
-                effect_type,
-                color_a,
-                color_b,
-                params,
-                corner_radius: r,
-            });
+            effect.paint(scene, bounds, radii);
         } else if let Some(bg) = background {
             scene.rounded_rect(RoundedRectPrimitive {
                 rect: bounds,
@@ -1078,15 +1112,27 @@ impl Element for Div {
         if let Some(border) = style.border_color
             && style.border_widths != [0.0; 4]
         {
-            scene.border(BorderPrimitive {
-                rect: bounds,
-                widths: style.border_widths,
-                corner_radii: radii,
-                color: border,
-            });
+            if style.border_style == quark::style::BorderStyle::Solid {
+                scene.border(BorderPrimitive {
+                    rect: bounds,
+                    widths: style.border_widths,
+                    corner_radii: radii,
+                    color: border,
+                });
+            } else {
+                let width = style.border_widths.iter().copied().fold(0.0, f32::max);
+                scene.path(quark::scene::PathPrimitive::border(
+                    bounds,
+                    width,
+                    radii,
+                    border,
+                    style.border_style,
+                ));
+            }
         }
 
         let should_clip = self.clips
+            || self.fades()
             || style.layout.overflow.x != taffy::Overflow::Visible
             || style.layout.overflow.y != taffy::Overflow::Visible;
         drop(style);
@@ -1299,6 +1345,13 @@ impl Element for Div {
             prepaint_state.scrollbars.register(index, cx);
         }
 
+        let mut masks = 0;
+        for (edge, &length) in FADE_EDGES.iter().zip(&self.fades) {
+            if length > 0.0 {
+                scene.push_mask(bounds, AlphaMask::fade_edge(bounds, *edge, length));
+                masks += 1;
+            }
+        }
         if (child_dx, child_dy) != (0.0, 0.0) {
             for child in self.children.iter_mut() {
                 child.paint_with_offset(engine, scene, cx, child_dx, child_dy);
@@ -1307,6 +1360,9 @@ impl Element for Div {
             for child in self.children.iter_mut() {
                 child.paint(engine, scene, cx);
             }
+        }
+        for _ in 0..masks {
+            scene.pop_isolate();
         }
 
         if semantic_parent.is_some() {
@@ -1410,6 +1466,23 @@ impl Div {
             self.element_handle,
             bounds,
         );
+    }
+}
+
+/// The edges of [`Div::fade_edge`], in the order of `Div::fades`.
+const FADE_EDGES: [FadeEdge; 4] = [
+    FadeEdge::Top,
+    FadeEdge::Right,
+    FadeEdge::Bottom,
+    FadeEdge::Left,
+];
+
+fn fade_index(edge: FadeEdge) -> usize {
+    match edge {
+        FadeEdge::Top => 0,
+        FadeEdge::Right => 1,
+        FadeEdge::Bottom => 2,
+        FadeEdge::Left => 3,
     }
 }
 

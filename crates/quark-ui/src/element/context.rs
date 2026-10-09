@@ -45,6 +45,9 @@ pub struct ElementContext<'a> {
     pub geometry: LayoutSnapshot,
     /// Drop targets added so far; becomes the frame's [`DropTargets`].
     pub drop_targets: DropTargets,
+    /// Native material regions painted so far; see
+    /// [`Self::add_material_region`].
+    pub material_regions: Vec<MaterialRegionRequest>,
     /// Inspector recording, style overrides, and phase timings.
     #[cfg(feature = "devtools")]
     pub devtools: crate::inspector::FrameProbe,
@@ -130,6 +133,7 @@ impl<'a> ElementContext<'a> {
                 geometry
             },
             drop_targets: DropTargets::default(),
+            material_regions: Vec::new(),
             #[cfg(feature = "devtools")]
             devtools: Default::default(),
             hovered: Vec::new(),
@@ -188,12 +192,18 @@ impl<'a> ElementContext<'a> {
         font_kind: FontKind,
         font_weight: FontWeight,
     ) -> f32 {
-        if text.is_empty() {
-            return 0.0;
-        }
         let style = TextStyle::new(font_size)
             .kind(font_kind)
             .weight(font_weight);
+        self.measure_text_width_styled(text, style)
+    }
+
+    /// [`Self::measure_text_width`] in a full `style`: tracking, family,
+    /// and weight measured exactly as text painted in it.
+    pub fn measure_text_width_styled(&mut self, text: &str, style: TextStyle) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
         self.layout_text_query(&TextQuery::new(text, style))
             .map_or(0.0, |layout| layout.size().0.ceil())
     }
@@ -284,6 +294,8 @@ impl<'a> ElementContext<'a> {
         frame.semantic.clear();
         frame.geometry.reset();
         frame.drop_targets.clear();
+        frame.material_regions.clear();
+        self.material_regions = frame.material_regions;
         self.hit_table = frame.hits;
         self.handlers = frame.handlers;
         self.semantic = frame.semantic;
@@ -700,6 +712,17 @@ impl<'a> ElementContext<'a> {
         self.volatile_reads += 1;
     }
 
+    /// `rect` (layout coordinates) in window coordinates within the current
+    /// clips, when no rotation or scale applies; `None` under one or when
+    /// the clips hide it.
+    pub(super) fn window_rect_if_untransformed(&self, rect: Rect) -> Option<Rect> {
+        let space = self.current_paint_space();
+        if !space.transform.is_identity() {
+            return None;
+        }
+        rect.intersection(space.window_clip)
+    }
+
     /// Push a geometry row clipped to `clip` (layout coordinates) within
     /// the current clips: how a replayed cache boundary republishes its
     /// rows under the current transform.
@@ -803,6 +826,28 @@ impl<'a> ElementContext<'a> {
         }
     }
 
+    /// Where this frame's prepaint output stands, for
+    /// [`Self::rewind_prepaint`].
+    pub(super) fn prepaint_mark(&self) -> PrepaintMark {
+        PrepaintMark {
+            hits: self.hit_table.len(),
+            local_hits: self.local_hit_ids.len(),
+            scroll_watches: self.scroll_watches.len(),
+            interaction: self.interaction.mark(),
+        }
+    }
+
+    /// Forget what prepaint registered since `mark` (hit rows, and the
+    /// recordings and groups of the elements that inserted them), so a
+    /// subtree can be prepainted again at another offset.
+    pub(super) fn rewind_prepaint(&mut self, mark: PrepaintMark) {
+        self.hit_table.truncate(mark.hits);
+        self.local_hit_ids.truncate(mark.local_hits);
+        self.local_hit_clips.truncate(mark.local_hits);
+        self.scroll_watches.truncate(mark.scroll_watches);
+        self.interaction.rewind(mark.interaction);
+    }
+
     /// First hit row of the innermost cache boundary recording now.
     pub(super) fn innermost_hit_recording(&self) -> Option<usize> {
         self.hit_recording_starts.last().copied()
@@ -855,8 +900,18 @@ impl<'a> ElementContext<'a> {
             semantic: std::mem::take(&mut self.semantic),
             geometry: std::mem::take(&mut self.geometry),
             drop_targets: std::mem::take(&mut self.drop_targets),
+            material_regions: std::mem::take(&mut self.material_regions),
         }
     }
+}
+
+/// See [`ElementContext::prepaint_mark`].
+#[derive(Clone, Copy)]
+pub(super) struct PrepaintMark {
+    hits: usize,
+    local_hits: usize,
+    scroll_watches: usize,
+    interaction: (usize, usize),
 }
 
 /// One level of the paint space stack.

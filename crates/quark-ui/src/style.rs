@@ -436,6 +436,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Draw the border dashed or dotted instead of solid (G9); the widths
+    /// and color still come from `border`/`border_w`.
+    fn border_style(mut self, style: quark::style::BorderStyle) -> Self {
+        self.element_style_mut().border_style = style;
+        self
+    }
+
     fn border_t(mut self, color: Color) -> Self {
         let s = self.element_style_mut();
         s.border_color = Some(color);

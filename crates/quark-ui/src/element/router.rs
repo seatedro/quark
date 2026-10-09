@@ -512,6 +512,8 @@ pub struct InputFrame {
     pub geometry: LayoutSnapshot,
     /// Where the frame takes drops.
     pub drop_targets: DropTargets,
+    /// Native material regions the frame asks for, in paint order.
+    pub material_regions: Vec<MaterialRegionRequest>,
 }
 
 /// The outcome of routing one event: the semantic node that handled it
@@ -523,6 +525,11 @@ pub struct Delivery {
     /// The event moved a [`ScrollHandle`] (or its scrollbar state) or a
     /// drag preview, so the window needs a repaint even without actions.
     pub redraw: bool,
+    /// A press no handler took landed on blank [`Div::window_drag_region`]
+    /// chrome (see [`InputRouter::window_drag_at`]): the host starts the
+    /// native window move now, while the press is current, unless
+    /// selectable text under the pointer takes the press.
+    pub window_drag: bool,
 }
 
 /// The drag holding the pointer. Frames come and go during a drag, so it
@@ -632,7 +639,10 @@ impl InputRouter {
             *focus = next;
         }
         let Some(target) = target else {
-            return Delivery::default();
+            return Delivery {
+                window_drag: self.frame.hits.window_drag_at(x, y),
+                ..Delivery::default()
+            };
         };
         let handlers = &self.frame.handlers;
         // The innermost node with a drag or click handler owns the press, so
@@ -661,13 +671,16 @@ impl InputRouter {
                 node: Some(node),
                 actions,
                 redraw: scroll_epoch() != epoch,
+                window_drag: false,
             };
         }
-        self.walk(target, UiEventKind::Click, |node| {
+        let mut delivery = self.walk(target, UiEventKind::Click, |node| {
             handlers
                 .click(node)
                 .map(|handler| handler.invoke(ClickEvent { x, y }))
-        })
+        });
+        delivery.window_drag = delivery.node.is_none() && self.frame.hits.window_drag_at(x, y);
+        delivery
     }
 
     /// The innermost node on the route at `(x, y)` with a middle click
@@ -712,6 +725,7 @@ impl InputRouter {
                 .into_iter()
                 .collect(),
             redraw: false,
+            window_drag: false,
         }
     }
 
@@ -728,6 +742,7 @@ impl InputRouter {
                     node: capture.node,
                     actions: capture.drag.on_move(x, y),
                     redraw: scroll_epoch() != epoch || capture.shows_preview(),
+                    window_drag: false,
                 }
             }
             None => Delivery::default(),
@@ -742,6 +757,7 @@ impl InputRouter {
                 node: capture.node,
                 actions: capture.drag.on_release().actions,
                 redraw: scroll_epoch() != epoch || capture.shows_preview(),
+                window_drag: false,
             },
             None => Delivery::default(),
         }
@@ -759,6 +775,7 @@ impl InputRouter {
                 node: capture.node,
                 actions: capture.drag.on_cancel(),
                 redraw: scroll_epoch() != epoch || capture.shows_preview(),
+                window_drag: false,
             },
             None => Delivery::default(),
         }
@@ -785,6 +802,7 @@ impl InputRouter {
             node: capture.node,
             actions: handoff.actions,
             redraw: scroll_epoch() != epoch || capture.shows_preview(),
+            window_drag: false,
         };
         let session =
             DragSession::handed_off(source, handoff.payload, capture.pointer, capture.drag);
@@ -887,6 +905,7 @@ impl InputRouter {
             node: Some(node),
             actions: vec![target.builder.build(lines)],
             redraw: false,
+            window_drag: false,
         }
     }
 
@@ -941,6 +960,7 @@ impl InputRouter {
                 node: Some(node),
                 actions,
                 redraw: scroll_epoch() != epoch,
+                window_drag: false,
             };
         }
         Delivery::default()
@@ -997,6 +1017,7 @@ impl InputRouter {
                 y: b.y + b.height / 2.0,
             }),
             redraw: false,
+            window_drag: false,
         }
     }
 
@@ -1083,6 +1104,7 @@ impl InputRouter {
                     node: Some(node),
                     actions,
                     redraw: false,
+                    window_drag: false,
                 };
             }
             if self.binding_stops(node, kind, phase) {
@@ -1955,7 +1977,7 @@ mod tests {
                     .child(div().w(40.0).h(40.0).flex_shrink_0())
                     .child(button("clipped tab", 40.0, 40.0).flex_shrink_0()),
             );
-        let router = routed(div().w(400.0).h(100.0).child(bar), 400.0, 100.0);
+        let mut router = routed(div().w(400.0).h(100.0).child(bar), 400.0, 100.0);
         let cases = [
             ("blank chrome", 360.0, 20.0, true),
             ("close button", 20.0, 20.0, false),
@@ -1967,7 +1989,9 @@ mod tests {
             ("below the bar", 360.0, 70.0, false),
         ];
         for (name, x, y, drags) in cases {
-            assert_eq!(router.window_drag_at(x, y), drags, "{name}");
+            let delivery = router.pointer_down(x, y, &mut None);
+            router.pointer_up();
+            assert_eq!(delivery.window_drag, drags, "{name}");
         }
     }
 }
