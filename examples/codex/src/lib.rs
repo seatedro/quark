@@ -10,6 +10,7 @@
 
 pub mod composer;
 pub mod data;
+pub mod diff;
 pub mod home;
 pub mod icons;
 pub mod menus;
@@ -231,6 +232,8 @@ pub enum Msg {
     SetTheme(ThemeChoice),
     SetToggle(&'static str),
     Terminal(quark_terminal::TerminalEvent),
+    /// The inline diff card, the Changes diff, and their controls.
+    Diff(diff::DiffMsg),
     Noop,
 }
 
@@ -264,6 +267,8 @@ pub struct Codex {
     /// The side panel fills the window, the thread becomes a tab.
     pub full_view: bool,
     pub scope: usize,
+    /// The agent's change, shared by the inline card and the Changes tab.
+    pub changes: diff::Changes,
     pub open_file: Option<&'static str>,
     pub palette: Option<palette::State>,
     pub thread_scroll: ScrollHandle,
@@ -308,6 +313,7 @@ impl Codex {
             tab: Tab::Changes,
             full_view: false,
             scope: 0,
+            changes: diff::Changes::cart(),
             open_file: None,
             palette: None,
             thread_scroll: ScrollHandle::new(),
@@ -329,6 +335,9 @@ impl Codex {
             run_started: None,
             options,
         };
+        if let Some(store) = grammar_store() {
+            app.changes.enable_syntax(store);
+        }
         if let Some(name) = app.options.scene.clone() {
             scenes::apply(&mut app, &name);
         }
@@ -369,7 +378,7 @@ impl Codex {
                         title,
                         status: Status::Running,
                         items: Vec::new(),
-                        pill: None,
+                        pill: false,
                     },
                 );
                 self.screen = Screen::Thread(id);
@@ -446,6 +455,21 @@ impl Codex {
             _ => None,
         }
     }
+}
+
+/// Grammar packs for the diff's syntax colors: `$QUARK_SYNTAX_PACKS`,
+/// else the workspace's `target/syntax-packs` when it holds packs for this
+/// target. Without packs, code shows in the plain code color.
+pub fn grammar_store() -> Option<quark_app::quark_ui::quark_syntax::GrammarStore> {
+    use quark_app::quark_ui::quark_syntax::{GrammarStore, StoreConfig, pack::TARGET};
+    let root = std::env::var_os("QUARK_SYNTAX_PACKS")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let root =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/syntax-packs");
+            root.join(TARGET).is_dir().then_some(root)
+        })?;
+    Some(GrammarStore::new(StoreConfig::new().local_packs(root)))
 }
 
 /// `app` with the Codex themes for its theme choice.
@@ -575,6 +599,8 @@ impl UiApp for Codex {
 
     fn init(&mut self, cx: &mut UiContext) {
         self.terminal.init(cx);
+        let waker = cx.window.waker().clone();
+        self.changes.set_syntax_wake(move || waker.wake());
         cx.set_focus(Some(COMPOSER_FOCUS));
     }
 
@@ -831,6 +857,7 @@ impl UiApp for Codex {
                 }
             }
             Msg::Terminal(event) => self.terminal.handle(event, cx),
+            Msg::Diff(msg) => diff::update(self, msg, cx),
             Msg::Noop => {}
         }
         cx.window.request_redraw();
@@ -854,6 +881,15 @@ impl UiApp for Codex {
             }
             "enter" if self.pending.is_some() && cx.focus() != Some(PALETTE_FOCUS) => {
                 self.update(Msg::Decide(true), cx);
+            }
+            "enter" if cx.focus() == Some(diff::FIND_FOCUS) => {
+                self.update(Msg::Diff(diff::DiffMsg::FindStep(!m.shift)), cx);
+            }
+            "escape" if cx.focus() == Some(diff::FIND_FOCUS) && self.menu.is_none() => {
+                self.update(Msg::Diff(diff::DiffMsg::Find(false)), cx);
+            }
+            "f" if cmd && self.side_panel && self.tab == Tab::Changes => {
+                self.update(Msg::Diff(diff::DiffMsg::Find(true)), cx);
             }
             "escape" if self.menu.is_some() || self.palette.is_some() => {
                 self.close_menus();
@@ -908,6 +944,8 @@ impl UiApp for Codex {
     fn edit_text(&mut self, target: FocusId, command: TextEditCommand) -> TextEditOutcome {
         if target == COMPOSER_FOCUS {
             self.composer.edit(command, self.now_ms)
+        } else if target == diff::FIND_FOCUS {
+            self.changes.edit_find(command, self.now_ms)
         } else if target == PALETTE_FOCUS
             && let Some(palette) = &mut self.palette
         {
@@ -919,6 +957,8 @@ impl UiApp for Codex {
 
     fn wake(&mut self, cx: &mut UiContext) {
         self.terminal.wake(cx);
+        // Syntax colors may have arrived; the next frame takes them.
+        cx.window.request_redraw();
     }
 }
 

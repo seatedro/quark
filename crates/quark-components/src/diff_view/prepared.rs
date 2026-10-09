@@ -233,6 +233,8 @@ pub struct RowPaint {
     /// File, hunk, or gap header text.
     pub title: Arc<str>,
     pub gap: Option<GapId>,
+    /// Gap rows: how many lines the gap hides.
+    pub hidden: u32,
     pub status: FileStatus,
     pub stats: (u32, u32),
     pub binary: bool,

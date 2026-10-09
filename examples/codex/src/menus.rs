@@ -11,6 +11,7 @@ use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Color;
 
+use crate::diff::DiffMsg;
 use crate::theme::{BODY, Pal, SMALL};
 use crate::widgets::*;
 use crate::{APPROVALS, Codex, EFFORTS, MODEL, Menu, Msg, SCOPES, Tab, composer, data, icons};
@@ -386,42 +387,59 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
             let r = anchor(vcx, "changes.options")?;
             let w = 220.0;
             let mut m = M::new(p, w, hi);
-            simple(
-                &mut m,
-                &[
-                    (Some(icons::REFRESH_CW), "Refresh", None, false, false),
-                    (Some(icons::WRAP), "Word wrap", None, false, false),
-                    (
-                        Some(icons::SPLIT_DIFF),
-                        "Switch to Auto diff",
-                        None,
-                        false,
-                        false,
-                    ),
-                    (
-                        Some(icons::LIST_FILTER),
-                        "Expand all diffs",
-                        None,
-                        false,
-                        false,
-                    ),
-                    (None, "", None, false, false),
-                    (Some(icons::DOC), "Load full files", None, true, false),
-                    (Some(icons::BROWSER), "Rich preview", None, false, false),
-                    (Some(icons::REVIEW), "Word diffs", None, true, false),
-                    (Some(icons::INFO), "Hide white space", None, false, false),
-                    (Some(icons::CUBE), "Hide imports", None, false, false),
-                ],
-                |_| Msg::CloseMenus,
-            );
+            let c = &app.changes;
+            let layout = if c.auto_layout() {
+                "Switch to split diff"
+            } else {
+                "Switch to Auto diff"
+            };
+            // Each entry and what it does; Refresh, Rich preview, and Hide
+            // imports have nothing to act on in the demo.
+            let entries = [
+                (Some(icons::REFRESH_CW), "Refresh", None, false, false),
+                (Some(icons::WRAP), "Word wrap", None, c.wraps(), false),
+                (Some(icons::SPLIT_DIFF), layout, None, false, false),
+                (
+                    Some(icons::LIST_FILTER),
+                    "Expand all diffs",
+                    None,
+                    false,
+                    false,
+                ),
+                (None, "", None, false, false),
+                (Some(icons::DOC), "Load full files", None, true, false),
+                (Some(icons::BROWSER), "Rich preview", None, false, false),
+                (
+                    Some(icons::REVIEW),
+                    "Word diffs",
+                    None,
+                    c.word_diffs(),
+                    false,
+                ),
+                (
+                    Some(icons::INFO),
+                    "Hide white space",
+                    None,
+                    c.hides_whitespace(),
+                    false,
+                ),
+                (Some(icons::CUBE), "Hide imports", None, false, false),
+            ];
+            simple(&mut m, &entries, |i| match i {
+                1 => Msg::Diff(DiffMsg::ToggleWrap),
+                2 => Msg::Diff(DiffMsg::ToggleAuto),
+                3 => Msg::Diff(DiffMsg::ExpandAll),
+                7 => Msg::Diff(DiffMsg::ToggleWordDiffs),
+                8 => Msg::Diff(DiffMsg::ToggleWhitespace),
+                _ => Msg::CloseMenus,
+            });
             m.item(
                 Item {
                     icon: Some(icons::COPY),
                     title: "Copy git apply command",
-                    dim: true,
                     ..Item::default()
                 },
-                Msg::CloseMenus,
+                Msg::Diff(DiffMsg::CopyPatch),
             );
             let h = m.h;
             m.at(place(r, w, h, Align::Left, win))

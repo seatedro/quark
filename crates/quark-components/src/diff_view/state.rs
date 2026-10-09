@@ -14,6 +14,7 @@
 //! Row keys, selection keys, and paint caches carry the unit, so they stay
 //! valid while other files change around them.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -21,8 +22,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use quark_diff::{
-    BlockKind, ContextPolicy, DiffDocument, Expansion, FileStatus, Mode, Projection, RowKind, Side,
-    inline_diff, line_detail,
+    BlockKind, Comparison, ComparisonOptions, ContextPolicy, DiffDocument, Expansion, FileStatus,
+    InlineOptions, LinePair, Mode, PairedInlineDiff, Projection, RowKind, Side, line_detail,
+    paired_inline_diff,
 };
 use quark_render::FontKind;
 use quark_text::{LayoutCache, TextParams, TextStyle, TextSystem};
@@ -43,7 +45,12 @@ const FACT_TAG: u64 = 8 << 60;
 const ANNOTATION_TAG: u64 = 9 << 60;
 const MORE_TAG: u64 = 10 << 60;
 
-/// One document of the view, with its own expansion and projection.
+/// Inline results kept per segment before the cache starts over, so
+/// scrolling a huge diff does not grow it without bound.
+const INLINE_CACHE_PAIRS: usize = 4_096;
+
+/// One document of the view, with its own expansion, comparison, and
+/// projection.
 #[derive(Debug)]
 pub(crate) struct Segment {
     pub doc: Arc<DiffDocument>,
@@ -55,10 +62,17 @@ pub(crate) struct Segment {
     /// The content revision anchors attach to.
     pub revision: u64,
     pub expansion: Expansion,
+    /// Which removed line sits beside which added one, and which changes
+    /// the whitespace policy hides; computed once per document and
+    /// options.
+    pub comparison: Comparison,
     pub projection: Projection,
     /// List index of each projection row, or [`NONE`] where a preview cut
     /// it.
     pub list_rows: Vec<u32>,
+    /// Changed ranges of each line pair shown, computed once for both
+    /// unified rows of the pair (and the split row) while preparing.
+    inline: RefCell<HashMap<LinePair, Rc<PairedInlineDiff>>>,
 }
 
 impl Segment {
@@ -68,17 +82,21 @@ impl Segment {
         generation: u64,
         mode: Mode,
         policy: ContextPolicy,
+        options: ComparisonOptions,
     ) -> Self {
         let expansion = Expansion::with_policy(&doc, policy);
-        let projection = Projection::new(&doc, mode, &expansion);
+        let comparison = Comparison::new(&doc, options);
+        let projection = Projection::with_comparison(&doc, mode, &expansion, &comparison);
         Self {
             doc,
             slot,
             generation,
             revision: 0,
             expansion,
+            comparison,
             projection,
             list_rows: Vec::new(),
+            inline: RefCell::default(),
         }
     }
 
@@ -88,7 +106,41 @@ impl Segment {
 
     /// Re-projects after an expansion or mode change.
     pub fn rebuild(&mut self, mode: Mode) {
-        self.projection.rebuild(&self.doc, mode, &self.expansion);
+        self.projection
+            .rebuild_with(&self.doc, mode, &self.expansion, &self.comparison);
+    }
+
+    /// Compares the document again under `options` and re-projects.
+    pub fn compare(&mut self, mode: Mode, options: ComparisonOptions) {
+        if self.comparison.options() != options {
+            self.comparison = Comparison::new(&self.doc, options);
+            self.inline.get_mut().clear();
+            self.rebuild(mode);
+        }
+    }
+
+    /// Forgets inline results, after the inline options changed.
+    pub fn clear_inline(&mut self) {
+        self.inline.get_mut().clear();
+    }
+
+    /// The changed ranges of `pair`, computed on first use.
+    pub fn inline_diff(&self, pair: LinePair, options: &InlineOptions) -> Rc<PairedInlineDiff> {
+        if let Some(hit) = self.inline.borrow().get(&pair) {
+            return hit.clone();
+        }
+        let line = |side, i| self.doc.text(pair.file, side).display_line(i).unwrap_or("");
+        let diff = Rc::new(paired_inline_diff(
+            line(Side::Old, pair.old),
+            line(Side::New, pair.new),
+            options,
+        ));
+        let mut cache = self.inline.borrow_mut();
+        if cache.len() >= INLINE_CACHE_PAIRS {
+            cache.clear();
+        }
+        cache.insert(pair, diff.clone());
+        diff
     }
 
     /// The row's line on `side` as `(unit, store index)`.
@@ -530,22 +582,7 @@ impl DiffViewState {
         }
         self.prepared = Some(key);
         self.frame_id += 1;
-        if self.files.is_static() {
-            let file_of = |r: &RowRef| match *r {
-                RowRef::Line { seg, row } => {
-                    Some(self.segments[seg as usize].projection.file[row as usize])
-                }
-                RowRef::Fact { file, .. } => Some(file),
-                _ => None,
-            };
-            let refs = &self.refs[window.clone()];
-            let first = refs.iter().find_map(file_of);
-            let last = refs.iter().rev().find_map(file_of);
-            if let (Some(first), Some(last)) = (first, last) {
-                self.syntax.set_visible_files(first..last + 1);
-            }
-        }
-
+        self.prioritize_syntax(window.clone());
         let scroll = self.list.scroll_offset();
         let ordered = self.ordered_selection();
         let mut kept = HashMap::with_capacity(window.len());
@@ -668,6 +705,37 @@ impl DiffViewState {
         })
     }
 
+    /// Tells the syntax workers which files are on screen, so theirs are
+    /// highlighted first. Does nothing for bridges whose files did not
+    /// move in or out of view.
+    fn prioritize_syntax(&mut self, window: Range<usize>) {
+        let refs = &self.refs[window];
+        let seg_file = |r: &RowRef| match *r {
+            RowRef::Line { seg, row } => Some((
+                seg,
+                self.segments[seg as usize].projection.file[row as usize],
+            )),
+            RowRef::Fact { seg, file, .. } => Some((seg, file)),
+            _ => None,
+        };
+        let (Some(first), Some(last)) = (
+            refs.iter().find_map(seg_file),
+            refs.iter().rev().find_map(seg_file),
+        ) else {
+            return;
+        };
+        if self.files.is_static() {
+            self.syntax.set_visible_files(first.1..last.1 + 1);
+            return;
+        }
+        for (seg, segment) in self.segments.iter().enumerate() {
+            if let Some(bridge) = self.slot_syntax.get_mut(segment.slot as usize) {
+                let shown = (first.0..=last.0).contains(&(seg as u32));
+                bridge.set_visible_files(0..u32::from(shown));
+            }
+        }
+    }
+
     /// Heights of rows entering the window, from their wrapped layouts.
     fn measure_window(
         &mut self,
@@ -721,8 +789,8 @@ impl DiffViewState {
                 let p = &segment.projection;
                 let file = p.file[row as usize];
                 (segment.generation, segment.slot).hash(&mut h);
-                if self.files.is_static() {
-                    self.syntax.file_generation(file).hash(&mut h);
+                if let Some((syntax, file)) = self.syntax_of(seg as usize, file) {
+                    syntax.file_generation(file).hash(&mut h);
                 }
                 if self.style.wrap {
                     let m = self.metrics();
@@ -797,6 +865,7 @@ impl DiffViewState {
             source_lines: [None, None],
             title: Arc::from(""),
             gap: None,
+            hidden: 0,
             status: FileStatus::Modified,
             stats: (0, 0),
             binary: false,
@@ -863,6 +932,7 @@ impl DiffViewState {
             source_lines: [None, None],
             title: Arc::from(""),
             gap: None,
+            hidden: 0,
             status: meta.status,
             stats: (
                 doc.files().additions[file as usize],
@@ -876,9 +946,9 @@ impl DiffViewState {
         match kind {
             RowKind::FileHeader => {
                 let unit = segment.unit(file);
-                if self.files.is_static() {
-                    paint.syntax = self.syntax.file_status(file);
-                }
+                paint.syntax = self
+                    .syntax_of(seg, file)
+                    .and_then(|(syntax, file)| syntax.file_status(file));
                 paint.collapsed = self.collapsed.contains(&unit);
                 paint.annotations = self.file_annotations(unit);
                 paint.title = match (&meta.old_path, &meta.new_path) {
@@ -889,6 +959,7 @@ impl DiffViewState {
             RowKind::HunkHeader => paint.title = hunk_title(doc, p.hunk[r]).into(),
             RowKind::Gap => {
                 let gap = p.gap(row).expect("gap row");
+                paint.hidden = gap.hidden;
                 paint.gap = Some(quark_diff::GapId {
                     file: segment.unit(file),
                     ..gap.id
@@ -925,10 +996,9 @@ impl DiffViewState {
                     let line = &line[..shown];
                     let range = store.display_range(index).unwrap_or(0..0);
                     let range = range.start..range.start + shown;
-                    let (spans, tones) = if self.files.is_static() {
-                        self.syntax.spans(file, side, range)
-                    } else {
-                        (Vec::new(), Arc::from([]))
+                    let (spans, tones) = match self.syntax_of(seg, file) {
+                        Some((syntax, file)) => syntax.spans(file, side, range),
+                        None => (Vec::new(), Arc::from([])),
                     };
                     let params = TextParams::new(line, self.text_style())
                         .spans(spans)
@@ -950,32 +1020,24 @@ impl DiffViewState {
         paint
     }
 
-    /// Changed words of `row`'s lines, by side.
+    /// Changed words of `row`'s lines, by side: the pair's inline diff,
+    /// shared by both unified rows that show it.
     fn word_ranges(&self, segment: &Segment, row: u32) -> [Vec<Range<usize>>; 2] {
-        let p = &segment.projection;
-        let r = row as usize;
-        let (old, new) = match p.kind[r] {
-            RowKind::Modified => (p.old[r], p.new[r]),
-            RowKind::Removed => (p.old[r], p.pair[r]),
-            RowKind::Added => (p.pair[r], p.new[r]),
-            _ => return Default::default(),
-        };
-        if old == quark_diff::NONE || new == quark_diff::NONE {
+        let Some(pair) = segment.projection.line_pair(row) else {
             return Default::default();
-        }
-        let file = p.file[r];
-        let line = |side, i| segment.doc.text(file, side).display_line(i).unwrap_or("");
-        let (a, b) = (line(Side::Old, old), line(Side::New, new));
-        if a.len().max(b.len()) > self.limits.inline_line_bytes {
-            return Default::default();
-        }
-        let d = inline_diff(a, b);
-        let bytes = |v: Vec<Range<u32>>| -> Vec<Range<usize>> {
-            v.into_iter()
-                .map(|r| r.start as usize..r.end as usize)
-                .collect()
         };
-        [bytes(d.old), bytes(d.new)]
+        let options = InlineOptions {
+            max_line_bytes: self
+                .inline_options
+                .max_line_bytes
+                .min(self.limits.inline_line_bytes),
+            ..self.inline_options
+        };
+        let d = segment.inline_diff(pair, &options);
+        let bytes = |v: &[Range<u32>]| -> Vec<Range<usize>> {
+            v.iter().map(|r| r.start as usize..r.end as usize).collect()
+        };
+        [bytes(&d.old), bytes(&d.new)]
     }
 }
 
@@ -1049,5 +1111,57 @@ mod tests {
         let expected = layout(&mut open(), &mut text, &mut layouts);
         assert_ne!(before, expected, "the fonts lay the rows out differently");
         assert_eq!(after, expected);
+    }
+
+    /// Each prepared line row as `old | new`, changed words in brackets.
+    fn split_rows(state: &DiffViewState) -> Vec<String> {
+        let frame = state.frame().unwrap();
+        let side = |row: &FrameRow, side: Side| {
+            let Some(line) = &row.paint.sides[side as usize] else {
+                return String::new();
+            };
+            let text = line.layout.text();
+            let mut out = String::new();
+            let mut at = 0;
+            for r in &line.words {
+                out.push_str(&text[at..r.start]);
+                out.push_str(&format!("[{}]", &text[r.clone()]));
+                at = r.end;
+            }
+            out.push_str(&text[at..]);
+            out
+        };
+        frame
+            .rows
+            .iter()
+            .filter(|row| row.paint.kind.is_line())
+            .map(|row| format!("{} | {}", side(row, Side::Old), side(row, Side::New)))
+            .collect()
+    }
+
+    // Catches the view pairing changed lines by position: a log line
+    // inserted above an edited return must not sit beside the old return,
+    // and the return's highlight must be its own edit.
+    #[test]
+    fn an_edited_line_pairs_with_its_similar_replacement() {
+        let old = "fn f() {\n    return a + b;\n}\n";
+        let new = "fn f() {\n    log(\"x\");\n    return a + b * 2;\n}\n";
+        let doc = quark_diff::diff_texts(Some("f.rs"), Some("f.rs"), Some(old), Some(new), 3);
+        let mut state = DiffViewState::new("test.diff", FocusId::new(1), doc);
+        state.set_mode(Mode::Split);
+        state.set_viewport(800.0, 400.0);
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        state.prepare(&mut text, &mut layouts, 1.0, 0);
+
+        assert_eq!(
+            split_rows(&state),
+            [
+                "fn f() { | fn f() {",
+                " |     log(\"x\");",
+                "    return a + b; |     return a + b[ * 2];",
+                "} | }",
+            ]
+        );
     }
 }

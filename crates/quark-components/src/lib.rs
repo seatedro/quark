@@ -52,7 +52,10 @@ pub use child::Child;
 pub use combobox::*;
 pub use context_menu::*;
 pub use diff_view::{
-    CopySide, DiffEvent, DiffKey, DiffOutcome, DiffStyle, DiffViewState, diff_view,
+    AnnotationId, CopyContent, CopySide, DiffAnchor, DiffAnnotation, DiffEvent, DiffKey,
+    DiffOutcome, DiffPreviewLimit, DiffSessionViewState, DiffStyle, DiffTarget, DiffViewState,
+    FindOptions, RevealAlign, SearchCoverage, SearchDirection, SearchSides, SearchSummary,
+    SourcePoint, diff_session_view, diff_session_view_with, diff_view, diff_view_with,
 };
 pub use disclosure::{DISCLOSURE_MS, DisclosurePhase, DisclosureState};
 pub use dock::{

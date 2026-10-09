@@ -9,10 +9,10 @@
 
 use std::ops::Range;
 
-use quark_diff::{FileStatus, RowKind, Side};
+use quark_diff::{FileStatus, GapId, RowKind, Side};
 use quark_ui::element::AnyElement;
 
-use super::prepared::AnnotationId;
+use super::prepared::{AnnotationId, Columns};
 
 /// A place in a built-in file header that a decorator can fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,6 +54,25 @@ pub struct AnnotationContext<'a> {
     pub width: f32,
 }
 
+/// A hunk header or collapsed gap row.
+#[derive(Debug, Clone, Copy)]
+pub struct SeparatorContext<'a> {
+    pub file: u32,
+    /// The gap the row folds, for [`super::DiffEvent::Expand`]; `None` for
+    /// a hunk header.
+    pub gap: Option<GapId>,
+    /// Lines the gap hides; zero for a hunk header.
+    pub hidden: u32,
+    /// The built-in row's text: the hidden-line count and the hunk header.
+    pub title: &'a str,
+    /// Where the gutters and text columns sit, so a fold bar can line up
+    /// with the code.
+    pub columns: Columns,
+    /// The row's size in points.
+    pub width: f32,
+    pub height: f32,
+}
+
 /// The line row holding the keyboard focus, whose gutter offers the
 /// decorator's utility (an Add comment button, say).
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +104,13 @@ pub trait DiffDecorator {
     /// A whole header under [`super::presentation::FileHeaders::Custom`];
     /// `None` falls back to the built-in one.
     fn header(&self, _cx: &HeaderContext) -> Option<AnyElement> {
+        None
+    }
+
+    /// A whole hunk header or gap row; `None` keeps the built-in one. A
+    /// gap's controls should emit [`super::DiffEvent::Expand`] for
+    /// [`SeparatorContext::gap`].
+    fn separator(&self, _cx: &SeparatorContext) -> Option<AnyElement> {
         None
     }
 
