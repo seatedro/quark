@@ -54,8 +54,12 @@ impl Default for TextMetrics {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RendererOptions {
     pub compositing: UiCompositing,
-    /// Coverage policy of `TextRun` and `RichTextRun` primitives; a
-    /// `StyledText` primitive names its own.
+    /// Coverage policy for the whole surface: `Perceptual` (the default)
+    /// honors each `StyledText` primitive's own rendering and backdrop;
+    /// `Linear` keeps every glyph's plain coverage, the appearance before
+    /// perceptual text, for apps that rely on it. `TextRun` and
+    /// `RichTextRun` primitives name no backdrop, so they draw with plain
+    /// coverage (or their layout's terminal correction) either way.
     pub text_rendering: TextRendering,
 }
 
@@ -2525,11 +2529,12 @@ fn transparent_alpha_mode(
 }
 
 /// How far, in pixels, a blur pass of `sigma` samples from the pixel it
-/// writes: the shader's `BLUR_TAPS` samples each side, spread so they reach
-/// three sigma.
+/// writes: up to the shader's `BLUR_TAPS` samples each side, spread so they
+/// reach three sigma.
 fn blur_reach(sigma: f32) -> f32 {
     const BLUR_TAPS: f32 = 12.0;
-    BLUR_TAPS * (3.0 * sigma / BLUR_TAPS).max(1.0)
+    let taps = BLUR_TAPS.min((3.0 * sigma).ceil());
+    taps * (3.0 * sigma / BLUR_TAPS).max(1.0)
 }
 
 /// The clear color of a window target showing `background`, premultiplied
@@ -4963,6 +4968,9 @@ mod mask_tests;
 #[cfg(test)]
 #[path = "pattern_tests.rs"]
 mod pattern_tests;
+#[cfg(test)]
+#[path = "perf_tests.rs"]
+mod perf_tests;
 #[cfg(test)]
 #[path = "svg_text_tests.rs"]
 mod svg_text_tests;

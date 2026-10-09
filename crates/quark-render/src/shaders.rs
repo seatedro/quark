@@ -1108,13 +1108,15 @@ fn fs_blur(input: VertexOutput) -> @location(0) vec4<f32> {
     // small sigma, spread apart for large. Each weight is the Gaussian at
     // the sample's actual distance, so spreading samples keeps the
     // kernel's width. `blur_reach` in the renderer must match.
+    // Small blurs reach three sigma in fewer taps.
+    let taps = min(BLUR_TAPS, i32(ceil(3.0 * sigma)));
     let step = max(1.0, 3.0 * sigma / f32(BLUR_TAPS));
     let texel = dir / tex_size * step;
     // The blur writes linear light, so an encoded source decodes first.
     let space = input.blur_params.w;
     var color = tap(input.uv, space);
     var total_weight = 1.0;
-    for (var k = 1; k <= BLUR_TAPS; k = k + 1) {
+    for (var k = 1; k <= taps; k = k + 1) {
         let d = f32(k) * step;
         let w = exp(-(d * d) / (2.0 * sigma * sigma));
         color += (tap(input.uv - texel * f32(k), space) + tap(input.uv + texel * f32(k), space)) * w;
