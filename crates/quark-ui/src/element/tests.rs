@@ -1583,3 +1583,91 @@ fn dashed_border_paints_a_patterned_stroke_along_the_box() {
     let b = strokes[0].bounds();
     assert_eq!((b.x, b.y, b.width, b.height), (0.0, 0.0, 100.0, 40.0));
 }
+
+// A faded div masks its children as one group; its own background stays
+// outside the mask.
+#[test]
+fn fade_edge_masks_the_children_but_not_the_div_itself() {
+    use quark::scene::Primitive;
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let red = Color::rgba(255, 0, 0, 255);
+    let blue = Color::rgba(0, 0, 255, 255);
+    let scene = paint_one(
+        &mut cx,
+        div()
+            .w(100.0)
+            .h(40.0)
+            .bg(red)
+            .fade_edge(FadeEdge::Right, 20.0)
+            .child(div().w(100.0).h(40.0).bg(blue)),
+    );
+
+    let fill = |color| {
+        scene
+            .primitives
+            .iter()
+            .position(|p| matches!(p, Primitive::RoundedRect(r) if r.color == color))
+    };
+    let start = scene
+        .primitives
+        .iter()
+        .position(|p| matches!(p, Primitive::IsolateStart(_)));
+    let end = scene
+        .primitives
+        .iter()
+        .position(|p| matches!(p, Primitive::IsolateEnd));
+    let (Some(red), Some(start), Some(blue), Some(end)) = (fill(red), start, fill(blue), end)
+    else {
+        panic!("missing primitives in {:?}", scene.primitives);
+    };
+    assert!(red < start && start < blue && blue < end);
+    let Primitive::IsolateStart(isolate) = &scene.primitives[start] else {
+        unreachable!()
+    };
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    assert_eq!(
+        isolate.mask,
+        Some(AlphaMask::fade_edge(bounds, FadeEdge::Right, 20.0))
+    );
+}
+
+// The fade clips: a child reaching past the faded div takes no click
+// where it is not painted.
+#[test]
+fn faded_div_clips_child_hits_to_its_bounds() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    cx.semantic = SemanticFrame::new(400.0, 100.0);
+    let mut root = div()
+        .w(400.0)
+        .h(100.0)
+        .child(
+            div()
+                .w(100.0)
+                .h(40.0)
+                .fade_edge(FadeEdge::Right, 20.0)
+                .child(
+                    div()
+                        .w(200.0)
+                        .h(40.0)
+                        .flex_shrink_0()
+                        .test_id("wide")
+                        .on_click(NoopAction),
+                ),
+        )
+        .into_any();
+    render_element(&mut root, &mut Scene::default(), &mut cx, 400.0, 100.0);
+    let mut router = InputRouter::default();
+    router.set_frame(cx.take_input_frame());
+
+    assert!(router.target_at(50.0, 20.0).is_some(), "inside the fade");
+    assert_eq!(router.target_at(150.0, 20.0), None, "past the div");
+}

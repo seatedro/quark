@@ -36,6 +36,7 @@ use crate::style::{ElementStyle, StyleOverride, Styled, apply_override};
 use crate::theme::Color;
 use quark_render::{BorderPrimitive, FontWeight, RoundedRectPrimitive, ShadowPrimitive};
 
+pub use quark::scene::{AlphaMask, FadeEdge};
 pub use quark::style::{
     BackgroundEffect, color_tint, linear_gradient, noise_gradient, radial_gradient, shimmer,
     vignette,

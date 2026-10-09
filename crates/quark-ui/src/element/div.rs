@@ -17,6 +17,9 @@ pub struct Div {
     transform: PaintTransform,
     bg_effect: Option<BackgroundEffect>,
     blur_radius: Option<f32>,
+    /// Fade lengths at the top, right, bottom, and left edges; zero is no
+    /// fade.
+    fades: [f32; 4],
     children: pool::ChildList,
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
@@ -76,6 +79,7 @@ pub fn div() -> Div {
         transform: PaintTransform::IDENTITY,
         bg_effect: None,
         blur_radius: None,
+        fades: [0.0; 4],
         children: pool::ChildList::new(),
         on_click: None,
         on_click_handler: None,
@@ -613,6 +617,26 @@ impl Div {
         self
     }
 
+    /// Fade the children out over the last `length` points before `edge`,
+    /// revealing whatever lies behind the div (G6). The children render as
+    /// one group, so overlapping text and backgrounds fade once. The div
+    /// clips its children, hits included, to its bounds; the fade itself
+    /// changes no hit target or semantics. Fades on several edges multiply.
+    /// A non-finite or non-positive length removes the edge's fade.
+    pub fn fade_edge(mut self, edge: FadeEdge, length: f32) -> Self {
+        let length = if length.is_finite() {
+            length.max(0.0)
+        } else {
+            0.0
+        };
+        self.fades[fade_index(edge)] = length;
+        self
+    }
+
+    fn fades(&self) -> bool {
+        self.fades.iter().any(|&length| length > 0.0)
+    }
+
     // -- Internal: input registration --
 
     /// Bind the hit entry to semantic node `node` and register its handlers.
@@ -924,6 +948,7 @@ impl Element for Div {
         }
 
         let clips = self.clips
+            || self.fades()
             || self.base_style.layout.overflow.x != taffy::Overflow::Visible
             || self.base_style.layout.overflow.y != taffy::Overflow::Visible;
         if clips {
@@ -1084,6 +1109,7 @@ impl Element for Div {
         }
 
         let should_clip = self.clips
+            || self.fades()
             || style.layout.overflow.x != taffy::Overflow::Visible
             || style.layout.overflow.y != taffy::Overflow::Visible;
         drop(style);
@@ -1296,6 +1322,13 @@ impl Element for Div {
             prepaint_state.scrollbars.register(index, cx);
         }
 
+        let mut masks = 0;
+        for (edge, &length) in FADE_EDGES.iter().zip(&self.fades) {
+            if length > 0.0 {
+                scene.push_mask(bounds, AlphaMask::fade_edge(bounds, *edge, length));
+                masks += 1;
+            }
+        }
         if (child_dx, child_dy) != (0.0, 0.0) {
             for child in self.children.iter_mut() {
                 child.paint_with_offset(engine, scene, cx, child_dx, child_dy);
@@ -1304,6 +1337,9 @@ impl Element for Div {
             for child in self.children.iter_mut() {
                 child.paint(engine, scene, cx);
             }
+        }
+        for _ in 0..masks {
+            scene.pop_isolate();
         }
 
         if semantic_parent.is_some() {
@@ -1407,6 +1443,23 @@ impl Div {
             self.element_handle,
             bounds,
         );
+    }
+}
+
+/// The edges of [`Div::fade_edge`], in the order of `Div::fades`.
+const FADE_EDGES: [FadeEdge; 4] = [
+    FadeEdge::Top,
+    FadeEdge::Right,
+    FadeEdge::Bottom,
+    FadeEdge::Left,
+];
+
+fn fade_index(edge: FadeEdge) -> usize {
+    match edge {
+        FadeEdge::Top => 0,
+        FadeEdge::Right => 1,
+        FadeEdge::Bottom => 2,
+        FadeEdge::Left => 3,
     }
 }
 
