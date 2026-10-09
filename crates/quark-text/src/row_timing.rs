@@ -113,10 +113,7 @@ fn report_row_layout_timing() {
     let fs = system.raster_font_system();
     let attrs = Attrs::new()
         .family(Family::Monospace)
-        .weight(Weight(crate::layout::weight_value(
-            style.font_kind,
-            style.font_weight,
-        )));
+        .weight(Weight(crate::layout::font_weight_value(style.font_weight)));
     let mut lines: Vec<BufferLine> = (0..ROWS * 2)
         .map(|_| {
             BufferLine::new(
