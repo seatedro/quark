@@ -14,13 +14,15 @@ categories = ["gui", "rendering"]
 quark.workspace = true
 quark-text.workspace = true
 bytemuck.workspace = true
-glyphon.workspace = true
+etagere.workspace = true
 image = { workspace = true, optional = true }
 # Path stroking and flattening. Already in every build through resvg's usvg,
 # so it adds no crates.
 kurbo = "0.11"
+lru.workspace = true
 pollster.workspace = true
 resvg.workspace = true
+rustc-hash.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
@@ -30,6 +32,13 @@ winit.workspace = true
 # some VMs). Windows always has DX12 or WARP, macOS always has Metal.
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = { workspace = true, features = ["gles"] }
+
+# DirectWrite glyph rasterization (text_engine::raster::directwrite), behind
+# text-raster-directwrite. Both crates are already in every Windows build
+# through wgpu's DX12 backend and quark-app.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Graphics_DirectWrite"] }
+windows-core = { version = "0.62", optional = true }
 
 [dev-dependencies]
 image.workspace = true
@@ -43,3 +52,6 @@ quark-ui = { workspace = true, features = ["test-alloc"] }
 # Enables the no-surface offscreen render path used by fixture renders, and
 # PNG output for it.
 headless-render = ["dep:image"]
+# The experimental DirectWrite rasterizer on Windows; swash stays the
+# default and the fallback.
+text-raster-directwrite = ["dep:windows", "dep:windows-core"]

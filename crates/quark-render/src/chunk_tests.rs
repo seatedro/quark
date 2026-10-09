@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use glyphon::MAX_DRAW_OFFSETS;
+use crate::text_engine::MAX_DRAW_OFFSETS;
 use quark::scene::SceneChunk;
 use quark_text::{TextParams, TextSpan, TextStyle};
 
@@ -543,7 +543,7 @@ fn assert_draws_prepared(
 // time, by fractions, back up, sideways, across a clip that cuts their
 // glyphs at the edges, with clips of their own that move with them, with
 // a fractional top crossing zero, after the atlas forgets its glyphs, at
-// several scales, and in more runs than glyphon has draw offsets.
+// several scales, and in more runs than the text engine has draw offsets.
 #[test]
 fn scrolled_text_draws_the_pixels_of_text_prepared_again() {
     let (w, h) = SIZE;
@@ -594,7 +594,7 @@ fn scrolled_text_draws_the_pixels_of_text_prepared_again() {
         }
     }
 
-    // A run per chunk, past the draw offsets glyphon has: the runs beyond
+    // A run per chunk, past the draw offsets the text engine has: the runs beyond
     // them share one offset that never moves.
     let runs = MAX_DRAW_OFFSETS + 60;
     let glyph = text
@@ -809,7 +809,7 @@ fn frame_cost(renderer: &mut Renderer, scene: &Scene, text: &mut TextSystem) -> 
     let micros = started.elapsed().as_micros() as u64;
     renderer.queue.submit(Some(encoder.finish()));
     let _ = renderer.device.poll(wgpu::PollType::wait_indefinitely());
-    renderer.atlas.trim();
+    renderer.atlas.end_frame();
     renderer.texture_pool.release(target);
     (micros, flattened, allocations)
 }

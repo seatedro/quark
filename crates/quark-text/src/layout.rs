@@ -355,7 +355,9 @@ pub struct LineInfo {
     pub rtl: bool,
 }
 
-/// Consecutive glyphs on one line sharing a span and direction.
+/// Consecutive glyphs on one visual row sharing a span and direction.
+/// A line has one row, except where wrapping between glyphs split a
+/// cluster over several rows (see [`TextLayout::lines`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlyphRun {
     pub line: usize,
@@ -363,6 +365,12 @@ pub struct GlyphRun {
     pub span: u32,
     pub rtl: bool,
     pub glyphs: Range<usize>,
+    /// The row's top, height, and baseline in physical pixels below the
+    /// layout origin, unrounded, as cosmic-text laid the row out: what the
+    /// renderer culls rows by and rounds baselines from.
+    pub phys_top: f32,
+    pub phys_height: f32,
+    pub phys_baseline: f32,
 }
 
 /// A layout's glyphs: one [`Glyph`] each, stored line by line in
@@ -372,9 +380,12 @@ pub struct GlyphRun {
 pub type GlyphColumns = [Glyph];
 
 /// One glyph of a [`TextLayout`]. Logical fields are in logical pixels;
-/// `phys_*` are physical pixels relative to the layout origin, already
-/// including the baseline. One record per glyph rather than a vector per
-/// field, so a new layout allocates its glyphs once.
+/// `phys_*` are physical pixels, unrounded. One record per glyph rather
+/// than a vector per field, so a new layout allocates its glyphs once.
+///
+/// Draw a glyph where [`TextLayout::physical_glyph`] puts it: the renderer
+/// truncates `phys_dy` and rounds the row's baseline separately, so adding
+/// them first moves glyphs on fractional baselines by a pixel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Glyph {
     pub x: f32,
@@ -390,8 +401,11 @@ pub struct Glyph {
     pub font_size: f32,
     pub font_weight: fontdb::Weight,
     pub flags: CacheKeyFlags,
-    pub phys_x: f32,
-    pub phys_y: f32,
+    /// Right of the shaped buffer's origin, which sits
+    /// [`TextLayout::buffer_x`] right of the layout origin.
+    pub phys_dx: f32,
+    /// Below the glyph's row baseline ([`GlyphRun::phys_baseline`]).
+    pub phys_dy: f32,
 }
 
 impl Glyph {
@@ -441,6 +455,10 @@ struct Run {
     rtl: bool,
     glyph_start: u32,
     glyph_end: u32,
+    /// Its row, in physical pixels; see [`GlyphRun`].
+    top: f32,
+    height: f32,
+    baseline: f32,
 }
 
 /// Lay `buffer` out again at its widest line when a line runs right to
@@ -772,15 +790,18 @@ impl TextLayout {
         let inv = 1.0 / scale;
         let line_paragraph = &mut scratch.line_paragraph;
         line_paragraph.clear();
-        let (glyph_count, run_count) = buffer
+        let (glyph_count, row_count, run_count) = buffer
             .layout_runs()
             .filter(|run| keep(run))
-            .fold((0, 0), |(g, r), run| (g + run.glyphs.len(), r + 1));
+            .fold((0, 0, 0), |(g, r, n), run| {
+                (g + run.glyphs.len(), r + 1, n + run_breaks(run.glyphs))
+            });
         // Room for a glyph per char lets a later text of as many chars,
         // with fewer ligatures, refill this layout without growing it.
         clear_reserve(glyphs, glyph_count.max(text.chars().count()));
         // One more for the line made below when no run was kept.
-        clear_reserve(lines, run_count.max(1));
+        clear_reserve(lines, row_count.max(1));
+        clear_reserve(runs, run_count);
         let mut width = 0.0_f32;
         let mut height = 0.0_f32;
 
@@ -820,9 +841,12 @@ impl TextLayout {
                 font_size: g.font_size,
                 font_weight: g.font_weight,
                 flags: g.cache_key_flags,
-                phys_x: buffer_x + g.x + g.font_size * g.x_offset,
-                phys_y: run.line_y + g.y - g.font_size * g.y_offset,
+                // The sums cosmic-text's `LayoutGlyph::physical` makes, in
+                // its order, so offsets cross subpixel bins where its do.
+                phys_dx: g.x + g.font_size * g.x_offset,
+                phys_dy: g.y - g.font_size * g.y_offset,
             }));
+            push_row_runs(runs, glyphs, glyph_start as usize, line_index, &run);
             // RTL lines end at the shifted buffer's right edge, which is the
             // widest RTL line's own; LTR lines start at the shift.
             let shift = if run.rtl { 0.0 } else { buffer_x };
@@ -880,7 +904,6 @@ impl TextLayout {
             };
         }
 
-        build_runs(glyphs, lines, runs);
         // Painting reads only the lines' layout, and the layout is never
         // laid out again, so its shaping goes back for the next build.
         for line in buffer.lines.iter_mut().chain(spare_lines.iter_mut()) {
@@ -1133,29 +1156,60 @@ impl TextLayout {
         self.glyphs.iter().copied()
     }
 
+    /// Runs in glyph order, row by row from the top.
     pub fn glyph_runs(&self) -> impl ExactSizeIterator<Item = GlyphRun> + '_ {
         self.runs.iter().map(|r| GlyphRun {
             line: r.line as usize,
             span: r.span,
             rtl: r.rtl,
             glyphs: r.glyph_start as usize..r.glyph_end as usize,
+            phys_top: r.top,
+            phys_height: r.height,
+            phys_baseline: r.baseline,
         })
     }
 
-    /// Rasterization key and integer pixel position for glyph `i`, with the
-    /// layout origin at `origin` in physical pixels. Equivalent to
-    /// cosmic-text's `LayoutGlyph::physical`.
+    /// Rasterization key and integer pixel position (baseline included) of
+    /// glyph `i`, with the layout origin at `origin` in physical pixels:
+    /// exactly where the renderer's buffer path draws it. That path places
+    /// each row's glyphs with cosmic-text's `LayoutGlyph::physical`, which
+    /// truncates the glyph's own vertical offset from the origin, then adds
+    /// the row's baseline rounded on its own.
     pub fn physical_glyph(&self, i: usize, origin: (f32, f32)) -> Option<PhysicalGlyph> {
-        let g = self.glyphs.get(i)?;
+        let glyph = self.glyphs.get(i)?;
+        let run = &self.runs[self.runs.partition_point(|r| r.glyph_end as usize <= i)];
+        Some(self.place(glyph, run.baseline, origin))
+    }
+
+    /// [`Self::physical_glyph`] of each of `run`'s glyphs, in order, without
+    /// looking its row up again.
+    pub fn physical_run(
+        &self,
+        run: &GlyphRun,
+        origin: (f32, f32),
+    ) -> impl ExactSizeIterator<Item = PhysicalGlyph> + '_ {
+        let baseline = run.phys_baseline;
+        self.glyphs[run.glyphs.clone()]
+            .iter()
+            .map(move |glyph| self.place(glyph, baseline, origin))
+    }
+
+    fn place(&self, g: &Glyph, baseline: f32, origin: (f32, f32)) -> PhysicalGlyph {
+        // The renderer's text area origin, summed as it sums it.
+        let left = origin.0 + self.buffer_x;
         let (cache_key, x, y) = CacheKey::new(
             g.font_id,
             g.glyph_id,
             g.font_size,
-            (g.phys_x + origin.0, (g.phys_y + origin.1).trunc()),
+            (g.phys_dx + left, (g.phys_dy + origin.1).trunc()),
             g.font_weight,
             g.flags,
         );
-        Some(PhysicalGlyph { cache_key, x, y })
+        PhysicalGlyph {
+            cache_key,
+            x,
+            y: y + baseline.round() as i32,
+        }
     }
 
     /// The shaped cosmic-text buffer (physical pixels), for glyphon.
@@ -1456,31 +1510,45 @@ fn rect_span(x0: f32, x1: f32, y: f32, height: f32) -> Rect {
 
 /// Refills `runs` with each line's maximal glyph ranges of one span and
 /// direction.
-fn build_runs(glyphs: &GlyphColumns, lines: &[Line], runs: &mut Vec<Run>) {
-    let breaks = || {
-        lines.iter().enumerate().flat_map(move |(line, l)| {
-            let end = l.glyph_end as usize;
-            l.glyphs().filter_map(move |i| {
-                let next_breaks = i + 1 == end
-                    || glyphs[i + 1].span != glyphs[i].span
-                    || glyphs[i + 1].rtl() != glyphs[i].rtl();
-                next_breaks.then_some((line, i))
-            })
+/// How many runs [`push_row_runs`] makes of a row's glyphs.
+fn run_breaks(glyphs: &[cosmic_text::LayoutGlyph]) -> usize {
+    let breaks = glyphs
+        .windows(2)
+        .filter(|w| {
+            w[0].metadata as u32 != w[1].metadata as u32
+                || w[0].level.is_rtl() != w[1].level.is_rtl()
         })
-    };
-    clear_reserve(runs, breaks().count());
-    let mut run_start = 0;
-    for (line, i) in breaks() {
-        // A line's first run starts at the line's first glyph.
-        let start = run_start.max(lines[line].glyph_start as usize);
-        runs.push(Run {
-            line: line as u32,
-            span: glyphs[i].span,
-            rtl: glyphs[i].rtl(),
-            glyph_start: start as u32,
-            glyph_end: (i + 1) as u32,
-        });
-        run_start = i + 1;
+        .count();
+    breaks + usize::from(!glyphs.is_empty())
+}
+
+/// Splits the glyphs from `start` on, one row's, into runs at span and
+/// direction changes.
+fn push_row_runs(
+    runs: &mut Vec<Run>,
+    glyphs: &GlyphColumns,
+    start: usize,
+    line: u32,
+    row: &cosmic_text::LayoutRun,
+) {
+    let mut run_start = start;
+    for i in start..glyphs.len() {
+        let next_breaks = i + 1 == glyphs.len()
+            || glyphs[i + 1].span != glyphs[i].span
+            || glyphs[i + 1].rtl() != glyphs[i].rtl();
+        if next_breaks {
+            runs.push(Run {
+                line,
+                span: glyphs[i].span,
+                rtl: glyphs[i].rtl(),
+                glyph_start: run_start as u32,
+                glyph_end: (i + 1) as u32,
+                top: row.line_top,
+                height: row.line_height,
+                baseline: row.line_y,
+            });
+            run_start = i + 1;
+        }
     }
 }
 
@@ -2128,7 +2196,7 @@ mod tests {
             g.iter().map(|g| g.font_size).collect::<Vec<_>>(),
             [14.0, 14.0, 7.0, 7.0]
         );
-        assert_eq!(g[2].phys_y, g[0].phys_y);
+        assert_eq!(g[2].phys_dy, g[0].phys_dy);
         assert_eq!(g[2].advance, plain.glyphs()[2].advance / 2.0);
         assert_eq!(layout.size().1, plain.size().1);
     }
@@ -2517,6 +2585,75 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A glyph's cache key and integer position, and the top and height
+    /// its row is culled by.
+    type Placed = (CacheKey, i32, i32, f32, f32);
+
+    /// Where the renderer's buffer path draws each glyph of `layout` with
+    /// its origin at `origin` (physical pixels): glyphon's text area
+    /// placement, which truncates a glyph's own offset from the origin and
+    /// adds its row's baseline rounded on its own.
+    fn buffer_placement(layout: &TextLayout, origin: (f32, f32)) -> Vec<Placed> {
+        let (left, top) = (origin.0 + layout.buffer_x(), origin.1);
+        let mut out = Vec::new();
+        for run in layout.buffer().layout_runs() {
+            let baseline = run.line_y.round() as i32;
+            for glyph in run.glyphs {
+                let p = glyph.physical((left, top), 1.0);
+                out.push((
+                    p.cache_key,
+                    p.x,
+                    p.y + baseline,
+                    run.line_top,
+                    run.line_height,
+                ));
+            }
+        }
+        out
+    }
+
+    proptest! {
+        #![proptest_config(config(48))]
+
+        // Catches the glyph accessors placing glyphs a pixel off the buffer
+        // path the renderer draws today, or culling by another row: adding
+        // a fractional baseline before truncating, summing x in another
+        // order (which can cross a subpixel bin), or using a wrapped
+        // cluster's line instead of its own row.
+        #[test]
+        fn physical_glyphs_land_where_the_buffer_path_draws_them(
+            text in mixed_text(),
+            wrap in prop_oneof![Just(None), (1.0f32..120.0).prop_map(Some)],
+            scale in prop::sample::select(&[1.0f32, 1.25, 1.5, 2.0][..]),
+            line_height in 14.0f32..24.0,
+            origin in (-40.0f32..40.0, -40.0f32..40.0),
+        ) {
+            let style = TextStyle::new(13.0).line_height(line_height);
+            let params = TextParams::new(text.as_str(), style)
+                .wrap_width(wrap)
+                .scale_factor(scale);
+            let layout = test_system().layout(&params).expect("layout");
+            let expected = buffer_placement(&layout, origin);
+            let by_run: Vec<Placed> = layout
+                .glyph_runs()
+                .flat_map(|run| {
+                    let row = (run.phys_top, run.phys_height);
+                    layout
+                        .physical_run(&run, origin)
+                        .map(move |p| (p.cache_key, p.x, p.y, row.0, row.1))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let by_index: Vec<_> = (0..layout.glyph_count())
+                .map(|i| layout.physical_glyph(i, origin).expect("glyph"))
+                .map(|p| (p.cache_key, p.x, p.y))
+                .collect();
+            let positions: Vec<_> = expected.iter().map(|e| (e.0, e.1, e.2)).collect();
+            prop_assert_eq!(by_run, expected);
+            prop_assert_eq!(by_index, positions);
         }
     }
 

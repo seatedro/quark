@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use glyphon::{
-    Attrs, AttrsList, AttrsOwned, Buffer, Color as GlyphonColor, FontSystem, LayoutGlyph,
-    PositionedGlyph, TextArea, TextAtlas, TextBounds,
-};
+use crate::text_engine::{PositionedGlyph, TextArea, TextBounds};
 use quark::scene::ShapedText;
 use quark::{Color, FontKind};
+use quark_text::cosmic_text::{
+    Attrs, AttrsList, AttrsOwned, Buffer, Color as GlyphColor, FontSystem, LayoutGlyph,
+};
 use quark_text::{TextLayout, TextParams, TextStyle, TextSystem, TextSystemId};
 
 use crate::renderer::{ClippedRichText, ClippedText, fade_color};
@@ -16,39 +16,32 @@ use crate::scene::{
     TextDecoration, TextDecorationKind,
 };
 
-/// How text primitives reach glyphon.
+/// How text primitives reach the text engine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum TextPath {
     /// Each layout's glyphs, already positioned, in the color of their
     /// span. Changing colors copies and reshapes nothing.
     #[default]
     Positioned,
-    /// One glyphon text area per primitive over the layout's buffer, with
+    /// One text area per primitive over the layout's buffer, with
     /// multi-colored layouts drawn from [`RecoloredBuffers`]. The fallback
     /// the positioned path is checked against.
     Buffer,
 }
 
-/// The text system whose fonts the renderer's glyph atlas and recolored
-/// buffers were filled from. Both hold cosmic-text face ids, which another
-/// system's font database hands out again from the start, so after a
-/// replacement a cached glyph would draw for an unrelated glyph of the new
-/// fonts. A font change within one system keeps its ids.
+/// The text system whose fonts the recolored buffers were shaped with.
+/// They hold cosmic-text face ids, which another system's font database
+/// hands out again from the start. (The glyph atlas keys glyphs by exact
+/// font instance instead, so it follows a replacement by itself.)
 #[derive(Default)]
 pub(super) struct GlyphOwner(Option<TextSystemId>);
 
 impl GlyphOwner {
     /// Records `text` as the system this frame draws with, first emptying
-    /// `atlas` and `recolored` when another system filled them.
-    pub(super) fn adopt(
-        &mut self,
-        text: &TextSystem,
-        atlas: &mut TextAtlas,
-        recolored: &mut RecoloredBuffers,
-    ) {
+    /// `recolored` when another system filled it.
+    pub(super) fn adopt(&mut self, text: &TextSystem, recolored: &mut RecoloredBuffers) {
         let system = text.font_epoch().system;
         if self.0.replace(system).is_some_and(|old| old != system) {
-            atlas.clear();
             recolored.entries.clear();
         }
     }
@@ -77,20 +70,23 @@ pub(super) fn push_positioned_glyphs(
 
 /// The fills of `rich_texts`' glyphs, in the order
 /// [`push_positioned_glyphs`] numbers them, into `out`.
-pub(super) fn run_fills(rich_texts: &[ClippedRichText], out: &mut Vec<glyphon::GlyphFill>) {
+pub(super) fn run_fills(
+    rich_texts: &[ClippedRichText],
+    out: &mut Vec<crate::text_engine::GlyphFill>,
+) {
     out.clear();
     out.extend(
         rich_texts
             .iter()
             .filter_map(|text| text.paint.fill)
-            .take(glyphon::MAX_GLYPH_FILLS),
+            .take(crate::text_engine::MAX_GLYPH_FILLS),
     );
 }
 
 /// Call `visit` with the glyphs of `texts` then `rich_texts` until it
-/// breaks, in glyphon's order for the same primitives as text areas, so
+/// breaks, in the buffer path's order for the same primitives as text areas, so
 /// overlapping glyphs blend the same way. Nothing is shaped or copied;
-/// layouts must come from the `TextSystem` passed to glyphon's prepare,
+/// layouts must come from the `TextSystem` passed to the text engine's prepare,
 /// because glyph cache keys carry that font database's face ids.
 pub(super) fn visit_positioned_glyphs(
     texts: &[ClippedText],
@@ -110,7 +106,7 @@ fn visit_glyphs(
     for text in texts {
         let primitive = &text.primitive;
         if let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() {
-            let color = glyphon_color(primitive.color);
+            let color = glyph_color(primitive.color);
             visit_layout_glyphs(
                 layout,
                 primitive.rect,
@@ -129,7 +125,7 @@ fn visit_glyphs(
     for text in rich_texts {
         let primitive = &text.primitive;
         let fill = match text.paint.fill {
-            Some(_) if fills < glyphon::MAX_GLYPH_FILLS => {
+            Some(_) if fills < crate::text_engine::MAX_GLYPH_FILLS => {
                 fills += 1;
                 fills as u8
             }
@@ -138,7 +134,7 @@ fn visit_glyphs(
         if let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() {
             let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
             // A filled glyph's color only carries the fade.
-            let faded = glyphon_color(fade_color(
+            let faded = glyph_color(fade_color(
                 quark::Color::rgba(255, 255, 255, 255),
                 text.alpha,
             ));
@@ -160,7 +156,7 @@ fn visit_glyphs(
                         return (faded, fill);
                     }
                     let color = span_color(span, default_color, span_colors);
-                    (glyphon_color(fade_color(color, text.alpha)), 0)
+                    (glyph_color(fade_color(color, text.alpha)), 0)
                 },
                 text.paint.backdrop,
             )?;
@@ -170,15 +166,15 @@ fn visit_glyphs(
     ControlFlow::Continue(())
 }
 
-/// Visit `layout`'s glyphs on lines that reach `clip`, placed as glyphon
-/// places a text area's: the same physical position, rounded baseline,
+/// Visit `layout`'s glyphs on lines that reach `clip`, placed as the
+/// buffer path places a text area's: the same physical position, rounded baseline,
 /// and line culling, so both paths draw identical pixels. `rows` hears
 /// every vertical offset added to `origin.y`: the top of each line
 /// checked against the clip, and each glyph's own offset.
 ///
 /// Positions come from the layout's cosmic-text buffer. The glyph columns
 /// cannot replace it yet: their `phys_y` adds the baseline before
-/// truncating, where glyphon rounds the baseline separately, which moves
+/// truncating, where the buffer path rounds the baseline separately, which moves
 /// glyphs on fractional baselines by a pixel. Drawing from the columns
 /// needs quark-text to keep each glyph's rounded baseline apart from its
 /// offset.
@@ -188,12 +184,13 @@ fn visit_layout_glyphs(
     clip: Rect,
     visit: &mut impl FnMut(PositionedGlyph) -> ControlFlow<()>,
     rows: &mut impl RowSink,
-    paint: impl Fn(&LayoutGlyph) -> (GlyphonColor, u8),
+    paint: impl Fn(&LayoutGlyph) -> (GlyphColor, u8),
     backdrop: Option<u8>,
 ) -> ControlFlow<()> {
     // The layout's hit-testing and carets already include this shift.
     let (left, top) = (origin.x + layout.buffer_x(), origin.y);
     let bounds = text_bounds(clip);
+    let scale = layout.scale_factor().to_bits();
     let mut reached = false;
     for run in layout.buffer().layout_runs() {
         rows.offset(run.line_top);
@@ -219,6 +216,7 @@ fn visit_layout_glyphs(
                 x: physical.x,
                 y: physical.y + line_y,
                 color,
+                scale,
                 bounds,
                 fill,
                 backdrop,
@@ -297,7 +295,7 @@ impl RowOffsets {
     /// subpixel bins; every row offset lands `dy` lower once truncated,
     /// so the same lines pass the clip and every glyph's row moves by
     /// `dy`; and clip bounds moved by `dy`, inside `(width, height)` both
-    /// times so glyphon's clamp to the viewport changes none.
+    /// times so the engine's clamp to the viewport changes none.
     pub(super) fn moved_down(
         &self,
         index: usize,
@@ -334,28 +332,27 @@ impl RowOffsets {
     }
 }
 
-/// Builds glyphon areas straight from the shaped layouts; nothing is shaped
-/// here. Layouts must come from the `TextSystem` passed to glyphon's prepare,
+/// Builds text areas straight from the shaped layouts; nothing is shaped
+/// here. Layouts must come from the `TextSystem` passed to the text engine's prepare,
 /// because glyph cache keys carry that font database's face ids.
 pub(super) fn prepare_text_areas<'a>(
     texts: &'a [ClippedText],
     rich_texts: &'a [ClippedRichText],
     recolored: &'a RecoloredBuffers,
-) -> impl Iterator<Item = TextArea<'a>> + 'a {
+) -> impl Iterator<Item = (TextArea<'a>, f32)> + 'a {
     let plain = texts.iter().filter_map(|text| {
         let primitive = &text.primitive;
         let layout = primitive.layout.downcast_ref::<TextLayout>()?;
-        Some(text_area(
-            layout,
-            primitive.rect,
-            text.clip,
-            primitive.color,
-        ))
+        let area = text_area(layout, primitive.rect, text.clip, primitive.color);
+        Some((area, layout.scale_factor()))
     });
     let rich = rich_texts.iter().filter_map(|text| {
         let primitive = &text.primitive;
         let layout = primitive.layout.downcast_ref::<TextLayout>()?;
-        Some(rich_text_area(layout, text, recolored))
+        Some((
+            rich_text_area(layout, text, recolored),
+            layout.scale_factor(),
+        ))
     });
     plain.chain(rich)
 }
@@ -369,8 +366,7 @@ fn text_area(layout: &TextLayout, origin: Rect, clip: Rect, color: Color) -> Tex
         // The buffer is already shaped at physical size.
         scale: 1.0,
         bounds: text_bounds(clip),
-        default_color: glyphon_color(color),
-        custom_glyphs: &[],
+        default_color: glyph_color(color),
     }
 }
 
@@ -414,10 +410,10 @@ fn uniform_color(
 }
 
 /// Copies of multi-colored layouts' buffers with each glyph's color baked
-/// in, so a rich text primitive draws as one glyphon area whatever its line
-/// and color count. glyphon colors glyphs from the buffer, and the layout's
+/// in, so a rich text primitive draws as one text area whatever its line
+/// and color count. The engine colors glyphs from the buffer, and the layout's
 /// own buffer is shared and immutable; drawing one area per same-colored
-/// stretch of each line instead made glyphon walk the buffer's lines once
+/// stretch of each line instead made the engine walk the buffer's lines once
 /// per stretch, quadratic in the line count.
 ///
 /// Building a copy reshapes the layout once, since cosmic-text bakes colors
@@ -520,7 +516,7 @@ fn recolor(
     buffer.set_monospace_width(font_system, source.monospace_width());
     let colored = |attrs: Attrs<'_>| {
         let color = span_color(attrs.metadata as u32, default_color, span_colors);
-        AttrsOwned::new(&attrs.color(glyphon_color(fade_color(color, alpha))))
+        AttrsOwned::new(&attrs.color(glyph_color(fade_color(color, alpha))))
     };
     buffer.lines = source
         .lines
@@ -711,8 +707,8 @@ pub(super) fn measure_mono_char_width(text: &mut TextSystem, font_size: f32) -> 
     glyphs.iter().map(|g| g.advance).sum::<f32>() / glyphs.len() as f32
 }
 
-pub(super) fn glyphon_color(color: Color) -> GlyphonColor {
-    GlyphonColor::rgba(color.r, color.g, color.b, color.a)
+pub(super) fn glyph_color(color: Color) -> GlyphColor {
+    GlyphColor::rgba(color.r, color.g, color.b, color.a)
 }
 
 /// `color`'s channels in 0..1, still sRGB-encoded and straight alpha. The

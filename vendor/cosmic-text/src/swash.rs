@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::fmt;
@@ -10,6 +11,7 @@ use swash::zeno::{Format, Vector};
 use crate::{CacheKey, CacheKeyFlags, Color, FontSystem, HashMap};
 
 pub use swash::scale::image::{Content as SwashContent, Image as SwashImage};
+pub use swash::scale::Source as SwashSource;
 pub use swash::zeno::{Angle, Command, Placement, Transform};
 
 fn swash_image(
@@ -27,9 +29,13 @@ fn swash_image(
         .variations()
         .find_by_tag(swash::Tag::from_be_bytes(*b"wght"));
 
-    // Build the scaler
+    // Build the scaler. The context keeps the last font's variation
+    // coordinates and `variations` only overwrites the axes it names, so
+    // clear them first: otherwise an axis this font has but the settings
+    // leave out (Inter's `opsz`) takes another font's coordinate.
     let mut scaler = context
         .builder(font.as_swash())
+        .normalized_coords(core::iter::empty::<i16>())
         .size(f32::from_bits(cache_key.font_size_bits))
         .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
     if let Some(variation) = variable_width {
@@ -124,6 +130,63 @@ fn swash_outline_commands(
     Some(path.commands().collect())
 }
 
+/// A face for [`SwashCache::render_face_into`]: the font's bytes, the face's
+/// offset in them, and swash's key for the scale context's per-font state.
+/// Make one per face and keep it: a new one per glyph has a new key, which
+/// throws that state away.
+pub struct SwashFace {
+    data: Arc<dyn AsRef<[u8]> + Send + Sync>,
+    offset: u32,
+    key: swash::CacheKey,
+}
+
+impl SwashFace {
+    /// Face `index` of a font file or collection, or `None` when the bytes
+    /// hold no such face.
+    pub fn new(data: Arc<dyn AsRef<[u8]> + Send + Sync>, index: u32) -> Option<Self> {
+        let font = swash::FontRef::from_index((*data).as_ref(), index as usize)?;
+        let (offset, key) = (font.offset, font.key);
+        Some(Self { data, offset, key })
+    }
+
+    fn font(&self) -> swash::FontRef<'_> {
+        swash::FontRef {
+            data: (*self.data).as_ref(),
+            offset: self.offset,
+            key: self.key,
+        }
+    }
+}
+
+impl fmt::Debug for SwashFace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SwashFace")
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How [`SwashCache::render_face_into`] draws a glyph: what a [`CacheKey`]
+/// and a font system's face decide for [`SwashCache::get_image`], given
+/// directly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SwashRender {
+    /// Pixels per em.
+    pub size: f32,
+    pub hint: bool,
+    /// The glyph origin's offset within its pixel, in pixels.
+    pub offset: (f32, f32),
+    /// How far to widen outlines on each side, in pixels (`THICKEN` uses a
+    /// fiftieth of the size).
+    pub embolden: f32,
+    /// Slant outlines by this many degrees (`FAKE_ITALIC` uses 14).
+    pub skew_degrees: Option<f32>,
+    /// Draw a color outline in the first palette, else a color bitmap of the
+    /// best fitting strike, before the monochrome outline; otherwise only
+    /// the monochrome outline.
+    pub color: bool,
+}
+
 /// Cache for rasterizing with the swash scaler
 pub struct SwashCache {
     context: ScaleContext,
@@ -165,6 +228,50 @@ impl SwashCache {
         self.image_cache
             .entry(cache_key)
             .or_insert_with(|| swash_image(font_system, &mut self.context, cache_key))
+    }
+
+    /// Draws glyph `glyph_id` of `face` into `image` (cleared first, its
+    /// storage reused) with each variation axis set to its value, as
+    /// `render` says, without a font system. Returns `false`, leaving
+    /// `image` empty, when the face has no drawing for the glyph.
+    pub fn render_face_into(
+        &mut self,
+        face: &SwashFace,
+        glyph_id: u16,
+        variations: impl IntoIterator<Item = ([u8; 4], f32)>,
+        render: &SwashRender,
+        image: &mut SwashImage,
+    ) -> bool {
+        image.clear();
+        let mut scaler = self
+            .context
+            .builder(face.font())
+            // Clear the last font's coordinates; see `swash_image`.
+            .normalized_coords(core::iter::empty::<i16>())
+            .size(render.size)
+            .hint(render.hint)
+            .variations(variations.into_iter().map(|(tag, value)| swash::Setting {
+                tag: swash::Tag::from_be_bytes(tag),
+                value,
+            }))
+            .build();
+        let sources: &[Source] = if render.color {
+            &[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
+                Source::Outline,
+            ]
+        } else {
+            &[Source::Outline]
+        };
+        Render::new(sources)
+            .format(Format::Alpha)
+            .embolden(render.embolden)
+            .offset(Vector::new(render.offset.0, render.offset.1))
+            .transform(render.skew_degrees.map(|degrees| {
+                Transform::skew(Angle::from_degrees(degrees), Angle::from_degrees(0.0))
+            }))
+            .render_into(&mut scaler, glyph_id, image)
     }
 
     /// Creates outline commands

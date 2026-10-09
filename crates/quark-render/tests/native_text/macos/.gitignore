@@ -1,0 +1,2 @@
+# run.sh copies the root lockfile in before each build.
+swash_dump/Cargo.lock

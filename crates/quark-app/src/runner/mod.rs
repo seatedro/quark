@@ -16,10 +16,10 @@ use accesskit::{
     TreeId, TreeUpdate,
 };
 use accesskit_winit::Adapter as AccessibilityAdapter;
-use glyphon::FontSystem;
 use quark::scene::{Scene, SurfaceBackground};
 use quark_render::fonts::FontSettings;
 use quark_render::{GpuContext, RenderError, Renderer, TextMetrics};
+use quark_text::cosmic_text::FontSystem;
 use quark_text::{LayoutCache, TextError, TextLayout, TextParams, TextSystem};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};

@@ -20,7 +20,6 @@ members = [
   "examples/codex",
   # A member so CI's fmt, clippy, and tests cover the patch.
   "vendor/accesskit_unix",
-  "vendor/glyphon",
   "vendor/cosmic-text",
   "vendor/taffy",
 ]
@@ -52,11 +51,12 @@ quark-update = { path = "crates/quark-update" }
 accesskit = "0.24"
 accesskit_winit = "0.33"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
-# Must stay on the cosmic-text minor that glyphon re-exports so FontSystem is one type.
 cosmic-text = "0.15"
 bytemuck = { version = "1.25.0", features = ["derive"] }
-glyphon = "0.10.0"
+# Glyph atlas rectangle packing for quark-render's text engine.
+etagere = "0.2.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+lru = { version = "0.16.2", default-features = false }
 pollster = "0.4.0"
 profiling = "1.0"
 # Tests only. Drops fork/timeout/regex strategies to keep builds small.
@@ -64,6 +64,7 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 raw-window-handle = "0.6"
 resvg = { version = "0.45", default-features = false, features = ["text"] }
+rustc-hash = "2.1.1"
 serde = { version = "1.0", features = ["derive"] }
 subsecond = "0.7"
 taffy = "0.9.2"
@@ -93,9 +94,6 @@ panic = "unwind"
 # (GetRoleName, an `id` attribute). See vendor/accesskit_unix/VENDORED.md.
 [patch.crates-io]
 accesskit_unix = { path = "vendor/accesskit_unix" }
-# glyphon 0.10.0 plus a prepare path for already positioned glyphs, so text
-# draws in per-glyph colors without reshaping. See vendor/glyphon/VENDORED.md.
-glyphon = { path = "vendor/glyphon" }
 # cosmic-text 0.15.0 plus allocation reuse in its shaping scratch. See
 # vendor/cosmic-text/VENDORED.md.
 cosmic-text = { path = "vendor/cosmic-text" }

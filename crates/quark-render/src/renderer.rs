@@ -2,10 +2,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use bytemuck::{Pod, Zeroable};
+/// Memory limits of a renderer's glyph atlas, for
+/// [`Renderer::set_text_atlas_limits`].
+pub use crate::text_engine::AtlasLimits as TextAtlasLimits;
+/// What a renderer's glyph atlas holds, from [`Renderer::text_atlas_memory`].
+pub use crate::text_engine::AtlasMemory as TextAtlasMemory;
 /// Glyph atlas work counters, from [`Renderer::text_atlas_stats`].
-pub use glyphon::AtlasStats as TextAtlasStats;
-use glyphon::{Cache, Resolution, SwashCache, TextAtlas, Viewport};
+pub use crate::text_engine::AtlasStats as TextAtlasStats;
+use crate::text_engine::{Cache, GlyphAtlas, Resolution, Viewport};
+/// Why text could not be prepared or drawn, in [`RenderError`].
+pub use crate::text_engine::{PrepareError as TextPrepareError, RenderError as TextRenderError};
+pub use crate::text_engine::{TextRasterizer, TextSmoothing};
+use bytemuck::{Pod, Zeroable};
 use quark_text::TextSystem;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -91,9 +99,13 @@ pub enum RenderError {
     #[error("device request failed: {0}")]
     RequestDevice(#[from] wgpu::RequestDeviceError),
     #[error("failed to prepare text: {0}")]
-    PrepareText(#[from] glyphon::PrepareError),
+    PrepareText(#[from] TextPrepareError),
     #[error("failed to render text: {0}")]
-    RenderText(#[from] glyphon::RenderError),
+    RenderText(#[from] TextRenderError),
+    /// [`Renderer::set_text_rasterizer`] asked for a rasterizer this build
+    /// or platform does not have.
+    #[error("the text rasterizer {0:?} is not available here")]
+    TextRasterizerUnavailable(TextRasterizer),
     #[error("surface acquisition failed")]
     SurfaceAcquire,
     /// The surface was lost or outdated and has been reconfigured; nothing
@@ -379,12 +391,13 @@ struct SharedImages {
 }
 
 /// The GPU state every window shares: one instance, adapter, device, and
-/// queue, the pipelines built for one surface format, glyphon's pipeline
-/// cache, and the uploaded-image cache. Cloning is cheap and shares it.
+/// queue, the pipelines built for one surface format, the text engine's
+/// pipeline cache, and the uploaded-image cache. Cloning is cheap and
+/// shares it.
 ///
 /// Each [`Renderer`] keeps only per-window state on top: its surface, frame
 /// buffers, offscreen targets, and glyph atlas. The atlas stays per window
-/// because glyphon trims it after every frame, which would evict glyphs
+/// because it is trimmed after every frame, which would evict glyphs
 /// another window still draws and re-upload them every frame.
 #[derive(Clone)]
 pub struct GpuContext {
@@ -774,14 +787,15 @@ pub struct Renderer {
     images: Arc<Mutex<SharedImages>>,
     viewport_buffer: wgpu::Buffer,
     viewport_bind_group: wgpu::BindGroup,
-    swash_cache: SwashCache,
     viewport: Viewport,
-    atlas: TextAtlas,
+    atlas: GlyphAtlas,
+    /// The rasterizer [`Self::set_text_rasterizer`] last asked for.
+    text_rasterizer: TextRasterizer,
     /// One text renderer per text run of the frame, kept with what it
     /// prepared.
     text_runs: text_runs::TextRuns,
-    /// False when this frame's glyphs did not fit the atlas; its text
-    /// segments are skipped.
+    /// False when this frame's glyphs could not be prepared even in
+    /// overflow mode; its text segments are skipped.
     text_ready: bool,
     /// Positioned glyphs unless a test compares against the buffer path.
     pub(crate) text_path: TextPath,
@@ -799,7 +813,7 @@ pub struct Renderer {
     active_frames: usize,
     plans: Vec<LayerPlan>,
     layer_scratch: LayerScratch,
-    /// Viewport uniform and glyphon viewport of layer target `i + 1`.
+    /// Viewport uniform and text viewport of layer target `i + 1`.
     layer_uniforms: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     layer_viewports: Vec<Viewport>,
     segment_texture: Option<SegmentTexture>,
@@ -855,6 +869,47 @@ impl Renderer {
     /// evictions, growths, and bytes uploaded.
     pub fn text_atlas_stats(&self) -> TextAtlasStats {
         self.atlas.stats()
+    }
+
+    /// What the glyph atlas holds now: pages and bytes by kind, the
+    /// limits, and the peak.
+    pub fn text_atlas_memory(&self) -> TextAtlasMemory {
+        self.atlas.memory()
+    }
+
+    /// Rasterizes glyphs with `rasterizer` from the next frame, forgetting
+    /// every glyph rasterized before; layouts stay valid. Swash still
+    /// draws what a native rasterizer cannot. Fails, changing nothing, for
+    /// a rasterizer this build or platform lacks.
+    pub fn set_text_rasterizer(&mut self, rasterizer: TextRasterizer) -> Result<(), RenderError> {
+        self.atlas
+            .set_rasterizer(rasterizer)
+            .map_err(|_| RenderError::TextRasterizerUnavailable(rasterizer))?;
+        self.text_rasterizer = rasterizer;
+        self.text_runs.forget();
+        Ok(())
+    }
+
+    /// The rasterizer asked for, and the one drawing: [`TextRasterizer::Auto`]
+    /// resolved, or [`TextRasterizer::Swash`] when Auto's could not start.
+    pub fn text_rasterizer(&self) -> (TextRasterizer, TextRasterizer) {
+        use crate::text_engine::raster::RasterBackend;
+        let effective = match self.atlas.native_profile().map(|p| p.backend) {
+            None | Some(RasterBackend::Swash) => TextRasterizer::Swash,
+            Some(RasterBackend::DirectWrite) => TextRasterizer::DirectWrite,
+            Some(RasterBackend::CoreText) => match self.text_rasterizer {
+                TextRasterizer::Auto => crate::text_engine::auto_rasterizer(),
+                other => other,
+            },
+        };
+        (self.text_rasterizer, effective)
+    }
+
+    /// Limits this renderer's glyph atlas to `limits` from the next frame.
+    /// A new page size forgets every cached glyph.
+    pub fn set_text_atlas_limits(&mut self, limits: TextAtlasLimits) {
+        self.atlas.set_limits(limits);
+        self.text_runs.forget();
     }
 
     fn for_surface(
@@ -960,9 +1015,18 @@ impl Renderer {
         });
 
         let texture_pool = TexturePool::new(shared.format);
-        let swash_cache = SwashCache::new();
         let viewport = Viewport::new(&device, &shared.glyph_cache);
-        let atlas = TextAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
+        let mut atlas = GlyphAtlas::new(&device, &queue, &shared.glyph_cache, shared.format);
+        // Windows draw with the platform's rasterizer; headless renderers
+        // (tests, fixtures) with deterministic swash unless asked.
+        let text_rasterizer = if surface.is_some() {
+            TextRasterizer::Auto
+        } else {
+            TextRasterizer::Swash
+        };
+        if let Err(error) = atlas.set_rasterizer(text_rasterizer) {
+            tracing::warn!("text rasterizer unavailable, drawing with swash: {error}");
+        }
 
         Self {
             device,
@@ -979,9 +1043,9 @@ impl Renderer {
             images: Arc::clone(&shared.images),
             viewport_buffer,
             viewport_bind_group,
-            swash_cache,
             viewport,
             atlas,
+            text_rasterizer,
             text_runs: text_runs::TextRuns::default(),
             text_ready: true,
             text_path: TextPath::default(),
@@ -1498,7 +1562,7 @@ impl Renderer {
         }
         readback.unmap();
 
-        self.atlas.trim();
+        self.atlas.end_frame();
         self.texture_pool.trim_unused();
         Ok(pixels)
     }
@@ -1574,7 +1638,7 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         let present_us = present_started_at.elapsed().as_micros() as u64;
-        self.atlas.trim();
+        self.atlas.end_frame();
         self.texture_pool.trim_unused();
 
         let cpu_us = (render_started_at.elapsed().as_micros() as u64)
@@ -1763,11 +1827,13 @@ impl Renderer {
 
         // Prepare every text run before recording any pass.
         self.text_ready = self.prepare_frame_text(frames, text);
-        if self.text_ready && self.text_path == TextPath::Positioned {
+        if self.text_ready {
             let viewports = std::iter::once(&mut self.viewport)
                 .chain(&mut self.layer_viewports[..frames.len() - 1]);
             self.text_runs.upload(&self.device, &self.queue, viewports);
         }
+        // Glyph uploads land ahead of every pass of the frame.
+        self.atlas.record_uploads(&self.queue, encoder);
 
         for frame in frames.iter_mut() {
             frame.blur = self.prepare_blur(
@@ -1789,6 +1855,8 @@ impl Renderer {
         // A layer's target number is above its parent's, so encoding from
         // the last target down draws every layer before its composite.
         let mut result = Ok(());
+        // The overflow ordinal whose uploads the encoded draws have reached.
+        let mut overflow = 0;
         for index in (0..frames.len()).rev() {
             let frame = &frames[index];
             let (view, clear) = match &frame.layer {
@@ -1810,7 +1878,7 @@ impl Renderer {
                 segments: segments.as_ref(),
                 clear,
             };
-            result = self.encode_steps(encoder, view, &target);
+            result = self.encode_steps(encoder, view, &target, &mut overflow);
             if result.is_err() {
                 break;
             }
@@ -1832,7 +1900,7 @@ impl Renderer {
         result
     }
 
-    /// Size the viewport uniform and glyphon viewport of every layer
+    /// Size the viewport uniform and text viewport of every layer
     /// target to its texture region.
     fn prepare_layer_viewports(&mut self, frames: &[TargetFrame]) {
         for (slot, frame) in frames.iter().skip(1).enumerate() {
@@ -1951,8 +2019,8 @@ impl Renderer {
     /// unpinned. False when this frame's glyphs do not fit and its text is
     /// skipped. On the positioned path the vertices still need uploading.
     fn prepare_frame_text(&mut self, frames: &[TargetFrame], text: &mut TextSystem) -> bool {
-        self.glyph_owner
-            .adopt(text, &mut self.atlas, &mut self.recolored);
+        self.atlas.begin_frame(text);
+        self.glyph_owner.adopt(text, &mut self.recolored);
         if self.text_path == TextPath::Buffer {
             self.recolored
                 .prepare(frames.iter().map(|frame| &frame.flat.rich_texts[..]), text);
@@ -1960,18 +2028,15 @@ impl Renderer {
         match self.prepare_text_runs(frames, text, true) {
             Ok(()) => true,
             Err(_) => {
-                // The atlas is full of glyphs pinned by this frame. Unpin
-                // them and prepare every run again, since the retry may
-                // evict glyphs that earlier runs' vertices point at.
-                self.atlas.trim();
-                match self.prepare_text_runs(frames, text, false) {
+                // The frame's pinned glyphs fill the atlas's hard limit.
+                // Draw it in overflow mode: glyphs not resident pass
+                // through reusable overflow pages, in encode order.
+                self.atlas.begin_overflow();
+                self.text_runs.forget();
+                match self.prepare_text_runs_in_order(frames, text) {
                     Ok(()) => true,
                     Err(error) => {
-                        // This frame's glyphs do not fit even alone. Draw
-                        // everything else rather than failing the frame, and
-                        // unpin so the next frame starts from a clean atlas.
                         tracing::warn!("skipping text for one frame: {error}");
-                        self.atlas.trim();
                         self.text_runs.forget();
                         false
                     }
@@ -2108,6 +2173,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         t: &EncodeTarget<'_>,
+        overflow: &mut u32,
     ) -> Result<(), RenderError> {
         let flat = &t.frame.flat;
         let (width, height) = (t.frame.width, t.frame.height);
@@ -2141,12 +2207,49 @@ impl Renderer {
                     pass.draw(0..4, blurs_done - 1..blurs_done);
                 }
                 for i in start..end {
-                    self.draw_step(
-                        &mut pass,
-                        &flat.steps[i],
-                        t.frame.batches.step_cmds[i].clone(),
-                        t,
-                    )?;
+                    let cmds = t.frame.batches.step_cmds[i].clone();
+                    let overflowing_text = self.atlas.overflowing()
+                        && self.text_ready
+                        && matches!(
+                            flat.steps[i],
+                            DrawStep::Batch {
+                                kind: PrimKind::Text,
+                                ..
+                            }
+                        );
+                    if !overflowing_text {
+                        self.draw_step(&mut pass, &flat.steps[i], cmds, t)?;
+                        continue;
+                    }
+                    // Each overflow ordinal's uploads overwrite the overflow
+                    // pages the previous one drew from: end the pass, copy,
+                    // and go on in a new pass over the same target.
+                    for run in cmds.start as usize..cmds.end as usize {
+                        let (renderer, slot) = self.text_runs.renderer(t.frame.text_base + run);
+                        let mut from = 0;
+                        for (k, ordinal) in renderer.segment_ordinals().enumerate() {
+                            if ordinal <= *overflow {
+                                continue;
+                            }
+                            pass.set_scissor_rect(0, 0, width, height);
+                            renderer.render_at(t.glyph_viewport, &mut pass, slot, from..k)?;
+                            from = k;
+                            drop(pass);
+                            for next in *overflow + 1..=ordinal {
+                                self.atlas.record_overflow(encoder, next);
+                            }
+                            *overflow = ordinal;
+                            pass = begin_pass(
+                                encoder,
+                                "quark_frame_pass",
+                                draw_view,
+                                wgpu::LoadOp::Load,
+                            );
+                            set_viewport(&mut pass);
+                        }
+                        pass.set_scissor_rect(0, 0, width, height);
+                        renderer.render_at(t.glyph_viewport, &mut pass, slot, from..usize::MAX)?;
+                    }
                 }
             }
             load = wgpu::LoadOp::Load;
@@ -2268,7 +2371,7 @@ impl Renderer {
                 pass.set_scissor_rect(0, 0, width, height);
                 for run in cmds {
                     let (renderer, slot) = self.text_runs.renderer(t.frame.text_base + run);
-                    renderer.render_at(&self.atlas, t.glyph_viewport, pass, slot)?;
+                    renderer.render_at(t.glyph_viewport, pass, slot, 0..usize::MAX)?;
                 }
                 return Ok(());
             }
@@ -3193,7 +3296,7 @@ pub(super) struct ClippedRichText {
 pub(super) struct GlyphPaint {
     /// Gradient or shimmer, placed in the target's pixels; `None` paints
     /// the default color.
-    pub(super) fill: Option<glyphon::GlyphFill>,
+    pub(super) fill: Option<crate::text_engine::GlyphFill>,
     /// sRGB-encoded luminance of the known opaque backdrop, for perceptual
     /// coverage.
     pub(super) backdrop: Option<u8>,
@@ -3214,7 +3317,7 @@ impl GlyphPaint {
         let unit = color_to_unit;
         let fill = match text.fill {
             TextFill::Solid(_) => None,
-            TextFill::LinearGradient(g) => Some(glyphon::GlyphFill {
+            TextFill::LinearGradient(g) => Some(crate::text_engine::GlyphFill {
                 axis: [
                     origin.x + g.start[0],
                     origin.y + g.start[1],
@@ -3237,7 +3340,7 @@ impl GlyphPaint {
                 } else {
                     0.0
                 };
-                Some(glyphon::GlyphFill {
+                Some(crate::text_engine::GlyphFill {
                     axis: [
                         start,
                         origin.y,
@@ -4954,6 +5057,9 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
 }
 
 #[cfg(test)]
+#[path = "atlas_tests.rs"]
+mod atlas_tests;
+#[cfg(test)]
 #[path = "blur_tests.rs"]
 mod blur_tests;
 #[cfg(test)]
@@ -4974,6 +5080,9 @@ mod perf_tests;
 #[cfg(test)]
 #[path = "svg_text_tests.rs"]
 mod svg_text_tests;
+#[cfg(test)]
+#[path = "text_diff_tests.rs"]
+mod text_diff_tests;
 #[cfg(test)]
 #[path = "text_fill_tests.rs"]
 mod text_fill_tests;
@@ -5322,7 +5431,7 @@ mod tests {
     }
 
     // Preparing an unchanged frame's text with every glyph in the atlas
-    // reuses glyphon's vertex storage and walks the layouts in place.
+    // reuses the text engine's vertex storage and walks the layouts in place.
     #[test]
     fn repeated_text_preparation_allocates_nothing() {
         let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
@@ -5438,7 +5547,7 @@ mod tests {
         }
     }
 
-    // The positioned path must draw what glyphon draws from text areas:
+    // The positioned path must draw what the buffer path draws from text areas:
     // fractional origins, a clip through a line, an overflowing RTL line
     // shifted inside its box, a color glyph, and multi-colored spans.
     #[test]
@@ -5508,8 +5617,8 @@ mod tests {
         assert_eq!(differing, 0, "pixels differ between text paths");
     }
 
-    // Regression: rich text drew one glyphon area per same-colored stretch of
-    // each line, and glyphon walks the buffer's lines for every area, so
+    // Regression: rich text drew one text area per same-colored stretch of
+    // each line, and the engine walks the buffer's lines for every area, so
     // highlighted code cost grew with the square of its line count.
     #[test]
     fn multi_line_rich_text_prepares_one_text_area() {
@@ -5901,8 +6010,8 @@ mod tests {
     // that frame draws everything but text and the next frame draws text.
     #[test]
     fn render_recovers_from_a_full_glyph_atlas() {
-        // glyphon caps its atlas at the device's texture size limit: at 256px
-        // a few dozen large glyphs cannot fit in one frame.
+        // The text atlas caps itself at the device's texture size limit: at
+        // 256px a few dozen large glyphs cannot fit in one frame.
         let limits = wgpu::Limits {
             max_texture_dimension_2d: 256,
             ..wgpu::Limits::default()
@@ -5963,12 +6072,16 @@ mod tests {
     }
 
     /// The frames around a glyph atlas growth: `Kept glyphs` alone, then
-    /// again beside enough large glyphs that the 256 px atlas grows while
-    /// the first text's glyphs are pinned, then alone once more. Returns
-    /// each frame's pixels and the atlas counters after it.
+    /// again beside enough large glyphs that the atlas adds 256 px pages
+    /// while the first text's glyphs are pinned, then alone once more.
+    /// Returns each frame's pixels and the atlas counters after it.
     fn frames_around_atlas_growth() -> Option<Vec<(image::RgbaImage, TextAtlasStats)>> {
         const SIZE: (u32, u32) = (256, 128);
         let mut renderer = gpu_renderer(SIZE.0, SIZE.1)?;
+        renderer.set_text_atlas_limits(TextAtlasLimits {
+            page_size: 256,
+            ..TextAtlasLimits::default()
+        });
         let mut text = test_text();
         let kept = white_text_with(&mut text, rect(4.0, 4.0, 248.0, 24.0), "Kept glyphs");
         let large = text.layout(&TextParams::new(
@@ -5997,7 +6110,8 @@ mod tests {
     }
 
     // Regression: growing the glyph atlas replaced its texture and
-    // rasterized and uploaded every cached glyph again.
+    // rasterized and uploaded every cached glyph again. A new page must
+    // leave cached glyphs alone.
     #[test]
     fn atlas_growth_rasterizes_no_cached_glyph_again() {
         let Some(frames) = frames_around_atlas_growth() else {
