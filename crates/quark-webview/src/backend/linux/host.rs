@@ -306,11 +306,14 @@ fn configure<'a>(
 }
 
 /// Settings beyond wry's: no console echo of page messages (they can carry
-/// credentials), no script-opened windows, no file-URL access.
+/// credentials), no file-URL access.
 fn harden(native: &webkit2gtk::WebView, devtools: bool) {
     if let Some(settings) = WebViewExt::settings(native) {
         settings.set_enable_write_console_messages_to_stdout(false);
-        settings.set_javascript_can_open_windows_automatically(false);
+        // Let `window.open` without a user gesture reach the `create`
+        // signal, which refuses and reports it, instead of WebKit's blocker
+        // dropping it silently. No window is ever created either way.
+        settings.set_javascript_can_open_windows_automatically(true);
         settings.set_allow_file_access_from_file_urls(false);
         settings.set_allow_universal_access_from_file_urls(false);
         settings.set_enable_developer_extras(devtools);
@@ -432,8 +435,29 @@ fn connect(
             }
         });
     }
-    // A backstop: new-window actions are refused in decide-policy already.
-    native.connect_create(|_, _| None);
+    {
+        // `window.open` arrives here (links with a target go through
+        // decide-policy first). Never create a window: refuse and report it,
+        // or load an allowed URL in place for `PopupPolicy::NavigateCurrent`.
+        let (sink, nav, closing) = (sink.clone(), Rc::clone(nav), Rc::clone(closing));
+        native.connect_create(move |webview, action| {
+            let uri = action.clone().request().and_then(|request| request.uri());
+            if closing.get() {
+                return None;
+            }
+            match sink.decide(uri.as_deref().unwrap_or(""), Target::NewWindow) {
+                Decision::LoadInCurrent(url) => {
+                    let (webview, nav) = (webview.clone(), Rc::clone(&nav));
+                    glib::idle_add_local_once(move || {
+                        nav.borrow_mut().requested = true;
+                        webview.load_uri(url.as_str());
+                    });
+                }
+                Decision::Allow | Decision::Block(_) => {}
+            }
+            None
+        });
+    }
     {
         let (sink, pending, closing) = (sink.clone(), pending.clone(), Rc::clone(closing));
         native.connect_web_process_terminated(move |_, _| {
