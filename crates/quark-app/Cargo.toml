@@ -288,6 +288,10 @@ name = "layout_demo"
 required-features = ["components"]
 
 [[example]]
+name = "webview_demo"
+required-features = ["ui", "webview"]
+
+[[example]]
 name = "platform_demo"
 required-features = ["notifications"]
 
