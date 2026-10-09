@@ -1,8 +1,8 @@
 """Catches: Diff panel controls that do nothing in the real app. Find in
 diff counts matches as typed and steps with Next; Expand all unchanged
 lines shows App.tsx lines outside the hunks (the patch is backed by the
-fixture sources); Auto and Split are offered once the dock is wide, and
-Auto keeps a split layout there. Saves diff-find.png and diff-auto.png."""
+fixture sources); a wide dock offers Auto (chosen) and Split, which shows
+unchanged lines on both sides. Saves diff-find.png and diff-split.png."""
 
 # quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
@@ -44,13 +44,14 @@ def spec(cua: Cua):
     cua.press(pid, "push button", "Expand all unchanged lines")
     wait_for("App.tsx's closing tag", lambda: named(OUTSIDE))
 
-    set_value(named("Resize Right dock"), 900)
+    set_value(named("Resize Right dock"), 700)
     auto = wait_for("Auto to be offered", lambda: app_tree().find("radio button", "Auto"))
     assert auto.has_state(STATE_CHECKED), "Auto is not the default layout"
+    cua.press(pid, "radio button", "Split")
     # Split shows unchanged lines on both sides.
-    wait_for("the automatic split", lambda: sum(
+    wait_for("the split diff", lambda: sum(
         1 for n in app_tree().walk() if n.name == "import { TripList } from \"./trips\";") == 2)
-    save_screenshot(cua, "diff-auto")
+    save_screenshot(cua, "diff-split")
 
 
 main(spec)
