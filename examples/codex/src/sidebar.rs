@@ -5,7 +5,7 @@
 //! the card starts at window x 52, y 44).
 
 use accesskit::Role;
-use quark::view;
+use quark::{FadeEdge, view};
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Color;
@@ -28,41 +28,50 @@ fn nav_row(p: &Pal, icon: AnyElement, label: &str, msg: Msg) -> Div {
     }
 }
 
-/// A chat row; `indent` puts the title under a project's name.
+/// Rows reveal their actions while hovered or holding focus.
+const ROW: GroupId = GroupId::new("sidebar.thread");
+
+/// A chat row; `indent` puts the title under a project's name. The title
+/// fades out at the row's edge instead of ending in an ellipsis, as the
+/// app does. Hovering or focusing the row swaps its status for Pin and
+/// Archive, in the same trailing space so nothing moves.
 fn thread_row(app: &Codex, p: &Pal, t: &Thread, indent: bool) -> AnyElement {
     let selected = app.screen == Screen::Thread(t.id);
+    let fill = if selected { p.row_selected } else { p.row_hover };
     view! {
-        <div class="flex-row items-center shrink-0 h-[30] pr-[10] gap-1.5 rounded-[8]" w={ROW_W}
-             pl={if indent { 32.0 } else { 8.0 }} bg={if selected { p.row_selected }}
-             hover_bg={if selected { p.row_selected } else { p.row_hover }} role="listitem"
-             aria-label={t.title.clone()} aria-selected={selected} on:click={Msg::Select(t.id)}>
-            {clipped(t.title.clone(), p, if selected { p.row_selected } else { p.sidebar })}
-            match t.status {
-                Status::Running => <icon svg={icons::LOADER} size={13.0} color={p.sidebar_muted} />
-                Status::Awaiting => {
-                    <div class="flex-row items-center h-[22] px-[9] rounded-[11] bg-[#1f4a31]
-                                max-w-[116] overflow-hidden">
-                        <txt("Awaiting approval", SMALL, Color::rgba(0x4c, 0xd2, 0x86, 255))
-                             class="truncate" />
-                    </div>
-                    <div class="w-1.5" />
-                    <icon svg={icons::LOADER} size={13.0} color={p.sidebar_muted} />
+        <div class="relative flex-row items-center shrink-0 h-[30] pr-[10] gap-1.5 rounded-[8]"
+             w={ROW_W} pl={if indent { 32.0 } else { 8.0 }} bg={if selected { p.row_selected }}
+             hover_bg={fill} role="listitem" aria-label={t.title.clone()} aria-selected={selected}
+             on:click={Msg::Select(t.id)} interaction_group={ROW}>
+            <div class="flex-1 min-w-0 overflow-hidden">
+                <txt(t.title.clone(), BODY, p.sidebar_text) overflow={TextOverflow::Fade(22.0)} />
+            </div>
+            <div class="flex-row items-center gap-1.5" show_when={GroupCondition::Idle(ROW)}>
+                match t.status {
+                    Status::Running => <icon svg={icons::LOADER} size={13.0} color={p.sidebar_muted} />
+                    Status::Awaiting => {
+                        <div class="flex-row items-center h-[22] px-[9] rounded-[11] bg-[#1f4a31]
+                                    max-w-[116] overflow-hidden">
+                            <txt("Awaiting approval", SMALL, Color::rgba(0x4c, 0xd2, 0x86, 255))
+                                 class="truncate" />
+                        </div>
+                        <div class="w-1.5" />
+                        <icon svg={icons::LOADER} size={13.0} color={p.sidebar_muted} />
+                    }
+                    Status::Error => <icon svg={icons::ALERT} size={15.0} color={p.error} />
+                    Status::Idle => {}
                 }
-                Status::Error => <icon svg={icons::ALERT} size={15.0} color={p.error} />
-                Status::Idle => {}
-            }
-        </div>
-    }
-}
-
-/// A title clipped at the row's edge under a short fade, as the app does
-/// (no ellipsis). The fade is painted in `bg`, the row's fill.
-fn clipped(title: String, p: &Pal, bg: Color) -> AnyElement {
-    view! {
-        <div class="flex-1 min-w-0 overflow-hidden relative">
-            <txt(title, BODY, p.sidebar_text) />
-            <div class="absolute right-0 top-0 w-[22] h-[18]"
-                 bg_effect={linear_gradient(0.0, bg.with_alpha(0), bg)} />
+            </div>
+            <div class="absolute right-0 top-0 h-full flex-row"
+                 show_when={GroupCondition::HoveredOrFocusWithin(ROW)}
+                 fade_edge={(FadeEdge::Left, 22.0)}>
+                <div class="flex-row items-center h-full pl-[22] pr-1 gap-0.5" bg={fill}
+                     rounded_corners={[0.0, 8.0, 8.0, 0.0]}>
+                    <icon_button(p, icons::PIN, 24.0, 14.0, p.sidebar_muted, "Pin chat", Msg::Noop) />
+                    <icon_button(p, icons::ARCHIVE, 24.0, 14.0, p.sidebar_muted, "Archive chat",
+                                 Msg::Noop) />
+                </div>
+            </div>
         </div>
     }
 }

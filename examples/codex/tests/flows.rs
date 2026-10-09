@@ -79,3 +79,20 @@ fn view_changes_opens_the_changes_tab() {
             .is_some()
     );
 }
+
+// Catches row actions that never appear, or appear on every row: hovering
+// one chat row reveals its Pin and Archive buttons, inside the row, and no
+// other row's.
+#[test]
+fn hovering_a_chat_row_reveals_only_its_actions() {
+    let mut ui = harness("home");
+    assert!(ui.find_all(By::role_name(Role::Button, "Archive chat")).is_empty());
+    let row = ui.find(By::role_name(Role::ListItem, "Design self-improving intent layer")).bounds;
+    ui.pointer_move((row.x + 40.0, row.y + row.height / 2.0));
+    ui.frame();
+    let archive = ui.find_all(By::role_name(Role::Button, "Archive chat"));
+    assert_eq!(archive.len(), 1);
+    let b = archive[0].bounds;
+    assert!(b.x > row.x + row.width / 2.0 && b.x + b.width <= row.x + row.width, "{b:?} in {row:?}");
+    assert!(b.y >= row.y && b.y + b.height <= row.y + row.height, "{b:?} in {row:?}");
+}
