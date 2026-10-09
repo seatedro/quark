@@ -122,6 +122,7 @@ impl<A: App> Runner<A> {
         event_loop: &ActiveEventLoop,
         options: &WindowOptions,
     ) -> Result<WindowState, RunError> {
+        crate::platform::material::watch_accessibility(&self.waker);
         let environment = crate::platform::material::environment(event_loop);
         let wants_alpha = environment.wants_alpha(options.background);
         let attributes = window_attributes(options, event_loop).with_transparent(wants_alpha);
@@ -594,10 +595,29 @@ impl<A: App> Runner<A> {
     }
 }
 
+impl<A: App> Runner<A> {
+    /// Re-resolve every open window's surface against the user's current
+    /// accessibility settings, telling the app of each that changed.
+    fn refresh_surfaces(&mut self, event_loop: &ActiveEventLoop) {
+        let changed: Vec<WindowHandle> = self
+            .windows
+            .iter_mut()
+            .filter_map(|(handle, entry)| entry.open_mut()?.refresh_surface().then_some(handle))
+            .collect();
+        for window in changed {
+            let event = AppEvent::WindowSurfaceChanged(window);
+            self.with_event_cx(event_loop, Some(window), |app, cx| app.app_event(event, cx));
+        }
+    }
+}
+
 impl<A: App> ApplicationHandler for Runner<A> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
         self.process_accessibility_actions(event_loop);
         self.process_app_events(event_loop);
+        if crate::platform::material::take_accessibility_change() {
+            self.refresh_surfaces(event_loop);
+        }
         // A worker thread can wake the loop before the first window exists;
         // the app has not seen `init` yet, so it is not told.
         if !self.started {

@@ -226,10 +226,18 @@ impl SurfaceEnvironment {
         }
     }
 
-    /// Whether `request` needs a surface that composites alpha.
+    /// Whether `request` needs a surface that composites alpha: whether
+    /// anything could show through it, whatever the user's accessibility
+    /// settings say now. They can change while the window is open, and the
+    /// surface (and on X11 the visual) is chosen only once.
     pub(crate) fn wants_alpha(&self, request: WindowBackground) -> bool {
+        let unrestricted = Self {
+            reduced_transparency: false,
+            increased_contrast: false,
+            ..*self
+        };
         !matches!(
-            self.background(request, true),
+            unrestricted.background(request, true),
             EffectiveBackground::Opaque(_) | EffectiveBackground::Fallback { .. }
         )
     }
@@ -367,6 +375,23 @@ impl SurfaceEnvironment {
     }
 }
 
+/// Wake the event loop through `waker` when the user's accessibility
+/// display settings change, where the platform says so; see
+/// [`take_accessibility_change`]. Once per process.
+pub(crate) fn watch_accessibility(waker: &crate::runner::Waker) {
+    #[cfg(target_os = "macos")]
+    macos::watch_accessibility(waker);
+    let _ = waker;
+}
+
+/// Whether the accessibility display settings changed since the last call.
+pub(crate) fn take_accessibility_change() -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::take_accessibility_change();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 /// The user's reduced transparency and increased contrast settings.
 fn accessibility() -> (bool, bool) {
     #[cfg(any(target_os = "macos", windows))]
@@ -486,7 +511,7 @@ mod tests {
                 sidebar(),
                 true,
                 fallback(ReducedTransparency),
-                false,
+                true,
             ),
             (
                 "increased contrast",
@@ -494,7 +519,7 @@ mod tests {
                 sidebar(),
                 true,
                 fallback(IncreasedContrast),
-                false,
+                true,
             ),
             (
                 "Windows 11 22H2",

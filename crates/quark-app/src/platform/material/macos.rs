@@ -8,6 +8,10 @@
 //! covers them. Being below it, they never take a click, and they are no
 //! accessibility elements.
 
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
 use objc2::{msg_send, sel};
@@ -236,4 +240,46 @@ pub(crate) fn title_double_click() -> TitleAction {
         Some("None") => TitleAction::Nothing,
         _ => TitleAction::ToggleMaximize,
     }
+}
+
+/// Set by the notification observer, taken by the event loop.
+static ACCESSIBILITY_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Observe `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`,
+/// which System Settings posts as reduced transparency or increased
+/// contrast change, while the app may keep focus throughout.
+pub(crate) fn watch_accessibility(waker: &crate::runner::Waker) {
+    static WATCH: Once = Once::new();
+    WATCH.call_once(|| {
+        let Some(class) = AnyClass::get(c"NSWorkspace") else {
+            return;
+        };
+        let waker = waker.clone();
+        let block = RcBlock::new(move |_note: *mut AnyObject| {
+            ACCESSIBILITY_CHANGED.store(true, Ordering::Release);
+            waker.wake();
+        });
+        let name =
+            NSString::from_str("NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification");
+        // SAFETY: NSWorkspace's notification center and its block-based
+        // observer API, on the main thread; a nil object and queue deliver
+        // every such notification on the posting (main) thread.
+        unsafe {
+            let workspace: Retained<AnyObject> = msg_send![class, sharedWorkspace];
+            let center: Retained<AnyObject> = msg_send![&workspace, notificationCenter];
+            let observer: Option<Retained<AnyObject>> = msg_send![
+                &center,
+                addObserverForName: &*name,
+                object: std::ptr::null::<AnyObject>(),
+                queue: std::ptr::null::<AnyObject>(),
+                usingBlock: &*block
+            ];
+            // Observed for the life of the process.
+            std::mem::forget(observer);
+        }
+    });
+}
+
+pub(crate) fn take_accessibility_change() -> bool {
+    ACCESSIBILITY_CHANGED.swap(false, Ordering::AcqRel)
 }

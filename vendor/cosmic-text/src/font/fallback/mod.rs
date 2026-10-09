@@ -329,15 +329,12 @@ impl<'a> FontFallbackIter<'a> {
     /// default family, which also settles ties toward the CSS side.
     fn family_match_key(&self, family_name: &str) -> Option<&FontMatchKey> {
         let in_family = |m_key: &&FontMatchKey| self.face_contains_family(m_key.id, family_name);
-        self.font_match_keys
-            .first()
-            .filter(in_family)
-            .or_else(|| {
-                self.font_match_keys
-                    .iter()
-                    .filter(in_family)
-                    .min_by_key(|m_key| m_key.font_weight_diff)
-            })
+        self.font_match_keys.first().filter(in_family).or_else(|| {
+            self.font_match_keys
+                .iter()
+                .filter(in_family)
+                .min_by_key(|m_key| m_key.font_weight_diff)
+        })
     }
 
     /// How many of the word's chars font `id` lacks, or `None` when the
