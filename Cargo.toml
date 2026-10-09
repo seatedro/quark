@@ -24,8 +24,10 @@ members = [
   "vendor/cosmic-text",
   "vendor/taffy",
 ]
-# cargo-fuzz targets build on their own with nightly sanitizers.
-exclude = ["fuzz"]
+# cargo-fuzz targets build on their own with nightly sanitizers. wry is
+# vendored for a macOS patch but stays out of the workspace, so ordinary
+# workspace builds never need WebKitGTK.
+exclude = ["fuzz", "vendor/wry"]
 
 [workspace.package]
 version = "0.1.0"
@@ -102,3 +104,6 @@ cosmic-text = { path = "vendor/cosmic-text" }
 # taffy 0.9.2, vendored to reuse storage across layouts. See
 # vendor/taffy/VENDORED.md.
 taffy = { path = "vendor/taffy" }
+# wry 0.57.0 plus WKWebView navigation hooks for quark-webview. See
+# vendor/wry/VENDORED.md.
+wry = { path = "vendor/wry" }

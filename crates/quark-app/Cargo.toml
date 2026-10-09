@@ -140,6 +140,9 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # The webview tests' local HTTPS fixture (tests/webview). Already in the
 # tree through ureq.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# webview_smoke trusts the fixture's certificate through
+# `quark_webview::testing`; no system libraries without `webview`.
+quark-webview = { workspace = true, features = ["test-trust"] }
 # Tests and examples always get the headless harness (`quark_app::testing`).
 quark-app = { path = ".", features = ["headless-render", "components"] }
 
