@@ -115,6 +115,7 @@ jobs:
         run: |
           cargo build -p quark-app --examples --features ui,notifications
           cargo build -p quark-workbench --bin workbench
+          cargo build -p quark-codex --bin codex-demo
 
       - name: Install cua driver
         run: e2e/install-cua.sh
