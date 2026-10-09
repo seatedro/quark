@@ -59,12 +59,17 @@ pub mod testing {
     /// For a non-loopback host, or when called again with other values.
     pub fn trust_leaf(der: Vec<u8>, hosts: &[&str]) {
         assert!(
-            hosts.iter().all(|host| matches!(*host, "127.0.0.1" | "::1" | "localhost")),
+            hosts
+                .iter()
+                .all(|host| matches!(*host, "127.0.0.1" | "::1" | "localhost")),
             "test trust is for loopback hosts only"
         );
         let hosts: Vec<String> = hosts.iter().map(|host| (*host).to_owned()).collect();
         let trusted = TRUST.get_or_init(|| (der.clone(), hosts.clone()));
-        assert!(*trusted == (der, hosts), "test trust is set once per process");
+        assert!(
+            *trusted == (der, hosts),
+            "test trust is set once per process"
+        );
     }
 }
 
