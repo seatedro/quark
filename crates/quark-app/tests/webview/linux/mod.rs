@@ -18,8 +18,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -39,8 +39,8 @@ pub mod evidence;
 const TITLE: &str = "linux smoke sign in";
 
 pub fn run() -> ExitCode {
-    if std::env::var_os("DISPLAY").is_none() {
-        println!("webview_smoke linux: no X11 display; skipped");
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        println!("webview_smoke linux: no display; skipped");
         return ExitCode::SUCCESS;
     }
     // The persistent profile lives under a data directory of the run's own.
@@ -62,6 +62,7 @@ pub fn run() -> ExitCode {
             failures: Vec::new(),
             clear: None,
             quiet: Arc::new(AtomicBool::new(false)),
+            sway: None,
         },
         WindowOptions {
             title: "linux webview smoke".into(),
@@ -112,6 +113,9 @@ struct Smoke {
     /// Set by a timer thread once the certificate failure had time to
     /// produce an error page.
     quiet: Arc<AtomicBool>,
+    /// Sway's answer to whether the modal floats, from a thread that polls
+    /// its tree while the app keeps servicing GTK.
+    sway: Option<Arc<Mutex<Option<Option<bool>>>>>,
 }
 
 impl Smoke {
@@ -239,21 +243,39 @@ impl Smoke {
         }
         match (self.step, event) {
             (Step::Getter, WebViewEvent::Opened { capabilities, .. }) => {
-                self.check("X11 parent relationship", capabilities.parent, ParentRelationship::Native);
+                // Native on X11 always; on Wayland exactly when the
+                // compositor can export the parent through xdg-foreign.
+                let expected = match parent_window(cx) {
+                    Some(RawWindowHandle::Wayland(_)) if !wayland::has_exporter() => ParentRelationship::AppEnforced,
+                    _ => ParentRelationship::Native,
+                };
+                self.check("the parent relationship", capabilities.parent, expected);
             }
             (Step::Getter, WebViewEvent::PageLoadFinished { view, document, .. }) => {
-                let parent = cx.window().and_then(|window| match window.window_handle().ok()?.as_raw() {
-                    RawWindowHandle::Xlib(handle) => Some(handle.window as u32),
-                    RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
-                    _ => None,
-                });
-                match parent {
-                    Some(parent) => self.check(
+                match parent_window(cx) {
+                    Some(RawWindowHandle::Xlib(handle)) => self.check(
                         "the modal's WM_TRANSIENT_FOR is the parent",
                         x11::transient_for_window_named(TITLE),
-                        Some(parent),
+                        Some(handle.window as u32),
                     ),
-                    None => self.failures.push("the parent has no X11 window".into()),
+                    Some(RawWindowHandle::Xcb(handle)) => self.check(
+                        "the modal's WM_TRANSIENT_FOR is the parent",
+                        x11::transient_for_window_named(TITLE),
+                        Some(handle.window.get()),
+                    ),
+                    // Sway floats a toplevel that has a parent and tiles one
+                    // that does not, so the tree shows whether it imported
+                    // the exported parent.
+                    Some(RawWindowHandle::Wayland(_)) if std::env::var_os("SWAYSOCK").is_some() => {
+                        let (slot, waker) = (Arc::new(Mutex::new(None)), cx.waker().clone());
+                        self.sway = Some(Arc::clone(&slot));
+                        std::thread::spawn(move || {
+                            *slot.lock().unwrap() = Some(wayland::sway_floating(TITLE));
+                            waker.wake();
+                        });
+                    }
+                    Some(RawWindowHandle::Wayland(_)) => {}
+                    _ => self.failures.push("the parent has no X11 or Wayland window".into()),
                 }
                 self.step = Step::Token;
                 self.evaluate(cx, view, document, "return await window.fixture.getToken();");
@@ -268,6 +290,9 @@ impl Smoke {
                 cx.webviews().close(view);
             }
             (Step::BadCert, WebViewEvent::NavigationFailed { stage, error, .. }) => {
+                // WebKitGTK races its own cancellation against the TLS error
+                // it reports, so either can name a refused certificate.
+                let error = if error == NavigationError::Cancelled { NavigationError::Tls } else { error };
                 self.check("a bad certificate fails", (stage, error), (FailureStage::Provisional, NavigationError::Tls));
                 // WebKit loads its error page right after the failure,
                 // unless the backend stops it. Give it time to, then look.
@@ -360,6 +385,18 @@ impl App for Smoke {
     }
 
     fn wake(&mut self, cx: &mut EventContext) {
+        if let Some(floating) = self
+            .sway
+            .as_ref()
+            .and_then(|slot| slot.lock().unwrap().take())
+        {
+            self.sway = None;
+            self.check(
+                "sway floats the modal over its imported parent",
+                floating,
+                Some(wayland::has_exporter()),
+            );
+        }
         if self.step == Step::BadCert
             && self.quiet.swap(false, Ordering::AcqRel)
             && let Some(view) = self.view
@@ -383,10 +420,94 @@ impl Drop for Smoke {
         if self.step != Step::Done {
             self.failures.push(format!("stopped at {:?}", self.step));
         }
+        if self.sway.is_some() {
+            self.failures.push("sway's tree was never read".into());
+        }
         for failure in &self.failures {
             eprintln!("webview_smoke linux: FAIL: {failure}");
         }
         PASSED.store(self.failures.is_empty(), Ordering::Release);
+    }
+}
+
+fn parent_window(cx: &EventContext) -> Option<RawWindowHandle> {
+    Some(cx.window()?.window_handle().ok()?.as_raw())
+}
+
+mod wayland {
+    use wayland_client::globals::{GlobalListContents, registry_queue_init};
+    use wayland_client::protocol::wl_registry::{self, WlRegistry};
+    use wayland_client::{Connection, Dispatch, QueueHandle};
+
+    struct Globals;
+
+    impl Dispatch<WlRegistry, GlobalListContents> for Globals {
+        fn event(
+            _: &mut Self,
+            _: &WlRegistry,
+            _: wl_registry::Event,
+            _: &GlobalListContents,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    /// Whether the compositor offers an xdg-foreign exporter, on a
+    /// connection of the test's own.
+    pub fn has_exporter() -> bool {
+        let Ok(conn) = Connection::connect_to_env() else {
+            return false;
+        };
+        let Ok((globals, _queue)) = registry_queue_init::<Globals>(&conn) else {
+            return false;
+        };
+        globals.contents().with_list(|list| {
+            list.iter()
+                .any(|global| global.interface.starts_with("zxdg_exporter_v"))
+        })
+    }
+
+    /// Whether sway shows the window titled `title` as floating; `None`
+    /// when it is not in the tree. Sway maps a toplevel tiled and floats it
+    /// once it applies the parent, so this waits up to two seconds for it;
+    /// call it off the UI thread, which must keep answering the compositor.
+    pub fn sway_floating(title: &str) -> Option<bool> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let floating = sway_tree_floating(title);
+            if floating == Some(true) || std::time::Instant::now() > deadline {
+                return floating;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn sway_tree_floating(title: &str) -> Option<bool> {
+        let output = std::process::Command::new("swaymsg")
+            .args(["-t", "get_tree"])
+            .output()
+            .ok()?;
+        let tree: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        fn find(node: &serde_json::Value, title: &str, floating: bool) -> Option<bool> {
+            if node["name"] == title {
+                return Some(floating);
+            }
+            let nodes = node["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|child| (child, floating));
+            let floats = node["floating_nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|child| (child, true));
+            nodes
+                .chain(floats)
+                .find_map(|(child, floating)| find(child, title, floating))
+        }
+        find(&tree, title, false)
     }
 }
 
