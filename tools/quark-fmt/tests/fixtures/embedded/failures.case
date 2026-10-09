@@ -1,0 +1,24 @@
+=== a fragment rustfmt would change beyond whitespace keeps its source
+context: expr
+prefix: color={
+suffix: }
+--- input
+            color={match tone { Tone::Muted => { p.muted }, Tone::Plain => p.text }}
+--- error
+rustfmt changed
+=== a fragment rustfmt rejects keeps its source
+context: expr
+prefix: value={
+suffix: }
+--- input
+            value={let x = 1}
+--- error
+rustfmt rejected
+=== a neighbour of a rejected fragment in the same run is still formatted
+context: expr
+prefix: value={
+suffix: }
+--- input
+            value={ a+b }
+--- expected
+            value={a + b}
