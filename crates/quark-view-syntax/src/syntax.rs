@@ -11,7 +11,7 @@
 //!
 //! The leaves cover the input: between two consecutive leaves there is
 //! only whitespace and comments. Leaves store spans; outside a procedural
-//! macro, with the `locations` feature, [`SpanRange::byte_range`] resolves
+//! macro, with the `locations` feature, `SpanRange::byte_range` resolves
 //! them against the parsed source.
 //!
 //! The AST link is positional. The [`NodeKind::is_child`] nodes inside an
