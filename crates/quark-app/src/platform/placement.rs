@@ -834,6 +834,126 @@ pub(crate) mod tests {
     /// Grabbable title bar strip the property guarantees, in points.
     const TITLE_BAR: (f64, f64) = (48.0, 24.0);
 
+    fn area(x: f64, y: f64, width: f64, height: f64) -> DesktopRect {
+        DesktopRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    // Catches a floating window left under a taskbar or past a display's
+    // edge, one shrunk below its minimum size, and an oversized window
+    // pinned anywhere but the work area's top-left (where its title bar
+    // and leading controls are).
+    #[test]
+    fn a_window_is_constrained_to_the_work_area() {
+        let none = (0.0, 0.0);
+        // (case, outer, work area, min outer size, expected)
+        let cases = [
+            (
+                "already inside stays",
+                area(100.0, 100.0, 800.0, 600.0),
+                area(0.0, 0.0, 1920.0, 1040.0),
+                none,
+                area(100.0, 100.0, 800.0, 600.0),
+            ),
+            (
+                "a taskbar along the bottom",
+                area(1500.0, 900.0, 600.0, 400.0),
+                area(0.0, 0.0, 1920.0, 1040.0),
+                none,
+                area(1320.0, 640.0, 600.0, 400.0),
+            ),
+            (
+                "a menu bar along the top",
+                area(200.0, -20.0, 600.0, 400.0),
+                area(0.0, 25.0, 1440.0, 875.0),
+                none,
+                area(200.0, 25.0, 600.0, 400.0),
+            ),
+            (
+                "a panel along the left",
+                area(10.0, 300.0, 600.0, 400.0),
+                area(48.0, 0.0, 1872.0, 1080.0),
+                none,
+                area(48.0, 300.0, 600.0, 400.0),
+            ),
+            (
+                "a dock along the right",
+                area(1700.0, 300.0, 600.0, 400.0),
+                area(0.0, 0.0, 1856.0, 1080.0),
+                none,
+                area(1256.0, 300.0, 600.0, 400.0),
+            ),
+            (
+                "a display left of the primary, at negative coordinates",
+                area(-2000.0, -50.0, 600.0, 400.0),
+                area(-1920.0, 0.0, 1920.0, 1040.0),
+                none,
+                area(-1920.0, 0.0, 600.0, 400.0),
+            ),
+            (
+                "too large shrinks to the work area",
+                area(-100.0, 10.0, 2400.0, 1200.0),
+                area(0.0, 30.0, 1920.0, 1010.0),
+                (240.0, 160.0),
+                area(0.0, 30.0, 1920.0, 1010.0),
+            ),
+            (
+                "a minimum larger than the work area keeps it, pinned top-left",
+                area(300.0, 300.0, 1600.0, 1000.0),
+                area(0.0, 30.0, 1280.0, 770.0),
+                (1400.0, 900.0),
+                area(0.0, 30.0, 1400.0, 900.0),
+            ),
+            (
+                "a non-finite rectangle is left alone",
+                area(f64::NAN, 0.0, 600.0, 400.0),
+                area(0.0, 0.0, 1920.0, 1040.0),
+                none,
+                area(f64::NAN, 0.0, 600.0, 400.0),
+            ),
+        ];
+        for (case, outer, work, min, expected) in cases {
+            let got = constrain_to_work_area(outer, work, min);
+            let same = |a: f64, b: f64| a == b || (a.is_nan() && b.is_nan());
+            assert!(
+                same(got.x, expected.x)
+                    && same(got.y, expected.y)
+                    && got.width == expected.width
+                    && got.height == expected.height,
+                "{case}: {got:?}"
+            );
+        }
+    }
+
+    // Catches a window released in a gap between displays, or beyond the
+    // last one after a display was unplugged, getting no display at all.
+    #[test]
+    fn the_display_for_a_point_contains_it_or_is_nearest() {
+        let displays = [
+            area(0.0, 0.0, 1920.0, 1080.0),
+            area(1920.0, 200.0, 1440.0, 900.0),
+        ];
+        let cases = [
+            ("on the first", (100.0, 100.0), Some(0)),
+            ("on the second", (2000.0, 500.0), Some(1)),
+            (
+                "above the second, beside the first",
+                (2500.0, 50.0),
+                Some(1),
+            ),
+            ("far right of both", (9000.0, 600.0), Some(1)),
+            ("far left of both", (-500.0, 600.0), Some(0)),
+        ];
+        for (case, point, expected) in cases {
+            assert_eq!(nearest_area(&displays, point), expected, "{case}");
+        }
+        assert_eq!(nearest_area(&[], (0.0, 0.0)), None, "no displays");
+    }
+
     proptest! {
         // A restored window's top-left title bar strip lies inside the
         // usable area of its monitor, measured in desktop pixels, whatever

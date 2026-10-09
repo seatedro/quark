@@ -183,6 +183,19 @@ pub struct DockWindows {
     /// Restored floating hosts, to open once the main window is.
     to_open: Vec<HostId>,
     notices: Vec<(WindowHandle, String)>,
+    placement: FloatingPlacement,
+}
+
+/// Where a newly floating window may go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FloatingPlacement {
+    /// Inside the work area of the display it lands on, moved and if need
+    /// be shrunk once it opens or is released
+    /// ([`EventContext::fit_window_to_work_area`](crate::EventContext::fit_window_to_work_area)).
+    #[default]
+    FitWorkArea,
+    /// Exactly where the pointer put it, even partly off screen.
+    Free,
 }
 
 impl DockWindows {
@@ -202,7 +215,15 @@ impl DockWindows {
             placements: HashMap::new(),
             to_open: Vec::new(),
             notices: Vec::new(),
+            placement: FloatingPlacement::default(),
         }
+    }
+
+    /// Where new floating windows may go; [`FloatingPlacement::FitWorkArea`]
+    /// by default.
+    pub fn floating_placement(mut self, placement: FloatingPlacement) -> Self {
+        self.placement = placement;
+        self
     }
 
     /// Title floating windows by their tabs and `title`: "Diff - App".
@@ -506,6 +527,8 @@ impl DockWindows {
                     if let Some((hotspot, at)) = align {
                         cx.window.align_window(window, hotspot, at);
                     }
+                    // After the alignment, which would otherwise undo it.
+                    self.fit(window, align.map(|(_, at)| at), cx);
                     self.settle(dock, &effects, Arrival::NewWindow, cx);
                 }
                 Err(refusal) => {
@@ -836,7 +859,7 @@ impl DockWindows {
                         self.keep_until_closed(host, transport);
                         self.settle(dock, &effects, Arrival::Existing, cx);
                     }
-                    Err(_) => self.end_live(dock, host, cx),
+                    Err(_) => self.end_live(dock, host, desktop, cx),
                 }
             }
             (DragResult::Dropped(DragOutcome::Target { hit, .. }), None) => {
@@ -850,7 +873,7 @@ impl DockWindows {
             (DragResult::Dropped(DragOutcome::Outside), None) => {
                 self.detach_on_release(dock, payload, hotspot, size, desktop, cx);
             }
-            (DragResult::Dropped(_), Some(host)) => self.end_live(dock, host, cx),
+            (DragResult::Dropped(_), Some(host)) => self.end_live(dock, host, desktop, cx),
             (DragResult::Dropped(_), None) | (DragResult::Cancelled, None) => {}
             (DragResult::Cancelled, Some(host)) => {
                 if let Ok(effects) = dock.cancel_live_detach(host) {
@@ -862,10 +885,28 @@ impl DockWindows {
         cx.window.request_redraw_all();
     }
 
-    /// A live tear-off released away from any group stays a window.
-    fn end_live(&mut self, dock: &mut DockState, host: HostId, cx: &mut UiContext) {
+    /// A live tear-off released away from any group stays a window, moved
+    /// into the work area of the display it was released on (`at`).
+    fn end_live(
+        &mut self,
+        dock: &mut DockState,
+        host: HostId,
+        at: Option<DesktopPoint>,
+        cx: &mut UiContext,
+    ) {
         if let Ok(effects) = dock.end_live_detach(host) {
+            if let Some(window) = self.window(host) {
+                self.fit(window, at, cx);
+            }
             self.settle(dock, &effects, Arrival::NewWindow, cx);
+        }
+    }
+
+    /// Keep a newly floating `window` reachable, by the placement policy.
+    /// While it follows the pointer it is left alone.
+    fn fit(&self, window: WindowHandle, at: Option<DesktopPoint>, cx: &mut UiContext) {
+        if self.placement == FloatingPlacement::FitWorkArea {
+            cx.window.fit_window_to_work_area(window, at);
         }
     }
 

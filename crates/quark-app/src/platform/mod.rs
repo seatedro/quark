@@ -36,3 +36,6 @@ pub(crate) mod theme;
 #[cfg(feature = "tray")]
 pub mod tray;
 pub mod window_state;
+pub(crate) mod work_area;
+#[cfg(target_os = "linux")]
+pub(crate) mod x11_root;

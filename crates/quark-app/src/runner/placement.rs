@@ -62,21 +62,22 @@ impl WindowPlacement {
 }
 
 /// A display as winit reports it: bounds in winit's physical pixels (on
-/// macOS, Cocoa points times the display's own scale), and no work area,
-/// which winit 0.30 does not report.
+/// macOS, Cocoa points times the display's own scale), with the work area
+/// the platform reports, which winit 0.30 does not.
 pub(super) fn monitor_info(monitor: &MonitorHandle) -> MonitorInfo {
     let position = monitor.position();
     let size = monitor.size();
+    let bounds = PhysicalRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    };
     MonitorInfo {
         name: monitor.name(),
-        bounds: PhysicalRect {
-            x: position.x,
-            y: position.y,
-            width: size.width,
-            height: size.height,
-        },
+        bounds,
         scale_factor: monitor.scale_factor(),
-        work_area: None,
+        work_area: crate::platform::work_area::work_area(monitor, bounds),
     }
 }
 
@@ -158,6 +159,11 @@ impl PlatformCapabilities {
 
         match event_loop.display_handle().map(|handle| handle.as_raw()) {
             Ok(RawDisplayHandle::Wayland(_)) => Self::WAYLAND,
+            #[cfg(target_os = "linux")]
+            Ok(RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_)) => {
+                crate::platform::x11_root::set_active();
+                Self::DESKTOP
+            }
             _ => Self::DESKTOP,
         }
     }

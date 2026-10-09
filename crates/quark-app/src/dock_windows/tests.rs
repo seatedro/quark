@@ -424,6 +424,48 @@ fn escape_puts_a_torn_off_tab_back_and_closes_its_window() {
     assert!(ui.app().dock.hosts().is_empty());
 }
 
+// Catches a tab torn off and released near a display's corner staying
+// partly under the taskbar or past the edge, where its title bar and tabs
+// cannot be reached.
+#[test]
+fn a_tab_released_near_a_display_corner_lands_inside_its_work_area() {
+    let stack = ScriptedStack::new();
+    let mut ui = desk(&stack);
+    let main = ui.main_window();
+    // A 1x display with a 40 px taskbar along the bottom.
+    ui.window(main).set_monitor(Some(MonitorInfo {
+        name: Some("DP-1".into()),
+        bounds: PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
+        scale_factor: 1.0,
+        work_area: Some(PhysicalRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1040,
+        }),
+    }));
+    let alpha = tab(&ui, "Alpha");
+    grab(&mut ui, alpha);
+    ui.desktop_move((1900.0, 1070.0));
+    ui.desktop_release();
+
+    let torn = floating(&ui);
+    let placement = ui.window(torn).placement();
+    let (x, y) = placement.outer_position.unwrap();
+    let (width, height) = placement.size;
+    assert_eq!(
+        (x + f64::from(width), y + f64::from(height)),
+        (1920.0, 1040.0),
+        "the window's bottom-right corner is the work area's"
+    );
+    assert_eq!(tabs_in(&mut ui, torn), ["Alpha"]);
+}
+
 // Catches a platform that cannot move windows with the pointer losing
 // tear-off altogether: there a release outside opens the window instead.
 #[test]
