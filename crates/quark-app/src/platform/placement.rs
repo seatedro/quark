@@ -405,6 +405,74 @@ pub fn restore(
     }
 }
 
+/// A rectangle in desktop units: Cocoa points on macOS, physical pixels on
+/// Windows and X11 (see [`crate::DesktopPoint`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DesktopRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl DesktopRect {
+    fn contains(&self, (x, y): (f64, f64)) -> bool {
+        (self.x..self.x + self.width).contains(&x) && (self.y..self.y + self.height).contains(&y)
+    }
+
+    /// The squared distance from `point` to the nearest point inside.
+    fn distance_squared(&self, (x, y): (f64, f64)) -> f64 {
+        let dx = (self.x - x).max(x - (self.x + self.width)).max(0.0);
+        let dy = (self.y - y).max(y - (self.y + self.height)).max(0.0);
+        dx * dx + dy * dy
+    }
+}
+
+/// The index of the area that contains `point`, else the nearest one; the
+/// first wins ties. `None` when there are no areas.
+pub fn nearest_area(areas: &[DesktopRect], point: (f64, f64)) -> Option<usize> {
+    if let Some(index) = areas.iter().position(|area| area.contains(point)) {
+        return Some(index);
+    }
+    areas
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            a.distance_squared(point)
+                .total_cmp(&b.distance_squared(point))
+        })
+        .map(|(index, _)| index)
+}
+
+/// Where a window whose outer rectangle (decorations included) is `outer`
+/// goes so that all of it lies inside the work area `work`. A window larger
+/// than the work area shrinks to it, but not below `min_size` (outer, in
+/// desktop units); one that still does not fit is pinned to the work area's
+/// top-left, so its title bar and the controls at its start stay reachable.
+/// A rectangle with a non-finite side is returned unchanged.
+pub fn constrain_to_work_area(
+    outer: DesktopRect,
+    work: DesktopRect,
+    min_size: (f64, f64),
+) -> DesktopRect {
+    let finite = |r: &DesktopRect| [r.x, r.y, r.width, r.height].iter().all(|v| v.is_finite());
+    if !finite(&outer) || !finite(&work) {
+        return outer;
+    }
+    let axis = |pos: f64, len: f64, start: f64, room: f64, min: f64| {
+        let len = len.min(room).max(min.min(len));
+        (pos.clamp(start, (start + room - len).max(start)), len)
+    };
+    let (x, width) = axis(outer.x, outer.width, work.x, work.width, min_size.0);
+    let (y, height) = axis(outer.y, outer.height, work.y, work.height, min_size.1);
+    DesktopRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

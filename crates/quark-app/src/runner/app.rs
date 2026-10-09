@@ -1,4 +1,5 @@
 use super::*;
+use crate::platform::material::{WindowBackground, WindowCorners};
 
 /// An application driven by [`run`]. Scene, size, and pointer coordinates
 /// are logical points; the runner scales each window's scene to physical
@@ -97,6 +98,12 @@ pub struct WindowOptions {
     /// Open maximized. A `persist_key` window restores its saved state
     /// instead.
     pub maximized: bool,
+    /// What shows behind the app's paint: an opaque color, a transparent
+    /// surface, or a native material. Resolved against the platform; see
+    /// [`crate::platform::material`] and [`EventContext::window_surface`].
+    pub background: WindowBackground,
+    /// The window's corner shape, as far as the platform allows.
+    pub corners: WindowCorners,
 }
 
 impl Default for WindowOptions {
@@ -114,6 +121,8 @@ impl Default for WindowOptions {
             position: None,
             active: true,
             maximized: false,
+            background: WindowBackground::default(),
+            corners: WindowCorners::default(),
         }
     }
 }

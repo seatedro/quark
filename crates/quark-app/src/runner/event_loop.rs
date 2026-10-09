@@ -122,7 +122,10 @@ impl<A: App> Runner<A> {
         event_loop: &ActiveEventLoop,
         options: &WindowOptions,
     ) -> Result<WindowState, RunError> {
-        let window = Arc::new(event_loop.create_window(window_attributes(options, event_loop))?);
+        let environment = crate::platform::material::environment(event_loop);
+        let wants_alpha = environment.wants_alpha(options.background);
+        let attributes = window_attributes(options, event_loop).with_transparent(wants_alpha);
+        let window = Arc::new(event_loop.create_window(attributes)?);
         let size = window.inner_size();
         let scale_factor = window.scale_factor();
         let accessibility_state = Arc::new(AccessibilityState::default());
@@ -151,6 +154,13 @@ impl<A: App> Runner<A> {
             }
         };
         renderer.resize(size.width, size.height, scale_factor);
+        let surface_alpha = surface_alpha(&mut renderer, wants_alpha);
+        let surface = SurfaceState::resolve(
+            options.background,
+            options.corners,
+            environment,
+            surface_alpha,
+        );
         #[cfg(target_os = "linux")]
         crate::platform::drag_out::window_created(&window);
         window.set_visible(true);
@@ -169,6 +179,9 @@ impl<A: App> Runner<A> {
             persist_key: options.persist_key.clone(),
             saved_placement: saved_placement(options, event_loop),
             position: Default::default(),
+            min_size: options.min_size,
+            surface_alpha,
+            surface,
         })
     }
 
@@ -797,4 +810,13 @@ fn logical_metrics(metrics: TextMetrics, scale: f32) -> TextMetrics {
         mono_line_height_px: metrics.mono_line_height_px / scale,
         mono_char_width_px: metrics.mono_char_width_px / scale,
     }
+}
+
+/// Make `renderer`'s surface composite alpha when `wanted`; returns whether
+/// it does. Until the renderer can pick a non-opaque alpha mode every
+/// surface is opaque, so material and transparent windows report their
+/// fallback.
+fn surface_alpha(renderer: &mut Renderer, wanted: bool) -> bool {
+    let _ = (renderer, wanted);
+    false
 }

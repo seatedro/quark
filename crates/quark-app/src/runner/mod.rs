@@ -44,6 +44,7 @@ mod events;
 mod placement;
 mod platform;
 mod scale;
+mod surface;
 mod table;
 #[cfg(feature = "test-support")]
 mod testing;
@@ -61,6 +62,7 @@ use placement::*;
 pub use placement::{DesktopPoint, PlatformCapabilities, WindowPlacement, restored_position};
 use platform::PlatformState;
 pub use scale::scene_to_physical;
+pub(crate) use surface::SurfaceState;
 pub use table::WindowHandle;
 use table::WindowTable;
 #[cfg(feature = "test-support")]
