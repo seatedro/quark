@@ -15,3 +15,10 @@ categories = ["parsing", "development-tools::procedural-macro-helpers"]
 proc-macro2 = "1"
 syn = { version = "2", features = ["full"] }
 
+
+[features]
+# Byte ranges for recorded spans (`SpanRange::byte_range`) and their
+# ordering check. Meaningful outside a procedural macro, where proc-macro2
+# tracks source locations; quark-macros leaves it off.
+locations = ["proc-macro2/span-locations"]
+

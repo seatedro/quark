@@ -1,5 +1,6 @@
 //! The parsed form of `view!` input. Parsing (`parse.rs`) only checks
-//! syntax; what each node means is decided when it is lowered (`emit.rs`).
+//! syntax; what each node means is decided when quark-macros lowers it
+//! (its `view/emit.rs`).
 
 use proc_macro2::Span;
 use syn::punctuated::Punctuated;
