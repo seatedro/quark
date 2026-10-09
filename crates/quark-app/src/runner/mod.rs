@@ -17,7 +17,7 @@ use accesskit::{
 };
 use accesskit_winit::Adapter as AccessibilityAdapter;
 use glyphon::FontSystem;
-use quark::scene::Scene;
+use quark::scene::{Scene, SurfaceBackground};
 use quark_render::fonts::FontSettings;
 use quark_render::{GpuContext, RenderError, Renderer, TextMetrics};
 use quark_text::{LayoutCache, TextError, TextLayout, TextParams, TextSystem};

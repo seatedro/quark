@@ -27,34 +27,7 @@ use quark::{Color, Rect};
 
 /// What a native material looks like, by its role in the window. Platforms
 /// map each kind to their closest material; kinds they lack share one.
-///
-/// Provisional: replaced by `quark::material::MaterialKind`, with the same
-/// variants, once the core crate defines it.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum MaterialKind {
-    /// The window's own background.
-    #[default]
-    WindowBackground,
-    /// A source list or sidebar beside the content.
-    Sidebar,
-    /// The main content area.
-    Content,
-    /// A title bar or toolbar.
-    Titlebar,
-    /// A header above a list or table.
-    HeaderView,
-    /// A popover or other transient panel.
-    Popover,
-    Menu,
-    Tooltip,
-    /// A heads-up display over other content.
-    Hud,
-    /// A sheet attached to a window.
-    Sheet,
-    /// The area under a window's content, for full-window effects.
-    UnderWindow,
-}
+pub use quark::scene::MaterialKind;
 
 /// A material and the opaque color drawn when the window cannot have it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -198,7 +171,8 @@ pub(crate) struct SurfaceEnvironment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Each platform builds only its own variants.
+#[allow(dead_code)]
 pub(crate) enum Backend {
     MacOs,
     /// `build` is the Windows build number, when known.
@@ -330,37 +304,360 @@ pub(crate) fn windows_corner(radius: f32) -> Option<f32> {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(target_os = "linux")]
+use linux as imp;
+#[cfg(target_os = "macos")]
+use macos as imp;
+#[cfg(windows)]
+use windows as imp;
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub(crate) use imp::NativeMaterial;
+
+/// No native materials on this platform.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[derive(Default)]
+pub(crate) struct NativeMaterial;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+impl NativeMaterial {
+    pub(crate) fn apply(
+        &mut self,
+        _window: &winit::window::Window,
+        surface: &WindowSurface,
+    ) -> bool {
+        !matches!(surface.background, EffectiveBackground::Material { .. })
+    }
+
+    pub(crate) fn set_regions(
+        &mut self,
+        _window: &winit::window::Window,
+        _regions: &[MaterialRect],
+    ) {
+    }
+}
+
 /// The desktop `event_loop` talks to, as far as it matters to surfaces.
 pub(crate) fn environment(event_loop: &winit::event_loop::ActiveEventLoop) -> SurfaceEnvironment {
-    let _ = event_loop;
-    let backend = if cfg!(target_os = "macos") {
-        Backend::MacOs
-    } else if cfg!(windows) {
-        Backend::Windows { build: None }
-    } else {
-        linux_backend(event_loop)
-    };
+    let (reduced_transparency, increased_contrast) = accessibility();
     SurfaceEnvironment {
-        backend,
-        reduced_transparency: false,
-        increased_contrast: false,
+        backend: backend(event_loop),
+        reduced_transparency,
+        increased_contrast,
+    }
+}
+
+impl SurfaceEnvironment {
+    /// This environment with the user's accessibility settings read again,
+    /// which can change while the app runs.
+    pub(crate) fn refreshed(self) -> Self {
+        let (reduced_transparency, increased_contrast) = accessibility();
+        Self {
+            reduced_transparency,
+            increased_contrast,
+            ..self
+        }
+    }
+}
+
+/// The user's reduced transparency and increased contrast settings.
+fn accessibility() -> (bool, bool) {
+    #[cfg(any(target_os = "macos", windows))]
+    return imp::accessibility();
+    // Desktop environments keep these in their own settings stores, with
+    // no common key to read.
+    #[cfg(not(any(target_os = "macos", windows)))]
+    (false, false)
+}
+
+#[cfg(target_os = "macos")]
+fn backend(_event_loop: &winit::event_loop::ActiveEventLoop) -> Backend {
+    Backend::MacOs
+}
+
+#[cfg(windows)]
+fn backend(_event_loop: &winit::event_loop::ActiveEventLoop) -> Backend {
+    Backend::Windows {
+        build: imp::build(),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn linux_backend(event_loop: &winit::event_loop::ActiveEventLoop) -> Backend {
+fn backend(event_loop: &winit::event_loop::ActiveEventLoop) -> Backend {
     use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
     match event_loop.display_handle().map(|handle| handle.as_raw()) {
-        Ok(RawDisplayHandle::Wayland(_)) => Backend::Wayland { blur: false },
-        _ => Backend::X11 {
-            compositor: false,
-            blur: false,
+        Ok(RawDisplayHandle::Wayland(display)) => Backend::Wayland {
+            blur: linux::wayland_blur(display.display),
         },
+        _ => {
+            let compositor = super::x11_root::compositor();
+            Backend::X11 {
+                compositor,
+                blur: compositor && super::x11_root::blur_available(),
+            }
+        }
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn linux_backend(_event_loop: &winit::event_loop::ActiveEventLoop) -> Backend {
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn backend(_event_loop: &winit::event_loop::ActiveEventLoop) -> Backend {
     Backend::Headless
+}
+
+/// What a double-click on a title bar does here.
+pub(crate) fn title_double_click() -> crate::platform::chrome::TitleAction {
+    #[cfg(target_os = "macos")]
+    return macos::title_double_click();
+    #[cfg(not(target_os = "macos"))]
+    crate::platform::chrome::TitleAction::ToggleMaximize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GRAY: Color = Color::rgba(40, 40, 40, 255);
+
+    fn on(backend: Backend) -> SurfaceEnvironment {
+        SurfaceEnvironment {
+            backend,
+            reduced_transparency: false,
+            increased_contrast: false,
+        }
+    }
+
+    fn sidebar() -> WindowBackground {
+        WindowBackground::Material(MaterialOptions::new(MaterialKind::Sidebar, GRAY))
+    }
+
+    fn fallback(reason: FallbackReason) -> EffectiveBackground {
+        EffectiveBackground::Fallback {
+            color: GRAY,
+            reason,
+        }
+    }
+
+    fn material(scope: MaterialScope) -> EffectiveBackground {
+        EffectiveBackground::Material {
+            kind: MaterialKind::Sidebar,
+            scope,
+        }
+    }
+
+    // Catches a material promised where the desktop, the OS version, the
+    // GPU surface, or the user's accessibility settings cannot show it, and
+    // an alpha surface asked for where nothing could show through (an X11
+    // ARGB visual without a compositor shows garbage).
+    #[test]
+    fn a_background_request_resolves_to_what_the_desktop_can_show() {
+        use FallbackReason::*;
+        use MaterialScope::*;
+        let reduced = SurfaceEnvironment {
+            reduced_transparency: true,
+            ..on(Backend::MacOs)
+        };
+        let contrast = SurfaceEnvironment {
+            increased_contrast: true,
+            ..on(Backend::Windows { build: Some(26100) })
+        };
+        let x11 = |compositor, blur| on(Backend::X11 { compositor, blur });
+        // (case, environment, request, surface composites alpha,
+        //  expected, asks for an alpha surface)
+        let cases = [
+            (
+                "macOS",
+                on(Backend::MacOs),
+                sidebar(),
+                true,
+                material(Regions),
+                true,
+            ),
+            (
+                "reduced transparency",
+                reduced,
+                sidebar(),
+                true,
+                fallback(ReducedTransparency),
+                false,
+            ),
+            (
+                "increased contrast",
+                contrast,
+                sidebar(),
+                true,
+                fallback(IncreasedContrast),
+                false,
+            ),
+            (
+                "Windows 11 22H2",
+                on(Backend::Windows { build: Some(22621) }),
+                sidebar(),
+                true,
+                material(WindowWide),
+                true,
+            ),
+            (
+                "Windows 11 21H2",
+                on(Backend::Windows { build: Some(22000) }),
+                sidebar(),
+                true,
+                fallback(OsTooOld),
+                false,
+            ),
+            (
+                "KWin on X11",
+                x11(true, true),
+                sidebar(),
+                true,
+                material(WindowWide),
+                true,
+            ),
+            (
+                "X11 without a compositor",
+                x11(false, false),
+                sidebar(),
+                true,
+                fallback(NoCompositor),
+                false,
+            ),
+            (
+                "an X11 compositor without blur",
+                x11(true, false),
+                sidebar(),
+                true,
+                fallback(Unsupported),
+                false,
+            ),
+            (
+                "Wayland without KWin's blur",
+                on(Backend::Wayland { blur: false }),
+                sidebar(),
+                true,
+                fallback(Unsupported),
+                false,
+            ),
+            (
+                "an opaque GPU surface",
+                on(Backend::MacOs),
+                sidebar(),
+                false,
+                fallback(OpaqueSurface),
+                true,
+            ),
+            (
+                "transparent on an X11 compositor",
+                x11(true, false),
+                WindowBackground::Transparent,
+                true,
+                EffectiveBackground::Transparent,
+                true,
+            ),
+            (
+                "transparent without a compositor",
+                x11(false, false),
+                WindowBackground::Transparent,
+                true,
+                EffectiveBackground::Fallback {
+                    color: DEFAULT_COLOR,
+                    reason: NoCompositor,
+                },
+                false,
+            ),
+            (
+                "opaque stays opaque",
+                on(Backend::MacOs),
+                WindowBackground::Opaque(GRAY),
+                true,
+                EffectiveBackground::Opaque(GRAY),
+                false,
+            ),
+        ];
+        for (case, environment, request, alpha, expected, asks) in cases {
+            assert_eq!(
+                (
+                    environment.background(request, alpha),
+                    environment.wants_alpha(request)
+                ),
+                (expected, asks),
+                "{case}"
+            );
+        }
+    }
+
+    // Catches a corner shape reported as granted where the platform keeps
+    // its own, and a DWM preference reported as the exact radius asked for.
+    #[test]
+    fn a_corner_request_resolves_to_the_platforms_nearest_shape() {
+        let windows = on(Backend::Windows { build: Some(22631) });
+        let cases = [
+            (
+                "macOS clips inside the system shape",
+                on(Backend::MacOs),
+                WindowCorners::Rounded(12.0),
+                CornerResult::Clipped(12.0),
+            ),
+            (
+                "macOS keeps titled corners",
+                on(Backend::MacOs),
+                WindowCorners::Square,
+                CornerResult::System,
+            ),
+            (
+                "Windows square",
+                windows,
+                WindowCorners::Square,
+                CornerResult::Square,
+            ),
+            (
+                "Windows small",
+                windows,
+                WindowCorners::Rounded(3.0),
+                CornerResult::Approximate {
+                    requested: 3.0,
+                    native: 4.0,
+                },
+            ),
+            (
+                "Windows large",
+                windows,
+                WindowCorners::Rounded(12.0),
+                CornerResult::Approximate {
+                    requested: 12.0,
+                    native: 8.0,
+                },
+            ),
+            (
+                "Windows 10 has no preference",
+                on(Backend::Windows { build: Some(19045) }),
+                WindowCorners::Rounded(12.0),
+                CornerResult::System,
+            ),
+            (
+                "X11 leaves corners to the window manager",
+                on(Backend::X11 {
+                    compositor: true,
+                    blur: true,
+                }),
+                WindowCorners::Rounded(12.0),
+                CornerResult::System,
+            ),
+            (
+                "a non-finite radius",
+                on(Backend::MacOs),
+                WindowCorners::Rounded(f32::NAN),
+                CornerResult::System,
+            ),
+        ];
+        for (case, environment, request, expected) in cases {
+            assert_eq!(environment.corners(request), expected, "{case}");
+        }
+    }
 }

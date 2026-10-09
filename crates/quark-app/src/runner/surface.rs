@@ -5,7 +5,8 @@
 
 use crate::platform::chrome::{TitleAction, WindowDragError};
 use crate::platform::material::{
-    Backend, MaterialRect, SurfaceEnvironment, WindowBackground, WindowCorners, WindowSurface,
+    Backend, EffectiveBackground, FallbackReason, MaterialRect, MaterialScope, SurfaceEnvironment,
+    WindowBackground, WindowCorners, WindowSurface,
 };
 use crate::platform::placement::{DesktopRect, constrain_to_work_area, nearest_area};
 
@@ -126,7 +127,7 @@ impl EventContext<'_> {
         let Some(WindowEntry::Open(state)) = self.windows.get(window) else {
             return TitleAction::Nothing;
         };
-        let action = title_double_click_action();
+        let action = crate::platform::material::title_double_click();
         match action {
             TitleAction::ToggleMaximize => state.window.set_maximized(!state.window.is_maximized()),
             TitleAction::Minimize => state.window.set_minimized(true),
@@ -267,12 +268,36 @@ fn desktop_areas(monitor: &MonitorInfo) -> (DesktopRect, DesktopRect) {
     (convert(monitor.bounds), convert(monitor.usable()))
 }
 
-/// What the platform does on a title bar double-click.
-fn title_double_click_action() -> TitleAction {
-    TitleAction::ToggleMaximize
-}
-
 impl WindowState {
+    /// Show what the surface resolved to: the renderer's background and the
+    /// native material and corners. A material the platform refuses falls
+    /// back to its color.
+    pub(super) fn apply_surface(&mut self) {
+        let mut effective = self.surface.effective;
+        if !self.native.apply(&self.window, &effective) {
+            if let (EffectiveBackground::Material { .. }, WindowBackground::Material(options)) =
+                (effective.background, self.surface.background)
+            {
+                effective.background = EffectiveBackground::Fallback {
+                    color: options.fallback,
+                    reason: FallbackReason::Failed,
+                };
+                self.native.apply(&self.window, &effective);
+            }
+            self.surface.effective = effective;
+        }
+        let background = match effective.background {
+            EffectiveBackground::Opaque(color) | EffectiveBackground::Fallback { color, .. } => {
+                SurfaceBackground::Opaque(color)
+            }
+            EffectiveBackground::Transparent | EffectiveBackground::Material { .. } => {
+                SurfaceBackground::Transparent
+            }
+        };
+        self.renderer.set_surface_background(background);
+        self.window.request_redraw();
+    }
+
     pub(super) fn set_background(&mut self, background: WindowBackground) {
         let surface = &self.surface;
         self.surface = SurfaceState::resolve(
@@ -281,7 +306,40 @@ impl WindowState {
             surface.environment,
             self.surface_alpha,
         );
+        self.apply_surface();
     }
 
-    pub(super) fn set_material_regions(&mut self, _regions: &[MaterialRect]) {}
+    /// Read the user's accessibility settings again and apply what they
+    /// change. Returns whether the effective surface changed.
+    pub(super) fn refresh_surface(&mut self) -> bool {
+        let surface = self.surface;
+        let environment = surface.environment.refreshed();
+        if environment == surface.environment {
+            return false;
+        }
+        self.surface = SurfaceState::resolve(
+            surface.background,
+            surface.corners,
+            environment,
+            self.surface_alpha,
+        );
+        let changed = self.surface.effective != surface.effective;
+        if changed {
+            self.apply_surface();
+        }
+        changed
+    }
+
+    pub(super) fn set_material_regions(&mut self, regions: &[MaterialRect]) {
+        // Over an opaque surface a region's view would never show.
+        let shows = matches!(
+            self.surface.effective.background,
+            EffectiveBackground::Material {
+                scope: MaterialScope::Regions,
+                ..
+            } | EffectiveBackground::Transparent
+        );
+        self.native
+            .set_regions(&self.window, if shows { regions } else { &[] });
+    }
 }

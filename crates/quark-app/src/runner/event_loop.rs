@@ -154,7 +154,9 @@ impl<A: App> Runner<A> {
             }
         };
         renderer.resize(size.width, size.height, scale_factor);
-        let surface_alpha = surface_alpha(&mut renderer, wants_alpha);
+        let surface_alpha = wants_alpha
+            && renderer.set_surface_background(SurfaceBackground::Transparent)
+                == SurfaceBackground::Transparent;
         let surface = SurfaceState::resolve(
             options.background,
             options.corners,
@@ -163,9 +165,7 @@ impl<A: App> Runner<A> {
         );
         #[cfg(target_os = "linux")]
         crate::platform::drag_out::window_created(&window);
-        window.set_visible(true);
-        position_traffic_lights(&window, options.traffic_lights);
-        Ok(WindowState {
+        let mut state = WindowState {
             renderer,
             accessibility,
             accessibility_state,
@@ -182,7 +182,13 @@ impl<A: App> Runner<A> {
             min_size: options.min_size,
             surface_alpha,
             surface,
-        })
+            native: Default::default(),
+        };
+        // Before the window shows, so it never flashes the wrong background.
+        state.apply_surface();
+        state.window.set_visible(true);
+        position_traffic_lights(&state.window, options.traffic_lights);
+        Ok(state)
     }
 
     fn handle_for(&self, id: WindowId) -> Option<WindowHandle> {
@@ -696,10 +702,21 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 self.theme_changed(event_loop, Some(handle), theme);
             }
             event => {
+                let mut surface_changed = false;
                 if let WindowEvent::Focused(true) = event {
                     self.focused = Some(handle);
+                    // Accessibility display settings change in the system
+                    // settings app, which takes focus from the window.
+                    surface_changed = state.refresh_surface();
                 }
-                for event in state.input.normalize(event) {
+                let events = state.input.normalize(event);
+                if surface_changed {
+                    let event = AppEvent::WindowSurfaceChanged(handle);
+                    self.with_event_cx(event_loop, Some(handle), |app, cx| {
+                        app.app_event(event, cx)
+                    });
+                }
+                for event in events {
                     self.with_event_cx(event_loop, Some(handle), |app, cx| app.event(event, cx));
                 }
             }
@@ -810,13 +827,4 @@ fn logical_metrics(metrics: TextMetrics, scale: f32) -> TextMetrics {
         mono_line_height_px: metrics.mono_line_height_px / scale,
         mono_char_width_px: metrics.mono_char_width_px / scale,
     }
-}
-
-/// Make `renderer`'s surface composite alpha when `wanted`; returns whether
-/// it does. Until the renderer can pick a non-opaque alpha mode every
-/// surface is opaque, so material and transparent windows report their
-/// fallback.
-fn surface_alpha(renderer: &mut Renderer, wanted: bool) -> bool {
-    let _ = (renderer, wanted);
-    false
 }

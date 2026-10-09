@@ -61,6 +61,7 @@ pub(super) struct WindowState {
     /// Whether the renderer's surface composites alpha.
     pub(super) surface_alpha: bool,
     pub(super) surface: SurfaceState,
+    pub(super) native: crate::platform::material::NativeMaterial,
 }
 
 impl WindowState {

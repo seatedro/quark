@@ -118,7 +118,6 @@ pub(crate) fn work_area() -> Option<PhysicalRect> {
 
 /// Whether a compositing manager owns the screen's `_NET_WM_CM_S<n>`
 /// selection, so a window's transparent pixels show what is behind it.
-#[allow(dead_code)] // Used by the material adapter.
 pub(crate) fn compositor() -> bool {
     with_root(|root| {
         let name = format!("_NET_WM_CM_S{}", root.screen);
@@ -137,7 +136,6 @@ pub(crate) fn compositor() -> bool {
 
 /// Whether KWin's blur effect runs: it announces its window property on
 /// the root window (as `KWindowEffects::isEffectAvailable` checks).
-#[allow(dead_code)] // Used by the material adapter.
 pub(crate) fn blur_available() -> bool {
     with_root(|root| {
         let atom = root.atom(KDE_BLUR)?;
@@ -149,7 +147,6 @@ pub(crate) fn blur_available() -> bool {
 
 /// Ask the compositor to blur behind all of `window` (an empty region
 /// means the whole window), or stop. Returns whether the request was sent.
-#[allow(dead_code)] // Used by the material adapter.
 pub(crate) fn set_blur(window: Window, blur: bool) -> bool {
     with_root(|root| {
         let atom = root.atom(KDE_BLUR)?;
