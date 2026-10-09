@@ -5,6 +5,7 @@
 //! the card starts at window x 52, y 44).
 
 use accesskit::Role;
+use quark::view;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Color;
@@ -17,306 +18,169 @@ use crate::{Codex, Menu, Msg, Screen};
 
 const ROW_W: f32 = 272.0;
 
-fn nav_row(p: &Pal, icon: Div, label: &str, msg: Msg) -> Div {
-    hrow()
-        .w(ROW_W)
-        .h(30.0)
-        .flex_shrink_0()
-        .pl(8.0)
-        .gap(8.0)
-        .rounded(8.0)
-        .hover_bg(p.row_hover)
-        .accessibility_role(Role::Button)
-        .accessibility_label(label.to_owned())
-        .on_click(msg)
-        .child(icon)
-        .child(txt(label, BODY, p.sidebar_text))
+fn nav_row(p: &Pal, icon: AnyElement, label: &str, msg: Msg) -> Div {
+    view! { -> Div,
+        <div class="flex-row items-center shrink-0 h-[30] pl-2 gap-2 rounded-[8]" w={ROW_W}
+             hover_bg={p.row_hover} role="button" aria-label={label.to_owned()} on:click={msg}>
+            {icon}
+            <txt(label, BODY, p.sidebar_text) />
+        </div>
+    }
 }
 
 /// A chat row; `indent` puts the title under a project's name.
-fn thread_row(app: &Codex, p: &Pal, t: &Thread, indent: bool) -> Div {
+fn thread_row(app: &Codex, p: &Pal, t: &Thread, indent: bool) -> AnyElement {
     let selected = app.screen == Screen::Thread(t.id);
-    let mut row = hrow()
-        .w(ROW_W)
-        .h(30.0)
-        .flex_shrink_0()
-        .pl(if indent { 32.0 } else { 8.0 })
-        .pr(10.0)
-        .gap(6.0)
-        .rounded(8.0)
-        .when(selected, |d| d.bg(p.row_selected))
-        .hover_bg(if selected {
-            p.row_selected
-        } else {
-            p.row_hover
-        })
-        .accessibility_role(Role::ListItem)
-        .accessibility_label(t.title.clone())
-        .accessibility_selected(selected)
-        .on_click(Msg::Select(t.id))
-        .child(clipped(
-            t.title.clone(),
-            p,
-            if selected { p.row_selected } else { p.sidebar },
-        ));
-    match t.status {
-        Status::Running => row = row.child(ico(icons::LOADER, 13.0, p.sidebar_muted)),
-        Status::Awaiting => {
-            row = row
-                .child(
-                    hrow()
-                        .h(22.0)
-                        .px(9.0)
-                        .rounded(11.0)
-                        .bg(Color::rgba(0x1f, 0x4a, 0x31, 255))
-                        .max_w(116.0)
-                        .overflow_hidden()
-                        .child(
-                            txt(
-                                "Awaiting approval",
-                                SMALL,
-                                Color::rgba(0x4c, 0xd2, 0x86, 255),
-                            )
-                            .truncate(),
-                        ),
-                )
-                .child(div().w(6.0))
-                .child(ico(icons::LOADER, 13.0, p.sidebar_muted))
-        }
-        Status::Error => row = row.child(ico(icons::ALERT, 15.0, p.error)),
-        Status::Idle => {}
+    view! {
+        <div class="flex-row items-center shrink-0 h-[30] pr-[10] gap-1.5 rounded-[8]" w={ROW_W}
+             pl={if indent { 32.0 } else { 8.0 }} bg={if selected { p.row_selected }}
+             hover_bg={if selected { p.row_selected } else { p.row_hover }} role="listitem"
+             aria-label={t.title.clone()} aria-selected={selected} on:click={Msg::Select(t.id)}>
+            {clipped(t.title.clone(), p, if selected { p.row_selected } else { p.sidebar })}
+            match t.status {
+                Status::Running => <icon svg={icons::LOADER} size={13.0} color={p.sidebar_muted} />
+                Status::Awaiting => {
+                    <div class="flex-row items-center h-[22] px-[9] rounded-[11] bg-[#1f4a31]
+                                max-w-[116] overflow-hidden">
+                        <txt("Awaiting approval", SMALL, Color::rgba(0x4c, 0xd2, 0x86, 255))
+                             class="truncate" />
+                    </div>
+                    <div class="w-1.5" />
+                    <icon svg={icons::LOADER} size={13.0} color={p.sidebar_muted} />
+                }
+                Status::Error => <icon svg={icons::ALERT} size={15.0} color={p.error} />
+                Status::Idle => {}
+            }
+        </div>
     }
-    row
 }
 
 /// A title clipped at the row's edge under a short fade, as the app does
 /// (no ellipsis). The fade is painted in `bg`, the row's fill.
-fn clipped(title: String, p: &Pal, bg: Color) -> Div {
-    div()
-        .flex_1()
-        .min_w(0.0)
-        .overflow_hidden()
-        .relative()
-        .child(txt(title, BODY, p.sidebar_text))
-        .child(
-            div()
-                .absolute()
-                .right(0.0)
-                .top(0.0)
-                .w(22.0)
-                .h(18.0)
-                .bg_effect(linear_gradient(0.0, bg.with_alpha(0), bg)),
-        )
+fn clipped(title: String, p: &Pal, bg: Color) -> AnyElement {
+    view! {
+        <div class="flex-1 min-w-0 overflow-hidden relative">
+            <txt(title, BODY, p.sidebar_text) />
+            <div class="absolute right-0 top-0 w-[22] h-[18]"
+                 bg_effect={linear_gradient(0.0, bg.with_alpha(0), bg)} />
+        </div>
+    }
 }
 
 fn header(p: &Pal, label: &str) -> Div {
-    hrow()
-        .w(ROW_W - 8.0)
-        .h(26.0)
-        .flex_shrink_0()
-        .pl(8.0)
-        .child(txt(label, BODY, p.sidebar_muted))
+    view! { -> Div,
+        <div class="flex-row items-center h-[26] shrink-0 pl-2" w={ROW_W - 8.0}>
+            <txt(label, BODY, p.sidebar_muted) />
+        </div>
+    }
 }
 
 pub fn view(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
-    let switcher = hrow()
-        .absolute()
-        .left(10.0)
-        .top(10.0)
-        .h(32.0)
-        .px(6.0)
-        .gap(6.0)
-        .rounded(8.0)
-        .hover_bg(p.row_hover)
-        .when(app.menu == Some(Menu::Mode), |d| d.bg(p.row_selected))
-        .id("sidebar.mode")
-        .accessibility_role(Role::Button)
-        .accessibility_label("Switch mode, current mode: Codex")
-        .on_click(Msg::Open(Menu::Mode))
-        .child(text("Codex").size(18.0).semibold().color(p.text).no_wrap())
-        .child(ico(icons::CHEVRON_DOWN, 13.0, p.sidebar_muted));
-    let mut bell = icon_button(
-        p,
-        icons::BELL,
-        28.0,
-        16.0,
-        if app.activity {
-            p.accent
-        } else {
-            p.sidebar_muted
-        },
-        "View activity",
-        Msg::ToggleActivity,
-    );
-    if app.activity {
-        bell = bell.bg(p.badge);
-    }
-    let tools = hrow()
-        .absolute()
-        .left(216.0)
-        .top(12.0)
-        .gap(4.0)
-        .child(bell)
-        .child(icon_button(
-            p,
-            icons::SEARCH,
-            28.0,
-            15.0,
-            p.sidebar_muted,
-            "Search",
-            Msg::Palette(true),
-        ));
-
-    let dot = div()
-        .w(16.0)
-        .h(16.0)
-        .items_center()
-        .justify_center()
-        .child(ico(icons::PET, 15.0, p.accent));
-    let nav = div()
-        .absolute()
-        .left(8.0)
-        .top(52.0)
-        .flex_col()
-        .gap(1.0)
-        .child(nav_row(
-            p,
-            div().child(ico(icons::COMPOSE, 16.0, p.sidebar_text)),
-            "New chat",
-            Msg::NewChat,
-        ))
-        .child(
-            nav_row(p, dot, "Your dot", Msg::Noop)
-                .pr(6.0)
-                .child(div().flex_1())
-                .child(
-                    hrow()
-                        .w(24.0)
-                        .h(20.0)
-                        .justify_center()
-                        .rounded(10.0)
-                        .bg(p.badge)
-                        .child(txt("1", SMALL, p.badge_text)),
-                ),
-        );
-
-    let mut list = div().flex_col().w(ROW_W).flex_shrink_0();
-    if app.activity {
-        list = list.child(
-            header(p, "Priority")
-                .child(div().flex_1())
-                .child(ico(icons::ELLIPSIS, 15.0, p.sidebar_muted))
-                .child(div().w(12.0))
-                .child(ico(icons::CLEAR_ALL, 15.0, p.sidebar_muted))
-                .child(div().w(10.0)),
-        );
-        list = list.child(div().h(6.0));
-        for (i, t) in app.data.threads.iter().take(2).enumerate() {
-            let preview = if i == 0 {
-                "The note wasn’t written because .codex is protected…"
-            } else {
-                "codex-demo"
-            };
-            let selected = app.screen == Screen::Thread(t.id);
-            list =
-                list.child(
-                    div()
-                        .w(ROW_W)
-                        .flex_col()
-                        .px(8.0)
-                        .py(6.0)
-                        .gap(2.0)
-                        .rounded(8.0)
-                        .when(selected, |d| d.bg(p.row_selected))
-                        .on_click(Msg::Select(t.id))
-                        .child(
-                            hrow()
-                                .gap(4.0)
-                                .child(
-                                    div().flex_1().min_w(0.0).overflow_hidden().child(
-                                        txt(t.title.clone(), BODY, p.sidebar_text).truncate(),
-                                    ),
-                                )
-                                .child(txt(crate::data::DEMO_PROJECT, BODY, p.sidebar_muted)),
-                        )
-                        .child(
-                            text(preview)
-                                .size(SMALL)
-                                .color(p.sidebar_muted)
-                                .line_height(1.3)
-                                .wrap_width(190.0),
-                        ),
-                );
-            if i == 0 {
-                list = list
-                    .child(div().h(18.0))
-                    .child(header(p, "Today"))
-                    .child(div().h(4.0));
-            }
-        }
+    let bell = if app.activity {
+        p.accent
     } else {
-        list = list.child(header(p, "Projects")).child(div().h(6.0));
-        for project in &app.data.projects {
-            let threads: Vec<&Thread> = app.data.threads_in(project.id).collect();
-            let selected = app.screen == Screen::Home && app.project == Some(project.id);
-            list = list.child(
-                hrow()
-                    .w(ROW_W)
-                    .h(30.0)
-                    .flex_shrink_0()
-                    .pl(8.0)
-                    .gap(8.0)
-                    .rounded(8.0)
-                    .when(selected, |d| d.bg(p.row_selected))
-                    .hover_bg(if selected {
-                        p.row_selected
+        p.sidebar_muted
+    };
+    view! {
+        <div class="absolute left-0 top-0" w={w} h={h} bg={p.sidebar}
+             border_r={p.frame_border.lerp(p.text, 0.06)}
+             accessibility_role={Role::Navigation} aria-label="Sidebar">
+            <div class="flex-row items-center absolute left-[10] top-[10] h-8 px-1.5 gap-1.5
+                        rounded-[8]"
+                 hover_bg={p.row_hover} bg={if app.menu == Some(Menu::Mode) { p.row_selected }}
+                 id="sidebar.mode" role="button" aria-label="Switch mode, current mode: Codex"
+                 on:click={Msg::Open(Menu::Mode)}>
+                <text size={18.0} color={p.text} class="font-semibold whitespace-nowrap">"Codex"</text>
+                <icon svg={icons::CHEVRON_DOWN} size={13.0} color={p.sidebar_muted} />
+            </div>
+            <div class="flex-row items-center absolute left-[216] top-3 gap-1">
+                <icon_button(p, icons::BELL, 28.0, 16.0, bell, "View activity",
+                             Msg::ToggleActivity) bg={if app.activity { p.badge }} />
+                <icon_button(p, icons::SEARCH, 28.0, 15.0, p.sidebar_muted, "Search",
+                             Msg::Palette(true)) />
+            </div>
+            <div class="absolute left-2 top-[52] flex-col gap-px">
+                <nav_row(p, view! {
+                    <div><icon svg={icons::COMPOSE} size={16.0} color={p.sidebar_text} /></div>
+                }, "New chat", Msg::NewChat) />
+                <nav_row(p, view! {
+                    <div class="w-4 h-4 items-center justify-center">
+                        <icon svg={icons::PET} size={15.0} color={p.accent} />
+                    </div>
+                }, "Your dot", Msg::Noop) class="pr-1.5">
+                    <div class="flex-1" />
+                    <div class="flex-row items-center w-6 h-5 justify-center rounded-[10]"
+                         bg={p.badge}>
+                        <txt("1", SMALL, p.badge_text) />
+                    </div>
+                </nav_row>
+            </div>
+            <div class="absolute left-2 top-[127] flex-col overflow-hidden" w={ROW_W}
+                 h={(h - 127.0).max(0.0)} accessibility_role={Role::List}
+                 aria-label={if app.activity { "Activity" } else { "Chats" }}>
+                <div class="flex-col shrink-0" w={ROW_W}>
+                    if app.activity {
+                        <header(p, "Priority")>
+                            <div class="flex-1" />
+                            <icon svg={icons::ELLIPSIS} size={15.0} color={p.sidebar_muted} />
+                            <div class="w-3" />
+                            <icon svg={icons::CLEAR_ALL} size={15.0} color={p.sidebar_muted} />
+                            <div class="w-[10]" />
+                        </header>
+                        <div class="h-1.5" />
+                        for (i, t) in app.data.threads.iter().take(2).enumerate() {
+                            let preview = if i == 0 {
+                                "The note wasn’t written because .codex is protected…"
+                            } else {
+                                "codex-demo"
+                            };
+                            let selected = app.screen == Screen::Thread(t.id);
+                            <div class="flex-col px-2 py-1.5 gap-0.5 rounded-[8]" w={ROW_W}
+                                 bg={if selected { p.row_selected }} on:click={Msg::Select(t.id)}>
+                                <div class="flex-row items-center gap-1">
+                                    <div class="flex-1 min-w-0 overflow-hidden">
+                                        <txt(t.title.clone(), BODY, p.sidebar_text) class="truncate" />
+                                    </div>
+                                    <txt(crate::data::DEMO_PROJECT, BODY, p.sidebar_muted) />
+                                </div>
+                                <text size={SMALL} color={p.sidebar_muted} line_height={1.3}
+                                      wrap_width={190.0}>{preview}</text>
+                            </div>
+                            if i == 0 {
+                                <div class="h-[18]" />
+                                <header(p, "Today") />
+                                <div class="h-1" />
+                            }
+                        }
                     } else {
-                        p.row_hover
-                    })
-                    .accessibility_role(Role::Button)
-                    .accessibility_label(project.name)
-                    .on_click(Msg::ChooseProject(Some(project.id)))
-                    .child(ico(icons::FOLDER_OPEN, 16.0, p.sidebar_text))
-                    .child(txt(project.name, BODY, p.sidebar_text)),
-            );
-            list = list.child(div().h(1.0));
-            for t in &threads {
-                list = list.child(thread_row(app, p, t, true)).child(div().h(1.0));
-            }
-        }
-        list = list
-            .child(div().h(24.0))
-            .child(header(p, "Recents"))
-            .child(div().h(6.0));
-        for t in &app.data.threads {
-            list = list.child(thread_row(app, p, t, false)).child(div().h(1.0));
-        }
+                        <header(p, "Projects") />
+                        <div class="h-1.5" />
+                        for project in &app.data.projects {
+                            let selected = app.screen == Screen::Home && app.project == Some(project.id);
+                            <div class="flex-row items-center shrink-0 h-[30] pl-2 gap-2 rounded-[8]"
+                                 w={ROW_W} bg={if selected { p.row_selected }}
+                                 hover_bg={if selected { p.row_selected } else { p.row_hover }}
+                                 role="button" aria-label={project.name}
+                                 on:click={Msg::ChooseProject(Some(project.id))}>
+                                <icon svg={icons::FOLDER_OPEN} size={16.0} color={p.sidebar_text} />
+                                <txt(project.name, BODY, p.sidebar_text) />
+                            </div>
+                            <div class="h-px" />
+                            for t in app.data.threads_in(project.id) {
+                                {thread_row(app, p, t, true)}
+                                <div class="h-px" />
+                            }
+                        }
+                        <div class="h-6" />
+                        <header(p, "Recents") />
+                        <div class="h-1.5" />
+                        for t in &app.data.threads {
+                            {thread_row(app, p, t, false)}
+                            <div class="h-px" />
+                        }
+                    }
+                </div>
+            </div>
+        </div>
     }
-    let list = div()
-        .absolute()
-        .left(8.0)
-        .top(127.0)
-        .w(ROW_W)
-        .h((h - 127.0).max(0.0))
-        .flex_col()
-        .overflow_hidden()
-        .accessibility_role(Role::List)
-        .accessibility_label(if app.activity { "Activity" } else { "Chats" })
-        .child(list);
-
-    div()
-        .absolute()
-        .left(0.0)
-        .top(0.0)
-        .w(w)
-        .h(h)
-        .bg(p.sidebar)
-        .border_r(p.frame_border.lerp(p.text, 0.06))
-        .accessibility_role(Role::Navigation)
-        .accessibility_label("Sidebar")
-        .child(switcher)
-        .child(tools)
-        .child(nav)
-        .child(list)
-        .into_any()
 }
