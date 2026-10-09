@@ -11,9 +11,11 @@
 //! [`highlight`] runs synchronously; [`HighlightWorker`] runs it on a
 //! background thread and drops requests superseded by a newer generation
 //! for the same slot, which suits a code block that is still streaming.
-//! Text made of excerpts, such as the hunks of a patch, is highlighted one
-//! excerpt at a time ([`highlight_fragments`]) so lexical state does not
-//! leak from one into the next.
+//! Several views can share one worker thread through
+//! [`HighlightWorker::share`]. Text made of excerpts, such as the hunks of
+//! a patch, is highlighted one excerpt at a time ([`highlight_fragments`],
+//! [`HighlightRequest::fragments`]) so lexical state does not leak from one
+//! into the next.
 //!
 //! Languages embedded in others (a script in HTML, a fenced block in
 //! Markdown, a macro body in Rust) are highlighted with their own grammars
@@ -76,7 +78,7 @@ pub use quark_update::PublicKey;
 #[cfg(feature = "engine")]
 pub use store::StoreConfig;
 pub use store::{GrammarStore, LanguageStatus};
-pub use worker::{HighlightWorker, Highlighted, WorkerGone};
+pub use worker::{HighlightRequest, HighlightWorker, Highlighted, Priority, WorkerGone};
 
 /// What a highlighted run of source is.
 #[repr(u8)]

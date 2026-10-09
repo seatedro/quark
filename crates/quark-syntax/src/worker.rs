@@ -1,8 +1,9 @@
 //! Highlighting on a background thread.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -10,18 +11,89 @@ use std::thread::JoinHandle;
 use crate::store::Outcome;
 use crate::{GrammarStore, HighlightSpan, LanguageId};
 
-#[derive(Clone)]
-struct Job {
-    slot: u64,
-    generation: u64,
-    language: LanguageId,
-    source: Arc<str>,
+/// Which queued request the worker takes next: every [`Priority::Visible`]
+/// one before any [`Priority::Background`] one, each in the order it was
+/// first requested.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Priority {
+    /// On screen now.
+    #[default]
+    Visible,
+    /// Not shown yet, such as a file further down a diff.
+    Background,
 }
 
+/// What to highlight for a slot.
+#[derive(Debug, Clone)]
+pub struct HighlightRequest {
+    pub language: LanguageId,
+    pub source: Arc<str>,
+    /// Byte ranges of `source` to highlight, each as a document of its own,
+    /// or `None` for the whole source as one document. See
+    /// [`HighlightRequest::fragments`].
+    pub fragments: Option<Arc<[Range<u32>]>>,
+    pub priority: Priority,
+}
+
+impl HighlightRequest {
+    /// The whole of `source`, visible.
+    pub fn new(language: LanguageId, source: Arc<str>) -> Self {
+        Self {
+            language,
+            source,
+            fragments: None,
+            priority: Priority::Visible,
+        }
+    }
+
+    /// Highlights only `ranges` (sorted and disjoint, on character
+    /// boundaries), each parsed on its own so no lexical state carries
+    /// from one to the next. For text made of excerpts, such as the hunks
+    /// of a patch: a comment opened in one hunk must not color the next,
+    /// whose surroundings are unknown. Result spans stay in `source`'s
+    /// coordinates and cover only the ranges.
+    pub fn fragments(mut self, ranges: impl Into<Arc<[Range<u32>]>>) -> Self {
+        self.fragments = Some(ranges.into());
+        self
+    }
+
+    pub fn priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+}
+
+/// One handle's request for `slot`.
+#[derive(Clone)]
+struct Job {
+    client: u64,
+    slot: u64,
+    generation: u64,
+    request: HighlightRequest,
+}
+
+/// Where one handle's results go.
+struct Reply {
+    done: Sender<Highlighted>,
+    wake: Wake,
+}
+
+/// Called after each result a handle receives.
+type Wake = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 enum Message {
+    /// A handle's results go to this reply from now on.
+    Register(u64, Reply),
     Job(Job),
+    Prioritize {
+        client: u64,
+        slot: u64,
+        priority: Priority,
+    },
     /// A pending grammar resolved: rerun the jobs waiting for one.
     Retry,
+    /// A handle was dropped: drop its jobs.
+    Forget(u64),
     Stop,
 }
 
@@ -56,15 +128,43 @@ pub struct Highlighted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerGone;
 
-/// Highlights a source, stopping early once the callback returns true.
-type Highlight = dyn Fn(&LanguageId, &str, &dyn Fn() -> bool) -> Outcome + Send + Sync;
+/// Highlights a request, stopping early once the callback returns true.
+type Highlight = dyn Fn(&HighlightRequest, &dyn Fn() -> bool) -> Outcome + Send + Sync;
 type HighlightFn = Arc<Highlight>;
+
+/// A handle's slot.
+type Key = (u64, u64);
 
 /// The newest generation requested per slot, written by
 /// [`HighlightWorker::request`] before the job is sent, so a highlight in
 /// progress can see that it was superseded without draining the channel.
 /// A slot's entry goes once its newest generation is done.
-type Latest = Arc<Mutex<HashMap<u64, u64>>>;
+type Latest = Arc<Mutex<HashMap<Key, u64>>>;
+
+/// The thread every handle of one worker shares; it stops when the last
+/// handle goes.
+struct Thread {
+    jobs: Sender<Message>,
+    handle: Option<JoinHandle<()>>,
+    /// Set on drop so the thread stops at the next checkpoint instead of
+    /// finishing its batch while the dropping thread waits.
+    cancel: Arc<AtomicBool>,
+    latest: Latest,
+    next_client: AtomicU64,
+}
+
+impl Drop for Thread {
+    fn drop(&mut self) {
+        // The flag stops a highlight in progress; `Stop` ends the thread's
+        // loop (the store's subscription keeps a sender, so the channel does
+        // not close). The wait is at most one checkpoint.
+        self.cancel.store(true, Ordering::Relaxed);
+        let _ = self.jobs.send(Message::Stop);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// Highlights requests on one background thread with a [`GrammarStore`]'s
 /// grammars. A slot is one code block; when several requests for a slot
@@ -72,6 +172,11 @@ type Latest = Arc<Mutex<HashMap<u64, u64>>>;
 /// streams faster than it highlights does not build a backlog. Results
 /// arrive in [`HighlightWorker::try_recv`]; callers still compare
 /// generations, since a result can land after a newer request was sent.
+///
+/// [`HighlightWorker::share`] makes another handle on the same thread with
+/// slots and results of its own, so several views highlight on one thread
+/// without seeing each other's results. Queued requests run by
+/// [`Priority`], then in the order they were first requested.
 ///
 /// A request whose grammars are still downloading gets the best result
 /// available at once (plain when its own grammar is missing, host colors
@@ -86,44 +191,83 @@ type Latest = Arc<Mutex<HashMap<u64, u64>>>;
 /// A highlight that panics yields a result with no spans (the block stays
 /// plain) and the thread keeps serving requests.
 pub struct HighlightWorker {
-    jobs: Option<Sender<Message>>,
+    thread: Arc<Thread>,
+    client: u64,
     done: Receiver<Highlighted>,
-    thread: Option<JoinHandle<()>>,
-    /// Set on drop so the thread stops at the next checkpoint instead of
-    /// finishing its batch while the dropping thread waits.
-    cancel: Arc<AtomicBool>,
-    latest: Latest,
+    wake: Wake,
 }
 
 impl HighlightWorker {
     pub fn new(store: GrammarStore) -> Self {
         let highlighter = store.clone();
-        let worker = Self::with_highlighter(Arc::new(move |language, source, cancelled| {
-            highlighter.highlight_until(language, source, cancelled)
+        let worker = Self::with_highlighter(Arc::new(move |request, cancelled| {
+            let HighlightRequest {
+                language,
+                source,
+                fragments,
+                ..
+            } = request;
+            match fragments {
+                Some(ranges) => {
+                    highlighter.highlight_fragments_until(language, source, ranges, cancelled)
+                }
+                None => highlighter.highlight_until(language, source, cancelled),
+            }
         }));
-        if let Some(jobs) = worker.jobs.clone() {
-            store.subscribe(move || jobs.send(Message::Retry).is_ok());
-        }
+        let jobs = worker.thread.jobs.clone();
+        store.subscribe(move || jobs.send(Message::Retry).is_ok());
         worker
     }
 
     fn with_highlighter(highlight: HighlightFn) -> Self {
         let (jobs, job_rx) = channel::<Message>();
-        let (done_tx, done) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let latest = Latest::default();
         let (stop, newest) = (cancel.clone(), latest.clone());
-        let thread = std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("quark-syntax".to_owned())
-            .spawn(move || run(&job_rx, &done_tx, &stop, &newest, &*highlight))
+            .spawn(move || run(&job_rx, &stop, &newest, &*highlight))
             .ok();
-        Self {
-            jobs: Some(jobs),
-            done,
-            thread,
+        Self::client_of(Arc::new(Thread {
+            jobs,
+            handle,
             cancel,
             latest,
+            next_client: AtomicU64::new(0),
+        }))
+    }
+
+    /// A new handle on `thread`. When the thread is gone the registration
+    /// is dropped with its sender, so the handle reports [`WorkerGone`].
+    fn client_of(thread: Arc<Thread>) -> Self {
+        let client = thread.next_client.fetch_add(1, Ordering::Relaxed);
+        let (done_tx, done) = channel();
+        let wake = Wake::default();
+        let reply = Reply {
+            done: done_tx,
+            wake: wake.clone(),
+        };
+        let _ = thread.jobs.send(Message::Register(client, reply));
+        Self {
+            thread,
+            client,
+            done,
+            wake,
         }
+    }
+
+    /// Another handle on this worker's thread, with its own slots (slot 1
+    /// of one handle is not slot 1 of another) and its own results. The
+    /// thread stops when its last handle is dropped.
+    pub fn share(&self) -> Self {
+        Self::client_of(self.thread.clone())
+    }
+
+    /// Calls `wake` on the worker thread after each result this handle
+    /// receives, so an app can wake its event loop to take it instead of
+    /// polling.
+    pub fn set_wake(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *lock(&self.wake) = Some(Arc::new(wake));
     }
 
     /// A worker whose thread is already gone, as when spawning fails. For
@@ -131,29 +275,40 @@ impl HighlightWorker {
     #[doc(hidden)]
     pub fn gone() -> Self {
         let (jobs, _) = channel();
-        let (_, done) = channel();
-        Self {
-            jobs: Some(jobs),
-            done,
-            thread: None,
+        Self::client_of(Arc::new(Thread {
+            jobs,
+            handle: None,
             cancel: Arc::new(AtomicBool::new(true)),
             latest: Latest::default(),
-        }
+            next_client: AtomicU64::new(0),
+        }))
     }
 
     pub fn request(&self, slot: u64, generation: u64, language: LanguageId, source: Arc<str>) {
-        if let Some(jobs) = &self.jobs {
-            let mut latest = lock(&self.latest);
-            let newest = latest.entry(slot).or_insert(generation);
-            *newest = (*newest).max(generation);
-            drop(latest);
-            let _ = jobs.send(Message::Job(Job {
-                slot,
-                generation,
-                language,
-                source,
-            }));
-        }
+        self.request_with(slot, generation, HighlightRequest::new(language, source));
+    }
+
+    pub fn request_with(&self, slot: u64, generation: u64, request: HighlightRequest) {
+        let mut latest = lock(&self.thread.latest);
+        let newest = latest.entry((self.client, slot)).or_insert(generation);
+        *newest = (*newest).max(generation);
+        drop(latest);
+        let _ = self.thread.jobs.send(Message::Job(Job {
+            client: self.client,
+            slot,
+            generation,
+            request,
+        }));
+    }
+
+    /// Moves `slot`'s queued request, if it has not started, to
+    /// `priority`.
+    pub fn prioritize(&self, slot: u64, priority: Priority) {
+        let _ = self.thread.jobs.send(Message::Prioritize {
+            client: self.client,
+            slot,
+            priority,
+        });
     }
 
     /// A finished highlight, without blocking: `Ok(None)` when none is ready
@@ -181,16 +336,8 @@ impl Default for HighlightWorker {
 
 impl Drop for HighlightWorker {
     fn drop(&mut self) {
-        // The flag stops a batch in progress; `Stop` ends the thread's loop
-        // (the store's subscription keeps a sender, so the channel does not
-        // close). The wait is at most one checkpoint.
-        self.cancel.store(true, Ordering::Relaxed);
-        if let Some(jobs) = self.jobs.take() {
-            let _ = jobs.send(Message::Stop);
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        // The thread itself stops when the last handle drops `Thread`.
+        let _ = self.thread.jobs.send(Message::Forget(self.client));
     }
 }
 
@@ -202,118 +349,185 @@ struct Parked {
     unresolved: Vec<LanguageId>,
 }
 
+/// A job waiting to run, with what it last published when it is a rerun
+/// for an arriving grammar.
+struct Queued {
+    job: Job,
+    previous: Option<Parked>,
+}
+
 fn run(
     messages: &Receiver<Message>,
-    done: &Sender<Highlighted>,
     cancel: &AtomicBool,
-    latest: &Mutex<HashMap<u64, u64>>,
+    latest: &Mutex<HashMap<Key, u64>>,
     highlight: &Highlight,
 ) {
+    let mut replies: HashMap<u64, Reply> = HashMap::new();
     // Jobs whose grammars were pending, newest per slot, rerun on `Retry`.
-    let mut parked: HashMap<u64, Parked> = HashMap::new();
-    while let Ok(first) = messages.recv() {
-        // Coalesce everything queued: keep the newest job per slot, in the
-        // order the slots were first requested.
-        let mut order = Vec::new();
-        let mut newest: HashMap<u64, Job> = HashMap::new();
+    let mut parked: HashMap<Key, Parked> = HashMap::new();
+    // The newest job per slot, and the slots in the order first queued.
+    let mut queued: HashMap<Key, Queued> = HashMap::new();
+    let mut order: Vec<Key> = Vec::new();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        // Wait while idle; otherwise take whatever arrived since the last
+        // job without waiting, so a newer request or priority counts before
+        // the next job is picked.
+        let first = if queued.is_empty() {
+            match messages.recv() {
+                Ok(message) => Some(message),
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
         let mut retry = false;
-        for message in std::iter::once(first).chain(messages.try_iter()) {
-            let job = match message {
-                Message::Job(job) => job,
-                Message::Retry => {
-                    retry = true;
-                    continue;
+        for message in first.into_iter().chain(messages.try_iter()) {
+            match message {
+                Message::Register(client, reply) => {
+                    replies.insert(client, reply);
+                }
+                Message::Job(job) => {
+                    let key = (job.client, job.slot);
+                    parked.remove(&key);
+                    match queued.get(&key) {
+                        Some(held) if held.job.generation > job.generation => {}
+                        Some(_) => {
+                            queued.insert(
+                                key,
+                                Queued {
+                                    job,
+                                    previous: None,
+                                },
+                            );
+                        }
+                        None => {
+                            order.push(key);
+                            queued.insert(
+                                key,
+                                Queued {
+                                    job,
+                                    previous: None,
+                                },
+                            );
+                        }
+                    }
+                }
+                Message::Prioritize {
+                    client,
+                    slot,
+                    priority,
+                } => {
+                    let key = (client, slot);
+                    if let Some(held) = queued.get_mut(&key) {
+                        held.job.request.priority = priority;
+                    }
+                    if let Some(waiting) = parked.get_mut(&key) {
+                        waiting.job.request.priority = priority;
+                    }
+                }
+                Message::Retry => retry = true,
+                Message::Forget(client) => {
+                    replies.remove(&client);
+                    parked.retain(|key, _| key.0 != client);
+                    queued.retain(|key, _| key.0 != client);
+                    order.retain(|key| key.0 != client);
+                    lock(latest).retain(|key, _| key.0 != client);
                 }
                 Message::Stop => return,
-            };
-            parked.remove(&job.slot);
-            match newest.get(&job.slot) {
-                Some(queued) if queued.generation > job.generation => {}
-                Some(_) => {
-                    newest.insert(job.slot, job);
-                }
-                None => {
-                    order.push(job.slot);
-                    newest.insert(job.slot, job);
-                }
             }
         }
-        // Slots rerun for a retry, with what each last published: a rerun
+        // Slots rerun for a retry carry what each last published: a rerun
         // that changes nothing is parked again without another result.
-        let mut retried: HashMap<u64, Parked> = HashMap::new();
         if retry {
-            for (slot, waiting) in parked.drain() {
-                order.push(slot);
-                newest.insert(slot, waiting.job.clone());
-                retried.insert(slot, waiting);
-            }
-        }
-        for slot in order {
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            let Some(job) = newest.remove(&slot) else {
-                continue;
-            };
-            let superseded = || {
-                cancel.load(Ordering::Relaxed)
-                    || lock(latest)
-                        .get(&slot)
-                        .is_some_and(|&newest| newest > job.generation)
-            };
-            // A grammar bug must not take the thread down: every later block
-            // would silently stay plain.
-            let outcome = catch_unwind(AssertUnwindSafe(|| {
-                highlight(&job.language, &job.source, &superseded)
-            }))
-            .unwrap_or_default();
-            if superseded() {
-                // The newer job is queued and replaces this one, parked
-                // state included.
-                continue;
-            }
-            {
-                let mut latest = lock(latest);
-                if latest
-                    .get(&slot)
-                    .is_some_and(|&newest| newest <= job.generation)
-                {
-                    latest.remove(&slot);
-                }
-            }
-            let mut previous = retried.remove(&slot);
-            if let Some(unchanged) = previous.take_if(|previous| {
-                previous.spans == outcome.spans && previous.unresolved == outcome.unresolved
-            }) {
-                // Still waiting on the same grammars.
-                parked.insert(slot, unchanged);
-                continue;
-            }
-            let revision = previous.map_or(0, |previous| previous.revision + 1);
-            let pending = outcome.pending();
-            if pending {
-                parked.insert(
-                    slot,
-                    Parked {
-                        job: job.clone(),
-                        revision,
-                        spans: outcome.spans.clone(),
-                        unresolved: outcome.unresolved.clone(),
+            for (key, waiting) in parked.drain() {
+                order.push(key);
+                queued.insert(
+                    key,
+                    Queued {
+                        job: waiting.job.clone(),
+                        previous: Some(waiting),
                     },
                 );
             }
-            let result = Highlighted {
-                slot,
-                generation: job.generation,
-                revision,
-                source: job.source,
-                spans: outcome.spans,
-                pending,
-                unresolved: outcome.unresolved,
-            };
-            if done.send(result).is_err() {
-                return;
+        }
+        let next = order
+            .iter()
+            .enumerate()
+            .min_by_key(|&(at, key)| (queued.get(key).map(|q| q.job.request.priority), at))
+            .map(|(at, _)| at);
+        let Some(key) = next.map(|at| order.remove(at)) else {
+            continue;
+        };
+        let Some(Queued { job, previous }) = queued.remove(&key) else {
+            continue;
+        };
+        let superseded = || {
+            cancel.load(Ordering::Relaxed)
+                || lock(latest)
+                    .get(&key)
+                    .is_some_and(|&newest| newest > job.generation)
+        };
+        // A grammar bug must not take the thread down: every later block
+        // would silently stay plain.
+        let outcome = catch_unwind(AssertUnwindSafe(|| highlight(&job.request, &superseded)))
+            .unwrap_or_default();
+        if superseded() {
+            // The newer job is queued and replaces this one, parked state
+            // included.
+            continue;
+        }
+        {
+            let mut latest = lock(latest);
+            if latest
+                .get(&key)
+                .is_some_and(|&newest| newest <= job.generation)
+            {
+                latest.remove(&key);
             }
+        }
+        let mut previous = previous;
+        if let Some(unchanged) = previous.take_if(|previous| {
+            previous.spans == outcome.spans && previous.unresolved == outcome.unresolved
+        }) {
+            // Still waiting on the same grammars.
+            parked.insert(key, unchanged);
+            continue;
+        }
+        let revision = previous.map_or(0, |previous| previous.revision + 1);
+        let pending = outcome.pending();
+        if pending {
+            parked.insert(
+                key,
+                Parked {
+                    job: job.clone(),
+                    revision,
+                    spans: outcome.spans.clone(),
+                    unresolved: outcome.unresolved.clone(),
+                },
+            );
+        }
+        let result = Highlighted {
+            slot: job.slot,
+            generation: job.generation,
+            revision,
+            source: job.request.source,
+            spans: outcome.spans,
+            pending,
+            unresolved: outcome.unresolved,
+        };
+        let Some(reply) = replies.get(&job.client) else {
+            continue;
+        };
+        if reply.done.send(result).is_err() {
+            // Its handle is gone; `Forget` follows.
+            continue;
+        }
+        let wake = lock(&reply.wake).clone();
+        if let Some(wake) = wake {
+            wake();
         }
     }
 }
@@ -327,7 +541,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    fn panics_on_boom(_: &LanguageId, source: &str, _: &dyn Fn() -> bool) -> Outcome {
+    fn panics_on_boom(request: &HighlightRequest, _: &dyn Fn() -> bool) -> Outcome {
+        let source = &*request.source;
         assert_ne!(source, "boom", "highlighter bug");
         Outcome {
             spans: vec![HighlightSpan {
@@ -365,14 +580,14 @@ mod tests {
         let (resume_tx, resume) = channel::<()>();
         let (seen_tx, seen) = channel();
         let resume = Mutex::new(resume);
-        let worker = HighlightWorker::with_highlighter(Arc::new(move |_, source, cancelled| {
-            if source == "first" {
+        let worker = HighlightWorker::with_highlighter(Arc::new(move |request, cancelled| {
+            if &*request.source == "first" {
                 started_tx.send(()).unwrap();
                 resume.lock().unwrap().recv().unwrap();
                 // The checkpoint a real highlight reaches while parsing.
                 seen_tx.send(cancelled()).unwrap();
             }
-            panics_on_boom(&rust(), source, cancelled)
+            panics_on_boom(request, cancelled)
         }));
         worker.request(1, 1, rust(), Arc::from("first"));
         started.recv().unwrap();
@@ -384,5 +599,80 @@ mod tests {
             (seen.recv(), first_result),
             (Ok(true), Ok((2, Arc::from("second"))))
         );
+    }
+
+    /// A worker whose highlight of `"hold"` waits for the returned sender,
+    /// after signalling the first receiver that it started.
+    fn held_worker() -> (HighlightWorker, Receiver<()>, Sender<()>) {
+        let (started_tx, started) = channel();
+        let (resume_tx, resume) = channel::<()>();
+        let resume = Mutex::new(resume);
+        let worker = HighlightWorker::with_highlighter(Arc::new(move |request, cancelled| {
+            if &*request.source == "hold" {
+                started_tx.send(()).unwrap();
+                resume.lock().unwrap().recv().unwrap();
+            }
+            panics_on_boom(request, cancelled)
+        }));
+        (worker, started, resume_tx)
+    }
+
+    // Catches views sharing a worker seeing each other's results or
+    // superseding each other's requests: the same slot on two handles is
+    // two slots, and each handle receives only its own result.
+    #[test]
+    fn shared_handles_keep_their_own_slots_and_results() {
+        let (first, started, resume) = held_worker();
+        let second = first.share();
+        first.request(9, 1, rust(), Arc::from("hold"));
+        started.recv().unwrap();
+        first.request(1, 1, rust(), Arc::from("one"));
+        second.request(1, 1, rust(), Arc::from("two"));
+        resume.send(()).unwrap();
+        let mine: Vec<Arc<str>> = (0..2).map(|_| first.recv().unwrap().source).collect();
+        let theirs = second.recv().unwrap().source;
+
+        assert_eq!(
+            (mine, theirs),
+            (vec![Arc::from("hold"), Arc::from("one")], Arc::from("two"))
+        );
+    }
+
+    // Catches queued requests running in arrival order regardless of
+    // priority, or a reprioritized request keeping its old place: a file
+    // scrolled into view is highlighted before files queued ahead of it.
+    #[test]
+    fn visible_requests_run_before_background_ones() {
+        let (worker, started, resume) = held_worker();
+        worker.request(9, 1, rust(), Arc::from("hold"));
+        started.recv().unwrap();
+        let background = |source: &str| {
+            HighlightRequest::new(rust(), Arc::from(source)).priority(Priority::Background)
+        };
+        worker.request_with(1, 1, background("offscreen"));
+        worker.request_with(2, 1, background("scrolled to"));
+        worker.request_with(3, 1, HighlightRequest::new(rust(), Arc::from("shown")));
+        worker.prioritize(2, Priority::Visible);
+        resume.send(()).unwrap();
+        let order: Vec<Arc<str>> = (0..4).map(|_| worker.recv().unwrap().source).collect();
+
+        assert_eq!(
+            order,
+            ["hold", "scrolled to", "shown", "offscreen"].map(Arc::from)
+        );
+    }
+
+    // Catches results that wait in the channel until the app happens to
+    // poll: the wake callback runs once a result can be taken.
+    #[test]
+    fn wake_runs_once_a_result_is_ready() {
+        let worker = HighlightWorker::with_highlighter(Arc::new(panics_on_boom));
+        let (woke_tx, woke) = channel();
+        worker.set_wake(move || woke_tx.send(()).unwrap());
+        worker.request(1, 1, rust(), Arc::from("fn"));
+        woke.recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap();
+
+        assert_eq!(worker.try_recv().map(|r| r.map(|r| r.slot)), Ok(Some(1)));
     }
 }
