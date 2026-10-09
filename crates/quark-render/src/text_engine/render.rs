@@ -1,12 +1,13 @@
+use std::ops::Range;
+
+use super::atlas::{GlyphAtlas, GlyphHandle};
 use super::{
-    ContentType, GlyphDetails, GlyphToRender, GpuCacheStatus, PositionedGlyph, PrepareError,
-    RenderError, State, TextArea, TextAtlas, TextBounds, Viewport,
+    GlyphToRender, PositionedGlyph, PrepareError, RenderError, TextArea, TextBounds, Viewport,
 };
-use quark_text::cosmic_text::{CacheKey, Color, FontSystem, LayoutRun, SwashCache, SwashContent};
+use quark_text::cosmic_text::{CacheKey, Color, FontSystem, LayoutRun};
 use wgpu::{
-    Buffer, BufferDescriptor, BufferUsages, COPY_BUFFER_ALIGNMENT, DepthStencilState, Device,
-    Extent3d, MultisampleState, Origin3d, Queue, RenderPass, RenderPipeline, TexelCopyBufferLayout,
-    TexelCopyTextureInfo, TextureAspect,
+    BindGroup, Buffer, BufferDescriptor, BufferUsages, COPY_BUFFER_ALIGNMENT, DepthStencilState,
+    Device, MultisampleState, Queue, RenderPass, RenderPipeline,
 };
 
 /// Most [`GlyphFill`]s one renderer holds.
@@ -30,6 +31,16 @@ pub(crate) struct GlyphFill {
     pub params: [f32; 4],
 }
 
+/// Consecutive glyph instances drawn with one bind group: at most one
+/// color page and one mask page, and one overflow ordinal.
+struct DrawSegment {
+    instances: Range<u32>,
+    color: Option<u32>,
+    mask: Option<u32>,
+    ordinal: u32,
+    bind: Option<BindGroup>,
+}
+
 /// Draws glyph instances, prepared from the atlas, into a render pass.
 pub(crate) struct TextRenderer {
     vertex_buffer: Buffer,
@@ -44,11 +55,16 @@ pub(crate) struct TextRenderer {
     fills_buffer: Buffer,
     fills_bind_group: wgpu::BindGroup,
     glyph_vertices: Vec<GlyphToRender>,
+    segments: Vec<DrawSegment>,
+    /// The atlas entries the instances draw from, each once, sorted.
+    handles: Vec<GlyphHandle>,
+    /// Some glyph sits in an overflow page, filled for one frame only.
+    overflowed: bool,
 }
 
 impl TextRenderer {
     pub(crate) fn new(
-        atlas: &mut TextAtlas,
+        atlas: &GlyphAtlas,
         device: &Device,
         multisample: MultisampleState,
         depth_stencil: Option<DepthStencilState>,
@@ -61,14 +77,19 @@ impl TextRenderer {
             mapped_at_creation: false,
         });
 
-        let pipeline = atlas.get_or_create_pipeline(device, multisample, depth_stencil.clone());
+        let pipeline = atlas.cache.get_or_create_pipeline(
+            device,
+            atlas.format,
+            multisample,
+            depth_stencil.clone(),
+        );
         let fills_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("quark text fills"),
             size: (MAX_GLYPH_FILLS * std::mem::size_of::<GlyphFill>()) as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let fills_bind_group = atlas.create_fills_bind_group(device, &fills_buffer);
+        let fills_bind_group = atlas.cache.create_fills_bind_group(device, &fills_buffer);
 
         Self {
             vertex_buffer,
@@ -82,6 +103,9 @@ impl TextRenderer {
             fills_buffer,
             fills_bind_group,
             glyph_vertices: Vec::new(),
+            segments: Vec::new(),
+            handles: Vec::new(),
+            overflowed: false,
         }
     }
 
@@ -89,7 +113,7 @@ impl TextRenderer {
     /// first), e.g. a non-sRGB view holding encoded colors.
     pub(crate) fn set_target_format(
         &mut self,
-        atlas: &TextAtlas,
+        atlas: &GlyphAtlas,
         device: &Device,
         format: wgpu::TextureFormat,
     ) {
@@ -124,30 +148,35 @@ impl TextRenderer {
         }
     }
 
-    /// Prepares the glyphs of `text_areas`' visible layout runs, in order,
-    /// and uploads them.
-    #[allow(clippy::too_many_arguments)]
+    /// The atlas entries the prepared glyphs draw from; pinning them all
+    /// ([`GlyphAtlas::pin`]) proves the vertices still draw those glyphs.
+    pub(crate) fn handles(&self) -> &[GlyphHandle] {
+        &self.handles
+    }
+
+    /// Whether any prepared glyph sits in an overflow page, which only
+    /// this frame's uploads fill.
+    pub(crate) fn uses_overflow(&self) -> bool {
+        self.overflowed
+    }
+
+    /// The overflow ordinal of each draw segment, in draw order.
+    pub(crate) fn segment_ordinals(&self) -> impl Iterator<Item = u32> + '_ {
+        self.segments.iter().map(|s| s.ordinal)
+    }
+
+    /// Prepares the glyphs of `text_areas`' visible layout runs, in order.
     pub(crate) fn prepare<'a>(
         &mut self,
-        device: &Device,
-        queue: &Queue,
+        atlas: &mut GlyphAtlas,
         font_system: &mut FontSystem,
-        atlas: &mut TextAtlas,
         viewport: &Viewport,
-        text_areas: impl IntoIterator<Item = TextArea<'a>>,
-        cache: &mut SwashCache,
+        text_areas: impl IntoIterator<Item = (TextArea<'a>, f32)>,
     ) -> Result<(), PrepareError> {
-        self.glyph_vertices.clear();
-
-        let state = State { device, queue };
-        let mut system = GlyphSystem {
-            atlas,
-            cache,
-            font_system,
-        };
+        self.clear();
         let resolution = viewport.resolution();
 
-        for text_area in text_areas {
+        for (text_area, raster_scale) in text_areas {
             let bounds = GlyphBounds::clipped(text_area.bounds, resolution);
 
             let is_run_visible = |run: &LayoutRun| {
@@ -174,65 +203,54 @@ impl TextRenderer {
                         None => text_area.default_color,
                     };
 
-                    if let Some(glyph_to_render) = prepare_glyph(
-                        &state,
-                        &mut system,
+                    self.push_glyph(
+                        atlas,
+                        font_system,
                         GlyphMetadata {
                             x: physical_glyph.x,
                             y: physical_glyph.y,
                             line_y: run.line_y,
+                            scale_factor: text_area.scale,
+                            raster_scale,
                             color,
                             cache_key: physical_glyph.cache_key,
-                            scale_factor: text_area.scale,
                             paint: 0,
                         },
                         bounds,
-                    )? {
-                        self.glyph_vertices.push(glyph_to_render);
-                    }
+                    )?;
                 }
             }
         }
 
-        self.upload(device, queue);
+        self.finish(atlas);
         Ok(())
     }
 
     /// Prepares glyphs that are already positioned, in the order given.
-    /// Unlike [`Self::prepare`], nothing is read from a [`cosmic_text::Buffer`]:
+    /// Unlike [`Self::prepare`], nothing is read from a cosmic-text buffer:
     /// each glyph brings its own position, color, and clip. Call
     /// [`Self::upload`] before rendering; keeping the GPU copy separate lets
     /// a caller budget preparation apart from the driver's staging.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_glyphs(
         &mut self,
-        device: &Device,
-        queue: &Queue,
+        atlas: &mut GlyphAtlas,
         font_system: &mut FontSystem,
-        atlas: &mut TextAtlas,
         viewport: &Viewport,
         glyphs: impl IntoIterator<Item = PositionedGlyph>,
-        cache: &mut SwashCache,
     ) -> Result<(), PrepareError> {
-        self.glyph_vertices.clear();
-
-        let state = State { device, queue };
-        let mut system = GlyphSystem {
-            atlas,
-            cache,
-            font_system,
-        };
+        self.clear();
         let resolution = viewport.resolution();
 
         for glyph in glyphs {
-            if let Some(glyph_to_render) = prepare_glyph(
-                &state,
-                &mut system,
+            self.push_glyph(
+                atlas,
+                font_system,
                 GlyphMetadata {
                     x: glyph.x,
                     y: glyph.y,
                     line_y: 0.0,
                     scale_factor: 1.0,
+                    raster_scale: f32::from_bits(glyph.scale),
                     color: glyph.color,
                     cache_key: glyph.cache_key,
                     paint: u32::from(glyph.fill)
@@ -241,16 +259,141 @@ impl TextRenderer {
                             .map_or(0, |luminance| 0x100 | u32::from(luminance) << 16),
                 },
                 GlyphBounds::clipped(glyph.bounds, resolution),
-            )? {
-                self.glyph_vertices.push(glyph_to_render);
-            }
+            )?;
         }
 
+        self.finish(atlas);
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        self.glyph_vertices.clear();
+        self.segments.clear();
+        self.handles.clear();
+        self.overflowed = false;
+    }
+
+    /// Sorts the handles and gives every segment its bind group.
+    fn finish(&mut self, atlas: &mut GlyphAtlas) {
+        self.handles.sort_unstable();
+        self.handles.dedup();
+        for segment in &mut self.segments {
+            if segment.bind.is_none() {
+                segment.bind = Some(atlas.bind_group(segment.color, segment.mask));
+            }
+        }
+    }
+
+    fn push_glyph(
+        &mut self,
+        atlas: &mut GlyphAtlas,
+        font_system: &mut FontSystem,
+        metadata: GlyphMetadata,
+        bounds: GlyphBounds,
+    ) -> Result<(), PrepareError> {
+        let Some(glyph) = atlas.glyph(font_system, metadata.cache_key, metadata.raster_scale)?
+        else {
+            return Ok(());
+        };
+        let placed = glyph.placed;
+
+        let mut x = metadata.x + placed.left;
+        let mut y =
+            (metadata.line_y * metadata.scale_factor).round() as i32 + metadata.y - placed.top;
+
+        let (mut atlas_x, mut atlas_y) = (placed.x, placed.y);
+        let mut width = placed.width as i32;
+        let mut height = placed.height as i32;
+
+        // Starts beyond right edge or ends beyond left edge
+        let max_x = x + width;
+        if x > bounds.x.max || max_x < bounds.x.min {
+            return Ok(());
+        }
+
+        // Starts beyond bottom edge or ends beyond top edge
+        let max_y = y + height;
+        if y > bounds.y.max || max_y < bounds.y.min {
+            return Ok(());
+        }
+
+        // Clip left edge
+        if x < bounds.x.min {
+            let right_shift = bounds.x.min - x;
+
+            x = bounds.x.min;
+            width = max_x - bounds.x.min;
+            atlas_x += right_shift as u32;
+        }
+
+        // Clip right edge
+        if x + width > bounds.x.max {
+            width = bounds.x.max - x;
+        }
+
+        // Clip top edge
+        if y < bounds.y.min {
+            let bottom_shift = bounds.y.min - y;
+
+            y = bounds.y.min;
+            height = max_y - bounds.y.min;
+            atlas_y += bottom_shift as u32;
+        }
+
+        // Clip bottom edge
+        if y + height > bounds.y.max {
+            height = bounds.y.max - y;
+        }
+
+        let index = self.glyph_vertices.len() as u32;
+        self.glyph_vertices.push(GlyphToRender {
+            pos: [x, y],
+            dim: [width as u16, height as u16],
+            uv: [atlas_x as u16, atlas_y as u16],
+            color: metadata.color.0,
+            // Colors are sRGB-encoded; the shader decodes them unless the
+            // target is encoded.
+            content_type_with_srgb: [
+                placed.kind as u16,
+                CONVERT_TO_LINEAR | linear_correction(&metadata.cache_key),
+            ],
+            depth: 0.0,
+            paint: metadata.paint,
+        });
+        match glyph.handle {
+            Some(handle) => self.handles.push(handle),
+            None => self.overflowed = true,
+        }
+
+        // Extend the last segment when its bind group can hold this page.
+        let page = Some(placed.page);
+        let is_color = placed.kind == super::ContentType::Color;
+        if let Some(last) = self.segments.last_mut()
+            && last.ordinal == glyph.ordinal
+        {
+            let slot = if is_color {
+                &mut last.color
+            } else {
+                &mut last.mask
+            };
+            if slot.is_none() || *slot == page {
+                *slot = page;
+                last.instances.end = index + 1;
+                return Ok(());
+            }
+        }
+        let (color, mask) = if is_color { (page, None) } else { (None, page) };
+        self.segments.push(DrawSegment {
+            instances: index..index + 1,
+            color,
+            mask,
+            ordinal: glyph.ordinal,
+            bind: None,
+        });
         Ok(())
     }
 
     /// Copies the prepared vertices to the GPU, growing the buffer if needed.
-    /// [`Self::prepare`] and its variants call this themselves.
     pub(crate) fn upload(&mut self, device: &Device, queue: &Queue) {
         let will_render = !self.glyph_vertices.is_empty();
         if !will_render {
@@ -276,30 +419,38 @@ impl TextRenderer {
         }
     }
 
-    /// Draws the glyphs last prepared, moving every glyph by the viewport's
-    /// draw offset `slot` (see [`Viewport::set_draw_offsets`]), clip included.
-    /// Drawing glyphs prepared earlier where the same glyphs moved by
-    /// whole pixels, with their bounds moved alike and inside the viewport
-    /// both times, would be prepared, needs no preparing or uploading
-    /// again. `slot` must be below [`super::MAX_DRAW_OFFSETS`].
+    /// Draws the segments `segments` of the glyphs last prepared, moving
+    /// every glyph by the viewport's draw offset `slot` (see
+    /// [`Viewport::set_draw_offsets`]), clip included. Drawing glyphs
+    /// prepared earlier where the same glyphs moved by whole pixels, with
+    /// their bounds moved alike and inside the viewport both times, would
+    /// be prepared, needs no preparing or uploading again. `slot` must be
+    /// below [`super::MAX_DRAW_OFFSETS`].
     pub(crate) fn render_at(
         &self,
-        atlas: &TextAtlas,
         viewport: &Viewport,
         pass: &mut RenderPass<'_>,
         slot: u32,
+        segments: Range<usize>,
     ) -> Result<(), RenderError> {
-        if self.glyph_vertices.is_empty() {
+        let segments = &self.segments
+            [segments.start.min(self.segments.len())..segments.end.min(self.segments.len())];
+        if self.glyph_vertices.is_empty() || segments.is_empty() {
             return Ok(());
         }
 
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &atlas.bind_group, &[]);
         pass.set_bind_group(1, &viewport.bind_group, &[]);
         pass.set_bind_group(2, &self.fills_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        // The vertex shader reads the slot from the vertex index.
-        pass.draw(slot * 4..slot * 4 + 4, 0..self.glyph_vertices.len() as u32);
+        for segment in segments {
+            let Some(bind) = &segment.bind else {
+                continue;
+            };
+            pass.set_bind_group(0, bind, &[]);
+            // The vertex shader reads the slot from the vertex index.
+            pass.draw(slot * 4..slot * 4 + 4, segment.instances.clone());
+        }
 
         Ok(())
     }
@@ -340,20 +491,13 @@ fn create_oversized_buffer(
     (buffer, size)
 }
 
-struct GetGlyphImageResult {
-    content_type: ContentType,
-    top: i16,
-    left: i16,
-    width: u16,
-    height: u16,
-    data: Vec<u8>,
-}
-
 struct GlyphMetadata {
     x: i32,
     y: i32,
     line_y: f32,
     scale_factor: f32,
+    /// The device scale the glyph was shaped at, for its raster key.
+    raster_scale: f32,
     color: Color,
     cache_key: CacheKey,
     paint: u32,
@@ -385,213 +529,4 @@ impl GlyphBounds {
             },
         }
     }
-}
-
-/// Rasterizes a font glyph for the atlas.
-fn text_glyph_image(system: &mut GlyphSystem, cache_key: CacheKey) -> Option<GetGlyphImageResult> {
-    let image = system
-        .cache
-        .get_image_uncached(system.font_system, cache_key)?;
-
-    let content_type = match image.content {
-        SwashContent::Color => ContentType::Color,
-        SwashContent::Mask => ContentType::Mask,
-        SwashContent::SubpixelMask => {
-            // Not implemented yet, but don't panic if this happens.
-            ContentType::Mask
-        }
-    };
-
-    Some(GetGlyphImageResult {
-        content_type,
-        top: image.placement.top as i16,
-        left: image.placement.left as i16,
-        width: image.placement.width as u16,
-        height: image.placement.height as u16,
-        data: image.data,
-    })
-}
-
-struct GlyphSystem<'a> {
-    atlas: &'a mut TextAtlas,
-    cache: &'a mut SwashCache,
-    font_system: &'a mut FontSystem,
-}
-
-fn prepare_glyph(
-    state: &State,
-    system: &mut GlyphSystem,
-    metadata: GlyphMetadata,
-    bounds: GlyphBounds,
-) -> Result<Option<GlyphToRender>, PrepareError> {
-    let details =
-        if let Some(details) = system.atlas.mask_atlas.glyph_cache.get(&metadata.cache_key) {
-            system
-                .atlas
-                .mask_atlas
-                .glyphs_in_use
-                .insert(metadata.cache_key);
-            details
-        } else if let Some(details) = system
-            .atlas
-            .color_atlas
-            .glyph_cache
-            .get(&metadata.cache_key)
-        {
-            system
-                .atlas
-                .color_atlas
-                .glyphs_in_use
-                .insert(metadata.cache_key);
-            details
-        } else {
-            let Some(image) = text_glyph_image(system, metadata.cache_key) else {
-                return Ok(None);
-            };
-
-            let should_rasterize = image.width > 0 && image.height > 0;
-
-            let (gpu_cache, atlas_id, inner) = if should_rasterize {
-                let mut inner = system.atlas.inner_for_content_mut(image.content_type);
-
-                // Find a position in the packer
-                let allocation = loop {
-                    match inner.try_allocate(image.width as usize, image.height as usize) {
-                        Some(a) => break a,
-                        None => {
-                            if !system.atlas.grow(
-                                state,
-                                system.font_system,
-                                system.cache,
-                                image.content_type,
-                            ) {
-                                return Err(PrepareError::AtlasFull);
-                            }
-
-                            inner = system.atlas.inner_for_content_mut(image.content_type);
-                        }
-                    }
-                };
-                let atlas_min = allocation.rectangle.min;
-
-                inner.stats.upload_bytes += image.data.len() as u64;
-                state.queue.write_texture(
-                    TexelCopyTextureInfo {
-                        texture: &inner.texture,
-                        mip_level: 0,
-                        origin: Origin3d {
-                            x: atlas_min.x as u32,
-                            y: atlas_min.y as u32,
-                            z: 0,
-                        },
-                        aspect: TextureAspect::All,
-                    },
-                    &image.data,
-                    TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(image.width as u32 * inner.num_channels() as u32),
-                        rows_per_image: None,
-                    },
-                    Extent3d {
-                        width: image.width as u32,
-                        height: image.height as u32,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
-                (
-                    GpuCacheStatus::InAtlas {
-                        x: atlas_min.x as u16,
-                        y: atlas_min.y as u16,
-                        content_type: image.content_type,
-                    },
-                    Some(allocation.id),
-                    inner,
-                )
-            } else {
-                let inner = &mut system.atlas.color_atlas;
-                (GpuCacheStatus::SkipRasterization, None, inner)
-            };
-
-            inner.stats.misses += 1;
-            inner.glyphs_in_use.insert(metadata.cache_key);
-            // Insert the glyph into the cache and return the details reference
-            inner
-                .glyph_cache
-                .get_or_insert(metadata.cache_key, || GlyphDetails {
-                    width: image.width,
-                    height: image.height,
-                    gpu_cache,
-                    atlas_id,
-                    top: image.top,
-                    left: image.left,
-                })
-        };
-
-    let mut x = metadata.x + details.left as i32;
-    let mut y =
-        (metadata.line_y * metadata.scale_factor).round() as i32 + metadata.y - details.top as i32;
-
-    let (mut atlas_x, mut atlas_y, content_type) = match details.gpu_cache {
-        GpuCacheStatus::InAtlas { x, y, content_type } => (x, y, content_type),
-        GpuCacheStatus::SkipRasterization => return Ok(None),
-    };
-
-    let mut width = details.width as i32;
-    let mut height = details.height as i32;
-
-    // Starts beyond right edge or ends beyond left edge
-    let max_x = x + width;
-    if x > bounds.x.max || max_x < bounds.x.min {
-        return Ok(None);
-    }
-
-    // Starts beyond bottom edge or ends beyond top edge
-    let max_y = y + height;
-    if y > bounds.y.max || max_y < bounds.y.min {
-        return Ok(None);
-    }
-
-    // Clip left ege
-    if x < bounds.x.min {
-        let right_shift = bounds.x.min - x;
-
-        x = bounds.x.min;
-        width = max_x - bounds.x.min;
-        atlas_x += right_shift as u16;
-    }
-
-    // Clip right edge
-    if x + width > bounds.x.max {
-        width = bounds.x.max - x;
-    }
-
-    // Clip top edge
-    if y < bounds.y.min {
-        let bottom_shift = bounds.y.min - y;
-
-        y = bounds.y.min;
-        height = max_y - bounds.y.min;
-        atlas_y += bottom_shift as u16;
-    }
-
-    // Clip bottom edge
-    if y + height > bounds.y.max {
-        height = bounds.y.max - y;
-    }
-
-    Ok(Some(GlyphToRender {
-        pos: [x, y],
-        dim: [width as u16, height as u16],
-        uv: [atlas_x, atlas_y],
-        color: metadata.color.0,
-        // Colors are sRGB-encoded; the shader decodes them unless the
-        // target is encoded.
-        content_type_with_srgb: [
-            content_type as u16,
-            CONVERT_TO_LINEAR | linear_correction(&metadata.cache_key),
-        ],
-        depth: 0.0,
-        paint: metadata.paint,
-    }))
 }

@@ -6,8 +6,9 @@
 //! renderer, and a run whose texts are exactly those a renderer prepared
 //! last frame, for the same target, draws that renderer's vertices again
 //! without preparing or uploading anything. Vertices point into the glyph
-//! atlas, so they hold only while no cached glyph has been evicted or
-//! cleared since: the atlas epoch.
+//! atlas, so they hold only while every glyph they draw is still where it
+//! was: the run keeps the handles of its glyphs and pins them all before
+//! any miss of the frame is placed, or prepares again when one went stale.
 //!
 //! A run that moved by whole pixels (a scrolled row) draws a renderer's
 //! vertices as they are, moved on the GPU by the renderer's draw offset,
@@ -89,7 +90,6 @@ struct RunMemo {
     valid: bool,
     target: usize,
     resolution: Option<Resolution>,
-    epoch: u64,
     texts: Vec<ClippedText>,
     rich_texts: Vec<ClippedRichText>,
     /// The glyphs prepared, on the positioned path, where they were
@@ -103,13 +103,11 @@ impl RunMemo {
     fn matches(
         &self,
         target: usize,
-        epoch: u64,
         texts: &[ClippedText],
         rich_texts: &[ClippedRichText],
     ) -> bool {
         self.valid
             && self.target == target
-            && self.epoch == epoch
             && self.texts.len() == texts.len()
             && self.rich_texts.len() == rich_texts.len()
             && self
@@ -132,14 +130,12 @@ impl RunMemo {
         &self,
         target: usize,
         resolution: Resolution,
-        epoch: u64,
         texts: &[ClippedText],
         rich_texts: &[ClippedRichText],
     ) -> Option<(i32, i32)> {
         if !(self.valid
             && self.target == target
             && self.resolution == Some(resolution)
-            && self.epoch == epoch
             && self.texts.len() == texts.len()
             && self.rich_texts.len() == rich_texts.len())
         {
@@ -365,13 +361,13 @@ impl TextRuns {
     fn translate(
         &mut self,
         slot: usize,
-        (target, resolution, epoch): (usize, Resolution, u64),
+        (target, resolution): (usize, Resolution),
         texts: &[ClippedText],
         rich_texts: &[ClippedRichText],
     ) -> bool {
         let memo = &mut self.memos[slot];
         let offset = &mut self.offsets[slot];
-        let Some(moved) = memo.moved_by(target, resolution, epoch, texts, rich_texts) else {
+        let Some(moved) = memo.moved_by(target, resolution, texts, rich_texts) else {
             return false;
         };
         let to = [offset[0] + moved.0, offset[1] + moved.1];
@@ -430,19 +426,23 @@ impl Renderer {
         // Only the positioned path draws exactly what the texts say; the
         // buffer path reads recolored buffers that change underneath.
         let reuse = reuse && self.text_path == TextPath::Positioned;
-        let epoch = self.atlas.epoch();
 
+        // Unchanged runs keep their vertices while every glyph they draw is
+        // still in place; pinning those glyphs now keeps this frame's
+        // misses from evicting them.
         for (target, frame) in frames.iter().enumerate() {
             for run in &frame.batches.text_runs {
                 let (texts, rich_texts) = run_items(frame, run);
                 let hash = run_hash(target, texts, rich_texts);
+                let runs = &mut self.text_runs;
                 let kept = reuse
                     .then(|| runs.lookup.get(&hash).copied())
                     .flatten()
                     .filter(|&slot| {
                         slot < count
                             && !runs.claimed[slot]
-                            && runs.memos[slot].matches(target, epoch, texts, rich_texts)
+                            && runs.memos[slot].matches(target, texts, rich_texts)
+                            && self.atlas.pin(runs.renderers[slot].handles())
                     });
                 if let Some(slot) = kept {
                     runs.claimed[slot] = true;
@@ -470,9 +470,14 @@ impl Renderer {
                         .filter(|&slot| slot < count && !runs.claimed[slot] && can_move(slot));
                     if let Some(slot) = candidate {
                         let (texts, rich_texts) = run_items(frame, run);
-                        if runs.translate(slot, (target, resolution, epoch), texts, rich_texts) {
+                        if runs.translate(slot, (target, resolution), texts, rich_texts)
+                            && self.atlas.pin(runs.renderers[slot].handles())
+                        {
                             runs.claimed[slot] = true;
                             runs.slots[index] = slot;
+                        } else {
+                            // Moved texts with stale glyphs: prepare them.
+                            runs.memos[slot].forget();
                         }
                     }
                     index += 1;
@@ -485,42 +490,11 @@ impl Renderer {
         for (target, frame) in frames.iter().enumerate() {
             for run in &frame.batches.text_runs {
                 if self.text_runs.slots[index] == usize::MAX {
-                    let runs = &mut self.text_runs;
-                    while free < runs.renderers.len() && runs.claimed[free] {
-                        free += 1;
-                    }
-                    if free == runs.renderers.len() {
-                        runs.renderers.push(TextRenderer::new(
-                            &mut self.atlas,
-                            &self.device,
-                            wgpu::MultisampleState::default(),
-                            None,
-                        ));
-                        runs.memos.push(RunMemo::default());
-                        runs.offsets.push([0, 0]);
-                        runs.claimed.push(false);
-                        runs.prepared.push(false);
-                        runs.pending.push(false);
-                    }
-                    runs.claimed[free] = true;
-                    runs.slots[index] = free;
-                    self.prepare_run(free, target, frame, run, text)?;
+                    let slot = self.claim_free_renderer(&mut free);
+                    self.text_runs.slots[index] = slot;
+                    self.prepare_run(slot, target, frame, run, text)?;
                 }
                 index += 1;
-            }
-        }
-
-        // Preparing evicted glyphs that kept vertices may point at.
-        if self.atlas.epoch() != epoch {
-            let mut index = 0;
-            for (target, frame) in frames.iter().enumerate() {
-                for run in &frame.batches.text_runs {
-                    let slot = self.text_runs.slots[index];
-                    if !self.text_runs.prepared[slot] {
-                        self.prepare_run(slot, target, frame, run, text)?;
-                    }
-                    index += 1;
-                }
             }
         }
 
@@ -542,18 +516,90 @@ impl Renderer {
         }
 
         let runs = &mut self.text_runs;
-        let epoch = self.atlas.epoch();
         runs.lookup.clear();
         runs.moved_lookup.clear();
         for ((&slot, &hash), &moved) in runs.slots.iter().zip(&runs.hashes).zip(&runs.moved_hashes)
         {
-            runs.memos[slot].epoch = epoch;
             runs.lookup.insert(hash, slot);
             runs.moved_lookup.insert(moved, slot);
         }
         // Unclaimed renderers keep no texts alive.
         for (memo, &claimed) in runs.memos.iter_mut().zip(&runs.claimed) {
             if !claimed {
+                memo.forget();
+            }
+        }
+        Ok(())
+    }
+
+    /// The first renderer not claimed this frame from `free` on, created
+    /// when there is none, and claimed.
+    fn claim_free_renderer(&mut self, free: &mut usize) -> usize {
+        let runs = &mut self.text_runs;
+        while *free < runs.renderers.len() && runs.claimed[*free] {
+            *free += 1;
+        }
+        if *free == runs.renderers.len() {
+            runs.renderers.push(TextRenderer::new(
+                &self.atlas,
+                &self.device,
+                wgpu::MultisampleState::default(),
+                None,
+            ));
+            runs.memos.push(RunMemo::default());
+            runs.offsets.push([0, 0]);
+            runs.claimed.push(false);
+            runs.prepared.push(false);
+            runs.pending.push(false);
+        }
+        runs.claimed[*free] = true;
+        *free
+    }
+
+    /// Prepares every text run of `frames` again in the order they are
+    /// encoded (the last target first), for a frame in overflow mode: its
+    /// glyphs go through the overflow pages ordinal by ordinal, so runs
+    /// must take them in the order their draws run.
+    pub(super) fn prepare_text_runs_in_order(
+        &mut self,
+        frames: &[TargetFrame],
+        text: &mut TextSystem,
+    ) -> Result<(), PrepareError> {
+        let total: usize = frames.iter().map(|f| f.batches.text_runs.len()).sum();
+        let runs = &mut self.text_runs;
+        runs.claimed.clear();
+        runs.claimed.resize(runs.renderers.len(), false);
+        runs.prepared.clear();
+        runs.prepared.resize(runs.renderers.len(), false);
+        runs.slots.clear();
+        runs.slots.resize(total, usize::MAX);
+        let mut free = 0;
+        for (target, frame) in frames.iter().enumerate().rev() {
+            for (i, run) in frame.batches.text_runs.iter().enumerate() {
+                let slot = self.claim_free_renderer(&mut free);
+                self.text_runs.slots[frame.text_base + i] = slot;
+                self.prepare_run(slot, target, frame, run, text)?;
+            }
+        }
+        let mut index = 0;
+        for frame in frames {
+            let format = self.target_format(frame.encoded);
+            for run in &frame.batches.text_runs {
+                let runs = &mut self.text_runs;
+                let slot = runs.slots[index];
+                let (_, rich_texts) = run_items(frame, run);
+                crate::text::run_fills(rich_texts, &mut runs.fills);
+                let renderer = &mut runs.renderers[slot];
+                renderer.set_target_format(&self.atlas, &self.device, format);
+                renderer.set_fills(&runs.fills);
+                index += 1;
+            }
+        }
+        let runs = &mut self.text_runs;
+        runs.lookup.clear();
+        runs.moved_lookup.clear();
+        for (memo, &claimed) in runs.memos.iter_mut().zip(&runs.claimed) {
+            if !claimed || !memo.valid {
                 memo.forget();
             }
         }
@@ -582,29 +628,24 @@ impl Renderer {
                 // Kept to check a later move of the run against.
                 push_positioned_glyphs(texts, rich_texts, &mut memo.glyphs, &mut memo.rows);
                 renderer.prepare_glyphs(
-                    &self.device,
-                    &self.queue,
-                    text.raster_font_system(),
                     &mut self.atlas,
+                    text.raster_font_system(),
                     viewport,
                     memo.glyphs.iter().copied(),
-                    &mut self.swash_cache,
                 )?
             }
             TextPath::Buffer => renderer.prepare(
-                &self.device,
-                &self.queue,
-                text.raster_font_system(),
                 &mut self.atlas,
+                text.raster_font_system(),
                 viewport,
                 prepare_text_areas(texts, rich_texts, &self.recolored),
-                &mut self.swash_cache,
             )?,
         }
         runs.prepared[slot] = true;
         runs.pending[slot] = true;
         runs.offsets[slot] = [0, 0];
-        memo.valid = true;
+        // Overflow pages hold this frame's glyphs only.
+        memo.valid = !renderer.uses_overflow();
         memo.target = target;
         memo.resolution = Some(viewport.resolution());
         memo.texts.extend_from_slice(texts);

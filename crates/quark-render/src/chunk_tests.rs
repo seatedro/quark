@@ -805,7 +805,7 @@ fn frame_cost(renderer: &mut Renderer, scene: &Scene, text: &mut TextSystem) -> 
     let micros = started.elapsed().as_micros() as u64;
     renderer.queue.submit(Some(encoder.finish()));
     let _ = renderer.device.poll(wgpu::PollType::wait_indefinitely());
-    renderer.atlas.trim();
+    renderer.atlas.end_frame();
     renderer.texture_pool.release(target);
     (micros, flattened, allocations)
 }

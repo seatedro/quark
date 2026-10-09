@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use crate::text_engine::{PositionedGlyph, TextArea, TextAtlas, TextBounds};
+use crate::text_engine::{PositionedGlyph, TextArea, TextBounds};
 use quark::scene::ShapedText;
 use quark::{Color, FontKind};
 use quark_text::cosmic_text::{
@@ -29,26 +29,19 @@ pub(crate) enum TextPath {
     Buffer,
 }
 
-/// The text system whose fonts the renderer's glyph atlas and recolored
-/// buffers were filled from. Both hold cosmic-text face ids, which another
-/// system's font database hands out again from the start, so after a
-/// replacement a cached glyph would draw for an unrelated glyph of the new
-/// fonts. A font change within one system keeps its ids.
+/// The text system whose fonts the recolored buffers were shaped with.
+/// They hold cosmic-text face ids, which another system's font database
+/// hands out again from the start. (The glyph atlas keys glyphs by exact
+/// font instance instead, so it follows a replacement by itself.)
 #[derive(Default)]
 pub(super) struct GlyphOwner(Option<TextSystemId>);
 
 impl GlyphOwner {
     /// Records `text` as the system this frame draws with, first emptying
-    /// `atlas` and `recolored` when another system filled them.
-    pub(super) fn adopt(
-        &mut self,
-        text: &TextSystem,
-        atlas: &mut TextAtlas,
-        recolored: &mut RecoloredBuffers,
-    ) {
+    /// `recolored` when another system filled it.
+    pub(super) fn adopt(&mut self, text: &TextSystem, recolored: &mut RecoloredBuffers) {
         let system = text.font_epoch().system;
         if self.0.replace(system).is_some_and(|old| old != system) {
-            atlas.clear();
             recolored.entries.clear();
         }
     }
@@ -197,6 +190,7 @@ fn visit_layout_glyphs(
     // The layout's hit-testing and carets already include this shift.
     let (left, top) = (origin.x + layout.buffer_x(), origin.y);
     let bounds = text_bounds(clip);
+    let scale = layout.scale_factor().to_bits();
     let mut reached = false;
     for run in layout.buffer().layout_runs() {
         rows.offset(run.line_top);
@@ -222,6 +216,7 @@ fn visit_layout_glyphs(
                 x: physical.x,
                 y: physical.y + line_y,
                 color,
+                scale,
                 bounds,
                 fill,
                 backdrop,
@@ -344,21 +339,20 @@ pub(super) fn prepare_text_areas<'a>(
     texts: &'a [ClippedText],
     rich_texts: &'a [ClippedRichText],
     recolored: &'a RecoloredBuffers,
-) -> impl Iterator<Item = TextArea<'a>> + 'a {
+) -> impl Iterator<Item = (TextArea<'a>, f32)> + 'a {
     let plain = texts.iter().filter_map(|text| {
         let primitive = &text.primitive;
         let layout = primitive.layout.downcast_ref::<TextLayout>()?;
-        Some(text_area(
-            layout,
-            primitive.rect,
-            text.clip,
-            primitive.color,
-        ))
+        let area = text_area(layout, primitive.rect, text.clip, primitive.color);
+        Some((area, layout.scale_factor()))
     });
     let rich = rich_texts.iter().filter_map(|text| {
         let primitive = &text.primitive;
         let layout = primitive.layout.downcast_ref::<TextLayout>()?;
-        Some(rich_text_area(layout, text, recolored))
+        Some((
+            rich_text_area(layout, text, recolored),
+            layout.scale_factor(),
+        ))
     });
     plain.chain(rich)
 }

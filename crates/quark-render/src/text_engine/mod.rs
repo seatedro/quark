@@ -1,15 +1,16 @@
-//! The glyph engine: rasterized glyphs in a texture atlas, their draw
-//! instances, and the pipeline and shader that draw them.
+//! The glyph engine: rasterized glyphs in a paged texture atlas (see
+//! [`atlas`]), their draw instances, and the pipeline and shader that draw
+//! them. Glyphs rasterize through the [`raster`] contract.
 //!
 //! Absorbed from glyphon 0.10.0 (<https://github.com/grovesNL/glyphon>,
 //! MIT OR Apache-2.0 OR Zlib; the license texts sit beside this file)
 //! together with every quark patch it carried as `vendor/glyphon`: the
-//! positioned-glyph prepare path, separate uploads, atlas growth by copy,
-//! atlas clearing and epochs, per-draw offsets, work counters, linear
-//! corrected coverage, encoded targets, and draw-time paint (fills and
-//! backdrops). Upstream's custom glyphs, depth callbacks, and web color
+//! positioned-glyph prepare path, separate uploads, per-draw offsets, work
+//! counters, linear corrected coverage, encoded targets, and draw-time
+//! paint (fills and backdrops); its growing two-texture atlas has since
+//! been replaced. Upstream's custom glyphs, depth callbacks, and web color
 //! mode, which quark never used, were left out. Shaping and layout stay in
-//! cosmic-text through quark-text; swash rasterizes.
+//! cosmic-text through quark-text.
 
 mod atlas;
 mod error;
@@ -18,34 +19,14 @@ pub(crate) mod raster;
 mod render;
 mod viewport;
 
-pub use atlas::AtlasStats;
-pub(crate) use atlas::TextAtlas;
+pub(crate) use atlas::GlyphAtlas;
+pub use atlas::{AtlasLimits, AtlasMemory, AtlasStats};
 pub use error::{PrepareError, RenderError};
 pub(crate) use pipeline::Cache;
 pub(crate) use render::{GlyphFill, MAX_GLYPH_FILLS, TextRenderer};
 pub(crate) use viewport::{MAX_DRAW_OFFSETS, Viewport};
 
-use etagere::AllocId;
 use quark_text::cosmic_text::{Buffer, CacheKey, Color};
-use wgpu::{Device, Queue};
-
-pub(crate) enum GpuCacheStatus {
-    InAtlas {
-        x: u16,
-        y: u16,
-        content_type: ContentType,
-    },
-    SkipRasterization,
-}
-
-pub(crate) struct GlyphDetails {
-    width: u16,
-    height: u16,
-    gpu_cache: GpuCacheStatus,
-    atlas_id: Option<AllocId>,
-    top: i16,
-    left: i16,
-}
 
 /// The kind of pixels a rasterized glyph holds.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -123,6 +104,9 @@ pub(crate) struct PositionedGlyph {
     pub x: i32,
     pub y: i32,
     pub color: Color,
+    /// `f32` bits of the device scale the glyph was shaped at, for its
+    /// raster key.
+    pub scale: u32,
     /// Clip rectangle, as [`TextArea::bounds`].
     pub bounds: TextBounds,
     /// One plus the index of the renderer's [`GlyphFill`] that colors a
@@ -133,9 +117,4 @@ pub(crate) struct PositionedGlyph {
     /// luminance. Overrides the correction a cache key's
     /// `LINEAR_CORRECTED` flag asks for. Ignored on an encoded target.
     pub backdrop: Option<u8>,
-}
-
-pub(crate) struct State<'a> {
-    pub(crate) device: &'a Device,
-    pub(crate) queue: &'a Queue,
 }
