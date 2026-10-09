@@ -36,6 +36,7 @@
 
 mod annotations;
 pub mod decorator;
+mod long_lines;
 mod navigation;
 mod paint;
 pub mod prepared;
@@ -221,6 +222,8 @@ struct PrepareKey {
     scroll: u32,
     revision: u64,
     scale: u32,
+    /// Each column's sideways scroll in long-line window grid steps.
+    hgrid: [u32; 2],
 }
 
 /// App-owned diff view state. See the [module docs](self).
@@ -259,6 +262,7 @@ pub struct DiffViewState {
     prepared: Option<PrepareKey>,
     content_w: [f32; 2],
     syntax: DiffSyntax,
+    long_lines: long_lines::LongLines,
     /// Session views: one bridge per file slot, all on `session_worker`.
     slot_syntax: Vec<DiffSyntax>,
     session_worker: Option<(HighlightWorker, GrammarStore)>,
@@ -334,6 +338,7 @@ impl DiffViewState {
             prepared: None,
             content_w: [0.0; 2],
             syntax: DiffSyntax::default(),
+            long_lines: Default::default(),
             slot_syntax: Vec::new(),
             session_worker: None,
             syntax_wake: None,
@@ -658,6 +663,10 @@ impl DiffViewState {
             self.syntax.set_budget(budget);
             for bridge in &mut self.slot_syntax {
                 bridge.set_budget(budget);
+            }
+            // Word diffs were computed under the old line limit.
+            for segment in &mut self.segments {
+                segment.clear_inline();
             }
             self.painted.clear();
             self.content_w = [0.0; 2];
@@ -1044,6 +1053,9 @@ impl DiffViewState {
         now_ms: u64,
     ) {
         if self.poll_syntax() {
+            self.revision += 1;
+        }
+        if self.long_lines.poll() {
             self.revision += 1;
         }
         let scrolled = self.autoscroll(now_ms);

@@ -500,6 +500,18 @@ pub(crate) fn highlight(
     resolve: &mut dyn FnMut(&LanguageId) -> Tag,
     cancelled: &dyn Fn() -> bool,
 ) -> Highlights {
+    highlight_parsed(root, None, source, limits, resolve, cancelled)
+}
+
+/// [`highlight`] with the host layer already parsed as `host`, when it is.
+fn highlight_parsed(
+    root: &Arc<Grammar>,
+    mut host: Option<ts::Tree>,
+    source: &str,
+    limits: Limits,
+    resolve: &mut dyn FnMut(&LanguageId) -> Tag,
+    cancelled: &dyn Fn() -> bool,
+) -> Highlights {
     let mut out = Highlights::default();
     if source.is_empty() {
         return out;
@@ -528,7 +540,11 @@ pub(crate) fn highlight(
         } else {
             &layer.ranges
         };
-        let Some(tree) = layer.grammar.parse(source, included, cancelled) else {
+        let parsed = match host.take().filter(|_| layer.depth == 0) {
+            Some(tree) => Some(tree),
+            None => layer.grammar.parse(source, included, cancelled),
+        };
+        let Some(tree) = parsed else {
             continue;
         };
         // A node spanning several ranges (an embedded document's root) also
@@ -614,6 +630,314 @@ pub(crate) fn highlight(
     out.work.discovered = limits.discovery - budget;
     out.spans = finish(merged, source);
     out
+}
+
+/// Window sizes of [`highlight_windows`], in bytes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Windowing {
+    /// Sources longer than this are highlighted window by window; shorter
+    /// ones in one go. Also the size a window starts at.
+    pub(crate) window: usize,
+    /// The largest window tried while looking for a place to cut: a parse
+    /// tree takes tens of bytes per source byte, so this bounds a
+    /// highlight's memory.
+    pub(crate) max_window: usize,
+    /// A window is cut only before this many bytes from its end, so the
+    /// parse up to the cut never depends on where the window was
+    /// truncated.
+    pub(crate) margin: usize,
+    /// Bytes highlighted before and after the focus ahead of the exact
+    /// pass.
+    pub(crate) focus_before: usize,
+    pub(crate) focus_after: usize,
+}
+
+impl Windowing {
+    pub(crate) const DEFAULT: Self = Self {
+        window: 2 << 20,
+        max_window: 8 << 20,
+        margin: 64 << 10,
+        focus_before: 64 << 10,
+        focus_after: 192 << 10,
+    };
+}
+
+/// One window's highlight from [`highlight_windows`]: spans in whole-source
+/// coordinates, all inside `range`.
+pub(crate) struct Window {
+    pub(crate) range: std::ops::Range<usize>,
+    /// Exact windows follow one another from the start and color their
+    /// bytes as a whole-file parse would. An inexact one is the focus
+    /// highlighted on its own, ahead of the exact pass; its colors hold
+    /// until an exact window covers them.
+    pub(crate) exact: bool,
+    pub(crate) highlights: Highlights,
+}
+
+/// Highlights a long `source` window by window, so memory stays bounded by
+/// the largest window's parse tree, and colors near the focus arrive
+/// before the rest.
+///
+/// Exact windows run from the start. Each parses a window of
+/// [`Windowing::window`] bytes as a document of its own, cuts it where its
+/// last top-level node before the window's final [`Windowing::margin`]
+/// starts, and keeps the spans before the cut; the next window starts
+/// there. A top-level node starts the same way whatever came before, so
+/// those spans match a whole-file parse. A window without such a node, or
+/// with an error early on, doubles up to [`Windowing::max_window`], then
+/// cuts anyway (at a line end when it has no node to cut at); only then
+/// can the next window start inside a construct and color differently.
+///
+/// Before each exact window, when `focus` (polled each time) lies past the
+/// exact windows so far and outside the last inexact window, the lines
+/// around the focus are highlighted on their own and emitted first: a
+/// window of a few hundred kilobytes colors in a fraction of the time an
+/// exact one takes, even at the very start.
+///
+/// The exact pass starts at `from`: 0, or where an earlier call yielded,
+/// with the inexact window that call colored last.
+/// After each exact window it hands off, `yield_after` is asked with the
+/// number handed off in this call, and the call stops when it says so (so a
+/// worker can take turns between long sources).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn highlight_windows(
+    root: &Arc<Grammar>,
+    source: &str,
+    sizes: Windowing,
+    (from, mut inexact, yield_after): (
+        usize,
+        Option<std::ops::Range<usize>>,
+        &dyn Fn(usize) -> bool,
+    ),
+    resolve: &(dyn Fn(&LanguageId) -> Tag + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
+    focus: &dyn Fn() -> Option<usize>,
+    emit: &mut dyn FnMut(Window),
+) -> WindowsEnd {
+    // This thread parses windows and finds their cuts; a second one runs
+    // the queries of each parsed window meanwhile, in order, so exact
+    // windows still arrive in order. A parsed window is handed over only
+    // once the query thread is free, which bounds the trees alive to two.
+    std::thread::scope(|scope| {
+        let (to_query, parsed) =
+            std::sync::mpsc::sync_channel::<(usize, usize, usize, ts::Tree)>(0);
+        let (done_tx, done) = std::sync::mpsc::channel::<Window>();
+        let query = move |(at, cut, end, tree): (usize, usize, usize, ts::Tree)| {
+            let text = &source[at..end];
+            let found = highlight_parsed(
+                root,
+                Some(tree),
+                text,
+                Limits::for_source(text.len()),
+                &mut |language| resolve(language),
+                cancelled,
+            );
+            Window {
+                range: at..cut,
+                exact: true,
+                highlights: shifted(found, at, cut),
+            }
+        };
+        let querying = std::thread::Builder::new()
+            .name("quark-syntax-query".to_owned())
+            .spawn_scoped(scope, move || {
+                for window in parsed {
+                    if cancelled() || done_tx.send(query(window)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        // Without the second thread, windows are queried here in turn.
+        let mut inline = querying.is_none().then_some(query);
+        let len = source.len();
+        let mut at = from.min(len);
+        let mut handed = 0;
+        while at < len {
+            for window in done.try_iter() {
+                emit(window);
+            }
+            if cancelled() {
+                return WindowsEnd::Cancelled;
+            }
+            if let Some(f) = focus().map(|f| f.min(len))
+                && f >= at
+                && inexact.as_ref().is_none_or(|r| !r.contains(&f))
+            {
+                let start = line_start(source, f.saturating_sub(sizes.focus_before)).max(at);
+                let end = line_end(source, (f + sizes.focus_after).min(len));
+                let text = &source[start..end];
+                let found = highlight(
+                    root,
+                    text,
+                    Limits::for_source(text.len()),
+                    &mut |language| resolve(language),
+                    cancelled,
+                );
+                if cancelled() {
+                    return WindowsEnd::Cancelled;
+                }
+                emit(Window {
+                    range: start..end,
+                    exact: false,
+                    highlights: shifted(found, start, end),
+                });
+                inexact = Some(start..end);
+            }
+            let mut size = sizes.window;
+            let (end, cut, tree) = loop {
+                let end = if len - at <= size {
+                    len
+                } else {
+                    line_end(source, at + size)
+                };
+                let Some(tree) = root.parse(&source[at..end], &[], cancelled) else {
+                    return WindowsEnd::Cancelled;
+                };
+                if end == len {
+                    break (end, len, tree);
+                }
+                let before = (end - at).saturating_sub(sizes.margin);
+                match top_level_cut(&tree, before) {
+                    Cut::At(cut) => break (end, at + cut, tree),
+                    Cut::EarlyError(cut) if size >= sizes.max_window => {
+                        break (end, at + cut, tree);
+                    }
+                    _ => {}
+                }
+                if size >= sizes.max_window {
+                    let cut = line_start(source, at + before).max(at + 1);
+                    break (end, cut, tree);
+                }
+                size *= 2;
+            };
+            match &mut inline {
+                Some(query) => emit(query((at, cut, end, tree))),
+                None => {
+                    if to_query.send((at, cut, end, tree)).is_err() {
+                        return WindowsEnd::Cancelled;
+                    }
+                }
+            }
+            at = cut;
+            handed += 1;
+            if at < len && yield_after(handed) {
+                break;
+            }
+        }
+        drop(to_query);
+        for window in done {
+            emit(window);
+        }
+        if cancelled() {
+            WindowsEnd::Cancelled
+        } else if at < len {
+            WindowsEnd::Yielded(at, inexact)
+        } else {
+            WindowsEnd::Done
+        }
+    })
+}
+
+/// How [`highlight_windows`] stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WindowsEnd {
+    Done,
+    /// It yielded; the exact pass goes on from this byte, and this is the
+    /// inexact window it last colored.
+    Yielded(usize, Option<std::ops::Range<usize>>),
+    Cancelled,
+}
+
+/// Where [`top_level_cut`] would cut a window.
+enum Cut {
+    At(usize),
+    /// The window's first error comes early (see [`top_level_cut`]).
+    EarlyError(usize),
+    None,
+}
+
+/// Where to cut a window parsed as `tree`: the start of its last
+/// top-level node that starts after the beginning and at or before byte
+/// `before`, but no later than the first top-level node with an error.
+///
+/// Truncating the window can leave a construct open (a template string or
+/// block comment running past its end), and the parser then reads what
+/// follows the construct's start as code: nodes that look fine but are not
+/// what a whole-file parse finds. The node holding the open construct has
+/// an error, so cutting at or before the first error keeps those out. A
+/// first error in the window's first quarter would leave little to keep;
+/// it is reported with the plain cut, so the caller can try a larger
+/// window (the construct may close in it) before taking the error as the
+/// source's own.
+fn top_level_cut(tree: &ts::Tree, before: usize) -> Cut {
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let mut cut = None;
+    let mut early = false;
+    for child in root.children(&mut cursor) {
+        let start = child.start_byte();
+        if start > before {
+            break;
+        }
+        if start > 0 {
+            if child.has_error() && !early {
+                if start >= before / 4 {
+                    return Cut::At(cut.unwrap_or(start));
+                }
+                early = true;
+            }
+            cut = Some(start);
+        }
+    }
+    match cut {
+        Some(cut) if early => Cut::EarlyError(cut),
+        Some(cut) => Cut::At(cut),
+        None => Cut::None,
+    }
+}
+
+/// `found`, whose spans are offsets into a text starting at `start`, as
+/// spans of the whole source, cut off at `end`.
+fn shifted(mut found: Highlights, start: usize, end: usize) -> Highlights {
+    let base = u32::try_from(start).unwrap_or(u32::MAX);
+    let limit = end.saturating_sub(start);
+    found.spans.retain_mut(|span| {
+        let r = span.range();
+        if r.start >= limit {
+            return false;
+        }
+        span.length = (r.end.min(limit) - r.start) as u32;
+        span.offset = span.offset.saturating_add(base);
+        true
+    });
+    found
+}
+
+/// How far [`line_start`] and [`line_end`] look for a line break before
+/// settling for a character boundary, so a minified source of one huge
+/// line still splits into bounded windows.
+const LINE_SEARCH: usize = 64 << 10;
+
+/// The start of the line holding byte `at`, or `at` itself (on a character
+/// boundary) when that line starts more than [`LINE_SEARCH`] earlier.
+fn line_start(source: &str, at: usize) -> usize {
+    let at = source.floor_char_boundary(at);
+    let from = source.floor_char_boundary(at.saturating_sub(LINE_SEARCH));
+    source[from..at]
+        .rfind('\n')
+        .map_or(if from == 0 { 0 } else { at }, |i| from + i + 1)
+}
+
+/// The end of the line holding byte `at`, past its newline, or `at` itself
+/// (on a character boundary) when that line ends more than
+/// [`LINE_SEARCH`] later.
+fn line_end(source: &str, at: usize) -> usize {
+    let at = source.floor_char_boundary(at);
+    let to = source.floor_char_boundary((at + LINE_SEARCH).min(source.len()));
+    source[at..to]
+        .find('\n')
+        .map_or(if to == source.len() { to } else { at }, |i| at + i + 1)
 }
 
 /// Stops a tree-sitter parse or query when `cancelled`.

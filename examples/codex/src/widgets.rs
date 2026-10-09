@@ -46,7 +46,8 @@ pub fn icon_button(
 }
 
 /// A menu surface at `(x, y)` in window coordinates: translucent fill
-/// over a backdrop blur, a hairline border, and a soft shadow.
+/// over a backdrop blur, a hairline border, and a soft shadow. It takes
+/// the pointer where it covers, so nothing beneath it hovers or clicks.
 pub fn menu_panel(p: &Pal, x: f32, y: f32, w: f32) -> Div {
     // The platform role alone, not `role="menu"` (which pins the semantic
     // role too), so a caller's `accessibility_role` (the palette's Dialog)
@@ -54,7 +55,7 @@ pub fn menu_panel(p: &Pal, x: f32, y: f32, w: f32) -> Div {
     view! { -> Div,
         <div class="absolute flex-col p-1 rounded-[10] blur-[18] z-60" left={x} top={y} w={w}
              bg={p.menu} border={p.menu_border} shadow={(16.0, 6.0, p.shadow)}
-             accessibility_role={Role::Menu} />
+             accessibility_role={Role::Menu} block_mouse />
     }
 }
 
@@ -165,10 +166,11 @@ pub fn js_badge() -> Div {
 }
 
 /// A transparent full-window layer under an open menu: a click outside
-/// the menu lands here and closes it.
+/// the menu lands here and closes it. Like the app's modal menus, it keeps
+/// the window beneath from hovering while the menu is open.
 pub fn click_catcher(w: f32, h: f32, action: impl Into<Action>) -> Div {
     view! { -> Div,
-        <div class="absolute left-0 top-0 z-55" w={w} h={h} on:click={action} />
+        <div class="absolute left-0 top-0 z-55" w={w} h={h} on:click={action} block_mouse />
     }
 }
 

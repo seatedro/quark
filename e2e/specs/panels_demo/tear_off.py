@@ -30,6 +30,13 @@ def frame(name):
     return next((f for f in app_frames() if f.name == name), None)
 
 
+def window_geometry(name):
+    wid = xdotool("search", "--sync", "--name", f"^{name}$").splitlines()[0]
+    out = xdotool("getwindowgeometry", "--shell", wid)
+    values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return tuple(int(values[k]) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+
+
 def node_by_id(window, node_id):
     root = frame(window)
     return root and next((n for n in root.walk() if n.attributes.get("id") == node_id), None)
@@ -71,7 +78,13 @@ def spec(cua: Cua):
     wait_for("the torn-off window to follow", lambda: threads_under(FLOATING, later))
     xdotool("mouseup", 1)
     wait_for("Threads to leave the main window", lambda: strip_of(MAIN, THREADS) is None)
-    assert threads_under(FLOATING, later), "the window moved on release"
+    # Released where it fits, the window stays under the pointer; where it
+    # would leave the screen, the dock fits it inside the work area instead.
+    x, y, w, h = window_geometry(FLOATING)
+    assert x >= 0 and y >= 0 and x + w <= 1280 and y + h <= 800, "the window left the screen"
+    # Window decorations sit outside the client geometry.
+    clamped = x + w >= 1280 - 12 or y + h >= 800 - 40
+    assert clamped or threads_under(FLOATING, later), "the window moved on release"
 
     chat = next(
         n for n in frame(MAIN).walk() if n.name == "Chat" and n.attributes.get("id", "").endswith(":panel")

@@ -175,9 +175,26 @@ mod tests {
         // Set the time the write gave the directory explicitly, so a
         // filesystem with coarse times cannot hide it.
         let at = UNIX_EPOCH + Duration::from_secs(1_000_000);
-        std::fs::File::open(&sub).unwrap().set_modified(at).unwrap();
+        open_dir(&sub).set_modified(at).unwrap();
         assert!(dirs.changed());
         assert!(!dirs.changed());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A directory handle that may set times: Windows opens directories
+    /// only with backup semantics, and times need write access.
+    fn open_dir(path: &std::path::Path) -> std::fs::File {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        }
+        #[cfg(not(windows))]
+        std::fs::File::open(path).unwrap()
     }
 }

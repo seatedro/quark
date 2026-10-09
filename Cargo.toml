@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/quark",
   "crates/quark-macros",
+  "crates/quark-view-syntax",
   "crates/quark-render",
   "crates/quark-text",
   "crates/quark-diff",

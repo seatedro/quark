@@ -7,7 +7,9 @@ with plausible-looking changes.
 ## Purpose And Scope
 
 `quark-macros` owns compile-time parsing and lowering for
-`#[derive(Store)]` and `view!`.
+`#[derive(Store)]` and `view!`. The `view!` grammar and AST live in
+`crates/quark-view-syntax`, shared with the view formatter; this crate
+lowers that AST.
 
 It does not own runtime reactivity, scene primitives, layout behavior, app
 actions, design tokens, or renderer behavior. It emits Rust method chains that
@@ -22,7 +24,11 @@ the `quark` crate and quark-ui's element builders must provide.
 ## Core Contracts
 
 - Keep dependencies limited to proc-macro tooling unless there is a strong
-  reason: `syn`, `quote`, and `proc-macro2` are the intended dependency set.
+  reason: `syn`, `quote`, `proc-macro2`, and `quark-view-syntax` (itself
+  only `syn` and `proc-macro2`) are the intended dependency set.
+- A grammar change goes in `quark-view-syntax`'s parser and records its
+  tokens in the concrete syntax tree in the same change, with a source
+  boundary case in that crate's tests.
 - `#[derive(Store)]` only supports non-generic structs with named fields.
   Tuple structs, unit structs, enums, unions, and generics should fail with
   clear compile errors.
