@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use quark_app::quark_ui::quark_syntax::{GrammarStore, HighlightKind, testing};
 use quark_components::diff_view::syntax::{DiffSyntax, SyntaxBudget, SyntaxStatus};
-use quark_diff::{DiffDocument, Side, diff_texts, parse_unified};
+use quark_diff::{DiffDocument, FileSources, Side, TextStore, diff_texts, parse_unified};
 
 const COLORS: &[HighlightKind] = &[
     HighlightKind::Keyword,
@@ -68,40 +68,24 @@ fn filler(count: usize) -> String {
 }
 
 // Catches whole files being highlighted hunk by hunk, which loses lexical
-// state that starts outside a hunk: a block comment opened before the
-// first hunk, and a template string spanning the gap between two hunks,
-// must color the changed lines inside them.
+// state between hunks: a template string spanning the gap between two
+// hunks must color the changed line of the second.
 #[test]
-fn whole_sources_carry_lexical_state_across_hunks() {
+fn template_string_spanning_two_hunks_stays_a_string() {
     let Some(store) = testing::store_with("javascript") else {
         return;
     };
-    // (old, new, hunks, needle, expected): the comment case has one hunk,
-    // starting after its opener; the template case two, with the gap
-    // between them inside the string.
-    let cases = [
-        (
-            format!("/* notes\n{}let x = 1;\n*/\n", filler(8)),
-            format!("/* notes\n{}let x = 2;\n*/\n", filler(8)),
-            1,
-            "let x = 2;",
-            "comment:let x = 2;",
-        ),
-        (
-            format!("const t = `\nalpha\n{}beta\n`;\n", filler(10)),
-            format!("const t = `\nalpha 2\n{}beta 2\n`;\n", filler(10)),
-            2,
-            "beta 2",
-            "string:beta 2",
-        ),
-    ];
-    for (old, new, hunks, needle, expected) in cases {
-        let doc = diff_texts(Some("a.js"), Some("a.js"), Some(&old), Some(&new), 3);
-        assert_eq!(doc.hunk_count(), hunks, "{needle}");
-        let syntax = highlighted(&doc, store.clone());
+    let old = format!("const t = `\nalpha\n{}beta\n`;\n", filler(10));
+    let new = format!("const t = `\nalpha 2\n{}beta 2\n`;\n", filler(10));
+    let doc = diff_texts(Some("a.js"), Some("a.js"), Some(&old), Some(&new), 3);
+    assert_eq!(
+        doc.hunk_count(),
+        2,
+        "the gap between hunks is in the string"
+    );
+    let syntax = highlighted(&doc, store);
 
-        assert_eq!(dump(&syntax, &doc, Side::New, needle), expected, "{needle}");
-    }
+    assert_eq!(dump(&syntax, &doc, Side::New, "beta 2"), "string:beta 2");
 }
 
 // Catches a patch's hunks being highlighted as one concatenated source: a
@@ -132,6 +116,53 @@ fn patch_hunks_do_not_share_lexical_state() {
     let syntax = highlighted(&doc, store);
 
     assert_eq!(dump(&syntax, &doc, Side::New, "let b"), "keyword:let");
+}
+
+// Catches a hydrated patch keeping its hunk-by-hunk colors: once the
+// exact sources arrive, a hunk inside a block comment opened above it is
+// recolored as comment and the file reports whole-source colors.
+#[test]
+fn hydrated_patch_recolors_from_whole_sources() {
+    let Some(store) = testing::store_with("rust") else {
+        return;
+    };
+    let old = format!("/* notes\n{}let x = 1;\n*/\n", filler(8));
+    let new = format!("/* notes\n{}let x = 2;\n*/\n", filler(8));
+    let patch = quark_diff::write_unified(&diff_texts(
+        Some("lib.rs"),
+        Some("lib.rs"),
+        Some(&old),
+        Some(&new),
+        3,
+    ));
+    let doc = parse_unified(&patch).unwrap();
+    let mut syntax = highlighted(&doc, store);
+    let before = (
+        syntax.file_status(0),
+        dump(&syntax, &doc, Side::New, "x = 2"),
+    );
+
+    let sources = FileSources {
+        old: Some(TextStore::new(old)),
+        new: Some(TextStore::new(new)),
+    };
+    let hydrated = doc.hydrate_file(0, sources).unwrap();
+    syntax.request(&hydrated, 2);
+    syntax.finish_pending();
+
+    assert_eq!(
+        [
+            before,
+            (
+                syntax.file_status(0),
+                dump(&syntax, &hydrated, Side::New, "x = 2")
+            )
+        ],
+        [
+            (Some(SyntaxStatus::PartialSource), "keyword:let".to_owned()),
+            (Some(SyntaxStatus::Ready), "comment:let x = 2;".to_owned()),
+        ]
+    );
 }
 
 // Catches injected languages losing their host's lexical state across a
