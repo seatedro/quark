@@ -35,8 +35,6 @@ pub enum TextError {
     },
     #[error("text longer than u32::MAX bytes")]
     TextTooLong,
-    #[error("font weight must be 1 to 1000, got {0}")]
-    InvalidFontWeight(u16),
 }
 
 /// A broken [`TextLayout`] glyph, line, or run invariant, reported by
@@ -269,14 +267,6 @@ impl<'a> TextQuery<'a> {
         }
         if u32::try_from(self.text.len()).is_err() {
             return Err(TextError::TextTooLong);
-        }
-        let weights = std::iter::once(style.font_weight)
-            .chain(self.spans.iter().filter_map(|span| span.weight));
-        for weight in weights {
-            let value = font_weight_value(weight);
-            if !(1..=1000).contains(&value) {
-                return Err(TextError::InvalidFontWeight(value));
-            }
         }
         for (index, span) in self.spans.iter().enumerate() {
             let Range { start, end } = span.range;
@@ -1531,16 +1521,11 @@ fn family(kind: FontKind) -> Family<'static> {
     }
 }
 
-/// The CSS weight (1 to 1000) text in `weight` asks for, the same in every
-/// family: Normal is 400, and an app that wants a heavier normal asks for
-/// that weight.
+/// The CSS weight text in `weight` asks for, the same in every family:
+/// Normal is 400 (an app that wants a heavier normal asks for that
+/// weight), and a numeric weight outside 1 to 1000 is clamped into it.
 pub(crate) fn font_weight_value(weight: FontWeight) -> u16 {
-    match weight {
-        FontWeight::Normal => 400,
-        FontWeight::Medium => 500,
-        FontWeight::Semibold => 600,
-        FontWeight::Bold => 700,
-    }
+    weight.value()
 }
 
 /// Points emoji-presentation clusters at the color emoji family, upright and

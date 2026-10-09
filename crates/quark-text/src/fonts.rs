@@ -1216,63 +1216,103 @@ mod tests {
         }
     }
 
+    /// The ink of `text` in `family` at `weight`, rasterized glyph by
+    /// glyph, with the family and registered weight of each glyph's face.
+    fn ink(
+        system: &mut crate::TextSystem,
+        text: &str,
+        family: &'static str,
+        weight: quark::FontWeight,
+    ) -> (u64, Vec<(String, u16)>) {
+        let style = crate::TextStyle::new(20.0)
+            .family(Some(family))
+            .weight(weight);
+        let layout = system
+            .layout(&crate::TextParams::new(text, style))
+            .expect("layout");
+        let mut raster = cosmic_text::SwashCache::new();
+        let fs = system.raster_font_system();
+        let mut ink = 0;
+        let mut faces = Vec::new();
+        for i in 0..layout.glyph_count() {
+            let key = layout
+                .physical_glyph(i, (0.0, 0.0))
+                .expect("glyph")
+                .cache_key;
+            if let Some(image) = raster.get_image_uncached(fs, key) {
+                ink += image.data.iter().map(|&a| u64::from(a)).sum::<u64>();
+            }
+            let face = fs.db().face(key.font_id).expect("face");
+            faces.push((face.families[0].0.clone(), face.weight.0));
+        }
+        (ink, faces)
+    }
+
     // A weight a family has no face for takes the family's face nearest
     // it, as CSS matching does, rather than another family that has the
-    // exact weight: before, Geist at 300 drew in Fira Code (whose variable
-    // face registers as 300) and Fira Code at 700 in Geist Bold. fontdb
+    // exact weight: before, Geist Light drew in Fira Code (whose variable
+    // face registers as 300) and Fira Code Bold in Geist Bold. fontdb
     // breaks the 400 to 500 tie at 450, looking down first from there.
     #[test]
     fn weight_without_a_face_takes_the_family_face_nearest_it() {
-        use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
-        let cases: [(&str, u16, (&str, u16)); 4] = [
-            (UI_FAMILY, 300, (UI_FAMILY, 400)),
-            (UI_FAMILY, 450, (UI_FAMILY, 400)),
-            (FIRA_CODE_FAMILY, 700, (FIRA_CODE_FAMILY, 300)),
-            (SOURCE_SANS_3_FAMILY, 300, (SOURCE_SANS_3_FAMILY, 400)),
+        use quark::FontWeight::{Bold, Light, Numeric};
+        let cases = [
+            (UI_FAMILY, Light, (UI_FAMILY, 400)),
+            (UI_FAMILY, Numeric(450), (UI_FAMILY, 400)),
+            (UI_FAMILY, Numeric(900), (UI_FAMILY, 700)),
+            (FIRA_CODE_FAMILY, Bold, (FIRA_CODE_FAMILY, 300)),
+            (SOURCE_SANS_3_FAMILY, Light, (SOURCE_SANS_3_FAMILY, 400)),
         ];
         let mut system = test_system();
-        let fs = system.raster_font_system();
-        for (family, weight, expected) in cases {
-            let attrs = Attrs::new()
-                .family(Family::Name(family))
-                .weight(Weight(weight));
-            let mut buffer = Buffer::new(fs, Metrics::new(14.0, 20.0));
-            buffer.set_text(fs, "Hamburg", &attrs, Shaping::Advanced, None);
-            buffer.shape_until_scroll(fs, false);
-            let run = buffer.layout_runs().next().expect("run");
-            for glyph in run.glyphs {
-                let face = fs.db().face(glyph.font_id).expect("face");
-                let got = (face.families[0].0.as_str(), face.weight.0);
-                assert_eq!(got, expected, "{family} at {weight}");
+        for (family, weight, (face_family, face_weight)) in cases {
+            let (_, faces) = ink(&mut system, "Hamburg", family, weight);
+            for (got_family, got_weight) in faces {
+                assert_eq!(
+                    (got_family.as_str(), got_weight),
+                    (face_family, face_weight),
+                    "{family} {weight:?}"
+                );
             }
         }
     }
 
-    // A static family taken at a lighter weight than its lightest face
+    // A static family asked for a lighter weight than its lightest face
     // draws that face as it is: no synthetic thinning (or emboldening)
     // makes up the difference.
     #[test]
-    fn static_face_at_a_missing_weight_rasterizes_as_its_own_weight() {
-        use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, SwashCache, Weight};
+    fn static_face_at_a_missing_weight_draws_its_own_weight() {
         let mut system = test_system();
-        let fs = system.raster_font_system();
-        let mut raster = SwashCache::new();
-        let mut images = Vec::new();
-        for weight in [300, 400] {
-            let attrs = Attrs::new()
-                .family(Family::Name(SOURCE_SANS_3_FAMILY))
-                .weight(Weight(weight));
-            let mut buffer = Buffer::new(fs, Metrics::new(20.0, 28.0));
-            buffer.set_text(fs, "R", &attrs, Shaping::Advanced, None);
-            buffer.shape_until_scroll(fs, false);
-            let run = buffer.layout_runs().next().expect("run");
-            let key = run.glyphs[0].physical((0.0, 0.0), 1.0).cache_key;
-            assert_eq!(key.font_weight.0, weight);
-            let image = raster.get_image_uncached(fs, key).expect("image");
-            images.push(image.data);
-        }
-        assert!(images[0].iter().any(|&a| a != 0), "ink");
-        assert_eq!(images[0], images[1]);
+        let light = ink(
+            &mut system,
+            "Rag",
+            SOURCE_SANS_3_FAMILY,
+            quark::FontWeight::Light,
+        );
+        let normal = ink(
+            &mut system,
+            "Rag",
+            SOURCE_SANS_3_FAMILY,
+            quark::FontWeight::Normal,
+        );
+        assert!(normal.0 > 0, "ink");
+        assert_eq!(light.0, normal.0);
+    }
+
+    // A numeric weight reaches a variable face's weight axis: Inter at 450
+    // inks more than at Normal (400) and less than at Medium (500), from
+    // the one face.
+    #[test]
+    fn numeric_weight_sets_a_variable_face_weight() {
+        use quark::FontWeight::{Medium, Normal, Numeric};
+        let mut system = test_system();
+        let [normal, between, medium] = [Normal, Numeric(450), Medium]
+            .map(|weight| ink(&mut system, "Hamburg", INTER_FAMILY, weight));
+        assert!(
+            normal.0 < between.0 && between.0 < medium.0,
+            "{normal:?} {between:?} {medium:?}"
+        );
+        assert_eq!(normal.1, between.1);
+        assert_eq!(between.1, medium.1);
     }
 
     /// The family of the face the first glyph of UI text (mono text with
