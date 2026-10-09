@@ -1185,6 +1185,20 @@ impl Renderer {
         }
     }
 
+    /// Snapshot `text`'s fonts for SVG text when they changed since the
+    /// last snapshot (a new system or a font change), dropping flattened
+    /// chunks whose icons were rasterized with the old ones.
+    fn adopt_svg_fonts(&mut self, text: &TextSystem) {
+        let epoch = text.font_epoch();
+        let fl = &mut self.flattener;
+        if fl.svg_fonts.as_ref().map(crate::icons::SvgFonts::epoch) != Some(epoch) {
+            if fl.svg_fonts.is_some() {
+                fl.chunks = chunks::ChunkCache::default();
+            }
+            fl.svg_fonts = Some(crate::icons::SvgFonts::new(text));
+        }
+    }
+
     /// The pipelines drawing to an encoded or a linear-light target.
     fn pipelines_for(&self, encoded: bool) -> &Pipelines {
         if encoded {
@@ -1395,6 +1409,7 @@ impl Renderer {
                 height: h,
             },
         );
+        self.adopt_svg_fonts(text);
         self.flatten(scene, w, h);
 
         // Owned target texture (COPY_SRC so we can read it back). Format matches
@@ -1519,6 +1534,7 @@ impl Renderer {
             bytemuck::bytes_of(&viewport_uniform),
         );
 
+        self.adopt_svg_fonts(text);
         self.flatten(scene, sw, sh);
 
         let surface = self.surface.as_ref().ok_or(RenderError::NoSurface)?;
@@ -3456,6 +3472,8 @@ struct Flattener {
     /// Per isolated group drawn in place, the clip stack depth to return
     /// to at its end.
     isolates: Vec<usize>,
+    /// Fonts SVG text in icons draws with.
+    svg_fonts: Option<crate::icons::SvgFonts>,
 }
 
 impl Flattener {
@@ -3726,7 +3744,7 @@ fn flatten_scene_into(
                 };
                 // Icons already on the GPU skip rasterizing.
                 let rasterize = |key| !image_cache.contains_key(&key);
-                if let Some(drawn) = convert(primitive, rasterize) {
+                if let Some(drawn) = convert(primitive, rasterize, fl.svg_fonts.as_ref()) {
                     emit(drawn, &draw, fl, out);
                 }
             }
@@ -3902,7 +3920,11 @@ struct Draw<'a> {
 /// The draw of a primitive other than a path, a chunk, or a state change,
 /// unclipped and unfaded. `rasterize` says whether an icon's pixels are
 /// needed (its texture is not on the GPU).
-fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option<Drawn> {
+fn convert(
+    primitive: &Primitive,
+    rasterize: impl FnOnce(u64) -> bool,
+    fonts: Option<&crate::icons::SvgFonts>,
+) -> Option<Drawn> {
     let quad = |rect: Rect, background, border_color, corner_radii, border_widths| {
         Drawn::Quad(QuadInstance {
             bounds: [rect.x, rect.y, rect.width, rect.height],
@@ -4014,10 +4036,10 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
                 height: icon.rect.height.round(),
             };
             let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
-            let cache_key = crate::icons::cache_key(&icon.name, px_size, icon.color);
+            let cache_key = crate::icons::cache_key_with(&icon.name, px_size, icon.color, fonts);
             // Once uploaded, the cache key alone is enough to draw.
             let (rgba, width, height) = if rasterize(cache_key) {
-                crate::icons::rasterize_svg(&icon.name, px_size, icon.color)
+                crate::icons::rasterize_svg_with(&icon.name, px_size, icon.color, fonts)
             } else {
                 (empty_rgba(), 0, 0)
             };
@@ -4941,6 +4963,9 @@ mod mask_tests;
 #[cfg(test)]
 #[path = "pattern_tests.rs"]
 mod pattern_tests;
+#[cfg(test)]
+#[path = "svg_text_tests.rs"]
+mod svg_text_tests;
 #[cfg(test)]
 #[path = "text_fill_tests.rs"]
 mod text_fill_tests;

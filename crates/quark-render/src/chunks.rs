@@ -498,6 +498,7 @@ impl ChunkEntry {
         chunk: &ChunkPrimitive,
         cache: &mut ChunkCache,
         scratch: &mut BandScratch,
+        fonts: Option<&crate::icons::SvgFonts>,
     ) {
         self.generation = Some(chunk.chunk.generation());
         self.scale = chunk.scale;
@@ -567,7 +568,7 @@ impl ChunkEntry {
                 _ => {
                     // An entry outlives the GPU copy of its icons, so it
                     // keeps their pixels.
-                    if let Some(drawn) = convert(&chunk.place(primitive), |_| true) {
+                    if let Some(drawn) = convert(&chunk.place(primitive), |_| true, fonts) {
                         self.items.push(item(ItemDraw::Drawn(drawn)));
                     }
                 }
@@ -649,7 +650,12 @@ fn draw(
     let (dx, dy) = match entry.moved(chunk) {
         Some(moved) => moved,
         None => {
-            entry.convert(chunk, &mut fl.chunks, &mut fl.band_scratch);
+            entry.convert(
+                chunk,
+                &mut fl.chunks,
+                &mut fl.band_scratch,
+                fl.svg_fonts.as_ref(),
+            );
             (0.0, 0.0)
         }
     };
