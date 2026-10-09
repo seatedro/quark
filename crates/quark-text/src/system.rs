@@ -35,6 +35,8 @@ pub struct TextSystem {
     resolved: [ResolvedFamily; 2],
     /// The last [`Self::font_snapshot`], while the fonts are unchanged.
     snapshot: Option<FontSnapshot>,
+    /// What [`Self::set_shape_plan_capacity`] set, for a reload to keep.
+    shape_plan_capacity: Option<usize>,
     scratch: LayoutScratch,
 }
 
@@ -134,6 +136,7 @@ impl TextSystem {
             generics,
             resolved,
             snapshot: None,
+            shape_plan_capacity: None,
             scratch: LayoutScratch::default(),
         }
     }
@@ -287,6 +290,29 @@ impl TextSystem {
     /// shaping, so changing this keeps the font epoch.
     pub fn set_shape_plan_capacity(&mut self, capacity: usize) {
         self.font_system.set_shape_plan_capacity(capacity);
+        self.shape_plan_capacity = Some(capacity);
+    }
+
+    /// Scans the installed fonts again and asks the platform again for the
+    /// system UI and monospace families, for an app the OS told that fonts
+    /// were installed, removed, or changed. Keeps loaded fonts, settings,
+    /// interned family ids, and the shape plan capacity; becomes a new
+    /// [`Self::font_epoch`], so
+    /// caches lay everything out again. Slow, like [`Self::new`]; a
+    /// [`Self::vendored_only`] system has nothing to rescan.
+    pub fn reload_system_fonts(&mut self) {
+        if self.vendored_only {
+            return;
+        }
+        let mut fresh = Self::with_settings(&self.settings);
+        for font in &self.loaded {
+            fresh.load_font_data(font.0.clone());
+        }
+        fresh.families = std::mem::take(&mut self.families);
+        if let Some(capacity) = self.shape_plan_capacity {
+            fresh.set_shape_plan_capacity(capacity);
+        }
+        *self = fresh;
     }
 
     /// Shapes and lays out text without caching. Prefer
