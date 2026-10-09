@@ -123,8 +123,8 @@ Maintainer details (pinning, cross-target checks, publishing) are in
   `symbol`, `source` (repository, commit, hash).
 - `library`, `highlights`, and optional `injections` each hold `path`,
   `sha256`, `size`.
-- Index: `{"payload": {"schema": 1, "target": ..., "packs": [manifest,
-  ...]}, "signature": "<hex>"}`.
+- Index:
+  `{"payload": {"schema": 1, "target": ..., "packs": [manifest, ...]}, "signature": "<hex>"}`.
 - The signature is Ed25519 over the payload's canonical JSON, as for
   quark-update manifests.
 - A file's URL is its `url` field, else `<language>/<path>` next to the

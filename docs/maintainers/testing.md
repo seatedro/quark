@@ -65,8 +65,8 @@ frames through the adapter:
   64 for a repeated frame, 512 for one streamed answer chunk with its frame.
   Measures 45 (53 with a screen reader) and 337; ceilings sit just above, so
   a regression fails while still under budget.
-- Print call sites: `cargo test -p quark-app report_ -- --ignored
-  --nocapture`.
+- Print call sites:
+  `cargo test -p quark-app report_ -- --ignored --nocapture`.
 
 ## Coverage gaps
 

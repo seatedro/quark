@@ -41,8 +41,8 @@ e2e/run.sh e2e/specs/workbench/*.py
 ```
 
 - `QUARK_SYNTAX_PACKS=target/syntax-packs` is exported when that directory
-  exists, so code is highlighted once the [grammar
-  packs](../docs/guide/syntax-packs.md#building-packs) are built.
+  exists, so code is highlighted once the
+  [grammar packs](../docs/guide/syntax-packs.md#building-packs) are built.
 - [theme_motion.py](specs/workbench/theme_motion.py) reads screenshots with
   Pillow (`python3-pil`); the runner does not check for it.
 - Each spec starts with a docstring naming the regression it catches;
