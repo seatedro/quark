@@ -502,10 +502,67 @@ fn paragraph(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> An
     }
 }
 
+/// A run of a word flow: prose in one color and weight, or an inline
+/// object (code pill, file chip) that breaks lines as one character.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Piece<'a> {
+    Words(&'a str, Color, bool),
+    Code(&'a str),
+    File(&'a str, Option<u32>),
+}
+
+/// `pieces` cut at the line break opportunities of their joined text
+/// (UAX #14), objects counting as U+FFFC: each group wraps as one unit.
+/// Cutting at span edges instead let a sentence's "." wrap alone after a
+/// semibold "13", which UAX #14 forbids.
+fn unbreakable_groups<'a>(pieces: &[Piece<'a>]) -> Vec<Vec<Piece<'a>>> {
+    let mut text = String::new();
+    let mut ranges = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let start = text.len();
+        match piece {
+            Piece::Words(t, ..) => text.push_str(t),
+            Piece::Code(_) | Piece::File(..) => text.push('\u{fffc}'),
+        }
+        ranges.push(start..text.len());
+    }
+    let mut groups = Vec::new();
+    let mut start = 0;
+    for (end, _) in unicode_linebreak::linebreaks(&text) {
+        let group: Vec<Piece> = pieces
+            .iter()
+            .zip(&ranges)
+            .filter(|(_, r)| r.start < end && r.end > start)
+            .map(|(piece, r)| match *piece {
+                Piece::Words(t, c, bold) => {
+                    let (lo, hi) = (start.max(r.start) - r.start, end.min(r.end) - r.start);
+                    Piece::Words(&t[lo..hi], c, bold)
+                }
+                object => object,
+            })
+            .collect();
+        groups.push(group);
+        start = end;
+    }
+    groups
+}
+
 /// Spans flowed word by word so file chips and their icon tiles wrap with
 /// the prose. `pending`, while a preamble streams, follows in a dimmer
 /// tone.
 fn inline_flow(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> AnyElement {
+    let mut pieces: Vec<Piece> = spans
+        .iter()
+        .map(|span| match *span {
+            Span::Text(t) => Piece::Words(t, color, false),
+            Span::Bold(t) => Piece::Words(t, p.text, true),
+            Span::Code(c) => Piece::Code(c),
+            Span::File(name, line) => Piece::File(name, line),
+        })
+        .collect();
+    if let Some(pending) = pending.filter(|s| !s.is_empty()) {
+        pieces.push(Piece::Words(pending, p.faint.lerp(p.bg, 0.3), false));
+    }
     let word = |w: &str, c: Color, bold: bool| {
         view! {
             <text size={BODY} color={c} class="whitespace-nowrap" line_height_points={LINE_PT}
@@ -514,40 +571,35 @@ fn inline_flow(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> 
             </text>
         }
     };
+    let piece = |piece: Piece| match piece {
+        Piece::Words(w, c, bold) => word(w, c, bold),
+        Piece::Code(c) => view! {
+            <div class="flex-row items-center px-[5] h-5 rounded-[5]" bg={p.chip}>
+                <text size={CODE + 0.5} color={p.text} class="font-mono whitespace-nowrap">
+                    {c}
+                </text>
+            </div>
+        },
+        Piece::File(name, line) => view! {
+            <div class="flex-row items-center gap-[5]" role="link"
+                 aria-label={name.to_owned()} on:click={Msg::OpenFile("cart.js")}>
+                <div class="w-[13] h-[13] rounded-[3] bg-[#2f6fd8] items-center justify-center">
+                    <text size={6.5} class="font-bold text-white whitespace-nowrap">"js"</text>
+                </div>
+                {word(name, p.link, false)}
+                if let Some(n) = line {
+                    {word(&format!(" (line {n})"), p.link, false)}
+                }
+            </div>
+        },
+    };
     view! {
         <div class="w-full flex-row flex-wrap items-center">
-            for span in spans {
-                match span {
-                    Span::Text(t) | Span::Bold(t) => {
-                        let bold = matches!(span, Span::Bold(_));
-                        for w in t.split_inclusive(' ') {
-                            {word(w, if bold { p.text } else { color }, bold)}
-                        }
-                    }
-                    Span::Code(c) => {
-                        <div class="flex-row items-center px-[5] h-5 rounded-[5]" bg={p.chip}>
-                            <text size={CODE + 0.5} color={p.text} class="font-mono whitespace-nowrap">
-                                {*c}
-                            </text>
-                        </div>
-                    }
-                    Span::File(name, line) => {
-                        <div class="flex-row items-center gap-[5]" role="link"
-                             aria-label={(*name).to_owned()} on:click={Msg::OpenFile("cart.js")}>
-                            <div class="w-[13] h-[13] rounded-[3] bg-[#2f6fd8] items-center justify-center">
-                                <text size={6.5} class="font-bold text-white whitespace-nowrap">"js"</text>
-                            </div>
-                            {word(name, p.link, false)}
-                            if let Some(n) = line {
-                                {word(&format!(" (line {n})"), p.link, false)}
-                            }
-                        </div>
-                    }
-                }
-            }
-            if let Some(pending) = pending.filter(|s| !s.is_empty()) {
-                for w in pending.split_inclusive(' ') {
-                    {word(w, p.faint.lerp(p.bg, 0.3), false)}
+            for group in unbreakable_groups(&pieces) {
+                if let [one] = group[..] {
+                    {piece(one)}
+                } else {
+                    <div class="flex-row items-center">{...group.into_iter().map(piece)}</div>
                 }
             }
         </div>

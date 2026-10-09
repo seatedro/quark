@@ -3014,6 +3014,7 @@ dependencies = [
  "quark-terminal",
  "quark-text",
  "quark-ui",
+ "unicode-linebreak",
 ]
 
 [[package]]

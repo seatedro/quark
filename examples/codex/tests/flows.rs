@@ -500,3 +500,32 @@ fn a_material_window_shows_the_sidebar_material() {
         "{r:?} for {sidebar:?}"
     );
 }
+
+// Regression: a bullet with file chips flowed span by span, so the "." of
+// "instead of 13." wrapped alone onto the next line at some widths. UAX
+// #14 forbids a break before closing punctuation, so at no width may a
+// "." or "," start a line after the run it ends.
+#[test]
+fn punctuation_never_wraps_away_from_the_word_it_ends() {
+    let mut ui = harness("turn1");
+    for width in (560..=984).step_by(3) {
+        ui.resize(width as f32, 738.0);
+        ui.frame();
+        let runs = ui.painted_texts();
+        for pair in runs.windows(2) {
+            let [word, mark] = pair else { unreachable!() };
+            let (w, m) = (word.bounds, mark.bounds);
+            if [".", ","].contains(&mark.text.trim_end_matches('\u{a0}')) {
+                // Same line: the mark's middle is within the word's rows
+                // (a code pill's text is smaller and centered).
+                let middle = m.y + m.height / 2.0;
+                assert!(
+                    middle > w.y && middle < w.y + w.height,
+                    "at {width}pt {:?} {m:?} wrapped away from {:?} {w:?}",
+                    mark.text,
+                    word.text
+                );
+            }
+        }
+    }
+}
