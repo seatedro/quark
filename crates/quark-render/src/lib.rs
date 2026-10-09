@@ -19,6 +19,7 @@ mod path;
 pub mod renderer;
 mod shaders;
 mod text;
+mod text_engine;
 
 #[cfg(test)]
 #[global_allocator]
