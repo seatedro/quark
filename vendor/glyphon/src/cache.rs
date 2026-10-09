@@ -38,6 +38,7 @@ struct Inner {
     vertex_buffers: [wgpu::VertexBufferLayout<'static>; 1],
     atlas_layout: BindGroupLayout,
     uniforms_layout: BindGroupLayout,
+    fills_layout: BindGroupLayout,
     pipeline_layout: PipelineLayout,
     cache: InnerCache,
 }
@@ -93,6 +94,12 @@ impl Cache {
                     format: VertexFormat::Float32,
                     offset: mem::size_of::<u32>() as u64 * 6,
                     shader_location: 5,
+                },
+                // quark patch: draw-time paint.
+                wgpu::VertexAttribute {
+                    format: VertexFormat::Uint32,
+                    offset: mem::size_of::<u32>() as u64 * 7,
+                    shader_location: 6,
                 },
             ],
         };
@@ -155,8 +162,25 @@ impl Cache {
             label: Some("glyphon uniforms bind group layout"),
         });
 
+        // quark patch: per-renderer glyph fills.
+        let fills_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(
+                        (crate::MAX_GLYPH_FILLS * mem::size_of::<crate::GlyphFill>()) as u64,
+                    ),
+                },
+                count: None,
+            }],
+            label: Some("glyphon fills bind group layout"),
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            bind_group_layouts: &[&atlas_layout, &uniforms_layout],
+            bind_group_layouts: &[&atlas_layout, &uniforms_layout, &fills_layout],
             ..Default::default()
         });
 
@@ -166,6 +190,7 @@ impl Cache {
             vertex_buffers: [vertex_buffer_layout],
             uniforms_layout,
             atlas_layout,
+            fills_layout,
             pipeline_layout,
             cache: Mutex::new(Vec::new()),
         }))
@@ -216,6 +241,17 @@ impl Cache {
                 },
             ],
             label: Some("glyphon uniforms bind group"),
+        })
+    }
+
+    pub(crate) fn create_fills_bind_group(&self, device: &Device, buffer: &Buffer) -> BindGroup {
+        device.create_bind_group(&BindGroupDescriptor {
+            layout: &self.0.fills_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+            label: Some("glyphon fills bind group"),
         })
     }
 

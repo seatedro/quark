@@ -591,6 +591,39 @@ struct ViewportUniform {
 @group(0) @binding(0)
 var<uniform> viewport: ViewportUniform;
 
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+// A premultiplied sample from a texture in space `source` (0 the target's
+// own, 1 linear light, 2 encoded sRGB), premultiplied in the target's
+// space: unpremultiplied, converted, and premultiplied again. Fully
+// transparent samples are zero.
+fn to_target_space(c: vec4<f32>, source: f32, target_encoded: bool) -> vec4<f32> {
+    if (source < 0.5) {
+        return c;
+    }
+    if (c.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let straight = c.rgb / c.a;
+    if (source < 1.5 && target_encoded) {
+        return vec4<f32>(srgb_encode(straight) * c.a, c.a);
+    }
+    if (source > 1.5 && !target_encoded) {
+        return vec4<f32>(srgb_decode(straight) * c.a, c.a);
+    }
+    return c;
+}
+
 @group(1) @binding(0)
 var t_source: texture_2d<f32>;
 @group(1) @binding(1)
@@ -602,6 +635,7 @@ struct VertexInput {
     @location(1) uv_rect: vec4<f32>,   // source UV [u_min, v_min, u_max, v_max]
     @location(2) tint: vec4<f32>,      // tint/opacity
     @location(3) radii: vec4<f32>,     // rounded mask [tl, tr, br, bl] over bounds
+    @location(4) space: vec4<f32>,     // [source space, 0, 0, 0]
 };
 
 struct VertexOutput {
@@ -610,6 +644,7 @@ struct VertexOutput {
     @location(1) @interpolate(flat) tint: vec4<f32>,
     @location(2) @interpolate(flat) bounds: vec4<f32>,
     @location(3) @interpolate(flat) radii: vec4<f32>,
+    @location(4) @interpolate(flat) space: f32,
 };
 
 @vertex
@@ -630,6 +665,7 @@ fn vs_blit(input: VertexInput) -> VertexOutput {
     out.tint = input.tint;
     out.bounds = input.bounds;
     out.radii = input.radii;
+    out.space = input.space.x;
     return out;
 }
 
@@ -653,7 +689,11 @@ fn blit_rounded_mask(pixel: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>) -> f
 
 @fragment
 fn fs_blit(input: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(t_source, s_source, input.uv);
+    let tex_color = to_target_space(
+        textureSample(t_source, s_source, input.uv),
+        input.space,
+        viewport.encoded > 0.5,
+    );
     let mask = blit_rounded_mask(input.position.xy, input.bounds, input.radii);
     return tex_color * input.tint * mask;
 }
@@ -675,6 +715,39 @@ struct ViewportUniform {
 @group(0) @binding(0)
 var<uniform> viewport: ViewportUniform;
 
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+// A premultiplied sample from a texture in space `source` (0 the target's
+// own, 1 linear light, 2 encoded sRGB), premultiplied in the target's
+// space: unpremultiplied, converted, and premultiplied again. Fully
+// transparent samples are zero.
+fn to_target_space(c: vec4<f32>, source: f32, target_encoded: bool) -> vec4<f32> {
+    if (source < 0.5) {
+        return c;
+    }
+    if (c.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let straight = c.rgb / c.a;
+    if (source < 1.5 && target_encoded) {
+        return vec4<f32>(srgb_encode(straight) * c.a, c.a);
+    }
+    if (source > 1.5 && !target_encoded) {
+        return vec4<f32>(srgb_decode(straight) * c.a, c.a);
+    }
+    return c;
+}
+
 @group(1) @binding(0)
 var t_layer: texture_2d<f32>;
 @group(1) @binding(1)
@@ -685,17 +758,23 @@ struct VertexInput {
     // Layer texel (u, v) lands at (a·u + c·v + tx, b·u + d·v + ty).
     @location(0) linear: vec4<f32>,        // [a, b, c, d]
     @location(1) offset_size: vec4<f32>,   // [tx, ty, layer width, layer height]
-    @location(2) params: vec4<f32>,        // [1 / texture width, 1 / texture height, opacity, 0]
+    @location(2) params: vec4<f32>,        // [1 / texture width, 1 / texture height, opacity, source space]
     @location(3) clip_bounds: vec4<f32>,
     @location(4) clip_radii: vec4<f32>,
+    @location(5) mask_axis: vec4<f32>,     // [x0, y0, x1, y1] in target pixels
+    @location(6) mask_offsets: vec4<f32>,
+    @location(7) mask_alphas: vec4<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) @interpolate(flat) opacity: f32,
+    @location(1) @interpolate(flat) opacity_space: vec2<f32>,
     @location(2) @interpolate(flat) clip_bounds: vec4<f32>,
     @location(3) @interpolate(flat) clip_radii: vec4<f32>,
+    @location(4) @interpolate(flat) mask_axis: vec4<f32>,
+    @location(5) @interpolate(flat) mask_offsets: vec4<f32>,
+    @location(6) @interpolate(flat) mask_alphas: vec4<f32>,
 };
 
 @vertex
@@ -715,10 +794,37 @@ fn vs_layer(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = local * input.params.xy;
-    out.opacity = input.params.z;
+    out.opacity_space = input.params.zw;
     out.clip_bounds = input.clip_bounds;
     out.clip_radii = input.clip_radii;
+    out.mask_axis = input.mask_axis;
+    out.mask_offsets = input.mask_offsets;
+    out.mask_alphas = input.mask_alphas;
     return out;
+}
+
+// The alpha mask's opacity at target pixel `p`: stops interpolated along
+// the axis, the first and last held beyond it.
+fn mask_alpha(p: vec2<f32>, axis: vec4<f32>, offsets: vec4<f32>, alphas: vec4<f32>) -> f32 {
+    let d = axis.zw - axis.xy;
+    let length2 = dot(d, d);
+    var t = 1.0;
+    if (length2 > 0.0) {
+        t = dot(p - axis.xy, d) / length2;
+    }
+    if (t <= offsets.x) {
+        return alphas.x;
+    }
+    if (t <= offsets.y) {
+        return mix(alphas.x, alphas.y, (t - offsets.x) / max(offsets.y - offsets.x, 1.0e-6));
+    }
+    if (t <= offsets.z) {
+        return mix(alphas.y, alphas.z, (t - offsets.y) / max(offsets.z - offsets.y, 1.0e-6));
+    }
+    if (t <= offsets.w) {
+        return mix(alphas.z, alphas.w, (t - offsets.z) / max(offsets.w - offsets.z, 1.0e-6));
+    }
+    return alphas.w;
 }
 
 fn layer_clip_alpha(pixel: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>) -> f32 {
@@ -742,9 +848,14 @@ fn layer_clip_alpha(pixel: vec2<f32>, bounds: vec4<f32>, radii: vec4<f32>) -> f3
 fn fs_layer(input: VertexOutput) -> @location(0) vec4<f32> {
     // The layer holds premultiplied color with a transparent border, so
     // bilinear sampling antialiases the edges of a rotated layer.
-    let color = textureSample(t_layer, s_layer, input.uv);
+    let color = to_target_space(
+        textureSample(t_layer, s_layer, input.uv),
+        input.opacity_space.y,
+        viewport.encoded > 0.5,
+    );
     let clip = layer_clip_alpha(input.position.xy, input.clip_bounds, input.clip_radii);
-    return color * (input.opacity * clip);
+    let mask = mask_alpha(input.position.xy, input.mask_axis, input.mask_offsets, input.mask_alphas);
+    return color * (input.opacity_space.x * clip * mask);
 }
 "#;
 
@@ -894,6 +1005,39 @@ struct ViewportUniform {
 @group(0) @binding(0)
 var<uniform> viewport: ViewportUniform;
 
+fn srgb_decode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+fn srgb_encode(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+// A premultiplied sample from a texture in space `source` (0 the target's
+// own, 1 linear light, 2 encoded sRGB), premultiplied in the target's
+// space: unpremultiplied, converted, and premultiplied again. Fully
+// transparent samples are zero.
+fn to_target_space(c: vec4<f32>, source: f32, target_encoded: bool) -> vec4<f32> {
+    if (source < 0.5) {
+        return c;
+    }
+    if (c.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let straight = c.rgb / c.a;
+    if (source < 1.5 && target_encoded) {
+        return vec4<f32>(srgb_encode(straight) * c.a, c.a);
+    }
+    if (source > 1.5 && !target_encoded) {
+        return vec4<f32>(srgb_decode(straight) * c.a, c.a);
+    }
+    return c;
+}
+
 @group(1) @binding(0)
 var t_source: texture_2d<f32>;
 @group(1) @binding(1)
@@ -930,6 +1074,10 @@ fn vs_blur(input: VertexInput) -> VertexOutput {
     return out;
 }
 
+fn tap(uv: vec2<f32>, space: f32) -> vec4<f32> {
+    return to_target_space(textureSample(t_source, s_source, uv), space, false);
+}
+
 @fragment
 fn fs_blur(input: VertexOutput) -> @location(0) vec4<f32> {
     let sigma = input.blur_params.z;
@@ -939,7 +1087,9 @@ fn fs_blur(input: VertexOutput) -> @location(0) vec4<f32> {
     let step_scale = max(1.0, sigma / 6.0);
     let texel = dir / tex_size * step_scale;
 
-    // 13-tap Gaussian kernel (offsets -6..+6).
+    // 13-tap Gaussian kernel (offsets -6..+6). The blur writes linear
+    // light, so an encoded source decodes first.
+    let space = input.blur_params.w;
     var color = vec4<f32>(0.0);
     var total_weight = 0.0;
 
@@ -951,19 +1101,19 @@ fn fs_blur(input: VertexOutput) -> @location(0) vec4<f32> {
     let w5 = exp(-25.0 / (2.0 * sigma * sigma));
     let w6 = exp(-36.0 / (2.0 * sigma * sigma));
 
-    color += textureSample(t_source, s_source, input.uv + texel * -6.0) * w6;
-    color += textureSample(t_source, s_source, input.uv + texel * -5.0) * w5;
-    color += textureSample(t_source, s_source, input.uv + texel * -4.0) * w4;
-    color += textureSample(t_source, s_source, input.uv + texel * -3.0) * w3;
-    color += textureSample(t_source, s_source, input.uv + texel * -2.0) * w2;
-    color += textureSample(t_source, s_source, input.uv + texel * -1.0) * w1;
-    color += textureSample(t_source, s_source, input.uv)                * w0;
-    color += textureSample(t_source, s_source, input.uv + texel *  1.0) * w1;
-    color += textureSample(t_source, s_source, input.uv + texel *  2.0) * w2;
-    color += textureSample(t_source, s_source, input.uv + texel *  3.0) * w3;
-    color += textureSample(t_source, s_source, input.uv + texel *  4.0) * w4;
-    color += textureSample(t_source, s_source, input.uv + texel *  5.0) * w5;
-    color += textureSample(t_source, s_source, input.uv + texel *  6.0) * w6;
+    color += tap(input.uv + texel * -6.0, space) * w6;
+    color += tap(input.uv + texel * -5.0, space) * w5;
+    color += tap(input.uv + texel * -4.0, space) * w4;
+    color += tap(input.uv + texel * -3.0, space) * w3;
+    color += tap(input.uv + texel * -2.0, space) * w2;
+    color += tap(input.uv + texel * -1.0, space) * w1;
+    color += tap(input.uv, space)                * w0;
+    color += tap(input.uv + texel *  1.0, space) * w1;
+    color += tap(input.uv + texel *  2.0, space) * w2;
+    color += tap(input.uv + texel *  3.0, space) * w3;
+    color += tap(input.uv + texel *  4.0, space) * w4;
+    color += tap(input.uv + texel *  5.0, space) * w5;
+    color += tap(input.uv + texel *  6.0, space) * w6;
 
     total_weight = w6 + w5 + w4 + w3 + w2 + w1 + w0 + w1 + w2 + w3 + w4 + w5 + w6;
 

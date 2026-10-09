@@ -72,6 +72,18 @@ pub(super) fn push_positioned_glyphs(
     );
 }
 
+/// The fills of `rich_texts`' glyphs, in the order
+/// [`push_positioned_glyphs`] numbers them, into `out`.
+pub(super) fn run_fills(rich_texts: &[ClippedRichText], out: &mut Vec<glyphon::GlyphFill>) {
+    out.clear();
+    out.extend(
+        rich_texts
+            .iter()
+            .filter_map(|text| text.paint.fill)
+            .take(glyphon::MAX_GLYPH_FILLS),
+    );
+}
+
 /// Call `visit` with the glyphs of `texts` then `rich_texts` until it
 /// breaks, in glyphon's order for the same primitives as text areas, so
 /// overlapping glyphs blend the same way. Nothing is shaped or copied;
@@ -102,15 +114,31 @@ fn visit_glyphs(
                 text.clip,
                 &mut visit,
                 rows,
-                |glyph| glyph.color_opt.unwrap_or(color),
+                |glyph| (glyph.color_opt.unwrap_or(color), 0),
+                None,
             )?;
         }
         rows.end_text();
     }
+    // Fills number from one within the run, in order; past the renderer's
+    // capacity texts draw in their base color.
+    let mut fills = 0usize;
     for text in rich_texts {
         let primitive = &text.primitive;
+        let fill = match text.paint.fill {
+            Some(_) if fills < glyphon::MAX_GLYPH_FILLS => {
+                fills += 1;
+                fills as u8
+            }
+            _ => 0,
+        };
         if let Some(layout) = primitive.layout.downcast_ref::<TextLayout>() {
             let (default_color, span_colors) = (primitive.default_color, &primitive.span_colors);
+            // A filled glyph's color only carries the fade.
+            let faded = glyphon_color(fade_color(
+                quark::Color::rgba(255, 255, 255, 255),
+                text.alpha,
+            ));
             visit_layout_glyphs(
                 layout,
                 primitive.rect,
@@ -118,11 +146,20 @@ fn visit_glyphs(
                 &mut visit,
                 rows,
                 |glyph| {
-                    let color = span_color(glyph.metadata as u32, default_color, span_colors);
-                    glyph
-                        .color_opt
-                        .unwrap_or(glyphon_color(fade_color(color, text.alpha)))
+                    let span = glyph.metadata as u32;
+                    if let Some(color) = glyph.color_opt {
+                        return (color, 0);
+                    }
+                    let own = span
+                        .checked_sub(1)
+                        .is_some_and(|i| (i as usize) < span_colors.len());
+                    if fill > 0 && !own {
+                        return (faded, fill);
+                    }
+                    let color = span_color(span, default_color, span_colors);
+                    (glyphon_color(fade_color(color, text.alpha)), 0)
                 },
+                text.paint.backdrop,
             )?;
         }
         rows.end_text();
@@ -148,7 +185,8 @@ fn visit_layout_glyphs(
     clip: Rect,
     visit: &mut impl FnMut(PositionedGlyph) -> ControlFlow<()>,
     rows: &mut impl RowSink,
-    color: impl Fn(&LayoutGlyph) -> GlyphonColor,
+    paint: impl Fn(&LayoutGlyph) -> (GlyphonColor, u8),
+    backdrop: Option<u8>,
 ) -> ControlFlow<()> {
     // The layout's hit-testing and carets already include this shift.
     let (left, top) = (origin.x + layout.buffer_x(), origin.y);
@@ -172,12 +210,15 @@ fn visit_layout_glyphs(
             rows.offset(glyph.y - glyph.font_size * glyph.y_offset);
             // The buffer is already shaped at physical size.
             let physical = glyph.physical((left, top), 1.0);
+            let (color, fill) = paint(glyph);
             visit(PositionedGlyph {
                 cache_key: physical.cache_key,
                 x: physical.x,
                 y: physical.y + line_y,
-                color: color(glyph),
+                color,
                 bounds,
+                fill,
+                backdrop,
             })?;
         }
     }
