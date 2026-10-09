@@ -141,6 +141,35 @@ fn an_open_menu_keeps_the_rows_beneath_it_from_hovering() {
     );
 }
 
+// Catches the transcript ending in a straight cut above the composer: a
+// card the composer half covers stays visible and clickable right up to
+// the composer's edge, and the composer, not the card, takes the pointer
+// where it covers it.
+#[test]
+fn the_composer_alone_covers_the_transcript_beneath_it() {
+    let mut ui = harness("file-change");
+    ui.resize(984.0, 620.0);
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let composer = ui.find(By::test_id(quark_codex::composer::CARD_ID)).bounds;
+    let view = ui.find(By::role_name(Role::Button, "View changes")).bounds;
+    assert!(
+        view.y < composer.y && view.y + view.height > composer.y,
+        "{view:?} must straddle the composer's top {composer:?}"
+    );
+    let x = view.x + view.width / 2.0;
+    let name_at = |ui: &UiTestHarness<Codex>, y: f32| ui.hit_test((x, y)).and_then(|n| n.name);
+    assert_eq!(
+        name_at(&ui, composer.y - 2.0).as_deref(),
+        Some("View changes")
+    );
+    assert_ne!(
+        name_at(&ui, composer.y + 3.0).as_deref(),
+        Some("View changes")
+    );
+}
+
 /// The diff lines a diff view shows (its list items), top to bottom.
 fn diff_lines(ui: &UiTestHarness<Codex>, view: &str) -> Vec<(String, f32)> {
     let Some(list) = ui.try_find(By::id(view)) else {
