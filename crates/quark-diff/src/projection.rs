@@ -5,13 +5,35 @@
 //! mode or the [`Expansion`] changes. Rows refer to lines by store index,
 //! so an app reads the text from the document.
 
+use crate::compare::{Comparison, LinePair, Step};
 use crate::model::{BlockKind, DiffDocument, Side, lines_before};
 
 /// No line on this side.
 pub const NONE: u32 = u32::MAX;
 
-/// Gaps that hide this many lines or fewer are shown instead.
+/// Gaps that hide this many lines or fewer are shown instead, by default.
 pub const MIN_HIDDEN: u32 = 3;
+
+/// Lines one reveal action shows, by default.
+pub const REVEAL_STEP: u32 = 20;
+
+/// How collapsed context behaves: lines a reveal action shows, and the
+/// largest hidden remainder that is shown instead of collapsed. Zero
+/// `min_hidden` keeps even a one-line gap collapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContextPolicy {
+    pub reveal_step: u32,
+    pub min_hidden: u32,
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self {
+            reveal_step: REVEAL_STEP,
+            min_hidden: MIN_HIDDEN,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -75,21 +97,70 @@ pub enum Reveal {
     All,
 }
 
-/// Lines revealed from each end of every gap.
+/// Lines revealed from each end of every gap, under a [`ContextPolicy`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Expansion {
     /// Per hunk: lines shown from the top and bottom of the gap above it.
     above: Vec<(u32, u32)>,
     /// Per file: lines shown from the top of the gap after its last hunk.
     after: Vec<u32>,
+    policy: ContextPolicy,
 }
 
 impl Expansion {
     pub fn new(doc: &DiffDocument) -> Self {
+        Self::with_policy(doc, ContextPolicy::default())
+    }
+
+    pub fn with_policy(doc: &DiffDocument, policy: ContextPolicy) -> Self {
         Self {
             above: vec![(0, 0); doc.hunk_count() as usize],
             after: vec![0; doc.file_count() as usize],
+            policy,
         }
+    }
+
+    pub fn policy(&self) -> ContextPolicy {
+        self.policy
+    }
+
+    /// Changes the policy, keeping the lines already revealed.
+    pub fn set_policy(&mut self, policy: ContextPolicy) {
+        self.policy = policy;
+    }
+
+    /// Hides every revealed line of `gap` again. Returns whether anything
+    /// changed.
+    pub fn collapse(&mut self, gap: GapId) -> bool {
+        let slot = match gap.hunk {
+            Some(h) => self.above.get_mut(h as usize).map(|s| {
+                let was = *s != (0, 0);
+                *s = (0, 0);
+                was
+            }),
+            None => self.after.get_mut(gap.file as usize).map(|s| {
+                let was = *s != 0;
+                *s = 0;
+                was
+            }),
+        };
+        slot.unwrap_or(false)
+    }
+
+    /// Reveals every gap of every file. Returns whether anything changed.
+    pub fn reveal_all(&mut self, doc: &DiffDocument) -> bool {
+        let mut changed = false;
+        for file in 0..doc.file_count() {
+            for hunk in doc.files().hunks[file as usize].clone() {
+                let gap = GapId {
+                    file,
+                    hunk: Some(hunk),
+                };
+                changed |= self.reveal(doc, gap, Reveal::All, 0);
+            }
+            changed |= self.reveal(doc, GapId { file, hunk: None }, Reveal::All, 0);
+        }
+        changed
     }
 
     /// Lines `gap` holds in all.
@@ -108,8 +179,8 @@ impl Expansion {
         }
     }
 
-    /// Lines of `gap` still hidden. A remainder of [`MIN_HIDDEN`] lines or
-    /// fewer is shown, so it counts as none.
+    /// Lines of `gap` still hidden. A remainder of the policy's
+    /// `min_hidden` lines or fewer is shown, so it counts as none.
     pub fn hidden(&self, doc: &DiffDocument, gap: GapId) -> u32 {
         self.hidden_of(gap, Self::gap_len(doc, gap))
     }
@@ -117,8 +188,12 @@ impl Expansion {
     /// [`Self::hidden`] for a gap of `len` lines.
     fn hidden_of(&self, gap: GapId, len: u32) -> u32 {
         let (top, bottom) = self.revealed(gap);
-        let hidden = len.saturating_sub(top + bottom);
-        if hidden <= MIN_HIDDEN { 0 } else { hidden }
+        let hidden = len.saturating_sub(top.saturating_add(bottom));
+        if hidden <= self.policy.min_hidden {
+            0
+        } else {
+            hidden
+        }
     }
 
     /// Reveals up to `amount` more lines of `gap`. A trailing gap only
@@ -133,7 +208,8 @@ impl Expansion {
         if hidden == 0 {
             return false;
         }
-        let take = if reveal == Reveal::All || hidden - amount.min(hidden) <= MIN_HIDDEN {
+        let take = if reveal == Reveal::All || hidden - amount.min(hidden) <= self.policy.min_hidden
+        {
             hidden
         } else {
             amount
@@ -198,8 +274,41 @@ impl Projection {
         p
     }
 
+    /// Rows of `doc` with change blocks aligned by `comparison`, which
+    /// must have been computed for `doc`.
+    pub fn with_comparison(
+        doc: &DiffDocument,
+        mode: Mode,
+        expansion: &Expansion,
+        comparison: &Comparison,
+    ) -> Self {
+        let mut p = Self {
+            mode,
+            ..Self::default()
+        };
+        p.rebuild_with(doc, mode, expansion, comparison);
+        p
+    }
+
     pub fn len(&self) -> u32 {
         self.kind.len() as u32
+    }
+
+    /// The changed line pair a row shows or belongs to: a side-by-side
+    /// modified row, or a unified removed or added row with a partner.
+    pub fn line_pair(&self, row: u32) -> Option<LinePair> {
+        let r = row as usize;
+        let (old, new) = match *self.kind.get(r)? {
+            RowKind::Modified => (self.old[r], self.new[r]),
+            RowKind::Removed => (self.old[r], self.pair[r]),
+            RowKind::Added => (self.pair[r], self.new[r]),
+            _ => return None,
+        };
+        (old != NONE && new != NONE).then_some(LinePair {
+            file: self.file[r],
+            old,
+            new,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -253,8 +362,35 @@ impl Projection {
         (tag << 60) | (file << 38) | (index & 0x3F_FFFF_FFFF)
     }
 
-    /// Rebuilds the rows in place, reusing the columns' memory.
+    /// Rebuilds the rows in place, reusing the columns' memory. Changed
+    /// lines pair by position; see [`Self::rebuild_with`].
     pub fn rebuild(&mut self, doc: &DiffDocument, mode: Mode, expansion: &Expansion) {
+        self.rebuild_inner(doc, mode, expansion, None);
+    }
+
+    /// [`Self::rebuild`] with change blocks aligned by `comparison`, which
+    /// must have been computed for `doc`.
+    pub fn rebuild_with(
+        &mut self,
+        doc: &DiffDocument,
+        mode: Mode,
+        expansion: &Expansion,
+        comparison: &Comparison,
+    ) {
+        assert!(
+            comparison.fits(doc),
+            "comparison computed for another document"
+        );
+        self.rebuild_inner(doc, mode, expansion, Some(comparison));
+    }
+
+    fn rebuild_inner(
+        &mut self,
+        doc: &DiffDocument,
+        mode: Mode,
+        expansion: &Expansion,
+        comparison: Option<&Comparison>,
+    ) {
         self.mode = mode;
         for column in [
             &mut self.file,
@@ -297,6 +433,10 @@ impl Projection {
                     let bi = block as usize;
                     let (os, ns) = (b.old_store[bi], b.new_store[bi]);
                     let (ol, nl) = (b.old_len[bi], b.new_len[bi]);
+                    if let (BlockKind::Change, Some(c)) = (b.kind[bi], comparison) {
+                        self.push_steps(c.block(block), file, hunk, mode);
+                        continue;
+                    }
                     match (b.kind[bi], mode) {
                         (BlockKind::Context, _) => {
                             for k in 0..ol {
@@ -341,6 +481,49 @@ impl Projection {
         debug_assert_eq!(self.verify_integrity(doc), Ok(()));
     }
 
+    /// Rows of one aligned change block. Unified rows list each run's
+    /// removed lines, then its added lines; lines equal under the
+    /// whitespace policy split runs and show as context.
+    fn push_steps(&mut self, steps: &[Step], file: u32, hunk: u32, mode: Mode) {
+        if mode == Mode::Split {
+            for &step in steps {
+                let (old, new) = step.lines();
+                let kind = match step {
+                    Step::Removed(_) => RowKind::Removed,
+                    Step::Added(_) => RowKind::Added,
+                    Step::Paired(..) => RowKind::Modified,
+                    Step::Equivalent(..) => RowKind::Context,
+                };
+                self.push(kind, file, hunk, old, new, NONE);
+            }
+            return;
+        }
+        let mut start = 0;
+        while start < steps.len() {
+            let end = steps[start..]
+                .iter()
+                .position(|s| matches!(s, Step::Equivalent(..)))
+                .map_or(steps.len(), |at| start + at);
+            let run = &steps[start..end];
+            for &step in run {
+                let (old, pair) = step.lines();
+                if old != NONE {
+                    self.push(RowKind::Removed, file, hunk, old, NONE, pair);
+                }
+            }
+            for &step in run {
+                let (pair, new) = step.lines();
+                if new != NONE {
+                    self.push(RowKind::Added, file, hunk, NONE, new, pair);
+                }
+            }
+            if let Some(&Step::Equivalent(old, new)) = steps.get(end) {
+                self.push(RowKind::Context, file, hunk, old, new, NONE);
+            }
+            start = end + 1;
+        }
+    }
+
     fn push(&mut self, kind: RowKind, file: u32, hunk: u32, old: u32, new: u32, pair: u32) {
         let row = self.len();
         if old != NONE {
@@ -361,7 +544,8 @@ impl Projection {
     /// store indices: revealed lines at the top, a gap row for the hidden
     /// middle (unless it is short enough to show), revealed lines below.
     fn push_gap(&mut self, id: GapId, (old, new): (u32, u32), len: u32, expansion: &Expansion) {
-        let (top, hidden, bottom) = gap_split(len, expansion.revealed(id));
+        let (top, hidden, bottom) =
+            gap_split(len, expansion.revealed(id), expansion.policy.min_hidden);
         for k in 0..top {
             self.push(RowKind::Context, id.file, NONE, old + k, new + k, NONE);
         }
@@ -451,11 +635,11 @@ impl Projection {
 
 /// Lines of a gap of `len` shown above its gap row, hidden under it, and
 /// shown below it, for `(top, bottom)` lines revealed from each end. A
-/// hidden remainder of [`MIN_HIDDEN`] lines or fewer is shown instead.
-fn gap_split(len: u32, (top, bottom): (u32, u32)) -> (u32, u32, u32) {
+/// hidden remainder of `min_hidden` lines or fewer is shown instead.
+fn gap_split(len: u32, (top, bottom): (u32, u32), min_hidden: u32) -> (u32, u32, u32) {
     let (mut top, bottom) = (top.min(len), bottom.min(len - top.min(len)));
     let mut hidden = len - top - bottom;
-    if hidden <= MIN_HIDDEN {
+    if hidden <= min_hidden {
         top += hidden;
         hidden = 0;
     }
@@ -484,7 +668,7 @@ mod verification {
     /// Any gap, above a hunk or trailing a file, after any two reveals of
     /// any amount from either end: its rows (lines shown on top, one gap
     /// row, lines shown below) cover every line once, the gap row agrees
-    /// with `Expansion::hidden`, a gap of `MIN_HIDDEN` lines or fewer is
+    /// with `Expansion::hidden`, a gap of `min_hidden` lines or fewer is
     /// shown instead, and lines revealed from an end show at that end.
     /// The row emission is left to the proptest: with rows pushed into
     /// the projection's columns, even six lines got the CI runner shut
@@ -499,16 +683,21 @@ mod verification {
         let mut expansion = Expansion {
             above: vec![(0, 0)],
             after: vec![0],
+            policy: ContextPolicy {
+                reveal_step: REVEAL_STEP,
+                min_hidden: kani::any::<u8>().into(),
+            },
         };
+        let min_hidden = expansion.policy.min_hidden;
         expansion.reveal_of(id, len, any_reveal(), kani::any());
         expansion.reveal_of(id, len, any_reveal(), kani::any());
         let revealed = expansion.revealed(id);
 
-        let (top, hidden, bottom) = gap_split(len, revealed);
+        let (top, hidden, bottom) = gap_split(len, revealed, min_hidden);
 
         assert!(u64::from(top) + u64::from(hidden) + u64::from(bottom) == u64::from(len));
         assert!(hidden == expansion.hidden_of(id, len));
-        assert!(hidden == 0 || hidden > MIN_HIDDEN);
+        assert!(hidden == 0 || hidden > min_hidden);
         if hidden > 0 {
             assert!((top, bottom) == revealed);
         }
@@ -519,8 +708,9 @@ mod verification {
     #[kani::proof]
     fn any_revealed_lines_split_a_gap_exactly() {
         let len: u32 = kani::any();
-        let (top, hidden, bottom) = gap_split(len, kani::any());
+        let min_hidden: u32 = kani::any();
+        let (top, hidden, bottom) = gap_split(len, kani::any(), min_hidden);
         assert!(u64::from(top) + u64::from(hidden) + u64::from(bottom) == u64::from(len));
-        assert!(hidden == 0 || hidden > MIN_HIDDEN);
+        assert!(hidden == 0 || hidden > min_hidden);
     }
 }
