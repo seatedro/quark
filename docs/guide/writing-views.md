@@ -340,6 +340,26 @@ no wrapper `div` changes the layout. Inside an element, `if`, `match`, and
 would write by hand, so they allocate nothing beyond the children. `view!` returns the root element; a
 root fragment becomes a `div`.
 
+## Returning a builder
+
+`view!` returns an `AnyElement`. A helper whose callers keep styling its
+result (adding children, an `id`, a fill) needs the builder itself:
+`view! { -> Type, <root> }` returns the root element's builder, checked
+against `Type`, so the helper can be used as a function tag.
+
+```rust
+fn menu_panel(p: &Pal, x: f32, y: f32) -> Div {
+    view! { -> Div,
+        <div class="absolute flex-col p-1 rounded-[10]" left={x} top={y} bg={p.menu} />
+    }
+}
+
+view! { <menu_panel(p, x, y) h={h}>{...rows}</menu_panel> }
+```
+
+The root must be one element; a fragment, control flow, or `{expr}` at
+the root is an error.
+
 ## Components with typed props
 
 `#[derive(Props)]` gives a component a typed builder, so

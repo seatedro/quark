@@ -46,7 +46,10 @@ pub fn view(input: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
     let emit = view::emit::Emit::new(input.scale.clone());
-    let tokens = emit.root(&input.root);
+    let tokens = match &input.typed {
+        Some(ty) => emit.typed_root(&input.root, ty),
+        None => emit.root(&input.root),
+    };
     // Any error replaces the whole expansion, so a rejected input never
     // compiles into partial or silently altered UI.
     match emit.into_errors() {

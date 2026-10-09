@@ -17,13 +17,21 @@ impl Parse for ViewInput {
         } else {
             None
         };
+        let typed = if input.peek(Token![->]) {
+            input.parse::<Token![->]>()?;
+            let ty: syn::Type = input.parse()?;
+            input.parse::<Token![,]>()?;
+            Some(ty)
+        } else {
+            None
+        };
         let root: Node = input.parse()?;
         if !input.is_empty() {
             return Err(
                 input.error("view! takes one root node; wrap siblings in a fragment: `<>...</>`")
             );
         }
-        Ok(ViewInput { scale, root })
+        Ok(ViewInput { scale, typed, root })
     }
 }
 

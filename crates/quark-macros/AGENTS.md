@@ -55,6 +55,9 @@ the `quark` crate and quark-ui's element builders must provide.
 - `<name(args)>` (lowercase, with arguments) calls the function `name` in
   scope and lowers like a builder component.
 - Reactive attributes use `name={@signal}` and lower to `cx.read(signal)`.
+- Every element lowers to its builder chain plus `.into_any()`, except the
+  root of `view! { -> Type, .. }`, which stays the builder (ascribed to
+  `Type`) so helpers can return a `Div` for callers to extend.
 - Input the macro cannot lower faithfully is a spanned compile error, and
   any error replaces the whole expansion.
 - Emitted paths are limited to `::core`, `::std`, and `::quark`; everything

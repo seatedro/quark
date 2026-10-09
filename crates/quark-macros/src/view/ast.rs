@@ -7,6 +7,9 @@ use syn::{Expr, ExprIf, Ident, LitStr, Pat, Token};
 
 pub(crate) struct ViewInput {
     pub scale: Option<Ident>,
+    /// `view! { -> Type, <root/> }`: the root builder itself, ascribed to
+    /// `Type`, instead of an `AnyElement`.
+    pub typed: Option<syn::Type>,
     pub root: Node,
 }
 
