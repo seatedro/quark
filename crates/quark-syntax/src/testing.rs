@@ -48,3 +48,12 @@ pub fn store_with_all(languages: &[&str]) -> Option<GrammarStore> {
     }
     Some(GrammarStore::new(StoreConfig::new().local_packs(root)))
 }
+
+/// [`store_with_all`], except that the packs of `deferred` stay pending,
+/// as if downloading, until [`GrammarStore::release_deferred`].
+pub fn store_deferring(languages: &[&str], deferred: &[&str]) -> Option<GrammarStore> {
+    store_with_all(languages)?;
+    Some(GrammarStore::new(
+        StoreConfig::new().local_packs(pack_root()).defer(deferred),
+    ))
+}

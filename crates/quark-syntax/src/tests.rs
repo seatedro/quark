@@ -34,6 +34,29 @@ fn rust_pack_built_by_the_tool_highlights_keywords_and_strings() {
     assert_eq!(dumped, RUST_DUMP);
 }
 
+// Catches excerpts sharing lexical state, or their spans landing at the
+// excerpt's own offsets: a block comment opened in the first fragment and
+// closed only after the second must not color the second, whose spans sit
+// at its place in the source.
+#[test]
+fn fragments_parse_independently_in_source_coordinates() {
+    let Some(store) = testing::store_with("rust") else {
+        return;
+    };
+    let source = "/* open\nlet a = 1;\n*/\n";
+
+    let spans = highlight_fragments(&store, &language("rs"), source, &[0..8, 8..19]);
+
+    assert_eq!(
+        dump(
+            &spans,
+            source,
+            &[HighlightKind::Comment, HighlightKind::Keyword]
+        ),
+        "keyword:let"
+    );
+}
+
 /// Packs named `name` that reuse `base`'s grammar and highlight query
 /// with `injections` as their injection query, in a temporary root.
 fn fixture_packs(fixtures: &[(&str, &str, &str)]) -> tempfile::TempDir {

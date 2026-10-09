@@ -99,6 +99,23 @@ impl GrammarStore {
         let _ = listener;
     }
 
+    /// Resolves the languages [`StoreConfig::defer`] held back and tells
+    /// subscribers, as a finished download would.
+    #[doc(hidden)]
+    pub fn release_deferred(&self) {
+        #[cfg(feature = "engine")]
+        if let Some(inner) = &self.inner {
+            let mut state = lock(&inner.state);
+            state.released = true;
+            // They resolve again on their next lookup.
+            for tag in std::mem::take(&mut state.deferred) {
+                state.tags.remove(&tag);
+            }
+            drop(state);
+            inner.notify();
+        }
+    }
+
     /// Highlights `source` with `language`'s grammar and the grammars of
     /// languages embedded in it, or returns no spans while the grammar is
     /// still on its way.
@@ -128,6 +145,49 @@ impl GrammarStore {
             let _ = (language, source, cancelled);
             Outcome::default()
         }
+    }
+
+    /// [`Self::highlight_until`] over each of `fragments` (sorted, disjoint
+    /// byte ranges of `source`) as a document of its own, so no lexical
+    /// state crosses from one into the next: a comment left open at the end
+    /// of one hunk of a patch does not swallow the next. Spans are in
+    /// `source`'s coordinates. A range that is out of order, out of bounds,
+    /// or not on character boundaries is skipped.
+    pub(crate) fn highlight_fragments_until(
+        &self,
+        language: &LanguageId,
+        source: &str,
+        fragments: &[std::ops::Range<u32>],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Outcome {
+        let mut out = Outcome::default();
+        let mut end = 0;
+        for fragment in fragments {
+            let range = fragment.start as usize..fragment.end as usize;
+            if range.start < end {
+                continue;
+            }
+            let Some(text) = source.get(range.clone()) else {
+                continue;
+            };
+            end = range.end;
+            let found = self.highlight_until(language, text, cancelled);
+            if cancelled() {
+                return Outcome::default();
+            }
+            out.spans
+                .extend(found.spans.into_iter().map(|span| HighlightSpan {
+                    offset: span.offset + fragment.start,
+                    ..span
+                }));
+            for language in found.unresolved {
+                if !out.unresolved.contains(&language) {
+                    out.unresolved.push(language);
+                }
+            }
+            out.truncated |= found.truncated;
+        }
+        out
     }
 
     /// [`Self::highlight_until`] with explicit bounds on embedded layers.
@@ -199,6 +259,9 @@ impl Outcome {
 #[derive(Debug, Clone, Default)]
 pub struct StoreConfig {
     local_packs: Vec<PathBuf>,
+    /// Languages whose local packs stay pending until
+    /// [`GrammarStore::release_deferred`], as if they were downloading.
+    deferred: Vec<String>,
     #[cfg(feature = "download")]
     pub(crate) downloads: Option<crate::download::Downloads>,
 }
@@ -216,6 +279,16 @@ impl StoreConfig {
     /// in the order added, before any download.
     pub fn local_packs(mut self, root: impl Into<PathBuf>) -> Self {
         self.local_packs.push(root.into());
+        self
+    }
+
+    /// Leaves the local packs of `languages` (pack language names) pending
+    /// until [`GrammarStore::release_deferred`], the way a download leaves
+    /// them, so tests can make a grammar arrive late without a server.
+    #[doc(hidden)]
+    pub fn defer(mut self, languages: &[&str]) -> Self {
+        self.deferred
+            .extend(languages.iter().map(|l| (*l).to_owned()));
         self
     }
 
@@ -259,6 +332,10 @@ pub(crate) struct State {
     /// Grammars by pack directory, so a language's aliases share one load.
     /// `None` records a pack that failed to load.
     loaded: HashMap<PathBuf, Option<Arc<Grammar>>>,
+    /// [`StoreConfig::defer`]red packs have been released.
+    released: bool,
+    /// Tags left pending by [`StoreConfig::defer`].
+    deferred: Vec<String>,
     #[cfg(feature = "download")]
     pub(crate) remote: crate::download::Remote,
 }
@@ -288,6 +365,10 @@ impl Inner {
             .local
             .get_or_insert_with(|| scan_local(&self.config.local_packs));
         if let Some((dir, manifest)) = local.get(tag).cloned() {
+            if !state.released && self.config.deferred.contains(&manifest.language) {
+                state.deferred.push(tag.to_owned());
+                return Tag::Pending;
+            }
             return load(state, &dir, &manifest);
         }
         #[cfg(feature = "download")]
@@ -297,7 +378,6 @@ impl Inner {
         Tag::Unavailable
     }
 
-    #[cfg_attr(not(feature = "download"), allow(dead_code))]
     pub(crate) fn notify(&self) {
         lock(&self.listeners).retain(|listener| listener());
     }
