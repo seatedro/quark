@@ -6,15 +6,14 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::{self, Overrides, Resolver, Settings};
+use crate::embedded::RustfmtProvider;
+use crate::rustfmt::RustfmtCommand;
 use crate::workspace::{self, Selected};
-use crate::{
-    Coverage, Diagnostic, FormatOptions, Invocation, NewlineStyle, PassThrough, Severity,
-    apply_edits,
-};
+use crate::{Coverage, Diagnostic, FormatOptions, Invocation, NewlineStyle, Severity, apply_edits};
 
 /// Composed transformations tried before giving up on a fixed point.
 const MAX_TRANSFORMS: usize = 3;
@@ -550,6 +549,110 @@ impl Formatted {
     }
 }
 
+/// One file's formatting machinery: its settings, the rustfmt command, and
+/// the embedded-Rust provider, whose cache carries across rounds.
+struct Engine<'a> {
+    settings: &'a Settings,
+    command: RustfmtCommand,
+    provider: RustfmtProvider,
+}
+
+impl<'a> Engine<'a> {
+    fn new(settings: &'a Settings, dir: &Path) -> Self {
+        // The working directory picks the pinned toolchain via rustup. A
+        // `--stdin-filepath` for an unsaved file may name a missing directory.
+        let cwd = dir
+            .ancestors()
+            .find(|d| d.is_dir())
+            .unwrap_or(Path::new("/"));
+        let command = RustfmtCommand {
+            edition: settings.edition.clone(),
+            style_edition: settings.style_edition.clone(),
+            config_path: settings.rustfmt.path.clone(),
+            ..RustfmtCommand::new(cwd)
+        };
+        let provider = RustfmtProvider::new(command.clone());
+        Self {
+            settings,
+            command,
+            provider,
+        }
+    }
+
+    /// The whole file through rustfmt, on stdin: it never reads or writes
+    /// files and never follows `mod` declarations.
+    fn rustfmt(&self, source: &str) -> Result<String, Vec<Problem>> {
+        self.command
+            .format(source, "")
+            .map_err(|e| vec![Problem::error(e.to_string())])
+    }
+
+    fn discover(&self, source: &str) -> Result<Vec<Invocation>, Vec<Problem>> {
+        crate::discover(source, &self.settings.quark.macro_names)
+            .map(|d| d.invocations)
+            .map_err(|d| vec![Problem::from_diagnostic(&d, source)])
+    }
+
+    /// The view printer over a whole file.
+    fn view_pass(&self, source: &str) -> Result<Formatted, Vec<Problem>> {
+        let r = &self.settings.rustfmt;
+        let newline_style = match r.newline_style {
+            config::NewlineStyle::Auto => NewlineStyle::Auto,
+            config::NewlineStyle::Unix => NewlineStyle::Unix,
+            config::NewlineStyle::Windows => NewlineStyle::Windows,
+            config::NewlineStyle::Native if cfg!(windows) => NewlineStyle::Windows,
+            config::NewlineStyle::Native => NewlineStyle::Unix,
+        };
+        let options = FormatOptions {
+            max_width: r.max_width,
+            tab_spaces: r.tab_spaces,
+            hard_tabs: r.hard_tabs,
+            newline_style,
+            macro_names: self.settings.quark.macro_names.clone(),
+        };
+        let outcome = crate::format_source(source, &options, &self.provider);
+        let notes = outcome
+            .diagnostics
+            .iter()
+            .map(|d| Problem::from_diagnostic(d, source))
+            .collect();
+        if outcome.has_errors() {
+            return Err(notes);
+        }
+        Ok(Formatted {
+            text: apply_edits(source, &outcome.edits),
+            notes,
+            coverage: outcome.coverage,
+        })
+    }
+
+    /// One round: rustfmt the whole file, put each view body back exactly as
+    /// it was (rustfmt's macro heuristics must not touch templates), then
+    /// format the views. `first` marks the round whose input is the user's
+    /// source.
+    fn compose(&self, source: &str, first: bool) -> Result<Formatted, Vec<Problem>> {
+        let before = self.discover(source)?;
+        let rustfmt = self.rustfmt(source)?;
+        let after = self.discover(&rustfmt)?;
+        let restored = restore_bodies(source, &before, &rustfmt, &after)?;
+        self.view_pass(&restored).map_err(|problems| {
+            // These positions are in rustfmt's output, which the user never
+            // sees. On the first round the views alone usually fail the same
+            // way on the original, which gives positions in the user's file.
+            match first.then(|| self.view_pass(source)) {
+                Some(Err(original)) => original,
+                _ => problems
+                    .into_iter()
+                    .map(|p| Problem {
+                        location: None,
+                        ..p
+                    })
+                    .collect(),
+            }
+        })
+    }
+}
+
 /// The complete transformation of one file. Full mode composes rustfmt and
 /// the view pass and only accepts a fixed point; view-only mode requires a
 /// second view pass to change nothing.
@@ -559,9 +662,10 @@ fn format_source(
     view_only: bool,
     dir: &Path,
 ) -> Result<Formatted, Vec<Problem>> {
+    let engine = Engine::new(settings, dir);
     if view_only {
-        let once = view_pass(source, settings)?;
-        let twice = view_pass(&once.text, settings)?;
+        let once = engine.view_pass(source)?;
+        let twice = engine.view_pass(&once.text)?;
         if twice.text != once.text {
             return Err(vec![Problem::error(
                 "view formatting is not idempotent; file left unchanged",
@@ -569,20 +673,19 @@ fn format_source(
         }
         return Ok(once);
     }
-    // Rustfmt's output can move a view, which changes the width the view
-    // printer sees, which can change rustfmt's next decision. Accept only a
-    // state that one more round leaves alone, within a fixed budget.
     // Most files hold no views. Their result is rustfmt's alone, as `cargo
     // fmt` would write it, so the verifying round is skipped.
     let discovery = crate::discover(source, &settings.quark.macro_names);
     if discovery.is_ok_and(|d| d.invocations.is_empty() && d.diagnostics.is_empty()) {
-        let text = rustfmt(source, settings, dir).map_err(|p| vec![p])?;
-        return Ok(Formatted::unchanged(&text));
+        return Ok(Formatted::unchanged(&engine.rustfmt(source)?));
     }
+    // Rustfmt's output can move a view, which changes the width the view
+    // printer sees, which can change rustfmt's next decision. Accept only a
+    // state that one more round leaves alone, within a fixed budget.
     let mut seen = vec![source.to_owned()];
-    let mut current = compose(source, settings, dir, true)?;
+    let mut current = engine.compose(source, true)?;
     for _ in 1..MAX_TRANSFORMS {
-        let next = compose(&current.text, settings, dir, false)?;
+        let next = engine.compose(&current.text, false)?;
         if next.text == current.text {
             // The verifying round's notes are located in the final text.
             return Ok(next);
@@ -596,42 +699,6 @@ fn format_source(
         "rustfmt and the view printer did not converge within {MAX_TRANSFORMS} passes; \
          file left unchanged"
     ))])
-}
-
-/// One round: rustfmt the whole file, put each view body back exactly as it
-/// was (rustfmt's macro heuristics must not touch templates), then format the
-/// views. `first` marks the round whose input is the user's source.
-fn compose(
-    source: &str,
-    settings: &Settings,
-    dir: &Path,
-    first: bool,
-) -> Result<Formatted, Vec<Problem>> {
-    let before = discover(source, settings)?;
-    let rustfmt = rustfmt(source, settings, dir).map_err(|p| vec![p])?;
-    let after = discover(&rustfmt, settings)?;
-    let restored = restore_bodies(source, &before, &rustfmt, &after)?;
-    view_pass(&restored, settings).map_err(|problems| {
-        // These positions are in rustfmt's output, which the user never
-        // sees. On the first round the views alone usually fail the same way
-        // on the original, which gives positions in the user's file.
-        match first.then(|| view_pass(source, settings)) {
-            Some(Err(original)) => original,
-            _ => problems
-                .into_iter()
-                .map(|p| Problem {
-                    location: None,
-                    ..p
-                })
-                .collect(),
-        }
-    })
-}
-
-fn discover(source: &str, settings: &Settings) -> Result<Vec<Invocation>, Vec<Problem>> {
-    crate::discover(source, &settings.quark.macro_names)
-        .map(|d| d.invocations)
-        .map_err(|d| vec![Problem::from_diagnostic(&d, source)])
 }
 
 /// Copies each original view body over its counterpart in rustfmt's output.
@@ -661,85 +728,4 @@ fn restore_bodies(
     }
     out.push_str(&formatted[copied..]);
     Ok(out)
-}
-
-/// The view printer over a whole file.
-fn view_pass(source: &str, settings: &Settings) -> Result<Formatted, Vec<Problem>> {
-    let r = &settings.rustfmt;
-    let newline_style = match r.newline_style {
-        config::NewlineStyle::Auto => NewlineStyle::Auto,
-        config::NewlineStyle::Unix => NewlineStyle::Unix,
-        config::NewlineStyle::Windows => NewlineStyle::Windows,
-        config::NewlineStyle::Native if cfg!(windows) => NewlineStyle::Windows,
-        config::NewlineStyle::Native => NewlineStyle::Unix,
-    };
-    let options = FormatOptions {
-        max_width: r.max_width,
-        tab_spaces: r.tab_spaces,
-        hard_tabs: r.hard_tabs,
-        newline_style,
-        macro_names: settings.quark.macro_names.clone(),
-    };
-    let outcome = crate::format_source(source, &options, &PassThrough);
-    let notes = outcome
-        .diagnostics
-        .iter()
-        .map(|d| Problem::from_diagnostic(d, source))
-        .collect();
-    if outcome.has_errors() {
-        return Err(notes);
-    }
-    Ok(Formatted {
-        text: apply_edits(source, &outcome.edits),
-        notes,
-        coverage: outcome.coverage,
-    })
-}
-
-/// Runs the toolchain's rustfmt on the whole file through stdin, so it never
-/// reads or writes files and never follows `mod` declarations.
-/// `QUARK_FMT_RUSTFMT` names a different binary.
-fn rustfmt(source: &str, settings: &Settings, dir: &Path) -> Result<String, Problem> {
-    let program = std::env::var_os("QUARK_FMT_RUSTFMT").unwrap_or_else(|| "rustfmt".into());
-    let mut cmd = Command::new(&program);
-    // The working directory picks the pinned toolchain via rustup. A
-    // `--stdin-filepath` for an unsaved file may name a missing directory.
-    let cwd = dir
-        .ancestors()
-        .find(|d| d.is_dir())
-        .unwrap_or(Path::new("/"));
-    cmd.current_dir(cwd)
-        .args(["--emit", "stdout", "--edition", &settings.edition])
-        .env_remove("RUSTFMT")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(style) = &settings.style_edition {
-        cmd.args(["--style-edition", style]);
-    }
-    if let Some(path) = &settings.rustfmt.path {
-        cmd.arg("--config-path").arg(path);
-    }
-    let program = program.to_string_lossy();
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| Problem::error(format!("{program}: {e}")))?;
-    let mut input = child.stdin.take().expect("piped stdin");
-    // Write from another thread: a large file can fill the stdout pipe
-    // before rustfmt has read all of stdin.
-    let source = source.to_owned();
-    let writer = std::thread::spawn(move || input.write_all(source.as_bytes()));
-    let out = child
-        .wait_with_output()
-        .map_err(|e| Problem::error(format!("{program}: {e}")))?;
-    let _ = writer.join();
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(Problem::error(format!(
-            "{program} failed: {}",
-            stderr.trim()
-        )));
-    }
-    String::from_utf8(out.stdout)
-        .map_err(|_| Problem::error(format!("{program}: output not UTF-8")))
 }
