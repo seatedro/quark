@@ -276,6 +276,9 @@ pub struct Codex {
     /// The agent's change, shared by the inline card and the Changes tab.
     pub changes: diff::Changes,
     pub open_file: Option<&'static str>,
+    /// The file viewer's code: down (with its gutter) and sideways.
+    pub file_scroll: ScrollHandle,
+    pub file_scroll_x: ScrollHandle,
     pub palette: Option<palette::State>,
     pub thread_scroll: ScrollHandle,
     /// Scroll the transcript to the latest turn on the next frame.
@@ -325,6 +328,8 @@ impl Codex {
             scope: 0,
             changes: diff::Changes::cart(),
             open_file: None,
+            file_scroll: ScrollHandle::new(),
+            file_scroll_x: ScrollHandle::new(),
             palette: None,
             thread_scroll: ScrollHandle::new(),
             stick_bottom: true,

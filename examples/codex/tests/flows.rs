@@ -205,6 +205,54 @@ fn the_side_panel_resizes_from_its_divider() {
     assert_eq!(thread.width, quark_codex::panel::THREAD_MIN);
 }
 
+// Catches the file viewer's gutter collapsing beside long lines and its
+// code running under the file tree: every line number ends at one x,
+// every line's code starts at one x past the gutter, and the code stops
+// where the tree begins.
+#[test]
+fn the_file_viewer_keeps_its_gutter_and_stays_clear_of_the_tree() {
+    let ui = harness("file-panel");
+    let code = ui.find(By::role_name(Role::Document, "cart.js")).bounds;
+    let tree = ui.find(By::role_name(Role::Tree, "Files")).bounds;
+    assert!(
+        code.x + code.width <= tree.x,
+        "{code:?} runs under {tree:?}"
+    );
+    let runs: Vec<_> = ui
+        .painted_texts()
+        .into_iter()
+        .filter(|t| t.bounds.x >= code.x && t.bounds.x < tree.x && t.bounds.y > code.y)
+        .collect();
+    let mut number_ends = Vec::new();
+    let mut code_starts = Vec::new();
+    for n in 1..=9 {
+        let number = runs
+            .iter()
+            .find(|t| t.text == n.to_string())
+            .unwrap_or_else(|| panic!("line number {n}"));
+        let row = number.bounds.y + number.bounds.height / 2.0;
+        number_ends.push(number.bounds.x + number.bounds.width);
+        let first = runs
+            .iter()
+            .filter(|t| !std::ptr::eq(*t, number))
+            .filter(|t| row > t.bounds.y && row < t.bounds.y + t.bounds.height)
+            .map(|t| t.bounds.x)
+            .fold(f32::INFINITY, f32::min);
+        if first.is_finite() {
+            code_starts.push(first);
+        }
+    }
+    let end = number_ends[0];
+    assert!(number_ends.iter().all(|&x| x == end), "{number_ends:?}");
+    assert_eq!(code_starts.len(), 7, "{code_starts:?}");
+    assert!(
+        code_starts
+            .iter()
+            .all(|&x| x == code_starts[0] && x >= end + 16.0),
+        "{code_starts:?} after {end}"
+    );
+}
+
 /// The diff lines a diff view shows (its list items), top to bottom.
 fn diff_lines(ui: &UiTestHarness<Codex>, view: &str) -> Vec<(String, f32)> {
     let Some(list) = ui.try_find(By::id(view)) else {
