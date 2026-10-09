@@ -49,6 +49,8 @@ mod table;
 #[cfg(feature = "test-support")]
 mod testing;
 mod text;
+#[cfg(feature = "webview")]
+mod webview;
 mod window;
 
 use accessibility::*;
@@ -69,4 +71,8 @@ use table::WindowTable;
 #[cfg(feature = "test-support")]
 pub(crate) use testing::{HeadlessRunner, VirtualWindow};
 pub use text::AppText;
+#[cfg(feature = "webview")]
+use webview::WebViewRunner;
+#[cfg(feature = "webview")]
+pub use webview::WebViews;
 use window::*;

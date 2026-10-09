@@ -172,6 +172,10 @@ pub(crate) struct HeadlessRunner {
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
     platform: PlatformState,
+    /// Virtual windows have no native handles, so every open fails with
+    /// `ParentRequired`.
+    #[cfg(feature = "webview")]
+    webviews: WebViewRunner,
 }
 
 impl HeadlessRunner {
@@ -181,6 +185,8 @@ impl HeadlessRunner {
     pub(crate) fn new(size: (f32, f32), scale_factor: f64) -> Self {
         let waker = Waker::detached();
         let (events, app_events) = EventSink::new(waker.clone());
+        #[cfg(feature = "webview")]
+        let webviews = WebViewRunner::new(&waker);
         let mut windows = WindowTable::default();
         let mut main = VirtualWindow::new("Test".to_owned(), size, scale_factor, (0.0, 0.0));
         main.focused = true;
@@ -213,6 +219,8 @@ impl HeadlessRunner {
             #[cfg(feature = "tray")]
             tray: None,
             platform: PlatformState::default(),
+            #[cfg(feature = "webview")]
+            webviews,
         }
     }
 
@@ -550,6 +558,8 @@ impl HeadlessRunner {
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
             platform: &mut self.platform,
+            #[cfg(feature = "webview")]
+            webviews: &mut self.webviews,
         }
     }
 

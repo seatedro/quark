@@ -2,7 +2,7 @@
 //! badges, single instance handoff, deep links, dragging files out, docking
 //! drags across windows, window state persistence, crash reports, native
 //! window materials and app-drawn chrome, and the opt-in launch at login,
-//! global shortcuts, and telemetry.
+//! global shortcuts, telemetry, and modal webviews.
 
 #[cfg(feature = "autostart")]
 pub mod autostart;
@@ -36,6 +36,8 @@ pub mod telemetry;
 pub(crate) mod theme;
 #[cfg(feature = "tray")]
 pub mod tray;
+#[cfg(feature = "webview")]
+pub mod webview;
 pub mod window_state;
 pub(crate) mod work_area;
 #[cfg(target_os = "linux")]

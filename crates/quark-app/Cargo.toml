@@ -38,6 +38,8 @@ puffin_http = { version = "0.17", optional = true }
 # System-wide shortcuts (`platform::global_shortcut`): Carbon hot keys on
 # macOS, RegisterHotKey on Windows, X11 key grabs on Linux.
 global-hotkey = { version = "0.8", optional = true }
+# Modal webviews (`platform::webview`). Pulls in WebKitGTK on Linux.
+quark-webview = { workspace = true, optional = true }
 
 # muda draws the native menu bar (`EventContext::set_menus`) on macOS and
 # Windows. It must stay on the minor tray-icon uses: both share muda's one
@@ -171,6 +173,10 @@ autostart = ["dep:objc2-service-management"]
 global-shortcut = ["ui", "dep:global-hotkey"]
 # Opt-in, local-by-default usage events: `platform::telemetry`.
 telemetry = []
+# Modal webviews through `EventContext::webviews`: WebKitGTK 2.40+ (API
+# 4.1, with GTK 3) on Linux, WKWebView on macOS, WebView2 on Windows. Off by
+# default: on Linux it needs the WebKitGTK system libraries.
+webview = ["dep:quark-webview", "quark-webview/native"]
 # Image get and set through `EventContext::clipboard_image`.
 clipboard-image = ["arboard/image-data"]
 # Developer tooling for UiApp windows: the frame HUD, the element inspector

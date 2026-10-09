@@ -84,6 +84,10 @@ pub enum AppEvent {
     /// A tray menu item was picked; carries its id.
     #[cfg(feature = "tray")]
     TrayMenu(String),
+    /// About a webview from [`EventContext::webviews`]. The context is bound
+    /// to the view's parent window while it is open.
+    #[cfg(feature = "webview")]
+    WebView(quark_webview::WebViewEvent),
 }
 
 /// Why a window closed, in [`AppEvent::WindowClosed`]. [`App::close_requested`]

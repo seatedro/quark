@@ -294,6 +294,8 @@ pub struct EventContext<'a> {
     #[cfg(feature = "tray")]
     pub(super) tray: &'a mut Option<tray_icon::TrayIcon>,
     pub(super) platform: &'a mut PlatformState,
+    #[cfg(feature = "webview")]
+    pub(super) webviews: &'a mut WebViewRunner,
 }
 
 impl EventContext<'_> {
@@ -426,9 +428,14 @@ impl EventContext<'_> {
 
     /// winit leaves IME off by default; enable it while a text field has focus.
     pub fn set_ime_allowed(&mut self, allowed: bool) {
-        if let Some(window) = self.native() {
-            window.set_ime_allowed(allowed);
-        }
+        let Some(state) = self
+            .window
+            .and_then(|window| self.windows.get_mut(window)?.open_mut())
+        else {
+            return;
+        };
+        state.window.set_ime_allowed(allowed);
+        state.ime_allowed = allowed;
     }
 
     /// Where the IME candidate window should appear, in logical points.
@@ -643,5 +650,14 @@ impl EventContext<'_> {
             #[cfg(feature = "test-support")]
             Clipboard::Memory(_) => None,
         }
+    }
+}
+
+#[cfg(feature = "webview")]
+impl<'w> EventContext<'w> {
+    /// Modal webviews over this context's window; see
+    /// [`crate::platform::webview`].
+    pub fn webviews(&mut self) -> WebViews<'_, 'w> {
+        WebViews { cx: self }
     }
 }
