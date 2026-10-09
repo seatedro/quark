@@ -333,6 +333,7 @@ is an error that suggests `"Send"`.
 | `match v { A => <tag/> B => { <a/> <b/> } C => expr, }` | Arms take markup, `{ children }`, or a Rust expression |
 | `for x in xs { .. }` | Each iteration's children |
 | `for x in xs key={x.id} { <div>..</div> }` | Adds `.key(..)` to each iteration's single root |
+| `for x in xs key={..} { match x { A => <a/> B => <b/> } }` | The body may instead be one `if` or `match` (after any `let`s); the key goes on the root of the branch taken. A branch holds one root or none; several are an error |
 | `let name = expr;` | Binds `name` for the children after it in the same list, branch, or loop body |
 
 A branch or arm with several children adds them to the parent directly;

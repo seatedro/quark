@@ -1,0 +1,5 @@
+error: a keyed `for` puts the key on one element per item, so its body and each `if` branch or `match` arm hold at most one; wrap these in a <div>
+  --> tests/ui/keyed_for_several_roots.rs:12:26
+   |
+12 |                         <div />
+   |                          ^^^
