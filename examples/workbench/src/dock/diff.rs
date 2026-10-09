@@ -35,6 +35,9 @@ pub const FIND_FIELD: FocusId = FocusId::from_key("workbench.diff.find");
 pub const SPLIT_MIN_WIDTH: f32 = 600.0;
 
 const TOOLBAR_H: f32 = 40.0;
+/// The row of view controls under the toolbar.
+const TOOLS_H: f32 = 34.0;
+const HEADER_H: f32 = TOOLBAR_H + TOOLS_H;
 const FIND_H: f32 = 34.0;
 
 /// The layouts the panel offers once it is wide enough.
@@ -181,7 +184,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
         find_bar(field, count, scx.is_focused(FIND_FIELD), width, colors)
     });
     let find_h = if find.is_some() { FIND_H } else { 0.0 };
-    let body_h = (height - TOOLBAR_H - find_h).max(0.0);
+    let body_h = (height - HEADER_H - find_h).max(0.0);
     state.view.set_viewport(width, body_h);
     let scale = vcx.frame.scale_factor();
     let now_ms = vcx.frame.elapsed().as_millis() as u64;
@@ -216,7 +219,7 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
         header.build(header_colors)
     })
     .w(width)
-    .h(TOOLBAR_H)
+    .h(HEADER_H)
     .flex_shrink_0();
     view! {
         <div w={width} h={height} class="flex-col" bg={colors.editor_surface} test_id="dock.diff">
@@ -259,9 +262,9 @@ fn find_bar(
     }
 }
 
-/// The toolbar over the diff: status, layout, find, wrap, expand, copy,
-/// Apply and Undo. It replays from the element cache until one of these
-/// fields changes.
+/// The toolbars over the diff: status with Apply and Undo, then the
+/// layout choice with find, wrap, expand, and copy. They replay from the
+/// element cache until one of these fields changes.
 struct Header {
     applied: bool,
     totals: (usize, u32, u32),
@@ -307,31 +310,38 @@ impl Header {
             }
         };
         view! {
-            <div w={width} h={TOOLBAR_H} class="flex-row items-center shrink-0"
-                 px={tokens::SPACE_8} gap={tokens::SPACE_8} border_b={colors.border_variant}
-                 bg={colors.panel} accessibility_role={accesskit::Role::Toolbar}
-                 aria-label="Diff actions">
-                <Badge label={badge} variant={variant} />
-                <div class="flex-row items-center gap-[6] flex-1" min_w={0.0}
-                     role="status" aria-label={format!("{summary}, {adds} additions, {dels} deletions")}>
-                    <text size={12.0} class="truncate" color={colors.text_muted}>{summary}</text>
-                    <text size={12.0} color={colors.line_add_text}>{format!("+{adds}")}</text>
-                    <text size={12.0} color={colors.line_del_text}>{format!("-{dels}")}</text>
+            <div w={width} h={HEADER_H} class="flex-col shrink-0" border_b={colors.border_variant}
+                 bg={colors.panel}>
+                <div w={width} h={TOOLBAR_H} class="flex-row items-center shrink-0"
+                     px={tokens::SPACE_8} gap={tokens::SPACE_8}
+                     accessibility_role={accesskit::Role::Toolbar} aria-label="Diff actions">
+                    <Badge label={badge} variant={variant} />
+                    <div class="flex-row items-center gap-[6] flex-1" min_w={0.0} role="status"
+                         aria-label={format!("{summary}, {adds} additions, {dels} deletions")}>
+                        <text size={12.0} class="truncate" color={colors.text_muted}>{summary}</text>
+                        <text size={12.0} color={colors.line_add_text}>{format!("+{adds}")}</text>
+                        <text size={12.0} color={colors.line_del_text}>{format!("-{dels}")}</text>
+                    </div>
+                    <Button on:click={super::Action::Diff(Action::Apply)} label="Apply"
+                            icon={lucide::CHECK} variant={ButtonStyle::Filled}
+                            size={ButtonSize::Compact} disabled={applied}
+                            tooltip="Apply the proposed changes to the demo files" />
+                    <Button on:click={super::Action::Diff(Action::Undo)} label="Undo"
+                            icon={lucide::CORNER_UP_LEFT} size={ButtonSize::Compact}
+                            disabled={!applied} tooltip="Restore the files from before Apply" />
                 </div>
-                if let Some(segmented) = segmented {
-                    {segmented}
-                }
-                {tool(lucide::SEARCH, "Find in diff", Action::Find(!finding), finding)}
-                {tool(lucide::WRAP_TEXT, "Wrap lines", Action::Wrap, wrap)}
-                {tool(lucide::LIST, "Expand all unchanged lines", Action::ExpandAll, false)}
-                {tool(lucide::COPY, "Copy patch", Action::Copy, false)}
-                <Button on:click={super::Action::Diff(Action::Apply)} label="Apply"
-                        icon={lucide::CHECK} variant={ButtonStyle::Filled}
-                        size={ButtonSize::Compact} disabled={applied}
-                        tooltip="Apply the proposed changes to the demo files" />
-                <Button on:click={super::Action::Diff(Action::Undo)} label="Undo"
-                        icon={lucide::CORNER_UP_LEFT} size={ButtonSize::Compact} disabled={!applied}
-                        tooltip="Restore the files from before Apply" />
+                <div w={width} h={TOOLS_H} class="flex-row items-center shrink-0"
+                     px={tokens::SPACE_8} gap={tokens::SPACE_4}
+                     accessibility_role={accesskit::Role::Toolbar} aria-label="Diff view">
+                    if let Some(segmented) = segmented {
+                        {segmented}
+                    }
+                    <div class="flex-1" />
+                    {tool(lucide::SEARCH, "Find in diff", Action::Find(!finding), finding)}
+                    {tool(lucide::WRAP_TEXT, "Wrap lines", Action::Wrap, wrap)}
+                    {tool(lucide::LIST, "Expand all unchanged lines", Action::ExpandAll, false)}
+                    {tool(lucide::COPY, "Copy patch", Action::Copy, false)}
+                </div>
             </div>
         }
         .into_any()
