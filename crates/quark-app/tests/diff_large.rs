@@ -5,7 +5,8 @@
 //!
 //! Run in release with
 //! `cargo test --release -p quark-app --features syntax --test diff_large -- --ignored --nocapture`;
-//! `QUARK_DIFF_FIXTURE_MIB` picks another size.
+//! `QUARK_DIFF_FIXTURE_MIB` picks another size, `QUARK_DIFF_CASE` the
+//! cases whose names contain it, and `QUARK_DIFF_NO_SYNTAX` skips colors.
 #![cfg(feature = "syntax")]
 
 use std::sync::mpsc::{Receiver, channel};
@@ -154,6 +155,8 @@ fn report_large_diffs() {
         let doc = diff_texts(Some("f.js"), Some("f.js"), Some(&old), Some(&new), 3);
         let diffed = started.elapsed();
         drop((old, new));
+        // What the diff and its document take, before the view.
+        let diff_peak = peak_rss().unwrap_or(0);
         let viewed = Instant::now();
         let mut diff = DiffViewState::new("large.diff", FOCUS, doc);
         let state_built = viewed.elapsed();
@@ -161,15 +164,23 @@ fn report_large_diffs() {
         diff.set_syntax_wake(move || {
             let _ = woke_tx.send(());
         });
-        diff.enable_syntax(store.clone());
+        // `QUARK_DIFF_NO_SYNTAX` leaves colors off, for quicker runs.
+        let syntax = std::env::var_os("QUARK_DIFF_NO_SYNTAX").is_none();
+        if syntax {
+            diff.enable_syntax(store.clone());
+        }
         let mut ui = UiTestHarness::new(Large { diff }, SIZE, 1.0);
         let first_paint = started.elapsed();
+        // The view's own part: state and first frame, without the diff.
+        let view_paint = viewed.elapsed();
+        let rows = ui.app().diff.frame().map_or(0, |frame| frame.row_count);
+        let paint_peak = peak_rss().unwrap_or(0);
 
         // Colors: the first on screen, then every part until both sides are
         // done.
         let (mut first_colors, mut full) = (None, None);
         let deadline = Instant::now() + Duration::from_secs(600);
-        while full.is_none() && Instant::now() < deadline {
+        while syntax && full.is_none() && Instant::now() < deadline {
             if !wait(&woke, Duration::from_secs(120)) {
                 break;
             }
@@ -241,12 +252,15 @@ fn report_large_diffs() {
         }
         let peak = peak_rss().unwrap_or(0);
         eprintln!(
-            "{name}: diff {diffed:.2?}, view state {state_built:.2?}, first paint {first_paint:.2?}, first colors \
+            "{name}: {rows} rows; diff {diffed:.2?}, view state {state_built:.2?}, view to first paint \
+             {view_paint:.2?}, first paint {first_paint:.2?}, first colors \
              {first_colors:.2?}, full syntax {full:.2?}; scroll {avg:.2?} avg / {worst:.2?} worst \
              (to {wheeled:.0} pt), \
              jumps {jump_avg:.2?} / {jump_worst:.2?}{sideways}; find {search:.2?}; settled frame \
-             {settled} allocations; peak RSS {:.0} MiB ({:.0} with inputs)",
+             {settled} allocations; peak RSS {:.0} MiB ({:.0} after the diff, {:.0} at first paint, {:.0} with inputs)",
             mib(peak.saturating_sub(inputs)),
+            mib(diff_peak.saturating_sub(inputs)),
+            mib(paint_peak.saturating_sub(inputs)),
             mib(peak),
         );
     }
