@@ -292,10 +292,6 @@ pub(crate) fn configure_generic_families(
     let settings = settings.normalized();
     let ui = resolve_family(db, FontRole::Ui, &settings.ui_family);
     let mono = resolve_family(db, FontRole::Mono, &settings.mono_family);
-    // A family picked for UI or code text with fewer weights than quark
-    // asks for (Fira Code's variable face registers only as Light) would
-    // otherwise lose to a fallback family of the exact weight.
-    fill_weights(db, [ui.family.as_str(), mono.family.as_str()]);
     db.set_sans_serif_family(ui.family.clone());
     db.set_monospace_family(mono.family.clone());
     [ui, mono]
@@ -408,61 +404,6 @@ impl Fallback for QuarkFallback {
             Some(list) => list,
             None => PlatformFallback.script_fallback(script, locale),
         }
-    }
-}
-
-/// Weights quark asks for (see `layout::weight_value`).
-const TEXT_WEIGHTS: [u16; 5] = [400, 450, 500, 600, 700];
-
-impl QuarkFallback {
-    /// cosmic-text takes a fallback family only through a face of exactly
-    /// the requested weight, so a family with fewer weights (the bundled
-    /// emoji and CJK faces have one) is skipped at the UI's normal weight
-    /// (450) and in bold, and an arbitrary face of the nearest weight wins
-    /// instead. Registers each listed family again under every missing text
-    /// weight, copying the face fontdb's own query picks for that weight;
-    /// copies share the original's bytes.
-    pub(crate) fn fill_weights(&self, db: &mut fontdb::Database) {
-        let mut families: Vec<&str> = self.common.clone();
-        families.extend(self.scripts.values().flatten());
-        families.sort_unstable();
-        families.dedup();
-        fill_weights(db, families);
-    }
-}
-
-/// Register each of `families` again under every text weight it lacks, as
-/// a copy of the face fontdb's own query picks for that weight; copies
-/// share the original's bytes.
-pub(crate) fn fill_weights<'a>(
-    db: &mut fontdb::Database,
-    families: impl IntoIterator<Item = &'a str>,
-) {
-    let mut copies = Vec::new();
-    for family in families {
-        for weight in TEXT_WEIGHTS {
-            let has_weight = db.faces().any(|face| {
-                face.weight.0 == weight
-                    && face.style == fontdb::Style::Normal
-                    && face.families.iter().any(|(name, _)| name == family)
-            });
-            if has_weight {
-                continue;
-            }
-            let query = fontdb::Query {
-                families: &[fontdb::Family::Name(family)],
-                weight: fontdb::Weight(weight),
-                ..fontdb::Query::default()
-            };
-            if let Some(face) = db.query(&query).and_then(|id| db.face(id)) {
-                let mut copy = face.clone();
-                copy.weight = fontdb::Weight(weight);
-                copies.push(copy);
-            }
-        }
-    }
-    for copy in copies {
-        db.push_face_info(copy);
     }
 }
 
@@ -1144,6 +1085,87 @@ mod tests {
             assert_ne!(joined, alone, "{text} with ligatures");
             assert_eq!(separate, alone, "{text} without ligatures");
         }
+    }
+
+    // Regression: UI text at Normal asked for weight 450 (mono for 400),
+    // which a variable UI family such as Inter draws heavier than its
+    // regular weight. Normal is 400 in every family, the weight glyphs
+    // rasterize at.
+    #[test]
+    fn normal_weight_is_400_in_every_family() {
+        let settings = FontSettings {
+            ui_family: INTER_FAMILY.to_owned(),
+            ..FontSettings::default()
+        };
+        let mut system = crate::TextSystem::vendored_only(&settings);
+        for kind in [quark::FontKind::Ui, quark::FontKind::Mono] {
+            let style = crate::TextStyle::new(14.0).kind(kind);
+            let layout = system
+                .layout(&crate::TextParams::new("Hamburg", style))
+                .expect("layout");
+            for glyph in layout.glyph_iter() {
+                assert_eq!(glyph.font_weight.0, 400, "{kind:?}");
+            }
+        }
+    }
+
+    // A weight a family has no face for takes the family's face nearest
+    // it, as CSS matching does, rather than another family that has the
+    // exact weight: before, Geist at 300 drew in Fira Code (whose variable
+    // face registers as 300) and Fira Code at 700 in Geist Bold. fontdb
+    // breaks the 400 to 500 tie at 450, looking down first from there.
+    #[test]
+    fn weight_without_a_face_takes_the_family_face_nearest_it() {
+        use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+        let cases: [(&str, u16, (&str, u16)); 4] = [
+            (UI_FAMILY, 300, (UI_FAMILY, 400)),
+            (UI_FAMILY, 450, (UI_FAMILY, 400)),
+            (FIRA_CODE_FAMILY, 700, (FIRA_CODE_FAMILY, 300)),
+            (SOURCE_SANS_3_FAMILY, 300, (SOURCE_SANS_3_FAMILY, 400)),
+        ];
+        let mut system = test_system();
+        let fs = system.raster_font_system();
+        for (family, weight, expected) in cases {
+            let attrs = Attrs::new()
+                .family(Family::Name(family))
+                .weight(Weight(weight));
+            let mut buffer = Buffer::new(fs, Metrics::new(14.0, 20.0));
+            buffer.set_text(fs, "Hamburg", &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(fs, false);
+            let run = buffer.layout_runs().next().expect("run");
+            for glyph in run.glyphs {
+                let face = fs.db().face(glyph.font_id).expect("face");
+                let got = (face.families[0].0.as_str(), face.weight.0);
+                assert_eq!(got, expected, "{family} at {weight}");
+            }
+        }
+    }
+
+    // A static family taken at a lighter weight than its lightest face
+    // draws that face as it is: no synthetic thinning (or emboldening)
+    // makes up the difference.
+    #[test]
+    fn static_face_at_a_missing_weight_rasterizes_as_its_own_weight() {
+        use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, SwashCache, Weight};
+        let mut system = test_system();
+        let fs = system.raster_font_system();
+        let mut raster = SwashCache::new();
+        let mut images = Vec::new();
+        for weight in [300, 400] {
+            let attrs = Attrs::new()
+                .family(Family::Name(SOURCE_SANS_3_FAMILY))
+                .weight(Weight(weight));
+            let mut buffer = Buffer::new(fs, Metrics::new(20.0, 28.0));
+            buffer.set_text(fs, "R", &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(fs, false);
+            let run = buffer.layout_runs().next().expect("run");
+            let key = run.glyphs[0].physical((0.0, 0.0), 1.0).cache_key;
+            assert_eq!(key.font_weight.0, weight);
+            let image = raster.get_image_uncached(fs, key).expect("image");
+            images.push(image.data);
+        }
+        assert!(images[0].iter().any(|&a| a != 0), "ink");
+        assert_eq!(images[0], images[1]);
     }
 
     // Regression: every TextSystem copied the vendored fonts (several MB)

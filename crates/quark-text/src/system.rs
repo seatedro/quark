@@ -225,19 +225,11 @@ impl TextSystem {
         self.fonts_changed();
     }
 
-    /// Makes `family` available at every weight quark asks for, as the UI
-    /// and monospace families are, for text that names it with
-    /// [`crate::TextStyle::family`]: a family with fewer faces (one
-    /// variable face, say) otherwise loses bold text to a fallback family.
-    /// Advances [`Self::font_epoch`] when it registers anything.
-    pub fn fill_family_weights(&mut self, family: &str) {
-        let db = self.font_system.db_mut();
-        let before = db.len();
-        crate::fonts::fill_weights(db, [family]);
-        if db.len() != before {
-            self.fonts_changed();
-        }
-    }
+    /// Does nothing. Text in a family with fewer weights than it asks for
+    /// (one variable face, say) used to fall back to another family unless
+    /// this registered the family at every weight; matching now takes the
+    /// family's face nearest the weight. Kept until callers drop it.
+    pub fn fill_family_weights(&mut self, _family: &str) {}
 
     /// Rederives what depends on the font database, and advances the
     /// generation so everything shaped before is shaped again.
@@ -317,7 +309,6 @@ fn font_system(
 ) -> (FontSystem, [ResolvedFamily; 2]) {
     let resolved = configure_generic_families(&mut db, settings);
     let fallback = QuarkFallback::new(settings.bundled_fallback, &locale);
-    fallback.fill_weights(&mut db);
     let font_system = FontSystem::new_with_locale_and_db_and_fallback(locale, db, fallback);
     (font_system, resolved)
 }
@@ -391,11 +382,10 @@ mod tests {
 
     // Catches bold text in a family named by the style falling back to
     // another family: JetBrains Mono ships one variable face, registered
-    // at a single weight, which cosmic-text does not take for bold.
+    // at a single weight, which cosmic-text took only at that weight.
     #[test]
     fn bold_text_in_a_named_family_keeps_the_family() {
         let mut system = TextSystem::vendored_only(&FontSettings::default());
-        system.fill_family_weights("JetBrains Mono");
         let style = TextStyle::new(14.0)
             .family(Some("JetBrains Mono"))
             .weight(quark::FontWeight::Bold);

@@ -280,7 +280,7 @@ impl<'a> TextQuery<'a> {
         let weights = std::iter::once(style.font_weight)
             .chain(self.spans.iter().filter_map(|span| span.weight));
         for weight in weights {
-            let value = weight_value(style.font_kind, weight);
+            let value = font_weight_value(weight);
             if !(1..=1000).contains(&value) {
                 return Err(TextError::InvalidFontWeight(value));
             }
@@ -780,7 +780,7 @@ impl TextLayout {
                     let key = (
                         style.family,
                         style.font_kind == FontKind::Mono,
-                        weight_value(style.font_kind, style.font_weight),
+                        font_weight_value(style.font_weight),
                     );
                     let faces = scratch.text_faces.faces(fs.db(), key, own_family, emoji);
                     text_spans(&mut attrs, paragraph, fs, &mut scratch.text_faces, faces);
@@ -1624,13 +1624,15 @@ fn family(kind: FontKind) -> Family<'static> {
     }
 }
 
-pub(crate) fn weight_value(kind: FontKind, weight: FontWeight) -> u16 {
-    match (kind, weight) {
-        (FontKind::Ui, FontWeight::Normal) => 450,
-        (_, FontWeight::Normal) => 400,
-        (_, FontWeight::Medium) => 500,
-        (_, FontWeight::Semibold) => 600,
-        (_, FontWeight::Bold) => 700,
+/// The CSS weight (1 to 1000) text in `weight` asks for, the same in every
+/// family: Normal is 400, and an app that wants a heavier normal asks for
+/// that weight.
+pub(crate) fn font_weight_value(weight: FontWeight) -> u16 {
+    match weight {
+        FontWeight::Normal => 400,
+        FontWeight::Medium => 500,
+        FontWeight::Semibold => 600,
+        FontWeight::Bold => 700,
     }
 }
 
@@ -1715,10 +1717,7 @@ fn set_font_features(features: &mut cosmic_text::FontFeatures, ligatures: bool) 
 fn base_attrs<'a>(style: &TextStyle, own_family: Family<'a>) -> Attrs<'a> {
     let attrs = Attrs::new()
         .family(own_family)
-        .weight(cosmic_text::Weight(weight_value(
-            style.font_kind,
-            style.font_weight,
-        )))
+        .weight(cosmic_text::Weight(font_weight_value(style.font_weight)))
         .cache_key_flags(style_flags(style));
     if style.letter_spacing != 0.0 {
         attrs.letter_spacing(style.letter_spacing)
@@ -1817,7 +1816,7 @@ fn span_attrs<'a>(
     } | style_flags(style);
     base_attrs(style, own_family)
         .family(if named { own_family } else { family(kind) })
-        .weight(cosmic_text::Weight(weight_value(kind, weight)))
+        .weight(cosmic_text::Weight(font_weight_value(weight)))
         .style(font_style)
         .cache_key_flags(flags)
         .metadata(index + 1)
@@ -2598,14 +2597,14 @@ mod tests {
     // distance, then by how many of the word's chars they lack, with the
     // default mono font first. Geist Mono lacks Greek and the snowman;
     // JetBrains Mono (400) and Fira Code (300) have Greek, and Noto Color
-    // Emoji, which counts as monospace, has the snowman at every weight.
+    // Emoji, which counts as monospace, has the snowman at its one weight.
     #[test]
     fn mono_fallback_picks_nearest_weight_then_best_coverage() {
         let cases = [
             ("a\u{3b1}", FontWeight::Normal, 1, "JetBrains Mono", 400),
             ("a\u{3b1}", FontWeight::Bold, 1, "JetBrains Mono", 400),
-            ("a\u{2603}", FontWeight::Medium, 1, "Noto Color Emoji", 500),
-            ("a\u{2603}", FontWeight::Bold, 1, "Noto Color Emoji", 700),
+            ("a\u{2603}", FontWeight::Medium, 1, "Noto Color Emoji", 400),
+            ("a\u{2603}", FontWeight::Bold, 1, "Noto Color Emoji", 400),
             ("x \u{3b1}b\u{3b3}", FontWeight::Bold, 4, "Geist Mono", 700),
             (
                 "x \u{3b1}b\u{3b3}",
