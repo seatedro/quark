@@ -628,6 +628,8 @@ mod tests {
             weight: None,
             style: Some(FontStyle::Italic),
             kind: None,
+            size: None,
+            letter_spacing: None,
         }]);
         let (_, a) = first_glyph(&mut system, &TextParams::new("a", plain));
         let (_, corrected) = first_glyph(

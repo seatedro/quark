@@ -172,6 +172,8 @@ mod tests {
                 weight: None,
                 style: Some(FontStyle::Italic),
                 kind: None,
+                size: None,
+                letter_spacing: None,
             }])
         };
         let family = |family, weight| style.family(Some(family)).weight(weight);

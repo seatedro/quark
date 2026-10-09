@@ -2196,7 +2196,7 @@ mod tests {
             g.iter().map(|g| g.font_size).collect::<Vec<_>>(),
             [14.0, 14.0, 7.0, 7.0]
         );
-        assert_eq!(g[2].phys_y, g[0].phys_y);
+        assert_eq!(g[2].phys_dy, g[0].phys_dy);
         assert_eq!(g[2].advance, plain.glyphs()[2].advance / 2.0);
         assert_eq!(layout.size().1, plain.size().1);
     }

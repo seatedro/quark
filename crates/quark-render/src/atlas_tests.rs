@@ -379,3 +379,52 @@ fn system_smoothing_draws_the_plane_of_the_text_gray() {
         assert!(system_drawn == fixed, "level {level}: another plane drew");
     }
 }
+
+// A span's own size reaches its glyphs' raster keys on both text paths:
+// "x" spanned at twice the size draws twice as tall as the plain "x"
+// beside it, and as tall as text laid out at that size throughout.
+#[test]
+fn a_spans_own_size_draws_its_glyphs_at_that_size() {
+    let mut system = test_text();
+    let spanned = system
+        .layout(
+            &TextParams::new("x x", TextStyle::new(16.0)).spans(vec![quark_text::TextSpan {
+                range: 2..3,
+                weight: None,
+                style: None,
+                kind: None,
+                size: Some(32.0),
+                letter_spacing: None,
+            }]),
+        )
+        .expect("layout");
+    let spanned = ShapedText::new(Arc::new(spanned));
+    let scene = scene([Primitive::TextRun(TextPrimitive {
+        rect: rect(4.0, 4.0, SIZE.0 as f32, 80.0),
+        layout: spanned,
+        color: INK,
+    })]);
+    // Inked rows of the columns `x0..x1`.
+    let ink_height = |pixels: &[u8], x0: u32, x1: u32| {
+        let rows: Vec<u32> = (0..SIZE.1)
+            .filter(|&y| (x0..x1).any(|x| pixels[((y * SIZE.0 + x) * 4) as usize] < 128))
+            .collect();
+        rows.last().map_or(0, |last| last - rows[0] + 1)
+    };
+    for path in [
+        crate::text::TextPath::Positioned,
+        crate::text::TextPath::Buffer,
+    ] {
+        let Some(mut renderer) = renderer(None) else {
+            return;
+        };
+        renderer.text_path = path;
+        let pixels = draw(&mut renderer, &scene, &mut system);
+        let (small, big) = (ink_height(&pixels, 0, 14), ink_height(&pixels, 14, 60));
+        assert!(small > 4, "{path:?}: no plain x");
+        assert!(
+            big * 10 >= small * 18 && big * 10 <= small * 22,
+            "{path:?}: spanned x is {big} px tall, plain {small}"
+        );
+    }
+}
