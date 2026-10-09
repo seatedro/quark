@@ -498,12 +498,16 @@ mod tests {
     // colors, or a focus ring or highlighted option fading into what is
     // behind it. Measured on rendered pixels: the ring two points outside
     // the focused control against the page or list just beyond it, and the
-    // highlighted option's fill against an unhighlighted one's.
+    // highlighted option's fill against an unhighlighted one's. Focus moves
+    // by keyboard, as rings show only for keyboard focus.
     #[test]
     fn high_contrast_focus_rings_and_highlighted_options_stay_visible() {
         let mut ui = UiTestHarness::new(ControlsDemo::new(), (640.0, 560.0), 2.0);
         choose_theme(&mut ui, "High contrast");
         let theme = ui.theme().clone();
+        // The clicks left Theme focused without a ring; come back to it.
+        ui.key("shift+tab");
+        ui.key("tab");
         assert_eq!(focused_name(&ui).as_deref(), Some("Theme"));
         let render = |ui: &mut UiTestHarness<ControlsDemo>| match ui.render_rgba() {
             Ok(pixels) => Some(pixels),
@@ -528,7 +532,8 @@ mod tests {
         assert!(contrast_ratio(ring, page) >= 3.0, "{ring:?} on {page:?}");
 
         // Opening Fruit highlights and focuses its chosen option, Apple.
-        ui.click_node(By::role_name(Role::ComboBox, "Fruit"));
+        tab_to_fruit(&mut ui);
+        ui.key("enter");
         let Some(pixels) = render(&mut ui) else {
             return;
         };
