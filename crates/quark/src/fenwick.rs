@@ -60,15 +60,6 @@ impl Fenwick {
         Self { tree }
     }
 
-    /// `len` copies of `value` in O(n) without the parent pass: node `i`
-    /// covers `lowbit(i)` values.
-    pub fn filled(len: usize, value: i64) -> Self {
-        let tree = (0..=len)
-            .map(|i| if i == 0 { 0 } else { value * lowbit(i) as i64 })
-            .collect();
-        Self { tree }
-    }
-
     pub fn len(&self) -> usize {
         self.tree.len() - 1
     }
@@ -268,16 +259,6 @@ mod tests {
 
     proptest! {
         #![proptest_config(crate::test_support::proptest_config(256))]
-        // Catches a slip in `filled`'s closed form, which would misplace
-        // every row of a list built at one height.
-        #[test]
-        fn filled_equals_build(len in 0..300usize, value in 0..1_000i64) {
-            prop_assert_eq!(
-                Fenwick::filled(len, value),
-                Fenwick::build(std::iter::repeat_n(value, len))
-            );
-        }
-
         // Catches lowbit slips in `push`, `add`, `prefix`, and the binary
         // lifting in `search`, which would misplace rows in virtual lists.
         #[test]

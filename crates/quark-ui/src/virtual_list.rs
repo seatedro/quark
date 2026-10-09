@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+mod heights;
 mod reorder;
 mod variable;
 
