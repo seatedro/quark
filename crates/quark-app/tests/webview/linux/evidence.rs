@@ -48,8 +48,8 @@ const BUSY: &str = "const box = document.createElement('div'); document.body.app
     const spin = () => { const end = performance.now() + 4; while (performance.now() < end) {} setTimeout(spin, 0); }; spin(); return true;";
 
 pub fn run() -> ExitCode {
-    if std::env::var_os("DISPLAY").is_none() {
-        println!("webview_smoke linux evidence: no X11 display; skipped");
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        println!("webview_smoke linux evidence: no display; skipped");
         return ExitCode::SUCCESS;
     }
     let fixture = Fixture::start().expect("fixture binds its sites");
@@ -197,10 +197,14 @@ impl Evidence {
     fn shot(&self, name: &str) {
         if let Some(dir) = std::env::var_os("QUARK_WEBVIEW_SHOTS") {
             let path = std::path::Path::new(&dir).join(format!("{name}.png"));
-            let _ = Command::new("import")
-                .args(["-window", "root"])
-                .arg(path)
-                .status();
+            // ImageMagick on X11, grim on a wlroots compositor.
+            let _ = match self.parent {
+                Some(_) => Command::new("import")
+                    .args(["-window", "root"])
+                    .arg(path)
+                    .status(),
+                None => Command::new("grim").arg(path).status(),
+            };
         }
     }
 
@@ -241,10 +245,13 @@ impl Evidence {
                 }
             }
             (Phase::Busy, WebViewEvent::EvaluationFinished { .. }) => {}
-            (Phase::Popup, WebViewEvent::Closed { .. }) => {
+            (Phase::Popup, WebViewEvent::Closed { .. }) if self.parent.is_some() => {
                 self.document = None;
                 self.open(cx, "/popup");
             }
+            // The click and focus checks drive X11; on Wayland the run
+            // ends with the measurements.
+            (Phase::Popup, WebViewEvent::Closed { .. }) => cx.exit(),
             (Phase::Popup, WebViewEvent::PageLoadFinished { document, .. }) => {
                 self.document = Some(document);
                 self.shot("modal-popup-page");
