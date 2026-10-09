@@ -435,3 +435,208 @@ pub enum SessionIntegrityError {
     Index(FileId),
     Snapshot(FileId),
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+
+    use super::{
+        DiffSession, DiffUpdate, FileDiffSnapshot, FileId, Revision, SourcePurpose, UpdateError,
+        UpdateOutcome,
+    };
+    use crate::remap::SourceRemap;
+    use crate::source::{FileSources, SourceCoverage};
+    use crate::{Side, TextStore, diff_texts, parse_unified, write_unified};
+
+    fn snapshot(id: u64, revision: u64, new: &str) -> FileDiffSnapshot {
+        let doc = diff_texts(Some("f"), Some("f"), Some("base\n"), Some(new), 3);
+        FileDiffSnapshot::new(FileId(id), Revision(revision), Arc::new(doc)).unwrap()
+    }
+
+    fn upsert(id: u64, revision: u64) -> DiffUpdate {
+        DiffUpdate::Upsert {
+            file: snapshot(id, revision, &format!("f{id} r{revision}\n")),
+            remap: None,
+        }
+    }
+
+    fn order(revision: u64, ids: &[u64]) -> DiffUpdate {
+        DiffUpdate::Order {
+            revision: Revision(revision),
+            files: ids.iter().map(|&id| FileId(id)).collect(),
+        }
+    }
+
+    /// Live files as `id@revision`, in order.
+    fn dump(session: &DiffSession) -> String {
+        let files: Vec<String> = session
+            .order()
+            .iter()
+            .map(|&id| format!("{}@{}", id.0, session.file(id).unwrap().revision.0))
+            .collect();
+        files.join(" ")
+    }
+
+    fn outcome(result: Result<UpdateOutcome, UpdateError>) -> String {
+        match result {
+            Ok(UpdateOutcome::Inserted { index }) => format!("inserted {index}"),
+            Ok(UpdateOutcome::Replaced {
+                index, previous, ..
+            }) => {
+                format!("replaced {index} from {}", previous.0)
+            }
+            Ok(UpdateOutcome::Removed { index }) => format!("removed {index:?}"),
+            Ok(UpdateOutcome::Reordered) => "reordered".into(),
+            Ok(UpdateOutcome::Hydrated { index }) => format!("hydrated {index}"),
+            Err(UpdateError::Stale { .. }) => "stale".into(),
+            Err(UpdateError::Removed { .. }) => "gone".into(),
+            Err(UpdateError::UnknownFile { file }) => format!("unknown {}", file.0),
+            Err(UpdateError::DuplicateInOrder { file }) => format!("duplicate {}", file.0),
+            Err(error) => format!("{error:?}"),
+        }
+    }
+
+    #[test]
+    fn late_updates_cannot_undo_newer_ones() {
+        let remove = |id, revision| DiffUpdate::Remove {
+            file: FileId(id),
+            revision: Revision(revision),
+        };
+        let steps = [
+            (upsert(1, 1), "inserted 0", "1@1"),
+            (upsert(2, 1), "inserted 1", "1@1 2@1"),
+            (upsert(1, 1), "stale", "1@1 2@1"),
+            (upsert(1, 3), "replaced 0 from 1", "1@3 2@1"),
+            (upsert(1, 2), "stale", "1@3 2@1"),
+            (remove(2, 2), "removed Some(1)", "1@3"),
+            (upsert(2, 5), "gone", "1@3"),
+            (order(1, &[2, 1]), "reordered", "1@3"),
+            (order(1, &[1]), "stale", "1@3"),
+            (upsert(3, 1), "inserted 1", "1@3 3@1"),
+            (order(2, &[3, 1, 3]), "duplicate 3", "1@3 3@1"),
+            (order(2, &[9]), "unknown 9", "1@3 3@1"),
+            (order(2, &[3]), "reordered", "3@1 1@3"),
+            // A removal that overtakes the file's first upsert still wins.
+            (remove(4, 1), "removed None", "3@1 1@3"),
+            (upsert(4, 1), "gone", "3@1 1@3"),
+        ];
+        let mut session = DiffSession::new();
+        for (i, (update, expected, files)) in steps.into_iter().enumerate() {
+            assert_eq!(outcome(session.apply(update)), expected, "step {i}");
+            assert_eq!(dump(&session), files, "step {i}");
+        }
+    }
+
+    /// Per file: its last revision and whether a removal follows it.
+    type Files = Vec<(u64, bool)>;
+    /// `(file, revision, is_removal)`.
+    type Updates = Vec<(u64, u64, bool)>;
+
+    /// Every revision of files 0..3, each optionally removed after its
+    /// last, delivered in any order.
+    fn deliveries() -> impl Strategy<Value = (Files, Updates)> {
+        prop::collection::vec((1u64..4, any::<bool>()), 3).prop_flat_map(|files| {
+            let updates: Vec<(u64, u64, bool)> = files
+                .iter()
+                .enumerate()
+                .flat_map(|(id, &(last, removed))| {
+                    let id = id as u64;
+                    (1..=last)
+                        .map(move |r| (id, r, false))
+                        .chain(removed.then_some((id, last + 1, true)))
+                })
+                .collect();
+            (Just(files), Just(updates).prop_shuffle())
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn any_delivery_order_converges_to_the_newest_revisions((files, updates) in deliveries()) {
+            let mut session = DiffSession::new();
+            for (id, revision, remove) in updates {
+                let update = if remove {
+                    DiffUpdate::Remove { file: FileId(id), revision: Revision(revision) }
+                } else {
+                    upsert(id, revision)
+                };
+                let _ = session.apply(update);
+            }
+            for (id, &(last, removed)) in files.iter().enumerate() {
+                let file = session.file(FileId(id as u64));
+                let shown = file.map(|f| f.diff.text(0, Side::New).as_str().to_owned());
+                let expected = (!removed).then(|| format!("f{id} r{last}\n"));
+                prop_assert_eq!(shown, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn hydrating_completes_a_revision_without_replacing_it() {
+        let full = diff_texts(Some("f"), Some("f"), Some("a\nb\n"), Some("a\nc\n"), 0);
+        let patch = parse_unified(&write_unified(&full)).unwrap();
+        let first = FileDiffSnapshot::new(FileId(7), Revision(1), Arc::new(patch)).unwrap();
+        let mut session = DiffSession::new();
+        session
+            .apply(DiffUpdate::Upsert {
+                file: first,
+                remap: None,
+            })
+            .unwrap();
+        let request = session.source_request(FileId(7), SourcePurpose::ExpandContext);
+        assert_eq!(request.map(|r| r.revision), Some(Revision(1)));
+        let hydrate = |revision| DiffUpdate::Hydrate {
+            file: FileId(7),
+            revision: Revision(revision),
+            sources: FileSources {
+                old: Some(TextStore::new("a\nb\n")),
+                new: Some(TextStore::new("a\nc\n")),
+            },
+        };
+        assert_eq!(outcome(session.apply(hydrate(0))), "stale");
+        assert_eq!(outcome(session.apply(hydrate(1))), "hydrated 0");
+        let held = session.file(FileId(7)).unwrap();
+        assert_eq!(
+            (held.revision, held.coverage()),
+            (Revision(1), SourceCoverage::Full)
+        );
+        assert_eq!(
+            session.source_request(FileId(7), SourcePurpose::ExpandContext),
+            None
+        );
+    }
+
+    #[test]
+    fn a_remap_must_lead_from_the_held_revision_to_the_new_one() {
+        let mut session = DiffSession::new();
+        session.apply(upsert(1, 2)).unwrap();
+        let (r1, r3, r4) = (
+            snapshot(1, 1, "x\n"),
+            snapshot(1, 3, "y\n"),
+            snapshot(1, 4, "z\n"),
+        );
+        let wrong = SourceRemap::between(&r1, &r3).unwrap();
+        let update = DiffUpdate::Upsert {
+            file: r3.clone(),
+            remap: Some(wrong),
+        };
+        assert_eq!(
+            session.apply(update).err(),
+            Some(UpdateError::RemapMismatch { file: FileId(1) })
+        );
+        session
+            .apply(DiffUpdate::Upsert {
+                file: r3.clone(),
+                remap: None,
+            })
+            .unwrap();
+        let right = SourceRemap::between(&r3, &r4).unwrap();
+        let update = DiffUpdate::Upsert {
+            file: r4,
+            remap: Some(right),
+        };
+        assert_eq!(outcome(session.apply(update)), "replaced 0 from 3");
+    }
+}

@@ -173,3 +173,69 @@ impl SourceRemap {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+
+    use super::{LineMap, RemapError, SourceRemap};
+    use crate::session::{FileDiffSnapshot, FileId, Revision};
+    use crate::{Side, diff_texts, parse_unified, write_unified};
+
+    fn snapshot(revision: u64, new: &str) -> FileDiffSnapshot {
+        let doc = diff_texts(Some("f"), Some("f"), Some("base\n"), Some(new), 3);
+        FileDiffSnapshot::new(FileId(1), Revision(revision), Arc::new(doc)).unwrap()
+    }
+
+    #[test]
+    fn unchanged_lines_follow_their_text_and_replaced_ones_are_flagged() {
+        let from = snapshot(1, "a\nb\nc\nd\n");
+        let to = snapshot(2, "x\na\nB\nc\nd\n");
+        let remap = SourceRemap::between(&from, &to).unwrap();
+        let lines: Vec<LineMap> = (0..4).map(|l| remap.map_line(Side::New, l)).collect();
+        assert_eq!(
+            lines,
+            [
+                LineMap::Kept(1),
+                LineMap::Replaced { at: 2 },
+                LineMap::Kept(3),
+                LineMap::Kept(4)
+            ]
+        );
+        let ranges = [0..1, 1..3, 2..4, 1..1].map(|r| remap.map_range(Side::New, r));
+        assert_eq!(ranges, [Some(1..2), None, Some(3..5), Some(2..2)]);
+    }
+
+    #[test]
+    fn patch_only_snapshots_cannot_be_remapped() {
+        let full = diff_texts(Some("f"), Some("f"), Some("a\n"), Some("b\n"), 3);
+        let patch = parse_unified(&write_unified(&full)).unwrap();
+        let from = FileDiffSnapshot::new(FileId(1), Revision(1), Arc::new(patch)).unwrap();
+        let to = snapshot(2, "c\n");
+        assert_eq!(SourceRemap::between(&from, &to), Err(RemapError::PatchOnly));
+    }
+
+    fn text() -> impl Strategy<Value = String> {
+        let line = prop::sample::select(vec!["a", "b", "c", "}", ""]);
+        prop::collection::vec(line, 0..20).prop_map(|lines| lines.join("\n"))
+    }
+
+    proptest! {
+        #[test]
+        fn kept_lines_map_to_equal_lines_in_order(from in text(), to in text()) {
+            let (a, b) = (snapshot(1, &from), snapshot(2, &to));
+            let remap = SourceRemap::between(&a, &b).unwrap();
+            let (old, new) = (a.diff.text(0, Side::New), b.diff.text(0, Side::New));
+            let mut last = None;
+            for line in 0..old.line_count() {
+                if let LineMap::Kept(at) = remap.map_line(Side::New, line) {
+                    prop_assert_eq!(old.line(line), new.line(at));
+                    prop_assert!(last.is_none_or(|l| l < at));
+                    last = Some(at);
+                }
+            }
+        }
+    }
+}
