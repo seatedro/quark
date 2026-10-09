@@ -1,0 +1,128 @@
+[package]
+name = "quark-webview"
+description = "Native webviews for Quark apps: modal sign-in windows with origin-bound script evaluation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/quark-webview"
+keywords = ["gui", "webview", "desktop"]
+categories = ["gui"]
+
+[dependencies]
+raw-window-handle.workspace = true
+serde.workspace = true
+serde_json = "1.0"
+thiserror.workspace = true
+url = "2.5"
+
+# WebKitGTK through wry's GTK host. No `tracing`: evaluated sources and
+# results may hold credentials. The wayland crates export the parent from
+# winit's connection for xdg-foreign; all are already in the tree through
+# winit at these versions.
+[target.'cfg(target_os = "linux")'.dependencies]
+wry = { version = "=0.57.0", default-features = false, features = ["os-webview", "x11"], optional = true }
+gtk = { version = "0.18", optional = true }
+glib = { version = "0.18", optional = true }
+gio = { version = "0.18", optional = true }
+gdkx11 = { version = "0.18", optional = true }
+webkit2gtk = { version = "2.0.2", features = ["v2_40"], optional = true }
+javascriptcore-rs = { version = "1.1", optional = true }
+libc = { version = "0.2", optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-backend = { version = "0.3", features = ["client_system"], optional = true }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"], optional = true }
+
+# WKWebView through wry, patched with navigation hooks (vendor/wry).
+[target.'cfg(target_os = "macos")'.dependencies]
+wry = { version = "=0.57.0", default-features = false, optional = true }
+objc2 = { version = "0.6", optional = true }
+block2 = { version = "0.6", optional = true }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"], optional = true }
+objc2-foundation = { version = "0.3", optional = true, features = [
+  "NSArray",
+  "NSDate",
+  "NSDictionary",
+  "NSError",
+  "NSGeometry",
+  "NSNull",
+  "NSSet",
+  "NSString",
+  "NSURL",
+  "NSURLAuthenticationChallenge",
+  "NSURLCredential",
+  "NSURLProtectionSpace",
+  "NSURLRequest",
+  "NSURLResponse",
+  "NSURLSession",
+  "NSUUID",
+  "NSValue",
+] }
+objc2-app-kit = { version = "0.3", optional = true, features = [
+  "NSAppearance",
+  "NSApplication",
+  "NSButton",
+  "NSColor",
+  "NSControl",
+  "NSEvent",
+  "NSGraphics",
+  "NSLayoutConstraint",
+  "NSResponder",
+  "NSScreen",
+  "NSText",
+  "NSView",
+  "NSWindow",
+] }
+objc2-web-kit = { version = "0.3", optional = true, features = [
+  "std",
+  "block2",
+  "objc2-app-kit",
+  "objc2-core-foundation",
+  "WKContentWorld",
+  "WKFrameInfo",
+  "WKHTTPCookieStore",
+  "WKNavigation",
+  "WKNavigationAction",
+  "WKNavigationDelegate",
+  "WKNavigationResponse",
+  "WKPreferences",
+  "WKSecurityOrigin",
+  "WKUIDelegate",
+  "WKUserContentController",
+  "WKWebView",
+  "WKWebViewConfiguration",
+  "WKWebpagePreferences",
+  "WKWebsiteDataRecord",
+  "WKWebsiteDataStore",
+  "WKWindowFeatures",
+] }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[features]
+# The platform engines: WebKitGTK on Linux, WKWebView on macOS, WebView2 on
+# Windows. Without it every open fails with `OpenError::Unsupported`, and the
+# policy and session logic builds with no system libraries.
+native = [
+  "dep:wry",
+  "dep:gtk",
+  "dep:glib",
+  "dep:gio",
+  "dep:gdkx11",
+  "dep:webkit2gtk",
+  "dep:javascriptcore-rs",
+  "dep:libc",
+  "dep:wayland-client",
+  "dep:wayland-backend",
+  "dep:wayland-protocols",
+  "dep:objc2",
+  "dep:block2",
+  "dep:objc2-core-foundation",
+  "dep:objc2-foundation",
+  "dep:objc2-app-kit",
+  "dep:objc2-web-kit",
+]
+# `testing::trust_leaf`: trust one fixture certificate for exact loopback
+# hosts. For the webview smoke tests only; never enable it in an app.
+test-trust = []

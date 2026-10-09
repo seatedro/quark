@@ -62,6 +62,9 @@ pub(super) struct WindowState {
     pub(super) surface_alpha: bool,
     pub(super) surface: SurfaceState,
     pub(super) native: crate::platform::material::NativeMaterial,
+    /// What the window's IME was last set to, so a modal webview opening
+    /// over it can drop a composition without turning IME on.
+    pub(super) ime_allowed: bool,
 }
 
 impl WindowState {

@@ -69,6 +69,8 @@ struct Runner<A> {
     #[cfg(feature = "tray")]
     tray: Option<tray_icon::TrayIcon>,
     platform: PlatformState,
+    #[cfg(feature = "webview")]
+    webviews: WebViewRunner,
     flags: Flags,
     launch_at: Instant,
     startup_failure: Option<RunError>,
@@ -88,6 +90,8 @@ impl<A: App> Runner<A> {
         let (accessibility_action_sender, accessibility_actions) = mpsc::channel();
         let text = AppText::new(&options.fonts);
         let (events, app_events) = EventSink::new(waker.clone());
+        #[cfg(feature = "webview")]
+        let webviews = WebViewRunner::new(&waker);
         Self {
             app,
             first_window: Some(options),
@@ -106,6 +110,8 @@ impl<A: App> Runner<A> {
             #[cfg(feature = "tray")]
             tray: None,
             platform: PlatformState::default(),
+            #[cfg(feature = "webview")]
+            webviews,
             flags: Flags::default(),
             launch_at: Instant::now(),
             startup_failure: None,
@@ -192,6 +198,7 @@ impl<A: App> Runner<A> {
             surface_alpha,
             surface,
             native: Default::default(),
+            ime_allowed: false,
         };
         // Before the window shows, so it never flashes the wrong background.
         state.apply_surface();
@@ -266,6 +273,8 @@ impl<A: App> Runner<A> {
             #[cfg(feature = "tray")]
             tray: &mut self.tray,
             platform: &mut self.platform,
+            #[cfg(feature = "webview")]
+            webviews: &mut self.webviews,
         };
         f(&mut self.app, &mut cx);
     }
@@ -294,6 +303,9 @@ impl<A: App> Runner<A> {
             let (handle, reason) = self.flags.close.remove(0);
             self.close(handle, reason);
         }
+        // Webviews opened, closed, or evaluated in the callbacks above.
+        #[cfg(feature = "webview")]
+        self.webviews.flush();
 
         if self.started && self.windows.is_empty() && !self.flags.keep_running_without_windows {
             event_loop.exit();
@@ -311,6 +323,13 @@ impl<A: App> Runner<A> {
         }
         if self.focused == Some(handle) {
             self.focused = None;
+        }
+        // Its modal goes first, while the parent's native window exists.
+        #[cfg(feature = "webview")]
+        for (_, event) in self.webviews.close_children(handle) {
+            self.call_app(Some(handle), |app, cx| {
+                app.app_event(AppEvent::WebView(event), cx)
+            });
         }
         let window = self.default_window_except(handle);
         self.call_app(window, |app, cx| {
@@ -368,6 +387,7 @@ impl<A: App> Runner<A> {
     }
 
     fn redraw(&mut self, handle: WindowHandle) {
+        let blocked = self.blocked(handle);
         let Some(state) = self.windows.get_mut(handle).and_then(WindowEntry::open_mut) else {
             return;
         };
@@ -407,11 +427,15 @@ impl<A: App> Runner<A> {
             let shown = shown_material_regions(&state.surface, &regions);
             state.native.set_regions(&state.window, shown);
         }
-        if ime.reset {
+        if ime.reset && !blocked {
             state.window.set_ime_allowed(false);
         }
         if let Some(allowed) = ime.allowed.or(ime.reset.then_some(true)) {
-            state.window.set_ime_allowed(allowed);
+            // Behind a modal IME stays off; the modal's close restores it.
+            if !blocked {
+                state.window.set_ime_allowed(allowed);
+            }
+            state.ime_allowed = allowed;
         }
         if let Some((x, y, width, height)) = ime.cursor_area {
             state.window.set_ime_cursor_area(
@@ -474,6 +498,10 @@ impl<A: App> Runner<A> {
             let Some(handle) = self.handle_for(id) else {
                 continue;
             };
+            // Assistive tech cannot act on a parent behind a modal.
+            if self.blocked(handle) {
+                continue;
+            }
             self.with_event_cx(event_loop, Some(handle), |app, cx| {
                 app.accessibility_action(request, cx)
             });
@@ -558,6 +586,9 @@ impl<A: App> Runner<A> {
         let Some(handle) = self.default_window() else {
             return;
         };
+        if self.blocked(handle) {
+            return;
+        }
         if let Some((key, shift)) = role.edit_key() {
             let chord = platform::edit_chord(key, shift);
             self.with_event_cx(event_loop, Some(handle), |app, cx| {
@@ -604,12 +635,59 @@ impl<A: App> Runner<A> {
                 continue;
             }
             let window = self.default_window();
+            // Menu accelerators do not reach a parent behind a modal.
+            if matches!(event, AppEvent::Menu(_))
+                && window.is_some_and(|window| self.blocked(window))
+            {
+                continue;
+            }
             self.with_event_cx(event_loop, window, |app, cx| app.app_event(event, cx));
         }
     }
 }
 
 impl<A: App> Runner<A> {
+    /// Whether a modal webview blocks `window`'s input.
+    fn blocked(&self, window: WindowHandle) -> bool {
+        #[cfg(feature = "webview")]
+        return self.webviews.blocks(window);
+        #[cfg(not(feature = "webview"))]
+        {
+            let _ = window;
+            false
+        }
+    }
+
+    /// Pump the webview engine and hand its events to the app.
+    #[cfg(feature = "webview")]
+    fn process_webviews(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.started {
+            return;
+        }
+        let events = self.webviews.service(self.launch_at.elapsed());
+        for (parent, event) in events {
+            let parent = parent
+                .filter(|&parent| self.windows.get(parent).is_some_and(|e| e.open().is_some()));
+            if let Some(state) = parent.and_then(|parent| self.windows.get(parent)?.open()) {
+                match &event {
+                    // Drop the parent's composition; its keys are blocked
+                    // until the modal closes.
+                    quark_webview::WebViewEvent::Opened { .. } => {
+                        state.window.set_ime_allowed(false);
+                    }
+                    quark_webview::WebViewEvent::Closed { .. } => {
+                        state.window.set_ime_allowed(state.ime_allowed);
+                    }
+                    _ => {}
+                }
+            }
+            let window = parent.or_else(|| self.default_window());
+            self.with_event_cx(event_loop, window, |app, cx| {
+                app.app_event(AppEvent::WebView(event), cx)
+            });
+        }
+    }
+
     /// Rescan the installed fonts after the platform reported a change; a
     /// new font epoch lays every window's text out again.
     fn reload_fonts(&mut self) {
@@ -636,6 +714,8 @@ impl<A: App> ApplicationHandler for Runner<A> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: ()) {
         self.process_accessibility_actions(event_loop);
         self.process_app_events(event_loop);
+        #[cfg(feature = "webview")]
+        self.process_webviews(event_loop);
         if crate::platform::material::take_accessibility_change() {
             self.refresh_surfaces(event_loop);
         }
@@ -758,7 +838,23 @@ impl<A: App> ApplicationHandler for Runner<A> {
                         self.flags.redraw_all = true;
                     }
                 }
-                let events = state.input.normalize(event);
+                let mut events = state.input.normalize(event);
+                if self.blocked(handle) {
+                    // The modal lock: redraws, resizes, and app messages go
+                    // on; pointer, key, IME, and drop input do not.
+                    events.retain(|event| {
+                        matches!(
+                            event,
+                            InputEvent::Focused(_)
+                                | InputEvent::ModifiersChanged(_)
+                                | InputEvent::PointerLeft
+                        )
+                    });
+                    #[cfg(feature = "webview")]
+                    if events.contains(&InputEvent::Focused(true)) {
+                        self.webviews.focus_modal(handle);
+                    }
+                }
                 if surface_changed {
                     let event = AppEvent::WindowSurfaceChanged(handle);
                     self.with_event_cx(event_loop, Some(handle), |app, cx| {
@@ -773,6 +869,17 @@ impl<A: App> ApplicationHandler for Runner<A> {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Webviews close before their parents, and pending evaluations
+        // fail as exiting.
+        #[cfg(feature = "webview")]
+        for (parent, event) in self.webviews.shutdown() {
+            if self.started {
+                let window = parent.or_else(|| self.default_window());
+                self.call_app(window, |app, cx| {
+                    app.app_event(AppEvent::WebView(event), cx)
+                });
+            }
+        }
         // Windows still open close for the quit, each told while its
         // placement is readable. No window changes apply from here on, so
         // windows these callbacks open are never created.
@@ -801,6 +908,8 @@ impl<A: App> ApplicationHandler for Runner<A> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.process_accessibility_actions(event_loop);
         self.process_app_events(event_loop);
+        #[cfg(feature = "webview")]
+        self.process_webviews(event_loop);
 
         #[cfg(feature = "hot-reload")]
         if let Some(pending) = &self.hot_reload_pending
@@ -844,6 +953,12 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 Err(Some(at)) => wake_at = Some(wake_at.map_or(at, |wake| wake.min(at))),
                 Err(None) => {}
             }
+        }
+        // GLib servicing and evaluation timeouts.
+        #[cfg(feature = "webview")]
+        if let Some(due) = self.webviews.next_deadline(now - self.launch_at) {
+            let at = self.launch_at + due;
+            wake_at = Some(wake_at.map_or(at, |wake| wake.min(at)));
         }
         event_loop.set_control_flow(match wake_at {
             Some(at) => ControlFlow::WaitUntil(at),
