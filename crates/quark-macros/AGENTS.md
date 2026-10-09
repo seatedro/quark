@@ -54,6 +54,8 @@ the `quark` crate and quark-ui's element builders must provide.
   the frame budget tests count allocations.
 - `<name(args)>` (lowercase, with arguments) calls the function `name` in
   scope and lowers like a builder component.
+- `let pat = expr;` among children lowers to the same `let` statement in
+  the children's statement list, so it scopes over the later siblings.
 - Reactive attributes use `name={@signal}` and lower to `cx.read(signal)`.
 - Every element lowers to its builder chain plus `.into_any()`, except the
   root of `view! { -> Type, .. }`, which stays the builder (ascribed to

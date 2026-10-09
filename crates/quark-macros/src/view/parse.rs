@@ -52,6 +52,15 @@ impl Parse for Node {
         if input.peek(Token![match]) {
             return Ok(Node::Match(input.parse()?));
         }
+        if input.peek(Token![let]) {
+            return match input.parse::<syn::Stmt>()? {
+                syn::Stmt::Local(local) => Ok(Node::Let(Box::new(local))),
+                other => Err(syn::Error::new_spanned(
+                    other,
+                    "expected `let pattern = value;`",
+                )),
+            };
+        }
         if input.peek(syn::token::Brace) {
             let content;
             braced!(content in input);

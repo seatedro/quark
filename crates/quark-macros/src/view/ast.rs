@@ -28,6 +28,9 @@ pub(crate) enum Node {
     If(IfNode),
     For(Box<ForNode>),
     Match(MatchNode),
+    /// `let pat = expr;` among children: binds names for the siblings
+    /// after it, in the same children list or branch.
+    Let(Box<syn::Local>),
 }
 
 pub(crate) struct IfNode {

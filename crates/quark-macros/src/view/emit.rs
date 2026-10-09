@@ -232,6 +232,14 @@ impl Emit {
             Node::If(chain) => self.if_chain(chain),
             Node::For(fl) => Mode::Spread(self.for_loop(fl)),
             Node::Match(m) => self.match_node(m),
+            Node::Let(local) => {
+                self.error(
+                    local.let_token.span,
+                    "a `let` binds names for the children after it, so it goes in a list of \
+                     children, before them",
+                );
+                Mode::Spread(quote!(::std::vec::Vec::<AnyElement>::new()))
+            }
         }
     }
 
@@ -380,6 +388,9 @@ impl Emit {
                 };
                 quote!(for #pat in #iter { #body })
             }
+            // A `let` scopes over the statements after it: the rest of
+            // this children list or branch.
+            Node::Let(local) => quote!(#local),
             // Text stays text for a props component's children (see
             // `prop_children_vec`).
             Node::Text(lit) if sink == Sink::Props => {
@@ -406,7 +417,7 @@ impl Emit {
         let singles: Vec<Option<Mode>> = bodies
             .iter()
             .map(|body| match body {
-                [only] => match self.node(only) {
+                [only] if !matches!(only, Node::Let(_)) => match self.node(only) {
                     Mode::Spread(_) => None,
                     mode => Some(mode),
                 },
@@ -1243,7 +1254,7 @@ fn method_ident(segments: &[Ident], span: Span) -> Ident {
 /// Children that `append_children` lowers to statements.
 fn is_control_flow(node: &Node) -> bool {
     match node {
-        Node::If(_) | Node::For(_) | Node::Match(_) | Node::Fragment(_) => true,
+        Node::If(_) | Node::For(_) | Node::Match(_) | Node::Fragment(_) | Node::Let(_) => true,
         Node::Element(el) => is_fragment_tag(el),
         _ => false,
     }
@@ -1262,5 +1273,6 @@ fn node_span(node: &Node) -> Span {
         Node::If(chain) => chain.cond.span(),
         Node::For(fl) => fl.iter.span(),
         Node::Match(m) => m.match_token.span,
+        Node::Let(local) => local.let_token.span,
     }
 }
