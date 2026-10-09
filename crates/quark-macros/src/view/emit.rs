@@ -232,6 +232,14 @@ impl Emit {
             Node::If(chain) => self.if_chain(chain),
             Node::For(fl) => Mode::Spread(self.for_loop(fl)),
             Node::Match(m) => self.match_node(m),
+            Node::Let(local) => {
+                self.error(
+                    local.let_token.span,
+                    "a `let` binds names for the children after it, so it goes in a list of \
+                     children, before them",
+                );
+                Mode::Spread(quote!(::std::vec::Vec::<AnyElement>::new()))
+            }
         }
     }
 
@@ -380,6 +388,9 @@ impl Emit {
                 };
                 quote!(for #pat in #iter { #body })
             }
+            // A `let` scopes over the statements after it: the rest of
+            // this children list or branch.
+            Node::Let(local) => quote!(#local),
             // Text stays text for a props component's children (see
             // `prop_children_vec`).
             Node::Text(lit) if sink == Sink::Props => {
@@ -406,7 +417,7 @@ impl Emit {
         let singles: Vec<Option<Mode>> = bodies
             .iter()
             .map(|body| match body {
-                [only] => match self.node(only) {
+                [only] if !matches!(only, Node::Let(_)) => match self.node(only) {
                     Mode::Spread(_) => None,
                     mode => Some(mode),
                 },
@@ -537,6 +548,37 @@ impl Emit {
     // -----------------------------------------------------------------------
 
     fn element(&self, el: &Element, key: Option<&(Ident, Expr)>) -> Mode {
+        if is_fragment_tag(el) {
+            self.reject_attrs(el, "a fragment takes no attributes");
+            return Mode::Spread(self.children_vec(&el.children));
+        }
+        let chain = self.builder(el, key);
+        Mode::Child(quote!(#chain.into_any()))
+    }
+
+    /// `view! { -> Type, <root/> }`: the root element's builder, not
+    /// erased to `AnyElement`, so a helper can return a `Div` (or any
+    /// builder) for its callers to keep styling.
+    pub fn typed_root(&self, node: &Node, ty: &syn::Type) -> TokenStream2 {
+        match node {
+            Node::Element(el) if !is_fragment_tag(el) => {
+                let chain = self.builder(el, None);
+                let root = Ident::new("__quark_root", Span::call_site());
+                quote_spanned!(ty.span()=> { let #root: #ty = #chain; #root })
+            }
+            other => {
+                self.error(
+                    node_span(other),
+                    "`view! { -> Type, .. }` returns the root element's builder, so the root \
+                     must be one element; fragments, control flow, and `{expr}` have none",
+                );
+                quote!(())
+            }
+        }
+    }
+
+    /// One element's builder chain, before `.into_any()`.
+    fn builder(&self, el: &Element, key: Option<&(Ident, Expr)>) -> TokenStream2 {
         let key_call = key.map(|(name, expr)| {
             let m = Ident::new("key", name.span());
             quote!(.#m(#expr))
@@ -545,26 +587,22 @@ impl Emit {
             Tag::Builtin(name) => {
                 let tag = name.to_string();
                 match tag.as_str() {
-                    "div" => Mode::Child(self.div(el, key_call)),
-                    "text" => Mode::Child(self.text(el)),
-                    "p" => Mode::Child(self.rich_text(el)),
-                    "icon" => Mode::Child(self.icon(el)),
+                    "div" => self.div(el, key_call),
+                    "text" => self.text(el),
+                    "p" => self.rich_text(el),
+                    "icon" => self.icon(el),
                     "spacer" => {
                         self.reject_attrs(el, "<spacer> takes no attributes");
                         self.reject_children(el, "<spacer> takes no children");
                         let f = Ident::new("spacer", el.span);
-                        Mode::Child(quote!(#f().into_any()))
-                    }
-                    "fragment" => {
-                        self.reject_attrs(el, "a fragment takes no attributes");
-                        Mode::Spread(self.children_vec(&el.children))
+                        quote!(#f())
                     }
                     t if INLINE_TAGS.contains(&t) => {
                         self.error(
                             el.span,
                             format!("<{t}> is inline rich text; put it inside <p>...</p>"),
                         );
-                        Mode::Child(quote!(""))
+                        quote!("")
                     }
                     t => {
                         let hint = closest(t, BUILTIN_TAGS.iter().copied())
@@ -578,19 +616,19 @@ impl Emit {
                                 BUILTIN_TAGS.join(", ")
                             ),
                         );
-                        Mode::Child(quote!(""))
+                        quote!("")
                     }
                 }
             }
-            Tag::Component(path) => Mode::Child(self.component(Some(path), el, key_call)),
-            Tag::Function(path) => Mode::Child(self.function(path, el, key_call)),
-            Tag::Value(_) => Mode::Child(self.component(None, el, key_call)),
+            Tag::Component(path) => self.component(Some(path), el, key_call),
+            Tag::Function(path) => self.function(path, el, key_call),
+            Tag::Value(_) => self.component(None, el, key_call),
             Tag::Slot(name) => {
                 self.error(
                     name.span(),
                     format!("slot <.{name}> must be a direct child of a component"),
                 );
-                Mode::Child(quote!(""))
+                quote!("")
             }
         }
     }
@@ -611,8 +649,7 @@ impl Emit {
         let f = Ident::new("div", el.span);
         let mut chain = self.attrs(quote!(#f()), &el.attrs, Target::Div);
         chain.extend(key_call);
-        let chain = self.append_children(chain, &el.children);
-        quote!(#chain.into_any())
+        self.append_children(chain, &el.children)
     }
 
     /// `<text>`: plain label text. Literal and `{expr}` children join into
@@ -655,8 +692,7 @@ impl Emit {
             }
         };
         let f = Ident::new("text", el.span);
-        let chain = self.attrs(quote!(#f(#content)), &el.attrs, Target::Text);
-        quote!(#chain.into_any())
+        self.attrs(quote!(#f(#content)), &el.attrs, Target::Text)
     }
 
     /// `<p>`: selectable rich text. Inline tags style runs of it.
@@ -664,7 +700,7 @@ impl Emit {
         let mut spans = Vec::new();
         self.spans(&el.children, &TokenStream2::new(), &mut spans);
         let f = Ident::new("selectable_rich_text", el.span);
-        let chain = self.attrs(
+        self.attrs(
             quote! {
                 #f({
                     let mut __quark_spans = ::std::vec::Vec::new();
@@ -674,8 +710,7 @@ impl Emit {
             },
             &el.attrs,
             Target::Rich,
-        );
-        quote!(#chain.into_any())
+        )
     }
 
     /// Statements pushing `StyledSpan`s for `children`, each with `style`
@@ -798,7 +833,7 @@ impl Emit {
         for attr in rest {
             chain = self.attr(chain, attr, Target::Icon);
         }
-        quote!(#chain.into_any())
+        chain
     }
 
     /// `<Name>`, `<Name(args)>`, `<name(args)>`, and `<{expr}>` (no path).
@@ -865,10 +900,9 @@ impl Emit {
                 chain = quote!(#chain.#m(#vec));
             }
             let build = Ident::new("build", el.span);
-            quote!(#chain.#build().into_any())
+            quote!(#chain.#build())
         } else {
-            let chain = self.append_children(chain, rest);
-            quote!(#chain.into_any())
+            self.append_children(chain, rest)
         }
     }
 
@@ -1220,7 +1254,7 @@ fn method_ident(segments: &[Ident], span: Span) -> Ident {
 /// Children that `append_children` lowers to statements.
 fn is_control_flow(node: &Node) -> bool {
     match node {
-        Node::If(_) | Node::For(_) | Node::Match(_) | Node::Fragment(_) => true,
+        Node::If(_) | Node::For(_) | Node::Match(_) | Node::Fragment(_) | Node::Let(_) => true,
         Node::Element(el) => is_fragment_tag(el),
         _ => false,
     }
@@ -1239,5 +1273,6 @@ fn node_span(node: &Node) -> Span {
         Node::If(chain) => chain.cond.span(),
         Node::For(fl) => fl.iter.span(),
         Node::Match(m) => m.match_token.span,
+        Node::Let(local) => local.let_token.span,
     }
 }

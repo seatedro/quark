@@ -7,6 +7,9 @@ use syn::{Expr, ExprIf, Ident, LitStr, Pat, Token};
 
 pub(crate) struct ViewInput {
     pub scale: Option<Ident>,
+    /// `view! { -> Type, <root/> }`: the root builder itself, ascribed to
+    /// `Type`, instead of an `AnyElement`.
+    pub typed: Option<syn::Type>,
     pub root: Node,
 }
 
@@ -25,6 +28,9 @@ pub(crate) enum Node {
     If(IfNode),
     For(Box<ForNode>),
     Match(MatchNode),
+    /// `let pat = expr;` among children: binds names for the siblings
+    /// after it, in the same children list or branch.
+    Let(Box<syn::Local>),
 }
 
 pub(crate) struct IfNode {

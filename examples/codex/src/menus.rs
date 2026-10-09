@@ -5,7 +5,7 @@
 //! its trigger's frame from the last frame's geometry, below it when it
 //! fits and above it otherwise.
 
-use quark::Rect;
+use quark::{Rect, view};
 use quark_app::ViewContext;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -16,6 +16,8 @@ use crate::widgets::*;
 use crate::{APPROVALS, Codex, EFFORTS, MODEL, Menu, Msg, SCOPES, Tab, composer, data, icons};
 
 /// A menu under construction: rows and the height they add up to.
+// view!: placement needs the menu's height before it is drawn, so rows
+// are pushed here with their heights; each row's markup is built by view!.
 struct M<'a> {
     p: &'a Pal,
     w: f32,
@@ -64,10 +66,15 @@ impl<'a> M<'a> {
         self
     }
 
-    fn at(self, (x, y): (f32, f32)) -> Div {
-        menu_panel(self.p, x, y, self.w)
-            .h(self.h)
-            .children(self.rows)
+    /// The menu at `(x, y)`, for callers that restyle the panel.
+    fn panel(self, (x, y): (f32, f32)) -> Div {
+        view! { -> Div,
+            <menu_panel(self.p, x, y, self.w) h={self.h}>{...self.rows}</menu_panel>
+        }
+    }
+
+    fn at(self, at: (f32, f32)) -> AnyElement {
+        self.panel(at).into_any()
     }
 }
 
@@ -141,36 +148,31 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
             let w = 419.0;
             let mut m = M::new(p, w, hi);
             m.custom(
-                hrow()
-                    .h(28.0)
-                    .px(8.0)
-                    .child(txt(
-                        "How should ChatGPT actions be approved?",
-                        SMALL,
-                        p.menu_header,
-                    ))
-                    .child(div().flex_1())
-                    .child(txt("Learn more", SMALL, p.menu_desc)),
+                view! {
+                    <div class="flex-row items-center h-7 px-2">
+                        <txt("How should ChatGPT actions be approved?", SMALL, p.menu_header) />
+                        <div class="flex-1" />
+                        <txt("Learn more", SMALL, p.menu_desc) />
+                    </div>
+                },
                 28.0,
             );
             for (i, (title, desc, icon)) in APPROVALS.iter().enumerate() {
-                let row = menu_item(
-                    p,
-                    Item {
-                        icon: Some(icon),
-                        title,
-                        desc: Some(desc),
-                        desc_below: true,
-                        check: app.approval == i,
-                        hi: hi == Some(i),
-                        // Full access reads in orange.
-                        tint: (i == 2).then_some(p.orange),
-                        ..Item::default()
-                    },
-                    Msg::Approval(i),
-                )
-                .h(43.0);
-                m.custom(row, 43.0);
+                let item = Item {
+                    icon: Some(icon),
+                    title,
+                    desc: Some(desc),
+                    desc_below: true,
+                    check: app.approval == i,
+                    hi: hi == Some(i),
+                    // Full access reads in orange.
+                    tint: (i == 2).then_some(p.orange),
+                    ..Item::default()
+                };
+                m.custom(
+                    view! { <menu_item(p, item, Msg::Approval(i)) class="h-[43]" /> },
+                    43.0,
+                );
             }
             let h = m.h;
             m.at(place(r, w, h, Align::Left, win))
@@ -179,73 +181,39 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
             let r = anchor(vcx, "pill.model")?;
             let w = 256.0;
             let h = 98.0;
-            let stops = EFFORTS.len();
-            let mut slider = hrow()
-                .w(w - 24.0)
-                .h(26.0)
-                .rounded(13.0)
-                .bg(p.menu_hi)
-                .px(2.0)
-                .justify_between()
-                .relative();
-            for (i, effort) in EFFORTS.iter().enumerate().take(stops) {
-                let knob = i == app.effort;
-                slider = slider.child(
-                    div()
-                        .w(24.0)
-                        .h(24.0)
-                        .items_center()
-                        .justify_center()
-                        .accessibility_role(accesskit::Role::RadioButton)
-                        .accessibility_label(*effort)
-                        .accessibility_selected(knob)
-                        .on_click(Msg::Effort(i))
-                        .child(if knob {
-                            div()
-                                .w(24.0)
-                                .h(24.0)
-                                .rounded(12.0)
-                                .bg(Color::rgba(255, 255, 255, 255))
-                        } else {
-                            div().w(4.0).h(4.0).rounded(2.0).bg(p.muted)
-                        }),
-                );
-            }
             let (x, y) = place(r, w, h, Align::Right, win);
-            menu_panel(p, x + 54.0, y, w)
-                .h(h)
-                .rounded(12.0)
-                .px(12.0)
-                .pt(8.0)
-                .child(
-                    hrow()
-                        .w(w - 24.0)
-                        .h(40.0)
-                        .child(ico(icons::BOLT, 15.0, p.muted))
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex_col()
-                                .items_center()
-                                .child(
-                                    text(EFFORTS[app.effort])
-                                        .size(BODY)
-                                        .medium()
-                                        .color(p.accent)
-                                        .no_wrap(),
-                                )
-                                .child(
-                                    hrow().gap(2.0).child(txt(MODEL, 12.0, p.muted)).child(ico(
-                                        icons::CHEVRON_RIGHT,
-                                        10.0,
-                                        p.muted,
-                                    )),
-                                ),
-                        )
-                        .child(ico(icons::ROTATE, 14.0, p.muted)),
-                )
-                .child(div().h(8.0))
-                .child(slider)
+            view! {
+                <menu_panel(p, x + 54.0, y, w) h={h} class="rounded-[12] px-3 pt-2">
+                    <div class="flex-row items-center h-10" w={w - 24.0}>
+                        <icon svg={icons::BOLT} size={15.0} color={p.muted} />
+                        <div class="flex-1 flex-col items-center">
+                            <text size={BODY} color={p.accent} class="font-medium whitespace-nowrap">
+                                {EFFORTS[app.effort]}
+                            </text>
+                            <div class="flex-row items-center gap-0.5">
+                                <txt(MODEL, 12.0, p.muted) />
+                                <icon svg={icons::CHEVRON_RIGHT} size={10.0} color={p.muted} />
+                            </div>
+                        </div>
+                        <icon svg={icons::ROTATE} size={14.0} color={p.muted} />
+                    </div>
+                    <div class="h-2" />
+                    <div class="flex-row items-center h-[26] rounded-[13] px-0.5 justify-between relative"
+                         w={w - 24.0} bg={p.menu_hi}>
+                        for (i, effort) in EFFORTS.iter().enumerate() {
+                            let knob = i == app.effort;
+                            <div class="w-6 h-6 items-center justify-center" role="radio"
+                                 aria-label={*effort} aria-selected={knob} on:click={Msg::Effort(i)}>
+                                if knob {
+                                    <div class="w-6 h-6 rounded-[12] bg-white" />
+                                } else {
+                                    <div class="w-1 h-1 rounded-[2]" bg={p.muted} />
+                                }
+                            </div>
+                        }
+                    </div>
+                </menu_panel>
+            }
         }
         Menu::Add => {
             let r = anchor(vcx, composer::CARD_ID)?;
@@ -276,32 +244,24 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
             );
             m.h += 14.0;
             let h = m.h;
-            m.at(place(r, w, h, Align::Left, win)).py(6.0).rounded(12.0)
+            view! { <{m.panel(place(r, w, h, Align::Left, win))} class="py-1.5 rounded-[12]" /> }
         }
         Menu::Profile => {
             let w = 228.0;
             let mut m = M::new(p, w, hi);
             m.custom(
-                hrow()
-                    .h(40.0)
-                    .px(8.0)
-                    .gap(10.0)
-                    .child(
-                        div()
-                            .w(18.0)
-                            .h(18.0)
-                            .rounded(9.0)
-                            .bg(p.avatar)
-                            .items_center()
-                            .justify_center()
-                            .child(txt("SE", 7.0, Color::rgba(255, 255, 255, 255))),
-                    )
-                    .child(
-                        div()
-                            .flex_col()
-                            .child(txt(data::ACCOUNT_NAME, BODY, p.menu_title))
-                            .child(txt(data::ACCOUNT_PLAN, SMALL, p.menu_desc)),
-                    ),
+                view! {
+                    <div class="flex-row items-center h-10 px-2 gap-[10]">
+                        <div class="w-[18] h-[18] rounded-[9] items-center justify-center"
+                             bg={p.avatar}>
+                            <txt("SE", 7.0, Color::rgba(255, 255, 255, 255)) />
+                        </div>
+                        <div class="flex-col">
+                            <txt(data::ACCOUNT_NAME, BODY, p.menu_title) />
+                            <txt(data::ACCOUNT_PLAN, SMALL, p.menu_desc) />
+                        </div>
+                    </div>
+                },
                 40.0,
             );
             m.sep();
@@ -321,7 +281,7 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
                 },
             );
             let h = m.h;
-            m.at((49.0, win.1 - 6.0 - h)).rounded(12.0)
+            view! { <{m.panel((49.0, win.1 - 6.0 - h))} class="rounded-[12]" /> }
         }
         Menu::ChatActions => {
             let r = anchor(vcx, "header.actions")?;
@@ -554,77 +514,60 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<AnyElement> {
             m.at(place(r, w, h, Align::Left, win))
         }
     };
-    Some(el.into_any())
+    Some(el)
 }
 
-fn search_row(p: &Pal, placeholder: &str) -> Div {
-    hrow()
-        .h(34.0)
-        .px(9.0)
-        .gap(8.0)
-        .child(ico(icons::SEARCH, 14.0, p.menu_desc))
-        .child(txt(placeholder, BODY, p.menu_desc))
+fn search_row(p: &Pal, placeholder: &str) -> AnyElement {
+    view! {
+        <div class="flex-row items-center h-[34] px-[9] gap-2">
+            <icon svg={icons::SEARCH} size={14.0} color={p.menu_desc} />
+            <txt(placeholder, BODY, p.menu_desc) />
+        </div>
+    }
 }
 
-fn summary(p: &Pal, r: Rect, win: (f32, f32)) -> Div {
+fn summary(p: &Pal, r: Rect, win: (f32, f32)) -> AnyElement {
     let row = |icon: &'static str, label: &str, chevron: bool, dim: bool| {
         let c = if dim { p.menu_desc } else { p.menu_title };
-        let mut d = hrow()
-            .h(30.0)
-            .px(16.0)
-            .gap(10.0)
-            .rounded(6.0)
-            .hover_bg(p.menu_hi)
-            .child(ico(icon, 16.0, c))
-            .child(txt(label, BODY, c));
-        if chevron {
-            d = d.child(ico(icons::CHEVRON_DOWN, 12.0, p.menu_desc));
+        view! { -> Div,
+            <div class="flex-row items-center h-[30] px-4 gap-[10] rounded-[6]" hover_bg={p.menu_hi}>
+                <icon svg={icon} size={16.0} color={c} />
+                <txt(label, BODY, c) />
+                if chevron {
+                    <icon svg={icons::CHEVRON_DOWN} size={12.0} color={p.menu_desc} />
+                }
+            </div>
         }
-        d
     };
     let w = 300.0;
     let h = 286.0;
     let (x, y) = place(r, w, h, Align::Right, win);
-    menu_panel(p, x, y + 4.0, w)
-        .h(h)
-        .rounded(14.0)
-        .py(10.0)
-        .child(
-            hrow()
-                .h(32.0)
-                .px(12.0)
-                .child(txt("Environment", BODY, p.menu_header))
-                .child(div().flex_1())
-                .child(ico(icons::PLUS, 15.0, p.menu_header)),
-        )
-        .child(row(icons::REVIEW, "Changes", false, false).on_click(Msg::OpenTab(Tab::Changes)))
-        .child(row(icons::LAPTOP, "Local", true, false))
-        .child(row(icons::BRANCH, "main", true, false))
-        .child(row(icons::COMMIT, "Commit or push", false, true))
-        .child(row(
-            icons::PR,
-            "Pull request status unavailable",
-            false,
-            true,
-        ))
-        .child(menu_sep(p).px(12.0))
-        .child(
-            hrow()
-                .h(32.0)
-                .px(16.0)
-                .child(txt("Sources", BODY, p.menu_header)),
-        )
-        .child(
-            hrow()
-                .h(28.0)
-                .px(16.0)
-                .child(txt("No sources yet", BODY, p.menu_desc)),
-        )
+    view! {
+        <menu_panel(p, x, y + 4.0, w) h={h} class="rounded-[14] py-[10]">
+            <div class="flex-row items-center h-8 px-3">
+                <txt("Environment", BODY, p.menu_header) />
+                <div class="flex-1" />
+                <icon svg={icons::PLUS} size={15.0} color={p.menu_header} />
+            </div>
+            <row(icons::REVIEW, "Changes", false, false) on:click={Msg::OpenTab(Tab::Changes)} />
+            <row(icons::LAPTOP, "Local", true, false) />
+            <row(icons::BRANCH, "main", true, false) />
+            <row(icons::COMMIT, "Commit or push", false, true) />
+            <row(icons::PR, "Pull request status unavailable", false, true) />
+            <menu_sep(p) class="px-3" />
+            <div class="flex-row items-center h-8 px-4">
+                <txt("Sources", BODY, p.menu_header) />
+            </div>
+            <div class="flex-row items-center h-7 px-4">
+                <txt("No sources yet", BODY, p.menu_desc) />
+            </div>
+        </menu_panel>
+    }
 }
 
 /// The "+" menu (u74) and the `@` menu, which shares its first groups;
 /// it opens above the composer, as wide as it.
-fn add_menu(p: &Pal, r: Rect, _win: (f32, f32), hi: Option<usize>, query: &str) -> Div {
+fn add_menu(p: &Pal, r: Rect, _win: (f32, f32), hi: Option<usize>, query: &str) -> AnyElement {
     let w = r.width;
     let mut m = M::new(p, w, hi.or(Some(0)));
     if query.is_empty() {
@@ -706,10 +649,9 @@ fn add_menu(p: &Pal, r: Rect, _win: (f32, f32), hi: Option<usize>, query: &str) 
     // Taller lists scroll inside a 320-point menu (u74).
     let h = m.h.min(320.0).min(r.y - 50.0).max(80.0);
     let y = r.y - h - 6.0;
-    menu_panel(p, r.x, y, w)
-        .h(h)
-        .overflow_hidden()
-        .children(m.rows)
+    view! {
+        <menu_panel(p, r.x, y, w) h={h} class="overflow-hidden">{...m.rows}</menu_panel>
+    }
 }
 
 /// The slash and `@` lists the draft opens, above the composer and as
@@ -743,20 +685,22 @@ fn composer_suggestions(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> Option<A
             }
             if m.items == 0 {
                 m.custom(
-                    hrow()
-                        .h(29.0)
-                        .px(8.0)
-                        .child(txt("No commands", BODY, p.menu_desc)),
+                    view! {
+                        <div class="flex-row items-center h-[29] px-2">
+                            <txt("No commands", BODY, p.menu_desc) />
+                        </div>
+                    },
                     29.0,
                 );
             }
             let h = m.h.min(320.0).min(r.y - 50.0).max(60.0);
-            menu_panel(p, r.x, r.y - h - 8.0, r.width)
-                .h(h)
-                .overflow_hidden()
-                .children(m.rows)
+            view! {
+                <menu_panel(p, r.x, r.y - h - 8.0, r.width) h={h} class="overflow-hidden">
+                    {...m.rows}
+                </menu_panel>
+            }
         }
         composer::Suggest::At(query) => add_menu(p, r, win, Some(app.composer.hi), &query),
     };
-    Some(el.into_any())
+    Some(el)
 }

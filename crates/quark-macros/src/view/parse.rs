@@ -17,13 +17,21 @@ impl Parse for ViewInput {
         } else {
             None
         };
+        let typed = if input.peek(Token![->]) {
+            input.parse::<Token![->]>()?;
+            let ty: syn::Type = input.parse()?;
+            input.parse::<Token![,]>()?;
+            Some(ty)
+        } else {
+            None
+        };
         let root: Node = input.parse()?;
         if !input.is_empty() {
             return Err(
                 input.error("view! takes one root node; wrap siblings in a fragment: `<>...</>`")
             );
         }
-        Ok(ViewInput { scale, root })
+        Ok(ViewInput { scale, typed, root })
     }
 }
 
@@ -43,6 +51,15 @@ impl Parse for Node {
         }
         if input.peek(Token![match]) {
             return Ok(Node::Match(input.parse()?));
+        }
+        if input.peek(Token![let]) {
+            return match input.parse::<syn::Stmt>()? {
+                syn::Stmt::Local(local) => Ok(Node::Let(Box::new(local))),
+                other => Err(syn::Error::new_spanned(
+                    other,
+                    "expected `let pattern = value;`",
+                )),
+            };
         }
         if input.peek(syn::token::Brace) {
             let content;

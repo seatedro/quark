@@ -2,6 +2,7 @@
 //! shortcuts, then suggested commands; typing filters the chats.
 
 use accesskit::Role;
+use quark::view;
 use quark_app::ViewContext;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -50,106 +51,65 @@ impl State {
 
 pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> AnyElement {
     let Some(state) = &app.palette else {
-        return div().into_any();
+        return view! { <div /> };
     };
     let w = 518.0_f32.min(app.size.0 - 24.0);
     let x = ((app.size.0 - w) / 2.0).round();
-    let input = text_input("Search chats or run a command", "")
-        .placeholder("Search chats or run a command")
-        .focus_target(PALETTE_FOCUS)
-        .focused(vcx.is_focused(PALETTE_FOCUS))
-        .field(&state.field)
-        .bare()
-        .w(w - 28.0)
-        .h(20.0);
-    let mut panel = menu_panel(p, x, 118.0, w)
-        .rounded(14.0)
-        .p(4.0)
-        .z_index(70)
-        .accessibility_role(Role::Dialog)
-        .accessibility_label("Search")
-        .child(hrow().h(40.0).px(10.0).child(input))
-        .child(menu_header(p, "Chats"));
     let matches = state.matches(&app.data);
-    if matches.is_empty() {
-        panel = panel.child(
-            hrow()
-                .h(31.0)
-                .px(8.0)
-                .child(txt("No matches", BODY, p.menu_desc)),
-        );
-    }
-    for (i, t) in matches.iter().enumerate() {
-        let project = t
-            .project
-            .and_then(|id| app.data.project(id))
-            .map_or("", |p| p.name);
-        panel = panel.child(
-            hrow()
-                .h(31.0)
-                .pl(36.0)
-                .pr(8.0)
-                .gap(10.0)
-                .rounded(7.0)
-                .when(i == 0, |d| d.bg(p.menu_hi))
-                .hover_bg(p.menu_hi)
-                .accessibility_role(Role::ListBoxOption)
-                .accessibility_label(t.title.clone())
-                .on_click(Msg::Select(t.id))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(0.0)
-                        .overflow_hidden()
-                        .child(txt(t.title.clone(), BODY, p.menu_title).truncate()),
-                )
-                .child(txt(project, SMALL, p.menu_desc))
-                .child(kbd(p, &format!("⌘{}", i + 1))),
-        );
-    }
-    panel = panel.child(menu_header(p, "Suggested"));
-    for ((label, keys), icon) in
+    let suggested =
         crate::data::SUGGESTED
             .iter()
-            .zip([icons::COMPOSE, icons::FOLDER_OPEN, icons::SETTINGS])
-    {
-        let msg = match *label {
-            "New chat" => Msg::NewChat,
-            "Settings" => Msg::Show(crate::Screen::Settings(crate::settings::Page::General)),
-            _ => Msg::Palette(false),
-        };
-        panel = panel.child(
-            hrow()
-                .h(31.0)
-                .px(8.0)
-                .gap(10.0)
-                .rounded(7.0)
-                .hover_bg(p.menu_hi)
-                .accessibility_role(Role::ListBoxOption)
-                .accessibility_label(label.to_string())
-                .on_click(msg)
-                .child(ico(icon, 16.0, p.menu_title))
-                .child(txt(*label, BODY, p.menu_title))
-                .child(div().flex_1())
-                .child(kbd(p, keys)),
-        );
+            .zip([icons::COMPOSE, icons::FOLDER_OPEN, icons::SETTINGS]);
+    view! {
+        <div class="absolute left-0 top-0 z-65" w={app.size.0} h={app.size.1}>
+            <div class="absolute left-0 top-0" w={app.size.0} h={app.size.1}
+                 on:click={Msg::Palette(false)} />
+            <menu_panel(p, x, 118.0, w) class="rounded-[14] p-1 z-70"
+                        accessibility_role={Role::Dialog} aria-label="Search">
+                <div class="flex-row items-center h-10 px-[10]">
+                    <text_input("Search chats or run a command", "")
+                        placeholder="Search chats or run a command" focus_target={PALETTE_FOCUS}
+                        focused={vcx.is_focused(PALETTE_FOCUS)} field={&state.field} bare
+                        w={w - 28.0} class="h-5" />
+                </div>
+                {menu_header(p, "Chats")}
+                if matches.is_empty() {
+                    <div class="flex-row items-center h-[31] px-2">
+                        <txt("No matches", BODY, p.menu_desc) />
+                    </div>
+                }
+                for (i, t) in matches.iter().enumerate() {
+                    let project = t
+                        .project
+                        .and_then(|id| app.data.project(id))
+                        .map_or("", |p| p.name);
+                    <div class="flex-row items-center h-[31] pl-9 pr-2 gap-[10] rounded-[7]"
+                         bg={if i == 0 { p.menu_hi }} hover_bg={p.menu_hi} role="option"
+                         aria-label={t.title.clone()} on:click={Msg::Select(t.id)}>
+                        <div class="flex-1 min-w-0 overflow-hidden">
+                            <txt(t.title.clone(), BODY, p.menu_title) class="truncate" />
+                        </div>
+                        <txt(project, SMALL, p.menu_desc) />
+                        {kbd(p, &format!("⌘{}", i + 1))}
+                    </div>
+                }
+                {menu_header(p, "Suggested")}
+                for ((label, keys), icon) in suggested {
+                    let msg = match *label {
+                        "New chat" => Msg::NewChat,
+                        "Settings" => Msg::Show(crate::Screen::Settings(crate::settings::Page::General)),
+                        _ => Msg::Palette(false),
+                    };
+                    <div class="flex-row items-center h-[31] px-2 gap-[10] rounded-[7]"
+                         hover_bg={p.menu_hi} role="option" aria-label={label.to_string()}
+                         on:click={msg}>
+                        <icon svg={icon} size={16.0} color={p.menu_title} />
+                        <txt(*label, BODY, p.menu_title) />
+                        <div class="flex-1" />
+                        {kbd(p, keys)}
+                    </div>
+                }
+            </menu_panel>
+        </div>
     }
-    div()
-        .absolute()
-        .left(0.0)
-        .top(0.0)
-        .w(app.size.0)
-        .h(app.size.1)
-        .z_index(65)
-        .child(
-            div()
-                .absolute()
-                .left(0.0)
-                .top(0.0)
-                .w(app.size.0)
-                .h(app.size.1)
-                .on_click(Msg::Palette(false)),
-        )
-        .child(panel)
-        .into_any()
 }
