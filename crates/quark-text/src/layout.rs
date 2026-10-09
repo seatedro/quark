@@ -577,7 +577,18 @@ pub(crate) struct LayoutScratch {
     features: cosmic_text::FontFeatures,
     /// Faces for text-presentation characters, kept across builds.
     pub(crate) text_faces: crate::fonts::TextFaces,
+    /// Shaping storage: a built layout keeps only its lines' layout (what
+    /// painting reads) and returns the shaping its lines were laid out from
+    /// here, so the next build shapes into it instead of allocating a span,
+    /// word, and glyph vector per word.
+    shapes: Vec<cosmic_text::ShapeLine>,
 }
+
+/// Most shaped lines [`LayoutScratch`] keeps for reuse, and the most
+/// storage one may hold: past either, a line's shaping is dropped rather
+/// than kept for the life of the text system.
+const SPARE_SHAPES: usize = 32;
+const SPARE_SHAPE_BYTES: usize = 64 << 10;
 
 impl TextLayout {
     /// A layout with no text, for [`Self::rebuild`] to fill.
@@ -809,6 +820,11 @@ impl TextLayout {
                     Shaping::Advanced,
                 )),
             }
+            if let Some(shape) = scratch.shapes.pop()
+                && let Some(unused) = buffer.lines[line_i].lend_shape_storage(shape)
+            {
+                scratch.shapes.push(unused);
+            }
         }
         scratch.features = base.font_features;
         buffer.set_wrap(fs, Wrap::WordOrGlyph);
@@ -939,6 +955,16 @@ impl TextLayout {
         }
 
         build_runs(glyphs, lines, runs);
+        // Painting reads only the lines' layout, and the layout is never
+        // laid out again, so its shaping goes back for the next build.
+        for line in buffer.lines.iter_mut().chain(spare_lines.iter_mut()) {
+            if let Some(shape) = line.take_shape()
+                && scratch.shapes.len() < SPARE_SHAPES
+                && shape.storage_bytes() <= SPARE_SHAPE_BYTES
+            {
+                scratch.shapes.push(shape);
+            }
+        }
         self.width = width;
         self.height = height;
         self.buffer_x = buffer_x;
