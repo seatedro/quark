@@ -80,3 +80,22 @@ suffix: }
                  @when {let Some(direction)=sort}
 --- expected
                  @when {let Some(direction) = sort}
+=== a let-else keeps `continue` without the semicolon rustfmt adds
+context: local
+--- input
+                let Some(label) = item.label.as_ref() else { continue };
+--- expected
+                let Some(label) = item.label.as_ref() else {
+                    continue
+                };
+=== a short call written with a trailing comma stays one argument per line
+context: expr
+prefix: w={
+suffix: }
+--- input
+            w={f(a, b,)}
+--- expected
+            w={f(
+                a,
+                b,
+            )}

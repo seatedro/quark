@@ -1,9 +1,9 @@
 === a fragment rustfmt would change beyond whitespace keeps its source
 context: expr
-prefix: color={
+prefix: width={
 suffix: }
 --- input
-            color={match tone { Tone::Muted => { p.muted }, Tone::Plain => p.text }}
+            width={((column))}
 --- error
 rustfmt changed
 === a fragment rustfmt rejects (here, an incomplete one) keeps its source
