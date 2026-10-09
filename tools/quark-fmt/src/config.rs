@@ -58,6 +58,7 @@ pub struct QuarkConfig {
     pub root: Option<PathBuf>,
     pub style_version: u32,
     pub macro_names: Vec<String>,
+    pub expr_macros: Vec<String>,
     pub exclude: Vec<glob::Pattern>,
 }
 
@@ -67,6 +68,7 @@ impl Default for QuarkConfig {
             root: None,
             style_version: 1,
             macro_names: vec!["view".into(), "quark::view".into()],
+            expr_macros: vec!["vec".into()],
             exclude: Vec::new(),
         }
     }
@@ -77,6 +79,7 @@ impl Default for QuarkConfig {
 struct QuarkFile {
     style_version: Option<u32>,
     macro_names: Option<Vec<String>>,
+    expr_macros: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
 }
 
@@ -285,6 +288,9 @@ fn read_quark(path: &Path) -> Result<QuarkConfig, String> {
     }
     if let Some(names) = file.macro_names {
         c.macro_names = names;
+    }
+    if let Some(names) = file.expr_macros {
+        c.expr_macros = names;
     }
     for glob in file.exclude.unwrap_or_default() {
         let pattern = glob::Pattern::new(&glob)

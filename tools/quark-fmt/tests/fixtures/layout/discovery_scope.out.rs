@@ -7,7 +7,8 @@ fn disabled() -> AnyElement {
 fn foreign() {
     ui::view! {<div   class="x"/>};
     qview! {<div   class="x"/>};
-    let v = vec![view! {<div   class="x"/>}];
+    let v = vec![view! { <div class="x" /> }];
+    let v = smallvec![view! {<div   class="x"/>}];
 }
 
 // quark-fmt: skip

@@ -82,18 +82,31 @@ fn rejected_inputs_report_why_and_change_nothing() {
     }
 }
 
+/// Only `expr_macros` bodies that parse as expressions are read as Rust;
+/// a view in any other macro body is reported and left alone, inside a
+/// view's embedded Rust too.
 #[test]
 fn a_view_inside_another_macro_is_reported_and_left_alone() {
     use quark_fmt::{DiagnosticKind, Severity, format_source};
-    let src = "fn f() { let v = vec![view! {<a   />}]; }";
-    let out = format_source(src, &FormatOptions::default(), &PassThrough);
-    assert!(out.edits.is_empty());
-    let d = &out.diagnostics[0];
-    assert_eq!(
-        (d.severity, d.kind),
-        (Severity::Warning, DiagnosticKind::HiddenMacro)
-    );
-    assert_eq!(&src[d.range.clone().unwrap()], "!");
+    let cases = [
+        "fn f() { let v = smallvec![view! {<a   />}]; }",
+        "fn f() { let v = vec![view! {<a   />} => 1]; }",
+        "fn f() { let v = format!(\"{:?}\", vec![view! {<a   />}]); }",
+        "fn f() { view! { <b>{smallvec![view! {<a   />}]}</b> }; }",
+    ];
+    for src in cases {
+        let out = format_source(src, &FormatOptions::default(), &PassThrough);
+        assert!(out.edits.is_empty(), "{src}: {:?}", out.edits);
+        let d = &out.diagnostics[0];
+        assert_eq!(
+            (d.severity, d.kind),
+            (Severity::Warning, DiagnosticKind::HiddenMacro),
+            "{src}"
+        );
+        // The `!` of the innermost view.
+        let bang = src.rfind("view").unwrap() + "view".len();
+        assert_eq!(d.range, Some(bang..bang + 1), "{src}");
+    }
 }
 
 /// A provider that fails keeps its fragment as written; one that changes

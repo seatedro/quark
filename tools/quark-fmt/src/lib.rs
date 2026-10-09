@@ -58,6 +58,9 @@ pub struct FormatOptions {
     /// Complete macro paths treated as quark views, compared after
     /// stripping a leading `::`. Default `["view", "quark::view"]`.
     pub macro_names: Vec<String>,
+    /// Macros whose bodies are Rust expression lists, searched for views
+    /// like ordinary code when they parse as such. Default `["vec"]`.
+    pub expr_macros: Vec<String>,
 }
 
 impl Default for FormatOptions {
@@ -68,6 +71,7 @@ impl Default for FormatOptions {
             hard_tabs: false,
             newline_style: NewlineStyle::Auto,
             macro_names: vec!["view".to_owned(), "quark::view".to_owned()],
+            expr_macros: vec!["vec".to_owned()],
         }
     }
 }
@@ -145,7 +149,8 @@ fn format_once(
     provider: &dyn RustProvider,
 ) -> FormatOutcome {
     let mut outcome = FormatOutcome::default();
-    let (found, tokens) = match discover::discover_with_tokens(source, &options.macro_names) {
+    let names = discover::Names::new(&options.macro_names, &options.expr_macros);
+    let (found, tokens) = match discover::discover_with_tokens(source, &names) {
         Ok(found) => found,
         Err(diagnostic) => {
             outcome.diagnostics.push(diagnostic);
@@ -153,7 +158,6 @@ fn format_once(
         }
     };
     outcome.diagnostics.extend(found.diagnostics);
-    let names = discover::normalize(&options.macro_names);
     let newline = match options.newline_style {
         NewlineStyle::Unix => "\n",
         NewlineStyle::Windows => "\r\n",

@@ -1,10 +1,13 @@
 //! Finds selected `view!` invocations in a Rust file.
 //!
 //! syn parses the whole file and a visitor checks every macro position
-//! against the configured paths. syn cannot see into an opaque macro body,
-//! so a view inside `vec![..]` stays as written with a coverage warning;
-//! views nested inside a selected view are found later by walking its
-//! template, and the outermost invocation owns their edits.
+//! against the configured paths. syn cannot see into an opaque macro body.
+//! The bodies of configured expression macros (`vec![..]` by default) are
+//! read as Rust when they parse as a comma-separated expression list (or
+//! `[x; n]`), so views there are found like any other; a view inside any
+//! other macro stays as written with a coverage warning. Views nested
+//! inside a selected view are found later by walking its template, and the
+//! outermost invocation owns their edits.
 
 use std::ops::Range;
 
@@ -47,16 +50,22 @@ pub struct Discovery {
 }
 
 /// Parses `source` and returns its selected invocations. A file that is not
-/// valid Rust yields a single error and must stay unchanged.
-pub fn discover(source: &str, macro_names: &[String]) -> Result<Discovery, Diagnostic> {
-    discover_with_tokens(source, macro_names).map(|(found, _)| found)
+/// valid Rust yields a single error and must stay unchanged. Views inside
+/// the bodies of `expr_macros` are found when those bodies parse as Rust
+/// expressions.
+pub fn discover(
+    source: &str,
+    macro_names: &[String],
+    expr_macros: &[String],
+) -> Result<Discovery, Diagnostic> {
+    discover_with_tokens(source, &Names::new(macro_names, expr_macros)).map(|(found, _)| found)
 }
 
 /// [`discover`], plus each invocation's body tokens, whose spans resolve
 /// to byte offsets in `source`.
 pub(crate) fn discover_with_tokens(
     source: &str,
-    macro_names: &[String],
+    names: &Names<'_>,
 ) -> Result<(Discovery, Vec<TokenStream>), Diagnostic> {
     let file: syn::File = syn::parse_str(&blank_preamble(source)).map_err(|e| {
         Diagnostic::error(
@@ -65,10 +74,9 @@ pub(crate) fn discover_with_tokens(
             format!("not valid Rust: {e}"),
         )
     })?;
-    let names = normalize(macro_names);
     let mut visitor = Visitor {
         source,
-        names: &names,
+        names,
         skip_depth: 0,
         found: Discovery::default(),
         tokens: Vec::new(),
@@ -77,11 +85,49 @@ pub(crate) fn discover_with_tokens(
     Ok((visitor.found, visitor.tokens))
 }
 
-pub(crate) fn normalize(macro_names: &[String]) -> Vec<&str> {
-    macro_names
+/// Normalized macro paths: views, and macros whose bodies are Rust
+/// expression lists.
+pub(crate) struct Names<'a> {
+    pub views: Vec<&'a str>,
+    pub exprs: Vec<&'a str>,
+}
+
+impl<'a> Names<'a> {
+    pub fn new(macro_names: &'a [String], expr_macros: &'a [String]) -> Self {
+        Names {
+            views: normalize(macro_names),
+            exprs: normalize(expr_macros),
+        }
+    }
+}
+
+fn normalize(names: &[String]) -> Vec<&str> {
+    names
         .iter()
         .map(|n| n.trim().trim_start_matches("::"))
         .collect()
+}
+
+/// `tokens` as the body of `vec!`: comma-separated expressions with an
+/// optional trailing comma, or `x; n`. `None` when it is not Rust.
+fn expr_list(tokens: TokenStream) -> Option<Vec<syn::Expr>> {
+    use syn::parse::{ParseStream, Parser};
+    let parse = |input: ParseStream<'_>| -> syn::Result<Vec<syn::Expr>> {
+        let mut exprs = Vec::new();
+        while !input.is_empty() {
+            exprs.push(input.parse()?);
+            if exprs.len() == 1 && input.peek(syn::Token![;]) {
+                input.parse::<syn::Token![;]>()?;
+                exprs.push(input.parse()?);
+                break;
+            }
+            if !input.is_empty() {
+                input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(exprs)
+    };
+    parse.parse2(tokens).ok()
 }
 
 /// Whether `path` (as written, spaces allowed) names a selected macro.
@@ -143,7 +189,7 @@ fn has_rustfmt_skip(attrs: &[syn::Attribute]) -> bool {
 
 struct Visitor<'a> {
     source: &'a str,
-    names: &'a [&'a str],
+    names: &'a Names<'a>,
     /// Nonzero inside an item or statement under a skip.
     skip_depth: usize,
     found: Discovery,
@@ -188,10 +234,11 @@ const KEYWORDS: &[&str] = &[
 
 /// Scans tokens for selected invocations. Outside any other macro they
 /// are collected in `nested`; inside one they are opaque and only produce
-/// a coverage warning.
+/// a coverage warning. An expression macro's body counts as outside when
+/// it parses as Rust.
 pub(crate) fn scan(
     tokens: &TokenStream,
-    names: &[&str],
+    names: &Names<'_>,
     inside_macro: bool,
     nested: &mut Vec<NestedCall>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -207,8 +254,11 @@ pub(crate) fn scan(
         };
         match call {
             Some((path, start, bang, group)) if !KEYWORDS.contains(&path.as_str()) => {
-                if !names.contains(&path.as_str()) {
-                    scan(&group.stream(), names, true, nested, diagnostics);
+                if !names.views.contains(&path.as_str()) {
+                    let opaque = inside_macro
+                        || !names.exprs.contains(&path.as_str())
+                        || expr_list(group.stream()).is_none();
+                    scan(&group.stream(), names, opaque, nested, diagnostics);
                 } else if inside_macro {
                     diagnostics.push(Diagnostic::warning(
                         DiagnosticKind::HiddenMacro,
@@ -307,7 +357,15 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if !is_selected(&mac.path, self.names) {
+        if !is_selected(&mac.path, &self.names.views) {
+            if self.names.exprs.contains(&path_string(&mac.path).as_str())
+                && let Some(exprs) = expr_list(mac.tokens.clone())
+            {
+                for expr in &exprs {
+                    self.visit_expr(expr);
+                }
+                return;
+            }
             let mut ignored = Vec::new();
             scan(
                 &mac.tokens,

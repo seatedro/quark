@@ -395,3 +395,88 @@ fn a_view_error_points_into_the_users_file_not_rustfmts_output() {
     assert!(run.stderr.starts_with("error: a.rs:2:"), "{}", run.stderr);
     assert_eq!(fx.read("a.rs"), broken);
 }
+
+/// Views inside `vec![..]` go through both passes: rustfmt lays out the
+/// list around them, the view printer lays out each view where rustfmt put
+/// it, and a second run finds nothing left to change.
+#[test]
+fn full_mode_formats_views_inside_vec_to_a_fixed_point() {
+    let fx = Fixture::new();
+    let source = r#"fn rows() -> Vec<AnyElement> {
+    vec![view! { <div class="flex-row items-center gap-3 rounded-[8] px-[10]" bg={p.rail_tile.lerp(card, 0.3)}><txt("Change", SMALL, p.text) /></div> }, view! {<b/>}]
+}
+fn appearance() -> AnyElement {
+    view! {
+        <div class="flex-col" w={w}>
+            {group(p, vec![view! {
+                <setting_row(p, "Mode", None, view! {<div class="flex-row items-center gap-4">{preview(ThemeChoice::System, white, black)}{preview(ThemeChoice::Light, white, white)}</div>}, w) class="h-[76]" />
+            }])}
+        </div>
+    }
+}
+"#;
+    fx.write("a.rs", source);
+    let run = fx.run(&["a.rs"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let expected = r#"fn rows() -> Vec<AnyElement> {
+    vec![
+        view! {
+            <div
+                class="flex-row items-center gap-3 rounded-[8] px-[10]"
+                bg={p.rail_tile.lerp(card, 0.3)}
+            >
+                <txt("Change", SMALL, p.text) />
+            </div>
+        },
+        view! { <b /> },
+    ]
+}
+fn appearance() -> AnyElement {
+    view! {
+        <div class="flex-col" w={w}>
+            {group(
+                p,
+                vec![view! {
+                    <setting_row(
+                        p,
+                        "Mode",
+                        None,
+                        view! {
+                            <div class="flex-row items-center gap-4">
+                                {preview(ThemeChoice::System, white, black)}
+                                {preview(ThemeChoice::Light, white, white)}
+                            </div>
+                        },
+                        w
+                    )
+                        class="h-[76]"
+                    />
+                }]
+            )}
+        </div>
+    }
+}
+"#;
+    assert_eq!(fx.read("a.rs"), expected);
+    let again = fx.run(&["--check", "a.rs"]);
+    assert_eq!(again.code, 0, "{}{}", again.stdout, again.stderr);
+}
+
+#[test]
+fn quark_fmt_toml_expr_macros_replace_the_default_list() {
+    let fx = Fixture::new();
+    fx.write("quark-fmt.toml", "expr_macros = [\"smallvec\"]\n");
+    let source = "fn f() {\n    let a = smallvec![view! {<a   />}];\n    let b = vec![view! {<b   />}];\n}\n";
+    let run = fx.stdin(&["--stdin", "--view-only"], source);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "fn f() {\n    let a = smallvec![view! { <a /> }];\n    let b = vec![view! {<b   />}];\n}\n"
+    );
+    assert!(
+        run.stderr
+            .contains("3:22: `view!` inside another macro's body"),
+        "{}",
+        run.stderr
+    );
+}
