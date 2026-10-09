@@ -183,6 +183,7 @@ fn report_large_diffs() {
             ui.pointer_move((600.0, 400.0));
             ui.wheel(0.0, 400.0);
         });
+        let wheeled = ui.app().diff.scroll_offset();
         let (jump_avg, jump_worst) = frames(&mut ui, 20, |ui, i| {
             let to = ui.app().diff.content_height() * (i as f32 / 20.0);
             ui.app_mut().diff.handle(DiffEvent::ScrollTo(to));
@@ -217,7 +218,8 @@ fn report_large_diffs() {
         let peak = peak_rss().unwrap_or(0);
         eprintln!(
             "{name}: diff {diffed:.2?}, first paint {first_paint:.2?}, first colors \
-             {first_colors:.2?}, full syntax {full:.2?}; scroll {avg:.2?} avg / {worst:.2?} worst, \
+             {first_colors:.2?}, full syntax {full:.2?}; scroll {avg:.2?} avg / {worst:.2?} worst \
+             (to {wheeled:.0} pt), \
              jumps {jump_avg:.2?} / {jump_worst:.2?}{sideways}; settled frame {settled} \
              allocations; peak RSS {:.0} MiB ({:.0} with inputs)",
             mib(peak.saturating_sub(inputs)),
