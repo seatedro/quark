@@ -41,6 +41,44 @@ pub mod service {
     pub use crate::session::{Service, Serviced};
 }
 
+/// Test-only certificate trust for the webview smoke tests (feature
+/// `test-trust`). Not for apps: there is no public certificate override.
+#[cfg(feature = "test-trust")]
+#[doc(hidden)]
+pub mod testing {
+    use std::sync::OnceLock;
+
+    pub(crate) static TRUST: OnceLock<(Vec<u8>, Vec<String>)> = OnceLock::new();
+
+    /// Trust exactly the certificate `der` for exactly `hosts`, in every
+    /// view opened afterwards. Hosts must be loopback (`127.0.0.1`, `::1`,
+    /// or `localhost`); another certificate for them stays rejected.
+    ///
+    /// # Panics
+    ///
+    /// For a non-loopback host, or when called again with other values.
+    pub fn trust_leaf(der: Vec<u8>, hosts: &[&str]) {
+        assert!(
+            hosts.iter().all(|host| matches!(*host, "127.0.0.1" | "::1" | "localhost")),
+            "test trust is for loopback hosts only"
+        );
+        let hosts: Vec<String> = hosts.iter().map(|host| (*host).to_owned()).collect();
+        let trusted = TRUST.get_or_init(|| (der.clone(), hosts.clone()));
+        assert!(*trusted == (der, hosts), "test trust is set once per process");
+    }
+}
+
+/// The fixture certificate and hosts the smoke tests trust, read by
+/// backends at open. Always `None` without the `test-trust` feature.
+#[allow(dead_code)]
+pub(crate) fn test_trust() -> Option<(&'static [u8], &'static [String])> {
+    #[cfg(feature = "test-trust")]
+    if let Some((der, hosts)) = testing::TRUST.get() {
+        return Some((der, hosts));
+    }
+    None
+}
+
 /// Identifies one webview. Stays valid until its [`WebViewEvent::Closed`];
 /// afterwards nothing matches it, even a view that reuses its slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
