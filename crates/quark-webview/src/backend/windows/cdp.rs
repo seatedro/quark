@@ -10,6 +10,8 @@
 //! reused by a later document or another renderer process can never
 //! receive the script.
 
+use std::collections::HashMap;
+
 use serde_json::{Value, json};
 
 /// The CDP events [`MainContext::on_event`] reads. Subscribe to all of them
@@ -20,16 +22,17 @@ pub(crate) const CONTEXT_EVENTS: [&str; 3] = [
     "Runtime.executionContextsCleared",
 ];
 
-/// The main frame's default execution context, as far as CDP has said.
+/// Default execution contexts per frame, and which frame is the main one.
 #[derive(Debug, Default)]
 pub(crate) struct MainContext {
-    /// The main frame's CDP frame id, from `Page.getFrameTree`. Contexts are
-    /// ignored until it is known.
+    /// The main frame's CDP frame id, from `Page.getFrameTree`.
     frame: Option<String>,
-    current: Option<Context>,
-    /// Set by a top-level navigation start: the old document's context no
-    /// longer counts, even if CDP has not destroyed it yet.
-    stale: bool,
+    /// The live default (page world) context of each frame, by frame id.
+    contexts: HashMap<String, Context>,
+    /// Bumped by every top-level navigation start. A context counts only if
+    /// it was created in the current epoch, so the old document's context
+    /// is revoked at once, before CDP gets around to destroying it.
+    epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +40,7 @@ struct Context {
     id: i64,
     unique_id: Option<String>,
     origin: String,
+    epoch: u64,
 }
 
 /// Why no context can take a script now.
@@ -54,21 +58,17 @@ pub(crate) enum Unbound {
 
 impl MainContext {
     /// Records the main frame's id from a `Page.getFrameTree` response.
-    /// Returns false when the response names no frame.
-    pub(crate) fn set_frame_tree(&mut self, response: &str) -> bool {
+    /// Asked again after each commit, in case the engine swapped the frame.
+    pub(crate) fn set_frame_tree(&mut self, response: &str) {
         let tree: Value = serde_json::from_str(response).unwrap_or(Value::Null);
-        match tree["frameTree"]["frame"]["id"].as_str() {
-            Some(id) => {
-                self.frame = Some(id.to_owned());
-                true
-            }
-            None => false,
+        if let Some(id) = tree["frameTree"]["frame"]["id"].as_str() {
+            self.frame = Some(id.to_owned());
         }
     }
 
     /// A top-level navigation was accepted: revoke the current context.
     pub(crate) fn navigation_started(&mut self) {
-        self.stale = true;
+        self.epoch += 1;
     }
 
     /// Applies one CDP event.
@@ -78,38 +78,31 @@ impl MainContext {
             "Runtime.executionContextCreated" => {
                 let context = &params["context"];
                 let aux = &context["auxData"];
-                let main_frame =
-                    self.frame.is_some() && aux["frameId"].as_str() == self.frame.as_deref();
-                let default = aux["isDefault"].as_bool() == Some(true);
-                if let (true, true, Some(id), Some(origin)) = (
-                    main_frame,
-                    default,
+                if let (Some(true), Some(frame), Some(id), Some(origin)) = (
+                    aux["isDefault"].as_bool(),
+                    aux["frameId"].as_str(),
                     context["id"].as_i64(),
                     context["origin"].as_str(),
                 ) {
-                    self.current = Some(Context {
+                    let context = Context {
                         id,
                         unique_id: context["uniqueId"].as_str().map(str::to_owned),
                         origin: origin.to_owned(),
-                    });
-                    self.stale = false;
+                        epoch: self.epoch,
+                    };
+                    self.contexts.insert(frame.to_owned(), context);
                 }
             }
             "Runtime.executionContextDestroyed" => {
-                let destroyed_unique = params["executionContextUniqueId"].as_str();
-                let destroyed_id = params["executionContextId"].as_i64();
-                let gone = self
-                    .current
-                    .as_ref()
-                    .is_some_and(|current| match destroyed_unique {
-                        Some(unique) => current.unique_id.as_deref() == Some(unique),
-                        None => Some(current.id) == destroyed_id,
-                    });
-                if gone {
-                    self.current = None;
-                }
+                let unique = params["executionContextUniqueId"].as_str();
+                let id = params["executionContextId"].as_i64();
+                // Prefer the unique id: numeric ids repeat across processes.
+                self.contexts.retain(|_, context| match unique {
+                    Some(unique) => context.unique_id.as_deref() != Some(unique),
+                    None => Some(context.id) != id,
+                });
             }
-            "Runtime.executionContextsCleared" => self.current = None,
+            "Runtime.executionContextsCleared" => self.contexts.clear(),
             _ => {}
         }
     }
@@ -117,10 +110,12 @@ impl MainContext {
     /// The `uniqueContextId` to evaluate in for a document of `origin`
     /// (serialized as a browser does, `https://host:port`).
     pub(crate) fn bind(&self, origin: &str) -> Result<&str, Unbound> {
-        let current = match &self.current {
-            Some(current) if !self.stale => current,
-            _ => return Err(Unbound::NotReady),
-        };
+        let current = self
+            .frame
+            .as_ref()
+            .and_then(|frame| self.contexts.get(frame))
+            .filter(|context| context.epoch == self.epoch)
+            .ok_or(Unbound::NotReady)?;
         if current.origin != origin {
             return Err(Unbound::WrongOrigin);
         }
@@ -347,14 +342,15 @@ mod tests {
     }
 
     #[test]
-    fn contexts_before_the_frame_tree_are_ignored() {
+    fn a_context_reported_before_the_frame_tree_binds_once_it_is_known() {
         let mut contexts = MainContext::default();
         contexts.on_event(
             CREATED,
             &created(1, Some("u1"), "https://a.test", "MAIN", true),
         );
-        contexts.set_frame_tree(FRAME_TREE);
         assert_eq!(contexts.bind("https://a.test"), Err(Unbound::NotReady));
+        contexts.set_frame_tree(FRAME_TREE);
+        assert_eq!(contexts.bind("https://a.test"), Ok("u1"));
     }
 
     #[test]
