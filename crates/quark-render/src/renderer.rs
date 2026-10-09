@@ -13,7 +13,8 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::path::{Band, push_bands, rule_code, stroke_outline, to_kurbo};
 use crate::scene::{
-    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive, Transform2D,
+    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive, TextRendering,
+    Transform2D, UiCompositing,
 };
 
 use crate::shaders::{
@@ -47,6 +48,30 @@ impl Default for TextMetrics {
             mono_char_width_px: 8.0,
         }
     }
+}
+
+/// How one renderer's surface draws: chosen per window or headless
+/// renderer, never process-wide, so changing one leaves other windows and
+/// offscreen renders as they were.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererOptions {
+    pub compositing: UiCompositing,
+    /// Coverage policy of `TextRun` and `RichTextRun` primitives; a
+    /// `StyledText` primitive names its own.
+    pub text_rendering: TextRendering,
+    /// Ask for a surface whose transparent pixels show what lies behind the
+    /// window (premultiplied alpha), for native materials. Falls back to an
+    /// opaque surface where the platform offers no such alpha mode.
+    pub transparent: bool,
+}
+
+/// What a renderer's surface does with its [`RendererOptions`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SurfaceCapabilities {
+    /// Transparent pixels reach the window system's compositor.
+    pub transparent: bool,
+    /// The surface composites in [`UiCompositing::WebCompatible`].
+    pub web_compatible: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -881,6 +906,7 @@ pub struct Renderer {
     segment_texture: Option<SegmentTexture>,
     /// Effect animation time of the frame being drawn, in seconds.
     time: f32,
+    options: RendererOptions,
 }
 
 impl Renderer {
@@ -1058,8 +1084,58 @@ impl Renderer {
             layer_viewports: Vec::new(),
             segment_texture: None,
             time: 0.0,
+            options: RendererOptions::default(),
             gpu,
         }
+    }
+
+    /// A renderer for `window` drawing as `options` say, on a new context.
+    pub fn new_with_options(
+        window: Arc<Window>,
+        options: RendererOptions,
+    ) -> Result<Self, RenderError> {
+        let mut renderer = Self::new(window)?;
+        renderer.set_options(options);
+        Ok(renderer)
+    }
+
+    /// [`Self::with_gpu`] drawing as `options` say.
+    pub fn with_gpu_and_options(
+        gpu: &GpuContext,
+        window: Arc<Window>,
+        options: RendererOptions,
+    ) -> Result<Self, RenderError> {
+        let mut renderer = Self::with_gpu(gpu, window)?;
+        renderer.set_options(options);
+        Ok(renderer)
+    }
+
+    /// [`Self::headless_with_gpu`] drawing as `options` say.
+    #[cfg(any(test, feature = "headless-render"))]
+    pub fn headless_with_options(
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+        options: RendererOptions,
+    ) -> Self {
+        let mut renderer = Self::headless_with_gpu(gpu, width, height, scale_factor);
+        renderer.set_options(options);
+        renderer
+    }
+
+    pub fn options(&self) -> RendererOptions {
+        self.options
+    }
+
+    /// Draw later frames as `options` say. Affects this renderer only.
+    pub fn set_options(&mut self, options: RendererOptions) {
+        self.options = options;
+    }
+
+    /// What the surface does with the options it was given.
+    pub fn capabilities(&self) -> SurfaceCapabilities {
+        SurfaceCapabilities::default()
     }
 
     /// Adopt a new window size. A zero dimension (a minimized window) leaves
@@ -3243,6 +3319,8 @@ fn flatten_scene_into(
             | Primitive::Shadow(_)
             | Primitive::TextRun(_)
             | Primitive::RichTextRun(_)
+            | Primitive::StyledText(_)
+            | Primitive::Stripes(_)
             | Primitive::BlurRegion(_)
             | Primitive::EffectQuad(_)
             | Primitive::Image(_)
@@ -3310,7 +3388,8 @@ fn flatten_scene_into(
                     fl.alpha = alpha;
                 }
             }
-            Primitive::LayerBoundary => {}
+            // Drawn in place until isolated groups render offscreen.
+            Primitive::IsolateStart(_) | Primitive::IsolateEnd | Primitive::LayerBoundary => {}
         }
     }
 
@@ -3460,6 +3539,13 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
         }
         Primitive::TextRun(text) => Drawn::Text(text.clone()),
         Primitive::RichTextRun(text) => Drawn::RichText(text.clone()),
+        // In its base color until text fills reach the glyph shader.
+        Primitive::StyledText(text) => Drawn::RichText(RichTextPrimitive {
+            rect: text.rect,
+            layout: text.layout.clone(),
+            default_color: text.fill.base_color(),
+            span_colors: text.span_colors.clone(),
+        }),
         Primitive::BlurRegion(blur) => Drawn::Blur(FlattenedBlurRegion {
             rect: blur.rect,
             blur_radius: blur.blur_radius,
@@ -3507,11 +3593,14 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
             })
         }
         Primitive::Path(_)
+        | Primitive::Stripes(_)
         | Primitive::Chunk(_)
         | Primitive::ClipStart(_)
         | Primitive::ClipEnd
         | Primitive::LayerStart(_)
         | Primitive::LayerEnd
+        | Primitive::IsolateStart(_)
+        | Primitive::IsolateEnd
         | Primitive::ZIndexPush(_)
         | Primitive::ZIndexPop
         | Primitive::LayerBoundary => return None,
@@ -4055,6 +4144,8 @@ fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
         }
         Primitive::TextRun(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
         Primitive::RichTextRun(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
+        Primitive::StyledText(p) => Some(p.rect.inset(-GLYPH_OVERHANG)),
+        Primitive::Stripes(p) => Some(p.rect),
         Primitive::Icon(p) => Some(p.rect),
         Primitive::Image(p) => Some(p.rect),
         Primitive::EffectQuad(p) => Some(p.rect),
@@ -4066,6 +4157,8 @@ fn paint_bounds(primitive: &Primitive) -> Option<Rect> {
         | Primitive::ZIndexPop
         | Primitive::LayerStart(_)
         | Primitive::LayerEnd
+        | Primitive::IsolateStart(_)
+        | Primitive::IsolateEnd
         | Primitive::LayerBoundary
         | Primitive::Chunk(_) => None,
     }

@@ -4,6 +4,9 @@
 //! quark-ui because it depends on its design tokens (`Sp`, `Rad`, `ShadowLayer`).
 
 use crate::color::Color;
+use crate::geometry::Rect;
+use crate::path::StrokePattern;
+use crate::scene::{EffectQuadPrimitive, EffectType, Scene};
 
 #[derive(Clone)]
 pub struct ShadowStyle {
@@ -21,6 +24,9 @@ pub struct ElementStyle {
     pub border_widths: [f32; 4],
     /// Per-corner radii: [top-left, top-right, bottom-right, bottom-left].
     pub corner_radii: [f32; 4],
+    /// How the border is drawn along its edges; patterned borders use the
+    /// largest of `border_widths` all round.
+    pub border_style: BorderStyle,
     pub opacity: f32,
     pub z_index: i32,
     pub shadows: Vec<ShadowStyle>,
@@ -41,6 +47,7 @@ impl Default for ElementStyle {
             border_color: None,
             border_widths: [0.0; 4],
             corner_radii: [0.0; 4],
+            border_style: BorderStyle::Solid,
             opacity: 1.0,
             z_index: 0,
             shadows: Vec::new(),
@@ -121,6 +128,9 @@ pub fn apply_override(base: &mut ElementStyle, ov: &StyleOverride) {
     }
 }
 
+/// A border's pattern; the same semantics as a stroke's.
+pub type BorderStyle = StrokePattern;
+
 #[derive(Debug, Clone, Copy)]
 pub enum BackgroundEffect {
     NoiseGradient {
@@ -149,6 +159,53 @@ pub enum BackgroundEffect {
     ColorTint {
         color: Color,
     },
+}
+
+impl BackgroundEffect {
+    /// Paint the effect as the background of `rect`: the primitive an
+    /// element pushes in place of a solid background fill. `corner_radii`
+    /// are [top-left, top-right, bottom-right, bottom-left]; effect quads
+    /// take the largest.
+    pub fn paint(self, scene: &mut Scene, rect: Rect, corner_radii: [f32; 4]) {
+        let r = corner_radii.iter().copied().fold(0.0, f32::max);
+        let (effect_type, params, color_a, color_b) = match self {
+            Self::NoiseGradient {
+                scale,
+                color_a,
+                color_b,
+            } => (EffectType::NoiseGradient, [scale, 0.0], color_a, color_b),
+            Self::LinearGradient {
+                angle,
+                color_a,
+                color_b,
+            } => (EffectType::LinearGradient, [angle, 0.0], color_a, color_b),
+            Self::RadialGradient { color_a, color_b } => {
+                (EffectType::RadialGradient, [0.0, 0.0], color_a, color_b)
+            }
+            Self::Shimmer {
+                base,
+                highlight,
+                speed,
+            } => (EffectType::Shimmer, [speed, 0.0], base, highlight),
+            Self::Vignette { color, intensity } => (
+                EffectType::Vignette,
+                [intensity, 0.0],
+                color,
+                Color::TRANSPARENT,
+            ),
+            Self::ColorTint { color } => {
+                (EffectType::ColorTint, [0.0, 0.0], color, Color::TRANSPARENT)
+            }
+        };
+        scene.effect_quad(EffectQuadPrimitive {
+            rect,
+            effect_type,
+            color_a,
+            color_b,
+            params,
+            corner_radius: r,
+        });
+    }
 }
 
 pub fn noise_gradient(scale: f32, color_a: Color, color_b: Color) -> BackgroundEffect {
