@@ -6,8 +6,7 @@
 //! unchanged lines. A file the view holds only as patch lines is searched
 //! where those lines reach, and the summary says so. Matches are kept as
 //! byte ranges of lines, never copies of the text, up to
-//! [`super::DiffLimits::search_matches`]; past that the count is a lower
-//! bound.
+//! [`FindOptions::max_matches`]; past that the count is a lower bound.
 
 use std::ops::Range;
 
@@ -44,6 +43,8 @@ pub struct FindOptions {
     pub case_sensitive: bool,
     /// Search unchanged lines too, not only added and removed ones.
     pub include_unchanged: bool,
+    /// Most matches kept; past it the count reads "at least".
+    pub max_matches: usize,
 }
 
 impl Default for FindOptions {
@@ -52,6 +53,7 @@ impl Default for FindOptions {
             sides: SearchSides::New,
             case_sensitive: false,
             include_unchanged: true,
+            max_matches: 10_000,
         }
     }
 }
@@ -212,7 +214,7 @@ impl DiffViewState {
     pub(crate) fn rerun_search(&mut self) {
         let active = self.search.active.map(|i| self.search.hits[i].clone());
         let (query, options) = (&self.search.query, self.search.options);
-        let limit = self.limits.search_matches;
+        let limit = options.max_matches;
         let mut hits = Vec::new();
         let mut at_least = false;
         let mut coverage = SearchCoverage::Full;

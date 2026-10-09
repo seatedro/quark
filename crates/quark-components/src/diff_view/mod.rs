@@ -38,7 +38,7 @@ pub mod prepared;
 pub mod presentation;
 mod search;
 mod selection;
-// mod session;
+mod session;
 mod state;
 mod syntax;
 mod view;
@@ -50,7 +50,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use quark::selection::Selection;
-use quark_diff::{DiffDocument, GapId, Mode, Projection, Reveal, Side};
+use quark_diff::{ContextPolicy, DiffDocument, DiffLimits, GapId, Mode, Projection, Reveal, Side};
 use quark_render::scene::Rect;
 use quark_syntax::GrammarStore;
 use quark_text::{FontEpoch, LayoutCache, TextSystem};
@@ -63,7 +63,7 @@ pub use navigation::{DiffTarget, FileId, RevealAlign, Revision, SourcePoint};
 pub use prepared::{AnnotationId, DiffPreviewLimit};
 pub use search::{FindOptions, SearchCoverage, SearchDirection, SearchSides, SearchSummary};
 pub use selection::CopyContent;
-// pub use session::{DiffSessionViewState, diff_session_view};
+pub use session::{DiffSessionViewState, diff_session_view};
 pub use view::diff_view;
 
 use annotations::AnnotationTable;
@@ -73,8 +73,8 @@ use search::SearchState;
 use state::{FileMap, RowRef, Segment};
 use syntax::DiffSyntax;
 
-/// Lines one click on an expand control reveals.
-pub const REVEAL_STEP: u32 = 20;
+/// Lines one click on an expand control reveals by default.
+pub const REVEAL_STEP: u32 = quark_diff::REVEAL_STEP;
 
 /// Autoscroll speed per point the pointer is past the edge band, in
 /// points per millisecond.
@@ -121,31 +121,6 @@ impl Default for DiffStyle {
     }
 }
 
-/// Size limits that keep exceptional input from stalling a frame. Past a
-/// limit the view shows less detail and says so; it never alters the
-/// source that copy reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DiffLimits {
-    /// Longest line, in bytes, whose pair gets changed-word highlights.
-    pub inline_line_bytes: usize,
-    /// Longest line, in bytes, shaped whole. A longer line shows its first
-    /// bytes up to this many, cut on a grapheme boundary, with
-    /// [`prepared::LineDetail::Prefix`].
-    pub shaped_line_bytes: usize,
-    /// Most search matches kept; past it the count reads "at least".
-    pub search_matches: usize,
-}
-
-impl Default for DiffLimits {
-    fn default() -> Self {
-        Self {
-            inline_line_bytes: quark_diff::MAX_INLINE_LINE_BYTES,
-            shaped_line_bytes: 4_096,
-            search_matches: 10_000,
-        }
-    }
-}
-
 /// Input from [`diff_view`], in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DiffEvent {
@@ -165,9 +140,10 @@ pub enum DiffEvent {
     /// The open control of a bounded preview's last row.
     OpenFull,
     /// The add-annotation control of a line (gutter utility or focused
-    /// row command).
+    /// row command): the row's [`prepared::RowPaint::file`], the side, and
+    /// the zero-based source line from [`prepared::RowPaint::source_lines`].
     Annotate {
-        file: FileId,
+        file: u32,
         side: Side,
         line: u32,
     },
@@ -274,6 +250,7 @@ pub struct DiffViewState {
     presentation: DiffPresentation,
     appearance: DiffAppearance,
     preview: Option<DiffPreviewLimit>,
+    context_policy: ContextPolicy,
     limits: DiffLimits,
     search: SearchState,
     annotations: AnnotationTable,
@@ -292,9 +269,13 @@ impl DiffViewState {
     /// window); `focus` is the view's keyboard focus target.
     pub fn new(id: &'static str, focus: FocusId, doc: DiffDocument) -> Self {
         let mut state = Self::empty(id, focus);
-        state
-            .segments
-            .push(Segment::new(Arc::new(doc), 0, 0, Mode::Unified));
+        state.segments.push(Segment::new(
+            Arc::new(doc),
+            0,
+            0,
+            Mode::Unified,
+            ContextPolicy::default(),
+        ));
         state
             .syntax
             .reset(state.segments[0].doc.file_count() as usize);
@@ -332,6 +313,7 @@ impl DiffViewState {
             presentation: DiffPresentation::default(),
             appearance: DiffAppearance::default(),
             preview: None,
+            context_policy: ContextPolicy::default(),
             limits: DiffLimits::default(),
             search: SearchState::default(),
             annotations: AnnotationTable::default(),
@@ -433,7 +415,13 @@ impl DiffViewState {
     pub fn set_document(&mut self, doc: DiffDocument) {
         self.generations += 1;
         let revision = self.segments[0].revision + 1;
-        let mut segment = Segment::new(Arc::new(doc), 0, self.generations, self.mode);
+        let mut segment = Segment::new(
+            Arc::new(doc),
+            0,
+            self.generations,
+            self.mode,
+            self.context_policy,
+        );
         segment.revision = revision;
         self.segments[0] = segment;
         self.selection = None;
@@ -491,6 +479,8 @@ impl DiffViewState {
         }
         let columns_moved = (presentation.numbers, presentation.markers)
             != (self.presentation.numbers, self.presentation.markers);
+        let bands_moved = (presentation.separators, presentation.headers)
+            != (self.presentation.separators, self.presentation.headers);
         self.presentation = presentation;
         match presentation.layout {
             DiffLayout::Unified => self.switch_mode(Mode::Unified),
@@ -501,7 +491,58 @@ impl DiffViewState {
             // Wrapped rows were measured for the old text width.
             self.painted.clear();
         }
+        if bands_moved {
+            // Header and separator rows change height.
+            let anchor = self.anchor();
+            self.rebuild_rows(anchor);
+        }
         self.revision += 1;
+    }
+
+    /// How far each reveal step goes and how few hidden lines a gap may
+    /// keep; applies to every file, keeping what is revealed.
+    pub fn set_context_policy(&mut self, policy: ContextPolicy) {
+        let anchor = self.anchor();
+        let mode = self.mode;
+        for segment in &mut self.segments {
+            segment.expansion.set_policy(policy);
+            segment.rebuild(mode);
+        }
+        self.context_policy = policy;
+        self.rebuild_rows(anchor);
+    }
+
+    /// Collapses a gap's revealed lines again. Returns whether any were
+    /// revealed.
+    pub fn collapse(&mut self, gap: GapId) -> bool {
+        let Some((seg, file)) = self.locate(gap.file) else {
+            return false;
+        };
+        if !self.segments[seg].expansion.collapse(GapId { file, ..gap }) {
+            return false;
+        }
+        let anchor = self.anchor();
+        let mode = self.mode;
+        self.segments[seg].rebuild(mode);
+        self.rebuild_rows(anchor);
+        true
+    }
+
+    /// Reveals every unchanged line of every file.
+    pub fn expand_all(&mut self) -> bool {
+        let anchor = self.anchor();
+        let mode = self.mode;
+        let mut changed = false;
+        for segment in &mut self.segments {
+            if segment.expansion.reveal_all(&segment.doc) {
+                segment.rebuild(mode);
+                changed = true;
+            }
+        }
+        if changed {
+            self.rebuild_rows(anchor);
+        }
+        changed
     }
 
     /// Local color overrides over the theme's.
@@ -632,7 +673,9 @@ impl DiffViewState {
                 self.set_scroll(self.list.scroll_offset() + lines as f32 * WHEEL_LINE_PX)
             }
             DiffEvent::ScrollTo(offset) => self.set_scroll(offset),
-            DiffEvent::Expand(gap, reveal) => self.reveal(gap, reveal, REVEAL_STEP),
+            DiffEvent::Expand(gap, reveal) => {
+                self.reveal(gap, reveal, self.context_policy.reveal_step)
+            }
             DiffEvent::Key(key) => return self.key(key),
             DiffEvent::OpenFull => {
                 return match self.preview_target() {
@@ -641,6 +684,7 @@ impl DiffViewState {
                 };
             }
             DiffEvent::Annotate { file, side, line } => {
+                let file = self.file_id(file);
                 return match self.anchor_for(file, side, line..line + 1) {
                     Some(anchor) => DiffOutcome::Annotate { anchor },
                     None => DiffOutcome::Unchanged,

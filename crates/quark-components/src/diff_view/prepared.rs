@@ -30,7 +30,9 @@ use quark_text::TextLayout;
 use quark_ui::FocusId;
 use quark_ui::element::{ScrollHandle, ScrollbarVisibility};
 
-use super::presentation::{DiffAppearance, DiffMarkers, DiffNumbers, DiffPresentation};
+use super::presentation::{
+    DiffAppearance, DiffMarkers, DiffNumbers, DiffPresentation, FileHeaders, HunkSeparator,
+};
 
 /// Width of a [`DiffMarkers::Bars`] strip, in points.
 pub const MARKER_BAR_W: f32 = 4.0;
@@ -136,16 +138,10 @@ impl Columns {
     }
 }
 
-/// How much of a source line its layout holds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum LineDetail {
-    #[default]
-    Complete,
-    /// The line is longer than the shaping limit: the layout holds its
-    /// first `shown_bytes` bytes (cut on a grapheme boundary) of
-    /// `total_bytes`. Copying the full line reads the source, never this.
-    Prefix { shown_bytes: u32, total_bytes: u32 },
-}
+/// How much of a source line its layout holds: all of it, or (past
+/// [`quark_diff::DiffLimits::shaped_line_bytes`]) a prefix of whole
+/// grapheme clusters. Copying the full line reads the source, never this.
+pub use quark_diff::LineDetail;
 
 /// One side of a materialized line row.
 #[derive(Debug)]
@@ -250,19 +246,28 @@ impl RowPaint {
             .map(|line| line.map_or(0, |l| l.saturating_add(1)))
     }
 
-    pub(crate) fn height(&self, m: &Metrics) -> f32 {
+    /// Height of the row: its kind's, or its tallest wrapped line's.
+    pub fn height(&self, m: &Metrics, presentation: &DiffPresentation) -> f32 {
         let lines = self.sides.iter().flatten();
-        lines.map(|l| l.layout.size().1.ceil()).fold(
-            self.kind.diff().map_or(m.line_h, |k| row_height(k, m)),
-            f32::max,
-        )
+        let base = self
+            .kind
+            .diff()
+            .map_or(m.line_h, |k| row_height(k, m, presentation));
+        lines.map(|l| l.layout.size().1.ceil()).fold(base, f32::max)
     }
 }
 
-/// Height of a row of `kind` before its text is measured.
-pub(crate) fn row_height(kind: RowKind, m: &Metrics) -> f32 {
+/// Height of a row of `kind` before its text is measured: hidden file
+/// headers take none, compact separators a thin bar.
+pub fn row_height(kind: RowKind, m: &Metrics, presentation: &DiffPresentation) -> f32 {
     match kind {
-        RowKind::FileHeader => (m.line_h * 2.0).round(),
+        RowKind::FileHeader => match presentation.headers {
+            FileHeaders::Hidden => 0.0,
+            FileHeaders::BuiltIn | FileHeaders::Custom => (m.line_h * 2.0).round(),
+        },
+        RowKind::HunkHeader | RowKind::Gap if presentation.separators == HunkSeparator::Compact => {
+            (m.line_h * 0.3).round().max(4.0)
+        }
         RowKind::HunkHeader | RowKind::Gap => (m.line_h * 1.4).round(),
         _ => m.line_h,
     }

@@ -21,10 +21,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use quark_diff::{
-    BlockKind, DiffDocument, Expansion, FileStatus, Mode, Projection, RowKind, Side, inline_diff,
+    BlockKind, ContextPolicy, DiffDocument, Expansion, FileStatus, Mode, Projection, RowKind, Side,
+    inline_diff, line_detail,
 };
 use quark_render::FontKind;
-use quark_text::offset::{next_grapheme, prev_grapheme};
 use quark_text::{LayoutCache, TextParams, TextStyle, TextSystem};
 use quark_ui::virtual_list::{RowKey, VariableList};
 
@@ -63,8 +63,14 @@ pub(crate) struct Segment {
 }
 
 impl Segment {
-    pub fn new(doc: Arc<DiffDocument>, slot: u32, generation: u64, mode: Mode) -> Self {
-        let expansion = Expansion::new(&doc);
+    pub fn new(
+        doc: Arc<DiffDocument>,
+        slot: u32,
+        generation: u64,
+        mode: Mode,
+        policy: ContextPolicy,
+    ) -> Self {
+        let expansion = Expansion::with_policy(&doc, policy);
         let projection = Projection::new(&doc, mode, &expansion);
         Self {
             doc,
@@ -129,40 +135,38 @@ pub(crate) struct Anchor {
     pub line: Option<(u32, Side, u32)>,
 }
 
-/// Facts about `file` its line rows do not show. See [`FileFact`].
+/// Facts about `file` its line rows do not show. See [`FileFact`]. A
+/// missing final newline is a fact only where it differs between the sides
+/// (or the file was added or deleted), since an unchanged one is not part
+/// of the change.
 pub(crate) fn file_facts(doc: &DiffDocument, file: u32) -> Vec<FileFact> {
-    let f = file as usize;
-    let meta = &doc.files().meta[f];
-    let changed = doc.files().additions[f] + doc.files().deletions[f] > 0;
-    let mut facts = Vec::new();
-    if meta.binary {
-        facts.push(FileFact::Binary);
+    let facts = doc.facts(file);
+    let mut out = Vec::new();
+    if facts.binary {
+        out.push(FileFact::Binary);
     }
-    if let (Some(old), Some(new)) = (&meta.old_mode, &meta.new_mode)
-        && old != new
-    {
-        facts.push(FileFact::ModeChange {
-            old: old.clone(),
-            new: new.clone(),
-        });
+    if let Some((old, new)) = facts.mode_change {
+        out.push(FileFact::ModeChange { old, new });
     }
-    match meta.status {
-        FileStatus::Renamed if !changed && !meta.binary => facts.push(FileFact::RenameOnly),
-        FileStatus::Copied if !changed && !meta.binary => facts.push(FileFact::CopyOnly),
+    match facts.status {
+        FileStatus::Renamed if !facts.has_hunks && !facts.binary => {
+            out.push(FileFact::RenameOnly);
+        }
+        FileStatus::Copied if !facts.has_hunks && !facts.binary => out.push(FileFact::CopyOnly),
         _ => {}
     }
-    let eof = [Side::Old, Side::New].map(|side| doc.text(file, side).no_newline_at_eof());
+    let eof = [facts.old_missing_newline, facts.new_missing_newline];
     for side in [Side::Old, Side::New] {
-        let differs = match meta.status {
+        let differs = match facts.status {
             FileStatus::Added => side == Side::New,
             FileStatus::Deleted => side == Side::Old,
             _ => eof[0] != eof[1],
         };
         if eof[side as usize] && differs {
-            facts.push(FileFact::NoNewlineAtEof(side));
+            out.push(FileFact::NoNewlineAtEof(side));
         }
     }
-    facts
+    out
 }
 
 /// How a metadata row reads.
@@ -177,19 +181,13 @@ pub(crate) fn fact_title(fact: &FileFact) -> String {
     }
 }
 
-/// Bytes of `text` a line limited to `limit` bytes shows: everything when
-/// it fits, else the longest prefix ending on a grapheme boundary. A single
-/// grapheme longer than the limit is cut on a char boundary instead, so
-/// the row is never empty.
+/// Bytes of `text` a line limited to `limit` bytes shows; see
+/// [`quark_diff::line_detail`].
 pub(crate) fn shown_len(text: &str, limit: usize) -> usize {
-    if text.len() <= limit {
-        return text.len();
+    match line_detail(text, limit) {
+        LineDetail::Complete => text.len(),
+        LineDetail::Prefix { shown_bytes, .. } => shown_bytes as usize,
     }
-    let cut = floor_boundary(text, limit);
-    let start = prev_grapheme(text, cut).get();
-    let end = next_grapheme(text, start).get();
-    let boundary = if end <= cut { end } else { start };
-    if boundary == 0 { cut } else { boundary }
 }
 
 /// Largest char boundary at or below `byte`, clamped to the text.
@@ -438,7 +436,7 @@ impl DiffViewState {
             let height = match self.refs[index] {
                 RowRef::Line { seg, row } => {
                     let kind = self.segments[seg as usize].projection.kind[row as usize];
-                    (!kind.is_line()).then(|| row_height(kind, &m))
+                    (!kind.is_line()).then(|| row_height(kind, &m, &self.presentation))
                 }
                 RowRef::Fact { .. } => None,
                 RowRef::Annotation { index } => Some(self.annotation_height(index, &m)),
@@ -632,10 +630,10 @@ impl DiffViewState {
             }
             let stamp = this.stamp(r, columns, scale);
             match painted.get(&key) {
-                Some(p) if p.stamp == stamp => p.height(&m),
+                Some(p) if p.stamp == stamp => p.height(&m, &this.presentation),
                 _ => {
                     let p = this.build_row(r, stamp, text, layouts, scale, columns);
-                    let height = p.height(&m);
+                    let height = p.height(&m, &this.presentation);
                     painted.insert(key, Rc::new(p));
                     height
                 }
@@ -845,15 +843,8 @@ impl DiffViewState {
                     }
                     let store = doc.text(file, side);
                     let line = store.display_line(index).unwrap_or("");
+                    let detail = line_detail(line, self.limits.shaped_line_bytes);
                     let shown = shown_len(line, self.limits.shaped_line_bytes);
-                    let detail = if shown < line.len() {
-                        LineDetail::Prefix {
-                            shown_bytes: shown as u32,
-                            total_bytes: line.len() as u32,
-                        }
-                    } else {
-                        LineDetail::Complete
-                    };
                     let line = &line[..shown];
                     let range = store.display_range(index).unwrap_or(0..0);
                     let range = range.start..range.start + shown;

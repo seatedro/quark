@@ -74,6 +74,10 @@ impl AnnotationTable {
         &self.entries[index as usize]
     }
 
+    pub fn entries_mut(&mut self) -> impl Iterator<Item = &mut Entry> {
+        self.entries.iter_mut()
+    }
+
     pub fn outdate_all(&mut self) {
         for entry in &mut self.entries {
             entry.outdated = true;
@@ -128,6 +132,25 @@ impl DiffViewState {
             .entries
             .iter()
             .map(|e| (&e.annotation, e.outdated))
+    }
+
+    /// Marks each annotation of `file` outdated unless its anchor names
+    /// existing lines of the file's current revision.
+    pub(crate) fn recheck_annotations(&mut self, file: FileId) {
+        let flags: Vec<Option<bool>> = self
+            .annotations
+            .entries
+            .iter()
+            .map(|e| {
+                let a = &e.annotation.anchor;
+                (a.file == file).then(|| !self.anchor_is_current(a))
+            })
+            .collect();
+        for (entry, outdated) in self.annotations.entries.iter_mut().zip(flags) {
+            if let Some(outdated) = outdated {
+                entry.outdated = outdated;
+            }
+        }
     }
 
     /// Whether `anchor` names existing lines of its file's current

@@ -11,15 +11,7 @@ use quark_diff::{RowKind, Side};
 use super::DiffViewState;
 use super::state::{NONE, RowRef, source_line, store_index};
 
-// Stand-ins with the shape of quark-diff's session ids until that API
-// lands; swapped for `pub use quark_diff::{FileId, Revision}`.
-/// A file's identity, assigned by the app.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FileId(pub u64);
-
-/// A content revision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct Revision(pub u64);
+pub use quark_diff::{FileId, Revision};
 
 /// A position in a file's source: zero-based `line` on `side`, `byte` into
 /// it.
