@@ -153,12 +153,16 @@ fn build(
         .filter_map(|(slot, column)| {
             let column = column.as_ref()?;
             let side = if slot == 0 { Side::Old } else { Side::New };
-            let content_w = if frame.wrap {
-                column.text_w
+            // Unwrapped columns scroll sideways over content laid out from
+            // an origin near the scroll: what lies before it is out of view.
+            let (content_w, origin) = if frame.wrap {
+                (f64::from(column.text_w), 0.0)
             } else {
-                frame.content_w[slot].max(column.text_w)
+                let content_w = frame.content_w[slot].max(f64::from(column.text_w));
+                (content_w, frame.content_origin[slot].min(content_w))
             };
-            Some((slot, column, side, content_w))
+            let laid_w = (content_w - origin) as f32;
+            Some((slot, column, side, content_w, origin, laid_w))
         });
     let split = frame.columns.mode == Mode::Split;
     // Split rows with no line on a side: one fill across that side's
@@ -201,7 +205,7 @@ fn build(
                  on:drag={move |press: ClickEvent| {
                      Box::new(SelectDrag { press, on_event }) as Box<dyn DragHandler>
                  }}>
-                for (slot, column, side, content_w) in columns {
+                for (slot, column, side, content_w, origin, laid_w) in columns {
                     <div class="absolute" left={column.gutter_x} class="top-0" w={column.gutter_w}
                          h={height} class="overflow-clip" bg={colors.gutter}>
                         <div w={column.gutter_w} class="flex-col" translate={(0.0, first_top)}>
@@ -215,11 +219,12 @@ fn build(
                          @when {frame.wrap} { class="overflow-clip" }
                          @when {!frame.wrap} {
                              track_scroll={&frame.hscroll[slot]} class="overflow-x-scroll"
-                             scroll_total_x={content_w} class="scrollbar-auto-hide"
+                             scroll_total_x={content_w} scroll_origin={(origin, 0.0)}
+                             class="scrollbar-auto-hide"
                          }>
-                        <div w={content_w} class="flex-col" translate={(0.0, first_top)}>
+                        <div w={laid_w} class="flex-col" translate={(0.0, first_top)}>
                             for row in &frame.rows {
-                                {text_cell(frame, row, side, content_w, look)}
+                                {text_cell(frame, row, side, laid_w, origin, look)}
                             }
                         </div>
                     </div>
@@ -425,7 +430,16 @@ fn paint_gutter(
     }
 }
 
-fn text_cell(frame: &ViewFrame, row: &FrameRow, side: Side, width: f32, look: Look) -> AnyElement {
+/// A line's text in a column `width` wide, laid out from content x
+/// `origin`.
+fn text_cell(
+    frame: &ViewFrame,
+    row: &FrameRow,
+    side: Side,
+    width: f32,
+    origin: f64,
+    look: Look,
+) -> AnyElement {
     let height = row.height;
     let mode = frame.columns.mode;
     let Some(kind) = row.paint.kind.diff().filter(|k| k.is_line()) else {
@@ -450,6 +464,7 @@ fn text_cell(frame: &ViewFrame, row: &FrameRow, side: Side, width: f32, look: Lo
         selected,
         &search,
         width.to_bits(),
+        origin.to_bits(),
         height.to_bits(),
         env.accessible,
         mode,
@@ -477,8 +492,8 @@ fn text_cell(frame: &ViewFrame, row: &FrameRow, side: Side, width: f32, look: Lo
                 <canvas(move |bounds, scene, cx| {
                     if let Some(line) = &canvas_paint.sides[shown as usize] {
                         paint_text(
-                            bounds, scene, line, shown, &search, selected, pad, font_size,
-                            colors, cx.scale_factor,
+                            bounds, scene, line, shown, &search, selected, pad, origin,
+                            font_size, colors, cx.scale_factor,
                         );
                     }
                 })
@@ -498,6 +513,7 @@ fn paint_text(
     search: &[SearchMark],
     selected: Option<(usize, usize)>,
     pad: f32,
+    origin: f64,
     font_size: f32,
     colors: DiffColors,
     scale: f32,
@@ -507,8 +523,9 @@ fn paint_text(
     } else {
         colors.add_word
     };
-    // A long line's layout holds only its window, which starts this far in.
-    let window_x = line.window.map_or(0.0, |w| w.x);
+    // A long line's layout holds only its window, which starts this far in:
+    // from the origin the cell is laid out at, in f64 until it is small.
+    let window_x = (line.window.map_or(0.0, |w| w.x) - origin) as f32;
     paint::line(
         scene,
         (bounds.x + pad + window_x, bounds.y),

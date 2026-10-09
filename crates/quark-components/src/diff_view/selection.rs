@@ -342,16 +342,18 @@ impl DiffViewState {
                 0.0
             } else {
                 self.hscroll[column_slot(frame.columns.mode, line_side)]
-                    .offset()
+                    .offset_f64()
                     .0
             };
-            let tx = x - column.text_x - frame.metrics.text_pad + scroll;
-            // A long line's layout holds only its window.
+            // A long line's layout holds only its window. Its x and the
+            // scroll can be hundreds of millions of points: subtract them
+            // in f64, before the layout's own f32 coordinates.
             let (start, window_x) = paint.window.map_or((0, 0.0), |w| (w.start, w.x));
+            let tx = f64::from(x - column.text_x - frame.metrics.text_pad) + scroll - window_x;
             let byte = if x < column.text_x {
                 0
             } else {
-                start + paint.layout.hit(tx - window_x, y - row.top).get()
+                start + paint.layout.hit(tx as f32, y - row.top).get()
             };
             return Some(SelectionPoint::new(key_of(seg, r, line_side, index), byte));
         }

@@ -636,16 +636,17 @@ impl DiffViewState {
             self.measure_window(text, layouts, scale, &columns);
         }
         let window = self.list.window(self.overscan()).range;
-        let grid = super::long_lines::GRID_COLUMNS as f32 * m.char_w;
+        let grid = super::long_lines::GRID_COLUMNS as f64 * f64::from(m.char_w);
+        let hgrid = [0, 1].map(|slot| {
+            let scroll = self.long_lines.expected_scroll(slot, self.frame_id);
+            (scroll.unwrap_or_else(|| self.hscroll[slot].offset_f64().0) / grid) as u32
+        });
         let key = PrepareKey {
             window: (window.start, window.end),
             scroll: self.list.scroll_offset().to_bits(),
             revision: self.revision,
             scale: scale.to_bits(),
-            hgrid: [0, 1].map(|slot| {
-                let scroll = self.long_lines.expected_scroll(slot, self.frame_id);
-                (scroll.unwrap_or_else(|| self.hscroll[slot].offset().0) / grid) as u32
-            }),
+            hgrid,
         };
         if self.prepared == Some(key) && self.frame.is_some() {
             return;
@@ -671,9 +672,11 @@ impl DiffViewState {
                     continue;
                 };
                 let slot = column_slot(self.mode, side);
-                let width = line.window.map_or(line.layout.size().0, |w| w.width);
-                self.content_w[slot] =
-                    self.content_w[slot].max((width + m.text_pad * 2.0 + m.char_w).ceil());
+                let width = line
+                    .window
+                    .map_or(f64::from(line.layout.size().0), |w| w.width);
+                let pad = f64::from(m.text_pad * 2.0 + m.char_w);
+                self.content_w[slot] = self.content_w[slot].max((width + pad).ceil());
             }
             let (selected, search) = match r {
                 RowRef::Line { seg, row } => {
@@ -725,6 +728,9 @@ impl DiffViewState {
             rows,
             sticky_header,
             content_w: self.content_w,
+            // A grid step before the scroll's: windows reach that far left,
+            // so content between the origin and the scroll is all there.
+            content_origin: hgrid.map(|step| f64::from(step.saturating_sub(1)) * grid),
             scroll,
             total: self.list.rows().total_extent(),
             row_count: self.refs.len() as u32,
@@ -1225,10 +1231,10 @@ impl DiffViewState {
         let m = self.metrics();
         let x = self.long_lines.x_of(store.shared(), range, byte, m.char_w);
         let columns = Columns::new(self.mode, self.viewport.0, &m, &self.presentation);
-        let view_w = columns.of(side).text_w - m.text_pad * 2.0;
+        let view_w = f64::from(columns.of(side).text_w - m.text_pad * 2.0);
         let handle = &self.hscroll[column_slot(self.mode, side)];
-        let (at, _) = handle.offset();
-        if x < at || x > at + view_w - m.char_w * 8.0 {
+        let (at, _) = handle.offset_f64();
+        if x < at || x > at + view_w - f64::from(m.char_w * 8.0) {
             let to = (x - view_w / 3.0).max(0.0);
             handle.set_offset(to, 0.0);
             // The handle moves only as the next frame paints; windows built
@@ -1257,7 +1263,7 @@ impl DiffViewState {
         let scroll = self
             .long_lines
             .expected_scroll(slot, self.frame_id)
-            .unwrap_or_else(|| self.hscroll[slot].offset().0);
+            .unwrap_or_else(|| self.hscroll[slot].offset_f64().0);
         let view_w = columns.of(side).text_w;
         self.long_lines
             .window(store.shared(), line, scroll, view_w, m.char_w)

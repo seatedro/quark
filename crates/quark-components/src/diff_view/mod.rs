@@ -261,7 +261,7 @@ pub struct DiffViewState {
     painted: HashMap<u64, Rc<RowPaint>>,
     frame: Option<Rc<ViewFrame>>,
     prepared: Option<PrepareKey>,
-    content_w: [f32; 2],
+    content_w: [f64; 2],
     syntax: DiffSyntax,
     long_lines: long_lines::LongLines,
     /// Session views: one bridge per file slot, all on `session_worker`.

@@ -200,7 +200,7 @@ pub(crate) struct LongLines {
     generation: Cell<u64>,
     /// Per column: a sideways scroll requested from the handle, which it
     /// applies only while painting, and the frame it was requested in.
-    expected: Cell<[Option<(f32, u64)>; 2]>,
+    expected: Cell<[Option<(f64, u64)>; 2]>,
 }
 
 impl LongLines {
@@ -212,7 +212,7 @@ impl LongLines {
         &self,
         text: &Arc<str>,
         line: Range<usize>,
-        scroll_x: f32,
+        scroll_x: f64,
         view_w: f32,
         char_w: f32,
     ) -> Option<LineWindow> {
@@ -223,8 +223,9 @@ impl LongLines {
         let line_text = &text[line];
         let map = self.map(key, line_text);
         let total = map.total(line_text);
-        let first = (scroll_x.max(0.0) / char_w) as usize;
-        let last = ((scroll_x.max(0.0) + view_w) / char_w).ceil() as usize;
+        let char_w64 = f64::from(char_w);
+        let first = (scroll_x.max(0.0) / char_w64) as usize;
+        let last = ((scroll_x.max(0.0) + f64::from(view_w)) / char_w64).ceil() as usize;
         let from = ((first / GRID_COLUMNS).saturating_sub(1) * GRID_COLUMNS).min(total);
         let to = ((last / GRID_COLUMNS + 2) * GRID_COLUMNS).min(total);
         let start = floor_grapheme(line_text, map.byte_of(line_text, from));
@@ -232,8 +233,8 @@ impl LongLines {
         Some(LineWindow {
             start,
             end,
-            x: map.column_of(line_text, start) as f32 * char_w,
-            width: total as f32 * char_w,
+            x: map.column_of(line_text, start) as f64 * char_w64,
+            width: total as f64 * char_w64,
         })
     }
 
@@ -245,11 +246,11 @@ impl LongLines {
         line: Range<usize>,
         byte: usize,
         char_w: f32,
-    ) -> f32 {
+    ) -> f64 {
         let key = (Arc::as_ptr(text) as *const u8 as usize, line.start);
         let line_text = &text[line];
         let byte = line_text.floor_char_boundary(byte);
-        self.map(key, line_text).column_of(line_text, byte) as f32 * char_w
+        self.map(key, line_text).column_of(line_text, byte) as f64 * f64::from(char_w)
     }
 
     fn map(&self, key: LineKey, line: &str) -> Arc<ColumnMap> {
@@ -268,7 +269,7 @@ impl LongLines {
 
     /// Records that column `slot` was asked to scroll to `x` in frame
     /// `frame`: windows use it until a later frame has painted it.
-    pub(crate) fn expect_scroll(&self, slot: usize, x: f32, frame: u64) {
+    pub(crate) fn expect_scroll(&self, slot: usize, x: f64, frame: u64) {
         let mut expected = self.expected.get();
         expected[slot] = Some((x, frame));
         self.expected.set(expected);
@@ -276,7 +277,7 @@ impl LongLines {
 
     /// The scroll [`Self::expect_scroll`] recorded for `slot`, until a
     /// frame after `frame`'s next has been built.
-    pub(crate) fn expected_scroll(&self, slot: usize, frame: u64) -> Option<f32> {
+    pub(crate) fn expected_scroll(&self, slot: usize, frame: u64) -> Option<f64> {
         let (x, at) = self.expected.get()[slot]?;
         (frame <= at + 1).then_some(x)
     }
@@ -383,7 +384,7 @@ mod tests {
 
     /// The window's text and its x, for a line scrolled `scroll_x` points
     /// with 10-point characters and a 100-point view.
-    fn shown(line: &str, scroll_x: f32) -> (String, f32, f32) {
+    fn shown(line: &str, scroll_x: f64) -> (String, f64, f64) {
         let text: Arc<str> = Arc::from(line);
         let w = LongLines::default()
             .window(&text, 0..line.len(), scroll_x, 100.0, 10.0)
@@ -401,7 +402,7 @@ mod tests {
         let wide = "\u{4E2D}".repeat(5_000);
         let accented = "e\u{301}".repeat(5_000);
         // (name, line, scroll, (columns shown, window x, line width))
-        type Case<'a> = (&'a str, &'a str, f32, (usize, f32, f32));
+        type Case<'a> = (&'a str, &'a str, f64, (usize, f64, f64));
         let cases: [Case; 4] = [
             // Columns 0..10 in view: grid steps 0 and 1, then one more.
             ("ascii at the start", &ascii, 0.0, (512, 0.0, 100_000.0)),
