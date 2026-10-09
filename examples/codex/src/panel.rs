@@ -1,6 +1,6 @@
-//! The side panel card: the Changes tab (scope pill, options, split diff
-//! of cart.js with "1 unmodified line" folds and word highlights), the
-//! Terminal tab, and the file viewer with its tree. Its tab strip lives in
+//! The side panel card: the Changes tab (scope pill, toolbar, find bar,
+//! and the shared diff viewer of `diff::Changes`), the Terminal tab, and
+//! the file viewer with its tree. Its tab strip lives in
 //! the title bar (`tab_strip`). The full view hands it the whole window
 //! and floats the composer over it (u29).
 
@@ -11,7 +11,8 @@ use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::theme::Color;
 
-use crate::data::{self, DiffLine};
+use crate::data;
+use crate::diff::DiffMsg;
 use crate::theme::{BODY, CODE, Pal, SMALL};
 use crate::widgets::*;
 use crate::{Codex, Frame, Menu, Msg, SCOPES, Tab, composer, icons};
@@ -19,7 +20,8 @@ use crate::{Codex, Frame, Menu, Msg, SCOPES, Tab, composer, icons};
 /// The panel card's width beside the thread (u25, u26).
 pub const PANEL_W: f32 = 319.0;
 const ROW_H: f32 = 21.5;
-const GUTTER: f32 = 46.0;
+/// The Changes tab's toolbar row, with the gap above it.
+const TOOLBAR_H: f32 = 52.0;
 
 pub fn width(app: &Codex, avail: f32) -> f32 {
     if !app.side_panel || !matches!(app.screen, crate::Screen::Thread(_)) {
@@ -39,7 +41,7 @@ pub fn view(
 ) -> AnyElement {
     let full = app.full_view;
     let body: AnyElement = match app.tab {
-        Tab::Changes => changes(app, p, w, h),
+        Tab::Changes => changes(app, p, w, h, vcx),
         Tab::Terminal => {
             let term_h = (h - if full { 80.0 } else { 8.0 }).max(0.0);
             view! { <div class="pl-4 pt-2">{app.terminal.view(w - 16.0, term_h, vcx)}</div> }
@@ -138,52 +140,58 @@ pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
     }
 }
 
-/// The Changes tab.
-fn changes(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
+/// The Changes tab: scope pill, toolbar, the find bar while open, and
+/// the shared diff viewer under them.
+fn changes(app: &mut Codex, p: &Pal, w: f32, h: f32, vcx: &mut ViewContext) -> AnyElement {
     let full = app.full_view;
+    let (adds, dels) = app.changes.stats();
+    let wrap = app.changes.wraps();
+    let find = app.changes.find_bar(p, w, vcx);
+    let find_h = if find.is_some() {
+        crate::diff::FIND_H
+    } else {
+        0.0
+    };
+    let diff = app
+        .changes
+        .review_view(w, (h - TOOLBAR_H - find_h).max(0.0), vcx);
     let tool = |svg: &'static str, label: &str, msg: Msg| {
         icon_button(p, svg, 28.0, 14.0, p.icon, label, msg)
     };
     view! {
         <div class="flex-col" w={w} h={h}>
             <div class="h-1" />
-            <div class="flex-row items-center h-12 px-2" w={w}>
+            <div class="flex-row items-center h-12 px-2" w={w} role="toolbar" aria-label="Changes">
                 <div class="flex-row items-center h-8 pl-[14] pr-[10] gap-1.5 rounded-[16]"
                      bg={p.tray} id="changes.scope" role="button" aria-label={SCOPES[app.scope]}
                      on:click={Msg::Open(Menu::ChangesScope)}>
                     <txt(SCOPES[app.scope], SMALL, p.text) />
                     <icon svg={icons::CHEVRON_DOWN} size={11.0} color={p.text} />
                     <div class="w-1" />
-                    <txt("+2", SMALL, p.add_num) />
-                    <txt("-2", SMALL, p.del_num) />
+                    <txt(format!("+{adds}"), SMALL, p.add_num) />
+                    <txt(format!("-{dels}"), SMALL, p.del_num) />
                 </div>
                 <div class="flex-1" />
                 <div class="flex-row items-center h-8 px-1 gap-0.5 rounded-[16]" bg={p.tray}>
                     <tool(icons::ELLIPSIS, "Options", Msg::Open(Menu::ChangesOptions))
                           id="changes.options" />
-                    <tool(icons::FILE_SEARCH, "Jump to file", Msg::Noop) />
+                    <tool(icons::FILE_SEARCH, "Find in changes", Msg::Diff(DiffMsg::Find(true))) />
                     if full {
                         <tool(icons::REFRESH_CW, "Refresh", Msg::Noop) />
-                        <tool(icons::WRAP, "Word wrap", Msg::Noop) />
-                        <tool(icons::LIST_FILTER, "Expand all diffs", Msg::Noop) />
-                        <div class="w-7 h-7 items-center justify-center">{split_glyph(p)}</div>
+                        <tool(icons::WRAP, "Word wrap", Msg::Diff(DiffMsg::ToggleWrap))
+                              aria-pressed={wrap} bg={if wrap { p.panel_tile }} />
+                        <tool(icons::LIST_FILTER, "Expand all diffs", Msg::Diff(DiffMsg::ExpandAll)) />
+                        <div class="w-7 h-7 items-center justify-center rounded-[7]" role="button"
+                             aria-label="Toggle split diff" hover_bg={p.row_hover.with_alpha(110)}
+                             on:click={Msg::Diff(DiffMsg::ToggleSplit)}>
+                            {split_glyph(p)}
+                        </div>
                     }
                     <tool(icons::FILES, "Show files", Msg::Noop) />
                 </div>
             </div>
-            <div class="flex-row items-center h-9 pl-4 pr-[10] gap-[9]" w={w}
-                 border_b={p.hairline} border_t={p.hairline} role="heading" aria-label="cart.js">
-                {js_badge()}
-                <txt("cart.js", BODY, p.text_soft) />
-                <div class="flex-1" />
-                <txt("+2", BODY, p.add_num) />
-                <txt("-2", BODY, p.del_num) />
-                <div class="w-0.5" />
-                <icon_button(p, icons::OPEN_EXTERNAL, 24.0, 13.0, p.icon, "Open in",
-                             Msg::OpenFile("cart.js")) />
-                <icon_button(p, icons::ELLIPSIS, 24.0, 13.0, p.icon, "File options", Msg::Noop) />
-            </div>
-            {split_diff(p, w)}
+            {?find}
+            {diff}
         </div>
     }
 }
@@ -194,244 +202,6 @@ fn split_glyph(p: &Pal) -> AnyElement {
         <div class="w-[14] h-3 rounded-[3] overflow-hidden flex-row" border={p.icon}>
             <div class="w-1.5 h-full" bg={p.del_bar} />
             <div class="w-1.5 h-full" bg={p.add_bar} />
-        </div>
-    }
-}
-
-/// The striped bar a deleted row carries; added rows get a solid one.
-fn bar(p: &Pal, kind: i8) -> AnyElement {
-    view! {
-        <div class="absolute left-0 top-0 w-1 flex-col" h={ROW_H}
-             bg={if kind >= 0 { p.add_bar }}>
-            if kind < 0 {
-                for i in 0..6 {
-                    <div class="w-1" h={ROW_H / 6.0}
-                         bg={if i % 2 == 0 { p.del_bar } else { p.del_code }} />
-                }
-            }
-        </div>
-    }
-}
-
-/// One side of a diff row: gutter, number, highlighted code; added lines
-/// get word highlights on what the change added.
-fn diff_cell(
-    p: &Pal,
-    w: f32,
-    num: Option<u32>,
-    kind: i8,
-    code: &str,
-    words: &[&str],
-    with_bar: bool,
-) -> AnyElement {
-    let (bg, num_color) = match kind {
-        -1 => (Some(p.del_code), p.del_num),
-        1 => (Some(p.add_code), p.add_num),
-        _ => (None, p.line_num),
-    };
-    view! {
-        <div class="flex-row items-center" w={w} h={ROW_H}>
-            <div class="flex-row items-center justify-end pr-[10] relative" w={GUTTER} h={ROW_H}
-                 bg={if let Some(bg) = bg { bg }}>
-                if with_bar && kind != 0 {
-                    {bar(p, kind)}
-                }
-                if let Some(n) = num {
-                    <text size={CODE} color={num_color} class="font-mono whitespace-nowrap">
-                        {n.to_string()}
-                    </text>
-                }
-            </div>
-            <div class="flex-row items-center pl-3 overflow-hidden" w={(w - GUTTER).max(0.0)}
-                 h={ROW_H} bg={if let Some(bg) = bg { bg }}>
-                {highlight_words(code, words, p)}
-            </div>
-        </div>
-    }
-}
-
-/// A unified diff row `w` wide, for the inline diff card.
-pub fn diff_row(p: &Pal, w: f32, line: DiffLine, with_bar: bool) -> AnyElement {
-    match line {
-        DiffLine::Context { new, .. } => diff_cell(
-            p,
-            w,
-            Some(new),
-            0,
-            data::line_of(data::CART_JS, new),
-            &[],
-            with_bar,
-        ),
-        DiffLine::Del { old } => diff_cell(
-            p,
-            w,
-            Some(old),
-            -1,
-            data::line_of(data::CART_JS_OLD, old),
-            &[],
-            with_bar,
-        ),
-        DiffLine::Add { new } => diff_cell(
-            p,
-            w,
-            Some(new),
-            1,
-            data::line_of(data::CART_JS, new),
-            data::added_words(new),
-            with_bar,
-        ),
-        DiffLine::Fold(n) => fold_bar(p, w, n),
-    }
-}
-
-fn fold_bar(p: &Pal, w: f32, n: u32) -> AnyElement {
-    view! {
-        <div class="flex-row items-center h-[33]" w={w}>
-            <div class="h-[33]" w={GUTTER} />
-            <div class="flex-row items-center flex-1 h-[33] pl-2" bg={p.fold}>
-                <txt(format!("{n} unmodified line{}", if n == 1 { "" } else { "s" }), SMALL, p.muted) />
-            </div>
-        </div>
-    }
-}
-
-fn split_diff(p: &Pal, w: f32) -> AnyElement {
-    let half = (w / 2.0).floor();
-    let lines = data::cart_diff(true);
-    // view!: pairing each deletion with the addition after it looks ahead
-    // and skips lines, which markup's `for` cannot; the cells are built
-    // here and the view places the rows.
-    let mut rows = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let (left, right) = match lines[i] {
-            DiffLine::Fold(n) => {
-                i += 1;
-                (
-                    fold_bar(p, half, n),
-                    view! {
-                        <div class="flex-row items-center h-[33] pl-1" w={half}>
-                            <div class="h-[33]" w={half - 4.0} bg={p.fold} />
-                        </div>
-                    },
-                )
-            }
-            DiffLine::Context { old, new } => {
-                i += 1;
-                (
-                    diff_cell(
-                        p,
-                        half,
-                        Some(old),
-                        0,
-                        data::line_of(data::CART_JS_OLD, old),
-                        &[],
-                        true,
-                    ),
-                    diff_cell(
-                        p,
-                        half,
-                        Some(new),
-                        0,
-                        data::line_of(data::CART_JS, new),
-                        &[],
-                        true,
-                    ),
-                )
-            }
-            DiffLine::Del { old } => {
-                let new = match lines.get(i + 1) {
-                    Some(DiffLine::Add { new }) => {
-                        i += 1;
-                        Some(*new)
-                    }
-                    _ => None,
-                };
-                i += 1;
-                let right = match new {
-                    Some(n) => diff_cell(
-                        p,
-                        half,
-                        Some(n),
-                        1,
-                        data::line_of(data::CART_JS, n),
-                        data::added_words(n),
-                        true,
-                    ),
-                    None => diff_cell(p, half, None, 0, "", &[], false),
-                };
-                (
-                    diff_cell(
-                        p,
-                        half,
-                        Some(old),
-                        -1,
-                        data::line_of(data::CART_JS_OLD, old),
-                        &[],
-                        true,
-                    ),
-                    right,
-                )
-            }
-            DiffLine::Add { new } => {
-                i += 1;
-                (
-                    diff_cell(p, half, None, 0, "", &[], false),
-                    diff_cell(
-                        p,
-                        half,
-                        Some(new),
-                        1,
-                        data::line_of(data::CART_JS, new),
-                        data::added_words(new),
-                        true,
-                    ),
-                )
-            }
-        };
-        rows.push((left, right));
-    }
-    view! {
-        <div class="flex-col pt-0.5" w={w}>
-            for (left, right) in rows {
-                <div class="flex-row items-center" w={w}>{left} {right}</div>
-            }
-        </div>
-    }
-}
-
-/// [`highlight`] with `words` (substrings of `code`) on a stronger tint.
-fn highlight_words(code: &str, words: &[&str], p: &Pal) -> AnyElement {
-    if words.is_empty() {
-        return view! { <highlight(code, p) /> };
-    }
-    // Split the line at the highlighted words and tint those pieces.
-    let mut rest = code;
-    let mut pieces: Vec<(&str, bool)> = Vec::new();
-    while !rest.is_empty() {
-        let hit = words
-            .iter()
-            .filter_map(|w| rest.find(w).map(|at| (at, *w)))
-            .min_by_key(|(at, _)| *at);
-        match hit {
-            Some((at, w)) => {
-                if at > 0 {
-                    pieces.push((&rest[..at], false));
-                }
-                pieces.push((&rest[at..at + w.len()], true));
-                rest = &rest[at + w.len()..];
-            }
-            None => {
-                pieces.push((rest, false));
-                rest = "";
-            }
-        }
-    }
-    view! {
-        <div class="flex-row items-center">
-            for (piece, hot) in pieces {
-                <highlight(piece, p) @when {hot} { bg={p.word_add} class="rounded-[3]" } />
-            }
         </div>
     }
 }
