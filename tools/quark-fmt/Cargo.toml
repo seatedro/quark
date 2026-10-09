@@ -19,6 +19,16 @@ syn = { version = "2", features = ["full", "visit"] }
 # unicode-ident 1.0.26 and newest unicode-properties 0.1.4 do not.
 ra-ap-rustc_lexer = "=0.145.0"
 unicode-width = "0.2"
+# Command line: config files, cargo metadata, file walks, exclude globs,
+# atomic writes, and --check diffs.
+glob = "0.3"
+serde.workspace = true
+serde_json = "1.0"
+similar = "2.7"
+tempfile = "3"
+toml = "1"
+walkdir = "2"
 
 [dev-dependencies]
+tempfile = "3"
 proptest.workspace = true
