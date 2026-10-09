@@ -1009,7 +1009,7 @@ fn fs_path(input: VertexOutput) -> @location(0) vec4<f32> {
 "#;
 
 // ---------------------------------------------------------------------------
-// Separable Gaussian blur shader — 13-tap kernel
+// Separable Gaussian blur shader — 25 taps reaching three sigma
 // ---------------------------------------------------------------------------
 
 pub(super) const BLUR_SHADER: &str = r#"
@@ -1093,6 +1093,8 @@ fn vs_blur(input: VertexInput) -> VertexOutput {
     return out;
 }
 
+const BLUR_TAPS: i32 = 12;
+
 fn tap(uv: vec2<f32>, space: f32) -> vec4<f32> {
     return to_target_space(textureSample(t_source, s_source, uv), space, false);
 }
@@ -1102,40 +1104,22 @@ fn fs_blur(input: VertexOutput) -> @location(0) vec4<f32> {
     let sigma = input.blur_params.z;
     let dir = vec2<f32>(input.blur_params.x, input.blur_params.y);
     let tex_size = vec2<f32>(textureDimensions(t_source));
-    // Step size in UV space, scaled up for large blur radii.
-    let step_scale = max(1.0, sigma / 6.0);
-    let texel = dir / tex_size * step_scale;
-
-    // 13-tap Gaussian kernel (offsets -6..+6). The blur writes linear
-    // light, so an encoded source decodes first.
+    // BLUR_TAPS samples each side reach three sigma: one texel apart for
+    // small sigma, spread apart for large. Each weight is the Gaussian at
+    // the sample's actual distance, so spreading samples keeps the
+    // kernel's width. `blur_reach` in the renderer must match.
+    let step = max(1.0, 3.0 * sigma / f32(BLUR_TAPS));
+    let texel = dir / tex_size * step;
+    // The blur writes linear light, so an encoded source decodes first.
     let space = input.blur_params.w;
-    var color = vec4<f32>(0.0);
-    var total_weight = 0.0;
-
-    let w0 = exp(0.0);
-    let w1 = exp(-1.0 / (2.0 * sigma * sigma));
-    let w2 = exp(-4.0 / (2.0 * sigma * sigma));
-    let w3 = exp(-9.0 / (2.0 * sigma * sigma));
-    let w4 = exp(-16.0 / (2.0 * sigma * sigma));
-    let w5 = exp(-25.0 / (2.0 * sigma * sigma));
-    let w6 = exp(-36.0 / (2.0 * sigma * sigma));
-
-    color += tap(input.uv + texel * -6.0, space) * w6;
-    color += tap(input.uv + texel * -5.0, space) * w5;
-    color += tap(input.uv + texel * -4.0, space) * w4;
-    color += tap(input.uv + texel * -3.0, space) * w3;
-    color += tap(input.uv + texel * -2.0, space) * w2;
-    color += tap(input.uv + texel * -1.0, space) * w1;
-    color += tap(input.uv, space)                * w0;
-    color += tap(input.uv + texel *  1.0, space) * w1;
-    color += tap(input.uv + texel *  2.0, space) * w2;
-    color += tap(input.uv + texel *  3.0, space) * w3;
-    color += tap(input.uv + texel *  4.0, space) * w4;
-    color += tap(input.uv + texel *  5.0, space) * w5;
-    color += tap(input.uv + texel *  6.0, space) * w6;
-
-    total_weight = w6 + w5 + w4 + w3 + w2 + w1 + w0 + w1 + w2 + w3 + w4 + w5 + w6;
-
+    var color = tap(input.uv, space);
+    var total_weight = 1.0;
+    for (var k = 1; k <= BLUR_TAPS; k = k + 1) {
+        let d = f32(k) * step;
+        let w = exp(-(d * d) / (2.0 * sigma * sigma));
+        color += (tap(input.uv - texel * f32(k), space) + tap(input.uv + texel * f32(k), space)) * w;
+        total_weight += 2.0 * w;
+    }
     return color / total_weight;
 }
 "#;

@@ -1942,9 +1942,13 @@ impl Renderer {
         let h = self.texture_pool.acquire(&self.device, width, height);
         let v = self.texture_pool.acquire(&self.device, width, height);
         let read_scene = if encoded { SOURCE_ENCODED } else { SOURCE_SAME };
-        // Pooled textures can be larger than the frame; passes on them set a
-        // viewport of the frame size, so UVs divide by the texture size.
-        let (tw, th) = (scene.width as f32, scene.height as f32);
+        // Pooled textures can be larger than the frame and than each other;
+        // passes on them set a viewport of the frame size, so each pass's
+        // UVs divide by the size of the texture it reads.
+        let uv_in = |target: &OffscreenTarget, r: Rect| {
+            let (tw, th) = (target.width as f32, target.height as f32);
+            [r.x / tw, r.y / th, r.right() / tw, r.bottom() / th]
+        };
 
         let mut blur_instances = Vec::new();
         let mut blit_instances = Vec::new();
@@ -1954,36 +1958,46 @@ impl Renderer {
             };
             let sigma = (region.blur_radius * 0.5).max(0.5);
             let br = region.rect;
-            let uv = [br.x / tw, br.y / th, br.right() / tw, br.bottom() / th];
             let bounds = [br.x, br.y, br.width, br.height];
-            // The vertical pass samples up to six (scaled) texels above and
+            // The vertical pass samples up to its kernel's reach above and
             // below the region, so the horizontal pass covers that margin
             // too; otherwise the region's top and bottom edges blend with
             // the cleared, transparent texels around it.
-            let reach = 6.0 * (sigma / 6.0).max(1.0) + 1.0;
+            let reach = blur_reach(sigma) + 1.0;
             let top = (br.y - reach).max(0.0);
             let bottom = (br.bottom() + reach).min(height as f32);
+            let band = Rect {
+                y: top,
+                height: bottom - top,
+                ..br
+            };
             blur_instances.push(BlurInstance {
                 bounds: [br.x, top, br.width, bottom - top],
-                uv_rect: [br.x / tw, top / th, br.right() / tw, bottom / th],
+                uv_rect: uv_in(&scene, band),
                 blur_params: [1.0, 0.0, sigma, read_scene],
             });
             blur_instances.push(BlurInstance {
                 bounds,
-                uv_rect: uv,
+                uv_rect: uv_in(&h, br),
                 blur_params: [0.0, 1.0, sigma, SOURCE_SAME],
             });
             blit_instances.push(BlitInstance {
                 bounds,
-                uv_rect: uv,
+                uv_rect: uv_in(&v, br),
                 tint: [1.0; 4],
                 radii: region.corner_radii,
                 space: [source_space(false, encoded), 0.0, 0.0, 0.0],
             });
         }
+        let frame = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: width as f32,
+            height: height as f32,
+        };
         blit_instances.push(BlitInstance {
             bounds: [0.0, 0.0, width as f32, height as f32],
-            uv_rect: [0.0, 0.0, width as f32 / tw, height as f32 / th],
+            uv_rect: uv_in(&scene, frame),
             tint: [1.0; 4],
             radii: [0.0; 4],
             space: [SOURCE_SAME; 4],
@@ -2439,6 +2453,14 @@ struct BlurTargets {
     scene_bind: wgpu::BindGroup,
     h_bind: wgpu::BindGroup,
     v_bind: wgpu::BindGroup,
+}
+
+/// How far, in pixels, a blur pass of `sigma` samples from the pixel it
+/// writes: the shader's `BLUR_TAPS` samples each side, spread so they reach
+/// three sigma.
+fn blur_reach(sigma: f32) -> f32 {
+    const BLUR_TAPS: f32 = 12.0;
+    BLUR_TAPS * (3.0 * sigma / BLUR_TAPS).max(1.0)
 }
 
 /// The clear color of a window target showing `background`, premultiplied
@@ -4851,6 +4873,9 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
     }
 }
 
+#[cfg(test)]
+#[path = "blur_tests.rs"]
+mod blur_tests;
 #[cfg(test)]
 #[path = "chunk_tests.rs"]
 mod chunk_tests;
