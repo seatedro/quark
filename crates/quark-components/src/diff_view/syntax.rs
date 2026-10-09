@@ -211,6 +211,11 @@ impl DiffSyntax {
         self.attach(worker.share(), store);
     }
 
+    /// Whether a worker is attached.
+    pub fn is_enabled(&self) -> bool {
+        self.worker.is_some()
+    }
+
     fn attach(&mut self, worker: HighlightWorker, store: GrammarStore) {
         if let Some(wake) = &self.wake {
             let wake = wake.clone();
@@ -236,12 +241,6 @@ impl DiffSyntax {
             worker.set_wake(move || wake());
         }
         self.wake = Some(wake);
-    }
-
-    /// The wake callback [`Self::set_wake`] set, for other background work
-    /// of the view to share.
-    pub(crate) fn wake(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
-        self.wake.clone()
     }
 
     /// Bounds what is parsed; takes effect at the next [`Self::request`].

@@ -24,7 +24,7 @@ use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
 
 use super::decorator::{
-    AnnotationContext, DiffDecorator, GutterContext, HeaderContext, HeaderSlot,
+    AnnotationContext, DiffDecorator, GutterContext, HeaderContext, HeaderSlot, SeparatorContext,
 };
 use super::paint::{self, Cue, LineColors};
 use super::prepared::{
@@ -628,6 +628,7 @@ fn band(
     let font_size = frame.metrics.font_size;
     let pad = frame.metrics.char_w * 2.0;
     let id = frame.id;
+    let columns = frame.columns;
     let deco = deco.clone();
     let hash = inputs_hash(&(
         paint.stamp,
@@ -644,7 +645,23 @@ fn band(
         PreparedKind::Diff(RowKind::FileHeader) => {
             file_header(&paint, id, width, height, pad, font_size, look, &deco)
         }
-        PreparedKind::Diff(_) => separator(&paint, width, height, pad, font_size, look, on_event),
+        PreparedKind::Diff(_) => {
+            let custom = deco.decorator.as_ref().and_then(|d| {
+                d.separator(&SeparatorContext {
+                    file: paint.file,
+                    gap: paint.gap,
+                    hidden: paint.hidden,
+                    title: &paint.title,
+                    columns,
+                    width,
+                    height,
+                })
+            });
+            match custom {
+                Some(custom) => view! { <div w={width} h={height}>{custom}</div> },
+                None => separator(&paint, width, height, pad, font_size, look, on_event),
+            }
+        }
         PreparedKind::Fact(fact) => {
             let label = fact_label(fact);
             let colors = look.colors;
@@ -673,13 +690,24 @@ fn band(
         }
         PreparedKind::More { hidden_rows } => {
             let colors = look.colors;
+            let env = look.env;
             let rows = if *hidden_rows == 1 { "row" } else { "rows" };
+            let label = format!("{hidden_rows} more {rows}");
             view! {
                 <div w={width} h={height} class="flex-row items-center" px={pad}
-                     bg={colors.separator}>
-                    <text size={font_size * 0.9} color={colors.muted}>
-                        "{hidden_rows} more {rows}"
-                    </text>
+                     bg={colors.separator}
+                     @when {env.accessible} {
+                         accessibility_role={Role::Status} aria-label={label.clone()}
+                     }>
+                    <text size={font_size * 0.9} color={colors.muted}>{label}</text>
+                    <div class="flex-1" />
+                    <div class="flex-row items-center h-full cursor-pointer" px={pad * 0.5}
+                         hover_bg={colors.hover} on:click={on_event(DiffEvent::OpenFull)}
+                         @when {env.accessible} {
+                             accessibility_role={Role::Button} aria-label="Open full diff"
+                         }>
+                        <text size={font_size * 0.9} color={colors.text}>"Open full diff"</text>
+                    </div>
                 </div>
             }
         }

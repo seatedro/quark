@@ -13,12 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 quark.workspace = true
-quark-app = { workspace = true, features = ["components"] }
-quark-ui.workspace = true
+quark-app = { workspace = true, features = ["components", "syntax"] }
+quark-ui = { workspace = true, features = ["syntax"] }
 quark-components.workspace = true
+quark-diff.workspace = true
 quark-text.workspace = true
 quark-terminal.workspace = true
 accesskit.workspace = true
 
 [dev-dependencies]
-quark-app = { workspace = true, features = ["components", "test-support"] }
+quark-app = { workspace = true, features = ["components", "syntax", "test-support"] }

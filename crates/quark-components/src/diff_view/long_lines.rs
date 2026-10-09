@@ -11,9 +11,9 @@
 //! the whole line wherever the window is.
 //!
 //! The word diff of a pair over [`SYNC_PAIR_BYTES`] runs on a thread of
-//! its own and is kept per pair; until it lands the pair shows no word
-//! highlights, and its arrival bumps [`LongLines::generation`] so rows
-//! repaint.
+//! its own and is kept per pair and options; until it lands the pair
+//! shows no word highlights, and its arrival bumps
+//! [`LongLines::generation`] so rows repaint.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -21,7 +21,9 @@ use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use quark_diff::{InlineDetail, InlineOptions, LineDetail, line_detail, paired_inline_diff};
+use quark_diff::{
+    InlineDetail, InlineMode, InlineOptions, LineDetail, line_detail, paired_inline_diff,
+};
 
 use super::prepared::LineWindow;
 
@@ -44,6 +46,17 @@ const KEPT_DIFFS: usize = 64;
 
 /// A line's identity for caching: its text's address and where it starts.
 type LineKey = (usize, usize);
+
+/// A pair's identity for caching: both lines and the options' bits.
+type PairKey = (LineKey, LineKey, (InlineMode, u32, usize));
+
+fn options_key(options: &InlineOptions) -> (InlineMode, u32, usize) {
+    (
+        options.mode,
+        options.min_kept_share.to_bits(),
+        options.max_line_bytes,
+    )
+}
 
 /// Changed word ranges of a pair, old side then new, in line bytes, and
 /// why they are what they are.
@@ -161,9 +174,10 @@ fn floor_grapheme(line: &str, byte: usize) -> usize {
 
 /// A word diff waiting for the thread.
 struct Job {
-    key: (LineKey, LineKey),
+    key: PairKey,
     old: (Arc<str>, Range<usize>),
     new: (Arc<str>, Range<usize>),
+    options: InlineOptions,
 }
 
 /// Called on the word thread after each result.
@@ -171,7 +185,7 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 
 struct Thread {
     jobs: Sender<Job>,
-    done: Receiver<((LineKey, LineKey), Words)>,
+    done: Receiver<(PairKey, Words)>,
     /// Read for each result, so a wake set after the thread started counts.
     wake: Arc<Mutex<Option<Wake>>>,
 }
@@ -180,8 +194,8 @@ struct Thread {
 #[derive(Default)]
 pub(crate) struct LongLines {
     maps: RefCell<Vec<(LineKey, Arc<ColumnMap>)>>,
-    diffs: RefCell<HashMap<(LineKey, LineKey), Words>>,
-    asked: RefCell<HashSet<(LineKey, LineKey)>>,
+    diffs: RefCell<HashMap<PairKey, Words>>,
+    asked: RefCell<HashSet<PairKey>>,
     thread: RefCell<Option<Thread>>,
     generation: Cell<u64>,
     /// Per column: a sideways scroll requested from the handle, which it
@@ -272,22 +286,20 @@ impl LongLines {
         self.generation.get()
     }
 
-    /// The changed words of a pair of display lines (byte ranges of their
-    /// stores' texts): at once for a short pair, else from the thread, or
-    /// `None` while it works. `wake` is called when a result lands.
+    /// The changed words of a long pair of display lines (byte ranges of
+    /// their stores' texts) under `options`, from the word thread: `None`
+    /// while it works. `wake` is called when a result lands.
     pub(crate) fn words(
         &self,
         old: (&Arc<str>, Range<usize>),
         new: (&Arc<str>, Range<usize>),
+        options: &InlineOptions,
         wake: Option<Wake>,
     ) -> Option<Words> {
-        if old.1.len() + new.1.len() <= SYNC_PAIR_BYTES {
-            let d = paired_inline_diff(&old.0[old.1.clone()], &new.0[new.1.clone()], &options());
-            return Some(words_of(d));
-        }
         let key = (
             (Arc::as_ptr(old.0) as *const u8 as usize, old.1.start),
             (Arc::as_ptr(new.0) as *const u8 as usize, new.1.start),
+            options_key(options),
         );
         if let Some(words) = self.diffs.borrow().get(&key) {
             return Some(words.clone());
@@ -300,6 +312,7 @@ impl LongLines {
                 key,
                 old: (old.0.clone(), old.1),
                 new: (new.0.clone(), new.1),
+                options: *options,
             });
         }
         None
@@ -330,10 +343,6 @@ impl LongLines {
     }
 }
 
-fn options() -> InlineOptions {
-    InlineOptions::default()
-}
-
 /// The word diff thread: it ends when its job sender is dropped with the
 /// view.
 fn spawn() -> Thread {
@@ -346,7 +355,7 @@ fn spawn() -> Thread {
         .spawn(move || {
             for job in job_rx {
                 let (old, new) = (&job.old.0[job.old.1], &job.new.0[job.new.1]);
-                let words = words_of(paired_inline_diff(old, new, &options()));
+                let words = words_of(paired_inline_diff(old, new, &job.options));
                 if done_tx.send((job.key, words)).is_err() {
                     return;
                 }

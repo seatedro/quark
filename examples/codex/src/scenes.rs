@@ -4,6 +4,8 @@
 //! ChatGPT 26.1007 in Codex mode, numbered ones Codex 26.623.
 
 use crate::data::{self, Item, ProjectId, Status, ThreadId};
+use quark_components::diff_view::presentation::DiffLayout;
+
 use crate::{Codex, Menu, Screen, Tab, settings::Page};
 
 type Setup = fn(&mut Codex);
@@ -86,7 +88,7 @@ pub const SCENES: &[(&str, &str, Setup)] = &[
             ],
         });
         set(a, items, Status::Running);
-        a.data.thread_mut(data::FAILING_THREAD).unwrap().pill = Some((2, 2));
+        a.data.thread_mut(data::FAILING_THREAD).unwrap().pill = true;
     }),
     (
         "file-change",
@@ -125,6 +127,16 @@ pub const SCENES: &[(&str, &str, Setup)] = &[
         turn2(a, true, true);
         a.side_panel = true;
         a.full_view = true;
+        // The capture's panel was set to split.
+        a.changes.set_layout(DiffLayout::Split);
+    }),
+    // Not captured: the full view with a review comment thread.
+    ("changes-comment", "u29-changes-full-view-dark", |a| {
+        turn2(a, true, true);
+        a.side_panel = true;
+        a.full_view = true;
+        a.changes.set_layout(DiffLayout::Split);
+        a.changes.seed_comment();
     }),
     ("approval", "u34-command-approval-prompt-dark", approval),
     ("approval-options", "u35-approval-options-menu-dark", |a| {

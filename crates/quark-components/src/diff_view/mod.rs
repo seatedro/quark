@@ -30,7 +30,9 @@
 //! annotation anchors, and navigation targets all convert through them.
 //!
 //! Syntax colors come from a `quark-syntax` worker thread
-//! ([`DiffViewState::enable_syntax`]); rows repaint as files finish.
+//! ([`DiffViewState::enable_syntax`]); rows repaint as files finish. A
+//! session view highlights each file revision as it arrives, on one
+//! worker, and keeps the colors of sides an update did not change.
 
 mod annotations;
 pub mod decorator;
@@ -53,7 +55,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use quark::selection::Selection;
-use quark_diff::{ContextPolicy, DiffDocument, DiffLimits, GapId, Mode, Projection, Reveal, Side};
+use quark_diff::{
+    ComparisonOptions, ContextPolicy, DiffDocument, DiffLimits, GapId, InlineOptions, Mode,
+    Projection, Reveal, Side,
+};
 use quark_render::scene::Rect;
 use quark_syntax::{GrammarStore, HighlightWorker};
 use quark_text::{FontEpoch, LayoutCache, TextSystem};
@@ -66,7 +71,7 @@ pub use navigation::{DiffTarget, FileId, RevealAlign, Revision, SourcePoint};
 pub use prepared::{AnnotationId, DiffPreviewLimit};
 pub use search::{FindOptions, SearchCoverage, SearchDirection, SearchSides, SearchSummary};
 pub use selection::CopyContent;
-pub use session::{DiffSessionViewState, diff_session_view};
+pub use session::{DiffSessionViewState, diff_session_view, diff_session_view_with};
 pub use view::{diff_view, diff_view_with};
 
 use annotations::AnnotationTable;
@@ -258,10 +263,16 @@ pub struct DiffViewState {
     content_w: [f32; 2],
     syntax: DiffSyntax,
     long_lines: long_lines::LongLines,
+    /// Session views: one bridge per file slot, all on `session_worker`.
+    slot_syntax: Vec<DiffSyntax>,
+    session_worker: Option<(HighlightWorker, GrammarStore)>,
+    syntax_wake: Option<Arc<dyn Fn() + Send + Sync>>,
     presentation: DiffPresentation,
     appearance: DiffAppearance,
     preview: Option<DiffPreviewLimit>,
     context_policy: ContextPolicy,
+    comparison: ComparisonOptions,
+    inline_options: InlineOptions,
     limits: DiffLimits,
     search: SearchState,
     annotations: AnnotationTable,
@@ -288,6 +299,7 @@ impl DiffViewState {
             0,
             Mode::Unified,
             ContextPolicy::default(),
+            ComparisonOptions::default(),
         ));
         state
             .syntax
@@ -327,10 +339,15 @@ impl DiffViewState {
             content_w: [0.0; 2],
             syntax: DiffSyntax::default(),
             long_lines: Default::default(),
+            slot_syntax: Vec::new(),
+            session_worker: None,
+            syntax_wake: None,
             presentation: DiffPresentation::default(),
             appearance: DiffAppearance::default(),
             preview: None,
             context_policy: ContextPolicy::default(),
+            comparison: ComparisonOptions::default(),
+            inline_options: InlineOptions::default(),
             limits: DiffLimits::default(),
             search: SearchState::default(),
             annotations: AnnotationTable::default(),
@@ -388,6 +405,26 @@ impl DiffViewState {
         self.limits
     }
 
+    pub fn comparison(&self) -> ComparisonOptions {
+        self.comparison
+    }
+
+    pub fn inline_options(&self) -> InlineOptions {
+        self.inline_options
+    }
+
+    /// Changed line pairs of `file` the whitespace policy shows as
+    /// unchanged, for a "N whitespace-only changes hidden" status.
+    pub fn hidden_whitespace_changes(&self, file: FileId) -> u32 {
+        self.unit_of(file)
+            .and_then(|unit| self.locate(unit))
+            .map_or(0, |(seg, file)| {
+                self.segments[seg]
+                    .comparison
+                    .hidden_whitespace_changes(file)
+            })
+    }
+
     pub fn scroll_offset(&self) -> f32 {
         self.list.scroll_offset()
     }
@@ -439,6 +476,7 @@ impl DiffViewState {
             self.generations,
             self.mode,
             self.context_policy,
+            self.comparison,
         );
         segment.revision = revision;
         self.segments[0] = segment;
@@ -563,6 +601,41 @@ impl DiffViewState {
         changed
     }
 
+    /// How removed and added lines are paired and which whitespace changes
+    /// are hidden; see [`ComparisonOptions`]. Every file is compared again
+    /// and the top source line stays in place. Copy, search, and patch
+    /// export keep reading the exact sources.
+    pub fn set_comparison(&mut self, options: ComparisonOptions) {
+        if options == self.comparison {
+            return;
+        }
+        let anchor = self.anchor();
+        let mode = self.mode;
+        for segment in &mut self.segments {
+            segment.compare(mode, options);
+        }
+        self.comparison = options;
+        // Rows may pair with other lines now.
+        self.painted.clear();
+        self.rebuild_rows(anchor);
+    }
+
+    /// Which changed units inside a line pair are highlighted, and the
+    /// limits past which none are. The shorter of
+    /// [`InlineOptions::max_line_bytes`] and
+    /// [`DiffLimits::inline_line_bytes`] applies.
+    pub fn set_inline_options(&mut self, options: InlineOptions) {
+        if options == self.inline_options {
+            return;
+        }
+        self.inline_options = options;
+        for segment in &mut self.segments {
+            segment.clear_inline();
+        }
+        self.painted.clear();
+        self.revision += 1;
+    }
+
     /// Local color overrides over the theme's.
     pub fn set_appearance(&mut self, appearance: DiffAppearance) {
         if appearance != self.appearance {
@@ -584,9 +657,17 @@ impl DiffViewState {
     pub fn set_limits(&mut self, limits: DiffLimits) {
         if limits != self.limits {
             self.limits = limits;
-            self.syntax.set_budget(SyntaxBudget {
+            let budget = SyntaxBudget {
                 side_bytes: limits.syntax_file_bytes,
-            });
+            };
+            self.syntax.set_budget(budget);
+            for bridge in &mut self.slot_syntax {
+                bridge.set_budget(budget);
+            }
+            // Word diffs were computed under the old line limit.
+            for segment in &mut self.segments {
+                segment.clear_inline();
+            }
             self.painted.clear();
             self.content_w = [0.0; 2];
             self.rerun_search();
@@ -609,9 +690,10 @@ impl DiffViewState {
     /// Highlights every file on a background thread, by file extension,
     /// with `store`'s grammars. Files whose language has no grammar (or
     /// whose grammar is still downloading) stay plain until it arrives.
-    /// Session views stay plain for now.
+    /// A session view also highlights each file revision as it arrives.
     pub fn enable_syntax(&mut self, store: GrammarStore) {
         if !self.files.is_static() {
+            self.attach_session_syntax(HighlightWorker::new(store.clone()), store);
             return;
         }
         self.syntax.enable(store);
@@ -623,6 +705,7 @@ impl DiffViewState {
     /// diffs need one parsing thread.
     pub fn enable_syntax_shared(&mut self, worker: &HighlightWorker, store: GrammarStore) {
         if !self.files.is_static() {
+            self.attach_session_syntax(worker.share(), store);
             return;
         }
         self.syntax.enable_shared(worker, store);
@@ -633,7 +716,98 @@ impl DiffViewState {
     /// Calls `wake` from the syntax worker when results are ready, so an
     /// idle app can ask for a frame instead of polling.
     pub fn set_syntax_wake(&mut self, wake: impl Fn() + Send + Sync + 'static) {
-        self.syntax.set_wake(wake);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let each = |bridge: &mut DiffSyntax| {
+            let wake = wake.clone();
+            bridge.set_wake(move || wake());
+        };
+        each(&mut self.syntax);
+        self.slot_syntax.iter_mut().for_each(each);
+        self.syntax_wake = Some(wake);
+    }
+
+    /// Session views: highlights every file on `worker`, one bridge per
+    /// file slot, each a handle of its own on the worker's thread.
+    fn attach_session_syntax(&mut self, worker: HighlightWorker, store: GrammarStore) {
+        // Bridges of an earlier worker lose their requests with it.
+        self.slot_syntax.clear();
+        self.session_worker = Some((worker, store));
+        for seg in 0..self.segments.len() {
+            self.request_slot_syntax(seg);
+        }
+    }
+
+    /// Asks for the colors of segment `seg`'s current document. Sides
+    /// whose source did not change keep the colors they have.
+    pub(crate) fn request_slot_syntax(&mut self, seg: usize) {
+        let Some((worker, store)) = &self.session_worker else {
+            return;
+        };
+        let segment = &self.segments[seg];
+        let slot = segment.slot as usize;
+        if self.slot_syntax.len() <= slot {
+            self.slot_syntax.resize_with(slot + 1, DiffSyntax::default);
+        }
+        let bridge = &mut self.slot_syntax[slot];
+        if !bridge.is_enabled() {
+            if let Some(wake) = &self.syntax_wake {
+                let wake = wake.clone();
+                bridge.set_wake(move || wake());
+            }
+            bridge.set_budget(SyntaxBudget {
+                side_bytes: self.limits.syntax_file_bytes,
+            });
+            bridge.enable_shared(worker, store.clone());
+        }
+        bridge.request(&segment.doc, segment.generation);
+    }
+
+    /// Drops the colors of a slot whose file left the session.
+    pub(crate) fn drop_slot_syntax(&mut self, slot: u32) {
+        if let Some(bridge) = self.slot_syntax.get_mut(slot as usize) {
+            *bridge = DiffSyntax::default();
+        }
+    }
+
+    /// The bridge holding segment `seg`'s colors, and the index it knows
+    /// the segment's `file` by.
+    pub(crate) fn syntax_of(&self, seg: usize, file: u32) -> Option<(&DiffSyntax, u32)> {
+        if self.files.is_static() {
+            return Some((&self.syntax, file));
+        }
+        let slot = self.segments.get(seg)?.slot;
+        self.slot_syntax.get(slot as usize).map(|s| (s, file))
+    }
+
+    /// Takes finished highlights. Returns whether any recolored a file.
+    fn poll_syntax(&mut self) -> bool {
+        if self.files.is_static() {
+            return self
+                .segments
+                .first()
+                .is_some_and(|segment| self.syntax.poll(segment.generation));
+        }
+        let mut changed = false;
+        for segment in &self.segments {
+            if let Some(bridge) = self.slot_syntax.get_mut(segment.slot as usize) {
+                changed |= bridge.poll(segment.generation);
+            }
+        }
+        changed
+    }
+
+    /// Blocks until every requested highlight has its first result and
+    /// takes it, so the next frame shows colors. For tests and
+    /// screenshots.
+    pub fn finish_syntax(&mut self) -> bool {
+        let mut changed = self.syntax.finish_pending();
+        for bridge in &mut self.slot_syntax {
+            changed |= bridge.finish_pending();
+        }
+        if changed {
+            self.revision += 1;
+        }
+        changed
     }
 
     /// Folds a file's rows under its header, or unfolds them. Returns
@@ -878,10 +1052,7 @@ impl DiffViewState {
         scale: f32,
         now_ms: u64,
     ) {
-        if self.files.is_static()
-            && let Some(segment) = self.segments.first()
-            && self.syntax.poll(segment.generation)
-        {
+        if self.poll_syntax() {
             self.revision += 1;
         }
         if self.long_lines.poll() {
