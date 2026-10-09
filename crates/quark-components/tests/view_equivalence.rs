@@ -387,6 +387,38 @@ fn button_children_name_the_button() {
     );
 }
 
+// Catches a landmark `role=` that names no platform role, so screen readers
+// see an unlabeled group instead of the region.
+#[test]
+fn landmark_roles_publish_their_platform_roles() {
+    let painted = paint(view! {
+        <div class="flex-col w-full h-full">
+            <div role="navigation" aria-label="Sidebar" class="h-4" />
+            <div role="complementary" aria-label="Panel" class="h-4" />
+            <div role="log" aria-label="Transcript" class="h-4" />
+            <div role="alertdialog" aria-label="Approve" class="h-4" />
+            <div role="window" aria-label="Codex" class="h-4" />
+        </div>
+    });
+    let roles: Vec<&str> = painted
+        .accessibility
+        .lines()
+        .filter_map(|line| line.split(" | ").nth(1))
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            "Navigation",
+            "Complementary",
+            "Log",
+            "AlertDialog",
+            "Window"
+        ],
+        "{}",
+        painted.accessibility
+    );
+}
+
 // Catches a class vocabulary entry that names a method the builders do not
 // have: this test stops compiling.
 #[test]

@@ -111,10 +111,12 @@ const SPATIAL_ATTRS: &[&str] = &[
 /// `role="..."` values: ARIA role names and the `SemanticRole` they set.
 const ROLES: &[(&str, &str)] = &[
     ("alert", "Alert"),
+    ("alertdialog", "AlertDialog"),
     ("button", "Button"),
     ("cell", "Cell"),
     ("checkbox", "CheckBox"),
     ("combobox", "ComboBox"),
+    ("complementary", "Complementary"),
     ("dialog", "Dialog"),
     ("document", "Document"),
     ("grid", "Grid"),
@@ -127,9 +129,11 @@ const ROLES: &[(&str, &str)] = &[
     ("list", "List"),
     ("listbox", "ListBox"),
     ("listitem", "ListItem"),
+    ("log", "Log"),
     ("menu", "Menu"),
     ("menubar", "MenuBar"),
     ("menuitem", "MenuItem"),
+    ("navigation", "Navigation"),
     ("option", "ListBoxOption"),
     ("progressbar", "ProgressIndicator"),
     ("radio", "RadioButton"),
@@ -150,6 +154,8 @@ const ROLES: &[(&str, &str)] = &[
     ("tooltip", "Tooltip"),
     ("tree", "Tree"),
     ("treeitem", "TreeItem"),
+    // Not ARIA: a window-like container inside the app window.
+    ("window", "Window"),
 ];
 
 /// `aria-*` attributes and the accessibility builder each calls.
@@ -372,19 +378,9 @@ impl Emit {
             Node::For(fl) => {
                 let pat = &fl.pat;
                 let iter = &fl.iter;
-                let body = match (&fl.key, fl.body.as_slice()) {
-                    (None, body) => self.stmts(body, sink),
-                    (Some(key), [Node::Element(el)]) => {
-                        let mode = self.element(el, Some(key));
-                        sink.add(mode)
-                    }
-                    (Some((name, _)), _) => {
-                        self.error(
-                            name.span(),
-                            "a keyed `for` needs exactly one element in its body to put the key on",
-                        );
-                        TokenStream2::new()
-                    }
+                let body = match &fl.key {
+                    None => self.stmts(&fl.body, sink),
+                    Some(key) => self.keyed_body(&fl.body, key, sink, true),
                 };
                 quote!(for #pat in #iter { #body })
             }
@@ -511,18 +507,15 @@ impl Emit {
     fn for_loop(&self, fl: &ForNode) -> TokenStream2 {
         let pat = &fl.pat;
         let iter = &fl.iter;
-        let body = match (&fl.key, fl.body.as_slice()) {
-            (None, _) => self.children_vec(&fl.body),
-            (Some(key), [Node::Element(el)]) => {
-                let mode = self.element(el, Some(key));
-                self.children_vec_of(mode)
-            }
-            (Some((name, _)), _) => {
-                self.error(
-                    name.span(),
-                    "a keyed `for` needs exactly one element in its body to put the key on",
-                );
-                quote!(::std::vec::Vec::new())
+        let body = match &fl.key {
+            None => self.children_vec(&fl.body),
+            Some(key) => {
+                let stmts = self.keyed_body(&fl.body, key, Sink::Vec, true);
+                quote! {{
+                    let mut __quark_children = ::std::vec::Vec::new();
+                    #stmts
+                    __quark_children
+                }}
             }
         };
         quote! {
@@ -533,14 +526,80 @@ impl Emit {
         }
     }
 
-    fn children_vec_of(&self, mode: Mode) -> TokenStream2 {
-        match mode {
-            Mode::Child(t) => quote!(::std::vec![(#t).into_any()]),
-            Mode::Optional(t) => {
-                quote!((#t).into_iter().map(|__quark_child| __quark_child.into_any()).collect::<::std::vec::Vec<_>>())
+    /// A keyed `for` body: leading `let`s, then one element that takes
+    /// `.key(..)`, or one `if`/`match` whose every branch is such a body.
+    /// A branch (not the loop body itself, `top`) may also be empty: it adds
+    /// no child, so it needs no key. Everything lowers to statements in
+    /// place, like an unkeyed body.
+    fn keyed_body(
+        &self,
+        body: &[Node],
+        key: &(Ident, Expr),
+        sink: Sink,
+        top: bool,
+    ) -> TokenStream2 {
+        let lets = body.iter().take_while(|n| matches!(n, Node::Let(_)));
+        let rest = &body[lets.clone().count()..];
+        let lets: TokenStream2 = lets.map(|n| self.child_stmts(n, sink)).collect();
+        let root = match rest {
+            [] if !top => TokenStream2::new(),
+            [Node::Element(el)] if !is_fragment_tag(el) => sink.add(self.element(el, Some(key))),
+            [Node::If(chain)] => {
+                let mut tokens = TokenStream2::new();
+                let mut link = Some(chain);
+                let mut first = true;
+                while let Some(c) = link {
+                    let cond = &c.cond;
+                    let then = self.keyed_body(&c.then_children, key, sink, false);
+                    if !first {
+                        tokens.extend(quote!(else));
+                    }
+                    first = false;
+                    tokens.extend(quote!(if #cond { #then }));
+                    if let Some(else_children) = &c.else_children {
+                        let body = self.keyed_body(else_children, key, sink, false);
+                        tokens.extend(quote!(else { #body }));
+                    }
+                    link = c.else_if.as_deref();
+                }
+                tokens
             }
-            Mode::Spread(t) => quote!((#t).into_iter().collect::<::std::vec::Vec<_>>()),
-        }
+            [Node::Match(m)] => {
+                let arms = m.arms.iter().map(|arm| {
+                    let pat = &arm.pat;
+                    let guard = arm.guard.as_ref().map(|g| quote!(if #g));
+                    let body = self.keyed_body(&arm.body, key, sink, false);
+                    quote!(#pat #guard => { #body })
+                });
+                let match_token = m.match_token;
+                let scrutinee = &m.scrutinee;
+                quote!(#match_token #scrutinee { #(#arms)* })
+            }
+            [] => {
+                self.error(
+                    key.0.span(),
+                    "a keyed `for` needs one element in its body to put the key on",
+                );
+                TokenStream2::new()
+            }
+            [only] => {
+                self.error(
+                    node_span(only),
+                    "a keyed `for` puts the key on one element; this is not an element, \
+                     `if`, or `match`",
+                );
+                TokenStream2::new()
+            }
+            [_, second, ..] => {
+                self.error(
+                    node_span(second),
+                    "a keyed `for` puts the key on one element per item, so its body and each \
+                     `if` branch or `match` arm hold at most one; wrap these in a <div>",
+                );
+                TokenStream2::new()
+            }
+        };
+        quote!(#lets #root)
     }
 
     // -----------------------------------------------------------------------

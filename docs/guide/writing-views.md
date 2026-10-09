@@ -69,6 +69,11 @@ error that suggests the closest one. Components start with an uppercase letter o
 (`<widgets::Card>`). A closing tag must match its opening tag; `</Card>`
 may close `<widgets::Card>`.
 
+Built-in tags call whatever function of that name is in scope, so a local
+binding shadows it: inside `Step::Prose { text, .. } => ..`, `<text>`
+calls the bound `text` and fails to compile. Rename the binding
+(`text: body`) to use the tag there.
+
 ## Attributes
 
 Every builder method is an attribute. The method name carries the
@@ -97,14 +102,19 @@ the call.
 | `key={..}`, `id="..."`, `test-id="..."` | `.key(..)`, `.id(..)`, `.test_id(..)` |
 | `track_scroll={&handle}`, `scrollbar_visibility={&state}` | `.track_scroll(&handle)`, `.scrollbar_visibility(&state)`: the only handle-style attributes, because they are the only ones the builders have |
 
-`role` takes the ARIA names `alert`, `button`, `cell`, `checkbox`,
-`combobox`, `dialog`, `document`, `grid`, `gridcell`, `group`, `heading`,
-`img`, `label`, `link`, `list`, `listbox`, `listitem`, `menu`, `menubar`,
-`menuitem`, `option`, `progressbar`, `radio`, `radiogroup`, `row`,
-`separator`, `slider`, `spinbutton`, `status`, `switch`, `tab`, `table`,
-`tablist`, `tabpanel`, `textbox`, `toolbar`, `tooltip`, `tree`, and
-`treeitem`, plus quark's `scrollarea`, or `role={expr}` for a
-`SemanticRole`.
+`role` takes the ARIA names `alert`, `alertdialog`, `button`, `cell`,
+`checkbox`, `combobox`, `complementary`, `dialog`, `document`, `grid`,
+`gridcell`, `group`, `heading`, `img`, `label`, `link`, `list`, `listbox`,
+`listitem`, `log`, `menu`, `menubar`, `menuitem`, `navigation`, `option`,
+`progressbar`, `radio`, `radiogroup`, `row`, `separator`, `slider`,
+`spinbutton`, `status`, `switch`, `tab`, `table`, `tablist`, `tabpanel`,
+`textbox`, `toolbar`, `tooltip`, `tree`, and `treeitem`, plus quark's
+`scrollarea` and `window`, or `role={expr}` for a `SemanticRole`.
+
+`role=` sets the platform role only when none is set yet, so an earlier
+`accessibility_role={..}` (from a helper, say) keeps its platform role
+while `role=` changes the semantic role. `group` and `scrollarea` publish
+no platform node; use `accessibility_role={Role::Group}` for one.
 
 `on:hover` expands to `.on_hover(..)`, which no builder has yet; hover is a
 style state in quark, written with `hover:` classes or `hover_bg={..}`.
@@ -333,6 +343,7 @@ is an error that suggests `"Send"`.
 | `match v { A => <tag/> B => { <a/> <b/> } C => expr, }` | Arms take markup, `{ children }`, or a Rust expression |
 | `for x in xs { .. }` | Each iteration's children |
 | `for x in xs key={x.id} { <div>..</div> }` | Adds `.key(..)` to each iteration's single root |
+| `for x in xs key={..} { match x { A => <a/> B => <b/> } }` | The body may instead be one `if` or `match` (after any `let`s); the key goes on the root of the branch taken. A branch holds one root or none; several are an error |
 | `let name = expr;` | Binds `name` for the children after it in the same list, branch, or loop body |
 
 A branch or arm with several children adds them to the parent directly;
