@@ -270,7 +270,7 @@ impl DiffSessionViewState {
                         source_line(&old_doc, 0, sa, ib),
                     );
                     match remap {
-                        Some(remap) => remap.map_range(sa, a.min(b)..a.max(b) + 1).is_some(),
+                        Some(remap) => map_range(remap, sa, a.min(b)..a.max(b) + 1).is_some(),
                         None => same_revision,
                     }
                 }
@@ -333,7 +333,9 @@ impl DiffSessionViewState {
                 continue;
             }
             let carried = match remap {
-                Some(remap) if a.revision == remap.from => remap.map_range(a.side, a.lines.clone()),
+                Some(remap) if a.revision == remap.from => {
+                    map_range(remap, a.side, a.lines.clone())
+                }
                 _ => None,
             };
             match carried {
@@ -404,6 +406,28 @@ impl DiffSessionViewState {
     ) -> Option<DiffAnchor> {
         self.view.anchor_for(file, side, lines)
     }
+}
+
+/// The later revision's lines for `lines` when every one of them was kept
+/// and they stay contiguous. Checks each line:
+/// [`SourceRemap::map_range`] checks only the ends, so it keeps a range
+/// with a line replaced inside it.
+fn map_range(
+    remap: &SourceRemap,
+    side: Side,
+    lines: std::ops::Range<u32>,
+) -> Option<std::ops::Range<u32>> {
+    let start = match remap.map_line(side, lines.start) {
+        LineMap::Kept(at) => at,
+        LineMap::Replaced { at } if lines.is_empty() => at,
+        LineMap::Replaced { .. } => return None,
+    };
+    for (offset, line) in lines.clone().enumerate() {
+        if remap.map_line(side, line) != LineMap::Kept(start + offset as u32) {
+            return None;
+        }
+    }
+    Some(start..start + lines.len() as u32)
 }
 
 /// The session diff at its viewport size, as of the last
