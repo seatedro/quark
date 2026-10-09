@@ -26,7 +26,7 @@ mod chunks;
 mod text_runs;
 
 use crate::text::{
-    GlyphOwner, RecoloredBuffers, TextPath, color_to_linear, measure_mono_char_width,
+    GlyphOwner, RecoloredBuffers, TextPath, color_to_unit, measure_mono_char_width,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1397,7 +1397,7 @@ impl Renderer {
         let viewport_uniform = ViewportUniform {
             resolution: [sw as f32, sh as f32],
             time: time_seconds,
-            _padding: 0.0,
+            encoded: 0.0,
         };
         self.queue.write_buffer(
             &self.viewport_buffer,
@@ -2476,7 +2476,7 @@ struct ShadowInstance {
     draw_bounds: [f32; 4],
     /// Original shadow-casting rect (x, y, w, h) before expansion.
     shadow_bounds: [f32; 4],
-    /// Shadow color (linear RGBA, premultiplied).
+    /// Shadow color (sRGB-encoded, straight alpha; see `color_to_unit`).
     color: [f32; 4],
     /// [blur_sigma, corner_radius, 0, 0]
     params: [f32; 4],
@@ -2532,9 +2532,9 @@ impl ShadowInstance {
 struct EffectQuadInstance {
     /// Element bounds: [x, y, width, height].
     bounds: [f32; 4],
-    /// First color (linear RGBA, premultiplied).
+    /// First color (sRGB-encoded, straight alpha; see `color_to_unit`).
     color_a: [f32; 4],
-    /// Second color (linear RGBA, premultiplied).
+    /// Second color (sRGB-encoded, straight alpha).
     color_b: [f32; 4],
     /// [effect_type, param1, param2, corner_radius].
     params: [f32; 4],
@@ -2709,7 +2709,9 @@ impl BlurInstance {
 struct ViewportUniform {
     resolution: [f32; 2],
     time: f32,
-    _padding: f32,
+    /// 1 when the target holds encoded sRGB values; see `to_target` in
+    /// the shaders.
+    encoded: f32,
 }
 
 impl ViewportUniform {
@@ -2717,7 +2719,7 @@ impl ViewportUniform {
         Self {
             resolution: [width as f32, height as f32],
             time: 0.0,
-            _padding: 0.0,
+            encoded: 0.0,
         }
     }
 }
@@ -3500,14 +3502,14 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
     Some(match primitive {
         Primitive::Rect(rect) => quad(
             rect.rect,
-            color_to_linear(rect.color),
+            color_to_unit(rect.color),
             [0.0; 4],
             [0.0; 4],
             [0.0; 4],
         ),
         Primitive::RoundedRect(rect) => quad(
             rect.rect,
-            color_to_linear(rect.color),
+            color_to_unit(rect.color),
             [0.0; 4],
             rect.corner_radii,
             [0.0; 4],
@@ -3515,7 +3517,7 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
         Primitive::Border(border) => quad(
             border.rect,
             [0.0; 4],
-            color_to_linear(border.color),
+            color_to_unit(border.color),
             border.corner_radii,
             border.widths,
         ),
@@ -3537,7 +3539,7 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
                     rect.width,
                     rect.height,
                 ],
-                color: color_to_linear(shadow.color),
+                color: color_to_unit(shadow.color),
                 params: [sigma, shadow.corner_radius, 0.0, 0.0],
                 clip_bounds: [0.0; 4],
                 clip_radii: [0.0; 4],
@@ -3561,8 +3563,8 @@ fn convert(primitive: &Primitive, rasterize: impl FnOnce(u64) -> bool) -> Option
             let rect = effect.rect;
             Drawn::Effect(EffectQuadInstance {
                 bounds: [rect.x, rect.y, rect.width, rect.height],
-                color_a: color_to_linear(effect.color_a),
-                color_b: color_to_linear(effect.color_b),
+                color_a: color_to_unit(effect.color_a),
+                color_b: color_to_unit(effect.color_b),
                 params: [
                     effect.effect_type as u32 as f32,
                     effect.params[0],
@@ -3656,7 +3658,7 @@ fn path_parts(
         if !push_bands(&outline, segments, &mut scratch.bands, &mut scratch.points) {
             continue;
         }
-        let color = color_to_linear(color);
+        let color = color_to_unit(color);
         let start = bands.len() as u32;
         bands.extend(scratch.bands.iter().map(|band| {
             let rect = band.rect.offset(origin[0], origin[1]);
