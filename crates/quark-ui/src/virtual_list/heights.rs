@@ -122,6 +122,9 @@ impl Heights {
     /// while at most a quarter of them differ from it.
     pub(super) fn build(base: f32, heights: impl IntoIterator<Item = f32>) -> Self {
         let heights = heights.into_iter();
+        // Rows to come, so a burst of exceptions at the start of a long
+        // list does not decide for all of it.
+        let expected = heights.size_hint().0;
         let mut sparse = Sparse::new(base);
         let mut dense: Option<Vec<f32>> = None;
         for height in heights {
@@ -131,8 +134,11 @@ impl Heights {
                     sparse.push(height);
                     // Past a quarter (and a floor, so short lists stay
                     // sparse) the exceptions cost more than the rows.
-                    if sparse.at.len() > 64 && sparse.at.len() * 4 > sparse.len {
-                        dense = Some(sparse.dense());
+                    let k = sparse.at.len();
+                    if k > 64 && k * 4 > sparse.len.max(expected) {
+                        let mut heights = sparse.dense();
+                        heights.reserve(expected.saturating_sub(heights.len()));
+                        dense = Some(heights);
                     }
                 }
             }
