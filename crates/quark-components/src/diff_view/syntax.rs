@@ -43,7 +43,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use quark_diff::{DiffDocument, Side, TextStore};
+use quark_diff::{DiffDocument, Side, SourceCoverage, TextStore};
 use quark_syntax::{
     GrammarStore, HighlightKind, HighlightRequest, HighlightSpan, HighlightWorker, Highlighted,
     LanguageId, LanguageStatus, Priority,
@@ -238,7 +238,7 @@ impl DiffSyntax {
         for file in 0..doc.file_count() {
             for side in [Side::Old, Side::New] {
                 let store = doc.text(file, side);
-                let fragments = doc.files().partial[file as usize]
+                let fragments = (doc.coverage(file) == SourceCoverage::PatchOnly)
                     .then(|| hunk_fragments(doc, file, side, store));
                 let path = side_path(doc, file, side);
                 self.request_side(file, side, path, store.shared(), fragments);
