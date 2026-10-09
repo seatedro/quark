@@ -1051,43 +1051,7 @@ impl Element for Div {
 
         // Background — effect quad takes priority over solid color.
         if let Some(effect) = self.bg_effect {
-            let (effect_type, params, color_a, color_b) = match effect {
-                BackgroundEffect::NoiseGradient {
-                    scale,
-                    color_a,
-                    color_b,
-                } => (EffectType::NoiseGradient, [scale, 0.0], color_a, color_b),
-                BackgroundEffect::LinearGradient {
-                    angle,
-                    color_a,
-                    color_b,
-                } => (EffectType::LinearGradient, [angle, 0.0], color_a, color_b),
-                BackgroundEffect::RadialGradient { color_a, color_b } => {
-                    (EffectType::RadialGradient, [0.0, 0.0], color_a, color_b)
-                }
-                BackgroundEffect::Shimmer {
-                    base,
-                    highlight,
-                    speed,
-                } => (EffectType::Shimmer, [speed, 0.0], base, highlight),
-                BackgroundEffect::Vignette { color, intensity } => (
-                    EffectType::Vignette,
-                    [intensity, 0.0],
-                    color,
-                    Color::TRANSPARENT,
-                ),
-                BackgroundEffect::ColorTint { color } => {
-                    (EffectType::ColorTint, [0.0, 0.0], color, Color::TRANSPARENT)
-                }
-            };
-            scene.effect_quad(EffectQuadPrimitive {
-                rect: bounds,
-                effect_type,
-                color_a,
-                color_b,
-                params,
-                corner_radius: r,
-            });
+            effect.paint(scene, bounds, radii);
         } else if let Some(bg) = background {
             scene.rounded_rect(RoundedRectPrimitive {
                 rect: bounds,
@@ -1100,12 +1064,23 @@ impl Element for Div {
         if let Some(border) = style.border_color
             && style.border_widths != [0.0; 4]
         {
-            scene.border(BorderPrimitive {
-                rect: bounds,
-                widths: style.border_widths,
-                corner_radii: radii,
-                color: border,
-            });
+            if style.border_style == quark::style::BorderStyle::Solid {
+                scene.border(BorderPrimitive {
+                    rect: bounds,
+                    widths: style.border_widths,
+                    corner_radii: radii,
+                    color: border,
+                });
+            } else {
+                let width = style.border_widths.iter().copied().fold(0.0, f32::max);
+                scene.path(quark::scene::PathPrimitive::border(
+                    bounds,
+                    width,
+                    radii,
+                    border,
+                    style.border_style,
+                ));
+            }
         }
 
         let should_clip = self.clips

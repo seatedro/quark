@@ -28,9 +28,7 @@ use quark::{
     UiEventPhase, UiEventResult, UiKey, UiNodeId,
 };
 use quark_render::Scene;
-use quark_render::scene::{
-    BlurRegionPrimitive, EffectQuadPrimitive, EffectType, Rect, Transform2D,
-};
+use quark_render::scene::{BlurRegionPrimitive, Rect, Transform2D};
 
 pub use taffy::NodeId as LayoutId;
 
