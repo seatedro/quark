@@ -72,3 +72,11 @@ suffix: ,
     view! { -> Option < Div >,
 --- expected
     view! { -> Option<Div>,
+=== table.rs: an @when condition with let is formatted as a condition
+context: expr
+prefix: @when {
+suffix: }
+--- input
+                 @when {let Some(direction)=sort}
+--- expected
+                 @when {let Some(direction) = sort}

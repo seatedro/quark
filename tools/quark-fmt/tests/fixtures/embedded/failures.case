@@ -6,12 +6,12 @@ suffix: }
             color={match tone { Tone::Muted => { p.muted }, Tone::Plain => p.text }}
 --- error
 rustfmt changed
-=== a fragment rustfmt rejects keeps its source
+=== a fragment rustfmt rejects (here, an incomplete one) keeps its source
 context: expr
 prefix: value={
 suffix: }
 --- input
-            value={let x = 1}
+            value={count +}
 --- error
 rustfmt rejected
 === a neighbour of a rejected fragment in the same run is still formatted
