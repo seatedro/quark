@@ -3047,6 +3047,7 @@ dependencies = [
  "glob",
  "proc-macro2",
  "proptest",
+ "quark-view-syntax",
  "ra-ap-rustc_lexer",
  "serde",
  "serde_json",

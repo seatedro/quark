@@ -8,6 +8,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The view! grammar quark-macros parses, with source spans for every leaf.
+quark-view-syntax = { path = "../../crates/quark-view-syntax", features = ["locations"] }
 # Byte ranges of tokens parsed outside a proc macro (`Span::byte_range`).
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 # `visit` finds every macro position in a parsed file.
