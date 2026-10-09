@@ -366,12 +366,10 @@ fn truncate_text_to_fit_accounts_for_font_weight() {
         cx.measure_text_width("Open Compare", font_size, FontKind::Ui, FontWeight::Medium);
     let full_width = cx.measure_text_width(text, font_size, FontKind::Ui, FontWeight::Medium);
 
-    let (truncated, truncated_width) = truncate_text_to_fit(
+    let (truncated, truncated_width) = truncate_text_to_fit_styled(
         &mut cx,
         text,
-        font_size,
-        FontKind::Ui,
-        FontWeight::Medium,
+        TextStyle::new(font_size).weight(FontWeight::Medium),
         full_width,
         max_width,
     );

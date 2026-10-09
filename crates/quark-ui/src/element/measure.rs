@@ -9,21 +9,6 @@ use quark_text::offset;
 // Text measurement helpers (layouts come from `ElementContext::layout_text`)
 // ---------------------------------------------------------------------------
 
-pub(super) fn truncate_text_to_fit(
-    cx: &mut ElementContext<'_>,
-    text: &str,
-    font_size: f32,
-    font_kind: FontKind,
-    font_weight: FontWeight,
-    full_width: f32,
-    max_width: f32,
-) -> (String, f32) {
-    let style = TextStyle::new(font_size)
-        .kind(font_kind)
-        .weight(font_weight);
-    truncate_text_to_fit_styled(cx, text, style, full_width, max_width)
-}
-
 /// The longest grapheme prefix of `text` that fits `max_width` with an
 /// ellipsis, measured in `style`, and its width; `text` itself when its
 /// `full_width` fits.
@@ -109,12 +94,10 @@ mod tests {
             .collect();
         for step in 1..80 {
             let max_width = full * step as f32 / 80.0;
-            let (truncated, _) = truncate_text_to_fit(
+            let (truncated, _) = truncate_text_to_fit_styled(
                 &mut cx,
                 &text,
-                14.0,
-                FontKind::Ui,
-                FontWeight::Normal,
+                TextStyle::new(14.0),
                 full,
                 max_width,
             );
