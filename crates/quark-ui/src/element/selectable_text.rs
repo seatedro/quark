@@ -1040,35 +1040,35 @@ const PILL_RADIUS: f32 = 0.35;
 /// that gets some (a pill's last character, and the character before a
 /// pill on its line), as its byte range, the span that styles it, and
 /// the extra ems of that span's size. Empty without pills.
-fn pill_room(spans: &[StyledSpan]) -> Vec<(std::ops::Range<usize>, usize, f32)> {
-    let mut out: Vec<(std::ops::Range<usize>, usize, f32)> = Vec::new();
+fn pill_room(spans: &[StyledSpan]) -> Vec<(std::ops::Range<usize>, &StyledSpan, f32)> {
+    let mut out: Vec<(std::ops::Range<usize>, &StyledSpan, f32)> = Vec::new();
     if spans.iter().all(|s| s.pill.is_none()) {
         return out;
     }
-    let scale = |i: usize| spans[i].font_scale.unwrap_or(1.0);
-    let mut add = |range: std::ops::Range<usize>, owner: usize, ems: f32| match out
+    let scale = |span: &StyledSpan| span.font_scale.unwrap_or(1.0);
+    let mut add = |range: std::ops::Range<usize>, owner, ems: f32| match out
         .iter_mut()
         .find(|(r, ..)| *r == range)
     {
         Some(entry) => entry.2 += ems,
         None => out.push((range, owner, ems)),
     };
-    // The span holding the last character before each offset.
-    let mut last: Option<(usize, char, usize)> = None;
+    // The span holding the last character so far, and where it ends.
+    let mut last: Option<(usize, char, &StyledSpan)> = None;
     let mut start = 0;
-    for (i, span) in spans.iter().enumerate() {
+    for span in spans {
         let end = start + span.text.len();
         if span.pill.is_some()
             && let Some(c) = span.text.chars().next_back()
         {
             if let Some((before, prev, owner)) = last.filter(|&(_, c, _)| c != '\n') {
-                let ems = (PILL_PAD + PILL_GAP) * scale(i) / scale(owner);
+                let ems = (PILL_PAD + PILL_GAP) * scale(span) / scale(owner);
                 add(before - prev.len_utf8()..before, owner, ems);
             }
-            add(end - c.len_utf8()..end, i, PILL_PAD + PILL_GAP);
+            add(end - c.len_utf8()..end, span, PILL_PAD + PILL_GAP);
         }
         if let Some(c) = span.text.chars().next_back() {
-            last = Some((end, c, i));
+            last = Some((end, c, span));
         }
         start = end;
     }
@@ -1087,10 +1087,10 @@ fn join_spans(spans: &[StyledSpan], style: &TextStyle, text: &mut String, out: &
     }
     for (range, owner, ems) in pill_room(spans) {
         // The style's own spacing, in ems of this span's size.
-        let own = style.letter_spacing / spans[owner].font_scale.unwrap_or(1.0);
+        let own = style.letter_spacing / owner.font_scale.unwrap_or(1.0);
         out.push(TextSpan {
             letter_spacing: Some(own + ems),
-            ..styled_span(&spans[owner], range, style)
+            ..styled_span(owner, range, style)
         });
     }
 }
@@ -1201,7 +1201,7 @@ pub(super) fn span_colors(
     spans
         .iter()
         .map(color)
-        .chain(room.into_iter().map(|(_, owner, _)| color(&spans[owner])))
+        .chain(room.into_iter().map(|(_, owner, _)| color(owner)))
         .collect()
 }
 
