@@ -115,6 +115,32 @@ fn hovering_a_chat_row_reveals_only_its_actions() {
     );
 }
 
+// Catches a popover that lets the pointer through: with the profile menu
+// open over the chat list, the row beneath the pointer must not hover and
+// reveal its Pin and Archive buttons through the menu.
+#[test]
+fn an_open_menu_keeps_the_rows_beneath_it_from_hovering() {
+    let mut ui = harness("file-change");
+    ui.click_node(By::role_name(Role::Button, "Open profile menu"));
+    ui.frame();
+    let menu = ui.find(By::role(Role::Menu)).bounds;
+    let inside = |x: f32, y: f32| {
+        x > menu.x && x < menu.x + menu.width && y > menu.y && y < menu.y + menu.height
+    };
+    let under = ui
+        .find_all(By::role(Role::ListItem))
+        .into_iter()
+        .map(|n| (n.bounds.x + 40.0, n.bounds.y + n.bounds.height / 2.0))
+        .find(|&(x, y)| inside(x, y))
+        .expect("a chat row under the menu");
+    ui.pointer_move(under);
+    ui.frame();
+    assert!(
+        ui.find_all(By::role_name(Role::Button, "Archive chat"))
+            .is_empty()
+    );
+}
+
 /// The diff lines a diff view shows (its list items), top to bottom.
 fn diff_lines(ui: &UiTestHarness<Codex>, view: &str) -> Vec<(String, f32)> {
     let Some(list) = ui.try_find(By::id(view)) else {

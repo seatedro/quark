@@ -63,7 +63,7 @@ pub fn view(app: &Codex, p: &Pal, vcx: &mut ViewContext) -> AnyElement {
     view! {
         <div class="absolute left-0 top-0 z-65" w={app.size.0} h={app.size.1}>
             <div class="absolute left-0 top-0" w={app.size.0} h={app.size.1}
-                 on:click={Msg::Palette(false)} />
+                 on:click={Msg::Palette(false)} block_mouse />
             <menu_panel(p, x, 118.0, w) class="rounded-[14] p-1 z-70"
                         accessibility_role={Role::Dialog} aria-label="Search">
                 <div class="flex-row items-center h-10 px-[10]">
