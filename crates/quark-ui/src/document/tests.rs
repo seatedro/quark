@@ -2717,7 +2717,10 @@ fn body_line_height_spaces_prose_headings_tables_and_markers() {
         .expect("marker");
     // Within the half point layout rounds the marker's box by.
     let center = marker.y + marker.height / 2.0;
-    assert!((center - (item.y + 11.0)).abs() <= 0.5, "{marker:?} {item:?}");
+    assert!(
+        (center - (item.y + 11.0)).abs() <= 0.5,
+        "{marker:?} {item:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

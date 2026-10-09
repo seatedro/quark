@@ -560,6 +560,8 @@ mod tests {
     /// 14pt selectable text.
     const SELECTABLE_LINE: f32 = 14.0 * 1.35;
     const SWATCH: Color = Color::rgba(10, 20, 30, 255);
+    /// Text color whose solid quads are decorations.
+    const INK: Color = Color::rgba(200, 100, 50, 255);
 
     /// A window's text state and element cache, kept across frames.
     struct Window {
@@ -578,6 +580,8 @@ mod tests {
     struct Frame {
         texts: Vec<(Rect, Vec<String>)>,
         swatch: Option<Rect>,
+        /// Solid quads in the `INK` color: text decorations.
+        decorations: Vec<Rect>,
     }
 
     impl Frame {
@@ -620,9 +624,14 @@ mod tests {
             let mut frame = Frame {
                 texts: Vec::new(),
                 swatch: None,
+                decorations: Vec::new(),
             };
             for primitive in &scene.primitives {
                 let (rect, shaped) = match primitive {
+                    quark_render::Primitive::Rect(r) if r.color == INK => {
+                        frame.decorations.push(r.rect);
+                        continue;
+                    }
                     quark_render::Primitive::TextRun(run) => (run.rect, &run.layout),
                     quark_render::Primitive::RichTextRun(run) => (run.rect, &run.layout),
                     quark_render::Primitive::RoundedRect(r) if r.color == SWATCH => {
@@ -882,6 +891,60 @@ mod tests {
                 rect.y + lines.len() as f32 * LINE,
                 "{name}"
             );
+        }
+    }
+
+    // Catches a point line height that paint and measurement disagree on:
+    // wrapped 14-point lines at 22 points stack 22 apart, and the box
+    // below starts after the last one.
+    #[test]
+    fn point_line_height_spaces_wrapped_lines() {
+        let frame = Window::new().paint(column(120.0, sentence().line_height_points(22.0)));
+        let (rect, lines) = frame.text();
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(
+            frame.swatch.expect("swatch").y,
+            rect.y + lines.len() as f32 * 22.0
+        );
+    }
+
+    // Catches tracking that paint applies but measurement ignores: 0.1 em
+    // at 14 points adds 1.4 points after each of ten glyphs, and a
+    // sentence that fits its column untracked wraps once tracked.
+    #[test]
+    fn letter_spacing_widens_and_rewraps_text() {
+        let mut window = Window::new();
+        let word = "abcdefghij";
+        let plain = window.width_of(word);
+        let tracked = window.paint(text(word).size(14.0).letter_spacing(0.1).no_wrap());
+        assert_eq!(tracked.text().0.width, (plain + 14.0).ceil());
+
+        let natural = window.width_of(SENTENCE).ceil();
+        let untracked = window.paint(column(natural, sentence()));
+        let wrapped = window.paint(column(natural, sentence().letter_spacing(0.1)));
+        assert_eq!(untracked.text().1.len(), 1);
+        assert!(wrapped.text().1.len() > 1, "{wrapped:?}");
+        assert_word_lines(&wrapped.text().1);
+    }
+
+    // Catches an underline drawn once across the box instead of per line:
+    // wrapped underlined text gets one quad under each painted line, below
+    // its baseline and inside its line box.
+    #[test]
+    fn an_underline_follows_each_wrapped_line() {
+        let frame = Window::new().paint(column(120.0, sentence().color(INK).underline()));
+        let (rect, lines) = frame.text();
+        assert!(lines.len() > 1, "{lines:?}");
+        assert_eq!(frame.decorations.len(), lines.len(), "{frame:?}");
+        for (i, quad) in frame.decorations.iter().enumerate() {
+            let top = rect.y + i as f32 * LINE;
+            // The baseline of 14-point text sits past the middle of its
+            // 21-point line box.
+            assert!(
+                quad.y > top + LINE / 2.0 && quad.bottom() <= top + LINE,
+                "line {i}: {quad:?}"
+            );
+            assert!(quad.width > 0.0 && quad.x >= rect.x, "line {i}: {quad:?}");
         }
     }
 }
