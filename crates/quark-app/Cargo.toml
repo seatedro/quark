@@ -135,6 +135,9 @@ quark-components.workspace = true
 quark-diff.workspace = true
 image.workspace = true
 proptest = { version = "1", default-features = false, features = ["std"] }
+# The webview tests' local HTTPS fixture (tests/webview). Already in the
+# tree through ureq.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Tests and examples always get the headless harness (`quark_app::testing`).
 quark-app = { path = ".", features = ["headless-render", "components"] }
 
@@ -194,6 +197,12 @@ profile-tracy = ["dep:profiling", "profiling/profile-with-tracy", "quark-ui?/pro
 # roles, and deep links on macOS and Windows; exits at once elsewhere.
 [[test]]
 name = "platform_smoke"
+harness = false
+
+# The local HTTPS fixture, then webviews against it on a real main thread.
+# `-- --serve` runs only the fixture, for another process.
+[[test]]
+name = "webview_smoke"
 harness = false
 
 [[example]]

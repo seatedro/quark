@@ -2973,6 +2973,7 @@ dependencies = [
  "quark-ui",
  "raw-window-handle",
  "rfd",
+ "rustls",
  "serde",
  "serde_json",
  "subsecond",
