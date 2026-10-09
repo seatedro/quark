@@ -346,8 +346,10 @@ struct ScrollState {
     /// The content position the children are laid out from this frame.
     origin: [f64; 2],
     viewport: Rect,
-    /// Keyed descendants painted last frame, relative to `origin`.
+    /// Keyed descendants painted last frame, relative to `items_origin`,
+    /// the origin of that frame.
     items: Vec<(u64, Rect)>,
+    items_origin: [f64; 2],
     /// The same, being collected this frame.
     recording: Vec<(u64, Rect)>,
     request: Option<Request>,
@@ -401,6 +403,7 @@ impl ScrollHandle {
             origin: [0.0; 2],
             viewport: Rect::default(),
             items: Vec::new(),
+            items_origin: [0.0; 2],
             recording: Vec::new(),
             request: None,
             item_request: None,
@@ -685,7 +688,7 @@ impl ScrollHandle {
                 // offset when this frame moved it.
                 s.fling = None;
                 let from = s.offset;
-                let found = request.item_offset(&s.items, s.origin, from, viewport, axes);
+                let found = request.item_offset(&s.items, s.items_origin, from, viewport, axes);
                 if !smooth && let Some(to) = found {
                     let to = clamp(to, s.max);
                     s.start_scroll(to, false, now, cx);
@@ -774,6 +777,7 @@ impl ScrollHandle {
         let mut s = self.0.borrow_mut();
         let s = &mut *s;
         std::mem::swap(&mut s.items, &mut s.recording);
+        s.items_origin = s.origin;
         let (request, from) = s.item_request.take()?;
         let Request::Item { smooth, .. } = request else {
             return None;
