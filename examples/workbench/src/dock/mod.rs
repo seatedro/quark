@@ -303,6 +303,9 @@ pub fn edit_text(
     command: TextEditCommand,
     ecx: &EditCx,
 ) -> Option<TextEditOutcome> {
+    if target == diff::FIND_FIELD {
+        return state.panels.diff.edit_find(command, ecx.now_ms);
+    }
     files::edit_text(&mut state.panels.files, target, command, ecx.now_ms)
 }
 
