@@ -632,21 +632,42 @@ mod tests {
         );
     }
 
-    /// A frame that repeats the last one, with no screen reader connected,
-    /// replays the view from the element cache.
+    /// A frame that repeats the last one replays the view from the element
+    /// cache: side by side without a screen reader, and unified with a
+    /// search match, an annotation, and the accessibility tree on.
     #[test]
     fn a_repeated_frame_allocates_nothing() {
         let lines = numbered(0..100_000);
         let new = lines.replace("line 5\n", "line five\n");
-        let mut ui = harness(diff_texts(
-            Some("f"),
-            Some("f"),
-            Some(&lines),
-            Some(&new),
-            3,
-        ));
-        ui.set_accessibility_active(false);
-        ui.app_mut().diff.set_mode(Mode::Split);
+        let doc = || diff_texts(Some("f"), Some("f"), Some(&lines), Some(&new), 3);
+        // (mode, accessibility, decorated)
+        for (mode, accessible, decorated) in
+            [(Mode::Split, false, false), (Mode::Unified, true, true)]
+        {
+            let mut ui = harness(doc());
+            ui.set_accessibility_active(accessible);
+            let diff = &mut ui.app_mut().diff;
+            diff.set_mode(mode);
+            if decorated {
+                diff.set_find_query("line 3", FindOptions::default());
+                diff.next_match(SearchDirection::Forward);
+                diff.set_annotations(vec![note(1, Side::New, 4)]);
+            }
+            for _ in 0..3 {
+                ui.frame();
+            }
+            let ((), sites) = test_alloc::profile(|| {
+                ui.frame();
+            });
+            assert!(sites.is_empty(), "{mode:?} {accessible}: {sites:#?}");
+        }
+    }
+
+    // The session view replays a repeated frame the same way.
+    #[test]
+    fn a_repeated_session_frame_allocates_nothing() {
+        let (a, _, _) = revisions(None);
+        let mut ui = session_ui(vec![a, snap(2, 1, "x\n", "y\n")]);
         for _ in 0..3 {
             ui.frame();
         }
@@ -1201,7 +1222,7 @@ diff --git a/f.txt b/f.txt
             let mut ui = session_ui(vec![a]);
             scroll_to(&mut ui, 148);
             let from = ui.find(line("line 150")).bounds;
-            let to = ui.find(line("line 151")).bounds;
+            let to = ui.find(line("line 152")).bounds;
             ui.drag(
                 (from.x + 1.0, from.y + 5.0),
                 (to.x + to.width - 1.0, to.y + 5.0),
