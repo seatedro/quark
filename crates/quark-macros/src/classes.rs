@@ -297,11 +297,8 @@ pub(crate) const FAMILIES: &[Family] = &[
 const UNSUPPORTED_VARIANTS: &[(&str, &str)] = &[
     (
         "focus",
-        "div has no focus style state; use `@when {cx.is_focused(id)} { .. }`",
-    ),
-    (
-        "focus-visible",
-        "div has no focus style state; use `@when {cx.is_focused(id)} { .. }`",
+        "div restyles only for focus that shows; use `focus-visible:`, or \
+         `@when {cx.is_focused(id)} { .. }` for any focus",
     ),
     (
         "focus-within",
@@ -334,6 +331,8 @@ pub(crate) struct Lowered {
     pub calls: Vec<TokenStream2>,
     /// Calls on the `StyleOverride` passed to `.hover(..)`.
     pub hover: Vec<TokenStream2>,
+    /// Calls on the `StyleOverride` passed to `.focus_visible(..)`.
+    pub focus_visible: Vec<TokenStream2>,
 }
 
 /// Lower `classes` (the literal's value) for a builder of kind `on`
@@ -411,10 +410,16 @@ fn split_variants(class: &str) -> (Vec<&str>, &str) {
 
 fn lower_one(class: &str, span: Span, on: Option<On>, out: &mut Lowered) -> Result<(), String> {
     let (variants, base) = split_variants(class);
-    let mut hover = false;
+    let mut state = None;
     for variant in variants {
         match variant {
-            "hover" => hover = true,
+            "hover" | "focus-visible" if state.is_some() => {
+                return Err(format!(
+                    "class `{class}`: one state variant per class; `hover:` and \
+                     `focus-visible:` do not combine"
+                ));
+            }
+            "hover" | "focus-visible" => state = Some(variant),
             v if BREAKPOINTS.contains(&v) => {
                 return Err(format!(
                     "class `{class}`: responsive breakpoints (`{v}:`) are not supported; \
@@ -426,13 +431,14 @@ fn lower_one(class: &str, span: Span, on: Option<On>, out: &mut Lowered) -> Resu
                 if let Some((_, why)) = UNSUPPORTED_VARIANTS.iter().find(|(name, _)| *name == v) {
                     return Err(format!("class `{class}`: `{v}:` is not supported: {why}"));
                 }
-                let mut names: Vec<&str> = vec!["hover"];
+                let mut names: Vec<&str> = vec!["hover", "focus-visible"];
                 names.extend(UNSUPPORTED_VARIANTS.iter().map(|(n, _)| *n));
                 let hint = closest(v, names.iter().copied())
                     .map(|s| format!("; did you mean `{s}:`?"))
                     .unwrap_or_default();
                 return Err(format!(
-                    "class `{class}`: unknown variant `{v}:`{hint} The only supported variant is `hover:`"
+                    "class `{class}`: unknown variant `{v}:`{hint} The supported variants are \
+                     `hover:` and `focus-visible:`"
                 ));
             }
         }
@@ -451,15 +457,19 @@ fn lower_one(class: &str, span: Span, on: Option<On>, out: &mut Lowered) -> Resu
         ));
     }
 
-    if hover {
+    if let Some(state) = state {
         let Some(hover_method) = hover_method else {
             return Err(format!(
-                "class `{class}`: `hover:` restyles only background, border color, text and \
+                "class `{class}`: `{state}:` restyles only background, border color, text and \
                  icon color, opacity, and `rounded-[..]`; `{base}` is none of these"
             ));
         };
         let m = Ident::new(hover_method, span);
-        out.hover.push(quote!(.#m(#args)));
+        let calls = match state {
+            "hover" => &mut out.hover,
+            _ => &mut out.focus_visible,
+        };
+        calls.push(quote!(.#m(#args)));
     } else {
         let m = Ident::new(method, span);
         out.calls.push(quote!(.#m(#args)));
@@ -738,7 +748,8 @@ pub(crate) fn vocabulary_check() -> TokenStream2 {
     }
     let [(_, boxed), (_, text), (_, icon)] = <[_; 3]>::try_from(by_on).ok().unwrap();
     quote! {{
-        let _ = div() #(#boxed)* .hover(|__quark_hover| __quark_hover #(#hover)*);
+        let _ = div() #(#boxed)* .hover(|__quark_hover| __quark_hover #(#hover)*)
+            .focus_visible(|__quark_focus| __quark_focus #(#hover)*);
         let _ = text("") #(#text)*;
         let _ = svg_icon("", 16.0) #(#icon)*;
     }}
@@ -768,7 +779,9 @@ fn reference_markdown() -> String {
             k.on.tag()
         ));
     }
-    out.push_str("\n| Family | Builder call | Values | On | `hover:` |\n|---|---|---|---|---|\n");
+    out.push_str(
+        "\n| Family | Builder call | Values | On | `hover:`, `focus-visible:` |\n|---|---|---|---|---|\n",
+    );
     for f in FAMILIES {
         let values = match f.value {
             Value::Spacing => "`N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]`",
@@ -816,6 +829,10 @@ mod tests {
         if !out.hover.is_empty() {
             let h: Vec<String> = out.hover.iter().map(|c| c.to_string()).collect();
             s.push_str(&format!(" hover[{}]", h.join(" ")));
+        }
+        if !out.focus_visible.is_empty() {
+            let h: Vec<String> = out.focus_visible.iter().map(|c| c.to_string()).collect();
+            s.push_str(&format!(" focus_visible[{}]", h.join(" ")));
         }
         Ok(s.replace(' ', ""))
     }
@@ -872,6 +889,11 @@ mod tests {
                 On::Box,
                 "hover[.bg((c)).opacity(0.8f32)]",
             ),
+            (
+                "focus-visible:border-[c] hover:bg-[c]",
+                On::Box,
+                "hover[.bg((c))]focus_visible[.border_color((c))]",
+            ),
         ];
         for (class, on, want) in cases {
             match lowered(class, *on) {
@@ -898,6 +920,12 @@ mod tests {
             ("focus:bg-[c]", On::Box, "`focus:` is not supported"),
             ("dark:bg-[c]", On::Box, "`dark:` is not supported"),
             ("hover:p-4", On::Box, "`hover:` restyles only"),
+            (
+                "focus-visible:p-4",
+                On::Box,
+                "`focus-visible:` restyles only",
+            ),
+            ("hover:focus-visible:bg-[c]", On::Box, "do not combine"),
             (
                 "text-sm",
                 On::Box,

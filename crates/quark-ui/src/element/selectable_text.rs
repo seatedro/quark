@@ -585,7 +585,7 @@ pub(super) fn register_link_input(
         };
         let key = format!("link:{source_key}:{}:{}", link.range.start, link.url);
         let focus = FocusId::from_key(&key);
-        if cx.is_focused(focus) {
+        if cx.is_focus_visible(focus) {
             for rect in &link.rects {
                 paint_focus_ring(scene, cx, *rect, [2.0; 4], 0.0);
             }
@@ -1114,7 +1114,10 @@ pub(crate) fn styled_params(
 /// Paints inline-code pills behind each span that has one, on every line
 /// it covers: from the room [`pill_room`] keeps before the run to the room
 /// after it, and from just above the run's glyphs to just below its
-/// baseline.
+/// baseline. A run that begins a line has no room before it (the room is
+/// advance on the character before, and letter spacing cannot add advance
+/// before a line's first glyph), so its pill starts at the paragraph's
+/// left edge rather than poking out of it.
 pub(super) fn paint_pills(
     scene: &mut Scene,
     layout: &TextLayout,
@@ -1136,7 +1139,7 @@ pub(super) fn paint_pills(
             } else {
                 r.right() + PILL_PAD * size
             };
-            let x = r.x - PILL_PAD * size;
+            let x = (r.x - PILL_PAD * size).max(0.0);
             let baseline = layout
                 .lines()
                 .find(|l| r.y + r.height / 2.0 >= l.top && r.y + r.height / 2.0 < l.top + l.height)
@@ -1752,6 +1755,59 @@ mod tests {
         assert!(pill.right() >= code_end + 4.0, "{pill:?} pads {code_end}");
         assert!(pill.x >= x(3) + space, "{pill:?} after {}", x(3));
         assert!(pill.right() + space <= x(13), "{pill:?} before {}", x(13));
+    }
+
+    // Regression: a pill beginning a line (the paragraph's first, or one
+    // its run wrapped onto) reached 5pt left of the text column, where the
+    // room before it would have been.
+    #[test]
+    fn a_pill_beginning_a_line_stays_inside_the_paragraph() {
+        const PILL: Color = Color::rgba(1, 2, 3, 255);
+        let code = || {
+            StyledSpan::plain("npm test")
+                .code()
+                .font_scale(12.0 / 14.0)
+                .pill(PILL)
+        };
+        let mut window = Window::new();
+        let lead = "Run the tests with ";
+        let wraps_at = window.width_of(lead) + 10.0;
+        let cases = [
+            ("first", vec![code(), StyledSpan::plain(" passes")], 400.0),
+            ("wrapped", vec![StyledSpan::plain(lead), code()], wraps_at),
+        ];
+        for (name, spans, width) in cases {
+            let mut scene = Scene::default();
+            let mut cx = ElementContext::new(
+                &window.theme,
+                1.0,
+                &mut window.text,
+                &mut window.layouts,
+                None,
+                &window.signals,
+            );
+            let mut root = div()
+                .p(20.0)
+                .child(rich_text(spans).size(14.0).width(width))
+                .into_any();
+            render_element(&mut root, &mut scene, &mut cx, 600.0, 300.0);
+            let pill = scene
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    quark_render::Primitive::RoundedRect(r) if r.color == PILL => Some(r.rect),
+                    _ => None,
+                })
+                .expect("a pill");
+            assert!(
+                pill.x >= 20.0,
+                "{name}: {pill:?} starts left of the text at 20"
+            );
+            assert!(
+                pill.right() > 60.0,
+                "{name}: {pill:?} still covers the code"
+            );
+        }
     }
 
     /// A paragraph mixing prose, bold, inline code, and a link long enough

@@ -20,6 +20,7 @@ quark-diff.workspace = true
 quark-text.workspace = true
 quark-terminal.workspace = true
 accesskit.workspace = true
+unicode-linebreak = "0.1"
 
 [dev-dependencies]
 quark-app = { workspace = true, features = ["components", "syntax", "test-support"] }

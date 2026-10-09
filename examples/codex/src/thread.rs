@@ -230,7 +230,7 @@ pub fn transcript(items: &[Item], p: &Pal, column: f32, embed: &mut Embed) -> Di
                         <answer(p, blocks, column) key={key} />
                     }
                     Item::FileChange { file } => {
-                        <file_change(p, file, embed.stats) key={key} />
+                        <file_change(p, file, embed.stats, column) key={key} />
                     }
                 }
             }
@@ -557,10 +557,67 @@ fn paragraph(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> An
     view! { <{rich_text(runs)} size={BODY} line_height_points={LINE_PT} /> }
 }
 
+/// A run of a word flow: prose in one color and weight, or an inline
+/// object (code pill, file chip) that breaks lines as one character.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Piece<'a> {
+    Words(&'a str, Color, bool),
+    Code(&'a str),
+    File(&'a str, Option<u32>),
+}
+
+/// `pieces` cut at the line break opportunities of their joined text
+/// (UAX #14), objects counting as U+FFFC: each group wraps as one unit.
+/// Cutting at span edges instead let a sentence's "." wrap alone after a
+/// semibold "13", which UAX #14 forbids.
+fn unbreakable_groups<'a>(pieces: &[Piece<'a>]) -> Vec<Vec<Piece<'a>>> {
+    let mut text = String::new();
+    let mut ranges = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let start = text.len();
+        match piece {
+            Piece::Words(t, ..) => text.push_str(t),
+            Piece::Code(_) | Piece::File(..) => text.push('\u{fffc}'),
+        }
+        ranges.push(start..text.len());
+    }
+    let mut groups = Vec::new();
+    let mut start = 0;
+    for (end, _) in unicode_linebreak::linebreaks(&text) {
+        let group: Vec<Piece> = pieces
+            .iter()
+            .zip(&ranges)
+            .filter(|(_, r)| r.start < end && r.end > start)
+            .map(|(piece, r)| match *piece {
+                Piece::Words(t, c, bold) => {
+                    let (lo, hi) = (start.max(r.start) - r.start, end.min(r.end) - r.start);
+                    Piece::Words(&t[lo..hi], c, bold)
+                }
+                object => object,
+            })
+            .collect();
+        groups.push(group);
+        start = end;
+    }
+    groups
+}
+
 /// Spans flowed word by word so file chips and their icon tiles wrap with
 /// the prose. `pending`, while a preamble streams, follows in a dimmer
 /// tone.
 fn inline_flow(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> AnyElement {
+    let mut pieces: Vec<Piece> = spans
+        .iter()
+        .map(|span| match *span {
+            Span::Text(t) => Piece::Words(t, color, false),
+            Span::Bold(t) => Piece::Words(t, p.text, true),
+            Span::Code(c) => Piece::Code(c),
+            Span::File(name, line) => Piece::File(name, line),
+        })
+        .collect();
+    if let Some(pending) = pending.filter(|s| !s.is_empty()) {
+        pieces.push(Piece::Words(pending, p.faint.lerp(p.bg, 0.3), false));
+    }
     let word = |w: &str, c: Color, bold: bool| {
         view! {
             <text
@@ -574,52 +631,39 @@ fn inline_flow(spans: &[Span], p: &Pal, color: Color, pending: Option<&str>) -> 
             </text>
         }
     };
+    let piece = |piece: Piece| match piece {
+        Piece::Words(w, c, bold) => word(w, c, bold),
+        Piece::Code(c) => view! {
+            <div class="flex-row items-center px-[5] h-5 rounded-[5]" bg={p.chip}>
+                <text size={CODE + 0.5} color={p.text} class="font-mono whitespace-nowrap">
+                    {c}
+                </text>
+            </div>
+        },
+        Piece::File(name, line) => view! {
+            <div
+                class="flex-row items-center gap-[5]"
+                role="link"
+                aria-label={name.to_owned()}
+                on:click={Msg::OpenFile("cart.js")}
+            >
+                <div class="w-[13] h-[13] rounded-[3] bg-[#2f6fd8] items-center justify-center">
+                    <text size={6.5} class="font-bold text-white whitespace-nowrap">"js"</text>
+                </div>
+                {word(name, p.link, false)}
+                if let Some(n) = line {
+                    {word(&format!(" (line {n})"), p.link, false)}
+                }
+            </div>
+        },
+    };
     view! {
         <div class="w-full flex-row flex-wrap items-center">
-            for span in spans {
-                match span {
-                    Span::Text(t) | Span::Bold(t) => {
-                        let bold = matches!(span, Span::Bold(_));
-                        for w in t.split_inclusive(' ') {
-                            {word(w, if bold { p.text } else { color }, bold)}
-                        }
-                    }
-                    Span::Code(c) => {
-                        <div class="flex-row items-center px-[5] h-5 rounded-[5]" bg={p.chip}>
-                            <text
-                                size={CODE + 0.5}
-                                color={p.text}
-                                class="font-mono whitespace-nowrap"
-                            >
-                                {*c}
-                            </text>
-                        </div>
-                    }
-                    Span::File(name, line) => {
-                        <div
-                            class="flex-row items-center gap-[5]"
-                            role="link"
-                            aria-label={(*name).to_owned()}
-                            on:click={Msg::OpenFile("cart.js")}
-                        >
-                            <div
-                                class="w-[13] h-[13] rounded-[3] bg-[#2f6fd8] items-center justify-center"
-                            >
-                                <text size={6.5} class="font-bold text-white whitespace-nowrap">
-                                    "js"
-                                </text>
-                            </div>
-                            {word(name, p.link, false)}
-                            if let Some(n) = line {
-                                {word(&format!(" (line {n})"), p.link, false)}
-                            }
-                        </div>
-                    }
-                }
-            }
-            if let Some(pending) = pending.filter(|s| !s.is_empty()) {
-                for w in pending.split_inclusive(' ') {
-                    {word(w, p.faint.lerp(p.bg, 0.3), false)}
+            for group in unbreakable_groups(&pieces) {
+                if let [one] = group[..] {
+                    {piece(one)}
+                } else {
+                    <div class="flex-row items-center">{...group.into_iter().map(piece)}</div>
                 }
             }
         </div>
@@ -676,45 +720,64 @@ fn answer(p: &Pal, blocks: &[Block], column: f32) -> Div {
     }
 }
 
-fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32)) -> Div {
+/// Below this card width Undo and View changes move under the title, as
+/// the web app's flex-wrap does, so neither is cut off.
+const CHANGE_CARD_ONE_ROW: f32 = 380.0;
+
+/// The file change card at the end of a turn, `w` wide: tile, title and
+/// counts, Undo, View changes. The title truncates before the buttons
+/// shrink.
+fn file_change(p: &Pal, file: &str, (adds, dels): (u32, u32), w: f32) -> Div {
     let light = p.mode == ThemeMode::Light;
+    let one_row = w >= CHANGE_CARD_ONE_ROW;
+    let title = view! {
+        <div class="flex-row items-center flex-1 min-w-0 gap-3">
+            <div class="w-10 h-10 shrink-0 rounded-[8] items-center justify-center" bg={p.tile}>
+                <icon svg={icons::REVIEW} size={17.0} color={p.text_soft} />
+            </div>
+            <div class="flex-col flex-1 min-w-0 gap-0.5">
+                <txt(format!("Edited {file}"), BODY, p.text) class="truncate" />
+                <div class="flex-row items-center gap-[5]">
+                    <txt(format!("+{adds}"), SMALL, p.success) />
+                    <txt(format!("-{dels}"), SMALL, p.error) />
+                </div>
+            </div>
+        </div>
+    };
+    let actions = view! {
+        <div class="flex-row items-center shrink-0 gap-3 justify-end">
+            <div class="flex-row items-center h-7 px-2 gap-1.5" role="button" aria-label="Undo">
+                <txt("Undo", SMALL, p.text_soft) />
+                <icon svg={icons::UNDO} size={13.0} color={p.text_soft} />
+            </div>
+            <div
+                class="flex-row items-center h-7 px-[10] rounded-[8]"
+                border={if light {
+                    p.change_border
+                } else {
+                    p.shell_border
+                }}
+                role="button"
+                aria-label="View changes"
+                on:click={Msg::OpenTab(crate::Tab::Changes)}
+            >
+                <txt("View changes", SMALL, p.text_soft) />
+            </div>
+        </div>
+    };
     view! { -> Div,
         <div class="w-full flex-col">
             <div
-                class="flex-row items-center w-full h-16 px-3 gap-3 rounded-[10]"
+                class="w-full px-3 rounded-[10]"
                 bg={p.change_card}
                 border={p.change_border}
                 accessibility_role={Role::Group}
                 aria-label={format!("Edited {file}")}
+                @when {one_row} { class="flex-row items-center h-16 gap-3" }
+                @when {!one_row} { class="flex-col py-3 gap-2" }
             >
-                <div class="w-10 h-10 rounded-[8] items-center justify-center" bg={p.tile}>
-                    <icon svg={icons::REVIEW} size={17.0} color={p.text_soft} />
-                </div>
-                <div class="flex-col gap-0.5">
-                    <txt(format!("Edited {file}"), BODY, p.text) />
-                    <div class="flex-row items-center gap-[5]">
-                        <txt(format!("+{adds}"), SMALL, p.success) />
-                        <txt(format!("-{dels}"), SMALL, p.error) />
-                    </div>
-                </div>
-                <div class="flex-1" />
-                <div class="flex-row items-center h-7 px-2 gap-1.5" role="button" aria-label="Undo">
-                    <txt("Undo", SMALL, p.text_soft) />
-                    <icon svg={icons::UNDO} size={13.0} color={p.text_soft} />
-                </div>
-                <div
-                    class="flex-row items-center h-7 px-[10] rounded-[8]"
-                    border={if light {
-                        p.change_border
-                    } else {
-                        p.shell_border
-                    }}
-                    role="button"
-                    aria-label="View changes"
-                    on:click={Msg::OpenTab(crate::Tab::Changes)}
-                >
-                    <txt("View changes", SMALL, p.text_soft) />
-                </div>
+                {title}
+                {actions}
             </div>
             <div class="h-4" />
         </div>

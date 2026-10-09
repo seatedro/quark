@@ -139,9 +139,14 @@ one builder call. No CSS at runtime.
   and icon color, opacity, `rounded-[..]`.
 - A `hover_bg={..}` after the class replaces it (each `.hover` call replaces
   the last).
-- `focus:`, `focus-visible:`, `active:`, `disabled:`, `dark:`,
-  `group-hover:` fail to compile and name the alternative:
-  `@when {cond} { .. }`, or theme colors for dark mode.
+- `focus-visible:` gathers the same classes into one `.focus_visible(|s| ...)`,
+  applied over `hover:` while the div's focus shows: focus from Tab, arrow
+  keys, a shortcut, or assistive tech, not from a click. The div's focus is
+  its `focus_ring` target, or the stable id of a clickable div. In code,
+  `cx.is_focus_visible(id)` answers the same question.
+- `focus:`, `active:`, `disabled:`, `dark:`, `group-hover:` fail to compile
+  and name the alternative: `@when {cond} { .. }`, or theme colors for dark
+  mode.
 - Breakpoints (`sm:` to `2xl:`) fail too: no viewport media queries; branch
   on the window size in the view.
 - An unknown class fails with the closest known class. A class for another
@@ -235,7 +240,7 @@ The tables below are generated from the macro's own tables.
 | `leading-relaxed` | `.line_height(1.625)` | `<text>` |
 | `leading-loose` | `.line_height(2.0)` | `<text>` |
 
-| Family | Builder call | Values | On | `hover:` |
+| Family | Builder call | Values | On | `hover:`, `focus-visible:` |
 |---|---|---|---|---|
 | `p-*` | `.p(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
 | `px-*` | `.px(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |

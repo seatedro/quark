@@ -37,6 +37,11 @@ pub(crate) struct WindowUiState {
     /// unset.
     pub(super) name: Option<String>,
     pub(super) focus: Option<FocusId>,
+    /// Whether focus shows its ring (`ElementContext::focus_visible`):
+    /// the last input that could move focus was a key or assistive tech,
+    /// not a pointer press. App code moving focus keeps it as is, as
+    /// programmatic focus in browsers follows the last input.
+    pub(super) focus_visible: bool,
     /// Focus as the adapter last settled it, to notice focus that moved to
     /// an element of this window.
     pub(super) focus_seen: Option<FocusId>,
@@ -162,6 +167,7 @@ impl WindowUiState {
         Self {
             name: None,
             focus: None,
+            focus_visible: true,
             focus_seen: None,
             pointer: None,
             hovered: Vec::new(),
