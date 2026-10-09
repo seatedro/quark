@@ -82,6 +82,8 @@ impl NavState {
 pub(super) struct Hooks {
     pub(super) sink: NativeSink,
     pub(super) state: Rc<RefCell<NavState>>,
+    #[cfg(feature = "test-trust")]
+    pub(super) trust: Option<super::trust::TestTrust>,
 }
 
 impl Hooks {
@@ -230,6 +232,18 @@ impl wry::NavigationHooks for Hooks {
 
     fn failed(&self, _webview: &WKWebView, native: Option<&WKNavigation>, error: &NSError) {
         self.failed_at(FailureStage::Committed, native, error);
+    }
+
+    #[cfg(feature = "test-trust")]
+    fn authentication_challenge(
+        &self,
+        _webview: &WKWebView,
+        challenge: &objc2_foundation::NSURLAuthenticationChallenge,
+        completion: &wry::AuthChallengeCompletion,
+    ) -> bool {
+        self.trust
+            .as_ref()
+            .is_some_and(|trust| trust.answer(challenge, completion))
     }
 }
 

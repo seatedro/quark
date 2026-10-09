@@ -9,6 +9,8 @@ mod eval;
 mod host;
 mod navigation;
 mod store;
+#[cfg(feature = "test-trust")]
+mod trust;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -126,6 +128,8 @@ impl MacBackend {
         let hooks = Hooks {
             sink: sink.clone(),
             state: Rc::clone(&state),
+            #[cfg(feature = "test-trust")]
+            trust: trust::TestTrust::current(),
         };
         let popup_sink = sink.clone();
         let title_sink = sink.clone();
