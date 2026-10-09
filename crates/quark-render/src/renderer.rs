@@ -13,8 +13,8 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::path::{Band, push_bands, rule_code, stroke_outline, to_kurbo};
 use crate::scene::{
-    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, TextPrimitive, TextRendering,
-    Transform2D, UiCompositing,
+    ClipPrimitive, Primitive, Rect, RichTextPrimitive, Scene, SurfaceBackground, TextPrimitive,
+    TextRendering, Transform2D, UiCompositing,
 };
 
 use crate::shaders::{
@@ -59,13 +59,9 @@ pub struct RendererOptions {
     /// Coverage policy of `TextRun` and `RichTextRun` primitives; a
     /// `StyledText` primitive names its own.
     pub text_rendering: TextRendering,
-    /// Ask for a surface whose transparent pixels show what lies behind the
-    /// window (premultiplied alpha), for native materials. Falls back to an
-    /// opaque surface where the platform offers no such alpha mode.
-    pub transparent: bool,
 }
 
-/// What a renderer's surface does with its [`RendererOptions`].
+/// What a renderer's surface does with its options and background.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SurfaceCapabilities {
     /// Transparent pixels reach the window system's compositor.
@@ -907,6 +903,7 @@ pub struct Renderer {
     /// Effect animation time of the frame being drawn, in seconds.
     time: f32,
     options: RendererOptions,
+    background: SurfaceBackground,
 }
 
 impl Renderer {
@@ -1085,6 +1082,7 @@ impl Renderer {
             segment_texture: None,
             time: 0.0,
             options: RendererOptions::default(),
+            background: SurfaceBackground::default(),
             gpu,
         }
     }
@@ -1136,6 +1134,14 @@ impl Renderer {
     /// What the surface does with the options it was given.
     pub fn capabilities(&self) -> SurfaceCapabilities {
         SurfaceCapabilities::default()
+    }
+
+    /// Show `background` where the scene paints nothing, returning the
+    /// background in effect: `Opaque` when a transparent one was asked for
+    /// but the surface offers no alpha mode that composites it.
+    pub fn set_surface_background(&mut self, background: SurfaceBackground) -> SurfaceBackground {
+        self.background = background;
+        background
     }
 
     /// Adopt a new window size. A zero dimension (a minimized window) leaves

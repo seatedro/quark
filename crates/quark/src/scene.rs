@@ -731,6 +731,43 @@ pub enum TextBackdrop {
     Opaque(Color),
 }
 
+/// What a window's surface shows where the app paints nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceBackground {
+    /// Cleared to this color every frame.
+    Opaque(Color),
+    /// Cleared to transparent, with premultiplied output, so the window
+    /// system composites what lies behind (a native material or the
+    /// desktop). Needs a surface alpha mode the platform may not offer.
+    Transparent,
+}
+
+impl Default for SurfaceBackground {
+    fn default() -> Self {
+        Self::Opaque(Color::rgba(0, 0, 0, 255))
+    }
+}
+
+/// Semantic kind of a native window material (G3). The native adapter maps
+/// it to the platform's closest material; renderer-free so element code can
+/// request regions without depending on the app crate.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MaterialKind {
+    #[default]
+    WindowBackground,
+    Sidebar,
+    Content,
+    Titlebar,
+    HeaderView,
+    Popover,
+    Menu,
+    Tooltip,
+    Hud,
+    Sheet,
+    UnderWindow,
+}
+
 // ---------------------------------------------------------------------------
 // Text fill
 // ---------------------------------------------------------------------------
