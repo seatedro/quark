@@ -1,0 +1,5 @@
+error: `view! { -> Type, .. }` returns the root element's builder, so the root must be one element; fragments, control flow, and `{expr}` have none
+ --> tests/ui/typed_root_fragment.rs:4:30
+  |
+4 |     let _ = view! { -> u8, <>"a" "b"</> };
+  |                              ^^^

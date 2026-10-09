@@ -69,6 +69,20 @@ cells) in a boundary inside one boundary for the whole view, so a frame
 where nothing changed replays one entry, and a scrolled frame builds only
 the rows that entered the window. The block document caches each row.
 
+Dock tab strips and split dividers cache themselves too, but an app's own
+chrome (a title bar, a toolbar, a sidebar header) rebuilds every frame
+unless the app puts it in a boundary. In the Workbench, boundaries around
+the dock, splits, toolbar, and sidebar took a repeated frame from 507
+allocations to 45.
+
+The `build` closure is `'static`, so it owns what it reads, and cloning
+strings into it allocates on every frame, replayed or not. The
+Workbench's title bar ([titlebar.rs](../../examples/workbench/src/shell/titlebar.rs))
+keeps its text in an `Rc` that the view reuses while the text is
+unchanged, moves a clone of the `Rc` into the closure, and hashes the
+data with the size it is drawn at:
+`inputs_hash(&(&*data, width.to_bits(), height.to_bits()))`.
+
 ## Recycled frame memory
 
 - **Element storage.** Each element type keeps a free list of its boxes,
@@ -117,6 +131,40 @@ Examples with a test module can carry a budget of their own:
 `hello_ui` rebuilds without a cache boundary and holds a repeated frame to
 30 allocations. Each budget file also has an ignored test that prints the
 call sites (`cargo test -p quark-app report_ -- --ignored --nocapture`).
+
+An app measures its own frames the same way: an integration test installs
+`Counting` as its global allocator and counts `UiTestHarness::frame`.
+[examples/workbench/tests/perf.rs](../../examples/workbench/tests/perf.rs)
+budgets the Workbench's whole window at 64 allocations for a repeated
+frame and 512 for one streamed chunk of an answer with its frame. It
+measures 45 (53 with a screen reader connected) and 337, and asserts
+ceilings just above those, so a regression fails while still under
+budget. Counts taken too early are noise:
+
+- `Counting` counts only the calling thread. The block document measures
+  rows, highlights code, and decodes images on worker threads, which the
+  harness's fake clock does not drive, and a frame that picks up their
+  results rebuilds rows. Before counting, wait for them with
+  `MarkdownDocument::finish_highlights`, `finish_images`, and
+  `finish_measures` (in that order: the first two rebuild rows that then
+  need measuring), then draw a frame and advance the clock so the
+  measured heights settle the scroll anchor.
+- Draw a few frames first, and take the least of several counts, so a
+  table growing once does not count:
+
+  ```rust
+  fn repeated_frame(ui: &mut UiTestHarness<Workbench>) -> u64 {
+      (0..3)
+          .map(|_| {
+              test_alloc::count(|| {
+                  ui.frame();
+              })
+              .1
+          })
+          .min()
+          .unwrap_or(0)
+  }
+  ```
 
 ## Profiling
 

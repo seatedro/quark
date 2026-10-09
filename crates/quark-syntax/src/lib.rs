@@ -11,6 +11,11 @@
 //! [`highlight`] runs synchronously; [`HighlightWorker`] runs it on a
 //! background thread and drops requests superseded by a newer generation
 //! for the same slot, which suits a code block that is still streaming.
+//! Several views can share one worker thread through
+//! [`HighlightWorker::share`]. Text made of excerpts, such as the hunks of
+//! a patch, is highlighted one excerpt at a time ([`highlight_fragments`],
+//! [`HighlightRequest::fragments`]) so lexical state does not leak from one
+//! into the next.
 //!
 //! Languages embedded in others (a script in HTML, a fenced block in
 //! Markdown, a macro body in Rust) are highlighted with their own grammars
@@ -73,7 +78,7 @@ pub use quark_update::PublicKey;
 #[cfg(feature = "engine")]
 pub use store::StoreConfig;
 pub use store::{GrammarStore, LanguageStatus};
-pub use worker::{HighlightWorker, Highlighted, WorkerGone};
+pub use worker::{HighlightRequest, HighlightWorker, Highlighted, Priority, WorkerGone};
 
 /// What a highlighted run of source is.
 #[repr(u8)]
@@ -189,6 +194,21 @@ impl std::fmt::Display for LanguageId {
 /// may load its pack from disk or start its download.
 pub fn highlight(store: &GrammarStore, language: &LanguageId, source: &str) -> Vec<HighlightSpan> {
     store.highlight(language, source).spans
+}
+
+/// [`highlight`] over each of `fragments` (sorted, disjoint byte ranges of
+/// `source`, on character boundaries) as a document of its own: a string or
+/// comment left open at the end of one does not continue into the next.
+/// Spans are in `source`'s coordinates and lie inside the fragments.
+pub fn highlight_fragments(
+    store: &GrammarStore,
+    language: &LanguageId,
+    source: &str,
+    fragments: &[std::ops::Range<u32>],
+) -> Vec<HighlightSpan> {
+    store
+        .highlight_fragments_until(language, source, fragments, &|| false)
+        .spans
 }
 
 #[cfg(all(test, feature = "download"))]

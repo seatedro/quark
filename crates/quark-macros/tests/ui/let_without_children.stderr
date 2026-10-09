@@ -1,0 +1,5 @@
+error: a `let` binds names for the children after it, so it goes in a list of children, before them
+ --> tests/ui/let_without_children.rs:4:21
+  |
+4 |     let _ = view! { let x = 1; };
+  |                     ^^^

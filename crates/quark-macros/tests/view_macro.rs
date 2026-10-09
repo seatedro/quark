@@ -681,6 +681,51 @@ fn lowercase_tag_with_arguments_calls_the_function() {
     assert_eq!(kids(&el), ["a", "b"]);
 }
 
+// Catches `let` among children not binding for the siblings after it in
+// its own scope (the rest of the list, branch, or loop iteration), or
+// adding a child or wrapper of its own.
+#[test]
+fn let_binds_for_the_following_children() {
+    let rows = [1, 2];
+    let el = view! {
+        <div>
+            let first = rows[0] * 10;
+            <text>"{first}"</text>
+            for n in rows {
+                let doubled = n * 2;
+                if doubled > 2 {
+                    let label = format!("big {doubled}");
+                    <text>{label}</text>
+                } else {
+                    <text>"{doubled}"</text>
+                }
+            }
+        </div>
+    };
+    assert_eq!(kids(&el), ["10", "2", "big 4"]);
+}
+
+// Catches `view! { -> Type, .. }` erasing the root to `AnyElement` (a
+// helper could not return a builder its callers keep styling) or losing
+// the root's attributes and children on the way.
+#[test]
+fn typed_root_returns_the_builder_for_callers_to_extend() {
+    fn panel(gap: f32) -> El {
+        view! { -> El,
+            <div gap={gap}>
+                <text>"a"</text>
+                if gap > 1.0 { "b" }
+            </div>
+        }
+    }
+    let el = view! { <panel(2.0) test_id="p">"c"</panel> };
+    assert_eq!(el.calls, ["gap(2.0)", "test_id(\"p\")"]);
+    assert_eq!(kids(&el), ["a", "b", "c"]);
+    let extended = panel(0.5).test_id("q").into_any();
+    assert_eq!(extended.calls, ["gap(0.5)", "test_id(\"q\")"]);
+    assert_eq!(kids(&extended), ["a"]);
+}
+
 // Catches `<{expr}>` not applying its attributes and children to the
 // builder value the expression evaluates to.
 #[test]

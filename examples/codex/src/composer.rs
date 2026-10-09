@@ -3,7 +3,7 @@
 //! the context tray under it on the home screen, and the slash and `@`
 //! suggestions its text opens.
 
-use accesskit::Role;
+use quark::view;
 use quark_app::ViewContext;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -181,7 +181,7 @@ pub fn card(
     w: f32,
     placeholder: &str,
     vcx: &mut ViewContext,
-) -> (Div, f32) {
+) -> (AnyElement, f32) {
     let density = if w < 420.0 {
         Density::Icons
     } else {
@@ -190,53 +190,37 @@ pub fn card(
     let text_w = (w - 24.0).max(40.0);
     app.composer.fit(vcx, text_w, TEXT_MIN - 1.0);
     let text_h = app.composer.text_h;
-    let editor = text_editor_element(
-        COMPOSER_FOCUS,
-        ScrollActionBuilder::new(|lines| Msg::ComposerScroll(lines).into()),
-    )
-    .editor_snapshot(&app.composer.editor)
-    .label(placeholder.to_owned())
-    .placeholder(placeholder.to_owned())
-    .focused(vcx.is_focused(COMPOSER_FOCUS))
-    .font_size(BODY)
-    .text_color(p.text)
-    .w(text_w)
-    .h(text_h);
     let h = 14.0 + text_h + 4.0 + 28.0 + 8.0;
     let light = p.mode == quark_app::quark_ui::theme::ThemeMode::Light;
-    let card = div()
-        .w(w)
-        .h(h)
-        .flex_col()
-        .pt(14.0)
-        .bg(p.composer)
-        .rounded(20.0)
-        .border(p.composer_border)
-        .when(light, |d| d.shadow(10.0, 2.0, p.shadow))
-        .id(CARD_ID)
-        .child(div().px(12.0).h(text_h).child(editor))
-        .child(div().h(4.0))
-        .child(controls(app, p, density));
+    let scroll = ScrollActionBuilder::new(|lines| Msg::ComposerScroll(lines).into());
+    let card = view! {
+        <div w={w} h={h} class="flex-col pt-[14] rounded-[20]" bg={p.composer}
+             border={p.composer_border} @when {light} { shadow={(10.0, 2.0, p.shadow)} }
+             id={CARD_ID}>
+            <div class="px-3" h={text_h}>
+                <text_editor_element(COMPOSER_FOCUS, scroll)
+                    editor_snapshot={&app.composer.editor} label={placeholder.to_owned()}
+                    placeholder={placeholder.to_owned()} focused={vcx.is_focused(COMPOSER_FOCUS)}
+                    font_size={BODY} text_color={p.text} w={text_w} h={text_h} />
+            </div>
+            <div class="h-1" />
+            {controls(app, p, density)}
+        </div>
+    };
     (card, h)
 }
 
 fn pill(p: &Pal, id: &str, label: &str, msg: Msg, open: bool) -> Div {
-    hrow()
-        .h(28.0)
-        .px(7.0)
-        .gap(6.0)
-        .rounded(14.0)
-        .hover_bg(p.menu_hi)
-        .when(open, |d| d.bg(p.menu_hi))
-        .id(id.to_owned())
-        .accessibility_role(Role::Button)
-        .accessibility_label(label.to_owned())
-        .on_click(msg)
+    view! { -> Div,
+        <div class="flex-row items-center h-7 px-[7] gap-1.5 rounded-[14]" hover_bg={p.menu_hi}
+             bg={if open { p.menu_hi }} id={id.to_owned()} role="button"
+             aria-label={label.to_owned()} on:click={msg} />
+    }
 }
 
 /// The send slot: a voice button while empty, send with text, stop while
 /// a turn runs.
-pub fn send_button(app: &Codex, p: &Pal) -> Div {
+pub fn send_button(app: &Codex, p: &Pal) -> AnyElement {
     let running = app.running();
     let has_text = !app.composer.editor.text().trim().is_empty();
     let (svg, label, size) = if running {
@@ -246,217 +230,112 @@ pub fn send_button(app: &Codex, p: &Pal) -> Div {
     } else {
         (icons::VOICE, "Start voice chat", 16.0)
     };
-    div()
-        .w(28.0)
-        .h(28.0)
-        .flex_shrink_0()
-        .rounded(14.0)
-        .bg(p.send_active)
-        .items_center()
-        .justify_center()
-        .accessibility_role(Role::Button)
-        .accessibility_label(label)
-        .on_click(if running { Msg::Stop } else { Msg::Send })
-        .child(ico(svg, size, p.send_active_glyph))
+    view! {
+        <div class="w-7 h-7 shrink-0 rounded-[14] items-center justify-center"
+             bg={p.send_active} role="button" aria-label={label}
+             on:click={if running { Msg::Stop } else { Msg::Send }}>
+            <icon svg={svg} size={size} color={p.send_active_glyph} />
+        </div>
+    }
 }
 
-fn controls(app: &Codex, p: &Pal, density: Density) -> Div {
+fn controls(app: &Codex, p: &Pal, density: Density) -> AnyElement {
     let (approval, _, approval_icon) = APPROVALS[app.approval];
     let full_access = app.approval == 2;
     let tint = if full_access { p.orange } else { p.muted };
-    let mut permissions = pill(
-        p,
-        "pill.permissions",
-        "Change permissions",
-        Msg::Open(Menu::Permissions),
-        app.menu == Some(Menu::Permissions),
-    )
-    .child(ico(approval_icon, 15.0, tint));
-    if density == Density::Full {
-        permissions = permissions.child(txt(approval, SMALL, tint));
-    }
+    let full = density == Density::Full;
     let model_open = app.menu == Some(Menu::Model);
-    let mut model = pill(
-        p,
-        "pill.model",
-        &format!("{} {}", crate::MODEL, crate::EFFORTS[app.effort]),
-        Msg::Open(Menu::Model),
-        model_open,
-    );
-    if density == Density::Icons {
-        model = model.child(ico(icons::BRAIN, 15.0, p.muted));
-    } else if model_open {
-        model = model
-            .w(146.0)
-            .justify_center()
-            .child(txt("Select effort", SMALL, p.muted))
-            .child(div().w(18.0))
-            .child(ico(icons::CHEVRON_DOWN, 11.0, p.muted));
-    } else {
-        model = model
-            .gap(4.0)
-            .child(txt(crate::MODEL, SMALL, p.text_soft))
-            .child(txt(crate::EFFORTS[app.effort], SMALL, p.muted))
-            .child(div().w(2.0))
-            .child(ico(icons::CHEVRON_DOWN, 11.0, p.muted));
+    let model_label = format!("{} {}", crate::MODEL, crate::EFFORTS[app.effort]);
+    view! {
+        <div class="flex-row items-center h-7 pl-2 pr-2 gap-[5]">
+            <icon_button(p, icons::PLUS, 28.0, 16.0, p.text_soft, "Add files and more",
+                         Msg::Open(Menu::Add)) id="pill.add" />
+            <pill(p, "pill.permissions", "Change permissions", Msg::Open(Menu::Permissions),
+                  app.menu == Some(Menu::Permissions))>
+                <icon svg={approval_icon} size={15.0} color={tint} />
+                if full {
+                    <txt(approval, SMALL, tint) />
+                }
+            </pill>
+            <div class="flex-1" />
+            <pill(p, "pill.model", &model_label, Msg::Open(Menu::Model), model_open)
+                  @when {full && model_open} { class="w-[146] justify-center" }
+                  @when {full && !model_open} { class="gap-1" }>
+                if !full {
+                    <icon svg={icons::BRAIN} size={15.0} color={p.muted} />
+                } else if model_open {
+                    <txt("Select effort", SMALL, p.muted) />
+                    <div class="w-[18]" />
+                    <icon svg={icons::CHEVRON_DOWN} size={11.0} color={p.muted} />
+                } else {
+                    <txt(crate::MODEL, SMALL, p.text_soft) />
+                    <txt(crate::EFFORTS[app.effort], SMALL, p.muted) />
+                    <div class="w-0.5" />
+                    <icon svg={icons::CHEVRON_DOWN} size={11.0} color={p.muted} />
+                }
+            </pill>
+            <icon_button(p, icons::MIC, 28.0, 15.0, p.text_soft, "Dictate", Msg::Noop) />
+            <div class="w-2" />
+            {send_button(app, p)}
+        </div>
     }
-    hrow()
-        .h(28.0)
-        .pl(8.0)
-        .pr(8.0)
-        .gap(5.0)
-        .child(
-            icon_button(
-                p,
-                icons::PLUS,
-                28.0,
-                16.0,
-                p.text_soft,
-                "Add files and more",
-                Msg::Open(Menu::Add),
-            )
-            .id("pill.add"),
-        )
-        .child(permissions)
-        .child(div().flex_1())
-        .child(model)
-        .child(icon_button(
-            p,
-            icons::MIC,
-            28.0,
-            15.0,
-            p.text_soft,
-            "Dictate",
-            Msg::Noop,
-        ))
-        .child(div().w(8.0))
-        .child(send_button(app, p))
 }
 
 /// The floating composer pill of the full view (u29).
-pub fn compact(app: &mut Codex, p: &Pal, w: f32, vcx: &mut ViewContext) -> Div {
+pub fn compact(app: &mut Codex, p: &Pal, w: f32, vcx: &mut ViewContext) -> AnyElement {
     let text_w = (w - 200.0).max(80.0);
     app.composer.fit(vcx, text_w, LINE_H);
-    let editor = text_editor_element(
-        COMPOSER_FOCUS,
-        ScrollActionBuilder::new(|lines| Msg::ComposerScroll(lines).into()),
-    )
-    .editor_snapshot(&app.composer.editor)
-    .label("Work with Codex")
-    .placeholder("Work with Codex")
-    .focused(vcx.is_focused(COMPOSER_FOCUS))
-    .font_size(BODY)
-    .text_color(p.text)
-    .w(text_w)
-    .h(LINE_H);
-    hrow()
-        .w(w)
-        .h(44.0)
-        .pl(8.0)
-        .pr(8.0)
-        .gap(4.0)
-        .bg(p.composer)
-        .rounded(22.0)
-        .border(p.composer_border)
-        .id(CARD_ID)
-        .child(icon_button(
-            p,
-            icons::PLUS,
-            28.0,
-            16.0,
-            p.text_soft,
-            "Add files and more",
-            Msg::Open(Menu::Add),
-        ))
-        .child(div().pl(4.0).child(editor))
-        .child(div().flex_1())
-        .child(icon_button(
-            p,
-            icons::BRAIN,
-            28.0,
-            15.0,
-            p.muted,
-            "Select effort",
-            Msg::Open(Menu::Model),
-        ))
-        .child(icon_button(
-            p,
-            icons::HAND,
-            28.0,
-            15.0,
-            p.muted,
-            "Change permissions",
-            Msg::Open(Menu::Permissions),
-        ))
-        .child(icon_button(
-            p,
-            icons::MIC,
-            28.0,
-            15.0,
-            p.text_soft,
-            "Dictate",
-            Msg::Noop,
-        ))
-        .child(div().w(4.0))
-        .child(send_button(app, p))
+    let scroll = ScrollActionBuilder::new(|lines| Msg::ComposerScroll(lines).into());
+    view! {
+        <div class="flex-row items-center h-11 pl-2 pr-2 gap-1 rounded-[22]" w={w}
+             bg={p.composer} border={p.composer_border} id={CARD_ID}>
+            <icon_button(p, icons::PLUS, 28.0, 16.0, p.text_soft, "Add files and more",
+                         Msg::Open(Menu::Add)) />
+            <div class="pl-1">
+                <text_editor_element(COMPOSER_FOCUS, scroll)
+                    editor_snapshot={&app.composer.editor} label="Work with Codex"
+                    placeholder="Work with Codex" focused={vcx.is_focused(COMPOSER_FOCUS)}
+                    font_size={BODY} text_color={p.text} w={text_w} h={LINE_H} />
+            </div>
+            <div class="flex-1" />
+            <icon_button(p, icons::BRAIN, 28.0, 15.0, p.muted, "Select effort",
+                         Msg::Open(Menu::Model)) />
+            <icon_button(p, icons::HAND, 28.0, 15.0, p.muted, "Change permissions",
+                         Msg::Open(Menu::Permissions)) />
+            <icon_button(p, icons::MIC, 28.0, 15.0, p.text_soft, "Dictate", Msg::Noop) />
+            <div class="w-1" />
+            {send_button(app, p)}
+        </div>
+    }
 }
 
 /// The tray attached above the home composer: project, where to work,
 /// and the local environment's settings.
-pub fn tray(app: &Codex, p: &Pal, w: f32) -> Div {
+pub fn tray(app: &Codex, p: &Pal, w: f32) -> AnyElement {
     let item = |id: &str, svg: &'static str, label: &str, msg: Msg| {
-        hrow()
-            .h(28.0)
-            .px(6.0)
-            .gap(7.0)
-            .rounded(7.0)
-            .hover_bg(p.menu_hi)
-            .id(id.to_owned())
-            .accessibility_role(Role::Button)
-            .accessibility_label(label.to_owned())
-            .on_click(msg)
-            .child(ico(svg, 15.0, p.text_soft))
-            .child(txt(label, SMALL, p.text_soft))
+        view! {
+            <div class="flex-row items-center h-7 px-1.5 gap-[7] rounded-[7]" hover_bg={p.menu_hi}
+                 id={id.to_owned()} role="button" aria-label={label.to_owned()} on:click={msg}>
+                <icon svg={svg} size={15.0} color={p.text_soft} />
+                <txt(label, SMALL, p.text_soft) />
+            </div>
+        }
     };
     let project = app
         .project
         .and_then(|id| app.data.project(id))
         .map_or("No project", |p| p.name);
-    div()
-        .w(w)
-        .h(42.0)
-        .bg(p.tray)
-        .rounded_corners([12.0, 12.0, 0.0, 0.0])
-        .child(
-            hrow()
-                .w(w)
-                .h(38.0)
-                .pl(4.0)
-                .pr(4.0)
-                .gap(10.0)
-                .child(item(
-                    "tray.project",
-                    icons::FOLDER,
-                    project,
-                    Msg::Open(Menu::ProjectPicker),
-                ))
-                .child(item(
-                    "tray.location",
-                    icons::LAPTOP,
-                    "This computer",
-                    Msg::Open(Menu::WorkIn),
-                ))
-                .child(div().flex_1())
-                .child(icon_button(
-                    p,
-                    icons::SETTINGS,
-                    28.0,
-                    15.0,
-                    p.muted,
-                    "Configure local environment",
-                    Msg::Noop,
-                )),
-        )
+    view! {
+        <div w={w} class="h-[42]" bg={p.tray} rounded_corners={[12.0, 12.0, 0.0, 0.0]}>
+            <div class="flex-row items-center h-[38] pl-1 pr-1 gap-[10]" w={w}>
+                {item("tray.project", icons::FOLDER, project, Msg::Open(Menu::ProjectPicker))}
+                {item("tray.location", icons::LAPTOP, "This computer", Msg::Open(Menu::WorkIn))}
+                <div class="flex-1" />
+                <icon_button(p, icons::SETTINGS, 28.0, 15.0, p.muted,
+                             "Configure local environment", Msg::Noop) />
+            </div>
+        </div>
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! scenes and tests use) starts no process and shows capture 38's
 //! transcript instead.
 
+use quark::view;
 use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -77,7 +78,7 @@ impl State {
             accessible: vcx.frame.accessibility_active(),
         };
         let view = terminal_view(&mut self.term, vcx.theme, env, |e| Msg::Terminal(e).into());
-        div().w(w).h(h).child(view).into_any()
+        view! { <div w={w} h={h}>{view}</div> }
     }
 
     pub fn handle(&mut self, event: TerminalEvent, cx: &mut UiContext) {

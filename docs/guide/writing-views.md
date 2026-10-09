@@ -333,12 +333,33 @@ is an error that suggests `"Send"`.
 | `match v { A => <tag/> B => { <a/> <b/> } C => expr, }` | Arms take markup, `{ children }`, or a Rust expression |
 | `for x in xs { .. }` | Each iteration's children |
 | `for x in xs key={x.id} { <div>..</div> }` | Adds `.key(..)` to each iteration's single root |
+| `let name = expr;` | Binds `name` for the children after it in the same list, branch, or loop body |
 
 A branch or arm with several children adds them to the parent directly;
 no wrapper `div` changes the layout. Inside an element, `if`, `match`, and
 `for` lower to the same Rust statements around `.child(..)` calls that you
 would write by hand, so they allocate nothing beyond the children. `view!` returns the root element; a
 root fragment becomes a `div`.
+
+## Returning a builder
+
+`view!` returns an `AnyElement`. A helper whose callers keep styling its
+result (adding children, an `id`, a fill) needs the builder itself:
+`view! { -> Type, <root> }` returns the root element's builder, checked
+against `Type`, so the helper can be used as a function tag.
+
+```rust
+fn menu_panel(p: &Pal, x: f32, y: f32) -> Div {
+    view! { -> Div,
+        <div class="absolute flex-col p-1 rounded-[10]" left={x} top={y} bg={p.menu} />
+    }
+}
+
+view! { <menu_panel(p, x, y) h={h}>{...rows}</menu_panel> }
+```
+
+The root must be one element; a fragment, control flow, or `{expr}` at
+the root is an error.
 
 ## Components with typed props
 

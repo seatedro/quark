@@ -40,7 +40,7 @@ mod search;
 mod selection;
 mod session;
 mod state;
-mod syntax;
+pub mod syntax;
 mod view;
 
 use std::cell::Cell;
