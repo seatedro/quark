@@ -175,6 +175,71 @@ jobs:
           kache daemon status
           kache stats --full || kache stats
 
+  # quark-app's webview feature on Linux against WebKitGTK 4.1, then the
+  # webview smoke test under Xvfb. Apart from `check`, which proves builds
+  # without the feature need no GTK or WebKit packages.
+  webview:
+    needs: changes
+    if: needs.changes.outputs.docs-only != 'true'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install system dependencies
+        # A stalled mirror otherwise hangs the job until its 6 h limit.
+        timeout-minutes: 10
+        run: |
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/80timeouts >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxi-dev libxrandr-dev libdbus-1-dev libgl1-mesa-dev \
+            mesa-vulkan-drivers libegl1 libgl1-mesa-dri \
+            pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev glib-networking \
+            xvfb openbox dbus-x11 at-spi2-core
+
+      # wry's async evaluation and policy APIs need WebKitGTK 2.40.
+      - name: Check WebKitGTK
+        run: |
+          pkg-config --modversion gtk+-3.0 webkit2gtk-4.1 javascriptcoregtk-4.1 libsoup-3.0
+          pkg-config --atleast-version=2.40 webkit2gtk-4.1
+
+      - name: Install toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy
+
+      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          cache-key-prefix: kache-webview
+          s3-bucket: ${{ secrets.KACHE_S3_ACCESS_KEY_ID != '' && 'quark-kache' || '' }}
+          s3-endpoint: https://d996894143090cc02f1539e379655b2c.r2.cloudflarestorage.com
+          s3-region: auto
+          s3-access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          save-cache: ${{ github.ref == 'refs/heads/master' }}
+          pr-comment: false
+          cache-executables: true
+
+      - name: Clippy
+        run: cargo clippy --locked -p quark-webview -p quark-app --features quark-app/webview --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked -p quark-webview --features native
+
+      # A session bus and a window manager, as on a desktop; the browser
+      # sandbox stays on.
+      - name: Smoke test
+        timeout-minutes: 15
+        run: >-
+          xvfb-run -a -s "-screen 0 1280x800x24"
+          dbus-run-session --
+          sh -c 'openbox & cargo test --locked -p quark-app --features webview --test webview_smoke'
+
   # macOS (Apple silicon) and Windows: the Linux job's clippy and tests, then
   # a smoke launch of hello_ui. Formatting and feature combinations are
   # platform independent and stay on Linux.
@@ -261,6 +326,10 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The WKWebView and WebView2 backends; Linux's is the webview job.
+      - name: Clippy webview
+        run: cargo clippy -p quark-webview -p quark-app --features quark-app/webview --all-targets -- -D warnings
 
       - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         if: success() && runner.os == 'Windows' && github.ref == 'refs/heads/master' && steps.ghostty-vt.outputs.cache-hit != 'true'
@@ -702,7 +771,7 @@ jobs:
   # verification and the faster PR jobs, and documentation-only changes.
   ci-result:
     if: ${{ always() && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
-    needs: [changes, check, platform, fuzz, miri, miri-pr, kani, kani-pr]
+    needs: [changes, check, webview, platform, fuzz, miri, miri-pr, kani, kani-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results
@@ -724,6 +793,7 @@ jobs:
           }
           expect changes true
           expect check "$native"
+          expect webview "$native"
           expect platform "$native"
           expect fuzz "$native"
           expect miri "$FULL"
