@@ -544,6 +544,24 @@ impl DiffViewState {
             if let (Some(first), Some(last)) = (first, last) {
                 self.syntax.set_visible_files(first..last + 1);
             }
+            // A long side still streaming colors the top line's surroundings
+            // first.
+            let top = refs.iter().find_map(|r| match *r {
+                RowRef::Line { seg, row } => Some((seg as usize, row)),
+                _ => None,
+            });
+            if let Some((seg, row)) = top {
+                let segment = &self.segments[seg];
+                let (p, file) = (&segment.projection, segment.projection.file[row as usize]);
+                for side in [Side::Old, Side::New] {
+                    let start = p
+                        .line(row, side)
+                        .and_then(|i| segment.doc.text(file, side).line_range(i).map(|r| r.start));
+                    if let Some(start) = start {
+                        self.syntax.set_focus(file, side, start);
+                    }
+                }
+            }
         }
 
         let scroll = self.list.scroll_offset();
