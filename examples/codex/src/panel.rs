@@ -5,6 +5,7 @@
 //! and floats the composer over it (u29).
 
 use accesskit::Role;
+use quark::view;
 use quark_app::ViewContext;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -39,327 +40,174 @@ pub fn view(
     let full = app.full_view;
     let body: AnyElement = match app.tab {
         Tab::Changes => changes(app, p, w, h),
-        Tab::Terminal => div()
-            .pl(16.0)
-            .pt(8.0)
-            .child(
-                app.terminal
-                    .view(w - 16.0, (h - if full { 80.0 } else { 8.0 }).max(0.0), vcx),
-            )
-            .into_any(),
+        Tab::Terminal => {
+            let term_h = (h - if full { 80.0 } else { 8.0 }).max(0.0);
+            view! { <div class="pl-4 pt-2">{app.terminal.view(w - 16.0, term_h, vcx)}</div> }
+        }
         Tab::File => file_viewer(app, p, w, h),
     };
-    let mut pane = div()
-        .absolute()
-        .left(x)
-        .top(0.0)
-        .w(w)
-        .h(h)
-        .bg(p.bg)
-        .when(!full, |d| d.border_l(p.frame_border.lerp(p.text, 0.06)))
-        .accessibility_role(Role::Complementary)
-        .accessibility_label("Side panel")
-        .child(body);
-    if full {
+    let composer = full.then(|| {
         let cw = 560.0_f32.min(w - 40.0);
         let composer = composer::compact(app, p, cw, vcx);
-        pane = pane.child(
-            div()
-                .absolute()
-                .left(((w - cw) / 2.0).round())
-                .top(h - 60.0)
-                .child(composer),
-        );
+        view! {
+            <div class="absolute" left={((w - cw) / 2.0).round()} top={h - 60.0}>{composer}</div>
+        }
+    });
+    view! {
+        <div class="absolute top-0" left={x} w={w} h={h} bg={p.bg}
+             @when {!full} { border_l={p.frame_border.lerp(p.text, 0.06)} }
+             accessibility_role={Role::Complementary} aria-label="Side panel">
+            {body}
+            {?composer}
+        </div>
     }
-    pane.into_any()
 }
 
 /// The panel's tabs in the title bar, with "+", the full view toggle, and
 /// the panel toggle. In the full view the thread is a tab too.
-pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> Div {
+pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
     let full = app.full_view;
     let left = if full { 232.0 } else { f.panel_x + 7.0 };
-    let mut strip = hrow().absolute().left(left).top(7.0).h(30.0).gap(6.0);
-    let tab =
-        |icon: AnyElement, label: String, active: bool, w: f32, msg: Msg, close: Option<Msg>| {
-            let mut t =
-                hrow()
-                    .w(w)
-                    .h(30.0)
-                    .pl(10.0)
-                    .pr(6.0)
-                    .gap(8.0)
-                    .rounded(8.0)
-                    .hover_bg(p.rail_tile.with_alpha(120))
-                    .accessibility_role(Role::Tab)
-                    .accessibility_label(label.clone())
-                    .accessibility_selected(active)
-                    .on_click(msg)
-                    .child(icon)
-                    .child(div().flex_1().min_w(0.0).overflow_hidden().child(
-                        txt(label, SMALL, if active { p.text } else { p.muted }).truncate(),
-                    ));
-            if active {
-                t = t.bg(p.rail_tile).border(p.frame_border.lerp(p.text, 0.08));
-            }
-            if let Some(close) = close {
-                t = t.child(icon_button(
-                    p,
-                    icons::CLOSE,
-                    20.0,
-                    11.0,
-                    p.muted,
-                    "Close tab",
-                    close,
-                ));
-            }
-            t
-        };
-    if full && let Some(t) = app.current_thread() {
-        strip = strip
-            .child(
-                tab(
-                    ico(icons::CHAT, 14.0, p.muted).into_any(),
-                    t.title.clone(),
-                    false,
-                    230.0,
-                    Msg::FullView,
-                    None,
-                )
-                .child(ico(icons::ELLIPSIS, 13.0, p.muted)),
-            )
-            .child(div().w(2.0));
+    let tab = |icon: AnyElement, label: String, active: bool, w: f32, msg: Msg| {
+        view! { -> Div,
+            <div class="flex-row items-center h-[30] pl-[10] pr-1.5 gap-2 rounded-[8]" w={w}
+                 hover_bg={p.rail_tile.with_alpha(120)} role="tab" aria-label={label.clone()}
+                 aria-selected={active} on:click={msg}
+                 @when {active} { bg={p.rail_tile} border={p.frame_border.lerp(p.text, 0.08)} }>
+                {icon}
+                <div class="flex-1 min-w-0 overflow-hidden">
+                    <txt(label, SMALL, if active { p.text } else { p.muted }) class="truncate" />
+                </div>
+            </div>
+        }
+    };
+    // Tabs share what the strip has: up to 236 points each in the full
+    // view, the panel's width beside the thread.
+    let tab_w = if full {
+        (236.0_f32).min((f.w - 232.0 - 170.0 - 236.0) / app.tabs.len() as f32)
+    } else {
+        (f.panel_w - 118.0).max(80.0) / app.tabs.len() as f32
+    };
+    view! {
+        <div>
+            <div class="flex-row items-center absolute top-[7] h-[30] gap-1.5" left={left}>
+                if full && let Some(t) = app.current_thread() {
+                    <tab(view! { <icon svg={icons::CHAT} size={14.0} color={p.muted} /> },
+                         t.title.clone(), false, 230.0, Msg::FullView)>
+                        <icon svg={icons::ELLIPSIS} size={13.0} color={p.muted} />
+                    </tab>
+                    <div class="w-0.5" />
+                }
+                for t in &app.tabs {
+                    let (icon, label): (AnyElement, String) = match t {
+                        Tab::Changes => (
+                            view! { <icon svg={icons::REVIEW} size={14.0} color={p.text_soft} /> },
+                            "Changes".into(),
+                        ),
+                        Tab::Terminal => (
+                            view! { <icon svg={icons::TERMINAL} size={14.0} color={p.text_soft} /> },
+                            data::DEMO_PROJECT.into(),
+                        ),
+                        Tab::File => (js_badge().into_any(), app.open_file.unwrap_or("cart.js").into()),
+                    };
+                    <tab(icon, label, *t == app.tab, tab_w, Msg::ShowTab(*t))>
+                        <icon_button(p, icons::CLOSE, 20.0, 11.0, p.muted, "Close tab",
+                                     Msg::CloseTab(*t)) />
+                    </tab>
+                }
+                <div class="w-1.5" />
+                <icon_button(p, icons::PLUS, 28.0, 16.0, p.icon, "New tab",
+                             Msg::Open(Menu::PanelTab)) id="panel.newtab" />
+            </div>
+            <div class="flex-row items-center absolute top-2 gap-1.5 w-[121] justify-end"
+                 left={f.w - 129.0}>
+                if full {
+                    <icon_button(p, icons::SUMMARY, 28.0, 16.0, p.icon, "Toggle summary",
+                                 Msg::Open(Menu::Summary)) id="header.summary" />
+                }
+                <icon_button(p, if full { icons::COLLAPSE } else { icons::EXPAND }, 28.0, 14.0,
+                             p.icon, if full { "Exit full view" } else { "Enter full view" },
+                             Msg::FullView) bg={if full { p.rail_tile }} />
+                <icon_button(p, icons::PANEL_RIGHT, 28.0, 16.0, p.text, "Hide tabs",
+                             Msg::ToggleSidePanel) bg={p.rail_tile} />
+            </div>
+        </div>
     }
-    for t in &app.tabs {
-        let (icon, label): (AnyElement, String) = match t {
-            Tab::Changes => (
-                ico(icons::REVIEW, 14.0, p.text_soft).into_any(),
-                "Changes".into(),
-            ),
-            Tab::Terminal => (
-                ico(icons::TERMINAL, 14.0, p.text_soft).into_any(),
-                data::DEMO_PROJECT.into(),
-            ),
-            Tab::File => (
-                js_badge().into_any(),
-                app.open_file.unwrap_or("cart.js").into(),
-            ),
-        };
-        let w = if full {
-            // Tabs share what the strip has, up to 236 points each.
-            (236.0_f32).min((f.w - 232.0 - 170.0 - 236.0) / app.tabs.len() as f32)
-        } else {
-            (f.panel_w - 118.0).max(80.0) / app.tabs.len() as f32
-        };
-        strip = strip.child(tab(
-            icon,
-            label,
-            *t == app.tab,
-            w,
-            Msg::ShowTab(*t),
-            Some(Msg::CloseTab(*t)),
-        ));
-    }
-    strip = strip.child(div().w(6.0)).child(
-        icon_button(
-            p,
-            icons::PLUS,
-            28.0,
-            16.0,
-            p.icon,
-            "New tab",
-            Msg::Open(Menu::PanelTab),
-        )
-        .id("panel.newtab"),
-    );
-    let mut right = hrow()
-        .absolute()
-        .left(f.w - 129.0)
-        .top(8.0)
-        .gap(6.0)
-        .w(121.0)
-        .justify_end();
-    if full {
-        right = right.child(
-            icon_button(
-                p,
-                icons::SUMMARY,
-                28.0,
-                16.0,
-                p.icon,
-                "Toggle summary",
-                Msg::Open(Menu::Summary),
-            )
-            .id("header.summary"),
-        );
-    }
-    let full_toggle = icon_button(
-        p,
-        if full { icons::COLLAPSE } else { icons::EXPAND },
-        28.0,
-        14.0,
-        p.icon,
-        if full {
-            "Exit full view"
-        } else {
-            "Enter full view"
-        },
-        Msg::FullView,
-    );
-    right = right
-        .child(if full {
-            full_toggle.bg(p.rail_tile)
-        } else {
-            full_toggle
-        })
-        .child(
-            icon_button(
-                p,
-                icons::PANEL_RIGHT,
-                28.0,
-                16.0,
-                p.text,
-                "Hide tabs",
-                Msg::ToggleSidePanel,
-            )
-            .bg(p.rail_tile),
-        );
-    div().child(strip).child(right)
 }
 
 /// The Changes tab.
 fn changes(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
     let full = app.full_view;
-    let scope = hrow()
-        .h(32.0)
-        .pl(14.0)
-        .pr(10.0)
-        .gap(6.0)
-        .rounded(16.0)
-        .bg(p.tray)
-        .id("changes.scope")
-        .accessibility_role(Role::Button)
-        .accessibility_label(SCOPES[app.scope])
-        .on_click(Msg::Open(Menu::ChangesScope))
-        .child(txt(SCOPES[app.scope], SMALL, p.text))
-        .child(ico(icons::CHEVRON_DOWN, 11.0, p.text))
-        .child(div().w(4.0))
-        .child(txt("+2", SMALL, p.add_num))
-        .child(txt("-2", SMALL, p.del_num));
     let tool = |svg: &'static str, label: &str, msg: Msg| {
         icon_button(p, svg, 28.0, 14.0, p.icon, label, msg)
     };
-    let mut tools = hrow()
-        .h(32.0)
-        .px(4.0)
-        .gap(2.0)
-        .rounded(16.0)
-        .bg(p.tray)
-        .child(
-            tool(icons::ELLIPSIS, "Options", Msg::Open(Menu::ChangesOptions)).id("changes.options"),
-        )
-        .child(tool(icons::FILE_SEARCH, "Jump to file", Msg::Noop));
-    if full {
-        tools = tools
-            .child(tool(icons::REFRESH_CW, "Refresh", Msg::Noop))
-            .child(tool(icons::WRAP, "Word wrap", Msg::Noop))
-            .child(tool(icons::LIST_FILTER, "Expand all diffs", Msg::Noop))
-            .child(
-                div()
-                    .w(28.0)
-                    .h(28.0)
-                    .items_center()
-                    .justify_center()
-                    .child(split_glyph(p)),
-            );
+    view! {
+        <div class="flex-col" w={w} h={h}>
+            <div class="h-1" />
+            <div class="flex-row items-center h-12 px-2" w={w}>
+                <div class="flex-row items-center h-8 pl-[14] pr-[10] gap-1.5 rounded-[16]"
+                     bg={p.tray} id="changes.scope" role="button" aria-label={SCOPES[app.scope]}
+                     on:click={Msg::Open(Menu::ChangesScope)}>
+                    <txt(SCOPES[app.scope], SMALL, p.text) />
+                    <icon svg={icons::CHEVRON_DOWN} size={11.0} color={p.text} />
+                    <div class="w-1" />
+                    <txt("+2", SMALL, p.add_num) />
+                    <txt("-2", SMALL, p.del_num) />
+                </div>
+                <div class="flex-1" />
+                <div class="flex-row items-center h-8 px-1 gap-0.5 rounded-[16]" bg={p.tray}>
+                    <tool(icons::ELLIPSIS, "Options", Msg::Open(Menu::ChangesOptions))
+                          id="changes.options" />
+                    <tool(icons::FILE_SEARCH, "Jump to file", Msg::Noop) />
+                    if full {
+                        <tool(icons::REFRESH_CW, "Refresh", Msg::Noop) />
+                        <tool(icons::WRAP, "Word wrap", Msg::Noop) />
+                        <tool(icons::LIST_FILTER, "Expand all diffs", Msg::Noop) />
+                        <div class="w-7 h-7 items-center justify-center">{split_glyph(p)}</div>
+                    }
+                    <tool(icons::FILES, "Show files", Msg::Noop) />
+                </div>
+            </div>
+            <div class="flex-row items-center h-9 pl-4 pr-[10] gap-[9]" w={w}
+                 border_b={p.hairline} border_t={p.hairline} role="heading" aria-label="cart.js">
+                {js_badge()}
+                <txt("cart.js", BODY, p.text_soft) />
+                <div class="flex-1" />
+                <txt("+2", BODY, p.add_num) />
+                <txt("-2", BODY, p.del_num) />
+                <div class="w-0.5" />
+                <icon_button(p, icons::OPEN_EXTERNAL, 24.0, 13.0, p.icon, "Open in",
+                             Msg::OpenFile("cart.js")) />
+                <icon_button(p, icons::ELLIPSIS, 24.0, 13.0, p.icon, "File options", Msg::Noop) />
+            </div>
+            {split_diff(p, w)}
+        </div>
     }
-    tools = tools.child(tool(icons::FILES, "Show files", Msg::Noop));
-    let toolbar = hrow()
-        .w(w)
-        .h(48.0)
-        .px(8.0)
-        .child(scope)
-        .child(div().flex_1())
-        .child(tools);
-    let header = hrow()
-        .w(w)
-        .h(36.0)
-        .pl(16.0)
-        .pr(10.0)
-        .gap(9.0)
-        .border_b(p.hairline)
-        .border_t(p.hairline)
-        .accessibility_role(Role::Heading)
-        .accessibility_label("cart.js")
-        .child(js_badge())
-        .child(txt("cart.js", BODY, p.text_soft))
-        .child(div().flex_1())
-        .child(txt("+2", BODY, p.add_num))
-        .child(txt("-2", BODY, p.del_num))
-        .child(div().w(2.0))
-        .child(icon_button(
-            p,
-            icons::OPEN_EXTERNAL,
-            24.0,
-            13.0,
-            p.icon,
-            "Open in",
-            Msg::OpenFile("cart.js"),
-        ))
-        .child(icon_button(
-            p,
-            icons::ELLIPSIS,
-            24.0,
-            13.0,
-            p.icon,
-            "File options",
-            Msg::Noop,
-        ));
-    div()
-        .w(w)
-        .h(h)
-        .flex_col()
-        .child(div().h(4.0))
-        .child(toolbar)
-        .child(header)
-        .child(split_diff(p, w))
-        .into_any()
 }
 
 /// The split-diff toolbar glyph: a red and a green half.
-fn split_glyph(p: &Pal) -> Div {
-    div()
-        .w(14.0)
-        .h(12.0)
-        .rounded(3.0)
-        .overflow_hidden()
-        .flex_row()
-        .border(p.icon)
-        .child(div().w(6.0).h_full().bg(p.del_bar))
-        .child(div().w(6.0).h_full().bg(p.add_bar))
+fn split_glyph(p: &Pal) -> AnyElement {
+    view! {
+        <div class="w-[14] h-3 rounded-[3] overflow-hidden flex-row" border={p.icon}>
+            <div class="w-1.5 h-full" bg={p.del_bar} />
+            <div class="w-1.5 h-full" bg={p.add_bar} />
+        </div>
+    }
 }
 
 /// The striped bar a deleted row carries; added rows get a solid one.
-fn bar(p: &Pal, kind: i8) -> Div {
-    let mut b = div()
-        .absolute()
-        .left(0.0)
-        .top(0.0)
-        .w(4.0)
-        .h(ROW_H)
-        .flex_col();
-    if kind < 0 {
-        for i in 0..6 {
-            b = b.child(div().w(4.0).h(ROW_H / 6.0).bg(if i % 2 == 0 {
-                p.del_bar
-            } else {
-                p.del_code
-            }));
-        }
-    } else {
-        b = b.bg(p.add_bar);
+fn bar(p: &Pal, kind: i8) -> AnyElement {
+    view! {
+        <div class="absolute left-0 top-0 w-1 flex-col" h={ROW_H}
+             bg={if kind >= 0 { p.add_bar }}>
+            if kind < 0 {
+                for i in 0..6 {
+                    <div class="w-1" h={ROW_H / 6.0}
+                         bg={if i % 2 == 0 { p.del_bar } else { p.del_code }} />
+                }
+            }
+        </div>
     }
-    b
 }
 
 /// One side of a diff row: gutter, number, highlighted code; added lines
@@ -372,43 +220,35 @@ fn diff_cell(
     code: &str,
     words: &[&str],
     with_bar: bool,
-) -> Div {
+) -> AnyElement {
     let (bg, num_color) = match kind {
         -1 => (Some(p.del_code), p.del_num),
         1 => (Some(p.add_code), p.add_num),
         _ => (None, p.line_num),
     };
-    let mut gutter = hrow().w(GUTTER).h(ROW_H).justify_end().pr(10.0).relative();
-    if with_bar && kind != 0 {
-        gutter = gutter.child(bar(p, kind));
+    view! {
+        <div class="flex-row items-center" w={w} h={ROW_H}>
+            <div class="flex-row items-center justify-end pr-[10] relative" w={GUTTER} h={ROW_H}
+                 bg={if let Some(bg) = bg { bg }}>
+                if with_bar && kind != 0 {
+                    {bar(p, kind)}
+                }
+                if let Some(n) = num {
+                    <text size={CODE} color={num_color} class="font-mono whitespace-nowrap">
+                        {n.to_string()}
+                    </text>
+                }
+            </div>
+            <div class="flex-row items-center pl-3 overflow-hidden" w={(w - GUTTER).max(0.0)}
+                 h={ROW_H} bg={if let Some(bg) = bg { bg }}>
+                {highlight_words(code, words, p)}
+            </div>
+        </div>
     }
-    if let Some(n) = num {
-        gutter = gutter.child(
-            text(n.to_string())
-                .size(CODE)
-                .mono()
-                .color(num_color)
-                .no_wrap(),
-        );
-    }
-    let mut code_box = hrow()
-        .w((w - GUTTER).max(0.0))
-        .h(ROW_H)
-        .pl(12.0)
-        .overflow_hidden();
-    if let Some(bg) = bg {
-        code_box = code_box.bg(bg);
-        gutter = gutter.bg(bg);
-    }
-    hrow()
-        .w(w)
-        .h(ROW_H)
-        .child(gutter)
-        .child(code_box.child(highlight_words(code, words, p)))
 }
 
 /// A unified diff row `w` wide, for the inline diff card.
-pub fn diff_row(p: &Pal, w: f32, line: DiffLine, with_bar: bool) -> Div {
+pub fn diff_row(p: &Pal, w: f32, line: DiffLine, with_bar: bool) -> AnyElement {
     match line {
         DiffLine::Context { new, .. } => diff_cell(
             p,
@@ -441,20 +281,23 @@ pub fn diff_row(p: &Pal, w: f32, line: DiffLine, with_bar: bool) -> Div {
     }
 }
 
-fn fold_bar(p: &Pal, w: f32, n: u32) -> Div {
-    hrow().w(w).h(33.0).child(div().w(GUTTER).h(33.0)).child(
-        hrow().flex_1().h(33.0).pl(8.0).bg(p.fold).child(txt(
-            format!("{n} unmodified line{}", if n == 1 { "" } else { "s" }),
-            SMALL,
-            p.muted,
-        )),
-    )
+fn fold_bar(p: &Pal, w: f32, n: u32) -> AnyElement {
+    view! {
+        <div class="flex-row items-center h-[33]" w={w}>
+            <div class="h-[33]" w={GUTTER} />
+            <div class="flex-row items-center flex-1 h-[33] pl-2" bg={p.fold}>
+                <txt(format!("{n} unmodified line{}", if n == 1 { "" } else { "s" }), SMALL, p.muted) />
+            </div>
+        </div>
+    }
 }
 
-fn split_diff(p: &Pal, w: f32) -> Div {
+fn split_diff(p: &Pal, w: f32) -> AnyElement {
     let half = (w / 2.0).floor();
-    let mut col = div().flex_col().w(w).pt(2.0);
     let lines = data::cart_diff(true);
+    // Pair each deletion with the addition after it; the pairing walks the
+    // lines by hand, so the rows are built here and placed by the view.
+    let mut rows = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let (left, right) = match lines[i] {
@@ -462,11 +305,11 @@ fn split_diff(p: &Pal, w: f32) -> Div {
                 i += 1;
                 (
                     fold_bar(p, half, n),
-                    hrow()
-                        .w(half)
-                        .h(33.0)
-                        .pl(4.0)
-                        .child(div().w(half - 4.0).h(33.0).bg(p.fold)),
+                    view! {
+                        <div class="flex-row items-center h-[33] pl-1" w={half}>
+                            <div class="h-[33]" w={half - 4.0} bg={p.fold} />
+                        </div>
+                    },
                 )
             }
             DiffLine::Context { old, new } => {
@@ -542,18 +385,23 @@ fn split_diff(p: &Pal, w: f32) -> Div {
                 )
             }
         };
-        col = col.child(hrow().w(w).child(left).child(right));
+        rows.push((left, right));
     }
-    col
+    view! {
+        <div class="flex-col pt-0.5" w={w}>
+            for (left, right) in rows {
+                <div class="flex-row items-center" w={w}>{left} {right}</div>
+            }
+        </div>
+    }
 }
 
 /// [`highlight`] with `words` (substrings of `code`) on a stronger tint.
-fn highlight_words(code: &str, words: &[&str], p: &Pal) -> Div {
+fn highlight_words(code: &str, words: &[&str], p: &Pal) -> AnyElement {
     if words.is_empty() {
-        return highlight(code, p);
+        return view! { <highlight(code, p) /> };
     }
     // Split the line at the highlighted words and tint those pieces.
-    let mut row = hrow();
     let mut rest = code;
     let mut pieces: Vec<(&str, bool)> = Vec::new();
     while !rest.is_empty() {
@@ -575,31 +423,27 @@ fn highlight_words(code: &str, words: &[&str], p: &Pal) -> Div {
             }
         }
     }
-    for (piece, hot) in pieces {
-        let h = highlight(piece, p);
-        row = row.child(if hot {
-            h.bg(p.word_add).rounded(3.0)
-        } else {
-            h
-        });
+    view! {
+        <div class="flex-row items-center">
+            for (piece, hot) in pieces {
+                <highlight(piece, p) @when {hot} { bg={p.word_add} class="rounded-[3]" } />
+            }
+        </div>
     }
-    row
 }
 
 /// A small JavaScript highlighter in Codex's token colors: comments,
 /// keywords, called names, numbers, strings, and identifiers after `.`.
 pub fn highlight(code: &str, p: &Pal) -> Div {
-    let mut row = hrow();
-    for (token, color) in tokens(code, p) {
-        row = row.child(
-            text(token.replace(' ', "\u{a0}"))
-                .size(CODE)
-                .mono()
-                .color(color)
-                .no_wrap(),
-        );
+    view! { -> Div,
+        <div class="flex-row items-center">
+            for (token, color) in tokens(code, p) {
+                <text size={CODE} color={color} class="font-mono whitespace-nowrap">
+                    {token.replace(' ', "\u{a0}")}
+                </text>
+            }
+        </div>
     }
-    row
 }
 
 pub fn tokens<'a>(code: &'a str, p: &Pal) -> Vec<(&'a str, Color)> {
@@ -665,69 +509,48 @@ pub fn tokens<'a>(code: &'a str, p: &Pal) -> Vec<(&'a str, Color)> {
     out
 }
 
-fn file_tree(p: &Pal, w: f32, h: f32, selected: Option<&str>, review: bool) -> Div {
-    let mut list = div()
-        .flex_col()
-        .w(w)
-        .h(h)
-        .px(8.0)
-        .pt(8.0)
-        .gap(0.0)
-        .border_l(p.hairline);
-    list = list.child(
-        hrow()
-            .h(28.0)
-            .px(9.0)
-            .gap(7.0)
-            .rounded(7.0)
-            .border(p.hairline)
-            .child(ico(icons::SEARCH, 14.0, p.muted))
-            .child(txt("Filter files...", BODY, p.muted)),
-    );
-    list = list.child(div().h(6.0));
+fn file_tree(p: &Pal, w: f32, h: f32, selected: Option<&str>, review: bool) -> AnyElement {
     let files: Vec<(&str, bool)> = if review {
         vec![("cart.js", false)]
     } else {
         data::FILES.to_vec()
     };
-    for (name, dir) in files {
-        let sel = Some(name) == selected;
-        let icon: AnyElement = if dir {
-            ico(icons::CHEVRON_RIGHT, 14.0, p.muted).into_any()
-        } else if name.ends_with(".js") {
-            js_badge().into_any()
-        } else if name.ends_with(".json") {
-            svg_icon(icons::FILE_JSON, 15.0).into_any()
-        } else {
-            svg_icon(icons::FILE_MD, 15.0).into_any()
-        };
-        let name_static: &'static str = match name {
-            "cart.test.js" => "cart.test.js",
-            "package.json" => "package.json",
-            "README.md" => "README.md",
-            ".git" => ".git",
-            _ => "cart.js",
-        };
-        list = list.child(
-            hrow()
-                .h(28.0)
-                .px(7.0)
-                .gap(10.0)
-                .rounded(6.0)
-                .when(sel, |d| d.bg(p.panel_tile))
-                .hover_bg(p.panel_tile)
-                .accessibility_role(Role::TreeItem)
-                .accessibility_label(name.to_owned())
-                .on_click(if dir {
-                    Msg::Noop
-                } else {
-                    Msg::OpenFile(name_static)
-                })
-                .child(div().w(15.0).items_center().child(icon))
-                .child(txt(name, SMALL, p.text_soft)),
-        );
+    view! {
+        <div class="flex-col px-2 pt-2 gap-0" w={w} h={h} border_l={p.hairline}>
+            <div class="flex-row items-center h-7 px-[9] gap-[7] rounded-[7]" border={p.hairline}>
+                <icon svg={icons::SEARCH} size={14.0} color={p.muted} />
+                <txt("Filter files...", BODY, p.muted) />
+            </div>
+            <div class="h-1.5" />
+            for (name, dir) in files {
+                let sel = Some(name) == selected;
+                let name_static: &'static str = match name {
+                    "cart.test.js" => "cart.test.js",
+                    "package.json" => "package.json",
+                    "README.md" => "README.md",
+                    ".git" => ".git",
+                    _ => "cart.js",
+                };
+                <div class="flex-row items-center h-7 px-[7] gap-[10] rounded-[6]"
+                     bg={if sel { p.panel_tile }} hover_bg={p.panel_tile} role="treeitem"
+                     aria-label={name.to_owned()}
+                     on:click={if dir { Msg::Noop } else { Msg::OpenFile(name_static) }}>
+                    <div class="w-[15] items-center">
+                        if dir {
+                            <icon svg={icons::CHEVRON_RIGHT} size={14.0} color={p.muted} />
+                        } else if name.ends_with(".js") {
+                            {js_badge()}
+                        } else if name.ends_with(".json") {
+                            <icon svg={icons::FILE_JSON} size={15.0} />
+                        } else {
+                            <icon svg={icons::FILE_MD} size={15.0} />
+                        }
+                    </div>
+                    <txt(name, SMALL, p.text_soft) />
+                </div>
+            }
+        </div>
     }
-    list
 }
 
 /// The Files tab: breadcrumbs, the open file with change markers, and the
@@ -746,90 +569,50 @@ fn file_viewer(app: &Codex, p: &Pal, w: f32, h: f32) -> AnyElement {
         }
         _ => "# codex-demo\n\nA tiny cart module for trying Codex.\n",
     };
-    let crumbs = hrow()
-        .w(w)
-        .h(38.0)
-        .pl(16.0)
-        .pr(8.0)
-        .gap(6.0)
-        .border_b(p.hairline)
-        .child(txt(data::DEMO_PROJECT, SMALL, p.muted))
-        .child(ico(icons::CHEVRON_RIGHT, 13.0, p.muted))
-        .child(txt(file, SMALL, p.text))
-        .child(div().flex_1())
-        .child(icon_button(
-            p,
-            icons::ELLIPSIS,
-            28.0,
-            15.0,
-            p.icon,
-            "More",
-            Msg::Noop,
-        ))
-        .child(div().w(6.0))
-        .child(
-            hrow()
-                .h(28.0)
-                .px(9.0)
-                .gap(8.0)
-                .rounded(8.0)
-                .border(p.hairline)
-                .child(svg_icon(icons::APP_FINDER, 15.0))
-                .child(txt("Open", BODY, p.text))
-                .child(ico(icons::CHEVRON_DOWN, 13.0, p.muted)),
-        )
-        .child(div().w(6.0))
-        .child(
-            icon_button(
-                p,
-                icons::FILES,
-                28.0,
-                15.0,
-                p.text,
-                "Toggle file tree",
-                Msg::Noop,
-            )
-            .bg(p.panel_tile),
-        );
     let changed = [3u32, 7];
-    let mut code = div().flex_col().w(code_w).pt(4.0);
-    for (i, line) in content.lines().chain(std::iter::once("")).enumerate() {
-        let n = i as u32 + 1;
-        let marker = if file == "cart.js" && changed.contains(&n) {
-            Color::rgba(0xf0, 0x8a, 0x3c, 255)
-        } else {
-            Color::TRANSPARENT
-        };
-        code = code.child(
-            hrow()
-                .h(ROW_H)
-                .child(div().w(4.0).h(ROW_H).bg(marker))
-                .child(
-                    hrow().w(39.0).justify_end().child(
-                        text(n.to_string())
-                            .size(CODE)
-                            .mono()
-                            .color(p.line_num)
-                            .no_wrap(),
-                    ),
-                )
-                .child(div().w(16.0))
-                .child(highlight(line, p)),
-        );
+    view! {
+        <div class="flex-col" w={w} h={h}>
+            <div class="flex-row items-center h-[38] pl-4 pr-2 gap-1.5" w={w} border_b={p.hairline}>
+                <txt(data::DEMO_PROJECT, SMALL, p.muted) />
+                <icon svg={icons::CHEVRON_RIGHT} size={13.0} color={p.muted} />
+                <txt(file, SMALL, p.text) />
+                <div class="flex-1" />
+                <icon_button(p, icons::ELLIPSIS, 28.0, 15.0, p.icon, "More", Msg::Noop) />
+                <div class="w-1.5" />
+                <div class="flex-row items-center h-7 px-[9] gap-2 rounded-[8]" border={p.hairline}>
+                    <icon svg={icons::APP_FINDER} size={15.0} />
+                    <txt("Open", BODY, p.text) />
+                    <icon svg={icons::CHEVRON_DOWN} size={13.0} color={p.muted} />
+                </div>
+                <div class="w-1.5" />
+                <icon_button(p, icons::FILES, 28.0, 15.0, p.text, "Toggle file tree", Msg::Noop)
+                             bg={p.panel_tile} />
+            </div>
+            <div class="flex-row items-start">
+                <div class="flex-col pt-1" w={code_w}>
+                    for (i, line) in content.lines().chain(std::iter::once("")).enumerate() {
+                        let n = i as u32 + 1;
+                        let marker = if file == "cart.js" && changed.contains(&n) {
+                            Color::rgba(0xf0, 0x8a, 0x3c, 255)
+                        } else {
+                            Color::TRANSPARENT
+                        };
+                        <div class="flex-row items-center" h={ROW_H}>
+                            <div class="w-1" h={ROW_H} bg={marker} />
+                            <div class="flex-row items-center w-[39] justify-end">
+                                <text size={CODE} color={p.line_num} class="font-mono whitespace-nowrap">
+                                    {n.to_string()}
+                                </text>
+                            </div>
+                            <div class="w-4" />
+                            {highlight(line, p)}
+                        </div>
+                    }
+                </div>
+                {file_tree(p, tree_w, h - 38.0, Some(file), false)}
+            </div>
+        </div>
     }
-    div()
-        .w(w)
-        .h(h)
-        .flex_col()
-        .child(crumbs)
-        .child(hrow().items_start().child(code).child(file_tree(
-            p,
-            tree_w,
-            h - 38.0,
-            Some(file),
-            false,
-        )))
-        .into_any()
 }
 
 #[cfg(test)]
