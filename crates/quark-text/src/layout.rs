@@ -39,17 +39,10 @@ pub enum TextError {
     InvalidFontWeight(u16),
 }
 
-/// A broken [`TextLayout`] column invariant, reported by
+/// A broken [`TextLayout`] glyph, line, or run invariant, reported by
 /// [`TextLayout::verify_integrity`].
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum IntegrityError {
-    #[error("{table}.{column} has {len} entries, expected {expected}")]
-    ColumnLength {
-        table: &'static str,
-        column: &'static str,
-        len: usize,
-        expected: usize,
-    },
     #[error("layout has no lines")]
     NoLines,
     #[error("layout size {width}x{height} is not finite and non-negative")]
@@ -375,62 +368,16 @@ pub struct GlyphRun {
     pub glyphs: Range<usize>,
 }
 
-/// Per-glyph columns, stored line by line in cosmic-text's order (left to
-/// right for LTR, logical order within RTL runs, so `x` is not sorted). Logical columns are in logical pixels; `phys_*` are physical
-/// pixels relative to the layout origin, already including the baseline.
-#[derive(Debug, Default, Clone)]
-pub struct GlyphColumns {
-    pub x: Vec<f32>,
-    pub advance: Vec<f32>,
-    pub line: Vec<u32>,
-    pub byte_start: Vec<u32>,
-    pub byte_end: Vec<u32>,
-    /// Unicode bidi embedding level; odd = RTL.
-    pub level: Vec<u8>,
-    pub span: Vec<u32>,
-    pub font_id: Vec<fontdb::ID>,
-    pub glyph_id: Vec<u16>,
-    pub font_size: Vec<f32>,
-    pub font_weight: Vec<fontdb::Weight>,
-    pub flags: Vec<CacheKeyFlags>,
-    pub phys_x: Vec<f32>,
-    pub phys_y: Vec<f32>,
-}
+/// A layout's glyphs: one [`Glyph`] each, stored line by line in
+/// cosmic-text's order (left to right for LTR, logical order within RTL
+/// runs, so `x` is not sorted). The name stays from when glyphs were stored
+/// a column per field.
+pub type GlyphColumns = [Glyph];
 
-impl GlyphColumns {
-    pub fn len(&self) -> usize {
-        self.x.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.x.is_empty()
-    }
-
-    fn rtl(&self, i: usize) -> bool {
-        self.level[i] % 2 == 1
-    }
-
-    /// Empties every column, keeping room for `glyphs` glyphs.
-    fn clear_reserve(&mut self, glyphs: usize) {
-        clear_reserve(&mut self.x, glyphs);
-        clear_reserve(&mut self.advance, glyphs);
-        clear_reserve(&mut self.line, glyphs);
-        clear_reserve(&mut self.byte_start, glyphs);
-        clear_reserve(&mut self.byte_end, glyphs);
-        clear_reserve(&mut self.level, glyphs);
-        clear_reserve(&mut self.span, glyphs);
-        clear_reserve(&mut self.font_id, glyphs);
-        clear_reserve(&mut self.glyph_id, glyphs);
-        clear_reserve(&mut self.font_size, glyphs);
-        clear_reserve(&mut self.font_weight, glyphs);
-        clear_reserve(&mut self.flags, glyphs);
-        clear_reserve(&mut self.phys_x, glyphs);
-        clear_reserve(&mut self.phys_y, glyphs);
-    }
-}
-
-/// One glyph of a [`TextLayout`], in the units [`GlyphColumns`] documents.
-/// Read glyphs through [`TextLayout::glyph`] and [`TextLayout::glyph_iter`].
+/// One glyph of a [`TextLayout`]. Logical fields are in logical pixels;
+/// `phys_*` are physical pixels relative to the layout origin, already
+/// including the baseline. One record per glyph rather than a vector per
+/// field, so a new layout allocates its glyphs once.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Glyph {
     pub x: f32,
@@ -542,7 +489,7 @@ pub struct TextLayout {
     scale_factor: f32,
     width: f32,
     height: f32,
-    glyphs: GlyphColumns,
+    glyphs: Vec<Glyph>,
     lines: Vec<Line>,
     runs: Vec<Run>,
     /// Physical x at which `buffer` is drawn relative to the layout origin.
@@ -600,7 +547,7 @@ impl TextLayout {
             scale_factor: 1.0,
             width: 0.0,
             height: 0.0,
-            glyphs: GlyphColumns::default(),
+            glyphs: Vec::new(),
             lines: Vec::new(),
             runs: Vec::new(),
             buffer_x: 0.0,
@@ -636,7 +583,7 @@ impl TextLayout {
 
     /// How many glyphs the columns hold without growing.
     pub(crate) fn glyph_capacity(&self) -> usize {
-        self.glyphs.x.capacity()
+        self.glyphs.capacity()
     }
 
     /// Bytes this layout keeps, at capacity: itself, its glyph, line, and
@@ -646,21 +593,7 @@ impl TextLayout {
         fn cap<T>(column: &Vec<T>) -> usize {
             column.capacity() * size_of::<T>()
         }
-        let g = &self.glyphs;
-        let glyphs = cap(&g.x)
-            + cap(&g.advance)
-            + cap(&g.line)
-            + cap(&g.byte_start)
-            + cap(&g.byte_end)
-            + cap(&g.level)
-            + cap(&g.span)
-            + cap(&g.font_id)
-            + cap(&g.glyph_id)
-            + cap(&g.font_size)
-            + cap(&g.font_weight)
-            + cap(&g.flags)
-            + cap(&g.phys_x)
-            + cap(&g.phys_y);
+        let glyphs = cap(&self.glyphs);
         let (lines, runs) = (cap(&self.lines), cap(&self.runs));
         let buffer = cap(&self.buffer.lines)
             + cap(&self.spare_lines)
@@ -848,7 +781,7 @@ impl TextLayout {
             .fold((0, 0), |(g, r), run| (g + run.glyphs.len(), r + 1));
         // Room for a glyph per char lets a later text of as many chars,
         // with fewer ligatures, refill this layout without growing it.
-        glyphs.clear_reserve(glyph_count.max(text.chars().count()));
+        clear_reserve(glyphs, glyph_count.max(text.chars().count()));
         // One more for the line made below when no run was kept.
         clear_reserve(lines, run_count.max(1));
         let mut width = 0.0_f32;
@@ -877,26 +810,22 @@ impl TextLayout {
                 lines.len() as u32
             };
             let glyph_start = glyphs.len() as u32;
-            for g in run.glyphs {
-                glyphs.x.push((g.x + buffer_x) * inv);
-                glyphs.advance.push(g.w * inv);
-                glyphs.line.push(line_index);
-                glyphs.byte_start.push((para_start + g.start) as u32);
-                glyphs.byte_end.push((para_start + g.end) as u32);
-                glyphs.level.push(g.level.number());
-                glyphs.span.push(g.metadata as u32);
-                glyphs.font_id.push(g.font_id);
-                glyphs.glyph_id.push(g.glyph_id);
-                glyphs.font_size.push(g.font_size);
-                glyphs.font_weight.push(g.font_weight);
-                glyphs.flags.push(g.cache_key_flags);
-                glyphs
-                    .phys_x
-                    .push(buffer_x + g.x + g.font_size * g.x_offset);
-                glyphs
-                    .phys_y
-                    .push(run.line_y + g.y - g.font_size * g.y_offset);
-            }
+            glyphs.extend(run.glyphs.iter().map(|g| Glyph {
+                x: (g.x + buffer_x) * inv,
+                advance: g.w * inv,
+                line: line_index,
+                byte_start: (para_start + g.start) as u32,
+                byte_end: (para_start + g.end) as u32,
+                level: g.level.number(),
+                span: g.metadata as u32,
+                font_id: g.font_id,
+                glyph_id: g.glyph_id,
+                font_size: g.font_size,
+                font_weight: g.font_weight,
+                flags: g.cache_key_flags,
+                phys_x: buffer_x + g.x + g.font_size * g.x_offset,
+                phys_y: run.line_y + g.y - g.font_size * g.y_offset,
+            }));
             // RTL lines end at the shifted buffer's right edge, which is the
             // widest RTL line's own; LTR lines start at the shift.
             let shift = if run.rtl { 0.0 } else { buffer_x };
@@ -983,31 +912,6 @@ impl TextLayout {
         let glyph_count = g.len();
         let line_count = l.len();
         let run_count = r.len();
-        let columns = [
-            ("glyphs", "advance", g.advance.len(), glyph_count),
-            ("glyphs", "line", g.line.len(), glyph_count),
-            ("glyphs", "byte_start", g.byte_start.len(), glyph_count),
-            ("glyphs", "byte_end", g.byte_end.len(), glyph_count),
-            ("glyphs", "level", g.level.len(), glyph_count),
-            ("glyphs", "span", g.span.len(), glyph_count),
-            ("glyphs", "font_id", g.font_id.len(), glyph_count),
-            ("glyphs", "glyph_id", g.glyph_id.len(), glyph_count),
-            ("glyphs", "font_size", g.font_size.len(), glyph_count),
-            ("glyphs", "font_weight", g.font_weight.len(), glyph_count),
-            ("glyphs", "flags", g.flags.len(), glyph_count),
-            ("glyphs", "phys_x", g.phys_x.len(), glyph_count),
-            ("glyphs", "phys_y", g.phys_y.len(), glyph_count),
-        ];
-        for (table, column, len, expected) in columns {
-            if len != expected {
-                return Err(IntegrityError::ColumnLength {
-                    table,
-                    column,
-                    len,
-                    expected,
-                });
-            }
-        }
         // `hit` and `caret` index line `count - 1` unconditionally.
         if line_count == 0 {
             return Err(IntegrityError::NoLines);
@@ -1063,20 +967,20 @@ impl TextLayout {
             });
         }
 
-        for glyph in 0..glyph_count {
-            let (start, end) = (g.byte_start[glyph] as usize, g.byte_end[glyph] as usize);
+        for (glyph, record) in g.iter().enumerate() {
+            let (start, end) = (record.byte_start as usize, record.byte_end as usize);
             if !in_text(start, end) {
                 return Err(IntegrityError::GlyphBytes { glyph, start, end });
             }
-            let line = g.line[glyph] as usize;
+            let line = record.line as usize;
             let on_line = l.get(line).is_some_and(|l| l.glyphs().contains(&glyph));
             if !on_line {
                 return Err(IntegrityError::GlyphLine { glyph, line });
             }
-            if g.span[glyph] as usize > self.spans().len() {
+            if record.span as usize > self.spans().len() {
                 return Err(IntegrityError::GlyphSpan {
                     glyph,
-                    span: g.span[glyph],
+                    span: record.span,
                     spans: self.spans().len(),
                 });
             }
@@ -1089,7 +993,7 @@ impl TextLayout {
             let same_line = gs < ge
                 && ge <= glyph_count
                 && line < line_count
-                && (gs..ge).all(|i| g.line[i] as usize == line);
+                && (gs..ge).all(|i| g[i].line as usize == line);
             if gs != next_glyph || !same_line {
                 return Err(IntegrityError::RunGlyphs {
                     run,
@@ -1156,13 +1060,13 @@ impl TextLayout {
             })
             .collect();
         let glyphs = &self.glyphs;
-        for (i, &byte) in glyphs.byte_start.iter().enumerate() {
-            let byte = byte as usize;
+        for glyph in glyphs {
+            let byte = glyph.byte_start as usize;
             let at = segments.partition_point(|&(end, _, _)| end <= byte);
             if let Some((_, trimmed, width)) = segments.get_mut(at)
                 && byte < *trimmed
             {
-                *width += glyphs.advance[i];
+                *width += glyph.advance;
             }
         }
         segments.iter().fold(0.0, |widest, s| widest.max(s.2))
@@ -1214,7 +1118,7 @@ impl TextLayout {
         }
     }
 
-    pub fn glyphs(&self) -> &GlyphColumns {
+    pub fn glyphs(&self) -> &[Glyph] {
         &self.glyphs
     }
 
@@ -1224,32 +1128,12 @@ impl TextLayout {
 
     /// Glyph `i`, in storage order (see [`GlyphColumns`]).
     pub fn glyph(&self, i: usize) -> Option<Glyph> {
-        (i < self.glyph_count()).then(|| self.glyph_at(i))
+        self.glyphs.get(i).copied()
     }
 
     /// Every glyph, in storage order.
     pub fn glyph_iter(&self) -> impl ExactSizeIterator<Item = Glyph> + '_ {
-        (0..self.glyph_count()).map(|i| self.glyph_at(i))
-    }
-
-    fn glyph_at(&self, i: usize) -> Glyph {
-        let g = &self.glyphs;
-        Glyph {
-            x: g.x[i],
-            advance: g.advance[i],
-            line: g.line[i],
-            byte_start: g.byte_start[i],
-            byte_end: g.byte_end[i],
-            level: g.level[i],
-            span: g.span[i],
-            font_id: g.font_id[i],
-            glyph_id: g.glyph_id[i],
-            font_size: g.font_size[i],
-            font_weight: g.font_weight[i],
-            flags: g.flags[i],
-            phys_x: g.phys_x[i],
-            phys_y: g.phys_y[i],
-        }
+        self.glyphs.iter().copied()
     }
 
     pub fn glyph_runs(&self) -> impl ExactSizeIterator<Item = GlyphRun> + '_ {
@@ -1265,17 +1149,14 @@ impl TextLayout {
     /// layout origin at `origin` in physical pixels. Equivalent to
     /// cosmic-text's `LayoutGlyph::physical`.
     pub fn physical_glyph(&self, i: usize, origin: (f32, f32)) -> Option<PhysicalGlyph> {
-        let g = &self.glyphs;
-        if i >= g.len() {
-            return None;
-        }
+        let g = self.glyphs.get(i)?;
         let (cache_key, x, y) = CacheKey::new(
-            g.font_id[i],
-            g.glyph_id[i],
-            g.font_size[i],
-            (g.phys_x[i] + origin.0, (g.phys_y[i] + origin.1).trunc()),
-            g.font_weight[i],
-            g.flags[i],
+            g.font_id,
+            g.glyph_id,
+            g.font_size,
+            (g.phys_x + origin.0, (g.phys_y + origin.1).trunc()),
+            g.font_weight,
+            g.flags,
         );
         Some(PhysicalGlyph { cache_key, x, y })
     }
@@ -1309,11 +1190,11 @@ impl TextLayout {
         let (mut left, mut right, mut inside) = (range.start, range.start, None);
         let mut nearest = (f32::INFINITY, range.start);
         for i in range {
-            let (x0, x1) = (g.x[i], g.x[i] + g.advance[i]);
-            if x0 < g.x[left] {
+            let (x0, x1) = (g[i].x, g[i].x + g[i].advance);
+            if x0 < g[left].x {
                 left = i;
             }
-            if x1 > g.x[right] + g.advance[right] {
+            if x1 > g[right].x + g[right].advance {
                 right = i;
             }
             if inside.is_none() && x >= x0 && x < x1 {
@@ -1324,9 +1205,9 @@ impl TextLayout {
                 nearest = (distance, i);
             }
         }
-        let byte = if x < g.x[left] {
+        let byte = if x < g[left].x {
             self.visual_left_byte(left)
-        } else if x >= g.x[right] + g.advance[right] {
+        } else if x >= g[right].x + g[right].advance {
             self.visual_right_byte(right)
         } else {
             // Falls back to the nearest glyph when x is in a gap between glyphs.
@@ -1334,7 +1215,7 @@ impl TextLayout {
             let (x0, x1) = self.cluster_extent(i);
             let w = x1 - x0;
             let mut frac = if w > 0.0 { (x - x0) / w } else { 0.0 };
-            if g.rtl(i) {
+            if g[i].rtl() {
                 frac = 1.0 - frac;
             }
             self.cluster_byte_at(i, frac.clamp(0.0, 1.0))
@@ -1402,13 +1283,13 @@ impl TextLayout {
             }
             let mut spans: Vec<(f32, f32)> = Vec::new();
             for i in glyph_range {
-                let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
+                let (gs, ge) = (g[i].byte_start as usize, g[i].byte_end as usize);
                 let (os, oe) = (gs.max(a), ge.min(b));
                 if os >= oe {
                     continue;
                 }
                 if os == gs && oe == ge {
-                    spans.push((g.x[i], g.x[i] + g.advance[i]));
+                    spans.push((g[i].x, g[i].x + g[i].advance));
                 } else {
                     let p = self.x_in_cluster(i, os);
                     let q = self.x_in_cluster(i, oe);
@@ -1455,19 +1336,19 @@ impl TextLayout {
 
     fn visual_left_byte(&self, i: usize) -> usize {
         let g = &self.glyphs;
-        if g.rtl(i) {
-            g.byte_end[i] as usize
+        if g[i].rtl() {
+            g[i].byte_end as usize
         } else {
-            g.byte_start[i] as usize
+            g[i].byte_start as usize
         }
     }
 
     fn visual_right_byte(&self, i: usize) -> usize {
         let g = &self.glyphs;
-        if g.rtl(i) {
-            g.byte_start[i] as usize
+        if g[i].rtl() {
+            g[i].byte_start as usize
         } else {
-            g.byte_end[i] as usize
+            g[i].byte_end as usize
         }
     }
 
@@ -1480,14 +1361,14 @@ impl TextLayout {
         let mut ending_at: Option<usize> = None;
         let mut first_logical = range.start;
         for i in range {
-            let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
+            let (gs, ge) = (g[i].byte_start as usize, g[i].byte_end as usize);
             if gs <= byte && byte < ge {
                 return self.x_in_cluster(i, byte);
             }
-            if ge <= byte && ending_at.is_none_or(|j| g.byte_end[j] < g.byte_end[i]) {
+            if ge <= byte && ending_at.is_none_or(|j| g[j].byte_end < g[i].byte_end) {
                 ending_at = Some(i);
             }
-            if gs < g.byte_start[first_logical] as usize {
+            if gs < g[first_logical].byte_start as usize {
                 first_logical = i;
             }
         }
@@ -1499,12 +1380,12 @@ impl TextLayout {
 
     fn leading_x(&self, i: usize) -> f32 {
         let (x0, x1) = self.cluster_extent(i);
-        if self.glyphs.rtl(i) { x1 } else { x0 }
+        if self.glyphs[i].rtl() { x1 } else { x0 }
     }
 
     fn trailing_x(&self, i: usize) -> f32 {
         let (x0, x1) = self.cluster_extent(i);
-        if self.glyphs.rtl(i) { x0 } else { x1 }
+        if self.glyphs[i].rtl() { x0 } else { x1 }
     }
 
     /// Visual `(left, right)` of glyph `i`'s whole cluster. A cluster can
@@ -1514,9 +1395,9 @@ impl TextLayout {
     fn cluster_extent(&self, i: usize) -> (f32, f32) {
         let g = &self.glyphs;
         let same = |j: usize| {
-            g.line[j] == g.line[i]
-                && g.byte_start[j] == g.byte_start[i]
-                && g.byte_end[j] == g.byte_end[i]
+            g[j].line == g[i].line
+                && g[j].byte_start == g[i].byte_start
+                && g[j].byte_end == g[i].byte_end
         };
         let mut first = i;
         while first > 0 && same(first - 1) {
@@ -1524,8 +1405,8 @@ impl TextLayout {
         }
         let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
         for j in (first..g.len()).take_while(|&j| same(j)) {
-            x0 = x0.min(g.x[j]);
-            x1 = x1.max(g.x[j] + g.advance[j]);
+            x0 = x0.min(g[j].x);
+            x1 = x1.max(g[j].x + g[j].advance);
         }
         (x0, x1)
     }
@@ -1534,7 +1415,7 @@ impl TextLayout {
     /// between graphemes (ligatures cover several).
     fn x_in_cluster(&self, i: usize, byte: usize) -> f32 {
         let g = &self.glyphs;
-        let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
+        let (gs, ge) = (g[i].byte_start as usize, g[i].byte_end as usize);
         let cluster = self.text().get(gs..ge).unwrap_or_default();
         let total = cluster.graphemes(true).count().max(1);
         let before = self
@@ -1542,7 +1423,7 @@ impl TextLayout {
             .get(gs..byte.clamp(gs, ge))
             .map_or(0, |s| s.graphemes(true).count());
         let mut frac = before as f32 / total as f32;
-        if g.rtl(i) {
+        if g[i].rtl() {
             frac = 1.0 - frac;
         }
         let (x0, x1) = self.cluster_extent(i);
@@ -1553,7 +1434,7 @@ impl TextLayout {
     /// cluster, rounded to the nearest grapheme boundary.
     fn cluster_byte_at(&self, i: usize, frac: f32) -> usize {
         let g = &self.glyphs;
-        let (gs, ge) = (g.byte_start[i] as usize, g.byte_end[i] as usize);
+        let (gs, ge) = (g[i].byte_start as usize, g[i].byte_end as usize);
         let cluster = self.text().get(gs..ge).unwrap_or_default();
         let total = cluster.graphemes(true).count().max(1);
         let k = (frac * total as f32).round() as usize;
@@ -1584,8 +1465,8 @@ fn build_runs(glyphs: &GlyphColumns, lines: &[Line], runs: &mut Vec<Run>) {
             let end = l.glyph_end as usize;
             l.glyphs().filter_map(move |i| {
                 let next_breaks = i + 1 == end
-                    || glyphs.span[i + 1] != glyphs.span[i]
-                    || glyphs.rtl(i + 1) != glyphs.rtl(i);
+                    || glyphs[i + 1].span != glyphs[i].span
+                    || glyphs[i + 1].rtl() != glyphs[i].rtl();
                 next_breaks.then_some((line, i))
             })
         })
@@ -1597,8 +1478,8 @@ fn build_runs(glyphs: &GlyphColumns, lines: &[Line], runs: &mut Vec<Run>) {
         let start = run_start.max(lines[line].glyph_start as usize);
         runs.push(Run {
             line: line as u32,
-            span: glyphs.span[i],
-            rtl: glyphs.rtl(i),
+            span: glyphs[i].span,
+            rtl: glyphs[i].rtl(),
             glyph_start: start as u32,
             glyph_end: (i + 1) as u32,
         });
@@ -2129,9 +2010,9 @@ mod tests {
         let layout = layout(text, None);
         let g = layout.glyphs();
         let w = (0..g.len())
-            .find(|&i| text.get(g.byte_start[i] as usize..g.byte_end[i] as usize) == Some("w"))
+            .find(|&i| text.get(g[i].byte_start as usize..g[i].byte_end as usize) == Some("w"))
             .expect("w glyph");
-        assert_eq!((g.byte_start[w], g.line[w]), (6, 1));
+        assert_eq!((g[w].byte_start, g[w].line), (6, 1));
     }
 
     #[test]
@@ -2188,7 +2069,7 @@ mod tests {
         let layout = test_system().layout(&params).expect("layout");
         let runs: Vec<_> = layout.glyph_runs().collect();
         assert_eq!(runs.iter().map(|r| r.span).collect::<Vec<_>>(), [0, 1, 0]);
-        assert_eq!(layout.glyphs().byte_start[runs[1].glyphs.start], 6);
+        assert_eq!(layout.glyphs()[runs[1].glyphs.start].byte_start, 6);
     }
 
     // Regression: mono text used Basic shaping, which skipped font fallback.
@@ -2198,10 +2079,10 @@ mod tests {
             let params = TextParams::new("a\u{3b1}", TextStyle::new(14.0).kind(kind));
             let layout = test_system().layout(&params).expect("layout");
             let g = layout.glyphs();
-            assert_eq!(g.byte_start[1], 1);
-            assert_ne!(g.glyph_id[1], 0, "{kind:?} alpha is .notdef");
+            assert_eq!(g[1].byte_start, 1);
+            assert_ne!(g[1].glyph_id, 0, "{kind:?} alpha is .notdef");
             assert_ne!(
-                g.font_id[1], g.font_id[0],
+                g[1].font_id, g[0].font_id,
                 "{kind:?} alpha did not fall back"
             );
         }
@@ -2373,7 +2254,7 @@ mod tests {
         let mut system = TextSystem::vendored_only(&FontSettings::default());
         let params = TextParams::new("office", TextStyle::new(14.0));
         let mut reused = system.layout(&params).expect("layout");
-        let old_font = reused.glyphs().font_id[0];
+        let old_font = reused.glyphs()[0].font_id;
         system.set_font_settings(&FontSettings {
             ui_family: "Inter".into(),
             ..FontSettings::default()
@@ -2382,7 +2263,7 @@ mod tests {
         system.rebuild(&mut reused);
         let fresh = system.layout(&params).expect("layout");
         assert_ne!(
-            fresh.glyphs().font_id[0],
+            fresh.glyphs()[0].font_id,
             old_font,
             "fixture lost its font change"
         );
@@ -2654,13 +2535,13 @@ mod tests {
                 .layout(&TextParams::new(text, style))
                 .expect("layout");
             let g = layout.glyphs();
-            let i = g.byte_start.iter().position(|&b| b as usize == byte);
+            let i = g.iter().position(|g| g.byte_start as usize == byte);
             let i = i.unwrap_or_else(|| panic!("{text:?} has no glyph at {byte}"));
             assert_ne!(
-                g.glyph_id[i], 0,
+                g[i].glyph_id, 0,
                 "{text:?} {weight:?} byte {byte} is .notdef"
             );
-            let face = system.font_system().db().face(g.font_id[i]).expect("face");
+            let face = system.font_system().db().face(g[i].font_id).expect("face");
             assert_eq!(
                 (face.families[0].0.as_str(), face.weight.0),
                 (family, face_weight),
@@ -2677,11 +2558,11 @@ mod tests {
             .lines()
             .map(|line| {
                 let mut glyphs: Vec<usize> = line.glyph_range.collect();
-                glyphs.sort_by(|&a, &b| g.x[a].total_cmp(&g.x[b]));
-                glyphs.dedup_by_key(|&mut i| g.byte_start[i]);
+                glyphs.sort_by(|&a, &b| g[a].x.total_cmp(&g[b].x));
+                glyphs.dedup_by_key(|&mut i| g[i].byte_start);
                 glyphs
                     .iter()
-                    .map(|&i| text.get(g.byte_start[i] as usize..g.byte_end[i] as usize))
+                    .map(|&i| text.get(g[i].byte_start as usize..g[i].byte_end as usize))
                     .collect::<Option<String>>()
                     .expect("clusters start and end on char boundaries")
             })
@@ -2744,7 +2625,7 @@ mod tests {
         let style = TextStyle::new(16.0).kind(FontKind::Mono);
         let alone = |system: &mut TextSystem, c: char| {
             let layout = system.layout(&TextParams::new(c.to_string(), style));
-            layout.expect("layout").glyphs().glyph_id[0]
+            layout.expect("layout").glyphs()[0].glyph_id
         };
         let text = "== <= &&\n&& == <=";
         let italic = |range| TextSpan {
@@ -2757,7 +2638,7 @@ mod tests {
         let layout = system.layout(&params).expect("layout");
         let g = layout.glyphs();
         let shaped: Vec<(usize, u16)> = (0..g.len())
-            .map(|i| (g.byte_start[i] as usize, g.glyph_id[i]))
+            .map(|i| (g[i].byte_start as usize, g[i].glyph_id))
             .collect();
         let expected: Vec<(usize, u16)> = text
             .char_indices()

@@ -984,17 +984,17 @@ mod tests {
     /// `(family, glyph_id, advance, bytes)` of each glyph, in order.
     #[cfg(any(feature = "emoji-font", feature = "cjk-font"))]
     fn glyph_table(system: &TextSystem, layout: &TextLayout) -> Vec<(String, u16, f32, String)> {
-        let g = layout.glyphs();
         let db = system.font_system().db();
-        (0..g.len())
-            .map(|i| {
+        layout
+            .glyphs()
+            .iter()
+            .map(|g| {
                 let family = db
-                    .face(g.font_id[i])
+                    .face(g.font_id)
                     .map(|face| face.families[0].0.clone())
                     .unwrap_or_default();
-                let range = g.byte_start[i] as usize..g.byte_end[i] as usize;
-                let bytes = layout.text().get(range).unwrap_or_default();
-                (family, g.glyph_id[i], g.advance[i], bytes.to_owned())
+                let bytes = layout.text().get(g.bytes()).unwrap_or_default();
+                (family, g.glyph_id, g.advance, bytes.to_owned())
             })
             .collect()
     }
@@ -1032,7 +1032,7 @@ mod tests {
             let reference = system
                 .layout(&TextParams::new("\u{1f600}", style))
                 .expect("layout");
-            let width = reference.glyphs().advance[0];
+            let width = reference.glyphs()[0].advance;
             for &(name, text) in SEQUENCES {
                 let layout = system
                     .layout(&TextParams::new(text, style))
@@ -1166,7 +1166,11 @@ mod tests {
             let layout = system
                 .layout(&TextParams::new(text, style))
                 .expect("layout");
-            layout.glyphs().glyph_id.to_vec()
+            layout
+                .glyphs()
+                .iter()
+                .map(|g| g.glyph_id)
+                .collect::<Vec<_>>()
         };
         let fira = FontSettings {
             mono_family: FIRA_CODE_FAMILY.to_owned(),

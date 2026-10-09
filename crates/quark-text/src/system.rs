@@ -435,8 +435,8 @@ mod tests {
             .layout(&TextParams::new("bold", style))
             .expect("layout");
         let db = system.font_system().db();
-        for id in &layout.glyphs().font_id {
-            let family = &db.face(*id).expect("face").families[0].0;
+        for glyph in layout.glyphs() {
+            let family = &db.face(glyph.font_id).expect("face").families[0].0;
             assert_eq!(family, "JetBrains Mono");
         }
     }
