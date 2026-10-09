@@ -233,11 +233,17 @@ fn running(a: &mut Codex, stage: u8) {
 
 fn turn1(a: &mut Codex, work: bool, group: bool, shell: bool) {
     failing(a);
+    if work {
+        // u13 to u15 were scrolled to put the divider near the top.
+        a.scroll_adjust = Some(59.0);
+    }
     set(a, data::turn1(work, group, shell), Status::Idle);
 }
 
 fn turn2(a: &mut Codex, work: bool, diff: bool) {
     failing(a);
+    // u20 and u23 keep the end of turn 1 in view above turn 2.
+    a.scroll_adjust = Some(-133.0);
     set(
         a,
         [data::turn1(false, false, false), data::turn2(work, diff)].concat(),

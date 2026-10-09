@@ -146,7 +146,8 @@ pub fn tab_strip(app: &Codex, p: &Pal, f: &Frame) -> Div {
             ),
         };
         let w = if full {
-            236.0
+            // Tabs share what the strip has, up to 236 points each.
+            (236.0_f32).min((f.w - 232.0 - 170.0 - 236.0) / app.tabs.len() as f32)
         } else {
             (f.panel_w - 118.0).max(80.0) / app.tabs.len() as f32
         };

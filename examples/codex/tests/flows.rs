@@ -12,8 +12,10 @@ fn harness(scene: &str) -> UiTestHarness<Codex> {
         ..Options::default()
     };
     let mut ui = UiTestHarness::with_adapter(adapter(Codex::new(options)), (984.0, 738.0), 1.0);
-    ui.frame();
-    ui.frame();
+    // Scenes may nudge the transcript's scroll a few frames in.
+    for _ in 0..4 {
+        ui.frame();
+    }
     ui
 }
 

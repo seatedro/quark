@@ -49,9 +49,20 @@ pub fn view(
     let bottom_top = h - 16.0 - bottom_h;
     let list_h = (bottom_top - 4.0).max(0.0);
     // Room under the turns so the latest one can scroll to the top, as
-    // the app keeps a new turn's prompt at the top of the view.
-    let transcript =
-        transcript(&items, p, column, app.now_ms).child(div().h((list_h - 160.0).max(0.0)));
+    // the app keeps a new turn's prompt at the top of the view. Legacy
+    // scenes pinned to an offset follow 26.623, which kept the end in view.
+    let spacer = if app.scroll_px.is_some() {
+        0.0
+    } else {
+        (list_h - 160.0).max(0.0)
+    };
+    let transcript = transcript(&items, p, column, app.now_ms).child(div().h(spacer));
+    if let Some(dy) = app.take_adjust() {
+        let (_, y) = app.thread_scroll.offset();
+        app.thread_scroll.set_offset(0.0, (y + dy).max(0.0));
+    } else if app.adjust_pending() {
+        vcx.frame.request_frame();
+    }
     if app.stick_bottom {
         // Pending requests: the handle resolves them once laid out.
         match app.scroll_px {
@@ -63,6 +74,10 @@ pub fn view(
                     .unwrap_or(0);
                 app.thread_scroll
                     .scroll_to_item(&format!("item-{last}"), ScrollAlign::Start);
+                if let Some(dy) = app.scroll_adjust {
+                    app.defer_adjust(dy);
+                    vcx.frame.request_frame();
+                }
             }
         }
         app.stick_bottom = false;
@@ -445,9 +460,26 @@ fn tool_row(p: &Pal, row: &Row, item: usize, step: usize, index: usize, column: 
                 line(
                     icons::PENCIL,
                     vec![
-                        txt(format!("Edited {file}"), BODY, ink).into_any(),
-                        txt(format!("+{adds}"), BODY, p.success).into_any(),
-                        txt(format!("-{dels}"), BODY, p.error).into_any(),
+                        txt(
+                            if *open {
+                                "Edited file".to_owned()
+                            } else {
+                                format!("Edited {file}")
+                            },
+                            BODY,
+                            ink,
+                        )
+                        .into_any(),
+                        if *open {
+                            div().into_any()
+                        } else {
+                            txt(format!("+{adds}"), BODY, p.success).into_any()
+                        },
+                        if *open {
+                            div().into_any()
+                        } else {
+                            txt(format!("-{dels}"), BODY, p.error).into_any()
+                        },
                         chevron(*open),
                     ],
                 )

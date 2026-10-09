@@ -270,6 +270,11 @@ pub struct Codex {
     pub stick_bottom: bool,
     /// A scene's exact transcript offset, instead of the latest turn.
     pub scroll_px: Option<f32>,
+    /// A scene's nudge from the latest turn's position, applied the frame
+    /// after the jump (the handle knows the item's place only then).
+    pub scroll_adjust: Option<f32>,
+    /// Frames left before the nudge applies, and the nudge.
+    pending_adjust: Option<(u8, f32)>,
     pub settings_handle: ScrollHandle,
     pub terminal: terminal::State,
     pub theme_choice: ThemeChoice,
@@ -307,6 +312,8 @@ impl Codex {
             thread_scroll: ScrollHandle::new(),
             stick_bottom: true,
             scroll_px: None,
+            scroll_adjust: None,
+            pending_adjust: None,
             settings_handle: ScrollHandle::new(),
             terminal,
             theme_choice: options.theme,
@@ -504,6 +511,32 @@ pub struct Frame {
 impl Frame {
     pub fn card_h(&self) -> f32 {
         self.bottom - self.top
+    }
+}
+
+impl Codex {
+    /// A scroll nudge that is due this frame. The jump to an item settles
+    /// only once the item has been laid out, which can take two frames.
+    pub fn take_adjust(&mut self) -> Option<f32> {
+        match self.pending_adjust {
+            Some((0, dy)) => {
+                self.pending_adjust = None;
+                Some(dy)
+            }
+            Some((n, dy)) => {
+                self.pending_adjust = Some((n - 1, dy));
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn defer_adjust(&mut self, dy: f32) {
+        self.pending_adjust = Some((2, dy));
+    }
+
+    pub fn adjust_pending(&self) -> bool {
+        self.pending_adjust.is_some()
     }
 }
 
