@@ -1130,6 +1130,7 @@ fn painted_texts(scene: &Scene) -> Vec<PaintedText> {
             let (bounds, layout) = match primitive {
                 Primitive::TextRun(run) => (run.rect, &run.layout),
                 Primitive::RichTextRun(run) => (run.rect, &run.layout),
+                Primitive::StyledText(run) => (run.rect, &run.layout),
                 _ => return None,
             };
             let layout = layout.downcast_ref::<quark_text::TextLayout>()?;
