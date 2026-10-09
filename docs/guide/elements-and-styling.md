@@ -215,6 +215,71 @@ it with `.scrollbar_visibility(&state)`; the tree, table, diff view, and
 document turn this on with `with_scrollbar_auto_hide()` (on the document
 element, `scrollbar_auto_hide()`).
 
+## Popovers, modals, and toasts
+
+Overlays are elements the view adds above its content with a z index.
+Layout does not know where an element lands until it has run, so a
+popover placed from bounds recorded on an earlier frame lags a frame: on
+the frame its trigger moves (a resize, a scroll) it draws at the old
+place. `quark_components::popover::anchored` places it after this frame's
+layout instead. Put it as the last child of the anchor element; it puts the
+popover on the preferred side, flips it when it does not fit there and
+the other side has more room, then clamps it inside the viewport (the
+window, from 0,0). A fragment; `open`, `theme`, and `window` are yours:
+
+```rust
+view! {
+    <div class="flex-row items-center px-3 h-8">
+        <text>"Sort"</text>
+        if open {
+            <anchored(
+                view! {
+                    <popover_panel(theme) w={180.0} p={4.0}>
+                        <text>"Newest first"</text>
+                    </popover_panel>
+                },
+                PopoverSide::Bottom,
+                window,
+            ) />
+        }
+    </div>
+}
+```
+
+Select and combobox lists use it; `place_popover` is the same rule as a
+function.
+
+- `Modal` and `CommandPalette::render` draw their own scrim over the
+  window size they are given, in `theme.colors.overlay_scrim`. A scrim
+  alpha copied from a CSS design dims less than intended; convert it as
+  [Colors and blending](#colors-and-blending) describes.
+- An overlay positioned with `bottom` or `right` resolves against its
+  parent. A layer holding overlays must itself be window-sized, or a
+  toast stack anchored to the bottom lands above the window's top edge.
+- `ToastQueue::stack` takes a `status_bar_height`: the points kept clear
+  under the stack. Pass the height of a bottom-anchored input such as a
+  chat composer, so toasts rest above its Send button instead of over it.
+  `Toast::new(ToastKind::Success, ..)` shows a check in the success color.
+- `CommandPalette::width(w)` sets the panel's width in points at 100%
+  zoom (default 640), narrowed to fit the window; `keycaps(true)` shows
+  each item's shortcut as one key cap per key instead of a line of text.
+
+## Disclosures and form fields
+
+Layout has no height transition, so `quark_components::DisclosureState`
+measures its content to animate it open and closed. Keep one per
+disclosure, call `tick(cx.animations(), now_ms, reduced_motion)` in the
+view, and wrap the content in `region(animations, content)` while
+`is_mounted()`, so a closed disclosure's content is not built. The
+content stays mounted, clipped, until it has collapsed. `trigger(label,
+on_toggle, theme)` is the row with the turning chevron.
+
+`FormField::new(id, label, control)` puts a label over any control, with
+`help(..)` or `error(Some(..))` under it. The field is an accessibility
+group named by its label and described by its error or help, marked
+invalid and required as told, and its error is a polite live region.
+Give the control the same label as its own name.
+
 ## The `view!` macro
 
 `quark::view!` writes the same builder calls as HTML-like markup, with

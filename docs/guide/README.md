@@ -7,11 +7,12 @@ and each names the file that compiles it.
 | Page | Covers |
 |---|---|
 | [Getting started](getting-started.md) | Adding Quark to a project, the first `UiApp`, running the examples |
-| [Elements and styling](elements-and-styling.md) | Element constructors, `Styled`, design tokens, themes, transitions, scrolling, `view!` |
+| [Elements and styling](elements-and-styling.md) | Element constructors, `Styled`, design tokens, themes and component recipes, color blending, points and pixels, transitions, scrolling, popovers, modals, toasts, `view!` |
 | [Writing views](writing-views.md) | `view!` markup next to the builders it expands to, typed component props, the class reference |
 | [State, actions, and messages](state-actions-messages.md) | `UiApp` state, typed actions, `UiSender`, focus, redraws, signals |
 | [Text and input](text-and-input.md) | `TextField`, `Editor`, IME, undo, and the composer pieces |
 | [Lists and documents](lists-and-documents.md) | Virtual lists, the block document, selection, find, trees, tables, diffs |
+| [Terminal](terminal.md) | `quark-terminal`: building with Zig, PTY wiring, scripted sessions for tests, Ghostty styles and cell metrics |
 | [Syntax highlighting and grammar packs](syntax-packs.md) | `GrammarStore`, building packs with `syntax-pack`, signed indexes, the threat model |
 | [Accessibility and automation](accessibility-and-automation.md) | The AccessKit tree, AT-SPI coverage, ids, end-to-end specs with cua |
 | [Performance model](performance.md) | Cache boundaries, frame memory reuse, allocation budgets, profiling |
