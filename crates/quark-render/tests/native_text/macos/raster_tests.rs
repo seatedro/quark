@@ -259,6 +259,7 @@ fn band_diff(
     height: u32,
     masks: &[Mask],
     mode: &Mode,
+    dump: Option<&mut image::GrayImage>,
 ) -> BandDiff {
     let width = sheet.width() as usize;
     let mut ours = vec![0.0f64; width * height as usize];
@@ -299,6 +300,18 @@ fn band_diff(
     }
     diff.mean = sum / n.max(1) as f64;
     diff.ink_ratio = ink_ours / ink_ref;
+    // The band as drawn in the sheet's colors, for review images.
+    if let Some(dump) = dump {
+        let (f, b) = ((mode.fg * 255.0).round(), (mode.bg * 255.0).round());
+        for (i, a) in ours.iter().enumerate() {
+            let c = b + (f - b) * a.round() / 255.0;
+            dump.put_pixel(
+                (i % width) as u32,
+                top + (i / width) as u32,
+                image::Luma([c.round() as u8]),
+            );
+        }
+    }
     diff
 }
 
@@ -347,6 +360,10 @@ fn compare_sheet(
     let mut systems: HashMap<String, (TextSystem, Option<FontRegistry>)> = HashMap::new();
     let mut raster = CoreTextRasterizer::new(profile);
     let mut out = Vec::new();
+    // QUARK_CT_DUMP=DIR writes the rasterizer's sheet, composited in the
+    // reference's colors, for side-by-side review.
+    let dump_dir = std::env::var_os("QUARK_CT_DUMP").map(PathBuf::from);
+    let mut dump = dump_dir.as_ref().map(|_| image.clone());
     for case in sheet["cases"].array() {
         let font = case["font"].str();
         let (family, kind) = match font {
@@ -430,8 +447,13 @@ fn compare_sheet(
         }
         out.push((
             case["id"].str().to_owned(),
-            band_diff(&image, top, height, &masks, mode),
+            band_diff(&image, top, height, &masks, mode, dump.as_mut()),
         ));
+    }
+    if let (Some(dir), Some(dump)) = (dump_dir, dump) {
+        let plane = plane.map_or(String::new(), |p| format!(".plane{p}"));
+        dump.save(dir.join(format!("{sheet_id}.{}{plane}.rust.png", mode.name)))
+            .unwrap();
     }
     Some(out)
 }
