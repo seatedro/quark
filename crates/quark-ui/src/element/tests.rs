@@ -1509,18 +1509,18 @@ fn selectable_text_hit_inside_bold_span_lands_on_painted_glyph() {
 
     let painted = &rich_text_runs(&scene)[0];
     let layout = painted.layout.downcast_ref::<TextLayout>().expect("layout");
-    let g = layout.glyphs();
-    let i = (0..g.len())
-        .find(|&i| g.byte_start[i] as usize == target)
+    let g = layout
+        .glyph_iter()
+        .find(|g| g.byte_start as usize == target)
         .expect("glyph at target byte");
     let line = layout.line(0).expect("line");
-    let x = painted.rect.x + g.x[i] + g.advance[i] * 0.25;
+    let x = painted.rect.x + g.x + g.advance * 0.25;
     let y = painted.rect.y + line.top + line.height * 0.5;
 
     let region = &cx.selectable_text_runs[0];
     assert_eq!(region.hit(x, y), target);
     let caret_x = region.text_origin.0 + region.layout.caret(target).x;
-    assert!((caret_x - (painted.rect.x + g.x[i])).abs() < 0.01);
+    assert!((caret_x - (painted.rect.x + g.x)).abs() < 0.01);
 }
 
 // Colors are applied at paint, so recoloring a block (hover, theme switch)
@@ -1547,4 +1547,39 @@ fn selectable_text_color_change_reuses_layout() {
 
     assert_eq!(red[0].layout, blue[0].layout, "recolor shaped a new layout");
     assert_ne!(red[0].span_colors, blue[0].span_colors);
+}
+
+// A dashed border is stroked along the box with its pattern, not drawn as
+// the solid border primitive.
+#[test]
+fn dashed_border_paints_a_patterned_stroke_along_the_box() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let dashed = quark::path::StrokePattern::Dashed {
+        dash: 4.0,
+        gap: 2.0,
+        offset: 0.0,
+    };
+    let scene = paint_one(
+        &mut cx,
+        div()
+            .w(100.0)
+            .h(40.0)
+            .border(Color::rgba(255, 255, 255, 255))
+            .border_style(dashed),
+    );
+
+    let strokes: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            quark::scene::Primitive::Path(path) => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(strokes.len(), 1);
+    assert_eq!(strokes[0].stroke.map(|s| s.style.pattern), Some(dashed));
+    let b = strokes[0].bounds();
+    assert_eq!((b.x, b.y, b.width, b.height), (0.0, 0.0, 100.0, 40.0));
 }
