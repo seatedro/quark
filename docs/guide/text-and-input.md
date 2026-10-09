@@ -1,17 +1,19 @@
 # Text and input
 
-Text editing is split between models the app owns and elements that draw
-them. `quark_ui::text_input::TextField` (single line) and `Editor`
-(multiline) hold the text, caret, selection anchor, IME composition, and
-undo log. Both are driven by `TextEditCommand`s and report a
-`TextEditOutcome` saying whether the text or selection changed and what to
-write to the clipboard. The elements, `text_input(...).field(&model)` and
-`text_editor_element`, paint a model and register its hit areas.
+Text fields, the multiline editor, IME, undo, and the chat composer pieces.
+
+- The app owns the models: `quark_ui::text_input::TextField` (single line)
+  and `Editor` (multiline).
+- A model holds text, caret, selection anchor, IME composition, and undo
+  log.
+- Models take `TextEditCommand`s and return a `TextEditOutcome`: whether
+  text or selection changed, and what to write to the clipboard.
+- Elements paint a model and register its hit areas:
+  `text_input(...).field(&model)`, `text_editor_element`.
 
 ## Driving a model
 
-This doctest from [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs)
-edits a field without a window:
+From [crates/quark-ui/src/lib.rs](../../crates/quark-ui/src/lib.rs):
 
 ```rust
 use quark_ui::text_input::{TextEditCommand, TextField};
@@ -27,78 +29,80 @@ field.apply(TextEditCommand::Undo);
 assert_eq!(field.text(), "hello");
 ```
 
-Positions are `TextOffset`s: byte offsets that sit on grapheme boundaries,
-so a caret never lands inside an emoji or a combining sequence. Commands
-carry raw byte indices, because they come from pointer hits on an earlier
-frame, the app, or assistive tech; the model snaps each one onto its
-current text before using it.
+- Positions are `TextOffset`s: byte offsets on grapheme boundaries, so a
+  caret never lands inside an emoji or combining sequence.
+- Commands carry raw byte indices (from old pointer hits, the app, or
+  assistive tech); the model snaps each onto its current text.
 
-Undo groups consecutive edits of the same kind into one step while they
-are contiguous, arrive within `COALESCE_PAUSE_MS` (1 second) of each other,
-and, for typing, do not start a new word. Time is passed in:
-`apply_at(command, now_ms)`, with the app's clock. `apply` keeps the time
-of the last `apply_at` (zero before the first), so edits through `apply`
-alone never pause long enough to split a step.
+## Undo
+
+- Consecutive edits of the same kind merge into one undo step while they are
+  contiguous, arrive within `COALESCE_PAUSE_MS` (1 second) of each other,
+  and (for typing) do not start a new word.
+- Pass time with `apply_at(command, now_ms)`, from the app's clock.
+- `apply` reuses the last `apply_at` time (zero before the first), so edits
+  through `apply` alone never split a step.
 
 ## Wiring a field into a `UiApp`
 
-The adapter does the input work once a field has a focus target:
-
 1. Give the element `.focus_target(ID)` and `.focused(cx.is_focused(ID))`.
-2. Implement `UiApp::edit_text(target, command)`: apply the command to the
-   model for `target` and return the outcome.
-3. Implement `UiApp::set_preedit(target, text, cursor)` for IME
-   composition, and `set_text_value` for assistive tech that sets the value.
+2. Implement `UiApp::edit_text(target, command)`: apply the command to that
+   target's model and return the outcome.
+3. Implement `UiApp::set_preedit(target, text, cursor)` for IME composition,
+   and `set_text_value` for assistive tech that sets the value.
 
-While the field has focus, the adapter turns typed text, IME commits,
-editing keys (word and line movement, selection, undo, redo), paste,
-copy, cut, and pointer selection (click, drag, double and triple click,
-Shift to extend, autoscroll past the edge) into commands. It writes
-`clipboard_write` through `UiApp::write_clipboard` and reads paste text
-through `read_clipboard`; both default to the system clipboard.
-[hello_ui.rs](../../crates/quark-app/examples/hello_ui.rs) shows the whole
-wiring.
+While the field has focus, the adapter turns input into commands:
+
+| Input | Covers |
+|---|---|
+| Text | Typed text, IME commits |
+| Editing keys | Word and line movement, selection, undo, redo |
+| Clipboard | Paste, copy, cut |
+| Pointer | Click, drag, double and triple click, Shift to extend, autoscroll past the edge |
+
+- Clipboard: `clipboard_write` goes through `UiApp::write_clipboard`, paste
+  reads `read_clipboard`. Both default to the system clipboard.
+- Full wiring: [hello_ui.rs](../../crates/quark-app/examples/hello_ui.rs).
 
 ## IME
 
-An IME composition is shown at the caret without touching the committed
-text (`TextEditCommand::SetPreedit`). The adapter tells the window where
-the caret is each frame, so the platform places its candidate window there,
-and cancels a composition when focus leaves the field
-(`TextEditCommand::CancelPreedit`). `quark_ui::text_input::compose` merges
-the text and the composition for painting.
-
-An element that handles composition in `UiApp::event`, such as a terminal,
-gets `InputEvent::ImePreedit` and `InputEvent::ImeCommit`; typed text
-arrives separately as `InputEvent::TextInput`. Once focus leaves the
-element composing, the adapter drops the rest of that composition until the
-next frame resets the platform IME, so neither the app nor a text field
-sees it.
+- A composition shows at the caret without touching committed text
+  (`TextEditCommand::SetPreedit`).
+- The adapter reports the caret position each frame, so the platform places
+  its candidate window there.
+- Focus leaving the field cancels the composition
+  (`TextEditCommand::CancelPreedit`).
+- `quark_ui::text_input::compose` merges text and composition for painting.
+- An element handling composition in `UiApp::event` (such as a terminal)
+  gets `InputEvent::ImePreedit` and `InputEvent::ImeCommit`; typed text
+  arrives separately as `InputEvent::TextInput`.
+- When focus leaves the composing element, the rest of that composition is
+  dropped until the next frame resets the platform IME.
 
 ## Composer pieces
 
-For chat inputs, `Editor` adds parts an app assembles into a composer:
+`Editor` parts for chat inputs:
 
-| Piece | What it does |
+| Piece | Does |
 |---|---|
-| `InlineAtom`, `RichText` | Ranges of the text that edit as one unit (mention chips). The label is ordinary text, so layout and screen readers read it; the caret never rests inside an atom, and an edit touching part of one takes all of it. |
-| `TriggerRule`, `find_trigger` | Finds the completion the caret is typing, such as `@` mentions or `/` commands at line start, from the text alone |
-| `Completion`, `CompletionProvider` | The popup state: query, items, selection, and keys. A provider answers at once or returns `Answer::Pending` and resolves later; answers for an outdated query are dropped |
-| `InputHooks` | Lets the app decide what a paste or drop becomes, such as an attachment instead of text |
+| `InlineAtom`, `RichText` | Text ranges that edit as one unit (mention chips). The label is ordinary text for layout and screen readers. The caret never rests inside; an edit touching part of one takes all of it |
+| `TriggerRule`, `find_trigger` | Finds the completion being typed, such as `@` mentions or `/` commands at line start, from the text alone |
+| `Completion`, `CompletionProvider` | Popup state: query, items, selection, keys. A provider answers at once or returns `Answer::Pending`; answers for an outdated query are dropped |
+| `InputHooks` | The app decides what a paste or drop becomes, such as an attachment |
 | `PromptHistory` | Arrow Up at the start recalls earlier entries; stepping past the newest restores the draft |
 
-[composer_demo.rs](../../crates/quark-app/examples/composer_demo.rs) puts
-all of them together, with completion answers arriving through a
-`UiSender` as a worker lookup would. Its test module drives the composer
-through the test harness.
+- Example:
+  [composer_demo.rs](../../crates/quark-app/examples/composer_demo.rs), with
+  completions arriving through a `UiSender`.
 
-## Text layout underneath
+## Text layout
 
-`quark-text` shapes text with cosmic-text. One `TextLayout` per string and
-style serves measurement, hit testing, selection, and painting, kept in a
-`LayoutCache` that evicts entries unused for a number of frames, so the
-caret a click lands on is the caret that is drawn. Fonts are bundled
-(Geist, Geist Mono, Inter, IBM Plex Sans and Mono, Source Sans 3,
-JetBrains Mono, Fira Code) with system fonts as fallback, plus Noto Color
-Emoji and a Noto Sans CJK subset when the `emoji-font` and `cjk-font`
-features are on.
+- `quark-text` shapes with cosmic-text.
+- One `TextLayout` per string and style serves measuring, hit testing,
+  selection, and painting, so the caret a click lands on is the one drawn.
+- Layouts live in a `LayoutCache` that evicts entries unused for a number of
+  frames.
+- Bundled fonts: Geist, Geist Mono, Inter, IBM Plex Sans and Mono, Source
+  Sans 3, JetBrains Mono, Fira Code. System fonts are the fallback.
+- Features `emoji-font` and `cjk-font` add Noto Color Emoji and a Noto Sans
+  CJK subset.
