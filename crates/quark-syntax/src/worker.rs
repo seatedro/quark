@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
-use crate::store::Outcome;
+use crate::store::{Outcome, Part};
 use crate::{GrammarStore, HighlightSpan, LanguageId};
 
 /// Which queued request the worker takes next: every [`Priority::Visible`]
@@ -33,6 +33,35 @@ pub struct HighlightRequest {
     /// [`HighlightRequest::fragments`].
     pub fragments: Option<Arc<[Range<u32>]>>,
     pub priority: Priority,
+    /// Where the reader is in a long source, read while it is highlighted
+    /// window by window; see [`HighlightRequest::focus`].
+    pub focus: Option<HighlightFocus>,
+}
+
+/// A byte offset of a source that a long highlight colors first, shared
+/// with the worker so it can move while the highlight runs: a scroll
+/// position, typically. Unset means none.
+#[derive(Debug, Clone, Default)]
+pub struct HighlightFocus(Arc<AtomicU64>);
+
+impl HighlightFocus {
+    pub fn new() -> Self {
+        let focus = Self::default();
+        focus.set(None);
+        focus
+    }
+
+    pub fn set(&self, byte: Option<usize>) {
+        let value = byte.map_or(u64::MAX, |b| b as u64);
+        self.0.store(value, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> Option<usize> {
+        match self.0.load(Ordering::Relaxed) {
+            u64::MAX => None,
+            byte => Some(byte as usize),
+        }
+    }
 }
 
 impl HighlightRequest {
@@ -43,6 +72,7 @@ impl HighlightRequest {
             source,
             fragments: None,
             priority: Priority::Visible,
+            focus: None,
         }
     }
 
@@ -59,6 +89,16 @@ impl HighlightRequest {
 
     pub fn priority(mut self, priority: Priority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Asks for a source longer than a couple of mebibytes to be
+    /// highlighted window by window, each window arriving as a result of
+    /// its own (see [`Highlighted::part`]); the lines around `focus` are
+    /// colored first, wherever it is when the worker gets to them. Without
+    /// a focus a request always gets one whole result.
+    pub fn focus(mut self, focus: HighlightFocus) -> Self {
+        self.focus = Some(focus);
         self
     }
 }
@@ -120,6 +160,23 @@ pub struct Highlighted {
     /// embedded in the source, whose regions keep the host's colors until
     /// they arrive.
     pub unresolved: Vec<LanguageId>,
+    /// `None` for a whole highlight. A long source comes in parts instead,
+    /// each with a higher revision, whose spans cover only its range.
+    pub part: Option<HighlightPart>,
+}
+
+/// What part of a long source a [`Highlighted`] colors.
+///
+/// Exact parts run from the start of the source and follow one another
+/// without gaps; together they color it as a whole-file highlight would,
+/// and the source is done when one ends at its end. An exact part starting
+/// at 0 begins a new pass (a grammar arrived), whose parts replace the old
+/// ones. An inexact part is the reader's focus colored on its own ahead of
+/// the exact pass: hold it only where no exact part has arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HighlightPart {
+    pub range: Range<u32>,
+    pub exact: bool,
 }
 
 /// The worker thread is gone (it could not be spawned), so no more results
@@ -128,8 +185,11 @@ pub struct Highlighted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerGone;
 
-/// Highlights a request, stopping early once the callback returns true.
-type Highlight = dyn Fn(&HighlightRequest, &dyn Fn() -> bool) -> Outcome + Send + Sync;
+/// Highlights a request, stopping early once the callback returns true. A
+/// streamed highlight hands its windows to the last argument and returns
+/// an outcome marked `streamed`.
+type Highlight =
+    dyn Fn(&HighlightRequest, &dyn Fn() -> bool, &mut dyn FnMut(Part)) -> Outcome + Send + Sync;
 type HighlightFn = Arc<Highlight>;
 
 /// A handle's slot.
@@ -200,18 +260,24 @@ pub struct HighlightWorker {
 impl HighlightWorker {
     pub fn new(store: GrammarStore) -> Self {
         let highlighter = store.clone();
-        let worker = Self::with_highlighter(Arc::new(move |request, cancelled| {
+        let worker = Self::with_highlighter(Arc::new(move |request, cancelled, emit| {
             let HighlightRequest {
                 language,
                 source,
                 fragments,
+                focus,
                 ..
             } = request;
-            match fragments {
-                Some(ranges) => {
+            match (fragments, focus) {
+                (Some(ranges), _) => {
                     highlighter.highlight_fragments_until(language, source, ranges, cancelled)
                 }
-                None => highlighter.highlight_until(language, source, cancelled),
+                // Only a request with a focus expects parts.
+                (None, Some(focus)) => {
+                    let focus = || focus.get();
+                    highlighter.highlight_streamed(language, source, cancelled, &focus, emit)
+                }
+                (None, None) => highlighter.highlight_until(language, source, cancelled),
             }
         }));
         let jobs = worker.thread.jobs.clone();
@@ -470,10 +536,42 @@ fn run(
                     .get(&key)
                     .is_some_and(|&newest| newest > job.generation)
         };
+        // Parts of a streamed highlight go out as they are done, each with
+        // the next revision.
+        let mut next_revision = previous.as_ref().map_or(0, |p| p.revision + 1);
+        let mut emit = |part: Part| {
+            if superseded() {
+                return;
+            }
+            let Some(reply) = replies.get(&job.client) else {
+                return;
+            };
+            let result = Highlighted {
+                slot: job.slot,
+                generation: job.generation,
+                revision: next_revision,
+                source: job.request.source.clone(),
+                spans: part.spans,
+                pending: false,
+                unresolved: part.unresolved,
+                part: Some(HighlightPart {
+                    range: part.range,
+                    exact: part.exact,
+                }),
+            };
+            next_revision += 1;
+            if reply.done.send(result).is_ok()
+                && let Some(wake) = lock(&reply.wake).clone()
+            {
+                wake();
+            }
+        };
         // A grammar bug must not take the thread down: every later block
         // would silently stay plain.
-        let outcome = catch_unwind(AssertUnwindSafe(|| highlight(&job.request, &superseded)))
-            .unwrap_or_default();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            highlight(&job.request, &superseded, &mut emit)
+        }))
+        .unwrap_or_default();
         if superseded() {
             // The newer job is queued and replaces this one, parked state
             // included.
@@ -487,6 +585,22 @@ fn run(
             {
                 latest.remove(&key);
             }
+        }
+        if outcome.streamed {
+            // Its parts are out; a pass with grammars still arriving runs
+            // again when one does.
+            if outcome.pending() {
+                parked.insert(
+                    key,
+                    Parked {
+                        job: job.clone(),
+                        revision: next_revision.saturating_sub(1),
+                        spans: Vec::new(),
+                        unresolved: outcome.unresolved,
+                    },
+                );
+            }
+            continue;
         }
         let mut previous = previous;
         if let Some(unchanged) = previous.take_if(|previous| {
@@ -517,6 +631,7 @@ fn run(
             spans: outcome.spans,
             pending,
             unresolved: outcome.unresolved,
+            part: None,
         };
         let Some(reply) = replies.get(&job.client) else {
             continue;
@@ -541,7 +656,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    fn panics_on_boom(request: &HighlightRequest, _: &dyn Fn() -> bool) -> Outcome {
+    fn panics_on_boom(
+        request: &HighlightRequest,
+        _: &dyn Fn() -> bool,
+        _: &mut dyn FnMut(Part),
+    ) -> Outcome {
         let source = &*request.source;
         assert_ne!(source, "boom", "highlighter bug");
         Outcome {
@@ -556,6 +675,49 @@ mod tests {
 
     fn rust() -> LanguageId {
         LanguageId::from_fence("rust").unwrap()
+    }
+
+    // Catches streamed parts going out with one revision (so a bridge keeps
+    // only the first) or a whole result following them that would replace
+    // them: each part arrives with the next revision and its range, and the
+    // slot's next result is the next request's.
+    #[test]
+    fn streamed_parts_arrive_with_rising_revisions_and_no_whole_result() {
+        let worker = HighlightWorker::with_highlighter(Arc::new(|request, cancelled, emit| {
+            if &*request.source != "long" {
+                return panics_on_boom(request, cancelled, emit);
+            }
+            for (range, exact) in [(3..4, false), (0..2, true), (2..4, true)] {
+                emit(Part {
+                    range,
+                    exact,
+                    spans: Vec::new(),
+                    unresolved: Vec::new(),
+                });
+            }
+            Outcome {
+                streamed: true,
+                ..Outcome::default()
+            }
+        }));
+        worker.request(1, 1, rust(), Arc::from("long"));
+        worker.request(2, 1, rust(), Arc::from("next"));
+        let seen: Vec<_> = (0..4)
+            .map(|_| {
+                let r = worker.recv().unwrap();
+                (r.slot, r.revision, r.part.map(|p| (p.range, p.exact)))
+            })
+            .collect();
+
+        assert_eq!(
+            seen,
+            [
+                (1, 0, Some((3..4, false))),
+                (1, 1, Some((0..2, true))),
+                (1, 2, Some((2..4, true))),
+                (2, 0, None),
+            ]
+        );
     }
 
     // Catches a panicking highlight killing the thread, after which every
@@ -580,15 +742,16 @@ mod tests {
         let (resume_tx, resume) = channel::<()>();
         let (seen_tx, seen) = channel();
         let resume = Mutex::new(resume);
-        let worker = HighlightWorker::with_highlighter(Arc::new(move |request, cancelled| {
-            if &*request.source == "first" {
-                started_tx.send(()).unwrap();
-                resume.lock().unwrap().recv().unwrap();
-                // The checkpoint a real highlight reaches while parsing.
-                seen_tx.send(cancelled()).unwrap();
-            }
-            panics_on_boom(request, cancelled)
-        }));
+        let worker =
+            HighlightWorker::with_highlighter(Arc::new(move |request, cancelled, emit| {
+                if &*request.source == "first" {
+                    started_tx.send(()).unwrap();
+                    resume.lock().unwrap().recv().unwrap();
+                    // The checkpoint a real highlight reaches while parsing.
+                    seen_tx.send(cancelled()).unwrap();
+                }
+                panics_on_boom(request, cancelled, emit)
+            }));
         worker.request(1, 1, rust(), Arc::from("first"));
         started.recv().unwrap();
         worker.request(1, 2, rust(), Arc::from("second"));
@@ -607,13 +770,14 @@ mod tests {
         let (started_tx, started) = channel();
         let (resume_tx, resume) = channel::<()>();
         let resume = Mutex::new(resume);
-        let worker = HighlightWorker::with_highlighter(Arc::new(move |request, cancelled| {
-            if &*request.source == "hold" {
-                started_tx.send(()).unwrap();
-                resume.lock().unwrap().recv().unwrap();
-            }
-            panics_on_boom(request, cancelled)
-        }));
+        let worker =
+            HighlightWorker::with_highlighter(Arc::new(move |request, cancelled, emit| {
+                if &*request.source == "hold" {
+                    started_tx.send(()).unwrap();
+                    resume.lock().unwrap().recv().unwrap();
+                }
+                panics_on_boom(request, cancelled, emit)
+            }));
         (worker, started, resume_tx)
     }
 

@@ -78,7 +78,10 @@ pub use quark_update::PublicKey;
 #[cfg(feature = "engine")]
 pub use store::StoreConfig;
 pub use store::{GrammarStore, LanguageStatus};
-pub use worker::{HighlightRequest, HighlightWorker, Highlighted, Priority, WorkerGone};
+pub use worker::{
+    HighlightFocus, HighlightPart, HighlightRequest, HighlightWorker, Highlighted, Priority,
+    WorkerGone,
+};
 
 /// What a highlighted run of source is.
 #[repr(u8)]

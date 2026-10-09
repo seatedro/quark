@@ -190,6 +190,96 @@ impl GrammarStore {
         out
     }
 
+    /// [`Self::highlight_until`] for a long source, window by window (see
+    /// `engine::highlight_windows`): each window goes to `emit` as it is
+    /// done, and the outcome returned has no spans of its own, only the
+    /// languages still arriving across all windows. A source no longer than
+    /// one window comes back whole, as from [`Self::highlight_until`].
+    pub(crate) fn highlight_streamed(
+        &self,
+        language: &LanguageId,
+        source: &str,
+        cancelled: &dyn Fn() -> bool,
+        focus: &dyn Fn() -> Option<usize>,
+        emit: &mut dyn FnMut(Part),
+    ) -> Outcome {
+        #[cfg(feature = "engine")]
+        {
+            self.highlight_windowed(
+                language,
+                source,
+                crate::engine::Windowing::DEFAULT,
+                cancelled,
+                focus,
+                emit,
+            )
+        }
+        #[cfg(not(feature = "engine"))]
+        {
+            let _ = (language, source, cancelled, focus, emit);
+            Outcome::default()
+        }
+    }
+
+    /// [`Self::highlight_streamed`] with explicit window sizes.
+    #[cfg(feature = "engine")]
+    pub(crate) fn highlight_windowed(
+        &self,
+        language: &LanguageId,
+        source: &str,
+        sizes: crate::engine::Windowing,
+        cancelled: &dyn Fn() -> bool,
+        focus: &dyn Fn() -> Option<usize>,
+        emit: &mut dyn FnMut(Part),
+    ) -> Outcome {
+        {
+            let Some(inner) = &self.inner else {
+                return Outcome::default();
+            };
+            if source.len() <= sizes.window {
+                return self.highlight_until(language, source, cancelled);
+            }
+            match inner.lookup(language.as_str()) {
+                Tag::Ready(grammar) => {
+                    let mut out = Outcome {
+                        streamed: true,
+                        ..Outcome::default()
+                    };
+                    crate::engine::highlight_windows(
+                        &grammar,
+                        source,
+                        sizes,
+                        &mut |embedded| inner.lookup(embedded.as_str()),
+                        cancelled,
+                        focus,
+                        &mut |window| {
+                            let found = window.highlights;
+                            for language in &found.unresolved {
+                                if !out.unresolved.contains(language) {
+                                    out.unresolved.push(language.clone());
+                                }
+                            }
+                            out.truncated |= found.truncated;
+                            emit(Part {
+                                range: window.range.start as u32..window.range.end as u32,
+                                exact: window.exact,
+                                spans: found.spans,
+                                unresolved: found.unresolved,
+                            });
+                        },
+                    );
+                    out
+                }
+                Tag::Pending => Outcome {
+                    spans: Vec::new(),
+                    unresolved: vec![language.clone()],
+                    ..Outcome::default()
+                },
+                Tag::Unavailable => Outcome::default(),
+            }
+        }
+    }
+
     /// [`Self::highlight_until`] with explicit bounds on embedded layers.
     #[cfg(feature = "engine")]
     pub(crate) fn highlight_within(
@@ -218,6 +308,7 @@ impl GrammarStore {
                     unresolved: found.unresolved,
                     truncated: found.truncated,
                     work: found.work,
+                    streamed: false,
                 }
             }
             Tag::Pending => Outcome {
@@ -244,6 +335,18 @@ pub(crate) struct Outcome {
     #[cfg(feature = "engine")]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) work: crate::engine::Work,
+    /// The spans went out window by window as [`Part`]s; `spans` is empty.
+    pub(crate) streamed: bool,
+}
+
+/// One window of a streamed highlight: spans of `source`, all inside
+/// `range`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Part {
+    pub(crate) range: std::ops::Range<u32>,
+    pub(crate) exact: bool,
+    pub(crate) spans: Vec<HighlightSpan>,
+    pub(crate) unresolved: Vec<LanguageId>,
 }
 
 impl Outcome {

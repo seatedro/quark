@@ -1021,3 +1021,205 @@ mod download {
         assert_eq!(store.status(&language("css")), LanguageStatus::Ready);
     }
 }
+
+/// Small windows, so a few kilobytes of source take several.
+const SMALL_WINDOWS: crate::engine::Windowing = crate::engine::Windowing {
+    window: 1024,
+    max_window: 4096,
+    margin: 128,
+    focus_before: 64,
+    focus_after: 64,
+};
+
+/// JavaScript whose template strings and block comments run across many
+/// lines, longer than a small window's margin.
+fn long_constructs() -> String {
+    let mut out = String::new();
+    for i in 0..12 {
+        out.push_str(&format!("const a{i} = `first line {i}\n"));
+        for k in 0..12 {
+            out.push_str(&format!(
+                "  if (x) {{ return {k}; }} // inside the string\n"
+            ));
+        }
+        out.push_str("`;\n/* a comment\n");
+        for k in 0..8 {
+            out.push_str(&format!("   let y{k} = \"in the comment\";\n"));
+        }
+        out.push_str("*/\nfunction f() { return 1; }\n");
+    }
+    out
+}
+
+/// The parts a windowed highlight of `source` emits.
+fn windowed_parts(
+    store: &GrammarStore,
+    source: &str,
+    focus: Option<usize>,
+) -> Vec<crate::store::Part> {
+    let mut parts = Vec::new();
+    store.highlight_windowed(
+        &language("js"),
+        source,
+        SMALL_WINDOWS,
+        &|| false,
+        &|| focus,
+        &mut |part| parts.push(part),
+    );
+    parts
+}
+
+// Catches windows cut inside a construct (a template string or block
+// comment spanning lines), which would color what follows the cut as
+// code: the exact windows, end to end, color the source exactly as one
+// parse of the whole does.
+#[test]
+fn exact_windows_color_a_long_source_like_one_parse() {
+    let Some(store) = testing::store_with("javascript") else {
+        return;
+    };
+    let source = long_constructs();
+
+    let parts = windowed_parts(&store, &source, None);
+    let ranges: Vec<_> = parts.iter().map(|p| p.range.clone()).collect();
+    let joined: Vec<HighlightSpan> = parts.into_iter().flat_map(|p| p.spans).collect();
+
+    assert!(ranges.len() > 3, "{ranges:?}");
+    assert!(ranges.windows(2).all(|w| w[0].end == w[1].start));
+    assert_eq!(
+        (ranges[0].start, ranges.last().unwrap().end),
+        (0, source.len() as u32)
+    );
+    assert_eq!(joined, highlight(&store, &language("js"), &source));
+}
+
+// Catches the visible region waiting for the exact pass to reach it: the
+// first part is the focus, colored on its own, before any exact window.
+#[test]
+fn the_focus_is_colored_before_the_exact_pass_reaches_it() {
+    let Some(store) = testing::store_with("javascript") else {
+        return;
+    };
+    let source = long_constructs();
+    let focus = source.len() * 9 / 10;
+
+    let parts = windowed_parts(&store, &source, Some(focus));
+    let first = &parts[0];
+
+    assert!(
+        !first.exact && first.range.contains(&(focus as u32)),
+        "{:?}",
+        first.range
+    );
+    assert!(!first.spans.is_empty());
+    assert!(parts[1..].iter().all(|p| p.exact));
+}
+
+/// About `bytes` bytes of plausible JavaScript, from a fixed seed.
+fn javascript(bytes: usize) -> String {
+    use std::fmt::Write;
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let mut out = String::with_capacity(bytes + 128);
+    while out.len() < bytes {
+        let n = next();
+        let _ = match n % 5 {
+            0 => writeln!(
+                out,
+                "const value{} = compute({}, \"label {}\");",
+                n % 9973,
+                n % 101,
+                n % 7
+            ),
+            1 => writeln!(
+                out,
+                "function step{}(a, b) {{ return a + b * {}; }}",
+                n % 99991,
+                n % 13
+            ),
+            2 => writeln!(out, "// note {} about the cache", n % 1_000_003),
+            3 => writeln!(
+                out,
+                "if (state.count > {}) {{ state.count -= 1; }}",
+                n % 5000
+            ),
+            _ => writeln!(
+                out,
+                "items.push({{ id: {}, name: `item ${{{}}}` }});",
+                n % 77777,
+                n % 9
+            ),
+        };
+    }
+    out
+}
+
+/// Peak resident memory since the last reset, in MiB (Linux).
+fn peak_rss_mib() -> f64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find(|l| l.starts_with("VmHWM:"))
+        .and_then(|l| l.split_whitespace().nth(1)?.parse::<f64>().ok())
+        .map_or(0.0, |kib| kib / 1024.0)
+}
+
+/// Time and peak memory of highlighting large JavaScript sources. Run in
+/// release with `--ignored --nocapture` and the JavaScript pack built.
+#[test]
+#[ignore = "measurement, prints a report"]
+fn report_large_highlights() {
+    let Some(store) = testing::store_with("javascript") else {
+        return;
+    };
+    let mib: usize = std::env::var("QUARK_SYNTAX_FIXTURE_MIB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(63);
+    let source = javascript(mib << 20);
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
+    let before = peak_rss_mib();
+    let started = std::time::Instant::now();
+    let focus = source.len() * 9 / 10;
+    let (mut first, mut focused, mut parts, mut spans, mut inexact) = (None, None, 0, 0, 0);
+    store.highlight_streamed(
+        &language("js"),
+        &source,
+        &|| false,
+        &|| Some(focus),
+        &mut |part| {
+            parts += 1;
+            spans += part.spans.len();
+            inexact += usize::from(!part.exact);
+            first.get_or_insert(started.elapsed());
+            if part.range.contains(&(focus as u32)) {
+                focused.get_or_insert(started.elapsed());
+            }
+        },
+    );
+    eprintln!(
+        "{mib} MiB JavaScript, windowed: first part {first:.2?}, focus (90%) {focused:.2?}, \
+         all {:.2?}, {parts} parts ({inexact} inexact), {spans} spans, peak RSS {:.0} MiB (+{:.0})",
+        started.elapsed(),
+        peak_rss_mib(),
+        peak_rss_mib() - before
+    );
+    if std::env::var_os("QUARK_SYNTAX_WHOLE").is_some() {
+        let _ = std::fs::write("/proc/self/clear_refs", "5");
+        let before = peak_rss_mib();
+        let started = std::time::Instant::now();
+        let whole = highlight(&store, &language("js"), &source);
+        eprintln!(
+            "{mib} MiB JavaScript, whole: {:.2?}, {} spans, peak RSS {:.0} MiB (+{:.0})",
+            started.elapsed(),
+            whole.len(),
+            peak_rss_mib(),
+            peak_rss_mib() - before
+        );
+    }
+}
