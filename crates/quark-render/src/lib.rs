@@ -19,6 +19,7 @@ mod path;
 pub mod renderer;
 mod shaders;
 mod text;
+mod text_engine;
 
 #[cfg(test)]
 #[global_allocator]
@@ -41,7 +42,7 @@ pub use text::{push_styled_text_decorations, push_text_decorations, text_decorat
 pub use quark_text::TextSystem;
 pub use renderer::{
     FrameStats, GpuContext, OffscreenTarget, RenderError, Renderer, RendererOptions,
-    SurfaceCapabilities, TextAtlasStats, TextMetrics,
+    SurfaceCapabilities, TextAtlasStats, TextMetrics, TextPrepareError, TextRenderError,
 };
 pub use scene::{
     AlphaMask, BlurRegionPrimitive, BorderPrimitive, ClipPrimitive, EffectQuadPrimitive,

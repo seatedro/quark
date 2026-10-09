@@ -1,9 +1,7 @@
-use crate::{
-    text_render::GlyphonCacheKey, Cache, ContentType, FontSystem, GlyphDetails, GpuCacheStatus,
-    RasterizeCustomGlyphRequest, RasterizedCustomGlyph, State, SwashCache,
-};
-use etagere::{size2, Allocation, BucketedAtlasAllocator};
+use super::{Cache, ContentType, GlyphDetails, GpuCacheStatus, State};
+use etagere::{Allocation, BucketedAtlasAllocator, size2};
 use lru::LruCache;
+use quark_text::cosmic_text::{CacheKey, FontSystem, SwashCache};
 use rustc_hash::FxHasher;
 use std::{collections::HashSet, hash::BuildHasherDefault};
 use wgpu::{
@@ -15,21 +13,19 @@ use wgpu::{
 
 type Hasher = BuildHasherDefault<FxHasher>;
 
-#[allow(dead_code)]
 pub(crate) struct InnerAtlas {
     pub kind: Kind,
     pub texture: Texture,
     pub texture_view: TextureView,
     pub packer: BucketedAtlasAllocator,
     pub size: u32,
-    pub glyph_cache: LruCache<GlyphonCacheKey, GlyphDetails, Hasher>,
-    pub glyphs_in_use: HashSet<GlyphonCacheKey, Hasher>,
+    pub glyph_cache: LruCache<CacheKey, GlyphDetails, Hasher>,
+    pub glyphs_in_use: HashSet<CacheKey, Hasher>,
     pub max_texture_dimension_2d: u32,
-    // quark patch: work counters, summed by `TextAtlas::stats`.
+    /// Work counters, summed by `TextAtlas::stats`.
     pub stats: AtlasStats,
 }
 
-// quark patch: atlas work counters for tests and devtools.
 /// Counts of the work a [`TextAtlas`] has done since it was created.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AtlasStats {
@@ -60,8 +56,8 @@ impl std::ops::Add for AtlasStats {
     }
 }
 
-/// Usages of every atlas texture. quark patch: `COPY_SRC`, so growing can
-/// copy the old texture into the new one.
+/// Usages of every atlas texture: `COPY_SRC`, so growing can copy the old
+/// texture into the new one.
 const ATLAS_USAGE: TextureUsages = TextureUsages::TEXTURE_BINDING
     .union(TextureUsages::COPY_DST)
     .union(TextureUsages::COPY_SRC);
@@ -77,7 +73,7 @@ impl InnerAtlas {
 
         // Create a texture to use for our atlas
         let texture = state.device.create_texture(&TextureDescriptor {
-            label: Some("glyphon atlas"),
+            label: Some("quark text atlas"),
             size: Extent3d {
                 width: size,
                 height: size,
@@ -146,7 +142,7 @@ impl InnerAtlas {
         }
     }
 
-    pub fn num_channels(&self) -> usize {
+    pub(crate) fn num_channels(&self) -> usize {
         self.kind.num_channels()
     }
 
@@ -155,10 +151,6 @@ impl InnerAtlas {
         state: &State,
         font_system: &mut FontSystem,
         cache: &mut SwashCache,
-        scale_factor: f32,
-        mut rasterize_custom_glyph: impl FnMut(
-            RasterizeCustomGlyphRequest,
-        ) -> Option<RasterizedCustomGlyph>,
     ) -> bool {
         if self.size >= self.max_texture_dimension_2d {
             return false;
@@ -171,12 +163,12 @@ impl InnerAtlas {
 
         self.packer.grow(size2(new_size as i32, new_size as i32));
 
-        // quark patch: kept to copy from below.
+        // Kept to copy from below.
         let old_texture = self.texture.clone();
 
         // Create a texture to use for our atlas
         self.texture = state.device.create_texture(&TextureDescriptor {
-            label: Some("glyphon atlas"),
+            label: Some("quark text atlas"),
             size: Extent3d {
                 width: new_size,
                 height: new_size,
@@ -191,7 +183,7 @@ impl InnerAtlas {
         });
         self.stats.growths += 1;
 
-        // quark patch: the allocations stayed put, so copying the old
+        // The allocations stayed put, so copying the old
         // texture into the new one's corner keeps every cached glyph without
         // rasterizing it again. Same format and sample count, so the copy is
         // valid whenever the old texture allows copying from it, as every
@@ -202,7 +194,7 @@ impl InnerAtlas {
             let mut encoder = state
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor {
-                    label: Some("glyphon atlas growth"),
+                    label: Some("quark text atlas growth"),
                 });
             encoder.copy_texture_to_texture(
                 old_texture.as_image_copy(),
@@ -226,38 +218,12 @@ impl InnerAtlas {
                 GpuCacheStatus::SkipRasterization => continue,
             };
 
-            let (image_data, width, height) = match cache_key {
-                GlyphonCacheKey::Text(cache_key) => {
-                    let image = cache.get_image_uncached(font_system, cache_key).unwrap();
-                    let width = image.placement.width as usize;
-                    let height = image.placement.height as usize;
-
-                    (image.data, width, height)
-                }
-                GlyphonCacheKey::Custom(cache_key) => {
-                    let input = RasterizeCustomGlyphRequest {
-                        id: cache_key.glyph_id,
-                        width: cache_key.width,
-                        height: cache_key.height,
-                        x_bin: cache_key.x_bin,
-                        y_bin: cache_key.y_bin,
-                        scale: scale_factor,
-                    };
-
-                    let Some(rasterized_glyph) = (rasterize_custom_glyph)(input) else {
-                        panic!("Custom glyph rasterizer returned `None` when it previously returned `Some` for the same input {:?}", &input);
-                    };
-
-                    // Sanity checks on the rasterizer output
-                    rasterized_glyph.validate(&input, Some(self.kind.as_content_type()));
-
-                    (
-                        rasterized_glyph.data,
-                        cache_key.width as usize,
-                        cache_key.height as usize,
-                    )
-                }
-            };
+            let image = cache.get_image_uncached(font_system, cache_key).unwrap();
+            let (image_data, width, height) = (
+                image.data,
+                image.placement.width as usize,
+                image.placement.height as usize,
+            );
 
             self.stats.rerasterized += 1;
             self.stats.upload_bytes += image_data.len() as u64;
@@ -296,7 +262,7 @@ impl InnerAtlas {
         self.glyphs_in_use.clear();
     }
 
-    // quark patch: see `TextAtlas::clear`.
+    /// See `TextAtlas::clear`.
     fn clear(&mut self) {
         self.packer.clear();
         self.glyph_cache.clear();
@@ -307,97 +273,47 @@ impl InnerAtlas {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Mask,
-    Color { srgb: bool },
+    /// sRGB-encoded RGBA, decoded when sampled.
+    Color,
 }
 
 impl Kind {
     fn num_channels(self) -> usize {
         match self {
             Kind::Mask => 1,
-            Kind::Color { .. } => 4,
+            Kind::Color => 4,
         }
     }
 
     fn texture_format(self) -> wgpu::TextureFormat {
         match self {
             Kind::Mask => TextureFormat::R8Unorm,
-            Kind::Color { srgb } => {
-                if srgb {
-                    TextureFormat::Rgba8UnormSrgb
-                } else {
-                    TextureFormat::Rgba8Unorm
-                }
-            }
-        }
-    }
-
-    fn as_content_type(&self) -> ContentType {
-        match self {
-            Self::Mask => ContentType::Mask,
-            Self::Color { .. } => ContentType::Color,
+            Kind::Color => TextureFormat::Rgba8UnormSrgb,
         }
     }
 }
 
-/// The color mode of a [`TextAtlas`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorMode {
-    /// Accurate color management.
-    ///
-    /// This mode will use a proper sRGB texture for colored glyphs. This will
-    /// produce physically accurate color blending when rendering.
-    Accurate,
-
-    /// Web color management.
-    ///
-    /// This mode reproduces the color management strategy used in the Web and
-    /// implemented by browsers.
-    ///
-    /// This entails storing glyphs colored using the sRGB color space in a
-    /// linear RGB texture. Blending will not be physically accurate, but will
-    /// produce the same results as most UI toolkits.
-    ///
-    /// This mode should be used to render to a linear RGB texture containing
-    /// sRGB colors.
-    Web,
-}
-
-/// An atlas containing a cache of rasterized glyphs that can be rendered.
-pub struct TextAtlas {
+/// An atlas containing a cache of rasterized glyphs that can be rendered:
+/// coverage masks in one texture and color glyphs in another.
+pub(crate) struct TextAtlas {
     pub(crate) cache: Cache,
     pub(crate) bind_group: BindGroup,
     pub(crate) color_atlas: InnerAtlas,
     pub(crate) mask_atlas: InnerAtlas,
     pub(crate) format: TextureFormat,
-    pub(crate) color_mode: ColorMode,
-    // quark patch: see `TextAtlas::epoch`.
+    /// See `TextAtlas::epoch`.
     clears: u64,
 }
 
 impl TextAtlas {
-    /// Creates a new [`TextAtlas`].
-    pub fn new(device: &Device, queue: &Queue, cache: &Cache, format: TextureFormat) -> Self {
-        Self::with_color_mode(device, queue, cache, format, ColorMode::Accurate)
-    }
-
-    /// Creates a new [`TextAtlas`] with the given [`ColorMode`].
-    pub fn with_color_mode(
+    pub(crate) fn new(
         device: &Device,
         queue: &Queue,
         cache: &Cache,
         format: TextureFormat,
-        color_mode: ColorMode,
     ) -> Self {
         let state = State { device, queue };
-        let color_atlas = InnerAtlas::new(
-            &state,
-            Kind::Color {
-                srgb: match color_mode {
-                    ColorMode::Accurate => true,
-                    ColorMode::Web => false,
-                },
-            },
-        );
+        let color_atlas = InnerAtlas::new(&state, Kind::Color);
         let mask_atlas = InnerAtlas::new(&state, Kind::Mask);
 
         let bind_group = cache.create_atlas_bind_group(
@@ -412,39 +328,35 @@ impl TextAtlas {
             color_atlas,
             mask_atlas,
             format,
-            color_mode,
             clears: 0,
         }
     }
 
-    pub fn trim(&mut self) {
+    pub(crate) fn trim(&mut self) {
         self.mask_atlas.trim();
         self.color_atlas.trim();
     }
 
-    // quark patch: forgetting every glyph.
     /// Drops every cached glyph, in use or not, keeping the textures and
     /// their size. Glyphs are keyed by font id, so an atlas that keeps
     /// drawing after the font database is replaced must be cleared: the
     /// new database numbers its faces from the start again.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.mask_atlas.clear();
         self.color_atlas.clear();
         self.clears += 1;
     }
 
-    // quark patch: when prepared vertices go stale.
     /// Changes whenever a cached glyph may have left its place: an eviction
     /// or a [`Self::clear`]. Growth keeps every glyph where it was. Vertices
     /// a renderer prepared at one epoch draw the same glyphs while the
     /// epoch is unchanged, so they may be drawn again without preparing.
-    pub fn epoch(&self) -> u64 {
+    pub(crate) fn epoch(&self) -> u64 {
         self.mask_atlas.stats.evictions + self.color_atlas.stats.evictions + self.clears
     }
 
-    // quark patch: atlas work counters.
     /// Work done by both atlas textures since this atlas was created.
-    pub fn stats(&self) -> AtlasStats {
+    pub(crate) fn stats(&self) -> AtlasStats {
         self.mask_atlas.stats + self.color_atlas.stats
     }
 
@@ -454,24 +366,10 @@ impl TextAtlas {
         font_system: &mut FontSystem,
         cache: &mut SwashCache,
         content_type: ContentType,
-        scale_factor: f32,
-        rasterize_custom_glyph: impl FnMut(RasterizeCustomGlyphRequest) -> Option<RasterizedCustomGlyph>,
     ) -> bool {
         let did_grow = match content_type {
-            ContentType::Mask => self.mask_atlas.grow(
-                state,
-                font_system,
-                cache,
-                scale_factor,
-                rasterize_custom_glyph,
-            ),
-            ContentType::Color => self.color_atlas.grow(
-                state,
-                font_system,
-                cache,
-                scale_factor,
-                rasterize_custom_glyph,
-            ),
+            ContentType::Mask => self.mask_atlas.grow(state, font_system, cache),
+            ContentType::Color => self.color_atlas.grow(state, font_system, cache),
         };
 
         if did_grow {

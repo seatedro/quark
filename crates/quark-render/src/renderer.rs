@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use bytemuck::{Pod, Zeroable};
 /// Glyph atlas work counters, from [`Renderer::text_atlas_stats`].
-pub use glyphon::AtlasStats as TextAtlasStats;
-use glyphon::{Cache, Resolution, SwashCache, TextAtlas, Viewport};
+pub use crate::text_engine::AtlasStats as TextAtlasStats;
+use crate::text_engine::{Cache, Resolution, TextAtlas, Viewport};
+/// Why text could not be prepared or drawn, in [`RenderError`].
+pub use crate::text_engine::{PrepareError as TextPrepareError, RenderError as TextRenderError};
+use bytemuck::{Pod, Zeroable};
 use quark_text::TextSystem;
+use quark_text::cosmic_text::SwashCache;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
@@ -91,9 +94,9 @@ pub enum RenderError {
     #[error("device request failed: {0}")]
     RequestDevice(#[from] wgpu::RequestDeviceError),
     #[error("failed to prepare text: {0}")]
-    PrepareText(#[from] glyphon::PrepareError),
+    PrepareText(#[from] TextPrepareError),
     #[error("failed to render text: {0}")]
-    RenderText(#[from] glyphon::RenderError),
+    RenderText(#[from] TextRenderError),
     #[error("surface acquisition failed")]
     SurfaceAcquire,
     /// The surface was lost or outdated and has been reconfigured; nothing
@@ -379,12 +382,13 @@ struct SharedImages {
 }
 
 /// The GPU state every window shares: one instance, adapter, device, and
-/// queue, the pipelines built for one surface format, glyphon's pipeline
-/// cache, and the uploaded-image cache. Cloning is cheap and shares it.
+/// queue, the pipelines built for one surface format, the text engine's
+/// pipeline cache, and the uploaded-image cache. Cloning is cheap and
+/// shares it.
 ///
 /// Each [`Renderer`] keeps only per-window state on top: its surface, frame
 /// buffers, offscreen targets, and glyph atlas. The atlas stays per window
-/// because glyphon trims it after every frame, which would evict glyphs
+/// because it is trimmed after every frame, which would evict glyphs
 /// another window still draws and re-upload them every frame.
 #[derive(Clone)]
 pub struct GpuContext {
@@ -799,7 +803,7 @@ pub struct Renderer {
     active_frames: usize,
     plans: Vec<LayerPlan>,
     layer_scratch: LayerScratch,
-    /// Viewport uniform and glyphon viewport of layer target `i + 1`.
+    /// Viewport uniform and text viewport of layer target `i + 1`.
     layer_uniforms: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     layer_viewports: Vec<Viewport>,
     segment_texture: Option<SegmentTexture>,
@@ -1832,7 +1836,7 @@ impl Renderer {
         result
     }
 
-    /// Size the viewport uniform and glyphon viewport of every layer
+    /// Size the viewport uniform and text viewport of every layer
     /// target to its texture region.
     fn prepare_layer_viewports(&mut self, frames: &[TargetFrame]) {
         for (slot, frame) in frames.iter().skip(1).enumerate() {
@@ -3193,7 +3197,7 @@ pub(super) struct ClippedRichText {
 pub(super) struct GlyphPaint {
     /// Gradient or shimmer, placed in the target's pixels; `None` paints
     /// the default color.
-    pub(super) fill: Option<glyphon::GlyphFill>,
+    pub(super) fill: Option<crate::text_engine::GlyphFill>,
     /// sRGB-encoded luminance of the known opaque backdrop, for perceptual
     /// coverage.
     pub(super) backdrop: Option<u8>,
@@ -3214,7 +3218,7 @@ impl GlyphPaint {
         let unit = color_to_unit;
         let fill = match text.fill {
             TextFill::Solid(_) => None,
-            TextFill::LinearGradient(g) => Some(glyphon::GlyphFill {
+            TextFill::LinearGradient(g) => Some(crate::text_engine::GlyphFill {
                 axis: [
                     origin.x + g.start[0],
                     origin.y + g.start[1],
@@ -3237,7 +3241,7 @@ impl GlyphPaint {
                 } else {
                     0.0
                 };
-                Some(glyphon::GlyphFill {
+                Some(crate::text_engine::GlyphFill {
                     axis: [
                         start,
                         origin.y,
@@ -5319,7 +5323,7 @@ mod tests {
     }
 
     // Preparing an unchanged frame's text with every glyph in the atlas
-    // reuses glyphon's vertex storage and walks the layouts in place.
+    // reuses the text engine's vertex storage and walks the layouts in place.
     #[test]
     fn repeated_text_preparation_allocates_nothing() {
         let Some(mut renderer) = gpu_renderer(CODE_SIZE.0, CODE_SIZE.1) else {
@@ -5435,7 +5439,7 @@ mod tests {
         }
     }
 
-    // The positioned path must draw what glyphon draws from text areas:
+    // The positioned path must draw what the buffer path draws from text areas:
     // fractional origins, a clip through a line, an overflowing RTL line
     // shifted inside its box, a color glyph, and multi-colored spans.
     #[test]
@@ -5505,8 +5509,8 @@ mod tests {
         assert_eq!(differing, 0, "pixels differ between text paths");
     }
 
-    // Regression: rich text drew one glyphon area per same-colored stretch of
-    // each line, and glyphon walks the buffer's lines for every area, so
+    // Regression: rich text drew one text area per same-colored stretch of
+    // each line, and the engine walks the buffer's lines for every area, so
     // highlighted code cost grew with the square of its line count.
     #[test]
     fn multi_line_rich_text_prepares_one_text_area() {
@@ -5896,8 +5900,8 @@ mod tests {
     // that frame draws everything but text and the next frame draws text.
     #[test]
     fn render_recovers_from_a_full_glyph_atlas() {
-        // glyphon caps its atlas at the device's texture size limit: at 256px
-        // a few dozen large glyphs cannot fit in one frame.
+        // The text atlas caps itself at the device's texture size limit: at
+        // 256px a few dozen large glyphs cannot fit in one frame.
         let limits = wgpu::Limits {
             max_texture_dimension_2d: 256,
             ..wgpu::Limits::default()

@@ -1,4 +1,4 @@
-use crate::{viewport::DRAW_OFFSETS_SIZE, GlyphToRender, Params};
+use super::{GlyphToRender, Params, viewport::DRAW_OFFSETS_SIZE};
 use std::{
     borrow::Cow,
     mem,
@@ -20,7 +20,7 @@ use wgpu::{
 /// A cache to share common resources (e.g., pipelines, layouts, shaders) between multiple text
 /// renderers.
 #[derive(Debug, Clone)]
-pub struct Cache(Arc<Inner>);
+pub(crate) struct Cache(Arc<Inner>);
 
 type InnerCache = Mutex<
     Vec<(
@@ -45,9 +45,9 @@ struct Inner {
 
 impl Cache {
     /// Creates a new `Cache` with the given `device`.
-    pub fn new(device: &Device) -> Self {
+    pub(crate) fn new(device: &Device) -> Self {
         let sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("glyphon sampler"),
+            label: Some("quark text sampler"),
             min_filter: FilterMode::Nearest,
             mag_filter: FilterMode::Nearest,
             mipmap_filter: MipmapFilterMode::Nearest,
@@ -57,7 +57,7 @@ impl Cache {
         });
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("glyphon shader"),
+            label: Some("quark text shader"),
             source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
         });
 
@@ -95,7 +95,7 @@ impl Cache {
                     offset: mem::size_of::<u32>() as u64 * 6,
                     shader_location: 5,
                 },
-                // quark patch: draw-time paint.
+                // Draw-time paint.
                 wgpu::VertexAttribute {
                     format: VertexFormat::Uint32,
                     offset: mem::size_of::<u32>() as u64 * 7,
@@ -133,7 +133,7 @@ impl Cache {
                     count: None,
                 },
             ],
-            label: Some("glyphon atlas bind group layout"),
+            label: Some("quark text atlas bind group layout"),
         });
 
         let uniforms_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -159,10 +159,10 @@ impl Cache {
                     count: None,
                 },
             ],
-            label: Some("glyphon uniforms bind group layout"),
+            label: Some("quark text uniforms bind group layout"),
         });
 
-        // quark patch: per-renderer glyph fills.
+        // Per-renderer glyph fills.
         let fills_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
@@ -171,12 +171,12 @@ impl Cache {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: NonZeroU64::new(
-                        (crate::MAX_GLYPH_FILLS * mem::size_of::<crate::GlyphFill>()) as u64,
+                        (super::MAX_GLYPH_FILLS * mem::size_of::<super::GlyphFill>()) as u64,
                     ),
                 },
                 count: None,
             }],
-            label: Some("glyphon fills bind group layout"),
+            label: Some("quark text fills bind group layout"),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -218,7 +218,7 @@ impl Cache {
                     resource: BindingResource::Sampler(&self.0.sampler),
                 },
             ],
-            label: Some("glyphon atlas bind group"),
+            label: Some("quark text atlas bind group"),
         })
     }
 
@@ -240,7 +240,7 @@ impl Cache {
                     resource: offsets.as_entire_binding(),
                 },
             ],
-            label: Some("glyphon uniforms bind group"),
+            label: Some("quark text uniforms bind group"),
         })
     }
 
@@ -251,7 +251,7 @@ impl Cache {
                 binding: 0,
                 resource: buffer.as_entire_binding(),
             }],
-            label: Some("glyphon fills bind group"),
+            label: Some("quark text fills bind group"),
         })
     }
 
@@ -278,7 +278,7 @@ impl Cache {
             .map(|(_, _, _, p)| p.clone())
             .unwrap_or_else(|| {
                 let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-                    label: Some("glyphon pipeline"),
+                    label: Some("quark text pipeline"),
                     layout: Some(pipeline_layout),
                     vertex: VertexState {
                         module: shader,

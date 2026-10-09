@@ -1,22 +1,18 @@
-use crate::{Cache, Params, Resolution};
-use std::{mem, slice};
+use super::{Cache, Params, Resolution};
+use std::mem;
 use wgpu::{BindGroup, Buffer, BufferDescriptor, BufferUsages, Device, Queue};
 
 /// How many draws [`Viewport::set_draw_offsets`] can move; see
-/// [`crate::TextRenderer::render_at`].
-pub const MAX_DRAW_OFFSETS: usize = 2048;
+/// [`super::TextRenderer::render_at`].
+pub(crate) const MAX_DRAW_OFFSETS: usize = 2048;
 
 /// Bytes of the draw offsets uniform: two offsets per 16-byte vector.
 pub(crate) const DRAW_OFFSETS_SIZE: u64 = (MAX_DRAW_OFFSETS * 8) as u64;
 
-/// Controls the visible area of all text for a given renderer. Any text outside of the visible
-/// area will be clipped.
-///
-/// Many projects will only ever need a single `Viewport`, but it is possible to create multiple
-/// `Viewport`s if you want to render text to specific areas within a window (without having to)
-/// bound each `TextArea`).
+/// The resolution, target encoding, and draw offsets of one render target
+/// that text draws into.
 #[derive(Debug)]
-pub struct Viewport {
+pub(crate) struct Viewport {
     params: Params,
     params_buffer: Buffer,
     /// The draw offsets last written, and their buffer (zeroed at
@@ -27,8 +23,7 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    /// Creates a new `Viewport` with the given `device` and `cache`.
-    pub fn new(device: &Device, cache: &Cache) -> Self {
+    pub(crate) fn new(device: &Device, cache: &Cache) -> Self {
         let params = Params {
             screen_resolution: Resolution {
                 width: 0,
@@ -38,14 +33,14 @@ impl Viewport {
         };
 
         let params_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("glyphon params"),
+            label: Some("quark text params"),
             size: mem::size_of::<Params>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let offsets_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("glyphon draw offsets"),
+            label: Some("quark text draw offsets"),
             size: DRAW_OFFSETS_SIZE,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -63,11 +58,11 @@ impl Viewport {
     }
 
     /// Sets the offset, in pixels, that each draw slot moves its glyphs by:
-    /// `offsets[s]` for [`crate::TextRenderer::render_at`] with slot `s`.
+    /// `offsets[s]` for [`super::TextRenderer::render_at`] with slot `s`.
     /// Slots past the end of `offsets` keep the offsets last set (zero at
     /// first); at most [`MAX_DRAW_OFFSETS`] are used. Writes the buffer
     /// only when an offset changed.
-    pub fn set_draw_offsets(&mut self, queue: &Queue, offsets: &[[i32; 2]]) {
+    pub(crate) fn set_draw_offsets(&mut self, queue: &Queue, offsets: &[[i32; 2]]) {
         let offsets = &offsets[..offsets.len().min(MAX_DRAW_OFFSETS)];
         let unchanged =
             offsets.len() <= self.offsets.len() && self.offsets[..offsets.len()] == *offsets;
@@ -81,47 +76,33 @@ impl Viewport {
         // Whole vectors, from the first pair.
         let pairs = self.offsets.len().div_ceil(2);
         self.offsets.resize(pairs * 2, [0, 0]);
-        queue.write_buffer(&self.offsets_buffer, 0, unsafe {
-            slice::from_raw_parts(
-                self.offsets.as_ptr() as *const u8,
-                mem::size_of_val(&self.offsets[..]),
-            )
-        });
+        queue.write_buffer(
+            &self.offsets_buffer,
+            0,
+            bytemuck::cast_slice(&self.offsets[..]),
+        );
     }
 
-    /// Updates the `Viewport` with the given `resolution`.
-    pub fn update(&mut self, queue: &Queue, resolution: Resolution) {
+    /// Sets the target's resolution.
+    pub(crate) fn update(&mut self, queue: &Queue, resolution: Resolution) {
         if self.params.screen_resolution != resolution {
             self.params.screen_resolution = resolution;
-
-            queue.write_buffer(&self.params_buffer, 0, unsafe {
-                slice::from_raw_parts(
-                    &self.params as *const Params as *const u8,
-                    mem::size_of::<Params>(),
-                )
-            });
+            queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&self.params));
         }
     }
 
-    // quark patch: encoded targets.
     /// Whether the target this viewport draws to holds sRGB-encoded values
     /// (blended as browsers blend). Glyph colors then stay encoded, color
     /// glyphs are encoded, and no coverage correction applies.
-    pub fn set_encoded(&mut self, queue: &Queue, encoded: bool) {
+    pub(crate) fn set_encoded(&mut self, queue: &Queue, encoded: bool) {
         let flag = u32::from(encoded);
         if self.params._pad[0] != flag {
             self.params._pad[0] = flag;
-            queue.write_buffer(&self.params_buffer, 0, unsafe {
-                slice::from_raw_parts(
-                    &self.params as *const Params as *const u8,
-                    mem::size_of::<Params>(),
-                )
-            });
+            queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&self.params));
         }
     }
 
-    /// Returns the current resolution of the `Viewport`.
-    pub fn resolution(&self) -> Resolution {
+    pub(crate) fn resolution(&self) -> Resolution {
         self.params.screen_resolution
     }
 }

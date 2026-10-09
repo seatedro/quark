@@ -19,7 +19,6 @@ quark-components = { workspace = true, optional = true }
 accesskit.workspace = true
 accesskit_winit.workspace = true
 arboard.workspace = true
-glyphon.workspace = true
 raw-window-handle.workspace = true
 serde.workspace = true
 thiserror.workspace = true

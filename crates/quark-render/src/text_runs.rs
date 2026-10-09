@@ -2,7 +2,7 @@
 //!
 //! Each text step draws as one or more runs: consecutive texts drawn from
 //! the same chunk (or from outside any chunk) share a run, so one changed
-//! row of a cached grid is a run of its own. Every run has its own glyphon
+//! row of a cached grid is a run of its own. Every run has its own text
 //! renderer, and a run whose texts are exactly those a renderer prepared
 //! last frame, for the same target, draws that renderer's vertices again
 //! without preparing or uploading anything. Vertices point into the glyph
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::ControlFlow;
 
-use glyphon::{
+use crate::text_engine::{
     MAX_DRAW_OFFSETS, PositionedGlyph, PrepareError, Resolution, TextBounds, TextRenderer, Viewport,
 };
 use quark_text::{TextLayout, TextSystem};
@@ -80,7 +80,7 @@ pub(super) struct TextRuns {
     moved_hashes: Vec<u64>,
     moved_lookup: HashMap<u64, usize, BuildHasherDefault<Passthrough>>,
     /// Scratch for a run's glyph fills.
-    fills: Vec<glyphon::GlyphFill>,
+    fills: Vec<crate::text_engine::GlyphFill>,
 }
 
 /// The texts a renderer's vertices were prepared from.
@@ -221,8 +221,8 @@ impl RunMemo {
 
 /// Whether `texts` and `rich_texts` place exactly the glyphs `prepared`
 /// moved by `to`, clips included, with every clip inside `resolution`
-/// both times (`prepared` moved by `from`, and by `to`), so glyphon's
-/// clamp to the viewport changes none.
+/// both times (`prepared` moved by `from`, and by `to`), so the text
+/// engine's clamp to the viewport changes none.
 fn glyphs_moved(
     prepared: &[PositionedGlyph],
     (texts, rich_texts): (&[ClippedText], &[ClippedRichText]),
@@ -390,7 +390,7 @@ impl TextRuns {
 }
 
 /// The draw offset slot of renderer `index`. Renderers past the offsets
-/// glyphon has share the last slot, which never moves.
+/// the text engine has share the last slot, which never moves.
 fn draw_slot(index: usize) -> u32 {
     index.min(MAX_DRAW_OFFSETS - 1) as u32
 }
