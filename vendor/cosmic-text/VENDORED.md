@@ -219,3 +219,12 @@ allocations they remove):
   `&mut FontSystem`; its differential test checks the bitmaps equal
   `get_image_uncached`'s. Upstream could take it as a lower-level entry
   beside `get_image`.
+- Variation coordinates cleared per glyph (`src/swash.rs`): swash's
+  `ScaleContext` keeps the previous font's normalized coordinates, and
+  `ScalerBuilder::variations` only overwrites the axes it names, so with
+  only `wght` set an axis such as Inter's `opsz` took whatever coordinate
+  the previously drawn variable font left at its index. `swash_image` and
+  `render_face_into` clear the coordinates first. quark-text's
+  `drawing_another_variable_font_first_changes_no_glyph` checks it. Worth
+  reporting to swash, whose `variations` could reset the coordinates it
+  resizes.

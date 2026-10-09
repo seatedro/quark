@@ -28,9 +28,13 @@ fn swash_image(
         .variations()
         .find_by_tag(swash::Tag::from_be_bytes(*b"wght"));
 
-    // Build the scaler
+    // Build the scaler. The context keeps the last font's variation
+    // coordinates and `variations` only overwrites the axes it names, so
+    // clear them first: otherwise an axis this font has but the settings
+    // leave out (Inter's `opsz`) takes another font's coordinate.
     let mut scaler = context
         .builder(font.as_swash())
+        .normalized_coords(core::iter::empty::<i16>())
         .size(f32::from_bits(cache_key.font_size_bits))
         .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
     if let Some(variation) = variable_width {
@@ -241,6 +245,8 @@ impl SwashCache {
         let mut scaler = self
             .context
             .builder(face.font())
+            // Clear the last font's coordinates; see `swash_image`.
+            .normalized_coords(core::iter::empty::<i16>())
             .size(render.size)
             .hint(render.hint)
             .variations(variations.into_iter().map(|(tag, value)| swash::Setting {
