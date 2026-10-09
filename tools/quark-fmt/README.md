@@ -30,7 +30,7 @@ Unknown flags are errors.
 |---|---|
 | 0 | Formatted, or nothing to change |
 | 1 | `--check` found changes |
-| 2 | Bad arguments or config, or a file failed (it is left unchanged) |
+| 2 | Bad arguments or config, a file failed (it is left unchanged), or a `--check` warning |
 
 ## Behavior
 
@@ -46,6 +46,11 @@ Unknown flags are errors.
   rename. The file mode is kept. A file edited during formatting is not
   overwritten.
 - `--check` writes nothing and prints a unified diff on stdout.
+- `--check` is strict: a warning (a view hidden in another macro, embedded
+  Rust kept as written) also exits 2.
+- Files without views get rustfmt alone, exactly as `cargo fmt` would.
+- `// quark-fmt: skip` on the line before a view, statement, or item keeps
+  it as written; so does `#[rustfmt::skip]`.
 - `--stdin` prints only the formatted source. On failure stdout is empty and
   the error goes to stderr, so editors keep the buffer.
 
