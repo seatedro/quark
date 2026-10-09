@@ -24,6 +24,7 @@ pub mod thread;
 pub mod widgets;
 
 use accesskit::Role;
+use quark::view;
 use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::style::Styled;
@@ -588,69 +589,55 @@ impl UiApp for Codex {
         let f = frame(self);
         let (w, h) = size;
 
-        let mut cards = div()
-            .absolute()
-            .left(f.left)
-            .top(f.top)
-            .w(w - f.left - FRAME_INSET)
-            .h(f.card_h())
-            .rounded(10.0)
-            .border(p.frame_border)
-            .overflow_hidden()
-            .bg(p.bg);
         let local = |x: f32| x - f.left;
-        if let Screen::Settings(page) = self.screen {
-            cards = cards.child(settings::view(self, page, p, &f, vcx));
-        } else {
-            if f.sidebar_w > 0.0 {
-                cards = cards.child(sidebar::view(self, p, f.sidebar_w, f.card_h()));
-            }
-            let main = match self.screen {
-                Screen::Home => home::view(self, p, (local(f.main_x), f.main_w, f.card_h()), vcx),
-                Screen::Thread(id) => {
-                    thread::view(self, id, p, (local(f.main_x), f.main_w, f.card_h()), vcx)
+        let cards = match self.screen {
+            Screen::Settings(page) => vec![settings::view(self, page, p, &f, vcx)],
+            screen => {
+                let mut cards = Vec::new();
+                if f.sidebar_w > 0.0 {
+                    cards.push(sidebar::view(self, p, f.sidebar_w, f.card_h()));
                 }
-                Screen::Settings(_) => unreachable!(),
-            };
-            cards = cards.child(main);
-            if f.panel_w > 0.0 {
-                cards = cards.child(panel::view(
-                    self,
-                    p,
-                    (local(f.panel_x), f.panel_w, f.card_h()),
-                    vcx,
-                ));
+                let main = (local(f.main_x), f.main_w, f.card_h());
+                cards.push(match screen {
+                    Screen::Thread(id) => thread::view(self, id, p, main, vcx),
+                    _ => home::view(self, p, main, vcx),
+                });
+                if f.panel_w > 0.0 {
+                    let panel = (local(f.panel_x), f.panel_w, f.card_h());
+                    cards.push(panel::view(self, p, panel, vcx));
+                }
+                cards
             }
-        }
-        let mut root = div()
-            .relative()
-            .w(w)
-            .h(h)
-            .bg(p.frame)
-            .overflow_hidden()
-            .accessibility_role(Role::Window)
-            .accessibility_label(APP_TITLE)
-            .child(rail(self, p, h))
-            .child(cards)
-            .child(title_bar(self, p, &f));
-        if !cfg!(target_os = "macos") {
-            root = root.child(traffic_lights());
-        }
-        if let Some(menu) = menus::view(self, p, vcx) {
-            if self.menu.is_some() {
-                root = root.child(click_catcher(w, h, Msg::CloseMenus));
-            }
-            root = root.child(menu);
-        }
-        if self.palette.is_some() {
-            root = root.child(palette::view(self, p, vcx));
-        }
+        };
+        let menu = menus::view(self, p, vcx);
+        let palette = self.palette.is_some().then(|| palette::view(self, p, vcx));
+        let root = view! {
+            <div class="relative overflow-hidden" w={w} h={h} bg={p.frame}
+                 accessibility_role={Role::Window} aria-label={APP_TITLE}>
+                {rail(self, p, h)}
+                <div class="absolute rounded-[10] overflow-hidden" left={f.left} top={f.top}
+                     w={w - f.left - FRAME_INSET} h={f.card_h()} border={p.frame_border} bg={p.bg}>
+                    {...cards}
+                </div>
+                {title_bar(self, p, &f)}
+                if !cfg!(target_os = "macos") {
+                    {traffic_lights()}
+                }
+                if let Some(menu) = menu {
+                    if self.menu.is_some() {
+                        {click_catcher(w, h, Msg::CloseMenus)}
+                    }
+                    {menu}
+                }
+                {?palette}
+            </div>
+        };
         if self.run_started.is_some() || self.has_live_text() {
             // The shimmer moves every frame; the fake run steps on its own.
             vcx.frame
                 .request_frame_in(std::time::Duration::from_millis(33));
         }
-        root.into_any()
+        root
     }
 
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
@@ -954,276 +941,112 @@ impl Codex {
 
 /// The icon rail: Home (selected), Space, Scheduled, Plugins, Explore,
 /// then Code Review and Sites, and the profile avatar at the bottom.
-fn rail(app: &Codex, p: &Pal, h: f32) -> Div {
+fn rail(app: &Codex, p: &Pal, h: f32) -> AnyElement {
     let item = |svg: &'static str, label: &str, y: f32, selected: bool, dot: bool, msg: Msg| {
-        let mut b = div()
-            .absolute()
-            .left(8.0)
-            .top(y)
-            .w(36.0)
-            .h(36.0)
-            .items_center()
-            .justify_center()
-            .rounded(9.0)
-            .hover_bg(p.rail_tile.with_alpha(150))
-            .accessibility_role(Role::Button)
-            .accessibility_label(label.to_owned())
-            .on_click(msg)
-            .child(ico(svg, 19.0, if selected { p.text } else { p.rail_icon }));
-        if selected {
-            b = b.bg(p.rail_tile);
+        view! {
+            <div class="absolute left-2 w-9 h-9 items-center justify-center rounded-[9]" top={y}
+                 hover_bg={p.rail_tile.with_alpha(150)} role="button"
+                 aria-label={label.to_owned()} on:click={msg} bg={if selected { p.rail_tile }}>
+                <icon svg={svg} size={19.0} color={if selected { p.text } else { p.rail_icon }} />
+                if dot {
+                    <div class="absolute left-6 top-[5] w-[7] h-[7] rounded-[4]" bg={p.accent} />
+                }
+            </div>
         }
-        if dot {
-            b = b.child(
-                div()
-                    .absolute()
-                    .left(24.0)
-                    .top(5.0)
-                    .w(7.0)
-                    .h(7.0)
-                    .rounded(4.0)
-                    .bg(p.accent),
-            );
-        }
-        b
     };
     let home = matches!(app.screen, Screen::Home | Screen::Thread(_));
-    let _ = home;
-    div()
-        .absolute()
-        .left(0.0)
-        .top(0.0)
-        .w(RAIL_W)
-        .h(h)
-        .accessibility_role(Role::Navigation)
-        .accessibility_label("Rail")
-        .child(item(icons::HOME, "Home", 52.0, home, true, Msg::NewChat))
-        .child(item(icons::SPACE, "Space", 96.0, false, false, Msg::Noop))
-        .child(item(
-            icons::CLOCK,
-            "Scheduled",
-            140.0,
-            false,
-            false,
-            Msg::Noop,
-        ))
-        .child(item(icons::AT, "Plugins", 184.0, false, false, Msg::Noop))
-        .child(item(
-            icons::ELLIPSIS,
-            "Explore",
-            228.0,
-            false,
-            true,
-            Msg::Noop,
-        ))
-        .child(
-            div()
-                .absolute()
-                .left(14.0)
-                .top(272.0)
-                .w(24.0)
-                .h(1.0)
-                .bg(p.frame_border),
-        )
-        .child(item(
-            icons::PR,
-            "Code Review",
-            281.0,
-            false,
-            false,
-            Msg::Noop,
-        ))
-        .child(item(icons::SITES, "Sites", 325.0, false, false, Msg::Noop))
-        .child(
-            div()
-                .absolute()
-                .left(14.0)
-                .top(h - 38.0)
-                .w(24.0)
-                .h(24.0)
-                .rounded(12.0)
-                .bg(p.avatar)
-                .items_center()
-                .justify_center()
-                .id("rail.profile")
-                .accessibility_role(Role::Button)
-                .accessibility_label("Open profile menu")
-                .on_click(Msg::Open(Menu::Profile))
-                .child(txt("SE", 9.0, Color::rgba(255, 255, 255, 255))),
-        )
+    view! {
+        <div class="absolute left-0 top-0" w={RAIL_W} h={h} accessibility_role={Role::Navigation}
+             aria-label="Rail">
+            {item(icons::HOME, "Home", 52.0, home, true, Msg::NewChat)}
+            {item(icons::SPACE, "Space", 96.0, false, false, Msg::Noop)}
+            {item(icons::CLOCK, "Scheduled", 140.0, false, false, Msg::Noop)}
+            {item(icons::AT, "Plugins", 184.0, false, false, Msg::Noop)}
+            {item(icons::ELLIPSIS, "Explore", 228.0, false, true, Msg::Noop)}
+            <div class="absolute left-[14] top-[272] w-6 h-px" bg={p.frame_border} />
+            {item(icons::PR, "Code Review", 281.0, false, false, Msg::Noop)}
+            {item(icons::SITES, "Sites", 325.0, false, false, Msg::Noop)}
+            <div class="absolute left-[14] w-6 h-6 rounded-[12] items-center justify-center"
+                 top={h - 38.0} bg={p.avatar} id="rail.profile" role="button"
+                 aria-label="Open profile menu" on:click={Msg::Open(Menu::Profile)}>
+                <txt("SE", 9.0, Color::rgba(255, 255, 255, 255)) />
+            </div>
+        </div>
+    }
 }
 
 /// The unified title bar: history and sidebar controls beside the
 /// traffic lights, the chat toolbar over the main card, the panel's tab
 /// strip over the panel card, and the new-tab button.
-fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> Div {
-    let mut bar = div()
-        .absolute()
-        .left(0.0)
-        .top(0.0)
-        .w(f.w)
-        .h(TITLE_H)
-        .z_index(20);
-    let mut left = hrow()
-        .absolute()
-        .left(88.0)
-        .top(8.0)
-        .h(28.0)
-        .gap(4.0)
-        .child(icon_button(
-            p,
-            icons::ARROW_LEFT,
-            28.0,
-            16.0,
-            p.icon,
-            "Back",
-            Msg::Noop,
-        ))
-        .child(icon_button(
-            p,
-            icons::ARROW_RIGHT,
-            28.0,
-            16.0,
-            p.icon_faint,
-            "Forward",
-            Msg::Noop,
-        ));
+fn title_bar(app: &Codex, p: &Pal, f: &Frame) -> AnyElement {
     let settings = matches!(app.screen, Screen::Settings(_));
-    if !settings {
-        left = left.child(div().w(8.0)).child(icon_button(
-            p,
-            icons::SIDEBAR,
-            28.0,
-            16.0,
-            p.icon,
-            "Hide sidebar",
-            Msg::ToggleSidebar,
-        ));
-    }
     let collapsed = f.sidebar_w == 0.0;
-    if collapsed && !matches!(app.screen, Screen::Settings(_)) {
-        left = left
-            .child(div().w(16.0))
-            .child(icon_button(
-                p,
-                icons::COMPOSE,
-                28.0,
-                16.0,
-                p.icon,
-                "New chat",
-                Msg::NewChat,
-            ))
-            .child(div().w(10.0))
-            .child(div().w(1.0).h(16.0).bg(p.frame_border));
-    }
-    bar = bar.child(left);
     let toolbar_x = if collapsed { 232.0 } else { f.main_x };
-    if let Some(t) = app.current_thread()
-        && !app.full_view
-    {
-        let right_edge = if f.panel_w > 0.0 {
-            f.panel_x
-        } else {
-            f.w - 40.0
-        };
-        let title_w = (right_edge - toolbar_x - 180.0).max(40.0);
-        bar = bar.child(
-            hrow()
-                .absolute()
-                .left(toolbar_x)
-                .top(8.0)
-                .w(right_edge - toolbar_x)
-                .h(28.0)
-                .pl(8.0)
-                .accessibility_role(Role::Toolbar)
-                .accessibility_label("Chat toolbar")
-                .child(
-                    div()
-                        .w(28.0)
-                        .h(28.0)
-                        .items_center()
-                        .justify_center()
-                        .child(ico(icons::FOLDER, 16.0, p.text)),
-                )
-                .child(div().w(8.0))
-                .child(
-                    div().max_w(title_w).min_w(0.0).overflow_hidden().child(
-                        text(t.title.clone())
-                            .size(theme::BODY)
-                            .medium()
-                            .color(p.text)
-                            .no_wrap()
-                            .truncate(),
-                    ),
-                )
-                .child(div().flex_1().min_w(8.0))
-                .child(
-                    icon_button(
-                        p,
-                        icons::ELLIPSIS,
-                        28.0,
-                        16.0,
-                        p.icon,
-                        "Chat actions",
-                        Msg::Open(Menu::ChatActions),
-                    )
-                    .id("header.actions"),
-                )
-                .child(div().w(6.0))
-                .child(
-                    icon_button(
-                        p,
-                        icons::SUMMARY,
-                        28.0,
-                        16.0,
-                        p.icon,
-                        "Toggle summary",
-                        Msg::Open(Menu::Summary),
-                    )
-                    .id("header.summary"),
-                )
-                .child(div().w(6.0)),
-        );
-    }
-    if settings {
-    } else if f.panel_w > 0.0 || app.full_view {
-        bar = bar.child(panel::tab_strip(app, p, f));
+    let thread = app.current_thread().filter(|_| !app.full_view);
+    let right_edge = if f.panel_w > 0.0 {
+        f.panel_x
     } else {
-        bar = bar.child(
-            div().absolute().left(f.w - 36.0).top(8.0).child(
-                icon_button(
-                    p,
-                    icons::NEW_TAB,
-                    28.0,
-                    16.0,
-                    p.icon,
-                    "New tab",
-                    Msg::Open(Menu::PanelTab),
-                )
-                .id("panel.newtab"),
-            ),
-        );
+        f.w - 40.0
+    };
+    let title_w = (right_edge - toolbar_x - 180.0).max(40.0);
+    view! {
+        <div class="absolute left-0 top-0 z-20" w={f.w} h={TITLE_H}>
+            <div class="flex-row items-center absolute left-[88] top-2 h-7 gap-1">
+                <icon_button(p, icons::ARROW_LEFT, 28.0, 16.0, p.icon, "Back", Msg::Noop) />
+                <icon_button(p, icons::ARROW_RIGHT, 28.0, 16.0, p.icon_faint, "Forward",
+                             Msg::Noop) />
+                if !settings {
+                    <div class="w-2" />
+                    <icon_button(p, icons::SIDEBAR, 28.0, 16.0, p.icon, "Hide sidebar",
+                                 Msg::ToggleSidebar) />
+                }
+                if collapsed && !settings {
+                    <div class="w-4" />
+                    <icon_button(p, icons::COMPOSE, 28.0, 16.0, p.icon, "New chat", Msg::NewChat) />
+                    <div class="w-[10]" />
+                    <div class="w-px h-4" bg={p.frame_border} />
+                }
+            </div>
+            if let Some(t) = thread {
+                <div class="flex-row items-center absolute top-2 h-7 pl-2" left={toolbar_x}
+                     w={right_edge - toolbar_x} role="toolbar" aria-label="Chat toolbar">
+                    <div class="w-7 h-7 items-center justify-center">
+                        <icon svg={icons::FOLDER} size={16.0} color={p.text} />
+                    </div>
+                    <div class="w-2" />
+                    <div class="min-w-0 overflow-hidden" max_w={title_w}>
+                        <text size={theme::BODY} color={p.text}
+                              class="font-medium whitespace-nowrap truncate">{t.title.clone()}</text>
+                    </div>
+                    <div class="flex-1 min-w-2" />
+                    <icon_button(p, icons::ELLIPSIS, 28.0, 16.0, p.icon, "Chat actions",
+                                 Msg::Open(Menu::ChatActions)) id="header.actions" />
+                    <div class="w-1.5" />
+                    <icon_button(p, icons::SUMMARY, 28.0, 16.0, p.icon, "Toggle summary",
+                                 Msg::Open(Menu::Summary)) id="header.summary" />
+                    <div class="w-1.5" />
+                </div>
+            }
+            if settings {
+            } else if f.panel_w > 0.0 || app.full_view {
+                {panel::tab_strip(app, p, f)}
+            } else {
+                <div class="absolute top-2" left={f.w - 36.0}>
+                    <icon_button(p, icons::NEW_TAB, 28.0, 16.0, p.icon, "New tab",
+                                 Msg::Open(Menu::PanelTab)) id="panel.newtab" />
+                </div>
+            }
+        </div>
     }
-    bar
 }
 
 /// macOS traffic lights, drawn where the platform has no native ones.
-fn traffic_lights() -> Div {
-    let light = |c: u32| {
-        div().w(14.0).h(14.0).rounded(7.0).bg(Color::rgba(
-            (c >> 16) as u8,
-            (c >> 8) as u8,
-            c as u8,
-            255,
-        ))
-    };
-    hrow()
-        .absolute()
-        .left(16.0)
-        .top(15.0)
-        .gap(9.0)
-        .z_index(80)
-        .child(light(0xf35a50))
-        .child(light(0xfdbd01))
-        .child(light(0x02bd00))
+fn traffic_lights() -> AnyElement {
+    view! {
+        <div class="flex-row items-center absolute left-4 top-[15] gap-[9] z-80">
+            <div class="w-[14] h-[14] rounded-[7] bg-[#f35a50]" />
+            <div class="w-[14] h-[14] rounded-[7] bg-[#fdbd01]" />
+            <div class="w-[14] h-[14] rounded-[7] bg-[#02bd00]" />
+        </div>
+    }
 }

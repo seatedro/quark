@@ -188,12 +188,3 @@ impl TintAll for Div {
         self
     }
 }
-
-/// A horizontal row with its children centered vertically.
-pub fn hrow() -> Div {
-    div().flex_row().items_center()
-}
-
-pub fn ico(svg: &'static str, size: f32, color: Color) -> SvgIcon {
-    svg_icon(svg, size).color(color)
-}
