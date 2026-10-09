@@ -1,0 +1,17 @@
+[package]
+name = "quark-view-syntax"
+description = "The view! grammar shared by quark-macros and the quark view formatter."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/quark-view-syntax"
+keywords = ["gui", "ui", "macro", "parser"]
+categories = ["parsing", "development-tools::procedural-macro-helpers"]
+
+# Syntax only: parsing and source metadata, no lowering. Keep the
+# dependencies to proc-macro tooling.
+[dependencies]
+proc-macro2 = "1"
+syn = { version = "2", features = ["full"] }
+

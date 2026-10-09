@@ -5,7 +5,7 @@ use proc_macro2::Span;
 use syn::punctuated::Punctuated;
 use syn::{Expr, ExprIf, Ident, LitStr, Pat, Token};
 
-pub(crate) struct ViewInput {
+pub struct ViewInput {
     pub scale: Option<Ident>,
     /// `view! { -> Type, <root/> }`: the root builder itself, ascribed to
     /// `Type`, instead of an `AnyElement`.
@@ -13,7 +13,7 @@ pub(crate) struct ViewInput {
     pub root: Node,
 }
 
-pub(crate) enum Node {
+pub enum Node {
     Element(Element),
     /// `<>...</>` or `<fragment>...</fragment>`: children flow into the parent.
     Fragment(Vec<Node>),
@@ -33,14 +33,14 @@ pub(crate) enum Node {
     Let(Box<syn::Local>),
 }
 
-pub(crate) struct IfNode {
+pub struct IfNode {
     pub cond: Expr,
     pub then_children: Vec<Node>,
     pub else_if: Option<Box<IfNode>>,
     pub else_children: Option<Vec<Node>>,
 }
 
-pub(crate) struct ForNode {
+pub struct ForNode {
     pub pat: Pat,
     pub iter: Expr,
     /// `for x in xs key={x.id} { ... }`: `.key(..)` on the body's root.
@@ -48,19 +48,19 @@ pub(crate) struct ForNode {
     pub body: Vec<Node>,
 }
 
-pub(crate) struct MatchNode {
+pub struct MatchNode {
     pub match_token: Token![match],
     pub scrutinee: Expr,
     pub arms: Vec<MatchArm>,
 }
 
-pub(crate) struct MatchArm {
+pub struct MatchArm {
     pub pat: Pat,
     pub guard: Option<Expr>,
     pub body: Vec<Node>,
 }
 
-pub(crate) struct Element {
+pub struct Element {
     pub tag: Tag,
     /// Span of the tag name, where errors about the element point.
     pub span: Span,
@@ -72,7 +72,7 @@ pub(crate) struct Element {
 }
 
 #[derive(Clone)]
-pub(crate) enum Tag {
+pub enum Tag {
     /// A lowercase name: `div`, `text`, `p`, `b`, ... Resolved at emit time
     /// so unknown names get a suggestion.
     Builtin(Ident),
@@ -87,7 +87,7 @@ pub(crate) enum Tag {
     Value(Box<Expr>),
 }
 
-pub(crate) enum Attr {
+pub enum Attr {
     /// Any builder method: `name`, `name={expr}`, `name="lit"`,
     /// `kebab-name=..`, and the `on:`, `aria-`, and `role` forms, which
     /// emit picks apart by `name.written`.
@@ -102,7 +102,7 @@ pub(crate) enum Attr {
     For(Box<Pat>, Expr, Vec<Attr>),
 }
 
-pub(crate) struct AttrName {
+pub struct AttrName {
     /// The name as written, segments joined: `aria-label`, `on:key:mod+s`.
     pub written: String,
     /// The first segment, so emitted method names map back to the source.
@@ -113,13 +113,13 @@ pub(crate) struct AttrName {
     pub event: Option<EventName>,
 }
 
-pub(crate) struct EventName {
+pub struct EventName {
     pub name: Ident,
     /// `on:key:<binding>`: the binding text.
     pub binding: Option<LitStr>,
 }
 
-pub(crate) enum AttrValue {
+pub enum AttrValue {
     /// Bare `name`.
     Flag,
     Expr(Expr),

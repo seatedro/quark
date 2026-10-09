@@ -6,7 +6,7 @@ use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, ExprIf, Ident, LitStr, Pat, Result, Token, braced, parenthesized};
 
-use super::ast::*;
+use crate::ast::*;
 
 impl Parse for ViewInput {
     fn parse(input: ParseStream) -> Result<Self> {
@@ -330,7 +330,7 @@ fn parse_tag(input: ParseStream) -> Result<(Tag, proc_macro2::Span)> {
     Ok((Tag::Component(path), span))
 }
 
-pub(crate) fn tag_name(tag: &Tag) -> String {
+pub fn tag_name(tag: &Tag) -> String {
     match tag {
         Tag::Builtin(name) => name.to_string(),
         Tag::Component(path) | Tag::Function(path) => path
