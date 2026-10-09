@@ -697,87 +697,124 @@ pub(crate) fn highlight_windows(
     root: &Arc<Grammar>,
     source: &str,
     sizes: Windowing,
-    resolve: &mut dyn FnMut(&LanguageId) -> Tag,
-    cancelled: &dyn Fn() -> bool,
+    resolve: &(dyn Fn(&LanguageId) -> Tag + Sync),
+    cancelled: &(dyn Fn() -> bool + Sync),
     focus: &dyn Fn() -> Option<usize>,
     emit: &mut dyn FnMut(Window),
 ) -> bool {
-    let len = source.len();
-    let mut at = 0;
-    let mut inexact: Option<std::ops::Range<usize>> = None;
-    while at < len {
-        if cancelled() {
-            return false;
-        }
-        if let Some(f) = focus().map(|f| f.min(len))
-            && f >= at + sizes.window
-            && inexact.as_ref().is_none_or(|r| !r.contains(&f))
-        {
-            let start = line_start(source, f.saturating_sub(sizes.focus_before)).max(at);
-            let end = line_end(source, (f + sizes.focus_after).min(len));
-            let text = &source[start..end];
-            let found = highlight(
+    // This thread parses windows and finds their cuts; a second one runs
+    // the queries of each parsed window meanwhile, in order, so exact
+    // windows still arrive in order. A parsed window is handed over only
+    // once the query thread is free, which bounds the trees alive to two.
+    std::thread::scope(|scope| {
+        let (to_query, parsed) =
+            std::sync::mpsc::sync_channel::<(usize, usize, usize, ts::Tree)>(0);
+        let (done_tx, done) = std::sync::mpsc::channel::<Window>();
+        let query = move |(at, cut, end, tree): (usize, usize, usize, ts::Tree)| {
+            let text = &source[at..end];
+            let found = highlight_parsed(
                 root,
+                Some(tree),
                 text,
                 Limits::for_source(text.len()),
-                resolve,
+                &mut |language| resolve(language),
                 cancelled,
             );
+            Window {
+                range: at..cut,
+                exact: true,
+                highlights: shifted(found, at, cut),
+            }
+        };
+        let querying = std::thread::Builder::new()
+            .name("quark-syntax-query".to_owned())
+            .spawn_scoped(scope, move || {
+                for window in parsed {
+                    if cancelled() || done_tx.send(query(window)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        // Without the second thread, windows are queried here in turn.
+        let mut inline = querying.is_none().then_some(query);
+        let len = source.len();
+        let mut at = 0;
+        let mut inexact: Option<std::ops::Range<usize>> = None;
+        while at < len {
+            for window in done.try_iter() {
+                emit(window);
+            }
             if cancelled() {
                 return false;
             }
-            emit(Window {
-                range: start..end,
-                exact: false,
-                highlights: shifted(found, start, end),
-            });
-            inexact = Some(start..end);
-        }
-        let mut size = sizes.window;
-        let (end, cut, tree) = loop {
-            let end = if len - at <= size {
-                len
-            } else {
-                line_end(source, at + size)
+            if let Some(f) = focus().map(|f| f.min(len))
+                && f >= at + sizes.window
+                && inexact.as_ref().is_none_or(|r| !r.contains(&f))
+            {
+                let start = line_start(source, f.saturating_sub(sizes.focus_before)).max(at);
+                let end = line_end(source, (f + sizes.focus_after).min(len));
+                let text = &source[start..end];
+                let found = highlight(
+                    root,
+                    text,
+                    Limits::for_source(text.len()),
+                    &mut |language| resolve(language),
+                    cancelled,
+                );
+                if cancelled() {
+                    return false;
+                }
+                emit(Window {
+                    range: start..end,
+                    exact: false,
+                    highlights: shifted(found, start, end),
+                });
+                inexact = Some(start..end);
+            }
+            let mut size = sizes.window;
+            let (end, cut, tree) = loop {
+                let end = if len - at <= size {
+                    len
+                } else {
+                    line_end(source, at + size)
+                };
+                let Some(tree) = root.parse(&source[at..end], &[], cancelled) else {
+                    return false;
+                };
+                if end == len {
+                    break (end, len, tree);
+                }
+                let before = (end - at).saturating_sub(sizes.margin);
+                match top_level_cut(&tree, before) {
+                    Cut::At(cut) => break (end, at + cut, tree),
+                    Cut::EarlyError(cut) if size >= sizes.max_window => {
+                        break (end, at + cut, tree);
+                    }
+                    _ => {}
+                }
+                if size >= sizes.max_window {
+                    let cut = line_start(source, at + before).max(at + 1);
+                    break (end, cut, tree);
+                }
+                size *= 2;
             };
-            let Some(tree) = root.parse(&source[at..end], &[], cancelled) else {
-                return false;
-            };
-            if end == len {
-                break (end, len, tree);
+            match &mut inline {
+                Some(query) => emit(query((at, cut, end, tree))),
+                None => {
+                    if to_query.send((at, cut, end, tree)).is_err() {
+                        return false;
+                    }
+                }
             }
-            let before = (end - at).saturating_sub(sizes.margin);
-            match top_level_cut(&tree, before) {
-                Cut::At(cut) => break (end, at + cut, tree),
-                Cut::EarlyError(cut) if size >= sizes.max_window => break (end, at + cut, tree),
-                _ => {}
-            }
-            if size >= sizes.max_window {
-                let cut = line_start(source, at + before).max(at + 1);
-                break (end, cut, tree);
-            }
-            size *= 2;
-        };
-        let text = &source[at..end];
-        let found = highlight_parsed(
-            root,
-            Some(tree),
-            text,
-            Limits::for_source(text.len()),
-            resolve,
-            cancelled,
-        );
-        if cancelled() {
-            return false;
+            at = cut;
         }
-        emit(Window {
-            range: at..cut,
-            exact: true,
-            highlights: shifted(found, at, cut),
-        });
-        at = cut;
-    }
-    true
+        drop(to_query);
+        for window in done {
+            emit(window);
+        }
+        !cancelled()
+    })
 }
 
 /// Where [`top_level_cut`] would cut a window.

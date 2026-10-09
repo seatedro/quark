@@ -199,7 +199,7 @@ impl GrammarStore {
         &self,
         language: &LanguageId,
         source: &str,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: &(dyn Fn() -> bool + Sync),
         focus: &dyn Fn() -> Option<usize>,
         emit: &mut dyn FnMut(Part),
     ) -> Outcome {
@@ -228,7 +228,7 @@ impl GrammarStore {
         language: &LanguageId,
         source: &str,
         sizes: crate::engine::Windowing,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: &(dyn Fn() -> bool + Sync),
         focus: &dyn Fn() -> Option<usize>,
         emit: &mut dyn FnMut(Part),
     ) -> Outcome {
@@ -249,7 +249,7 @@ impl GrammarStore {
                         &grammar,
                         source,
                         sizes,
-                        &mut |embedded| inner.lookup(embedded.as_str()),
+                        &|embedded| inner.lookup(embedded.as_str()),
                         cancelled,
                         focus,
                         &mut |window| {

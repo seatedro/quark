@@ -188,8 +188,9 @@ pub struct WorkerGone;
 /// Highlights a request, stopping early once the callback returns true. A
 /// streamed highlight hands its windows to the last argument and returns
 /// an outcome marked `streamed`.
-type Highlight =
-    dyn Fn(&HighlightRequest, &dyn Fn() -> bool, &mut dyn FnMut(Part)) -> Outcome + Send + Sync;
+type Highlight = dyn Fn(&HighlightRequest, &(dyn Fn() -> bool + Sync), &mut dyn FnMut(Part)) -> Outcome
+    + Send
+    + Sync;
 type HighlightFn = Arc<Highlight>;
 
 /// A handle's slot.
@@ -658,7 +659,7 @@ mod tests {
 
     fn panics_on_boom(
         request: &HighlightRequest,
-        _: &dyn Fn() -> bool,
+        _: &(dyn Fn() -> bool + Sync),
         _: &mut dyn FnMut(Part),
     ) -> Outcome {
         let source = &*request.source;
