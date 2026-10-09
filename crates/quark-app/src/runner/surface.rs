@@ -5,7 +5,7 @@
 
 use crate::platform::chrome::{TitleAction, WindowDragError};
 use crate::platform::material::{
-    Backend, EffectiveBackground, FallbackReason, MaterialRect, MaterialScope, SurfaceEnvironment,
+    EffectiveBackground, FallbackReason, MaterialRect, MaterialScope, SurfaceEnvironment,
     WindowBackground, WindowCorners, WindowSurface,
 };
 use crate::platform::placement::{DesktopRect, constrain_to_work_area, nearest_area};
@@ -42,9 +42,10 @@ impl SurfaceState {
     }
 
     /// The headless runner's: no desktop shows through.
+    #[cfg(feature = "test-support")]
     pub(crate) fn headless(background: WindowBackground, corners: WindowCorners) -> Self {
         let environment = SurfaceEnvironment {
-            backend: Backend::Headless,
+            backend: crate::platform::material::Backend::Headless,
             reduced_transparency: false,
             increased_contrast: false,
         };

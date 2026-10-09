@@ -25,9 +25,7 @@ mod chunks;
 #[path = "text_runs.rs"]
 mod text_runs;
 
-use crate::text::{
-    GlyphOwner, RecoloredBuffers, TextPath, color_to_unit, measure_mono_char_width,
-};
+use crate::text::{GlyphOwner, RecoloredBuffers, TextPath, color_to_unit, measure_mono_char_width};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextMetrics {
