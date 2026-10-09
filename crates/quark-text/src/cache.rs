@@ -42,6 +42,8 @@ impl LayoutKey {
             attrs.write_u16(weight_tag(span.weight));
             attrs.write_u8(style_tag(span.style));
             attrs.write_u8(span.kind.map_or(255, kind_tag));
+            attrs.write_u32(span.size.map_or(u32::MAX, f32::to_bits));
+            attrs.write_u32(span.letter_spacing.map_or(u32::MAX, f32::to_bits));
         }
 
         Self {

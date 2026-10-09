@@ -168,6 +168,19 @@ fn provider_failures_and_token_changes() {
     );
 }
 
+/// `macro_names` decides which paths are views: a configured re-export is
+/// formatted and the default name, not configured, is left alone.
+#[test]
+fn configured_macro_names_select_views() {
+    let options = FormatOptions {
+        macro_names: vec!["ui::view".to_owned()],
+        ..FormatOptions::default()
+    };
+    let src = "fn f() { ::ui::view! {<a   />}; view! {<a   />}; }";
+    let out = format_to_string(src, &options, &PassThrough).unwrap();
+    assert_eq!(out, "fn f() { ::ui::view! { <a /> }; view! {<a   />}; }");
+}
+
 mod properties {
     //! Random templates over the grammar, with random whitespace and
     //! comments at every gap between template tokens.
