@@ -14,6 +14,7 @@ members = [
   "crates/quark-terminal",
   "crates/quark-app",
   "crates/quark-update",
+  "crates/quark-webview",
   "tools/syntax-pack",
   "tools/quark-fmt",
   "examples/workbench",
@@ -48,6 +49,7 @@ quark-components = { path = "crates/quark-components" }
 quark-terminal = { path = "crates/quark-terminal" }
 quark-app = { path = "crates/quark-app" }
 quark-update = { path = "crates/quark-update" }
+quark-webview = { path = "crates/quark-webview" }
 accesskit = "0.24"
 accesskit_winit = "0.33"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
