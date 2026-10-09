@@ -31,55 +31,37 @@ const WORDS: &[&str] = &[
     "state", "frame", "cache", "query", "token", "scope", "label", "width", "height", "error",
 ];
 
-/// One plausible line of code, mostly unique thanks to its numbers.
-fn code_line(rng: &mut Rng, out: &mut String) {
+/// About `bytes` bytes of plausible JavaScript, a statement per line.
+pub fn javascript(seed: u64, bytes: usize) -> String {
     use std::fmt::Write;
-    let indent = (rng.below(4) * 4) as usize;
-    out.extend(std::iter::repeat_n(' ', indent));
-    let w = |rng: &mut Rng| WORDS[rng.below(WORDS.len() as u64) as usize];
-    let _ = match rng.below(5) {
-        0 => writeln!(
-            out,
-            "let {}_{} = {}({});",
-            w(rng),
-            rng.below(10_000),
-            w(rng),
-            w(rng)
-        ),
-        1 => writeln!(
-            out,
-            "if {}.{} > {} {{ return {}; }}",
-            w(rng),
-            w(rng),
-            rng.below(100_000),
-            w(rng)
-        ),
-        2 => writeln!(
-            out,
-            "// {} the {} of {} {}",
-            w(rng),
-            w(rng),
-            w(rng),
-            rng.next_u64()
-        ),
-        3 => writeln!(
-            out,
-            "{}.{}({}, {});",
-            w(rng),
-            w(rng),
-            rng.below(1 << 20),
-            w(rng)
-        ),
-        _ => writeln!(out, "fn {}_{}(&self) -> u32 {{", w(rng), rng.below(1 << 24)),
-    };
-}
-
-/// About `bytes` bytes of code-like lines.
-pub fn source(seed: u64, bytes: usize) -> String {
     let mut rng = Rng::new(seed);
     let mut out = String::with_capacity(bytes + 128);
     while out.len() < bytes {
-        code_line(&mut rng, &mut out);
+        let n = rng.next_u64();
+        let w = WORDS[(n % WORDS.len() as u64) as usize];
+        let _ = match n % 5 {
+            0 => writeln!(
+                out,
+                "const {w}{} = compute({}, \"label {}\");",
+                n % 9973,
+                n % 101,
+                n % 7
+            ),
+            1 => writeln!(
+                out,
+                "function {w}{}(a, b) {{ return a + b * {}; }}",
+                n % 99991,
+                n % 13
+            ),
+            2 => writeln!(out, "// note {} about the {w}", n % 1_000_003),
+            3 => writeln!(out, "if ({w}.count > {}) {{ {w}.count -= 1; }}", n % 5000),
+            _ => writeln!(
+                out,
+                "items.push({{ id: {}, name: `{w} ${{{}}}` }});",
+                n % 77777,
+                n % 9
+            ),
+        };
     }
     out
 }
@@ -101,7 +83,7 @@ pub fn scattered_edits(old: &str, seed: u64, per_mille: u64) -> String {
             }
             1 => {
                 out.push_str(line);
-                code_line(&mut rng, &mut out);
+                out.push_str(&javascript(rng.next_u64(), 1));
             }
             _ => {}
         }
@@ -110,7 +92,8 @@ pub fn scattered_edits(old: &str, seed: u64, per_mille: u64) -> String {
 }
 
 /// `old` with the middle `share` of its bytes (on line boundaries)
-/// replaced by unrelated lines of about the same size: one change block.
+/// replaced by unrelated JavaScript of about the same size: one change
+/// block.
 pub fn one_block(old: &str, seed: u64, share: f64) -> String {
     let len = old.len();
     let cut = |at: usize| old[..at].rfind('\n').map_or(0, |i| i + 1);
@@ -118,7 +101,7 @@ pub fn one_block(old: &str, seed: u64, share: f64) -> String {
     let to = cut(((len as f64) * (0.5 + share / 2.0)) as usize);
     let mut out = String::with_capacity(len + 128);
     out.push_str(&old[..from]);
-    out.push_str(&source(seed, to - from));
+    out.push_str(&javascript(seed, to - from));
     out.push_str(&old[to..]);
     out
 }

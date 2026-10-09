@@ -885,8 +885,8 @@ fn file_facts_report_changes_that_have_no_lines() {
 #[ignore = "measurement, prints a report"]
 fn report_large_inputs() {
     use crate::fixtures::{
-        edit_line, every_nth, minified, one_block, peak_rss, repetitive, reset_peak_rss,
-        scattered_edits, source,
+        edit_line, every_nth, javascript, minified, one_block, peak_rss, repetitive,
+        reset_peak_rss, scattered_edits,
     };
     const MIB: usize = 1 << 20;
     let size = std::env::var("QUARK_DIFF_FIXTURE_MIB")
@@ -895,7 +895,7 @@ fn report_large_inputs() {
         .unwrap_or(64)
         * MIB;
     // A little under the size, so edits keep the new side within it.
-    let base = source(1, size - size / 64);
+    let base = javascript(1, size - size / 64);
     let line = minified(2, size - size / 64);
     let repeated = repetitive(3, size - size / 64);
     type Make<'a> = Box<dyn Fn() -> (String, String) + 'a>;
