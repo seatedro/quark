@@ -3003,6 +3003,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "quark-codex"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "quark",
+ "quark-app",
+ "quark-components",
+ "quark-terminal",
+ "quark-text",
+ "quark-ui",
+]
+
+[[package]]
 name = "quark-components"
 version = "0.1.0"
 dependencies = [
