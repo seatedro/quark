@@ -485,6 +485,11 @@ impl<U: UiApp> UiTestHarness<U> {
         self.main().middle_click(at);
     }
 
+    /// Press and release the secondary button at `at`.
+    pub fn right_click(&mut self, at: (f32, f32)) {
+        self.main().right_click(at);
+    }
+
     /// Middle click the center of the one node `by` finds.
     ///
     /// # Panics
@@ -1023,12 +1028,17 @@ impl<U: UiApp> UiWindow<'_, U> {
     }
 
     pub fn middle_click(&mut self, at: (f32, f32)) {
+        self.press_release(at, MouseButton::Middle);
+    }
+
+    pub fn right_click(&mut self, at: (f32, f32)) {
+        self.press_release(at, MouseButton::Right);
+    }
+
+    fn press_release(&mut self, at: (f32, f32), button: MouseButton) {
         self.move_to_point(at);
         for state in [ElementState::Pressed, ElementState::Released] {
-            self.send_event(InputEvent::PointerButton {
-                button: MouseButton::Middle,
-                state,
-            });
+            self.send_event(InputEvent::PointerButton { button, state });
         }
     }
 
@@ -1256,6 +1266,7 @@ fn key_press(binding: &Binding) -> Option<(KeyChord, Option<String>)> {
         "f10" => Some(NamedKey::F10),
         "f11" => Some(NamedKey::F11),
         "f12" => Some(NamedKey::F12),
+        "contextmenu" => Some(NamedKey::ContextMenu),
         _ => None,
     };
     let (logical, text) = match named {

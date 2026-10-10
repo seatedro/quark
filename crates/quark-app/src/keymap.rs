@@ -269,6 +269,7 @@ fn display_key(key: &str) -> String {
         "arrowright" => "Right".to_owned(),
         "pagedown" => "Page Down".to_owned(),
         "pageup" => "Page Up".to_owned(),
+        "contextmenu" => "Menu".to_owned(),
         key if key.len() == 1 => key.to_ascii_uppercase(),
         key => title_case(key),
     }

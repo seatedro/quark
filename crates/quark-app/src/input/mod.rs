@@ -276,6 +276,7 @@ fn named_binding_key(named: NamedKey) -> Option<(&'static str, bool)> {
         NamedKey::F10 => ("f10", false),
         NamedKey::F11 => ("f11", false),
         NamedKey::F12 => ("f12", false),
+        NamedKey::ContextMenu => ("contextmenu", false),
         _ => return None,
     })
 }

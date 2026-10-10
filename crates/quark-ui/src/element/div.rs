@@ -27,6 +27,7 @@ pub struct Div {
     on_click: Option<Action>,
     on_click_handler: Option<ClickHandler>,
     on_middle_click: Option<Action>,
+    on_context_menu: Option<ContextMenuHandler>,
     on_drag: Option<DragStart>,
     /// Literal bindings stay borrowed, so declaring one allocates nothing.
     key_bindings: Vec<(std::borrow::Cow<'static, str>, Action)>,
@@ -92,6 +93,7 @@ pub fn div() -> Div {
         on_click: None,
         on_click_handler: None,
         on_middle_click: None,
+        on_context_menu: None,
         on_drag: None,
         key_bindings: Vec::new(),
         on_scroll: None,
@@ -215,6 +217,21 @@ impl Div {
     /// release on this element. Primary clicks and drags are unaffected.
     pub fn on_middle_click(mut self, action: impl Into<Action>) -> Self {
         self.on_middle_click = Some(action.into());
+        self
+    }
+
+    /// Map a context menu request on this element or a descendant without
+    /// its own to an action: a secondary click (also Ctrl-click on macOS)
+    /// at the pointer, or Shift+F10 or the Menu key while it holds focus.
+    /// Focus does not move, and primary clicks are unaffected.
+    pub fn on_context_menu(mut self, f: impl Fn(ContextMenuEvent) -> Action + 'static) -> Self {
+        self.on_context_menu = Some(ContextMenuHandler::new(f));
+        self
+    }
+
+    /// [`Self::on_context_menu`] with a handler the caller keeps.
+    pub fn on_context_menu_handler(mut self, handler: ContextMenuHandler) -> Self {
+        self.on_context_menu = Some(handler);
         self
     }
 
@@ -707,6 +724,9 @@ impl Div {
         if let Some(action) = self.on_middle_click.take() {
             cx.handlers.on_middle_click(node, action);
         }
+        if let Some(handler) = self.on_context_menu.take() {
+            cx.handlers.on_context_menu(node, handler);
+        }
         if let Some(start) = self.on_drag.take() {
             cx.handlers.on_drag(node, start);
         }
@@ -1000,6 +1020,7 @@ impl Element for Div {
         if self.on_click.is_some()
             || self.on_click_handler.is_some()
             || self.on_middle_click.is_some()
+            || self.on_context_menu.is_some()
         {
             flags |= HitFlags::CLICK;
         }

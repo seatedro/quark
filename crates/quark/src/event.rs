@@ -12,6 +12,8 @@ pub enum UiEventKind {
     TextInput,
     Focus,
     Blur,
+    /// A secondary click or the keyboard's context menu key.
+    ContextMenu,
 }
 
 /// Capture/target/bubble phases borrowed from the web, expressed as native data.

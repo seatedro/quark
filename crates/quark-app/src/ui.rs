@@ -1087,6 +1087,14 @@ impl<U: UiApp> UiAdapter<U> {
         self.deliver(delivery, cx);
     }
 
+    /// A secondary click at the pointer: the context menu handler under it.
+    fn context_menu_click(&mut self, cx: &mut EventContext) {
+        if let Some((x, y)) = self.win.pointer {
+            let delivery = self.win.router.context_menu_at(x, y);
+            self.deliver(delivery, cx);
+        }
+    }
+
     /// A press on window drag chrome: the platform's title double-click
     /// action when it completes one, else a native window move.
     fn chrome_pressed(&mut self, at: (f32, f32), cx: &mut EventContext) {
@@ -1160,6 +1168,11 @@ impl<U: UiApp> UiAdapter<U> {
             self.deliver(delivery, cx);
             return;
         }
+        let delivery = self.win.router.context_menu_key(&binding, self.win.focus);
+        if delivery.node.is_some() {
+            self.deliver(delivery, cx);
+            return;
+        }
         // Enter or Space on a focused clickable that binds neither clicks it,
         // so everything a pointer can press is reachable from the keyboard.
         let delivery = self.win.router.activate(&binding, self.win.focus);
@@ -1223,6 +1236,12 @@ impl<U: UiApp> UiAdapter<U> {
                 self.win.pointer = None;
                 self.update_hover(cx);
             }
+            // macOS reads Ctrl-click as a secondary click.
+            UiInput::PointerDown(PointerButton::Primary)
+                if cfg!(target_os = "macos") && cx.modifiers().control_key() =>
+            {
+                self.context_menu_click(cx);
+            }
             UiInput::PointerDown(PointerButton::Primary) => self.pointer_pressed(cx),
             UiInput::PointerUp(PointerButton::Primary) => {
                 self.win.title_press.release();
@@ -1244,6 +1263,13 @@ impl<U: UiApp> UiAdapter<U> {
                     let delivery = self.win.router.middle_up(x, y);
                     self.deliver(delivery, cx);
                 }
+            }
+            // Windows opens context menus on release, the others on press.
+            UiInput::PointerDown(PointerButton::Secondary) if !cfg!(windows) => {
+                self.context_menu_click(cx);
+            }
+            UiInput::PointerUp(PointerButton::Secondary) if cfg!(windows) => {
+                self.context_menu_click(cx);
             }
             UiInput::PointerDown(_) | UiInput::PointerUp(_) => {}
             UiInput::Wheel { dx, dy, ended } => {

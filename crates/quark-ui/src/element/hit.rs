@@ -46,6 +46,37 @@ impl std::fmt::Debug for ClickHandler {
     }
 }
 
+/// A request to open a context menu, in window points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextMenuEvent {
+    /// Where to open the menu: the pointer for a click; for a key, the
+    /// bottom left corner of the focused element.
+    pub x: f32,
+    pub y: f32,
+    /// Shift+F10 or the Menu key asked, not a pointer.
+    pub keyboard: bool,
+}
+
+/// Context menu callback: maps where the menu opens to the app's action.
+#[derive(Clone)]
+pub struct ContextMenuHandler(Rc<dyn Fn(ContextMenuEvent) -> Action>);
+
+impl ContextMenuHandler {
+    pub fn new(f: impl Fn(ContextMenuEvent) -> Action + 'static) -> Self {
+        Self(Rc::new(f))
+    }
+
+    pub fn invoke(&self, event: ContextMenuEvent) -> Action {
+        (self.0)(event)
+    }
+}
+
+impl std::fmt::Debug for ContextMenuHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ContextMenuHandler(..)")
+    }
+}
+
 /// Starts a drag on pointer down. The returned handler captures the
 /// pointer: it receives every move and the release, wherever they land.
 #[derive(Clone)]

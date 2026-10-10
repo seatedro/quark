@@ -96,6 +96,7 @@ On a `div`:
 | Builder | Effect |
 |---|---|
 | `on_click(action)` | Emits an action |
+| `on_context_menu(\|at\| action)` | Secondary click (Ctrl-click on macOS) at the pointer, or Shift+F10 / Menu key on the focused element at its bottom left; `at.keyboard` tells which |
 | `hover_bg(color)` | Restyles under the pointer |
 | `focus_ring(focus_id)` | Focusable as `focus_id`, and a Tab stop |
 | `trap_focus(true)` | Keeps Tab inside a modal's focus scope |

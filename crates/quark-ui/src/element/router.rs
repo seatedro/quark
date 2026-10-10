@@ -240,6 +240,8 @@ pub struct InputHandlers {
     click: Vec<ClickHandler>,
     middle_click_node: Vec<usize>,
     middle_click: Vec<Action>,
+    context_menu_node: Vec<usize>,
+    context_menu: Vec<ContextMenuHandler>,
     drag_node: Vec<usize>,
     drag: Vec<DragStart>,
     scroll_node: Vec<usize>,
@@ -268,6 +270,13 @@ impl InputHandlers {
     pub fn on_middle_click(&mut self, node: usize, action: Action) {
         self.middle_click_node.push(node);
         self.middle_click.push(action);
+    }
+
+    /// A secondary click (Ctrl-click on macOS), Shift+F10, or the Menu
+    /// key on this node or a descendant without its own.
+    pub fn on_context_menu(&mut self, node: usize, handler: ContextMenuHandler) {
+        self.context_menu_node.push(node);
+        self.context_menu.push(handler);
     }
 
     pub fn on_drag(&mut self, node: usize, start: DragStart) {
@@ -321,6 +330,8 @@ impl InputHandlers {
         self.click.clear();
         self.middle_click_node.clear();
         self.middle_click.clear();
+        self.context_menu_node.clear();
+        self.context_menu.clear();
         self.drag_node.clear();
         self.drag.clear();
         self.scroll_node.clear();
@@ -340,6 +351,7 @@ impl InputHandlers {
         HandlerMarks {
             click: self.click.len(),
             middle_click: self.middle_click.len(),
+            context_menu: self.context_menu.len(),
             drag: self.drag.len(),
             scroll: self.scroll.len(),
             scroll_x: self.scroll_x.len(),
@@ -371,6 +383,10 @@ impl InputHandlers {
             &self.middle_click_node[marks.middle_click..],
             node_base,
             &mut out.middle_click_node,
+        ) & nodes(
+            &self.context_menu_node[marks.context_menu..],
+            node_base,
+            &mut out.context_menu_node,
         ) & nodes(&self.drag_node[marks.drag..], node_base, &mut out.drag_node)
             & nodes(
                 &self.scroll_node[marks.scroll..],
@@ -402,6 +418,10 @@ impl InputHandlers {
             &self.middle_click[marks.middle_click..],
             &mut out.middle_click,
         );
+        copy(
+            &self.context_menu[marks.context_menu..],
+            &mut out.context_menu,
+        );
         copy(&self.drag[marks.drag..], &mut out.drag);
         copy(&self.scroll[marks.scroll..], &mut out.scroll);
         copy(&self.scroll_x[marks.scroll_x..], &mut out.scroll_x);
@@ -422,6 +442,9 @@ impl InputHandlers {
         self.middle_click_node
             .extend(shift(&from.middle_click_node, node_base));
         self.middle_click.extend_from_slice(&from.middle_click);
+        self.context_menu_node
+            .extend(shift(&from.context_menu_node, node_base));
+        self.context_menu.extend_from_slice(&from.context_menu);
         self.drag_node.extend(shift(&from.drag_node, node_base));
         self.drag.extend_from_slice(&from.drag);
         self.scroll_node.extend(shift(&from.scroll_node, node_base));
@@ -447,6 +470,11 @@ impl InputHandlers {
     fn middle_click(&self, node: usize) -> Option<&Action> {
         let i = self.middle_click_node.iter().position(|n| *n == node)?;
         self.middle_click.get(i)
+    }
+
+    fn context_menu(&self, node: usize) -> Option<&ContextMenuHandler> {
+        let i = self.context_menu_node.iter().position(|n| *n == node)?;
+        self.context_menu.get(i)
     }
 
     fn drag(&self, node: usize) -> Option<&DragStart> {
@@ -494,6 +522,7 @@ impl InputHandlers {
 pub(super) struct HandlerMarks {
     click: usize,
     middle_click: usize,
+    context_menu: usize,
     drag: usize,
     scroll: usize,
     scroll_x: usize,
@@ -727,6 +756,58 @@ impl InputRouter {
             redraw: false,
             window_drag: false,
         }
+    }
+
+    /// A context menu click at `(x, y)`: the innermost handler on the
+    /// route gets the pointer position. Focus does not move.
+    pub fn context_menu_at(&self, x: f32, y: f32) -> Delivery {
+        let Some(target) = self.target_at(x, y) else {
+            return Delivery::default();
+        };
+        let handlers = &self.frame.handlers;
+        let event = ContextMenuEvent {
+            x,
+            y,
+            keyboard: false,
+        };
+        self.walk(target, UiEventKind::ContextMenu, |node| {
+            handlers
+                .context_menu(node)
+                .map(|handler| vec![handler.invoke(event)])
+        })
+    }
+
+    /// Shift+F10 or the Menu key: the context menu of the focused element,
+    /// or of its nearest ancestor with one, at the focused element's bottom
+    /// left corner. Other keys and an unfocused window deliver nothing.
+    pub fn context_menu_key(&self, pressed: &Binding, focus: Option<FocusId>) -> Delivery {
+        let m = pressed.mods;
+        let menu_key = match pressed.key.as_str() {
+            "contextmenu" => !(m.cmd || m.ctrl || m.alt || m.shift),
+            "f10" => m.shift && !(m.cmd || m.ctrl || m.alt),
+            _ => false,
+        };
+        let semantic = &self.frame.semantic;
+        let Some(focused) = focus
+            .filter(|_| menu_key)
+            .and_then(|focus| semantic.node_for_focus(focus))
+        else {
+            return Delivery::default();
+        };
+        let Some(b) = semantic.nodes().get(focused).map(|n| n.bounds) else {
+            return Delivery::default();
+        };
+        let event = ContextMenuEvent {
+            x: b.x,
+            y: b.y + b.height,
+            keyboard: true,
+        };
+        let handlers = &self.frame.handlers;
+        self.walk(focused, UiEventKind::ContextMenu, |node| {
+            handlers
+                .context_menu(node)
+                .map(|handler| vec![handler.invoke(event)])
+        })
     }
 
     /// Moves go to the capturing drag, wherever the pointer is. A drag

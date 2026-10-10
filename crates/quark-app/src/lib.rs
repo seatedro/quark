@@ -203,6 +203,8 @@ macro_rules! profile_scope {
     };
 }
 
+#[cfg(all(test, feature = "test-support"))]
+mod context_menu_tests;
 #[cfg(feature = "devtools")]
 mod devtools;
 #[cfg(feature = "components")]
