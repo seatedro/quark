@@ -234,7 +234,10 @@ impl DiffDocument {
             let expected = if reaches_end && store.line_count() > 0 {
                 store.no_newline_at_eof()
             } else if reaches_end {
-                sources[s].no_newline_at_eof()
+                // No hunk lines on this side, so its last line (if any) is
+                // unchanged and followed by the other side's hunk lines:
+                // it ends in a newline.
+                false
             } else {
                 if store.no_newline_at_eof() {
                     return Err(HydrationError::Eof(side));

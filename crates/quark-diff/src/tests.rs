@@ -754,6 +754,11 @@ fn hydration_names_why_it_refuses_sources() {
             sources("a\nb", "a\nc"),
             HydrationError::Eof(Side::Old),
         ),
+        (
+            &patch_of("a\nb\n", "a\n", 0),
+            sources("a\nb\n", "a"),
+            HydrationError::Eof(Side::New),
+        ),
     ];
     for (doc, sources, expected) in cases {
         assert_eq!(doc.hydrate_file(0, sources).err(), Some(expected));
