@@ -32,6 +32,8 @@
 
 mod adornment;
 mod background;
+#[cfg(test)]
+mod edit_tests;
 mod element;
 mod facade;
 mod find;
@@ -1134,8 +1136,76 @@ impl<G: BlockGeometry> Document<G> {
         rows: impl IntoIterator<Item = &'a DocumentRow>,
     ) -> Result<(), RowError> {
         let rows: Vec<&DocumentRow> = rows.into_iter().collect();
+        self.insert_rows(self.len(), &rows)?;
+        self.mark_new_content();
+        Ok(())
+    }
+
+    /// Inserts older rows before the first one. The rows on screen and
+    /// the selection stay where they are.
+    pub fn prepend<'a>(
+        &mut self,
+        rows: impl IntoIterator<Item = &'a DocumentRow>,
+    ) -> Result<(), RowError> {
+        let rows: Vec<&DocumentRow> = rows.into_iter().collect();
+        self.insert_rows(0, &rows)
+    }
+
+    /// Inserts rows, in their given order, before the row at `index`;
+    /// `len()` appends, as [`Self::extend`] does. The first visible row
+    /// keeps its place on screen (or the view stays pinned to the bottom),
+    /// and the selection keeps its endpoints, so rows inserted inside it
+    /// are selected too. Fails without changes for an index past the end,
+    /// or a row key already present or repeated in the batch.
+    pub fn insert<'a>(
+        &mut self,
+        index: usize,
+        rows: impl IntoIterator<Item = &'a DocumentRow>,
+    ) -> Result<(), RowError> {
+        let len = self.len();
+        if index > len {
+            return Err(RowError::IndexOutOfBounds { index, len });
+        }
+        let rows: Vec<&DocumentRow> = rows.into_iter().collect();
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.insert_rows(index, &rows)?;
+        // Only rows arriving at the end are new content to jump to.
+        if index == len {
+            self.mark_new_content();
+        }
+        Ok(())
+    }
+
+    /// Inserts rows right after row `after`, as [`Self::insert`] does.
+    pub fn insert_after<'a>(
+        &mut self,
+        after: RowKey,
+        rows: impl IntoIterator<Item = &'a DocumentRow>,
+    ) -> Result<(), RowError> {
+        let index = self
+            .list
+            .rows()
+            .index_of(after)
+            .ok_or(RowError::UnknownKey(after))?;
+        self.insert(index + 1, rows)
+    }
+
+    /// Inserts `rows` before the row at `index` in one pass: one row
+    /// table insertion, one block order splice, one integrity check.
+    fn insert_rows(&mut self, index: usize, rows: &[&DocumentRow]) -> Result<(), RowError> {
         let keys: Vec<RowKey> = rows.iter().map(|m| m.key).collect();
-        self.anchored(|list| list.extend(&keys))?;
+        let len = self.len();
+        self.anchored(|list| list.insert_batch(index, &keys))?;
+        // The new rows own no blocks yet, so the search passes over them.
+        let at = if index == len {
+            self.order.len()
+        } else {
+            self.last_block_before_index(index)
+                .and_then(|b| self.order.position(b))
+                .map_or(0, |p| p as usize + 1)
+        };
         let mut fresh = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
@@ -1148,34 +1218,7 @@ impl<G: BlockGeometry> Document<G> {
             fresh.extend_from_slice(&blocks);
             self.adopt(row.key, blocks);
         }
-        self.order.extend(fresh);
-        self.mark_new_content();
-        self.debug_check();
-        Ok(())
-    }
-
-    /// Inserts older rows before the first one. The rows on screen and
-    /// the selection stay where they are.
-    pub fn prepend<'a>(
-        &mut self,
-        rows: impl IntoIterator<Item = &'a DocumentRow>,
-    ) -> Result<(), RowError> {
-        let rows: Vec<&DocumentRow> = rows.into_iter().collect();
-        let keys: Vec<RowKey> = rows.iter().map(|m| m.key).collect();
-        self.anchored(|list| list.prepend(&keys))?;
-        let mut fresh = Vec::new();
-        let mut seen = HashSet::new();
-        for row in &rows {
-            let blocks: Vec<BlockKey> = row
-                .blocks
-                .iter()
-                .map(|block| block.key)
-                .filter(|key| !self.order.contains(*key) && seen.insert(*key))
-                .collect();
-            fresh.extend_from_slice(&blocks);
-            self.adopt(row.key, blocks);
-        }
-        self.order.prepend(fresh);
+        self.order.insert_batch(at, fresh);
         self.debug_check();
         Ok(())
     }
@@ -1222,12 +1265,21 @@ impl<G: BlockGeometry> Document<G> {
         Ok(())
     }
 
+    /// Removes row `key`. The first visible row keeps its place on screen;
+    /// when it is the one removed, the row after it takes its place.
     pub fn remove(&mut self, key: RowKey) -> Result<(), RowError> {
         self.anchored(|list| list.remove(key))?;
         // The rows on screen stay put; nothing is left to keep in place.
         if self.anchor.is_some_and(|a| a.row == key) {
             self.anchor = None;
         }
+        if self.held_row == Some(key) {
+            self.held_row = None;
+        }
+        if self.kept_row == Some(key) {
+            self.kept_row = None;
+        }
+        self.row_builds.remove(&key);
         for block in self.row_blocks.remove(&key).unwrap_or_default() {
             self.forget_block(block);
         }
@@ -1248,6 +1300,11 @@ impl<G: BlockGeometry> Document<G> {
         self.scroll_handles.remove(&block);
         self.wrapped.remove(&block);
         self.block_row.remove(&block);
+        self.measured.remove(&block);
+        self.painted.remove(&block);
+        if self.reveal.as_ref().is_some_and(|r| r.block == block) {
+            self.reveal = None;
+        }
         let Some(pos) = self.order.remove(block) else {
             return;
         };
@@ -1268,7 +1325,12 @@ impl<G: BlockGeometry> Document<G> {
 
     /// Last block of the nearest earlier row that has blocks.
     fn last_block_before(&self, row: RowKey) -> Option<BlockKey> {
-        let index = self.list.rows().index_of(row)?;
+        self.last_block_before_index(self.list.rows().index_of(row)?)
+    }
+
+    /// Last block of the nearest row before the one at `index` that has
+    /// blocks.
+    fn last_block_before_index(&self, index: usize) -> Option<BlockKey> {
         self.list.rows().keys()[..index]
             .iter()
             .rev()
@@ -1376,9 +1438,11 @@ impl<G: BlockGeometry> Document<G> {
     }
 
     /// Runs a row-table edit that keeps the first visible row or the
-    /// bottom in place: routed input is taken in first, so the edit
-    /// anchors against what the user scrolled to, and the handle follows
-    /// the correction after.
+    /// bottom in place. Every row insertion and removal, and every height
+    /// or viewport change, goes through here: routed input is taken in
+    /// first, so the edit anchors against what the user scrolled to, and
+    /// the handle follows the correction after, carrying a smooth scroll
+    /// or fling along.
     fn anchored<T>(&mut self, edit: impl FnOnce(&mut VariableList) -> T) -> T {
         self.sync_scroll_input();
         let out = edit(&mut self.list);

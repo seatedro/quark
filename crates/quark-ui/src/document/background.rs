@@ -554,15 +554,16 @@ mod tests {
         assert_eq!((ui.heights(), ui.anchor()), (expected, anchor));
     }
 
-    // Catches a height measured at the old width being applied after a
-    // resize, or after the rows were narrowed by their style, which would
-    // leave the row marked exact at the wrong height.
+    // Catches a height measured before a change being applied after it: at
+    // the old width after a resize or after the rows were narrowed by their
+    // style, which would leave the row marked exact at the wrong height, or
+    // for a removed row to the new row reusing its key.
     #[test]
-    fn result_measured_before_a_width_change_is_dropped() {
-        type Change = fn(&mut Ui);
-        let changes: [(&str, Change); 2] = [
-            ("viewport width", |ui| ui.size.0 = 300.0),
-            ("row style", |ui| {
+    fn a_result_measured_before_a_change_is_dropped() {
+        type Change = fn(&mut Ui, &[RowKey]);
+        let cases: [(&str, Change); 3] = [
+            ("width change", |ui, _| ui.size.0 = 300.0),
+            ("row style", |ui, _| {
                 for row in 0..40 {
                     let mut chrome = entry(row, String::new()).chrome;
                     chrome.style.max_width = Some(260.0);
@@ -570,18 +571,27 @@ mod tests {
                     ui.md.set_chrome(RowKey(row), chrome).unwrap();
                 }
             }),
+            ("row key reused", |ui, rows| {
+                for &row in rows {
+                    let index = ui.md.document().list().rows().index_of(row).unwrap();
+                    ui.md.remove(row).unwrap();
+                    let grown = format!("{}\n\n{}", PIECES[0], PIECES[4]);
+                    ui.md.insert(index, [entry(row.0, grown)]).unwrap();
+                }
+            }),
         ];
-        for (name, change) in changes {
+        for (name, change) in cases {
             let mut ui = Ui::new(history(40), (420.0, 300.0));
             // Every request finishes before the change is seen.
             let (background, _) = ui.md.background_mut();
-            let in_flight = background.pending.len();
+            let in_flight: Vec<RowKey> = background.pending.keys().copied().collect();
             let worker = background.worker.as_ref().unwrap();
-            let stale: Vec<RowHeight> = (0..in_flight)
+            let stale: Vec<RowHeight> = in_flight
+                .iter()
                 .map(|_| worker.recv().ok().unwrap())
                 .collect();
 
-            change(&mut ui);
+            change(&mut ui, &in_flight);
             ui.frame();
             let (background, document) = ui.md.background_mut();
             let taken = stale
