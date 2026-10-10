@@ -44,6 +44,7 @@ impl LayoutKey {
             attrs.write_u8(span.kind.map_or(255, kind_tag));
             attrs.write_u32(span.size.map_or(u32::MAX, f32::to_bits));
             attrs.write_u32(span.letter_spacing.map_or(u32::MAX, f32::to_bits));
+            attrs.write_u8(u8::from(span.keep_together));
         }
 
         Self {

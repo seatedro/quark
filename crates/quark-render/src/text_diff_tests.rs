@@ -120,6 +120,7 @@ fn prose(shaper: &mut Shaper, scene: &mut Scene, origin: (f32, f32), width: f32)
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         });
     }
     let styled = shaper.layout_spans(text, TextStyle::new(15.0), None, spans.clone());

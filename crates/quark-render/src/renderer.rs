@@ -5292,6 +5292,7 @@ mod tests {
                 kind: None,
                 size: None,
                 letter_spacing: None,
+                keep_together: false,
             },
             quark_text::TextSpan {
                 range: 6..12,
@@ -5300,6 +5301,7 @@ mod tests {
                 kind: None,
                 size: None,
                 letter_spacing: None,
+                keep_together: false,
             },
         ]);
         let layout = test_text().layout(&params).expect("layout");
@@ -5339,6 +5341,7 @@ mod tests {
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         }
     }
 
@@ -5632,6 +5635,7 @@ mod tests {
                 kind: None,
                 size: None,
                 letter_spacing: None,
+                keep_together: false,
             })
             .collect::<Vec<_>>();
         let mut text = test_text();

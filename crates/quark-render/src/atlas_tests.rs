@@ -395,6 +395,7 @@ fn a_spans_own_size_draws_its_glyphs_at_that_size() {
                 kind: None,
                 size: Some(32.0),
                 letter_spacing: None,
+                keep_together: false,
             }]),
         )
         .expect("layout");

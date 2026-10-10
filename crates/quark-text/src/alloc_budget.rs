@@ -162,6 +162,7 @@ fn styled_row(seed: usize) -> Input {
         kind: None,
         size: None,
         letter_spacing: None,
+        keep_together: false,
     };
     Input {
         spans: vec![
