@@ -77,6 +77,7 @@ impl Block {
                         (
                             StyledSpan {
                                 text: escaped,
+                                keep_together: span.keep_together || tone == SpanTone::InlineCode,
                                 ..span
                             },
                             tone,

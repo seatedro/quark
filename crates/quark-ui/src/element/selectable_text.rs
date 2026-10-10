@@ -167,6 +167,10 @@ pub struct StyledSpan {
     /// click target, underlined together on hover. Without an explicit
     /// `color`, link text paints in the theme's accent text color.
     pub link: Option<Arc<str>>,
+    /// Wrapping keeps the run on one line when it fits on one, rather than
+    /// breaking at its spaces; a run wider than a line wraps as usual. See
+    /// [`TextSpan::keep_together`].
+    pub keep_together: bool,
 }
 
 impl StyledSpan {
@@ -183,6 +187,7 @@ impl StyledSpan {
             underline_style: None,
             strikethrough: false,
             link: None,
+            keep_together: false,
         }
     }
 
@@ -196,9 +201,18 @@ impl StyledSpan {
         self
     }
 
-    /// Monospaced, for inline code. Set a background with [`Self::pill`].
+    /// Monospaced and kept together, for inline code. Set a background
+    /// with [`Self::pill`].
     pub fn code(mut self) -> Self {
         self.font_kind = FontKind::Mono;
+        self.keep_together = true;
+        self
+    }
+
+    /// Whether wrapping keeps the run on one line when it fits on one; see
+    /// [`Self::keep_together`](field@Self::keep_together).
+    pub fn keep_together(mut self, keep: bool) -> Self {
+        self.keep_together = keep;
         self
     }
 
@@ -1023,6 +1037,7 @@ fn styled_span(span: &StyledSpan, range: std::ops::Range<usize>, base: &TextStyl
         kind: (span.font_kind != base.font_kind).then_some(span.font_kind),
         size: span.font_scale.map(|scale| base.font_size * scale),
         letter_spacing: None,
+        keep_together: span.keep_together,
     }
 }
 
@@ -1098,8 +1113,10 @@ fn join_spans(spans: &[StyledSpan], style: &TextStyle, text: &mut String, out: &
     pill_room(spans, |range, owner, ems| {
         // The style's own spacing, in ems of this span's size.
         let own = style.letter_spacing / owner.font_scale.unwrap_or(1.0);
+        // Room only: the owner's own span keeps it together.
         out.push(TextSpan {
             letter_spacing: Some(own + ems),
+            keep_together: false,
             ..styled_span(owner, range, style)
         });
     });
