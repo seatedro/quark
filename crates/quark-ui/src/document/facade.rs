@@ -132,10 +132,7 @@ impl MarkdownDocument {
         &mut self,
         entries: impl IntoIterator<Item = MarkdownEntry>,
     ) -> Result<(), RowError> {
-        let rows = self.adopt(entries)?;
-        self.document.extend(&rows)?;
-        self.store(rows);
-        Ok(())
+        self.add(entries, |document, rows| document.extend(rows))
     }
 
     /// Inserts older rows before the first one; the rows on screen and
@@ -144,10 +141,39 @@ impl MarkdownDocument {
         &mut self,
         entries: impl IntoIterator<Item = MarkdownEntry>,
     ) -> Result<(), RowError> {
-        let rows = self.adopt(entries)?;
-        self.document.prepend(&rows)?;
-        self.store(rows);
-        Ok(())
+        self.add(entries, |document, rows| document.prepend(rows))
+    }
+
+    /// Inserts rows, in their given order, before the row at `index`
+    /// (`len()` appends), as a group of steps expands. The rows on screen
+    /// and the selection stay put, and an open find includes the new
+    /// rows' matches at once. Fails without changes for an index past the
+    /// end, or a row key already present or repeated in the batch.
+    pub fn insert(
+        &mut self,
+        index: usize,
+        entries: impl IntoIterator<Item = MarkdownEntry>,
+    ) -> Result<(), RowError> {
+        let len = self.len();
+        if index > len {
+            return Err(RowError::IndexOutOfBounds { index, len });
+        }
+        self.add(entries, |document, rows| document.insert(index, rows))
+    }
+
+    /// Inserts rows right after row `after`, as [`Self::insert`] does.
+    pub fn insert_after(
+        &mut self,
+        after: RowKey,
+        entries: impl IntoIterator<Item = MarkdownEntry>,
+    ) -> Result<(), RowError> {
+        let index = self
+            .document
+            .list()
+            .rows()
+            .index_of(after)
+            .ok_or(RowError::UnknownKey(after))?;
+        self.insert(index + 1, entries)
     }
 
     /// Replaces the markdown of `row`, as each streamed chunk arrives. Only
@@ -200,6 +226,9 @@ impl MarkdownDocument {
         self.refresh(row)
     }
 
+    /// Removes `row`. A row inserted later under the same key is a new
+    /// row: its blocks get new keys, so no selection, highlight, or
+    /// background height of this one reaches it.
     pub fn remove(&mut self, row: RowKey) -> Result<(), RowError> {
         self.document.remove(row)?;
         self.rows.remove(&row);
@@ -210,6 +239,7 @@ impl MarkdownDocument {
             }
             entry.markdown.clear(&mut self.syntax);
         }
+        self.refresh_open_find();
         Ok(())
     }
 
@@ -381,11 +411,15 @@ impl MarkdownDocument {
         self.document.selected_text(&self.rows)
     }
 
-    /// Parses and converts new rows without adding them anywhere.
-    fn adopt(
+    /// Adds new rows through `commit`, all or nothing: the keys are
+    /// checked before any markdown is parsed or any block key allocated,
+    /// and the converted rows are stored only once the document holds
+    /// them.
+    fn add(
         &mut self,
         entries: impl IntoIterator<Item = MarkdownEntry>,
-    ) -> Result<Vec<DocumentRow>, RowError> {
+        commit: impl FnOnce(&mut Document, &[DocumentRow]) -> Result<(), RowError>,
+    ) -> Result<(), RowError> {
         let entries: Vec<MarkdownEntry> = entries.into_iter().collect();
         // A whole history arrives as one batch, so repeats are found with a
         // set; the first repeated key is reported, and nothing is adopted.
@@ -396,6 +430,7 @@ impl MarkdownDocument {
             }
         }
         let mut rows = Vec::with_capacity(entries.len());
+        let mut staged = Vec::with_capacity(entries.len());
         for new in entries {
             let mut parser = IncrementalMarkdown::new();
             let doc = parser.parse(&new.markdown);
@@ -408,13 +443,23 @@ impl MarkdownDocument {
                 markdown: MarkdownBlocks::new(),
             };
             rows.push(self.convert(new.row, &mut entry));
-            self.entries.insert(new.row, entry);
+            staged.push((new.row, entry));
         }
-        Ok(rows)
+        // The document holds exactly the rows in `entries`, and callers
+        // check the position, so this fails only on a bug.
+        commit(&mut self.document, &rows)?;
+        self.entries.extend(staged);
+        self.rows.extend(rows.into_iter().map(|m| (m.key, m)));
+        self.refresh_open_find();
+        Ok(())
     }
 
-    fn store(&mut self, rows: Vec<DocumentRow>) {
-        self.rows.extend(rows.into_iter().map(|m| (m.key, m)));
+    /// Brings an open find up to date with the rows just committed, so a
+    /// caller can step through matches before the next prepare.
+    fn refresh_open_find(&mut self) {
+        if self.document.find().is_some() {
+            self.document.refresh_find(&self.rows);
+        }
     }
 
     /// Converts `entry`'s parsed markdown and records who owns its keys.

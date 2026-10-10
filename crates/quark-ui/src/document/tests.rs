@@ -576,6 +576,10 @@ enum Op {
     /// Message (by rank among current rows), new block count.
     Update(u8, u8),
     Remove(u8),
+    /// Position (by rank, up to the end), block count of each new row.
+    Insert(u8, Vec<u8>),
+    /// Puts the most recently removed row back after the row at a rank.
+    Reinsert(u8),
     SelectAll,
 }
 
@@ -585,6 +589,8 @@ fn op() -> impl Strategy<Value = Op> {
         (1u8..4).prop_map(Op::Prepend),
         (any::<u8>(), 0u8..4).prop_map(|(r, n)| Op::Update(r, n)),
         any::<u8>().prop_map(Op::Remove),
+        (any::<u8>(), prop::collection::vec(0u8..3, 0..4)).prop_map(|(r, n)| Op::Insert(r, n)),
+        any::<u8>().prop_map(Op::Reinsert),
         Just(Op::SelectAll),
     ]
 }
@@ -605,6 +611,7 @@ proptest! {
     fn edits_keep_rows_blocks_and_selection_consistent(ops in prop::collection::vec(op(), 1..40)) {
         let mut view: Document<GridGeometry> = Document::new(grid_style());
         let (mut next, mut first) = (1_000u64, 1_000u64);
+        let mut removed = Vec::new();
         for op in ops {
             match op {
                 Op::Push(n) => {
@@ -629,6 +636,29 @@ proptest! {
                     let keys = view.list().rows().keys();
                     let key = keys[rank as usize % keys.len()];
                     view.remove(key).unwrap();
+                    removed.push(key);
+                }
+                Op::Insert(rank, counts) => {
+                    let rows: Vec<_> = counts
+                        .iter()
+                        .map(|&count| {
+                            next += 1;
+                            blocks_message(next - 1, count)
+                        })
+                        .collect();
+                    view.insert(rank as usize % (view.len() + 1), &rows).unwrap();
+                }
+                Op::Reinsert(rank) => {
+                    if let Some(key) = removed.pop() {
+                        let row = blocks_message(key.0, 2);
+                        match view.list().rows().keys() {
+                            [] => view.insert(0, [&row]).unwrap(),
+                            keys => {
+                                let after = keys[rank as usize % keys.len()];
+                                view.insert_after(after, [&row]).unwrap();
+                            }
+                        }
+                    }
                 }
                 Op::SelectAll => view.select_all(),
             }

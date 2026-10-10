@@ -551,30 +551,47 @@ mod tests {
         assert_eq!((ui.heights(), ui.anchor()), (expected, anchor));
     }
 
-    // Catches a height measured at the old width being applied after a
-    // resize, which would leave the row marked exact at the wrong height.
+    // Catches a height measured before a change being applied after it: at
+    // the old width after a resize, which would leave the row marked exact
+    // at the wrong height, or for a removed row to the new row reusing its
+    // key.
     #[test]
-    fn result_measured_before_a_width_change_is_dropped() {
-        let mut ui = Ui::new(history(40), (420.0, 300.0));
-        // Every request at 420 finishes before the resize is seen.
-        let (background, _) = ui.md.background_mut();
-        let in_flight = background.pending.len();
-        let worker = background.worker.as_ref().unwrap();
-        let stale: Vec<RowHeight> = (0..in_flight)
-            .map(|_| worker.recv().ok().unwrap())
-            .collect();
+    fn a_result_measured_before_a_change_is_dropped() {
+        type Change = fn(&mut Ui, &[RowKey]);
+        let cases: [(&str, Change); 2] = [
+            ("width change", |ui, _| ui.size.0 = 300.0),
+            ("row key reused", |ui, rows| {
+                for &row in rows {
+                    let index = ui.md.document().list().rows().index_of(row).unwrap();
+                    ui.md.remove(row).unwrap();
+                    let grown = format!("{}\n\n{}", PIECES[0], PIECES[4]);
+                    ui.md.insert(index, [entry(row.0, grown)]).unwrap();
+                }
+            }),
+        ];
+        for (name, change) in cases {
+            let mut ui = Ui::new(history(40), (420.0, 300.0));
+            // Every request finishes before the change is seen.
+            let (background, _) = ui.md.background_mut();
+            let in_flight: Vec<RowKey> = background.pending.keys().copied().collect();
+            let worker = background.worker.as_ref().unwrap();
+            let stale: Vec<RowHeight> = in_flight
+                .iter()
+                .map(|_| worker.recv().ok().unwrap())
+                .collect();
 
-        ui.size.0 = 300.0;
-        ui.frame();
-        let (background, document) = ui.md.background_mut();
-        let taken = stale
-            .into_iter()
-            .filter(|result| background.take(*result, document))
-            .count();
-        ui.md.finish_measures();
+            change(&mut ui, &in_flight);
+            ui.frame();
+            let (background, document) = ui.md.background_mut();
+            let taken = stale
+                .into_iter()
+                .filter(|result| background.take(*result, document))
+                .count();
+            ui.md.finish_measures();
 
-        let expected = ui.synchronous_heights();
-        assert_eq!((taken, ui.heights()), (0, expected));
+            let expected = ui.synchronous_heights();
+            assert_eq!((taken, ui.heights()), (0, expected), "{name}");
+        }
     }
 
     // Catches a streaming row off screen keeping the height of its first

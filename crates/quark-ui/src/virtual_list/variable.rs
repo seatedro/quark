@@ -286,6 +286,9 @@ impl RowTable {
                 return Err(RowError::DuplicateKey(key));
             }
         }
+        if keys.is_empty() {
+            return Ok(());
+        }
         let height = self.estimate();
         let count = keys.len();
         let (own, map) = self.explicit_keys();
@@ -661,15 +664,39 @@ impl VariableList {
 
     /// Appends a batch of rows, indexing and checking once.
     pub fn extend(&mut self, keys: &[RowKey]) -> Result<f64, RowError> {
-        self.anchored(|rows| rows.insert_batch(rows.len(), keys))
+        self.insert_batch(self.rows.len(), keys)
+    }
+
+    /// Inserts a batch of rows before the row at `index` (`len()`
+    /// appends), indexing and checking once. Fails without changes for an
+    /// index past the end, or a key already present or repeated in the
+    /// batch.
+    pub fn insert_batch(&mut self, index: usize, keys: &[RowKey]) -> Result<f64, RowError> {
+        self.anchored(|rows| rows.insert_batch(index, keys))
     }
 
     pub fn insert(&mut self, index: usize, key: RowKey) -> Result<f64, RowError> {
         self.anchored(|rows| rows.insert(index, key))
     }
 
+    /// Removing the first visible row keeps the next row where it was on
+    /// screen, or the previous one when it was the last; the view clamps
+    /// where an end of the content makes that impossible.
     pub fn remove(&mut self, key: RowKey) -> Result<f64, RowError> {
-        self.anchored(|rows| rows.remove(key))
+        let anchor = self.capture_anchor().and_then(|anchor| {
+            if anchor.key != key {
+                return Some(anchor);
+            }
+            let index = self.rows.index_of(key)?;
+            let survivor = if index + 1 < self.rows.len() {
+                index + 1
+            } else {
+                index.checked_sub(1)?
+            };
+            Some(self.anchor_at(survivor))
+        });
+        self.rows.remove(key)?;
+        Ok(self.restore(anchor))
     }
 
     pub fn set_height(&mut self, key: RowKey, height: f32) -> Result<f64, RowError> {
@@ -746,17 +773,19 @@ impl VariableList {
     }
 
     fn capture_anchor(&self) -> Option<Anchor> {
-        let index = self.rows.row_at(self.scroll_offset)?;
-        let top = self.rows.offset_of_index(index);
-        Some(Anchor {
+        Some(self.anchor_at(self.rows.row_at(self.scroll_offset)?))
+    }
+
+    fn anchor_at(&self, index: usize) -> Anchor {
+        Anchor {
             key: self.rows.key_at(index),
-            top_in_view: top - self.scroll_offset,
-        })
+            top_in_view: self.rows.offset_of_index(index) - self.scroll_offset,
+        }
     }
 
     /// Moves the scroll offset to honor the pin or the anchor and returns
-    /// the change. A removed anchor row leaves the offset where it was,
-    /// which keeps the rows above it in place.
+    /// the change. Without an anchor (no rows were left to keep) the
+    /// offset only clamps, so empty content settles at zero.
     fn restore(&mut self, anchor: Option<Anchor>) -> f64 {
         let old = self.scroll_offset;
         let max = self.max_scroll_offset();
