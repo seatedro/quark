@@ -16,9 +16,11 @@
 //! Each frame the app calls [`Document::prepare`] with a
 //! [`BlockMeasurer`] (normally [`TextMeasurer`] over the frame's shared
 //! `LayoutCache`), which measures only the rows in the overscanned window,
-//! then builds [`Document::element`] from the result. Pointer and wheel
-//! input comes back as [`DocumentEvent`]s in the element's local
-//! coordinates, which the app passes to [`Document::handle`].
+//! then builds [`Document::element`] from the result. Pointer input comes
+//! back as [`DocumentEvent`]s in the element's local coordinates, which the
+//! app passes to [`Document::handle`]. Wheel, trackpad, scrollbar, and key
+//! input moves the document's [`ScrollHandle`] directly, by the points
+//! given, with flings and smooth scrolls; the next prepare takes it in.
 //!
 //! Rows outside the window are measured on a background thread when the
 //! measurer offers a [`MeasureSpec`] ([`MarkdownDocument`] does this by
@@ -36,6 +38,8 @@ mod find;
 mod images;
 mod markdown;
 mod measure;
+#[cfg(test)]
+mod scroll_tests;
 mod syntax;
 mod table;
 #[cfg(test)]
@@ -72,10 +76,13 @@ use quark_render::scene::Rect;
 use quark_text::FontEpoch;
 
 use crate::element::{
-    AnyElement, Binding, LineHeight, ScrollHandle, ScrollbarVisibility, StyledSpan, join_code_lines,
+    AnyElement, Axis, Binding, LineHeight, ScrollAxes, ScrollHandle, ScrollStep, StyledSpan,
+    join_code_lines,
 };
 use crate::theme::Theme;
-use crate::virtual_list::{RowError, RowIntegrityError, RowKey, ScrollAlign, VariableList};
+use crate::virtual_list::{
+    RowError, RowIntegrityError, RowKey, STICK_EPSILON_PX, ScrollAlign, VariableList,
+};
 use quark::Color;
 use quark::focus::FocusId;
 
@@ -933,9 +940,19 @@ pub struct Document<G = TextGeometry> {
     /// Code blocks whose lines wrap, kept while the block is in the
     /// document.
     wrapped: HashSet<BlockKey>,
-    /// When the list's auto-hiding scrollbar shows; see
-    /// [`DocumentElement::scrollbar_auto_hide`](element::DocumentElement::scrollbar_auto_hide).
-    scrollbar: ScrollbarVisibility,
+    /// The vertical scroll. Input and motion move it: the router moves it
+    /// on wheel, thumb, and key input, and prepare resolves its requests,
+    /// smooth scrolls, and flings. The list keeps the row heights, the
+    /// anchored offset, and the bottom pin; each prepare and edit takes
+    /// new input into the list first ([`Self::sync_scroll_input`]) and
+    /// moves the handle along with the list's corrections after
+    /// ([`Self::rebase_scroll`]).
+    scroll: ScrollHandle,
+    /// The handle's input generation the list has taken in.
+    scroll_input: u64,
+    /// The focus target of the list itself, which keyboard scrolling
+    /// moves.
+    focus: FocusId,
     /// Elements built so far; rows whose scroll is still moving hash it so
     /// they rebuild every frame until it settles.
     elements_built: u64,
@@ -993,7 +1010,9 @@ impl<G: BlockGeometry> Document<G> {
             scroll_handles: HashMap::new(),
             code_toolbar: false,
             wrapped: HashSet::new(),
-            scrollbar: ScrollbarVisibility::new(),
+            scroll: ScrollHandle::new(),
+            scroll_input: 0,
+            focus: next_focus(),
             elements_built: 0,
         }
     }
@@ -1069,7 +1088,7 @@ impl<G: BlockGeometry> Document<G> {
 
     /// Appends a row at the end.
     pub fn push(&mut self, row: &DocumentRow) -> Result<(), RowError> {
-        self.list.append(row.key)?;
+        self.anchored(|list| list.append(row.key))?;
         let blocks = row
             .blocks
             .iter()
@@ -1089,7 +1108,7 @@ impl<G: BlockGeometry> Document<G> {
     ) -> Result<(), RowError> {
         let rows: Vec<&DocumentRow> = rows.into_iter().collect();
         let keys: Vec<RowKey> = rows.iter().map(|m| m.key).collect();
-        self.list.extend(&keys)?;
+        self.anchored(|list| list.extend(&keys))?;
         let mut fresh = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
@@ -1116,7 +1135,7 @@ impl<G: BlockGeometry> Document<G> {
     ) -> Result<(), RowError> {
         let rows: Vec<&DocumentRow> = rows.into_iter().collect();
         let keys: Vec<RowKey> = rows.iter().map(|m| m.key).collect();
-        self.list.prepend(&keys)?;
+        self.anchored(|list| list.prepend(&keys))?;
         let mut fresh = Vec::new();
         let mut seen = HashSet::new();
         for row in &rows {
@@ -1177,7 +1196,7 @@ impl<G: BlockGeometry> Document<G> {
     }
 
     pub fn remove(&mut self, key: RowKey) -> Result<(), RowError> {
-        self.list.remove(key)?;
+        self.anchored(|list| list.remove(key))?;
         // The rows on screen stay put; nothing is left to keep in place.
         if self.anchor.is_some_and(|a| a.row == key) {
             self.anchor = None;
@@ -1237,29 +1256,131 @@ impl<G: BlockGeometry> Document<G> {
 
     // -- Scrolling --
 
-    pub fn scroll_offset(&self) -> f32 {
-        self.list.scroll_offset() as f32
+    /// The vertical scroll handle. Wheel, trackpad, scrollbar, and key
+    /// input move it through the element; flings and smooth scrolls run
+    /// in [`Self::prepare`]. Ask for scrolls through it:
+    /// `set_offset(0.0, y)` jumps and `animate_to(0.0, y)` scrolls
+    /// smoothly on the next prepare, overriding anchoring. Its item
+    /// requests reach only keyed elements of materialized rows; bring rows
+    /// and text into view with [`Self::anchor_row`] and [`Self::reveal`].
+    pub fn scroll_handle(&self) -> &ScrollHandle {
+        &self.scroll
     }
 
+    /// The offset, including wheel and thumb input routed to the handle
+    /// since the last prepare.
+    pub fn scroll_offset_f64(&self) -> f64 {
+        if self.input_pending() {
+            self.scroll.offset_f64().1
+        } else {
+            self.list.scroll_offset()
+        }
+    }
+
+    pub fn max_scroll_offset_f64(&self) -> f64 {
+        self.list.max_scroll_offset()
+    }
+
+    /// [`Self::scroll_offset_f64`], rounded to `f32`: past 2^24 points it
+    /// steps by whole points or more.
+    pub fn scroll_offset(&self) -> f32 {
+        self.scroll_offset_f64() as f32
+    }
+
+    /// [`Self::max_scroll_offset_f64`], rounded to `f32`.
     pub fn max_scroll_offset(&self) -> f32 {
-        self.list.max_scroll_offset() as f32
+        self.max_scroll_offset_f64() as f32
     }
 
     /// A user scroll; landing at the bottom pins the view there. Cancels
-    /// a [`Self::anchor_row`].
+    /// a [`Self::anchor_row`] and stops a smooth scroll or fling.
     pub fn set_scroll_offset(&mut self, offset: impl Into<f64>) -> f32 {
+        self.sync_scroll_input();
         self.anchor = None;
+        self.scroll.stop();
         self.adjust_scroll(offset)
     }
 
     /// Moves the view without cancelling an anchor: the document's own
-    /// corrections.
+    /// corrections. Motion in progress moves along.
     fn adjust_scroll(&mut self, offset: impl Into<f64>) -> f32 {
         let offset = self.list.set_scroll_offset(offset);
         if self.list.is_stuck_to_bottom() {
             self.content_below = false;
         }
+        self.rebase_scroll();
         offset as f32
+    }
+
+    /// Takes the input the router gave the handle since the last sync
+    /// (wheel and thumb moves land on it directly) into the list, before
+    /// anything anchors against the list's offset. New input of any kind,
+    /// even input clamped to no movement, supersedes an anchor and a
+    /// pending reveal. The document's own moves are not input.
+    fn sync_scroll_input(&mut self) {
+        if !self.input_pending() {
+            return;
+        }
+        self.scroll_input = self.scroll.input_generation();
+        self.anchor = None;
+        self.reveal = None;
+        self.list.set_scroll_offset(self.scroll.offset_f64().1);
+        if self.list.is_stuck_to_bottom() {
+            self.content_below = false;
+        }
+        self.rebase_scroll();
+    }
+
+    /// Whether input moved the handle since the list last took it in.
+    fn input_pending(&self) -> bool {
+        self.scroll.input_generation() != self.scroll_input
+    }
+
+    /// Moves the handle to the list's offset after the list moved itself
+    /// (an anchoring correction, the bottom pin, a remeasure), carrying a
+    /// smooth scroll or fling along, and gives it the list's extent.
+    fn rebase_scroll(&mut self) {
+        self.scroll.rebase(
+            Axis::Y,
+            self.list.scroll_offset(),
+            self.list.max_scroll_offset(),
+            self.list.is_stuck_to_bottom(),
+        );
+    }
+
+    /// Runs a row-table edit that keeps the first visible row or the
+    /// bottom in place: routed input is taken in first, so the edit
+    /// anchors against what the user scrolled to, and the handle follows
+    /// the correction after.
+    fn anchored<T>(&mut self, edit: impl FnOnce(&mut VariableList) -> T) -> T {
+        self.sync_scroll_input();
+        let out = edit(&mut self.list);
+        self.rebase_scroll();
+        out
+    }
+
+    /// Resolves the handle's pending request and motion at `now_ms`
+    /// against the list's extent, and moves the list there: a resolved
+    /// scroll pins or unpins like a user scroll.
+    fn resolve_scroll(&mut self, now_ms: u64, reduced_motion: bool) {
+        if self.scroll.is_settled() {
+            return;
+        }
+        self.scroll.advance(ScrollStep {
+            size: self.size,
+            content: (f64::from(self.size.0), self.list.rows().total_extent()),
+            axes: ScrollAxes { x: false, y: true },
+            now_ms,
+            reduced_motion,
+            // The element asks for the frames while motion goes on.
+            animate: true,
+            defer_items: false,
+        });
+        self.list.set_scroll_offset(self.scroll.offset_f64().1);
+        if self.list.is_stuck_to_bottom() {
+            self.content_below = false;
+        }
+        self.rebase_scroll();
     }
 
     /// Keeps `row`'s top `viewport_offset` points below the viewport's top,
@@ -1273,12 +1394,15 @@ impl<G: BlockGeometry> Document<G> {
     ///
     /// A user scroll ([`Self::set_scroll_offset`], wheel, drag
     /// autoscroll), a reveal, another anchor, or removing the row cancels
-    /// it; removal leaves the view where it is. Fails for a row that is not
-    /// in the document, or a nonfinite offset.
+    /// it; removal leaves the view where it is. Anchoring stops a smooth
+    /// scroll or fling. Fails for a row that is not in the document, or a
+    /// nonfinite offset.
     pub fn anchor_row(&mut self, row: RowKey, viewport_offset: f32) -> Result<(), RowError> {
         if self.list.rows().index_of(row).is_none() || !viewport_offset.is_finite() {
             return Err(RowError::UnknownKey(row));
         }
+        self.sync_scroll_input();
+        self.scroll.stop();
         self.anchor = Some(RowAnchor {
             row,
             viewport_offset,
@@ -1297,11 +1421,19 @@ impl<G: BlockGeometry> Document<G> {
         self.anchor = None;
     }
 
+    /// Scrolls by `delta` points from the offset, in `f64`.
     pub fn scroll_by(&mut self, delta: f32) -> f32 {
-        self.set_scroll_offset(self.scroll_offset() + delta)
+        self.sync_scroll_input();
+        self.set_scroll_offset(self.list.scroll_offset() + f64::from(delta))
     }
 
+    /// Whether the view follows the bottom, including input routed to the
+    /// handle since the last prepare, which pins as a user scroll does.
     pub fn is_stuck_to_bottom(&self) -> bool {
+        if self.input_pending() {
+            let max = self.list.max_scroll_offset();
+            return self.scroll.offset_f64().1 >= max - f64::from(STICK_EPSILON_PX);
+        }
         self.list.is_stuck_to_bottom()
     }
 
@@ -1483,6 +1615,8 @@ impl<G: BlockGeometry> Document<G> {
         let Some(row) = self.block_row.get(&block).copied() else {
             return;
         };
+        self.sync_scroll_input();
+        self.scroll.stop();
         let in_view = self
             .blocks
             .iter()
@@ -1492,6 +1626,7 @@ impl<G: BlockGeometry> Document<G> {
         self.anchor = None;
         if !in_view {
             let _ = self.list.scroll_to(row, align);
+            self.rebase_scroll();
             if self.list.is_stuck_to_bottom() {
                 self.content_below = false;
             }
@@ -1577,6 +1712,8 @@ impl<G: BlockGeometry> Document<G> {
     pub fn handle(&mut self, event: DocumentEvent) {
         match event {
             DocumentEvent::PointerDown { x, y } => {
+                // Selecting takes over from a smooth scroll or fling.
+                self.scroll.stop();
                 self.drag = Some(Drag {
                     pointer: (x, y),
                     last_ms: None,
@@ -1590,10 +1727,15 @@ impl<G: BlockGeometry> Document<G> {
                 self.extend_selection_to(x, y);
             }
             DocumentEvent::PointerUp => self.drag = None,
+            #[allow(deprecated)]
             DocumentEvent::Wheel(lines) => {
                 self.scroll_by(lines as f32 * self.style.line_scroll);
             }
+            #[allow(deprecated)]
             DocumentEvent::ScrollTo(offset) => {
+                self.set_scroll_offset(offset);
+            }
+            DocumentEvent::ScrollToOffset(offset) => {
                 self.set_scroll_offset(offset);
             }
             DocumentEvent::SetCodeWrap { block, wrap } => self.set_code_wrap(block, wrap),
@@ -1604,8 +1746,13 @@ impl<G: BlockGeometry> Document<G> {
         self.drag.is_some()
     }
 
-    /// A drag is autoscrolling; draw another frame.
+    /// A drag is autoscrolling, or a scroll is pending or moving; draw
+    /// another frame.
     pub fn wants_frame(&self) -> bool {
+        self.autoscrolling() || !self.scroll.is_settled()
+    }
+
+    fn autoscrolling(&self) -> bool {
         self.drag
             .is_some_and(|drag| self.autoscroll_velocity(drag.pointer.1) != 0.0)
     }
@@ -1664,13 +1811,16 @@ impl<G: BlockGeometry> Document<G> {
     }
 
     /// Whether `focus` is one of the document's own focus targets: the
-    /// sideways scroll of a wide code block or table, which a press or Tab
-    /// focuses so arrow keys reach it. Apps route copy and select-all to
-    /// the document while focus is on nothing or on one of these.
+    /// list itself, or the sideways scroll of a wide code block or table,
+    /// which a press or Tab focuses so arrow keys reach it. Apps route copy
+    /// and select-all to the document while focus is on nothing or on one
+    /// of these.
     pub fn owns_focus(&self, focus: FocusId) -> bool {
-        self.scroll_handles
-            .keys()
-            .any(|key| FocusId::from_key(&scroll_area_id(*key)) == focus)
+        focus == self.focus
+            || self
+                .scroll_handles
+                .keys()
+                .any(|key| FocusId::from_key(&scroll_area_id(*key)) == focus)
     }
 
     /// How far block `key`'s content is scrolled left: a wide code block
@@ -1690,25 +1840,56 @@ impl<G: BlockGeometry> Document<G> {
 
     // -- Frame --
 
-    /// Advances autoscroll to `now_ms`, measures the rows entering the
-    /// window at `width`, and rebuilds the materialized rows. A width
-    /// change, or a change of the measurer's [`MeasureKey`] (such as new
-    /// fonts), remeasures every row as it becomes visible.
+    /// Takes in routed scroll input, resolves the scroll's requests,
+    /// smooth scroll, or fling and autoscroll at `now_ms`, measures the
+    /// rows entering the window at `width`, and rebuilds the materialized
+    /// rows. A width change, or a change of the measurer's [`MeasureKey`]
+    /// (such as new fonts), remeasures every row as it becomes visible.
+    /// `reduced_motion` (the theme's) makes smooth scrolls jump and stops
+    /// flings.
     pub fn prepare<M: BlockMeasurer<Geometry = G>>(
         &mut self,
         width: f32,
         height: f32,
         now_ms: u64,
+        reduced_motion: bool,
         source: &impl DocumentSource,
         measurer: &mut M,
     ) {
+        self.begin_prepare(width, height, now_ms, reduced_motion, measurer);
+        self.finish_prepare(source, measurer);
+    }
+
+    /// The first half of [`Self::prepare`]: input, the viewport, and the
+    /// scroll's motion, resolved before anything anchors against the
+    /// offset. Moving only in the element's prepaint would paint rows
+    /// prepared for another window.
+    fn begin_prepare<M: BlockMeasurer<Geometry = G>>(
+        &mut self,
+        width: f32,
+        height: f32,
+        now_ms: u64,
+        reduced_motion: bool,
+        measurer: &mut M,
+    ) {
+        self.sync_scroll_input();
         if height != self.size.1 {
-            self.list.set_viewport_height(height);
+            self.anchored(|list| list.set_viewport_height(height));
         }
         self.size = (width, height);
         measurer.apply_style(&self.style);
+        self.resolve_scroll(now_ms, reduced_motion);
         self.autoscroll(now_ms);
+    }
 
+    /// The rest of [`Self::prepare`]: measuring, held rows, anchors, and
+    /// reveals, each correction moving the handle along, then the rows at
+    /// the final offset.
+    fn finish_prepare<M: BlockMeasurer<Geometry = G>>(
+        &mut self,
+        source: &impl DocumentSource,
+        measurer: &mut M,
+    ) {
         let held = self.held_row.take().and_then(|row| {
             let top = self.list.rows().offset_of(row)? - self.list.scroll_offset();
             Some((row, top))
@@ -1814,6 +1995,7 @@ impl<G: BlockGeometry> Document<G> {
                     RowItem::Adornment { height, .. } => height,
                 })
             });
+        self.rebase_scroll();
     }
 
     fn autoscroll(&mut self, now_ms: u64) {
@@ -2028,7 +2210,7 @@ impl<G: BlockGeometry> Document<G> {
         if self.list.rows().is_measured(row) != Some(false) {
             return false;
         }
-        self.list.set_height(row, height).is_ok()
+        self.anchored(|list| list.set_height(row, height)).is_ok()
     }
 
     /// A copy that builds its next element from scratch, for comparing
@@ -2245,6 +2427,13 @@ fn vertical_distance(rect: &Rect, y: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// A focus target of its own for each document's list.
+fn next_focus() -> FocusId {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    FocusId::new(quark::stable_hash("quark.document") ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
 /// The stable id of the sideways scroll area of wide block `key`.

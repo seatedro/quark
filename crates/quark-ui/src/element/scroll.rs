@@ -19,10 +19,8 @@
 //! attaches its own with `scrollbar_visibility`.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::animation::{AnimKey, Curve, PropId};
 use crate::design::ScrollbarSz;
 
 /// Distance one arrow key scrolls.
@@ -30,12 +28,9 @@ pub const KEY_LINE_PX: f32 = 2.0 * WHEEL_LINE_PX;
 /// How long scrollbars of an auto-hiding container stay after it scrolls.
 pub const SCROLLBAR_LINGER_MS: u64 = 1000;
 
-/// Smooth scrolls (programmatic and keyboard) take this long.
-const SMOOTH_SCROLL: Motion = Motion::Tween {
-    duration_ms: 220,
-    delay_ms: 0,
-    curve: Curve::EaseOutCubic,
-};
+/// Smooth scrolls (programmatic and keyboard) take this long, easing out
+/// on a cubic.
+const SMOOTH_SCROLL_MS: u64 = 220;
 /// Time constant of a fling's exponential slowdown. 325 ms is the value
 /// iOS-like kinetic scrolling uses: a fling covers `velocity * tau`.
 const FLING_TAU_MS: f32 = 325.0;
@@ -46,10 +41,6 @@ const FLING_STOP_SPEED: f32 = 0.02;
 const VELOCITY_WINDOW_MS: u64 = 100;
 /// Fingers that rested longer than this before lifting do not fling.
 const LIFT_PAUSE_MS: u64 = 50;
-/// Animation table props of a handle's smooth scroll; below the transition
-/// range so the per-frame transition sweep leaves them alone.
-const PROP_X: PropId = PropId(0xE000);
-const PROP_Y: PropId = PropId(0xE001);
 
 /// One page of a `viewport`-long container: the viewport less two lines of
 /// overlap, but at least half of it.
@@ -321,6 +312,49 @@ impl Fling {
     }
 }
 
+/// A smooth scroll: an ease-out cubic from `from` to `to` over
+/// [`SMOOTH_SCROLL_MS`] from `start_ms`, all in `f64`, so a scroll far
+/// into long content lands exactly on its target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Smooth {
+    from: [f64; 2],
+    to: [f64; 2],
+    start_ms: u64,
+}
+
+impl Smooth {
+    /// Offset at `now_ms`, and whether the scroll is still under way.
+    fn at(&self, now_ms: u64) -> ([f64; 2], bool) {
+        let t = now_ms.saturating_sub(self.start_ms) as f64 / SMOOTH_SCROLL_MS as f64;
+        if t >= 1.0 {
+            return (self.to, false);
+        }
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let at = |i: usize| self.from[i] + (self.to[i] - self.from[i]) * eased;
+        ([at(0), at(1)], true)
+    }
+}
+
+/// What [`ScrollHandle::advance`] resolves a frame's offset against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScrollStep {
+    /// The viewport's size.
+    pub size: (f32, f32),
+    /// The content's size.
+    pub content: (f64, f64),
+    pub axes: ScrollAxes,
+    pub now_ms: u64,
+    /// Smooth scrolls jump and flings stop where they are.
+    pub reduced_motion: bool,
+    /// Smooth scrolls animate; without it they jump (a div painted without
+    /// an animation table).
+    pub animate: bool,
+    /// An item request waits for the item's bounds in this frame
+    /// ([`ScrollHandle::end_frame`]), as a div's does. Otherwise it lands
+    /// by the bounds recorded last frame.
+    pub defer_items: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Request {
     Offset {
@@ -357,14 +391,16 @@ struct ScrollState {
     /// at: [`ScrollHandle::end_frame`] resolves it against the item's
     /// bounds in this frame.
     item_request: Option<(Request, [f64; 2])>,
-    /// Target of the smooth scroll in progress. The animation table runs
-    /// the distance left to it, which `f32` holds exactly near the end.
-    smooth: Option<[f64; 2]>,
+    smooth: Option<Smooth>,
     fling: Option<Fling>,
     samples: Samples,
     /// The axis whose thumb is held.
     dragging: Option<Axis>,
-    key: AnimKey,
+    /// Bumped by every wheel, thumb, key, and requested scroll, even one
+    /// clamped to no movement, but not by an owner's own corrections
+    /// ([`ScrollHandle::rebase`]): a document tells user intent from
+    /// layout by it.
+    input: u64,
 }
 
 /// Shared, retained scroll state of one container; clones refer to the same
@@ -395,8 +431,6 @@ impl std::fmt::Debug for ScrollHandle {
 
 impl ScrollHandle {
     pub fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let state = Rc::new(RefCell::new(ScrollState {
             offset: [0.0; 2],
             max: [0.0; 2],
@@ -411,11 +445,7 @@ impl ScrollHandle {
             fling: None,
             samples: Samples::default(),
             dragging: None,
-            // Hash the counter so handle keys spread over the key space
-            // instead of sitting next to small app-chosen keys.
-            key: AnimKey(
-                quark::stable_hash("scroll-handle") ^ id.wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            ),
+            input: 0,
         }));
         Self(state, ScrollbarVisibility::new())
     }
@@ -517,6 +547,47 @@ impl ScrollHandle {
         let mut s = self.0.borrow_mut();
         s.request = Some(request);
         s.fling = None;
+        s.input += 1;
+    }
+
+    /// Changes with every wheel, thumb, key, and requested scroll since the
+    /// handle was made, moved or not, and with nothing else.
+    pub(crate) fn input_generation(&self) -> u64 {
+        self.0.borrow().input
+    }
+
+    /// Drop a pending request and stop a smooth scroll or fling where it
+    /// is: the owner moved the offset itself.
+    pub(crate) fn stop(&self) {
+        let mut s = self.0.borrow_mut();
+        s.request = None;
+        s.smooth = None;
+        s.fling = None;
+    }
+
+    /// Follow content that moved under the viewport along `axis`: the
+    /// offset becomes `to` (the owner's anchoring correction), a smooth
+    /// scroll or fling in progress moves with it, keeping its velocity and
+    /// timing, and the offset is clamped to the new `max`. With
+    /// `follows_end` the move only follows the end of the content (a view
+    /// pinned to the bottom): a smooth scroll keeps its target, unless it
+    /// was headed for the end.
+    pub(crate) fn rebase(&self, axis: Axis, to: f64, max: f64, follows_end: bool) {
+        let mut s = self.0.borrow_mut();
+        let i = axis.index();
+        let delta = to - s.offset[i];
+        let old_max = s.max[i];
+        if let Some(smooth) = &mut s.smooth {
+            smooth.from[i] += delta;
+            if !follows_end || smooth.to[i] >= old_max {
+                smooth.to[i] += delta;
+            }
+        }
+        if let Some(fling) = &mut s.fling {
+            fling.from[i] += delta;
+        }
+        s.max[i] = max.max(0.0);
+        s.offset[i] = to.clamp(0.0, s.max[i]);
     }
 
     /// Whether the content can move along `axis` toward its end
@@ -539,6 +610,7 @@ impl ScrollHandle {
         s.smooth = None;
         s.fling = None;
         s.request = None;
+        s.input += 1;
         let mut sample = Sample {
             delta: [0.0; 2],
             at_ms: now_ms,
@@ -573,6 +645,7 @@ impl ScrollHandle {
             velocity,
             start_ms: now_ms,
         });
+        s.input += 1;
         bump_epoch();
         true
     }
@@ -586,9 +659,10 @@ impl ScrollHandle {
     /// moves anything.
     pub(crate) fn key_scroll(&self, scroll: KeyScroll) -> bool {
         let mut s = self.0.borrow_mut();
+        s.input += 1;
         let axis = scroll.axis();
         let i = axis.index();
-        let mut to = s.smooth.unwrap_or(s.offset);
+        let mut to = s.smooth.map_or(s.offset, |smooth| smooth.to);
         if let Some(Request::Offset { to: pending, .. }) = s.request {
             to = pending;
         }
@@ -611,6 +685,7 @@ impl ScrollHandle {
         s.smooth = None;
         s.fling = None;
         s.request = None;
+        s.input += 1;
         if to != s.offset[i] {
             s.offset[i] = to;
             bump_epoch();
@@ -640,85 +715,80 @@ impl ScrollHandle {
         self.0.borrow().dragging
     }
 
-    /// Start a frame: take the container's `viewport`, its `content` size,
-    /// and the content position its children are laid out from, resolve
-    /// requests, advance a smooth scroll or fling, and return the offset
-    /// to paint children at: the scroll offset less `origin`. Keyed
-    /// descendants painted before [`Self::end_frame`] are recorded for
-    /// `scroll_to_item`.
-    pub(crate) fn begin_frame(
-        &self,
-        viewport: Rect,
-        content: (f64, f64),
-        origin: (f64, f64),
-        axes: ScrollAxes,
-        cx: &mut ElementContext,
-    ) -> (f32, f32) {
-        let now = cx.clock_ms;
-        let reduced_motion = cx.theme.reduced_motion;
+    /// The controller step: take the viewport and content sizes, resolve a
+    /// pending request, and move a smooth scroll or fling to `now_ms`,
+    /// clamped to the content. Returns whether motion goes on, so the
+    /// caller asks for the next frame. Changing to reduced motion while
+    /// moving lands a smooth scroll on its target and stops a fling where
+    /// it is.
+    pub(crate) fn advance(&self, step: ScrollStep) -> bool {
+        let now = step.now_ms;
         let mut s = self.0.borrow_mut();
         let s = &mut *s;
-        s.viewport = viewport;
-        s.origin = [origin.0, origin.1];
         for axis in Axis::BOTH {
             let i = axis.index();
-            let content = match axis {
-                Axis::X => content.0,
-                Axis::Y => content.1,
+            let (content, view) = match axis {
+                Axis::X => (step.content.0, step.size.0),
+                Axis::Y => (step.content.1, step.size.1),
             };
-            s.max[i] = if axes.has(axis) {
-                (content - f64::from(axis.span(viewport).1)).max(0.0)
+            s.max[i] = if step.axes.has(axis) {
+                (content - f64::from(view)).max(0.0)
             } else {
                 0.0
             };
         }
         let clamp =
             |to: [f64; 2], max: [f64; 2]| [to[0].clamp(0.0, max[0]), to[1].clamp(0.0, max[1])];
+        let animate = step.animate && !step.reduced_motion;
 
         s.item_request = None;
         match s.request.take() {
             Some(Request::Offset { to, smooth }) => {
                 s.fling = None;
                 let to = clamp(to, s.max);
-                s.start_scroll(to, smooth && !reduced_motion, now, cx);
+                s.start_scroll(to, smooth && animate, now);
             }
             Some(request @ Request::Item { smooth, .. }) => {
-                // Jump to where the item was last frame now, so a still
-                // item costs no second prepaint; `end_frame` corrects the
-                // offset when this frame moved it.
                 s.fling = None;
                 let from = s.offset;
-                let found = request.item_offset(&s.items, s.items_origin, from, viewport, axes);
-                if !smooth && let Some(to) = found {
-                    let to = clamp(to, s.max);
-                    s.start_scroll(to, false, now, cx);
+                let viewport = Rect {
+                    width: step.size.0,
+                    height: step.size.1,
+                    ..s.viewport
+                };
+                let found =
+                    request.item_offset(&s.items, s.items_origin, from, viewport, step.axes);
+                if step.defer_items {
+                    // Jump to where the item was last frame now, so a still
+                    // item costs no second prepaint; `end_frame` corrects
+                    // the offset when this frame moved it.
+                    if !smooth && let Some(to) = found {
+                        s.start_scroll(clamp(to, s.max), false, now);
+                    }
+                    s.item_request = Some((request, from));
+                } else if let Some(to) = found {
+                    s.start_scroll(clamp(to, s.max), smooth && animate, now);
                 }
-                s.item_request = Some((request, from));
             }
             None => {}
         }
 
-        if let Some(target) = s.smooth {
-            let key = s.key;
-            let moving = match cx.animations_mut() {
-                Some(table) => {
-                    let left = |prop| f64::from(table.get(key, prop).unwrap_or(0.0));
-                    s.offset = [target[0] + left(PROP_X), target[1] + left(PROP_Y)];
-                    let moving = table.is_animating(key, PROP_X) || table.is_animating(key, PROP_Y);
-                    if !moving {
-                        table.remove(key, PROP_X);
-                        table.remove(key, PROP_Y);
-                    }
-                    moving
-                }
-                None => false,
-            };
-            if moving {
-                // The table schedules the frame; this marks the output as
-                // clock-dependent for cache boundaries.
-                cx.request_frame_at_ms(now);
+        if step.reduced_motion {
+            if let Some(smooth) = s.smooth.take() {
+                s.offset = smooth.to;
+            }
+            if let Some(fling) = s.fling.take() {
+                s.offset = fling.at(now).0;
+            }
+        }
+
+        let mut moving = false;
+        if let Some(smooth) = s.smooth {
+            let (at, more) = smooth.at(now);
+            s.offset = at;
+            if more {
+                moving = true;
             } else {
-                s.offset = target;
                 s.smooth = None;
             }
         }
@@ -733,11 +803,74 @@ impl ScrollHandle {
             if speed < FLING_STOP_SPEED || blocked {
                 s.fling = None;
             } else {
-                cx.request_frame_at_ms(now);
+                moving = true;
             }
         }
 
         s.offset = clamp(s.offset, s.max);
+        moving
+    }
+
+    /// Start a frame: take the container's `viewport`, its `content` size,
+    /// and the content position its children are laid out from, resolve
+    /// requests, advance a smooth scroll or fling ([`Self::advance`]), and
+    /// return the offset to paint children at: the scroll offset less
+    /// `origin`. Keyed descendants painted before [`Self::end_frame`] are
+    /// recorded for `scroll_to_item`.
+    pub(crate) fn begin_frame(
+        &self,
+        viewport: Rect,
+        content: (f64, f64),
+        origin: (f64, f64),
+        axes: ScrollAxes,
+        cx: &mut ElementContext,
+    ) -> (f32, f32) {
+        {
+            let mut s = self.0.borrow_mut();
+            s.viewport = viewport;
+            s.origin = [origin.0, origin.1];
+        }
+        let now = cx.clock_ms;
+        let moving = self.advance(ScrollStep {
+            size: (viewport.width, viewport.height),
+            content,
+            axes,
+            now_ms: now,
+            reduced_motion: cx.theme.reduced_motion,
+            animate: cx.animations().is_some(),
+            defer_items: true,
+        });
+        if moving {
+            // Also marks the output as clock-dependent for cache
+            // boundaries.
+            cx.request_frame_at_ms(now);
+        }
+        self.watch(viewport, cx)
+    }
+
+    /// Start a frame whose offset [`Self::advance`] resolved already, as a
+    /// document does while preparing its rows: take the container's
+    /// `viewport` (window points), lay the children out at the offset
+    /// itself, and ask for the next frame while motion goes on. Keyed
+    /// descendants painted before [`Self::end_frame`] are recorded for the
+    /// next `advance`.
+    pub(crate) fn begin_resolved_frame(&self, viewport: Rect, cx: &mut ElementContext) {
+        let moving = {
+            let mut s = self.0.borrow_mut();
+            s.viewport = viewport;
+            s.origin = s.offset;
+            s.smooth.is_some() || s.fling.is_some()
+        };
+        if moving {
+            cx.request_frame_at_ms(cx.clock_ms);
+        }
+        self.watch(viewport, cx);
+    }
+
+    /// Start collecting keyed descendants and note the handle for an
+    /// enclosing cache boundary. Returns the offset to paint children at.
+    fn watch(&self, viewport: Rect, cx: &mut ElementContext) -> (f32, f32) {
+        let mut s = self.0.borrow_mut();
         s.recording.clear();
         cx.watch_scroll(|| ScrollWatch {
             handle: self.clone(),
@@ -772,7 +905,7 @@ impl ScrollHandle {
         axes: ScrollAxes,
         cx: &mut ElementContext,
     ) -> Option<(f32, f32)> {
-        let reduced_motion = cx.theme.reduced_motion;
+        let animate = !cx.theme.reduced_motion && cx.animations().is_some();
         let now = cx.clock_ms;
         let mut s = self.0.borrow_mut();
         let s = &mut *s;
@@ -784,10 +917,10 @@ impl ScrollHandle {
         };
         let to = request.item_offset(&s.items, s.origin, from, s.viewport, axes)?;
         let to = [to[0].clamp(0.0, s.max[0]), to[1].clamp(0.0, s.max[1])];
-        if smooth && !reduced_motion {
+        if smooth && animate {
             // This frame paints the smooth scroll's first step, the offset
             // it starts from, wherever the item turned out to be.
-            s.start_scroll(to, true, now, cx);
+            s.start_scroll(to, true, now);
             cx.request_frame_at_ms(now);
             return None;
         }
@@ -858,21 +991,17 @@ impl ScrollState {
     }
 
     /// Move to `to` (already clamped): a smooth scroll from the current
-    /// offset when `smooth` and the context has an animation table, else
-    /// at once.
-    fn start_scroll(&mut self, to: [f64; 2], smooth: bool, now: u64, cx: &mut ElementContext) {
-        match cx.animations_mut() {
-            Some(table) if smooth && to != self.offset => {
-                for (prop, i) in [(PROP_X, 0), (PROP_Y, 1)] {
-                    table.set(self.key, prop, (self.offset[i] - to[i]) as f32, now);
-                    table.animate_to(self.key, prop, 0.0, SMOOTH_SCROLL, now);
-                }
-                self.smooth = Some(to);
-            }
-            _ => {
-                self.offset = to;
-                self.smooth = None;
-            }
+    /// offset starting at `now` when `smooth`, else at once.
+    fn start_scroll(&mut self, to: [f64; 2], smooth: bool, now: u64) {
+        if smooth && to != self.offset {
+            self.smooth = Some(Smooth {
+                from: self.offset,
+                to,
+                start_ms: now,
+            });
+        } else {
+            self.offset = to;
+            self.smooth = None;
         }
     }
 }

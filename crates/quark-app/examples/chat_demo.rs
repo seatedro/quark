@@ -577,15 +577,22 @@ impl UiApp for Demo {
         let header_h = 36.0;
         let body_h = (height - header_h).max(0.0);
         let font_size = self.chat.document().style().font_size;
+        let reduced_motion = cx.theme.reduced_motion;
         let text_cx = cx.frame.text();
         let measurer =
             TextMeasurer::new(&mut text_cx.system, &mut text_cx.layouts, font_size, scale);
         let now_ms = now.as_millis() as u64;
         if self.sync {
-            self.chat
-                .prepare(width, body_h, now_ms, &mut WindowOnly(measurer));
+            self.chat.prepare(
+                width,
+                body_h,
+                now_ms,
+                reduced_motion,
+                &mut WindowOnly(measurer),
+            );
         } else {
-            self.chat.prepare(width, body_h, now_ms, &mut { measurer });
+            self.chat
+                .prepare(width, body_h, now_ms, reduced_motion, &mut { measurer });
         }
         let element = self
             .chat
