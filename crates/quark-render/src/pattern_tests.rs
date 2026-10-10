@@ -272,3 +272,29 @@ fn stripes_keep_their_period_across_scales() {
         assert!(image.get_pixel(0, 0).0[0] < 10, "corner not clipped");
     }
 }
+
+// A light border on a light fill stays as light as its color around a
+// rounded corner: blending toward the border quad's transparent fill once
+// left a dark grey fringe along the arc's inner edge.
+#[test]
+fn a_rounded_border_has_no_dark_fringe_at_its_corners() {
+    let size = (80, 60);
+    let mut scene = Scene::default();
+    white(&mut scene, size);
+    scene.border(crate::scene::BorderPrimitive::uniform(
+        rect(10.0, 10.0, 60.0, 40.0),
+        2.0,
+        20.0,
+        Color::rgba(226, 226, 230, 255),
+    ));
+    let Some(image) = render(&scene, size, Default::default()) else {
+        return;
+    };
+    evidence("g9-border-corner", &image);
+    for y in 10..30 {
+        for x in 10..30 {
+            let [r, ..] = image.get_pixel(x, y).0;
+            assert!(r >= 224, "({x}, {y}) is {r}, darker than the border");
+        }
+    }
+}

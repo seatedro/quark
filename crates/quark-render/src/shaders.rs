@@ -288,6 +288,10 @@ fn fs_quad(input: VertexOutput) -> @location(0) vec4<f32> {
     // the wider of its two adjacent sides (a circular stand-in for CSS's
     // elliptical inner corner).
     let bw = input.border_widths;
+    // Premultiplied: a border quad's fill is transparent, and blending
+    // toward it in straight alpha would darken the border's color along
+    // its anti-aliased inner edge, a grey fringe inside rounded corners.
+    let background = vec4<f32>(input.background.rgb * input.background.a, input.background.a);
     var color: vec4<f32>;
     if (max(max(bw.x, bw.y), max(bw.z, bw.w)) > 0.0) {
         let inner_min = input.bounds.xy + vec2<f32>(bw.w, bw.x);
@@ -313,13 +317,13 @@ fn fs_quad(input: VertexOutput) -> @location(0) vec4<f32> {
             fill_blend = saturate(aa - quad_sdf(ip, inner_half, inner_radius));
         }
         let blended = over(input.background, input.border_color);
-        color = mix(blended, input.background, fill_blend);
+        let border = vec4<f32>(blended.rgb * blended.a, blended.a);
+        color = mix(border, background, fill_blend);
     } else {
-        color = input.background;
+        color = background;
     }
 
-    let final_alpha = color.a * outer_alpha * clip_alpha;
-    return vec4<f32>(color.rgb * final_alpha, final_alpha);
+    return color * (outer_alpha * clip_alpha);
 }
 "#;
 
