@@ -1088,11 +1088,15 @@ impl<U: UiApp> UiAdapter<U> {
     }
 
     /// A secondary click at the pointer: the context menu handler under it.
-    fn context_menu_click(&mut self, cx: &mut EventContext) {
-        if let Some((x, y)) = self.win.pointer {
-            let delivery = self.win.router.context_menu_at(x, y);
-            self.deliver(delivery, cx);
-        }
+    /// False when no handler took it.
+    fn context_menu_click(&mut self, cx: &mut EventContext) -> bool {
+        let Some((x, y)) = self.win.pointer else {
+            return false;
+        };
+        let delivery = self.win.router.context_menu_at(x, y);
+        let taken = delivery.node.is_some();
+        self.deliver(delivery, cx);
+        taken
     }
 
     /// A press on window drag chrome: the platform's title double-click
@@ -1236,12 +1240,12 @@ impl<U: UiApp> UiAdapter<U> {
                 self.win.pointer = None;
                 self.update_hover(cx);
             }
-            // macOS reads Ctrl-click as a secondary click.
+            // macOS reads Ctrl-click as a secondary click where a context
+            // menu takes it; elsewhere it stays a modified primary press.
             UiInput::PointerDown(PointerButton::Primary)
-                if cfg!(target_os = "macos") && cx.modifiers().control_key() =>
-            {
-                self.context_menu_click(cx);
-            }
+                if cfg!(target_os = "macos")
+                    && cx.modifiers().control_key()
+                    && self.context_menu_click(cx) => {}
             UiInput::PointerDown(PointerButton::Primary) => self.pointer_pressed(cx),
             UiInput::PointerUp(PointerButton::Primary) => {
                 self.win.title_press.release();
