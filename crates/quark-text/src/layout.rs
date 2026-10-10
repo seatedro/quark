@@ -175,7 +175,8 @@ impl TextStyle {
 }
 
 /// Attribute override for a byte range of the text. Later spans win where
-/// they overlap. Glyphs record the index of the span that styled them.
+/// they overlap, except [`keep_together`](Self::keep_together), which no
+/// later span clears. Glyphs record the index of the span that styled them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpan {
     pub range: Range<usize>,
@@ -190,6 +191,12 @@ pub struct TextSpan {
     /// Extra advance after every glyph of the span, in ems of its size, in
     /// place of the style's: room around an inline code pill.
     pub letter_spacing: Option<f32>,
+    /// Wrapping keeps the range on one line when it fits on one, moving
+    /// it to the next line whole rather than breaking at its spaces (inline
+    /// code). A range wider than a line wraps as usual. Overlapping kept
+    /// ranges keep together as one; ranges that only touch stay apart, and
+    /// line breaks in the text still break. Unwrapped layout ignores it.
+    pub keep_together: bool,
 }
 
 /// Everything a layout depends on. Sizes are logical pixels.
@@ -544,6 +551,8 @@ pub(crate) struct LayoutScratch {
     /// here, so the next build shapes into it instead of allocating a span,
     /// word, and glyph vector per word.
     shapes: Vec<cosmic_text::ShapeLine>,
+    /// A paragraph's keep-together ranges, sorted and coalesced.
+    keep: Vec<Range<usize>>,
 }
 
 /// Most shaped lines [`LayoutScratch`] keeps for reuse, and the most
@@ -720,6 +729,8 @@ impl TextLayout {
         while buffer.lines.len() > paragraphs.len() {
             spare_lines.extend(buffer.lines.pop());
         }
+        let any_kept = spans.iter().any(|span| span.keep_together);
+        scratch.keep.clear();
         for (line_i, (range, ending)) in paragraphs.iter().enumerate() {
             let mut attrs = AttrsList::new(&base);
             for (i, span) in spans.iter().enumerate() {
@@ -768,6 +779,10 @@ impl TextLayout {
                     Shaping::Advanced,
                 )),
             }
+            if any_kept {
+                keep_ranges(spans, range, &mut scratch.keep);
+            }
+            buffer.lines[line_i].set_keep_together_ranges(&scratch.keep);
             if let Some(shape) = scratch.shapes.pop()
                 && let Some(unused) = buffer.lines[line_i].lend_shape_storage(shape)
             {
@@ -1589,6 +1604,28 @@ fn split_paragraphs(text: &str, out: &mut Vec<(Range<usize>, LineEnding)>) {
     out.push((start..text.len(), LineEnding::None));
 }
 
+/// Fills `out` with the parts of `spans`' keep-together ranges inside the
+/// paragraph `paragraph`, relative to it, sorted, and with overlapping
+/// ones joined. Ranges that only touch stay apart.
+fn keep_ranges(spans: &[TextSpan], paragraph: &Range<usize>, out: &mut Vec<Range<usize>>) {
+    out.clear();
+    for span in spans.iter().filter(|span| span.keep_together) {
+        let start = span.range.start.max(paragraph.start);
+        let end = span.range.end.min(paragraph.end);
+        if start < end {
+            out.push(start - paragraph.start..end - paragraph.start);
+        }
+    }
+    out.sort_unstable_by_key(|range| range.start);
+    out.dedup_by(|later, earlier| {
+        let overlaps = later.start < earlier.end;
+        if overlaps {
+            earlier.end = earlier.end.max(later.end);
+        }
+        overlaps
+    });
+}
+
 fn family(kind: FontKind) -> Family<'static> {
     match kind {
         FontKind::Ui => Family::SansSerif,
@@ -1833,8 +1870,9 @@ mod tests {
         )
     }
 
-    /// A span styling `text` up to the char boundary at or before `end`.
-    fn prefix_span(text: &str, end: usize, style: FontStyle) -> Vec<TextSpan> {
+    /// A span styling `text` up to the char boundary at or before `end`,
+    /// kept together when `keep`.
+    fn prefix_span(text: &str, end: usize, style: FontStyle, keep: bool) -> Vec<TextSpan> {
         let end = (0..=end.min(text.len()))
             .rev()
             .find(|&i| text.is_char_boundary(i))
@@ -1846,7 +1884,52 @@ mod tests {
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: keep,
         }]
+    }
+
+    /// A span keeping together `text` between the char boundaries at or
+    /// before `ends`.
+    fn kept_span(text: &str, ends: (usize, usize)) -> Vec<TextSpan> {
+        let snap = |i: usize| {
+            (0..=i.min(text.len()))
+                .rev()
+                .find(|&i| text.is_char_boundary(i))
+                .unwrap_or(0)
+        };
+        let (a, b) = (snap(ends.0), snap(ends.1));
+        vec![kept(a.min(b)..a.max(b))]
+    }
+
+    fn kept(range: Range<usize>) -> TextSpan {
+        TextSpan {
+            range,
+            weight: None,
+            style: None,
+            kind: None,
+            size: None,
+            letter_spacing: None,
+            keep_together: true,
+        }
+    }
+
+    /// The text of each line of `layout`.
+    fn line_texts(layout: &TextLayout) -> Vec<&str> {
+        layout
+            .lines()
+            .map(|line| layout.text().get(line.byte_range).unwrap_or_default())
+            .collect()
+    }
+
+    /// `text` with `spans` wrapped to the room an unwrapped layout of them
+    /// has up to byte `room_end`, less a point.
+    fn wrapped_short_of(text: &str, spans: Vec<TextSpan>, room_end: usize) -> TextLayout {
+        let mut system = test_system();
+        let params = TextParams::new(text, TextStyle::new(14.0)).spans(spans);
+        let room = system.layout(&params).expect("layout").caret(room_end).x;
+        system
+            .layout(&params.wrap_width(Some(room - 1.0)))
+            .expect("layout")
     }
 
     fn grapheme_boundaries(text: &str) -> Vec<usize> {
@@ -1945,13 +2028,18 @@ mod tests {
         #![proptest_config(config(48))]
 
         // Catches carets and hits disagreeing (a click lands one grapheme off)
-        // at wraps, ligatures, combining marks, and line endings.
+        // at wraps (also those a kept range moves), ligatures, combining
+        // marks, and line endings.
         #[test]
         fn layout_caret_then_hit_returns_each_grapheme_boundary(
             text in text(LTR_PIECES),
             wrap in wrap(),
+            kept_ends in (0usize..100, 0usize..100),
         ) {
-            let layout = layout(&text, wrap);
+            let params = TextParams::new(text.as_str(), TextStyle::new(14.0))
+                .spans(kept_span(&text, kept_ends))
+                .wrap_width(wrap);
+            let layout = test_system().layout(&params).expect("layout");
             prop_assert_eq!(layout.verify_integrity(), Ok(()));
             // Some distinct offsets share one caret: whitespace hung past a
             // wrap has no glyphs, and "\n\r" is one line ending but two
@@ -1997,7 +2085,8 @@ mod tests {
         // lines aligned against the wrap width, or a cluster wider than the
         // wrap pushed to negative x.
         // Catches state a rebuild carries over from the layout whose storage
-        // it reuses: extra paragraphs, stale glyphs, runs, or line ranges.
+        // it reuses: extra paragraphs, stale glyphs, runs, line ranges, or
+        // keep-together ranges.
         #[test]
         fn layout_rebuilt_in_another_layouts_storage_matches_fresh_layout(
             first in mixed_text(),
@@ -2006,8 +2095,8 @@ mod tests {
             span_ends in (0usize..40, 0usize..40),
         ) {
             let style = TextStyle::new(14.0);
-            let first_spans = prefix_span(&first, span_ends.0, FontStyle::Italic);
-            let second_spans = prefix_span(&second, span_ends.1, FontStyle::Normal);
+            let first_spans = prefix_span(&first, span_ends.0, FontStyle::Italic, true);
+            let second_spans = prefix_span(&second, span_ends.1, FontStyle::Normal, false);
             let mut system = test_system();
             let first = TextParams::new(first, style).spans(first_spans).wrap_width(wraps.0);
             let mut reused = system.layout(&first).expect("layout");
@@ -2045,6 +2134,95 @@ mod tests {
             assert!(w <= width + 1.0, "width {w} exceeds wrap {width}");
             let line_height = 14.0 * DEFAULT_LINE_HEIGHT_FACTOR;
             assert!((h - line_height * wrapped.line_count() as f32).abs() < 0.5);
+        }
+    }
+
+    // Catches inline code broken at its spaces: a kept run that fits on a
+    // line moves to the next one whole, also when later spans change its
+    // font or spacing (an inline code pill's room) partway through.
+    #[test]
+    fn a_fitting_code_span_moves_whole_to_the_next_line() {
+        let text = "say foo bar z";
+        let restyled = |range, kind, letter_spacing| TextSpan {
+            kind,
+            letter_spacing,
+            keep_together: false,
+            ..kept(range)
+        };
+        let overrides = [
+            vec![],
+            vec![
+                restyled(9..11, Some(FontKind::Mono), None),
+                restyled(10..11, None, Some(0.5)),
+            ],
+        ];
+        for later in overrides {
+            let spans = [vec![kept(4..11)], later].concat();
+            // Room for "say foo" but not "say foo bar".
+            let layout = wrapped_short_of(text, spans.clone(), 11);
+            assert_eq!(line_texts(&layout), ["say ", "foo bar z"], "{spans:?}");
+        }
+    }
+
+    // Catches a kept run wider than a line wrapping as one unbreakable
+    // word (glyph by glyph) rather than at its spaces: it wraps exactly as
+    // the same text without the constraint, including a token wider than
+    // a line.
+    #[test]
+    fn an_oversized_code_span_uses_ordinary_word_wrapping() {
+        let text = "run git commit --message abcdefghijklmnopqrstuvwxyz now";
+        let code = 4..51;
+        let mut system = test_system();
+        for width in [60.0, 120.0, 200.0] {
+            let params = TextParams::new(text, TextStyle::new(14.0)).wrap_width(Some(width));
+            let plain = system.layout(&params).expect("layout");
+            let constrained = system
+                .layout(&params.spans(vec![kept(code.clone())]))
+                .expect("layout");
+            assert!(plain.line_count() > 2, "width {width}");
+            assert_eq!(
+                line_texts(&constrained),
+                line_texts(&plain),
+                "width {width}"
+            );
+        }
+    }
+
+    // Catches kept ranges joined or split where they should not be: ranges
+    // that only touch keep together apart, a line break inside one breaks
+    // it and keeps each side together, and one spanning both directions
+    // stays whole across its bidi runs.
+    #[test]
+    fn kept_ranges_keep_together_apart_across_line_breaks_and_directions() {
+        let hebrew = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}";
+        let mixed = format!("say foo {hebrew} bar z");
+        let mixed_end = mixed.len() - 2;
+        // Text, its kept ranges, the end of the room it is wrapped short of,
+        // and its lines.
+        type Case<'a> = (&'a str, Vec<TextSpan>, usize, Vec<&'a str>);
+        let cases: [Case; 3] = [
+            (
+                "foo bar baz qux",
+                vec![kept(0..8), kept(8..15)],
+                15,
+                vec!["foo bar ", "baz qux"],
+            ),
+            (
+                "say foo bar\nbaz qux",
+                vec![kept(4..19)],
+                11,
+                vec!["say ", "foo bar", "baz qux"],
+            ),
+            (
+                &mixed,
+                vec![kept(4..mixed_end)],
+                mixed_end,
+                vec!["say ", mixed.get(4..).unwrap_or_default()],
+            ),
+        ];
+        for (text, spans, room_end, expected) in cases {
+            let layout = wrapped_short_of(text, spans, room_end);
+            assert_eq!(line_texts(&layout), expected, "{text:?}");
         }
     }
 
@@ -2161,6 +2339,7 @@ mod tests {
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         }];
         let params = TextParams::new("plain bold plain", TextStyle::new(14.0)).spans(spans);
         let layout = test_system().layout(&params).expect("layout");
@@ -2177,6 +2356,7 @@ mod tests {
             kind: None,
             size,
             letter_spacing,
+            keep_together: false,
         }
     }
 
@@ -2432,6 +2612,7 @@ mod tests {
             kind,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         };
         vec![
             TextParams::new("office affine", style),
@@ -2512,6 +2693,7 @@ mod tests {
                 kind,
                 size: None,
                 letter_spacing: None,
+                keep_together: false,
             }
         };
         vec![
@@ -2670,7 +2852,7 @@ mod tests {
         ) {
             let (mut full, mut memo) = memo_pair(&FontSettings::default());
             let params = TextParams::new(text.as_str(), TextStyle::new(14.0))
-                .spans(prefix_span(&text, end, FontStyle::Italic))
+                .spans(prefix_span(&text, end, FontStyle::Italic, false))
                 .wrap_width(wrap);
             let expected = dump(&full.layout(&params).expect("layout"));
             for _ in 0..2 {
@@ -2859,6 +3041,7 @@ mod tests {
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         };
         let params = TextParams::new(text, style).spans(vec![italic(0..2), italic(6..11)]);
         let layout = system.layout(&params).expect("layout");
@@ -2884,6 +3067,7 @@ mod tests {
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         };
         let cases = [
             (

@@ -565,6 +565,7 @@ impl DiffSyntax {
                     kind: None,
                     size: None,
                     letter_spacing: None,
+                    keep_together: false,
                 });
                 tones.push(kind);
             }

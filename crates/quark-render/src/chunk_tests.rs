@@ -455,6 +455,7 @@ fn scrolling_rows(text: &mut TextSystem, scale: f32) -> Vec<Arc<SceneChunk>> {
                 kind: None,
                 size: None,
                 letter_spacing: None,
+                keep_together: false,
             }];
             let params = TextParams::new(line.clone(), TextStyle::new(15.0 * scale)).spans(spans);
             let layout = ShapedText::new(Arc::new(text.layout(&params).expect("layout")));
@@ -652,6 +653,7 @@ fn terminal_row(text: &mut TextSystem, line: &str) -> Arc<SceneChunk> {
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         })
         .collect::<Vec<_>>();
     let params = TextParams::new(line.to_owned(), TextStyle::new(13.0)).spans(spans);

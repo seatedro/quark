@@ -174,6 +174,7 @@ mod tests {
                 kind: None,
                 size: None,
                 letter_spacing: None,
+                keep_together: false,
             }])
         };
         let family = |family, weight| style.family(Some(family)).weight(weight);

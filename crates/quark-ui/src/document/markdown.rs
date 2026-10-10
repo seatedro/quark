@@ -201,6 +201,7 @@ fn styled_spans(
                 italic: flags.contains(SpanFlags::ITALIC) || image,
                 strikethrough: flags.contains(SpanFlags::STRIKE),
                 link: url.cloned(),
+                keep_together: code,
                 ..StyledSpan::plain(text)
             };
             let tone = if code {

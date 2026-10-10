@@ -578,6 +578,7 @@ fn text_style(
         kind: None,
         size: None,
         letter_spacing: None,
+        keep_together: false,
     });
     (text_style, italic)
 }

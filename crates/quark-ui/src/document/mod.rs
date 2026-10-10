@@ -335,9 +335,11 @@ impl Block {
             .map(|(mut span, tone)| {
                 // A pill keeps room in the layout, and measuring reads these
                 // spans rather than the painted ones: without a pill here the
-                // row would be measured (and shaped) without that room.
+                // row would be measured (and shaped) without that room. The
+                // same goes for keeping the code on one line.
                 if tone == SpanTone::InlineCode {
                     span.pill.get_or_insert(Color::TRANSPARENT);
+                    span.keep_together = true;
                 }
                 (span, tone)
             })

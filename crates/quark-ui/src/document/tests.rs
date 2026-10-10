@@ -803,10 +803,13 @@ fn layout_lines(layout: &quark_text::TextLayout) -> Vec<String> {
 // palette sets the pill only on the painted spans, so measuring shaped
 // another layout, which wraps elsewhere once the room pushes a word over
 // (and costs a second shaping of every such paragraph). At each width the
-// measured lines are the painted ones.
+// measured lines are the painted ones, from one cached layout. Also catches
+// inline code broken at its spaces: code that fits on a line stays on one,
+// longer code wraps only at its spaces, and copy keeps the text as written.
 #[test]
 fn inline_code_is_measured_with_the_room_its_pill_keeps() {
     use crate::element::StyledSpan;
+    const LONG: &str = "git rebase origin main onto dev";
     let code = |text: &str| {
         let span = StyledSpan {
             font_kind: quark_render::FontKind::Mono,
@@ -824,10 +827,20 @@ fn inline_code_is_measured_with_the_room_its_pill_keeps() {
             code("cargo fmt"),
             plain(" and "),
             code("clippy"),
-            plain(" before you push the branch."),
+            plain(" before you "),
+            code(LONG),
+            plain(" on the branch."),
         ],
     );
     let text = block.text().to_owned();
+    let range_of = |code: &str| {
+        let start = text.find(code).expect("code in text");
+        start..start + code.len()
+    };
+    let (short, long) = (
+        [range_of("cargo test"), range_of("cargo fmt")],
+        range_of(LONG),
+    );
     let messages: HashMap<RowKey, DocumentRow> = [(
         RowKey(1),
         DocumentRow {
@@ -843,15 +856,56 @@ fn inline_code_is_measured_with_the_room_its_pill_keeps() {
         let measured = view
             .visible_blocks()
             .iter()
-            .find_map(|b| b.geometry.layout.as_deref().map(layout_lines));
+            .find_map(|b| b.geometry.layout.clone())
+            .expect("the paragraph is measured");
         let drawn = painted
             .regions
             .iter()
             .find(|r| r.layout.text() == text)
-            .map(|r| layout_lines(&r.layout));
-        assert!(drawn.is_some(), "width {width}: the paragraph is drawn");
-        assert_eq!(measured, drawn, "width {width}");
+            .map(|r| r.layout.clone())
+            .unwrap_or_else(|| panic!("width {width}: the paragraph is drawn"));
+        assert_eq!(
+            layout_lines(&measured),
+            layout_lines(&drawn),
+            "width {width}"
+        );
+        assert!(Arc::ptr_eq(&measured, &drawn), "width {width}: one layout");
+        let breaks: Vec<usize> = drawn.lines().skip(1).map(|l| l.byte_range.start).collect();
+        let inside = |r: &std::ops::Range<usize>| -> Vec<usize> {
+            let inside = |&b: &usize| r.start < b && b < r.end;
+            breaks.iter().copied().filter(inside).collect()
+        };
+        // Short code fits on a line from about 128 points, long code from
+        // about 304; narrower, each wraps at its spaces.
+        for r in short.iter().filter(|_| width >= 140.0) {
+            assert_eq!(
+                inside(r),
+                [0; 0],
+                "width {width}: {:?}",
+                layout_lines(&drawn)
+            );
+        }
+        for b in inside(&long) {
+            assert_eq!(
+                &text[b - 1..b],
+                " ",
+                "width {width}: {:?}",
+                layout_lines(&drawn)
+            );
+        }
+        if width >= 312.0 {
+            assert_eq!(
+                inside(&long),
+                [0; 0],
+                "width {width}: {:?}",
+                layout_lines(&drawn)
+            );
+        }
     }
+    let mut view = real_view(&messages);
+    paint(&mut view, &messages, (100.0, 400.0), 0.0);
+    view.select_all();
+    assert_eq!(view.selected_text(&messages), text);
 }
 
 #[test]

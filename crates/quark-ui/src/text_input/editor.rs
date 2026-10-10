@@ -238,6 +238,7 @@ pub(super) fn syntax_layout_spans(
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         });
         kinds.push(span.kind);
     }
@@ -273,6 +274,7 @@ pub(super) fn style_layout_spans(styles: &[StyleSpan]) -> (Vec<TextSpan>, Vec<Sy
             kind: style.contains(InlineStyle::CODE).then_some(FontKind::Mono),
             size: None,
             letter_spacing: None,
+            keep_together: false,
         });
         kinds.push(match span.format.link {
             Some(_) => SyntaxTokenKind::Link,

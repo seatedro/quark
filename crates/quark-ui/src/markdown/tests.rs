@@ -46,6 +46,8 @@ fn blocks_dump_matches_commonmark_structure() {
         ("- ![shot](s.png)", "img(s.png) -: [img:shot]"),
         ("![a](c.png) after", "p: [img:[a]] after"),
         ("[![a](c.png)](https://x.y)", "p: [img,l=https://x.y:[a]]"),
+        // Adjacent code literals stay apart even when styled alike.
+        ("_`a b`_*`c d`*", "p: [i,c:a b][i,c:c d]"),
     ];
     for (input, expected) in cases {
         let doc = MarkdownDoc::parse(input);

@@ -164,6 +164,27 @@ own pull request.
   `memoized_runs_take_each_glyphs_own_attributes` tests compare layouts
   and shaped lines with the memo on and off.
 
+- Keep-together ranges (`src/buffer_line.rs`, `src/shape.rs`):
+  `BufferLine::set_keep_together_ranges` takes sorted, disjoint byte ranges
+  of the line that word wrapping keeps on one line when each fits on one,
+  and `ShapeLine::layout_to_buffer_keeping` is `layout_to_buffer` with
+  them (`layout_to_buffer` passes none, so it behaves as upstream's). Before
+  wrapping, the words whose glyphs overlap a range, counted in logical
+  order across the line's bidi spans, form a group; a group no wider than
+  the line asks for room for all of it at its first word, so it moves to
+  the next line whole, and wrapping does not break inside it. A wider group
+  wraps as if unconstrained, with ordinary word breaks and glyph fallback.
+  Words stay as shaped and ranges add no break, so text, byte offsets, and
+  shaping are unchanged. Reset, `set_text` with new text, `split_off`, and
+  `append` clear, partition, or shift the ranges; `storage_bytes` counts
+  them, and the group scratch lives in `ShapeBuffer`. quark-text sets them
+  for `TextSpan::keep_together` (inline code). Upstream has no equivalent;
+  it could go up as a no-break range attribute. quark-text's
+  `a_fitting_code_span_moves_whole_to_the_next_line`,
+  `an_oversized_code_span_uses_ordinary_word_wrapping`, and
+  `kept_ranges_keep_together_apart_across_line_breaks_and_directions`
+  check it.
+
 ## Not patched: bidi analysis
 
 For lines the fast path above does not take, `ShapeLine::build` runs

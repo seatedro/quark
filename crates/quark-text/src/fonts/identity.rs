@@ -630,6 +630,7 @@ mod tests {
             kind: None,
             size: None,
             letter_spacing: None,
+            keep_together: false,
         }]);
         let (_, a) = first_glyph(&mut system, &TextParams::new("a", plain));
         let (_, corrected) = first_glyph(

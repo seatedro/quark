@@ -124,6 +124,9 @@ pub struct ShapeBuffer {
     reorder_levels: Vec<unicode_bidi::Level>,
     reorder_runs: Vec<Range<usize>>,
 
+    /// Buffer for the word runs a layout keeps on one line.
+    keep_groups: Vec<KeepGroup>,
+
     /// Buffer for a run's font features converted for harfrust.
     rb_font_features: Vec<harfrust::Feature>,
 
@@ -152,6 +155,7 @@ impl Default for ShapeBuffer {
             bidi_levels: Vec::new(),
             reorder_levels: Vec::new(),
             reorder_runs: Vec::new(),
+            keep_groups: Vec::new(),
             rb_font_features: Vec::new(),
             missing: Vec::new(),
             fb_missing: Vec::new(),
@@ -1049,6 +1053,16 @@ impl VisualLine {
     }
 }
 
+/// Words that wrapping keeps on one line: those from the `first`th word
+/// up to the `end`th, counting the line's words in logical order across
+/// its spans, which are `width` wide together.
+#[derive(Clone, Copy, Debug)]
+struct KeepGroup {
+    first: usize,
+    end: usize,
+    width: f32,
+}
+
 impl ShapeLine {
     /// How many glyphs `visual_line`'s ranges cover, counted as `layout_to_buffer` takes them.
     fn visual_line_glyphs(&self, visual_line: &VisualLine) -> usize {
@@ -1385,6 +1399,84 @@ impl ShapeLine {
         lines
     }
 
+    /// Fills `groups` with the words of each run of `ranges` (sorted,
+    /// disjoint byte ranges of the line) that fits on a line `width` wide,
+    /// in logical order. A word belongs to every range its glyphs' bytes
+    /// overlap, so ranges that share a word form one group; ranges that
+    /// only touch stay apart. A group of one word has no break inside to
+    /// prevent, and a group wider than a line wraps as if unconstrained.
+    fn keep_groups(
+        &self,
+        ranges: &[Range<usize>],
+        font_size: f32,
+        width: f32,
+        groups: &mut Vec<KeepGroup>,
+    ) {
+        groups.clear();
+        let mut push = |group: KeepGroup| {
+            if group.end - group.first > 1 && group.width <= width {
+                groups.push(group);
+            }
+        };
+        // The first range that can still overlap a word, and the open
+        // group with the last range it overlaps.
+        let mut next = 0;
+        let mut open: Option<(KeepGroup, usize)> = None;
+        let mut ordinal = 0;
+        for span in &self.spans {
+            // Words run in visual order in a span against the line's direction.
+            let reversed = self.rtl != span.level.is_rtl();
+            let words = span.words.len();
+            for k in 0..words {
+                let word = &span.words[if reversed { words - 1 - k } else { k }];
+                if word.glyphs.is_empty() {
+                    if let Some((group, _)) = &mut open {
+                        group.end = ordinal + 1;
+                    }
+                    ordinal += 1;
+                    continue;
+                }
+                let (start, end) = word
+                    .glyphs
+                    .iter()
+                    .fold((usize::MAX, 0), |(s, e), g| (s.min(g.start), e.max(g.end)));
+                while next < ranges.len() && ranges[next].end <= start {
+                    next += 1;
+                }
+                let mut last = next;
+                while last < ranges.len() && ranges[last].start < end {
+                    last += 1;
+                }
+                let word_width = word.width(font_size);
+                match &mut open {
+                    // Overlaps a range the open group does.
+                    Some((group, group_last)) if last > next && next < *group_last => {
+                        group.end = ordinal + 1;
+                        group.width += word_width;
+                        *group_last = last;
+                    }
+                    _ => {
+                        if let Some((group, _)) = open.take() {
+                            push(group);
+                        }
+                        if last > next {
+                            let group = KeepGroup {
+                                first: ordinal,
+                                end: ordinal + 1,
+                                width: word_width,
+                            };
+                            open = Some((group, last));
+                        }
+                    }
+                }
+                ordinal += 1;
+            }
+        }
+        if let Some((group, _)) = open {
+            push(group);
+        }
+    }
+
     pub fn layout_to_buffer(
         &self,
         scratch: &mut ShapeBuffer,
@@ -1394,6 +1486,35 @@ impl ShapeLine {
         align: Option<Align>,
         layout_lines: &mut Vec<LayoutLine>,
         match_mono_width: Option<f32>,
+    ) {
+        self.layout_to_buffer_keeping(
+            scratch,
+            font_size,
+            width_opt,
+            wrap,
+            align,
+            layout_lines,
+            match_mono_width,
+            &[],
+        );
+    }
+
+    /// [`Self::layout_to_buffer`], keeping each of `keep_together` (sorted,
+    /// disjoint byte ranges of the line) on one line when it fits on one:
+    /// word wrapping does not break between words its bytes overlap, and
+    /// moves them to the next line together instead. A range wider than a
+    /// line wraps as if it were not there. Glyph wrapping and unwrapped
+    /// layout ignore the ranges.
+    pub fn layout_to_buffer_keeping(
+        &self,
+        scratch: &mut ShapeBuffer,
+        font_size: f32,
+        width_opt: Option<f32>,
+        wrap: Wrap,
+        align: Option<Align>,
+        layout_lines: &mut Vec<LayoutLine>,
+        match_mono_width: Option<f32>,
+        keep_together: &[Range<usize>],
     ) {
         fn add_to_visual_line(
             vl: &mut VisualLine,
@@ -1439,6 +1560,19 @@ impl ShapeLine {
         let mut reorder_levels = mem::take(&mut scratch.reorder_levels);
         let mut new_order = mem::take(&mut scratch.reorder_runs);
 
+        // The word runs kept on one line, the next to reach, the ordinal the
+        // run being laid out ends at, and the word's ordinal, in logical order.
+        let mut keep_groups = mem::take(&mut scratch.keep_groups);
+        keep_groups.clear();
+        if let (Some(width), Wrap::Word | Wrap::WordOrGlyph, false) =
+            (width_opt, wrap, keep_together.is_empty())
+        {
+            self.keep_groups(keep_together, font_size, width, &mut keep_groups);
+        }
+        let mut next_group = 0;
+        let mut kept_until = 0;
+        let mut ordinal = 0;
+
         if wrap == Wrap::None {
             for (span_index, span) in self.spans.iter().enumerate() {
                 let mut word_range_width = 0.;
@@ -1471,15 +1605,28 @@ impl ShapeLine {
                     let mut fitting_start = (span.words.len(), 0);
                     for (i, word) in span.words.iter().enumerate().rev() {
                         let word_width = word.width(font_size);
+                        // A kept run's first word needs room for the run.
+                        let group = keep_groups
+                            .get(next_group)
+                            .filter(|group| group.first == ordinal)
+                            .copied();
+                        let kept = ordinal < kept_until;
+                        if let Some(group) = group {
+                            next_group += 1;
+                            kept_until = group.end;
+                        }
+                        ordinal += 1;
+                        let needed = group.map_or(word_width, |group| group.width);
 
                         // Addition in the same order used to compute the final width, so that
                         // relayouts with that width as the `line_width` will produce the same
                         // wrapping results.
-                        if current_visual_line.w + (word_range_width + word_width)
-                            <= width_opt.unwrap_or(f32::INFINITY)
+                        if kept
+                            || current_visual_line.w + (word_range_width + needed)
+                                <= width_opt.unwrap_or(f32::INFINITY)
                             // Include one blank word over the width limit since it won't be
                             // counted in the final width
-                            || (word.blank
+                            || (group.is_none() && word.blank
                                 && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY))
                         {
                             // fits
@@ -1542,8 +1689,11 @@ impl ShapeLine {
                         } else {
                             // Wrap::Word, Wrap::WordOrGlyph
 
-                            // If we had a previous range, commit that line before the next word.
-                            if word_range_width > 0. {
+                            // If we had a previous range, commit that line before the next word,
+                            // and before a kept run that earlier spans' words leave no room for.
+                            if word_range_width > 0.
+                                || (group.is_some() && current_visual_line.w > 0.)
+                            {
                                 // Current word causing a wrap is not whitespace, so we ignore the
                                 // previous word if it's a whitespace
                                 let trailing_blank = span
@@ -1599,11 +1749,24 @@ impl ShapeLine {
                     let mut fitting_start = (0, 0);
                     for (i, word) in span.words.iter().enumerate() {
                         let word_width = word.width(font_size);
-                        if current_visual_line.w + (word_range_width + word_width)
-                            <= width_opt.unwrap_or(f32::INFINITY)
+                        // A kept run's first word needs room for the run.
+                        let group = keep_groups
+                            .get(next_group)
+                            .filter(|group| group.first == ordinal)
+                            .copied();
+                        let kept = ordinal < kept_until;
+                        if let Some(group) = group {
+                            next_group += 1;
+                            kept_until = group.end;
+                        }
+                        ordinal += 1;
+                        let needed = group.map_or(word_width, |group| group.width);
+                        if kept
+                            || current_visual_line.w + (word_range_width + needed)
+                                <= width_opt.unwrap_or(f32::INFINITY)
                             // Include one blank word over the width limit since it won't be
                             // counted in the final width.
-                            || (word.blank
+                            || (group.is_none() && word.blank
                                 && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY))
                         {
                             // fits
@@ -1666,8 +1829,11 @@ impl ShapeLine {
                         } else {
                             // Wrap::Word, Wrap::WordOrGlyph
 
-                            // If we had a previous range, commit that line before the next word.
-                            if word_range_width > 0. {
+                            // If we had a previous range, commit that line before the next word,
+                            // and before a kept run that earlier spans' words leave no room for.
+                            if word_range_width > 0.
+                                || (group.is_some() && current_visual_line.w > 0.)
+                            {
                                 // Current word causing a wrap is not whitespace, so we ignore the
                                 // previous word if it's a whitespace.
                                 let trailing_blank = i > 0 && span.words[i - 1].blank;
@@ -1929,6 +2095,7 @@ impl ShapeLine {
         scratch.glyph_sets = cached_glyph_sets;
         scratch.reorder_levels = reorder_levels;
         scratch.reorder_runs = new_order;
+        scratch.keep_groups = keep_groups;
     }
 }
 

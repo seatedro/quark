@@ -499,6 +499,9 @@ struct Builder {
     lone_image: Option<(String, Option<u32>)>,
     links: Vec<u32>,
     table: Option<TableState>,
+    /// The next text is a code literal: it starts a span of its own, so
+    /// adjacent literals stay apart (layout keeps each on one line).
+    literal: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -524,6 +527,7 @@ impl Builder {
             }
             Event::Code(text) => {
                 self.ensure_open();
+                self.literal = true;
                 self.push_text(&text, SpanFlags::CODE);
             }
             Event::Html(text) | Event::InlineHtml(text) => {
@@ -532,6 +536,7 @@ impl Builder {
             }
             Event::InlineMath(text) | Event::DisplayMath(text) => {
                 self.ensure_open();
+                self.literal = true;
                 self.push_text(&text, SpanFlags::CODE);
             }
             Event::FootnoteReference(name) => {
@@ -851,6 +856,7 @@ impl Builder {
     }
 
     fn push_text(&mut self, text: &str, extra: SpanFlags) {
+        let literal = std::mem::take(&mut self.literal);
         if text.is_empty() {
             return;
         }
@@ -877,7 +883,8 @@ impl Builder {
             (None, None) => len_u32(d.span_range.len()),
         };
         let n = d.span_range.len();
-        if n > floor as usize
+        if !literal
+            && n > floor as usize
             && d.span_flags[n - 1] == flags
             && d.span_link[n - 1] == link
             && d.span_range[n - 1].end == start
