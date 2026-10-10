@@ -97,6 +97,7 @@ pub fn content(row: &Row, expanded: bool) -> RowContent {
             header_height: AUTHOR_LINE,
             label: Some(format!("{}, {}", row.author(), row.at).into()),
             kind,
+            ..RowChrome::default()
         },
         adornments,
     }

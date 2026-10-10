@@ -36,6 +36,9 @@ mod find;
 mod images;
 mod markdown;
 mod measure;
+mod row_style;
+#[cfg(test)]
+mod row_style_tests;
 mod syntax;
 mod table;
 #[cfg(test)]
@@ -53,6 +56,8 @@ pub use find::{FindBarActions, FindIntegrityError, FindMatch, FindState, find_ba
 pub use images::{DecodedImage, ImageLoader, ImageState, ImageStore, LoadedImage};
 pub use markdown::{BlockKeys, CODE_SCALE, MarkdownBlocks, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
+use row_style::RowGeometry;
+pub use row_style::{RowAlign, RowStyle};
 pub use syntax::SyntaxHighlighter;
 pub use table::{TableCell, TableCells, TableGeometry, TableMetrics};
 
@@ -559,8 +564,9 @@ impl DocumentRow {
 }
 
 /// App data for the chrome around one row's blocks. The document reserves
-/// the header band and hands the rest to the [`RowDecorator`], which draws
-/// the header and background from it. The default is no chrome.
+/// the header band, sizes and fills the row's box by its [`RowStyle`], and
+/// hands the rest to the [`RowDecorator`], which draws the header and
+/// background from it. The default is no chrome.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RowChrome {
     /// Height of the band above the blocks the header is drawn in; zero
@@ -572,11 +578,22 @@ pub struct RowChrome {
     /// App-defined kind the decorator branches on, as a chat message's
     /// role.
     pub kind: u32,
+    /// The row's width, alignment, padding, and rounded background.
+    pub style: RowStyle,
+}
+
+impl RowChrome {
+    /// Whether rows with chrome `self` and `other` have the same height.
+    fn same_layout(&self, other: &Self) -> bool {
+        self.header_height.to_bits() == other.header_height.to_bits()
+            && self.style.same_layout(&other.style)
+    }
 }
 
 impl Hash for RowChrome {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (self.header_height.to_bits(), &self.label, self.kind).hash(state);
+        self.style.hash(state);
     }
 }
 
@@ -584,21 +601,23 @@ impl Hash for RowChrome {
 /// cached, so what a decorator draws must depend only on the chrome, the
 /// row width, and the theme.
 pub trait RowDecorator {
-    /// Painted behind the whole row.
+    /// Painted over the whole row box, rounded by its
+    /// [`RowStyle::corner_radius`], unless [`RowStyle::background`] is set.
     fn background(&self, chrome: &RowChrome, theme: &Theme) -> Option<Color> {
         let _ = (chrome, theme);
         None
     }
 
-    /// A bar along the row's leading edge, over the background, as its
-    /// color and width in points: the accent of an alert or error row.
+    /// A bar along the row box's leading edge, over the background, as
+    /// its color and width in points: the accent of an alert or error row.
     fn leading_edge(&self, chrome: &RowChrome, theme: &Theme) -> Option<(Color, f32)> {
         let _ = (chrome, theme);
         None
     }
 
-    /// The element filling the header band, `width` wide and
-    /// `chrome.header_height` tall. Called only when the row is rebuilt.
+    /// The element filling the header band, `width` wide (the row's
+    /// content column) and `chrome.header_height` tall. Called only when
+    /// the row is rebuilt.
     fn header(&self, chrome: &RowChrome, width: f32, theme: &Theme) -> Option<AnyElement> {
         let _ = (chrome, width, theme);
         None
@@ -628,7 +647,8 @@ impl DocumentSource for HashMap<RowKey, DocumentRow> {
 
 /// Layout of a row: `pad_y`, the row's [`RowChrome::header_height`], the
 /// blocks separated by `block_gap`, and `pad_y` again. Blocks are inset
-/// `pad_x` on both sides.
+/// `pad_x` on both sides. A row's [`RowStyle::padding`] replaces `pad_x`
+/// and `pad_y`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DocumentStyle {
     pub font_size: f32,
@@ -802,8 +822,13 @@ pub struct VisibleRow {
     pub key: RowKey,
     /// Position among all rows.
     pub index: usize,
+    /// `rect.y`.
     pub top: f32,
+    /// `rect.height`.
     pub height: f32,
+    /// The row's box: as wide as its [`RowStyle`] makes it, and placed by
+    /// its alignment.
+    pub rect: Rect,
     /// This row's entries in [`Document::visible_blocks`].
     pub blocks: std::ops::Range<usize>,
     /// This row's entries in [`Document::visible_adornments`].
@@ -1802,17 +1827,24 @@ impl<G: BlockGeometry> Document<G> {
             .measure_visible(width, style.overscan, |key, width| {
                 let key = RowKey(key);
                 let blocks = owned_blocks(source, block_row, key);
-                let (header, adornments) = source.row(key).map_or((0.0, &[][..]), |r| {
-                    (r.chrome.header_height, r.adornments.as_slice())
-                });
-                let block_width = block_width(&style, width);
-                lay_out_row(&style, header, blocks, adornments, |item, _| match item {
-                    RowItem::Block { block, .. } => {
-                        let block = code.present(block);
-                        measure_cached(cache, measurer, &block, block_width).height()
-                    }
-                    RowItem::Adornment { height, .. } => height,
-                })
+                let (chrome, adornments) = row_chrome(source, key);
+                let geometry = RowGeometry::resolve(&chrome.style, width, &style);
+                let header = chrome.header_height;
+                lay_out_row(
+                    &style,
+                    &geometry,
+                    header,
+                    blocks,
+                    adornments,
+                    |item, _| match item {
+                        RowItem::Block { block, .. } => {
+                            let block = code.present(block);
+                            let width = geometry.content_width;
+                            measure_cached(cache, measurer, &block, width).height()
+                        }
+                        RowItem::Adornment { height, .. } => height,
+                    },
+                )
             });
     }
 
@@ -1839,7 +1871,7 @@ impl<G: BlockGeometry> Document<G> {
         measurer: &mut M,
     ) {
         let style = self.style;
-        let block_width = block_width(&style, self.size.0);
+        let width = self.size.0;
         let window = self.list.window(style.overscan);
         let scroll = self.list.scroll_offset();
         let rows = self.list.rows();
@@ -1861,9 +1893,9 @@ impl<G: BlockGeometry> Document<G> {
             let height = rows.height_of(key).unwrap_or(0.0);
             let first = self.blocks.len();
             let first_adornment = self.adornments.len();
-            let (header, adornments) = source.row(key).map_or((0.0, &[][..]), |r| {
-                (r.chrome.header_height, r.adornments.as_slice())
-            });
+            let (chrome, adornments) = row_chrome(source, key);
+            let geometry = RowGeometry::resolve(&chrome.style, width, &style);
+            let (column_x, block_width) = (geometry.content_x, geometry.content_width);
             let (blocks, visible_adornments) = (&mut self.blocks, &mut self.adornments);
             let (measured, handles) = (&mut self.measured, &mut self.scroll_handles);
             let code = CodePresentation {
@@ -1871,56 +1903,70 @@ impl<G: BlockGeometry> Document<G> {
                 wrapped: &self.wrapped,
             };
             let owned = owned_blocks(source, &self.block_row, key);
-            lay_out_row(&style, header, owned, adornments, |item, y| match item {
-                RowItem::Block { index: i, block } => {
-                    let block = code.present(block);
-                    let block = &*block;
-                    let geometry = measure_cached(measured, measurer, block, block_width);
-                    if let Some(entry) = measured.remove(&block.key) {
-                        kept.insert(block.key, entry);
+            let header = chrome.header_height;
+            lay_out_row(
+                &style,
+                &geometry,
+                header,
+                owned,
+                adornments,
+                |item, y| match item {
+                    RowItem::Block { index: i, block } => {
+                        let block = code.present(block);
+                        let block = &*block;
+                        let geometry = measure_cached(measured, measurer, block, block_width);
+                        if let Some(entry) = measured.remove(&block.key) {
+                            kept.insert(block.key, entry);
+                        }
+                        let block_height = geometry.height();
+                        let column = block_width - block.style.inset(style.font_size);
+                        if geometry.natural_width().is_some_and(|w| w > column) {
+                            handles.entry(block.key).or_default();
+                        }
+                        blocks.push(VisibleBlock {
+                            key: block.key,
+                            row: key,
+                            index: i,
+                            rect: Rect {
+                                x: column_x,
+                                y: top + y,
+                                width: block_width,
+                                height: block_height,
+                            },
+                            offset_in_row: y,
+                            text_len: block.text().len(),
+                            geometry,
+                        });
+                        block_height
                     }
-                    let block_height = geometry.height();
-                    let column = block_width - block.style.inset(style.font_size);
-                    if geometry.natural_width().is_some_and(|w| w > column) {
-                        handles.entry(block.key).or_default();
+                    RowItem::Adornment { index: i, height } => {
+                        visible_adornments.push(VisibleAdornment {
+                            key: adornments[i].key,
+                            row: key,
+                            index: i,
+                            rect: Rect {
+                                x: column_x,
+                                y: top + y,
+                                width: block_width,
+                                height,
+                            },
+                            offset_in_row: y,
+                        });
+                        height
                     }
-                    blocks.push(VisibleBlock {
-                        key: block.key,
-                        row: key,
-                        index: i,
-                        rect: Rect {
-                            x: style.pad_x,
-                            y: top + y,
-                            width: block_width,
-                            height: block_height,
-                        },
-                        offset_in_row: y,
-                        text_len: block.text().len(),
-                        geometry,
-                    });
-                    block_height
-                }
-                RowItem::Adornment { index: i, height } => {
-                    visible_adornments.push(VisibleAdornment {
-                        key: adornments[i].key,
-                        row: key,
-                        index: i,
-                        rect: Rect {
-                            x: style.pad_x,
-                            y: top + y,
-                            width: block_width,
-                            height,
-                        },
-                        offset_in_row: y,
-                    });
-                    height
-                }
-            });
+                },
+            );
             self.rows.push(VisibleRow {
                 key,
                 index,
                 top,
                 height,
+                rect: Rect {
+                    x: geometry.x,
+                    y: top,
+                    width: geometry.width,
+                    height,
+                },
                 blocks: first..self.blocks.len(),
                 adornments: first_adornment..self.adornments.len(),
             });
@@ -2012,6 +2058,7 @@ impl<G: BlockGeometry> Document<G> {
         let content = source.row(row);
         RowSnapshot {
             header: content.map_or(0.0, |r| r.chrome.header_height),
+            style: content.map_or_else(RowStyle::default, |r| r.chrome.style),
             adornments: content.map_or_else(Vec::new, |r| {
                 r.adornments.iter().map(|a| (a.slot, a.height)).collect()
             }),
@@ -2165,6 +2212,7 @@ fn owned_blocks<'a>(
 #[derive(Debug, Clone)]
 pub(super) struct RowSnapshot {
     pub header: f32,
+    pub style: RowStyle,
     pub adornments: Vec<(AdornmentSlot, f32)>,
     pub blocks: Vec<Block>,
 }
@@ -2178,9 +2226,10 @@ enum RowItem<'a> {
     Adornment { index: usize, height: f32 },
 }
 
-/// Lays a row out top to bottom: `pad_y`, the `header` band, its blocks
-/// and adornments in flow order separated by the block gap (half of it
-/// before a [`BlockStyle::tight`] block), and `pad_y` again. `item` gets
+/// Lays a row out top to bottom: `geometry`'s top padding, the `header`
+/// band, its blocks and adornments in flow order separated by the block
+/// gap (half of it before a [`BlockStyle::tight`] block), and the bottom
+/// padding. `item` gets
 /// each item and its top below the row's top and returns its height.
 /// Returns the row's height. The UI thread and the background measurer
 /// both lay rows out through it, so their heights agree to the bit.
@@ -2189,12 +2238,13 @@ enum RowItem<'a> {
 /// [`AdornmentSlot::Before`] block is not among `blocks` goes to the end.
 fn lay_out_row<'a, A: AdornmentShape>(
     style: &DocumentStyle,
+    geometry: &RowGeometry,
     header: f32,
     blocks: impl Iterator<Item = (usize, &'a Block)> + Clone,
     adornments: &[A],
     mut item: impl FnMut(RowItem<'a>, f32) -> f32,
 ) -> f32 {
-    let mut y = style.pad_y + header;
+    let mut y = geometry.pad_top + header;
     let mut placed = false;
     let mut next = |entry: RowItem<'a>, tight: bool| {
         if placed {
@@ -2230,11 +2280,26 @@ fn lay_out_row<'a, A: AdornmentShape>(
     for (index, _, height) in shaped.filter(|a| at_end(a.1)) {
         next(RowItem::Adornment { index, height }, false);
     }
-    y + style.pad_y
+    y + geometry.pad_bottom
 }
 
-fn block_width(style: &DocumentStyle, width: f32) -> f32 {
-    (width - style.pad_x * 2.0).max(1.0)
+/// `row`'s chrome and adornments; none for a row the source lacks.
+fn row_chrome(source: &impl DocumentSource, row: RowKey) -> (&RowChrome, &[RowAdornment]) {
+    static NONE: RowChrome = RowChrome {
+        header_height: 0.0,
+        label: None,
+        kind: 0,
+        style: RowStyle {
+            max_width: None,
+            align: RowAlign::Start,
+            background: None,
+            corner_radius: 0.0,
+            padding: None,
+        },
+    };
+    source
+        .row(row)
+        .map_or((&NONE, &[]), |r| (&r.chrome, r.adornments.as_slice()))
 }
 
 fn vertical_distance(rect: &Rect, y: f32) -> f32 {

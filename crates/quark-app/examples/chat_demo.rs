@@ -172,6 +172,7 @@ fn chat_chrome(role: Role, author: &str) -> RowChrome {
         header_height: AUTHOR_LINE.round(),
         label: Some(author.into()),
         kind: role as u32,
+        ..RowChrome::default()
     }
 }
 

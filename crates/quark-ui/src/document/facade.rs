@@ -167,7 +167,9 @@ impl MarkdownDocument {
     }
 
     /// Replaces the chrome of `row`: its author line once an answer has
-    /// finished streaming, say. The row is rebuilt on the next prepare.
+    /// finished streaming, say. The row is repainted on the next prepare,
+    /// and remeasured when its header height, width cap, or padding
+    /// changed; its markdown is not converted again.
     pub fn set_chrome(&mut self, row: RowKey, chrome: RowChrome) -> Result<(), RowError> {
         let entry = self
             .entries
@@ -176,8 +178,20 @@ impl MarkdownDocument {
         if entry.chrome == chrome {
             return Ok(());
         }
-        entry.chrome = chrome;
-        self.refresh(row)
+        let remeasure = !entry.chrome.same_layout(&chrome);
+        entry.chrome = chrome.clone();
+        // `rows` and `entries` hold the same keys.
+        let Some(content) = self.rows.get_mut(&row) else {
+            return self.refresh(row);
+        };
+        content.chrome = chrome;
+        if remeasure {
+            // A height in flight was measured for the old box; the old
+            // height stays as the estimate until the new one lands.
+            self.background.forget(row);
+            self.document.update(content)?;
+        }
+        Ok(())
     }
 
     /// Replaces the adornments of `row`: a tool card's header changing

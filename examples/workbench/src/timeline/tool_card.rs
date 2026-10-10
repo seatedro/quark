@@ -82,6 +82,7 @@ pub fn content(row: &Row, call: &ToolCall, expanded: bool) -> RowContent {
             header_height: 0.0,
             label: Some(format!("Tool: {name}").into()),
             kind: KIND_TOOL,
+            ..RowChrome::default()
         },
         adornments: vec![header(tool, call.clone(), expanded)],
     }

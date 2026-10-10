@@ -23,8 +23,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use quark_text::{LayoutCache, TextSystem, TextSystemRecipe};
 
 use super::{
-    BlockGeometry, BlockMeasurer, Document, DocumentSource, DocumentStyle, RowItem, RowSnapshot,
-    TextMeasurer, block_width, lay_out_row,
+    BlockGeometry, BlockMeasurer, Document, DocumentSource, DocumentStyle, RowGeometry, RowItem,
+    RowSnapshot, TextMeasurer, lay_out_row,
 };
 use crate::virtual_list::RowKey;
 
@@ -43,8 +43,8 @@ pub struct MeasureSpec {
     pub scale_factor: f32,
 }
 
-/// Everything a row's height depends on besides its header and blocks. Each distinct
-/// value is one epoch.
+/// Everything a row's height depends on besides its snapshot (header, row
+/// style, adornments, and blocks). Each distinct value is one epoch.
 #[derive(Debug, Clone)]
 pub(super) struct RowLayout {
     spec: MeasureSpec,
@@ -83,10 +83,12 @@ struct WorkerGone;
 type MeasureRow = fn(&mut TextMeasurer<'_>, &RowLayout, &RowSnapshot) -> f32;
 
 fn measure_row(measurer: &mut TextMeasurer<'_>, layout: &RowLayout, row: &RowSnapshot) -> f32 {
-    let width = block_width(&layout.style, layout.width);
+    let geometry = RowGeometry::resolve(&row.style, layout.width, &layout.style);
+    let width = geometry.content_width;
     measurer.apply_style(&layout.style);
     lay_out_row(
         &layout.style,
+        &geometry,
         row.header,
         row.blocks.iter().enumerate(),
         &row.adornments,
@@ -417,7 +419,7 @@ mod tests {
     use quark_text::{LayoutCache, TextSystem};
 
     use super::*;
-    use crate::document::{MarkdownDocument, MarkdownEntry, RowChrome};
+    use crate::document::{MarkdownDocument, MarkdownEntry, RowAlign, RowChrome, RowStyle};
 
     const FONT_SIZE: f32 = 14.0;
 
@@ -552,29 +554,44 @@ mod tests {
     }
 
     // Catches a height measured at the old width being applied after a
-    // resize, which would leave the row marked exact at the wrong height.
+    // resize, or after the rows were narrowed by their style, which would
+    // leave the row marked exact at the wrong height.
     #[test]
     fn result_measured_before_a_width_change_is_dropped() {
-        let mut ui = Ui::new(history(40), (420.0, 300.0));
-        // Every request at 420 finishes before the resize is seen.
-        let (background, _) = ui.md.background_mut();
-        let in_flight = background.pending.len();
-        let worker = background.worker.as_ref().unwrap();
-        let stale: Vec<RowHeight> = (0..in_flight)
-            .map(|_| worker.recv().ok().unwrap())
-            .collect();
+        type Change = fn(&mut Ui);
+        let changes: [(&str, Change); 2] = [
+            ("viewport width", |ui| ui.size.0 = 300.0),
+            ("row style", |ui| {
+                for row in 0..40 {
+                    let mut chrome = entry(row, String::new()).chrome;
+                    chrome.style.max_width = Some(260.0);
+                    chrome.style.padding = Some([4.0, 20.0, 4.0, 20.0]);
+                    ui.md.set_chrome(RowKey(row), chrome).unwrap();
+                }
+            }),
+        ];
+        for (name, change) in changes {
+            let mut ui = Ui::new(history(40), (420.0, 300.0));
+            // Every request finishes before the change is seen.
+            let (background, _) = ui.md.background_mut();
+            let in_flight = background.pending.len();
+            let worker = background.worker.as_ref().unwrap();
+            let stale: Vec<RowHeight> = (0..in_flight)
+                .map(|_| worker.recv().ok().unwrap())
+                .collect();
 
-        ui.size.0 = 300.0;
-        ui.frame();
-        let (background, document) = ui.md.background_mut();
-        let taken = stale
-            .into_iter()
-            .filter(|result| background.take(*result, document))
-            .count();
-        ui.md.finish_measures();
+            change(&mut ui);
+            ui.frame();
+            let (background, document) = ui.md.background_mut();
+            let taken = stale
+                .into_iter()
+                .filter(|result| background.take(*result, document))
+                .count();
+            ui.md.finish_measures();
 
-        let expected = ui.synchronous_heights();
-        assert_eq!((taken, ui.heights()), (0, expected));
+            let expected = ui.synchronous_heights();
+            assert_eq!((taken, ui.heights()), (0, expected), "{name}");
+        }
     }
 
     // Catches a streaming row off screen keeping the height of its first
@@ -750,12 +767,16 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(12))]
 
         // Catches the worker shaping differently from the UI thread: other
-        // fonts, scale, width, or gaps would make rows jump when they
-        // scroll in.
+        // fonts, scale, width, gaps, or row box (a narrowed or padded row)
+        // would make rows jump when they scroll in.
         #[test]
         fn background_heights_equal_synchronous_heights(
             messages in prop::collection::vec(
-                prop::collection::vec(prop::sample::select(PIECES), 1..4),
+                (
+                    prop::collection::vec(prop::sample::select(PIECES), 1..4),
+                    prop::option::of(60.0f32..500.0),
+                    prop::option::of(prop::array::uniform4(0.0f32..40.0)),
+                ),
                 2..8,
             ),
             width in 120.0f32..700.0,
@@ -763,10 +784,26 @@ mod tests {
             let entries = messages
                 .iter()
                 .enumerate()
-                .map(|(i, parts)| entry(i as u64, parts.join("\n\n")))
+                .map(|(i, (parts, max_width, padding))| {
+                    let mut entry = entry(i as u64, parts.join("\n\n"));
+                    entry.chrome.style = RowStyle {
+                        max_width: *max_width,
+                        align: RowAlign::End,
+                        padding: *padding,
+                        ..RowStyle::default()
+                    };
+                    entry
+                })
                 .collect();
-            // A viewport of one pixel leaves nearly every row to the worker.
+            // A viewport of one pixel without overscan leaves every row but
+            // the first to the worker.
             let mut ui = Ui::new(entries, (width.round(), 1.0));
+            let style = DocumentStyle {
+                overscan: 0.0,
+                ..*ui.md.document().style()
+            };
+            ui.md.document_mut().set_style(style);
+            ui.frame();
 
             ui.md.finish_measures();
 
