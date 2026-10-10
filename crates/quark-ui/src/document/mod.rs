@@ -678,6 +678,11 @@ pub struct DocumentStyle {
     /// ([`LineHeight::scaled`]); code blocks keep their own. An invalid
     /// value falls back to [`LineHeight::PARAGRAPH`].
     pub line_height: LineHeight,
+    /// The widest the rows' area grows, in logical points. A wider
+    /// viewport centers the area in it: rows lay out and paint within it,
+    /// while the viewport still scrolls and keeps its scrollbar at its own
+    /// edge. `None` lets rows span the viewport.
+    pub max_column: Option<f32>,
 }
 
 impl DocumentStyle {
@@ -692,6 +697,7 @@ impl DocumentStyle {
             edge: (font_size * 2.0).round(),
             overscan: (font_size * 20.0).round(),
             line_height: LineHeight::PARAGRAPH,
+            max_column: None,
         }
     }
 

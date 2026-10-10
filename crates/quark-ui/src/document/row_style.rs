@@ -113,12 +113,20 @@ pub(super) struct RowGeometry {
 impl RowGeometry {
     pub fn resolve(row: &RowStyle, viewport_width: f32, style: &DocumentStyle) -> Self {
         let viewport = sanitize(viewport_width);
-        let width = row.cap().map_or(viewport, |cap| cap.min(viewport));
-        let x = match row.align {
-            RowAlign::Start => 0.0,
-            RowAlign::End => viewport - width,
-            RowAlign::Center => (viewport - width) * 0.5,
-        };
+        // Rows lay out in the column, centered in a wider viewport.
+        let area = style
+            .max_column
+            .map(sanitize)
+            .filter(|column| *column > 0.0)
+            .map_or(viewport, |column| column.min(viewport));
+        let offset = ((viewport - area) * 0.5).round();
+        let width = row.cap().map_or(area, |cap| cap.min(area));
+        let x = offset
+            + match row.align {
+                RowAlign::Start => 0.0,
+                RowAlign::End => area - width,
+                RowAlign::Center => (area - width) * 0.5,
+            };
         let [top, right, bottom, left] = row
             .padding
             .unwrap_or([style.pad_y, style.pad_x, style.pad_y, style.pad_x])

@@ -25,22 +25,29 @@ fn bubble(align: RowAlign, padding: Option<[f32; 4]>) -> RowStyle {
 // places: its row x counted twice or not at all, or its padding left out
 // of one of them. Dragging from the glyphs of the styled row 1 into row 2
 // copies exactly the text between them, and the text is painted where it
-// was measured.
+// was measured. A document column narrower than the viewport moves every
+// row into it the same way.
 #[test]
 fn a_narrow_end_aligned_row_selects_the_text_it_paints() {
     let padded = Some([4.0, 24.0, 8.0, 12.0]);
     // A 400-point viewport, the document's pad_x 17 and pad_y 8, and a
-    // 20-point header band.
+    // 20-point header band; a 300-point column sits 50 points in.
     let cases = [
-        (RowAlign::Start, None, "box 0+240 block 17,28"),
-        (RowAlign::End, None, "box 160+240 block 177,28"),
-        (RowAlign::Center, None, "box 80+240 block 97,28"),
-        (RowAlign::End, padded, "box 160+240 block 172,24"),
+        (RowAlign::Start, None, None, "box 0+240 block 17,28"),
+        (RowAlign::End, None, None, "box 160+240 block 177,28"),
+        (RowAlign::Center, None, None, "box 80+240 block 97,28"),
+        (RowAlign::End, padded, None, "box 160+240 block 172,24"),
+        (RowAlign::Start, None, Some(300.0), "box 50+240 block 67,28"),
+        (RowAlign::End, None, Some(300.0), "box 110+240 block 127,28"),
     ];
-    for (align, padding, expected) in cases {
+    for (align, padding, column, expected) in cases {
         let mut rows = real_document(3);
         rows.get_mut(&RowKey(1)).unwrap().chrome.style = bubble(align, padding);
         let mut view = real_view(&rows);
+        view.set_style(DocumentStyle {
+            max_column: column,
+            ..*view.style()
+        });
         view.set_scroll_offset(0.0);
         let mut painted = paint(&mut view, &rows, (400.0, 600.0), 0.0);
         let row = view.visible_rows()[1].clone();
@@ -95,7 +102,7 @@ fn a_narrow_end_aligned_row_selects_the_text_it_paints() {
                 "wraps across a few lines when the column is narrow enough.\n\nMessage 2"
                     .to_owned()
             ),
-            "{align:?} {padding:?}"
+            "{align:?} {padding:?} {column:?}"
         );
     }
 }

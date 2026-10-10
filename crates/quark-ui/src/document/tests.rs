@@ -92,6 +92,7 @@ fn grid_style() -> DocumentStyle {
         edge: 32.0,
         overscan: 450.0,
         line_height: LineHeight::PARAGRAPH,
+        max_column: None,
     }
 }
 

@@ -54,6 +54,7 @@ pub fn document_style() -> DocumentStyle {
         line_scroll: 42.0,
         edge: 28.0,
         overscan: 320.0,
+        max_column: None,
     }
 }
 
