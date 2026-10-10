@@ -1,6 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 use core::mem;
+use core::ops::Range;
 
 use crate::{
     Align, Attrs, AttrsList, Cached, FontSystem, LayoutGlyph, LayoutLine, LineEnding, ShapeLine,
@@ -18,6 +19,9 @@ pub struct BufferLine {
     layout_opt: Cached<Vec<LayoutLine>>,
     shaping: Shaping,
     metadata: Option<usize>,
+    /// Byte ranges word wrapping keeps on one line when they fit on one;
+    /// see [`Self::set_keep_together_ranges`].
+    keep_together: Vec<Range<usize>>,
 }
 
 impl BufferLine {
@@ -39,6 +43,7 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping,
             metadata: None,
+            keep_together: Vec::new(),
         }
     }
 
@@ -60,6 +65,7 @@ impl BufferLine {
         self.layout_opt.set_unused();
         self.shaping = shaping;
         self.metadata = None;
+        self.keep_together.clear();
     }
 
     /// Heap bytes the line keeps, at capacity: its text, attributes, and
@@ -79,7 +85,11 @@ impl BufferLine {
                         .sum::<usize>()
             }
         };
-        self.text.capacity() + self.attrs_list.storage_bytes() + shape + layout
+        self.text.capacity()
+            + self.attrs_list.storage_bytes()
+            + self.keep_together.capacity() * mem::size_of::<Range<usize>>()
+            + shape
+            + layout
     }
 
     /// Get current text
@@ -90,6 +100,7 @@ impl BufferLine {
     /// Set text and attributes list
     ///
     /// Will reset shape and layout if it differs from current text and attributes list.
+    /// New text clears the keep-together ranges.
     /// Returns true if the line was reset
     pub fn set_text<T: AsRef<str>>(
         &mut self,
@@ -99,6 +110,9 @@ impl BufferLine {
     ) -> bool {
         let text = text.as_ref();
         if text != self.text || ending != self.ending || attrs_list != self.attrs_list {
+            if text != self.text {
+                self.keep_together.clear();
+            }
             self.text.clear();
             self.text.push_str(text);
             self.ending = ending;
@@ -179,6 +193,12 @@ impl BufferLine {
     pub fn append(&mut self, other: &Self) {
         let len = self.text.len();
         self.text.push_str(other.text());
+        self.keep_together.extend(
+            other
+                .keep_together
+                .iter()
+                .map(|range| range.start + len..range.end + len),
+        );
 
         // To preserve line endings, we use the one from the other line
         self.ending = other.ending();
@@ -205,6 +225,22 @@ impl BufferLine {
         self.reset();
 
         let mut new = Self::new(text, self.ending, attrs_list, self.shaping);
+        // Ranges past `index` move to the new line; one across it splits.
+        let first_moved = self.keep_together.partition_point(|r| r.end <= index);
+        new.keep_together.extend(
+            self.keep_together[first_moved..]
+                .iter()
+                .map(|r| r.start.max(index) - index..r.end - index),
+        );
+        let straddles = self
+            .keep_together
+            .get(first_moved)
+            .is_some_and(|r| r.start < index);
+        self.keep_together
+            .truncate(first_moved + usize::from(straddles));
+        if straddles {
+            self.keep_together[first_moved].end = index;
+        }
         // To preserve line endings, it moves to the new line
         self.ending = LineEnding::None;
         new.align = self.align;
@@ -288,6 +324,28 @@ impl BufferLine {
         }
     }
 
+    /// Sets byte ranges of the line (sorted, disjoint, on char boundaries)
+    /// that word wrapping keeps on one line when each fits on one: it does
+    /// not break between the words a range's bytes overlap, and moves them
+    /// to the next line together. A range wider than the line wraps as if it
+    /// were not there. Keeps the storage. Resets layout if they changed.
+    /// Returns true if the line was reset
+    pub fn set_keep_together_ranges(&mut self, ranges: &[Range<usize>]) -> bool {
+        if ranges == self.keep_together.as_slice() {
+            return false;
+        }
+        debug_assert!(
+            ranges
+                .windows(2)
+                .all(|pair| pair[0].start < pair[0].end && pair[0].end <= pair[1].start),
+            "keep-together ranges must be sorted and disjoint"
+        );
+        self.keep_together.clear();
+        self.keep_together.extend_from_slice(ranges);
+        self.reset_layout();
+        true
+    }
+
     /// Get line shaping cache
     pub const fn shape_opt(&self) -> Option<&ShapeLine> {
         self.shape_opt.get()
@@ -310,8 +368,9 @@ impl BufferLine {
                 .layout_opt
                 .take_unused()
                 .unwrap_or_else(|| Vec::with_capacity(1));
-            let shape = self.shape(font_system, tab_width);
-            shape.layout_to_buffer(
+            self.shape(font_system, tab_width);
+            let shape = self.shape_opt.get().expect("shape not found");
+            shape.layout_to_buffer_keeping(
                 &mut font_system.shape_buffer,
                 font_size,
                 width_opt,
@@ -319,6 +378,7 @@ impl BufferLine {
                 align,
                 &mut layout,
                 match_mono_width,
+                &self.keep_together,
             );
             self.layout_opt.set_used(layout);
         }
@@ -354,6 +414,7 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping: Shaping::Advanced,
             metadata: None,
+            keep_together: Vec::new(),
         }
     }
 
