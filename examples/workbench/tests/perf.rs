@@ -196,20 +196,22 @@ fn transcript_rows(ui: &UiTestHarness<Workbench>) -> Vec<quark_ui::virtual_list:
         .unwrap_or_default()
 }
 
-/// A 96-point wheel step up the stress transcript, over rows it has
+/// A 168-point wheel step up the stress transcript, over rows it has
 /// shown before (warm caches, as the design's scroll budget assumes):
-/// (allocations, rows entering).
+/// (allocations, rows entering). The document scrolls by the wheel's
+/// points, so the step is as far as the four 42-point lines it took when
+/// the wheel moved by lines, far enough to bring rows past the overscan.
 fn transcript_scroll(ui: &mut UiTestHarness<Workbench>) -> (u64, u64) {
     let step = |ui: &mut UiTestHarness<Workbench>, dy: f32| {
         ui.wheel(0.0, dy);
         settle_transcript(ui);
     };
     ui.pointer_move((640.0, 400.0));
-    for dy in [-96.0, -96.0, -96.0, 96.0, 96.0, 96.0] {
+    for dy in [-168.0, -168.0, -168.0, 168.0, 168.0, 168.0] {
         step(ui, dy);
     }
     let before = transcript_rows(ui);
-    let ((), allocated) = test_alloc::count(|| ui.wheel(0.0, -96.0));
+    let ((), allocated) = test_alloc::count(|| ui.wheel(0.0, -168.0));
     let entering = transcript_rows(ui)
         .iter()
         .filter(|key| !before.contains(key))
