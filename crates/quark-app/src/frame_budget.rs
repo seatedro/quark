@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use quark_ui::document::{
-    DocumentStyle, MarkdownDocument, MarkdownEntry, RowChrome, RowDecorator, TextMeasurer,
+    DocumentStyle, MarkdownDocument, MarkdownEntry, RowAlign, RowChrome, RowDecorator, RowStyle,
+    TextMeasurer,
 };
 use quark_ui::element::{AnyElement, IntoAnyElement, NoopAction, ScrollHandle, cached, div, text};
 use quark_ui::style::Styled;
@@ -276,6 +277,21 @@ fn chat_markdown(i: u64) -> String {
     )
 }
 
+/// Every other message is a narrow rounded row at the right end, as a
+/// user's message in a chat.
+fn chat_row_style(i: u64) -> RowStyle {
+    if i.is_multiple_of(2) {
+        return RowStyle::default();
+    }
+    RowStyle {
+        max_width: Some(520.0),
+        align: RowAlign::End,
+        background: Some(quark::Color::rgba(40, 60, 90, 255)),
+        corner_radius: 14.0,
+        padding: Some([10.0, 14.0, 10.0, 14.0]),
+    }
+}
+
 /// The transcript in a harness past its warm-up frames, every row's
 /// height measured.
 fn chat(accessibility: bool) -> UiTestHarness<Chat> {
@@ -288,6 +304,7 @@ fn chat(accessibility: bool) -> UiTestHarness<Chat> {
                 header_height: 22.0,
                 label: Some("Assistant".into()),
                 kind: 0,
+                style: chat_row_style(i),
             },
             markdown: chat_markdown(i),
         }))

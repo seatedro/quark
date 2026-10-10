@@ -1793,6 +1793,7 @@ mod tests {
                     header_height: 22.0,
                     label: Some(format!("author {i}").into()),
                     kind: 0,
+                    ..RowChrome::default()
                 },
                 blocks: vec![Block::plain(BlockKey(i), text)],
                 adornments: Vec::new(),

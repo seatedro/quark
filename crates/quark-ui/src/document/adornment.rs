@@ -55,8 +55,9 @@ pub enum AdornmentAccessibility {
 pub struct AdornmentCx<'a> {
     pub row: RowKey,
     pub key: AdornmentKey,
-    /// Size of the band: the row's block column wide, the adornment's
-    /// height tall.
+    /// Size of the band: the row's content column wide (see
+    /// [`RowStyle::content_width`](super::RowStyle::content_width)), the
+    /// adornment's height tall.
     pub width: f32,
     pub height: f32,
     pub theme: &'a Theme,
@@ -71,8 +72,9 @@ pub struct RowAdornment {
     pub key: AdornmentKey,
     pub slot: AdornmentSlot,
     /// Height of the band in logical points, measured by the app at the
-    /// document's width. It counts toward the row's height; zero takes no
-    /// space and builds nothing.
+    /// row's [`RowStyle::content_width`](super::RowStyle::content_width).
+    /// It counts toward the row's height; zero takes no space and builds
+    /// nothing.
     pub height: f32,
     /// Changes whenever the builder would build something else (a state,
     /// a label, a count it shows). The row rebuilds when it does.

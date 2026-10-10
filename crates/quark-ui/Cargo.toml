@@ -62,6 +62,8 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # Animated image tests build GIFs and run the decoder without the `images`
 # feature.
 image = { workspace = true, features = ["gif", "webp"] }
+# Pixel probes of rendered rows, on hosts with a GPU.
+quark-render = { workspace = true, features = ["headless-render"] }
 
 
 # Tests feed published trees through AccessKit's AT-SPI layer to check what

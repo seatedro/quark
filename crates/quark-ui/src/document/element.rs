@@ -22,7 +22,7 @@ use super::measure::{failed_image_spans, image_extent};
 use super::{
     AdornmentAccessibility, AdornmentCx, Block, BlockContent, BlockGeometry, Decorator, Document,
     DocumentSource, ImageState, LIST_STEP, Palette, QUOTE_STEP, RowAdornment, RowChrome,
-    TableCells, TableMetrics, VisibleRow,
+    RowGeometry, RowStyle, TableCells, TableMetrics, VisibleRow,
 };
 use crate::accessibility::{AccessibilityAction, AccessibilityNode, CollectionInfo};
 use crate::action::Action;
@@ -190,7 +190,10 @@ struct RowBuild {
     /// 1-based position among all rows, and the row count.
     position: usize,
     row_count: usize,
+    /// The row box's size.
     size: (f32, f32),
+    /// The box's corner radius at its height.
+    radius: f32,
     chrome: RowChrome,
     decorator: Option<Decorator>,
     header: Rect,
@@ -332,7 +335,6 @@ impl<G: BlockGeometry> Document<G> {
         on_event: impl Fn(DocumentEvent) -> Action + 'static,
     ) -> DocumentElement {
         self.elements_built += 1;
-        let width = self.size.0;
         let palette = Palette::new(theme);
         let colors = RowColors::new(theme);
         let theme_hash = {
@@ -391,11 +393,10 @@ impl<G: BlockGeometry> Document<G> {
             let subtree = build.clone();
             placed.push(Placed {
                 rect: Rect {
-                    x: 0.0,
-                    // From the whole point, in f64 until it is small.
+                    // From the whole point, in f64 until it is small; the
+                    // box's x and width come from its row style.
                     y: (self.list.rows().offset_of_index(row.index) - whole) as f32,
-                    width,
-                    height: row.height,
+                    ..row.rect
                 },
                 element: cached(row_cache_key(row.key), hash, move || {
                     RowElement::new(subtree, &links, &controls)
@@ -446,6 +447,16 @@ impl<G: BlockGeometry> Document<G> {
             LineHeight::Points(points) => (1u8, points.to_bits()).hash(&mut hasher),
         }
         chrome.hash(&mut hasher);
+        // The box and column the row's local rects derive from; where the
+        // box sits is placement, outside the cached subtree.
+        let geometry = self.row_geometry(chrome);
+        for v in [
+            geometry.width,
+            geometry.content_x - geometry.x,
+            geometry.pad_top,
+        ] {
+            v.to_bits().hash(&mut hasher);
+        }
         // Another decorator draws other chrome.
         self.decorator
             .as_ref()
@@ -487,6 +498,13 @@ impl<G: BlockGeometry> Document<G> {
         &self.adornments[row.adornments.clone()]
     }
 
+    /// The box and column of a row with `chrome` at the current width, as
+    /// materialize resolved them.
+    fn row_geometry(&self, chrome: Option<&RowChrome>) -> RowGeometry {
+        let style = chrome.map_or_else(RowStyle::default, |c| c.style);
+        RowGeometry::resolve(&style, self.size.0, &self.style)
+    }
+
     /// The inputs of `row`'s subtree.
     fn row_build(
         &self,
@@ -500,8 +518,9 @@ impl<G: BlockGeometry> Document<G> {
         ),
         row_count: usize,
     ) -> RowBuild {
-        let style = &self.style;
-        let width = self.size.0;
+        let geometry = self.row_geometry(chrome);
+        // Children sit relative to the row box, which the element places.
+        let origin_x = row.rect.x;
         let mut built = Vec::with_capacity(row.blocks.len());
         let mut highlights = Vec::new();
         let mut rects = Vec::new();
@@ -510,6 +529,7 @@ impl<G: BlockGeometry> Document<G> {
                 continue;
             };
             let rect = Rect {
+                x: visible.rect.x - origin_x,
                 y: visible.offset_in_row,
                 ..visible.rect
             };
@@ -551,17 +571,18 @@ impl<G: BlockGeometry> Document<G> {
             key: row.key,
             position: row.index + 1,
             row_count,
-            size: (width, row.height),
+            size: (row.rect.width, row.height),
+            radius: geometry.radius(row.height),
             header: Rect {
-                x: style.pad_x,
-                y: style.pad_y,
-                width: (width - style.pad_x * 2.0).max(1.0),
+                x: geometry.content_x - origin_x,
+                y: geometry.pad_top,
+                width: geometry.content_width,
                 height: chrome.map_or(0.0, |c| c.header_height),
             },
             chrome: chrome.cloned().unwrap_or_default(),
             decorator: self.decorator.clone(),
-            font_size: style.font_size,
-            line_height: style.line_height,
+            font_size: self.style.font_size,
+            line_height: self.style.line_height,
             colors,
             blocks: built,
             adornments: self
@@ -570,6 +591,7 @@ impl<G: BlockGeometry> Document<G> {
                 .filter_map(|visible| {
                     let adornment = adornments.get(visible.index)?;
                     let rect = Rect {
+                        x: visible.rect.x - origin_x,
                         y: visible.offset_in_row,
                         ..visible.rect
                     };
@@ -583,7 +605,9 @@ impl<G: BlockGeometry> Document<G> {
 
 /// One row: its chrome background, find highlights, chrome header,
 /// blocks, and adornments, with the row's list item node. Built inside the
-/// row's cached boundary, so it paints relative to the row's top left.
+/// row's cached boundary, so it paints relative to the row box's top left.
+/// A row with a [`RowStyle`] clips what it paints to its rounded box and
+/// its hit regions to the box's bounds.
 struct RowElement {
     build: Rc<RowBuild>,
     /// The decorator's header, built at layout, where the theme is known.
@@ -601,6 +625,10 @@ enum RowChild {
 }
 
 impl RowElement {
+    fn shaped(&self) -> bool {
+        self.build.chrome.style != RowStyle::default()
+    }
+
     fn new(build: Rc<RowBuild>, links: &LinkHandler, controls: &CodeControls) -> Self {
         let mut children = Vec::with_capacity(build.blocks.len() * 2 + build.adornments.len());
         let mut placed = Vec::new();
@@ -694,11 +722,15 @@ impl Element for RowElement {
 
     fn prepaint(
         &mut self,
-        _bounds: Bounds,
+        bounds: Bounds,
         _layout_state: &mut (),
         engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) {
+        let shaped = self.shaped();
+        if shaped {
+            cx.push_clip(bounds);
+        }
         if let Some(header) = &mut self.header {
             header.prepaint(engine, cx);
         }
@@ -708,6 +740,9 @@ impl Element for RowElement {
                 RowChild::Adornment(_, Some(element)) => element.prepaint(engine, cx),
                 RowChild::Adornment(_, None) => {}
             }
+        }
+        if shaped {
+            cx.pop_clip();
         }
     }
 
@@ -720,13 +755,20 @@ impl Element for RowElement {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        let shaped = self.shaped();
         let build = &*self.build;
-        let background = build
-            .decorator
-            .as_ref()
-            .and_then(|d| d.0.background(&build.chrome, cx.theme));
+        if shaped {
+            scene.clip_rounded(bounds, [build.radius; 4]);
+            cx.push_paint_clip(bounds);
+        }
+        let background = build.chrome.style.background.or_else(|| {
+            build
+                .decorator
+                .as_ref()
+                .and_then(|d| d.0.background(&build.chrome, cx.theme))
+        });
         if let Some(color) = background {
-            scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, 0.0, color));
+            scene.rounded_rect(RoundedRectPrimitive::uniform(bounds, build.radius, color));
         }
         let edge = build
             .decorator
@@ -796,6 +838,10 @@ impl Element for RowElement {
             }
         }
         cx.pop_semantic_parent();
+        if shaped {
+            cx.pop_paint_clip();
+            scene.pop_clip();
+        }
     }
 }
 

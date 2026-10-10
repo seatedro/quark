@@ -108,6 +108,7 @@ fn message_with(i: u64, blocks: &[&str]) -> DocumentRow {
             header_height: 20.0,
             label: Some(format!("author {i}").into()),
             kind: (i % 2) as u32,
+            ..RowChrome::default()
         },
         blocks: blocks
             .iter()
@@ -654,7 +655,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
-struct Ev(DocumentEvent);
+pub(super) struct Ev(pub(super) DocumentEvent);
 
 impl From<Ev> for Action {
     fn from(ev: Ev) -> Self {
@@ -662,16 +663,16 @@ impl From<Ev> for Action {
     }
 }
 
-struct Painted {
-    scene: Scene,
-    accessibility: AccessibilityFrame,
-    regions: Vec<crate::element::SelectableTextRegion>,
-    router: InputRouter,
+pub(super) struct Painted {
+    pub(super) scene: Scene,
+    pub(super) accessibility: AccessibilityFrame,
+    pub(super) regions: Vec<crate::element::SelectableTextRegion>,
+    pub(super) router: InputRouter,
 }
 
 /// Prepares `view` with real layouts and paints its element `top`
 /// pixels below the window's top edge.
-fn paint(
+pub(super) fn paint(
     view: &mut Document,
     messages: &HashMap<RowKey, DocumentRow>,
     size: (f32, f32),
@@ -716,7 +717,7 @@ fn paint(
     }
 }
 
-fn real_document(n: u64) -> HashMap<RowKey, DocumentRow> {
+pub(super) fn real_document(n: u64) -> HashMap<RowKey, DocumentRow> {
     (0..n)
         .map(|i| {
             let mut m = message_with(
@@ -739,7 +740,7 @@ fn real_document(n: u64) -> HashMap<RowKey, DocumentRow> {
         .collect()
 }
 
-fn real_view(messages: &HashMap<RowKey, DocumentRow>) -> Document {
+pub(super) fn real_view(messages: &HashMap<RowKey, DocumentRow>) -> Document {
     let mut keys: Vec<&RowKey> = messages.keys().collect();
     keys.sort();
     let mut view = Document::new(DocumentStyle::for_font_size(14.0));
@@ -1645,6 +1646,20 @@ fn cached_rows_paint_exactly_what_an_uncached_frame_paints_after_each_edit() {
         }),
         ("find", |t, m, _| t.set_find_query("lines", m)),
         ("narrow", |_, _, size| size.0 = 300.0),
+        ("round and narrow row 2", |t, m, _| {
+            let message = m.get_mut(&RowKey(2)).unwrap();
+            message.chrome.style = RowStyle {
+                max_width: Some(220.0),
+                align: RowAlign::End,
+                background: Some(Color::rgba(40, 80, 160, 255)),
+                corner_radius: 12.0,
+                padding: Some([6.0, 12.0, 6.0, 12.0]),
+            };
+            t.update(message).unwrap();
+        }),
+        ("realign row 2", |_, m, _| {
+            m.get_mut(&RowKey(2)).unwrap().chrome.style.align = RowAlign::Center;
+        }),
         ("append a row", |t, m, _| {
             let message = message_with(30, &["A new message at the end."]);
             t.push(&message).unwrap();
@@ -2272,38 +2287,52 @@ fn adornment_controls_stay_accessible_in_a_labelled_row() {
 
 // Catches a press on an adornment's button starting a text selection
 // instead of reaching the button, which sits over the document's drag
-// surface.
+// surface. In a row narrowed to the right, the place the button would
+// take in a full-width row is margin and must not reach it.
 #[test]
 fn clicking_an_adornment_button_emits_its_action_and_selects_nothing() {
-    let mut rows = real_document(3);
-    rows.get_mut(&RowKey(1)).unwrap().adornments = vec![retry_bar(0)];
-    let mut view = real_view(&rows);
-    let mut painted = paint(&mut view, &rows, (400.0, 600.0), 0.0);
-    let update = painted.accessibility.tree_update("Test", None);
-    let button = update
-        .nodes
-        .iter()
-        .find(|(_, n)| n.label() == Some("Retry 1"))
-        .and_then(|(_, n)| n.bounds())
-        .expect("the button is published");
-    let (x, y) = (
-        ((button.x0 + button.x1) * 0.5) as f32,
-        ((button.y0 + button.y1) * 0.5) as f32,
-    );
+    let narrow = RowStyle {
+        max_width: Some(240.0),
+        align: RowAlign::End,
+        ..RowStyle::default()
+    };
+    // The row box's left edge.
+    for (style, margin) in [(RowStyle::default(), 0.0), (narrow, 160.0)] {
+        let mut rows = real_document(3);
+        let row = rows.get_mut(&RowKey(1)).unwrap();
+        row.adornments = vec![retry_bar(0)];
+        row.chrome.style = style;
+        let mut view = real_view(&rows);
+        let mut painted = paint(&mut view, &rows, (400.0, 600.0), 0.0);
+        let update = painted.accessibility.tree_update("Test", None);
+        let button = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Retry 1"))
+            .and_then(|(_, n)| n.bounds())
+            .expect("the button is published");
+        let (x, y) = (
+            ((button.x0 + button.x1) * 0.5) as f32,
+            ((button.y0 + button.y1) * 0.5) as f32,
+        );
 
-    let mut actions = painted.router.pointer_down(x, y, &mut None).actions;
-    actions.extend(painted.router.pointer_up().actions);
-    for action in &actions {
-        if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
-            view.handle(*event);
+        let mut actions = click(&mut painted, (x, y));
+        if margin > 0.0 {
+            actions.extend(click(&mut painted, (x - margin, y)));
         }
-    }
+        for action in &actions {
+            if let Some(Ev(event)) = action.downcast_ref::<Ev>() {
+                view.handle(*event);
+            }
+        }
 
-    let retries: Vec<&Retry> = actions.iter().filter_map(|a| a.downcast_ref()).collect();
-    assert_eq!(
-        (retries, view.selected_text(&rows)),
-        (vec![&Retry(1)], String::new())
-    );
+        let retries: Vec<&Retry> = actions.iter().filter_map(|a| a.downcast_ref()).collect();
+        assert_eq!(
+            (retries, view.selected_text(&rows)),
+            (vec![&Retry(1)], String::new()),
+            "{style:?}"
+        );
+    }
 }
 
 // Catches a cached row replaying an adornment whose revision changed: a
