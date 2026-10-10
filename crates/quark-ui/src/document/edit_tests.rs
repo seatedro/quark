@@ -373,3 +373,95 @@ fn removing_the_visible_row_preserves_the_next_survivor() {
         );
     }
 }
+
+/// Inline code in the user's message.
+const CODE: &str = "cargo test --lib";
+
+/// A user's message: a 220-point rounded bubble at the row's end.
+fn user_row(row: u64, markdown: &str) -> MarkdownEntry {
+    MarkdownEntry {
+        row: RowKey(row),
+        chrome: RowChrome {
+            style: RowStyle {
+                max_width: Some(220.0),
+                align: RowAlign::End,
+                background: Some(quark::Color::rgba(40, 90, 200, 255)),
+                corner_radius: 12.0,
+                padding: Some([8.0, 12.0, 8.0, 12.0]),
+            },
+            ..RowChrome::default()
+        },
+        markdown: markdown.to_owned(),
+    }
+}
+
+// Catches the edits of an agent transcript undoing scrolling, row shape,
+// inline code wrapping, selection, or find: a reply grows and steps
+// expand above the view and right after the user's bubble, and the bubble
+// itself is edited. The bubble stays where it was on screen, in its
+// narrow box, with its code on one of its wrapped lines; the selection
+// across it takes in the new step; find has the new matches in row order
+// around its current one.
+#[test]
+fn a_transcript_keeps_its_bubble_selection_and_find_while_steps_expand() {
+    let mut entries = transcript(40);
+    let asked = format!("please run `{CODE}` before you merge");
+    entries[20] = user_row(20, &asked);
+    let mut ui = Ui::new(entries);
+    ui.md.set_find_query("cargo");
+    ui.md.find_next(ScrollAlign::Center);
+    ui.settle();
+    let top = ui.md.document().list().rows().offset_of(RowKey(20));
+    ui.scroll_to(top.unwrap() - 10.0);
+    ui.select((19, 4), (21, 3));
+    // `"<top>@<x>+<width>, <lines> lines, code on <lines>"`.
+    let bubble = |ui: &Ui| {
+        let document = ui.md.document();
+        let row = document.visible_rows().iter().find(|r| r.key == RowKey(20));
+        let row = row.unwrap();
+        let block = &document.visible_blocks()[row.blocks.clone()][0];
+        let text = ui.md.rows()[&RowKey(20)].blocks[0].text();
+        let code = text.find(CODE).unwrap();
+        let lines = |range: std::ops::Range<usize>| {
+            let mut rects = Vec::new();
+            block.geometry.range_rects(range, &mut rects);
+            let mut tops: Vec<u32> = rects.iter().map(|r| r.y.to_bits()).collect();
+            tops.dedup();
+            tops.len()
+        };
+        format!(
+            "{}@{}+{}, {} lines, code on {}",
+            row.rect.y,
+            row.rect.x,
+            row.rect.width,
+            lines(0..text.len()),
+            lines(code..code + CODE.len())
+        )
+    };
+    let before = bubble(&ui);
+
+    ui.md
+        .set_markdown(RowKey(3), &format!("row 3\n\n{STEP}"))
+        .unwrap();
+    ui.md
+        .insert_after(RowKey(5), [entry(100, STEP), entry(101, "cargo fmt")])
+        .unwrap();
+    ui.md
+        .insert_after(RowKey(20), [entry(102, "step: cargo build")])
+        .unwrap();
+    ui.md
+        .set_markdown(RowKey(20), &format!("{asked}, thanks"))
+        .unwrap();
+    let found = ui.find_dump();
+    ui.settle();
+
+    assert_eq!(
+        (before.as_str(), bubble(&ui), ui.md.selected_text(), found),
+        (
+            "10@200+220, 3 lines, code on 1",
+            before.clone(),
+            format!("19\n\nplease run {CODE} before you merge, thanks\n\nstep: cargo build\n\nrow"),
+            "101:0..5 *20:11..16 102:6..11".to_owned(),
+        )
+    );
+}

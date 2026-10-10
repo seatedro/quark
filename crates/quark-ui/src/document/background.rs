@@ -778,8 +778,9 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(12))]
 
         // Catches the worker shaping differently from the UI thread: other
-        // fonts, scale, width, gaps, or row box (a narrowed or padded row)
-        // would make rows jump when they scroll in.
+        // fonts, scale, width, gaps, or row box (a narrowed or padded row,
+        // including one inserted mid-document) would make rows jump when
+        // they scroll in.
         #[test]
         fn background_heights_equal_synchronous_heights(
             messages in prop::collection::vec(
@@ -792,7 +793,7 @@ mod tests {
             ),
             width in 120.0f32..700.0,
         ) {
-            let entries = messages
+            let mut entries: Vec<MarkdownEntry> = messages
                 .iter()
                 .enumerate()
                 .map(|(i, (parts, max_width, padding))| {
@@ -806,6 +807,11 @@ mod tests {
                     entry
                 })
                 .collect();
+            // The rows between the first and the last arrive later, in one
+            // batch between them.
+            let last = entries.pop().unwrap();
+            let middle = entries.split_off(1);
+            entries.push(last);
             // A viewport of one pixel without overscan leaves every row but
             // the first to the worker.
             let mut ui = Ui::new(entries, (width.round(), 1.0));
@@ -814,6 +820,8 @@ mod tests {
                 ..*ui.md.document().style()
             };
             ui.md.document_mut().set_style(style);
+            ui.frame();
+            ui.md.insert(1, middle).unwrap();
             ui.frame();
 
             ui.md.finish_measures();

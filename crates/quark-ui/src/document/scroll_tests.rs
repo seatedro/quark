@@ -407,3 +407,61 @@ fn remeasuring_above_a_moving_document_preserves_its_path() {
         26.0
     );
 }
+
+// Catches a row edit anchoring against the offset from before routed
+// input, or leaving motion behind: rows inserted or removed above the view
+// after a wheel (before the frame that takes it in) or during a smooth
+// scroll must leave on screen the rows the input reaches without the edit.
+#[test]
+fn editing_rows_above_after_input_keeps_the_view_the_input_reaches() {
+    type Step = fn(&mut View);
+    let insert: Step = |view| {
+        let rows = [1000, 1001].map(text_row);
+        view.doc.insert_after(RowKey(4), &rows).unwrap();
+        view.rows.extend(rows.map(|r| (r.key, r)));
+    };
+    let remove: Step = |view| {
+        view.doc.remove(RowKey(5)).unwrap();
+        view.rows.remove(&RowKey(5));
+    };
+    let wheel: Step = |view| view.wheel(45.0, 1000);
+    let smooth: Step = |view| {
+        view.doc.scroll_handle().animate_to(0.0, 960.0);
+        view.frame(1000);
+        view.frame(1055);
+    };
+    // Name, input, edit, and how far the edit moves the offset.
+    let cases: [(&str, Step, Step, f64); 4] = [
+        ("wheel, insert", wheel, insert, 64.0),
+        ("wheel, remove", wheel, remove, -32.0),
+        ("smooth scroll, insert", smooth, insert, 64.0),
+        ("smooth scroll, remove", smooth, remove, -32.0),
+    ];
+    let on_screen = |painted: Vec<(String, f32)>| -> Vec<(String, f32)> {
+        painted
+            .into_iter()
+            .filter(|(_, y)| (0.0..H).contains(y))
+            .collect()
+    };
+    for (name, input, edit, delta) in cases {
+        let mut views = [(); 2].map(|_| View::new((0..100).map(text_row)));
+        for view in &mut views {
+            view.doc.set_scroll_offset(320.0);
+            view.frame(0);
+            input(view);
+        }
+        let [edited, unchanged] = &mut views;
+        edit(edited);
+
+        for now in [1110, 1220, 1500] {
+            let seen = on_screen(edited.frame(now));
+            assert_eq!(seen, on_screen(unchanged.frame(now)), "{name} at {now}");
+            assert!(!seen.is_empty(), "{name}");
+        }
+        assert_eq!(
+            edited.doc.scroll_offset_f64() - unchanged.doc.scroll_offset_f64(),
+            delta,
+            "{name}"
+        );
+    }
+}
