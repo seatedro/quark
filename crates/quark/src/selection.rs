@@ -218,22 +218,37 @@ impl BlockOrder {
     /// Prepends `keys` (in their given order) before the current first block.
     /// Keys already present are skipped. Rebuilds the index once per batch.
     pub fn prepend(&mut self, keys: impl IntoIterator<Item = BlockKey>) -> usize {
-        let mut fresh: Vec<BlockKey> = Vec::new();
-        let mut seen: HashSet<BlockKey> = HashSet::new();
-        for key in keys {
-            if !self.index.contains_key(&key) && seen.insert(key) {
-                fresh.push(key);
-            }
+        self.insert_batch(0, keys).unwrap_or(0)
+    }
+
+    /// Inserts `keys` (in their given order) before the block at `index`;
+    /// `len()` appends, as [`Self::extend`] does. Keys already present, or
+    /// repeated in `keys`, are skipped. Reindexes the blocks after `index`
+    /// once per batch. Returns how many were added, or `None` without
+    /// changes when `index` is past the end.
+    pub fn insert_batch(
+        &mut self,
+        index: usize,
+        keys: impl IntoIterator<Item = BlockKey>,
+    ) -> Option<usize> {
+        match index.cmp(&self.keys.len()) {
+            Ordering::Greater => return None,
+            Ordering::Equal => return Some(self.extend(keys)),
+            Ordering::Less => {}
         }
+        let mut seen: HashSet<BlockKey> = HashSet::new();
+        let fresh: Vec<BlockKey> = keys
+            .into_iter()
+            .filter(|key| !self.index.contains_key(key) && seen.insert(*key))
+            .collect();
         if fresh.is_empty() {
-            return 0;
+            return Some(0);
         }
         let added = fresh.len();
-        fresh.extend_from_slice(&self.keys);
-        self.keys = fresh;
-        self.reindex_from(0);
+        self.keys.splice(index..index, fresh);
+        self.reindex_from(index);
         debug_assert_eq!(self.verify_integrity(), Ok(()));
-        added
+        Some(added)
     }
 
     /// Inserts `key` right after `after`. Returns `false` if `after` is
@@ -494,6 +509,8 @@ mod tests {
         Append(u64),
         Extend(Vec<u64>),
         Prepend(Vec<u64>),
+        /// Position (possibly past the end), keys.
+        InsertBatch(usize, Vec<u64>),
         InsertAfter(u64, u64),
         Remove(u64),
     }
@@ -506,6 +523,11 @@ mod tests {
             key.clone().prop_map(Op::Append),
             prop::collection::vec(key.clone(), 0..5).prop_map(Op::Extend),
             prop::collection::vec(key.clone(), 0..5).prop_map(Op::Prepend),
+            (
+                0..KEYS as usize + 2,
+                prop::collection::vec(key.clone(), 0..5)
+            )
+                .prop_map(|(at, keys)| Op::InsertBatch(at, keys)),
             (key.clone(), key.clone()).prop_map(|(a, b)| Op::InsertAfter(a, b)),
             key.prop_map(Op::Remove),
         ]
@@ -551,6 +573,20 @@ mod tests {
                         fresh.extend(&model);
                         model = fresh;
                         prop_assert_eq!(order.prepend(keys.into_iter().map(k)), added);
+                    }
+                    Op::InsertBatch(at, keys) => {
+                        let added = (at <= model.len()).then(|| {
+                            let mut fresh: Vec<u64> = Vec::new();
+                            for key in &keys {
+                                if !model.contains(key) && !fresh.contains(key) {
+                                    fresh.push(*key);
+                                }
+                            }
+                            let added = fresh.len();
+                            model.splice(at..at, fresh);
+                            added
+                        });
+                        prop_assert_eq!(order.insert_batch(at, keys.into_iter().map(k)), added);
                     }
                     Op::InsertAfter(after, key) => {
                         let at = model.iter().position(|&m| m == after);
