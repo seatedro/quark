@@ -255,9 +255,11 @@ impl UiApp for Chat {
         let (width, height) = cx.frame.size();
         let scale = cx.frame.scale_factor();
         let font_size = self.transcript.document().style().font_size;
+        let reduced_motion = cx.theme.reduced_motion;
         let text = cx.frame.text();
         let mut measurer = TextMeasurer::new(&mut text.system, &mut text.layouts, font_size, scale);
-        self.transcript.prepare(width, height, 0, &mut measurer);
+        self.transcript
+            .prepare(width, height, 0, reduced_motion, &mut measurer);
         self.transcript
             .element(cx.theme, |_| NoopAction.into())
             .into_any()

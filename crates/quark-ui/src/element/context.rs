@@ -343,10 +343,6 @@ impl<'a> ElementContext<'a> {
         self.animations.as_deref()
     }
 
-    pub(crate) fn animations_mut(&mut self) -> Option<&mut AnimationTable> {
-        self.animations.as_deref_mut()
-    }
-
     /// Prepaint children of a container scrolled by `handle` between this
     /// and [`Self::pop_scroll_handle`].
     pub(crate) fn push_scroll_handle(&mut self, handle: &ScrollHandle) {

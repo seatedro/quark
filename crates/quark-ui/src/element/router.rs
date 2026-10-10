@@ -1838,6 +1838,7 @@ mod tests {
                     w,
                     h,
                     0,
+                    false,
                     &self.messages,
                     &mut TextMeasurer::new(&mut self.text, &mut self.layouts, 14.0, 1.0),
                 );

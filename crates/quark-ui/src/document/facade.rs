@@ -22,6 +22,7 @@ use super::{
     RowAdornment, RowChrome, RowDecorator, TextGeometry,
 };
 use crate::action::Action;
+use crate::element::ScrollHandle;
 use crate::markdown::{BlockKind, IncrementalMarkdown, MarkdownDoc};
 use crate::theme::Theme;
 use crate::virtual_list::{RowError, RowKey, ScrollAlign};
@@ -309,14 +310,23 @@ impl MarkdownDocument {
         width: f32,
         height: f32,
         now_ms: u64,
+        reduced_motion: bool,
         measurer: &mut M,
     ) {
         let style = *self.document.style();
         self.background.configure(measurer, style, width);
-        self.background.apply(&mut self.document);
+        // Scroll input and motion resolve first, so the heights that land
+        // anchor against the offset the user scrolled to.
         self.document
-            .prepare(width, height, now_ms, &self.rows, measurer);
+            .begin_prepare(width, height, now_ms, reduced_motion, measurer);
+        self.background.apply(&mut self.document);
+        self.document.finish_prepare(&self.rows, measurer);
         self.background.request(&self.document, &self.rows);
+    }
+
+    /// See [`Document::scroll_handle`].
+    pub fn scroll_handle(&self) -> &ScrollHandle {
+        self.document.scroll_handle()
     }
 
     /// Rows are being measured in the background; draw another frame to

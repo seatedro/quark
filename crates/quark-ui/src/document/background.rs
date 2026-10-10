@@ -484,7 +484,8 @@ mod tests {
 
         fn frame(&mut self) {
             let mut measurer = TextMeasurer::new(&mut self.text, &mut self.layouts, FONT_SIZE, 1.0);
-            self.md.prepare(self.size.0, self.size.1, 0, &mut measurer);
+            self.md
+                .prepare(self.size.0, self.size.1, 0, false, &mut measurer);
         }
 
         fn scroll_to(&mut self, offset: f32) {
@@ -516,7 +517,7 @@ mod tests {
                 .extend(keys.into_iter().map(|k| &messages[k]))
                 .unwrap();
             let mut measurer = TextMeasurer::new(&mut self.text, &mut self.layouts, FONT_SIZE, 1.0);
-            reference.prepare(self.size.0, 1.0e7, 0, messages, &mut measurer);
+            reference.prepare(self.size.0, 1.0e7, 0, false, messages, &mut measurer);
             let rows = reference.list().rows();
             rows.keys()
                 .iter()

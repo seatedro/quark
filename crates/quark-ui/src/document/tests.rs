@@ -148,7 +148,7 @@ impl Doc {
     fn frame(&mut self) {
         let (w, h) = self.size;
         self.view
-            .prepare(w, h, self.now_ms, &self.messages, &mut Grid);
+            .prepare(w, h, self.now_ms, false, &self.messages, &mut Grid);
         self.now_ms += 16;
     }
 
@@ -484,22 +484,34 @@ fn autoscroll_is_faster_farther_past_the_edge() {
 // Scroll model
 // ---------------------------------------------------------------------------
 
+// A wheel up of a few points, routed to the document's handle, lets go of
+// the bottom at once: the streaming row then grows below the view.
 #[test]
 fn update_then_prepare_keeps_pin() {
-    let mut doc = Doc::rows(50);
-    let mut text = String::from("m49 second");
+    for (wheel, pinned, first_bottom) in [(0.0, true, 900.0), (-10.0, false, 910.0)] {
+        let mut doc = Doc::rows(50);
+        doc.view
+            .scroll_handle()
+            .scroll_by(crate::element::Axis::Y, wheel, doc.now_ms);
+        let mut text = String::from("m49 second");
 
-    let mut bottoms = Vec::new();
-    for _ in 0..8 {
-        text.push_str(" streaming words");
-        doc.stream(49, 1, &text);
-        doc.frame();
-        bottoms.push(doc.last_row_bottom());
+        let mut bottoms = Vec::new();
+        for _ in 0..8 {
+            text.push_str(" streaming words");
+            doc.stream(49, 1, &text);
+            doc.frame();
+            bottoms.push(doc.last_row_bottom());
+        }
+
+        assert_eq!(doc.view.is_stuck_to_bottom(), pinned, "wheel {wheel}");
+        assert_eq!(bottoms[0], first_bottom, "wheel {wheel}");
+        if pinned {
+            assert_eq!(bottoms, [900.0; 8]);
+        } else {
+            assert!(bottoms[7] > bottoms[0], "{bottoms:?}");
+        }
+        assert!(doc.view.visible_rows().last().unwrap().height > 90.0);
     }
-
-    assert!(doc.view.is_stuck_to_bottom());
-    assert_eq!(bottoms, [900.0; 8]);
-    assert!(doc.view.visible_rows().last().unwrap().height > 90.0);
 }
 
 #[test]
@@ -672,6 +684,7 @@ fn paint(
         size.0,
         size.1,
         0,
+        false,
         messages,
         &mut TextMeasurer::new(&mut text, &mut layouts, font_size, 1.0),
     );
@@ -1063,7 +1076,7 @@ fn streaming_markdown_reshapes_only_the_last_block() {
     messages.insert(message.key, message);
     let mut frame = |view: &mut Document, messages: &HashMap<_, _>| {
         let mut measurer = TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0);
-        view.prepare(400.0, 600.0, 0, messages, &mut measurer);
+        view.prepare(400.0, 600.0, 0, false, messages, &mut measurer);
         view.visible_blocks()
             .iter()
             .map(|b| b.geometry.layout.clone().unwrap())
@@ -1264,6 +1277,7 @@ fn paint_markdown(
         400.0,
         300.0,
         0,
+        false,
         &mut TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0),
     );
     let element = md.element(theme, |ev| Ev(ev).into());
@@ -1333,6 +1347,7 @@ fn link_click_emits_the_document_link_action() {
         400.0,
         300.0,
         0,
+        false,
         &mut TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0),
     );
     let element = md
@@ -1384,6 +1399,7 @@ fn drag_selection_follows_a_scaled_document() {
         400.0,
         300.0,
         0,
+        false,
         &mut TextMeasurer::new(&mut text, &mut layouts, 14.0, 1.0),
     );
     let element = md.element(&theme, |ev| Ev(ev).into());
@@ -1493,6 +1509,7 @@ impl CachedPainter {
             size.0,
             size.1,
             0,
+            false,
             messages,
             &mut TextMeasurer::new(&mut self.text, &mut self.layouts, font_size, 1.0),
         );
@@ -1753,6 +1770,7 @@ fn prepare_markdown(md: &mut MarkdownDocument, text: &mut TextSystem, layouts: &
         400.0,
         300.0,
         0,
+        false,
         &mut TextMeasurer::new(text, layouts, 14.0, 1.0),
     );
 }
@@ -2843,21 +2861,50 @@ fn an_anchored_row_holds_its_place_as_content_changes() {
 }
 
 // Catches an anchor that fights the user: once they scroll, the row moves
-// with the content and the next frame leaves it there.
+// with the content and the next frame leaves it there, whether the scroll
+// came from the app, the wheel (on the document's handle), or a requested
+// jump, and whether a frame or an edit comes first.
 #[test]
 fn a_user_scroll_releases_the_anchor() {
-    let mut doc = Doc::rows(40);
-    doc.size.1 = 400.0;
-    doc.view.anchor_row(RowKey(20), 12.0).unwrap();
-    doc.frame();
+    type Scroll = fn(&mut Doc, f64);
+    let cases: [(&str, Scroll); 3] = [
+        ("set_scroll_offset", |doc, to| {
+            doc.view.set_scroll_offset(to);
+        }),
+        ("wheel", |doc, to| {
+            let delta = (to - doc.view.scroll_offset_f64()) as f32;
+            doc.view
+                .scroll_handle()
+                .scroll_by(crate::element::Axis::Y, delta, doc.now_ms);
+        }),
+        ("set_offset", |doc, to| {
+            doc.view.scroll_handle().set_offset(0.0, to);
+        }),
+    ];
+    for (name, scroll) in cases {
+        for frame_first in [true, false] {
+            let mut doc = Doc::rows(40);
+            doc.size.1 = 400.0;
+            doc.view.anchor_row(RowKey(20), 12.0).unwrap();
+            doc.frame();
 
-    doc.scroll_to(doc.view.scroll_offset() + 30.0);
-    let grown = tall_message(25, 4);
-    doc.view.update(&grown).unwrap();
-    doc.messages.insert(grown.key, grown);
-    doc.frame();
+            let to = doc.view.scroll_offset_f64() + 30.0;
+            scroll(&mut doc, to);
+            if frame_first {
+                doc.frame();
+            }
+            let grown = tall_message(25, 4);
+            doc.view.update(&grown).unwrap();
+            doc.messages.insert(grown.key, grown);
+            doc.frame();
 
-    assert_eq!((doc.view.anchor(), doc.screen_top(20)), (None, -18.0));
+            assert_eq!(
+                (doc.view.anchor(), doc.screen_top(20)),
+                (None, -18.0),
+                "{name}, frame first: {frame_first}"
+            );
+        }
+    }
 }
 
 // Catches removing the anchored row nudging the view over two frames: the

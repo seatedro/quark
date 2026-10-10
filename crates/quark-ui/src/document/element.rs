@@ -1,6 +1,6 @@
 //! The document's element: the materialized rows placed at the positions
 //! [`Document::prepare`] computed, painted through `SelectableText` and
-//! `CodeBlock`, with drag-select, wheel, and accessibility wiring.
+//! `CodeBlock`, with drag-select, scrolling, and accessibility wiring.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use accesskit::Role as AccessibilityRole;
+use quark::focus::{FocusId, TabStop};
 use quark::hit::{CursorHint, HitFlags, HitId};
 use quark::{SemanticActions, SemanticNode, SemanticRole, Transform2D};
 use quark_render::scene::Rect;
@@ -30,8 +31,8 @@ use crate::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, CodeBlock, CodeHeader, DragHandler,
     DragReleaseResult, DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId,
     LineHeight, LinkClicked, LinkHandler, ParagraphStyle, ScrollActionBuilder, ScrollAxes,
-    ScrollHandle, ScrollSink, ScrollTarget, ScrollbarInput, ScrollbarVisibility, Scrollbars,
-    StyledSpan, cached, code_block_joined, div, inputs_hash, selectable_rich_text, svg_icon, text,
+    ScrollHandle, ScrollSink, ScrollbarInput, Scrollbars, StyledSpan, cached, code_block_joined,
+    div, inputs_hash, selectable_rich_text, svg_icon, text,
 };
 use crate::icons::lucide;
 use crate::style::Styled;
@@ -61,7 +62,8 @@ fn list_label(label: &'static str) -> Arc<str> {
 }
 
 /// Input from the document element, in coordinates relative to its top
-/// left. Pass each to [`Document::handle`].
+/// left. Pass each to [`Document::handle`]. Wheel, trackpad, scrollbar,
+/// and key scrolling move [`Document::scroll_handle`] instead.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DocumentEvent {
     PointerDown {
@@ -73,10 +75,17 @@ pub enum DocumentEvent {
         y: f32,
     },
     PointerUp,
+    /// Scroll by whole lines of [`DocumentStyle::line_scroll`](super::DocumentStyle::line_scroll),
+    /// at once. Assistive tech's line scrolls still arrive as this.
+    #[deprecated(note = "wheel input moves `Document::scroll_handle` by points")]
     Wheel(i32),
-    /// The scrollbar moved the view to this offset (`f32::MAX` for the
-    /// end); landing at the bottom pins the view there.
+    /// [`Self::ScrollToOffset`] in `f32`, which steps by whole points or
+    /// more past 2^24.
+    #[deprecated(note = "use `ScrollToOffset`, which keeps the offset exact")]
     ScrollTo(f32),
+    /// Jump to this offset (`f64::MAX` for the end), as assistive tech's
+    /// absolute scrolls do; landing at the bottom pins the view there.
+    ScrollToOffset(f64),
     /// A code block's wrap toggle was pressed.
     SetCodeWrap {
         block: BlockKey,
@@ -280,9 +289,14 @@ impl RowColors {
 /// Built by [`Document::element`].
 pub struct DocumentElement {
     size: (f32, f32),
-    scroll: f32,
-    max_scroll: f32,
-    total_extent: f32,
+    /// The document's, at the offset its rows were prepared at.
+    scroll: ScrollHandle,
+    /// The offset's fraction of a point. Rows are laid out from the whole
+    /// point above it and shifted up by this when placed, so a fractional
+    /// scroll moves them exactly instead of by layout's rounding.
+    shift: f32,
+    total_extent: f64,
+    focus: FocusId,
     row_count: usize,
     /// One cached row subtree per materialized row.
     rows: Vec<Placed>,
@@ -293,8 +307,6 @@ pub struct DocumentElement {
     /// A drag is autoscrolling; ask for the next frame.
     animating: bool,
     scrollbar_auto_hide: bool,
-    /// The document's, so the linger survives rebuilding the element.
-    scrollbar_visibility: ScrollbarVisibility,
 }
 
 /// Cache keys of document rows, apart from other cached boundaries.
@@ -342,6 +354,8 @@ impl<G: BlockGeometry> Document<G> {
             None => LinkClicked { url: url.clone() }.into(),
         });
 
+        let scroll = self.list.scroll_offset();
+        let whole = scroll.floor();
         let mut painted = std::mem::take(&mut self.painted);
         let mut kept = std::mem::take(&mut self.painted_spare);
         let mut builds = std::mem::take(&mut self.row_builds);
@@ -378,7 +392,8 @@ impl<G: BlockGeometry> Document<G> {
             placed.push(Placed {
                 rect: Rect {
                     x: 0.0,
-                    y: row.top,
+                    // From the whole point, in f64 until it is small.
+                    y: (self.list.rows().offset_of_index(row.index) - whole) as f32,
                     width,
                     height: row.height,
                 },
@@ -398,18 +413,18 @@ impl<G: BlockGeometry> Document<G> {
 
         DocumentElement {
             size: self.size,
-            scroll: self.list.scroll_offset() as f32,
-            max_scroll: self.list.max_scroll_offset() as f32,
-            total_extent: self.list.rows().total_extent() as f32,
+            scroll: self.scroll.clone(),
+            shift: (scroll - whole) as f32,
+            total_extent: self.list.rows().total_extent(),
+            focus: self.focus,
             row_count,
             rows: placed,
             on_event,
             on_link,
             on_copy: controls.on_copy,
             label: Cow::Borrowed("Document"),
-            animating: self.wants_frame(),
+            animating: self.autoscrolling(),
             scrollbar_auto_hide: false,
-            scrollbar_visibility: self.scrollbar.clone(),
         }
     }
 
@@ -1459,12 +1474,13 @@ impl DocumentElement {
         self
     }
 
-    /// Input from the wheel and the scrollbar.
+    /// Assistive tech's scroll actions: lines, and absolute offsets.
     fn scroll_builder(&self) -> ScrollActionBuilder {
         let lines = self.on_event.clone();
         let to = self.on_event.clone();
+        #[allow(deprecated)]
         ScrollActionBuilder::new(move |n| lines(DocumentEvent::Wheel(n)))
-            .with_to_px(move |px| to(DocumentEvent::ScrollTo(px as f32)))
+            .with_to_px(move |px| to(DocumentEvent::ScrollToOffset(f64::from(px))))
     }
 }
 
@@ -1488,9 +1504,11 @@ fn absolute(rect: Rect) -> taffy::Style {
 /// The document's prepaint state: the list's hit entry and its scrollbar.
 pub struct DocumentPrepaint {
     hit: HitId,
-    builder: ScrollActionBuilder,
     scrollbars: Scrollbars,
 }
+
+/// The list scrolls vertically; wide blocks scroll sideways themselves.
+const LIST_AXES: ScrollAxes = ScrollAxes { x: false, y: true };
 
 impl Element for DocumentElement {
     type LayoutState = ();
@@ -1528,32 +1546,35 @@ impl Element for DocumentElement {
         cx: &mut ElementContext,
     ) -> DocumentPrepaint {
         let hit = cx.insert_hit(bounds, HitFlags::DRAG | HitFlags::SCROLL, CursorHint::Text);
+        // The offset resolved in prepare, which placed the rows; this only
+        // takes the bounds, watches the handle, and keeps motion drawing.
+        self.scroll.begin_resolved_frame(bounds, cx);
         cx.push_clip(bounds);
+        cx.push_scroll_handle(&self.scroll);
         for placed in &mut self.rows {
-            placed.element.prepaint(engine, cx);
+            placed
+                .element
+                .prepaint_with_offset(engine, cx, 0.0, -self.shift);
         }
-        // The list owns its offset (through the app), so the bar's input
-        // becomes document events like the wheel's.
-        let builder = self.scroll_builder();
+        cx.pop_scroll_handle();
+        self.scroll.end_frame(LIST_AXES, cx);
         let scrollbars = Scrollbars::prepaint(
             ScrollbarInput {
                 bounds,
-                content: (f64::from(bounds.width), f64::from(self.total_extent)),
-                offset: (0.0, f64::from(self.scroll)),
-                axes: ScrollAxes { x: false, y: true },
-                sinks: [None, Some(ScrollSink::Builder(builder.clone()))],
+                content: (f64::from(bounds.width), self.total_extent),
+                offset: self.scroll.offset_f64(),
+                axes: LIST_AXES,
+                sinks: [None, Some(ScrollSink::Handle(self.scroll.clone()))],
                 auto_hide: self.scrollbar_auto_hide,
-                visibility: Some(self.scrollbar_visibility.clone()),
-                focused: false,
+                visibility: Some(self.scroll.scrollbar_visibility().clone()),
+                // Read only for auto-hide: the read ties an enclosing cache
+                // boundary to focus.
+                focused: self.scrollbar_auto_hide && cx.is_focused(self.focus),
             },
             cx,
         );
         cx.pop_clip();
-        DocumentPrepaint {
-            hit,
-            builder,
-            scrollbars,
-        }
+        DocumentPrepaint { hit, scrollbars }
     }
 
     fn paint(
@@ -1570,25 +1591,21 @@ impl Element for DocumentElement {
             cx.request_frame_at_ms(cx.clock_ms + AUTOSCROLL_FRAME_MS);
         }
 
-        // The list: one hit entry and semantic node owning drag and wheel.
+        // The list: one hit entry and semantic node owning drag, wheel,
+        // and, focused, keyboard scrolling.
         let mut node = SemanticNode::new(bounds);
         node.parent = cx.current_semantic_parent();
         node.role = Some(SemanticRole::ScrollArea);
         node.label = Some(Arc::from(&*self.label));
         node.actions = SemanticActions::default().scrollable().draggable();
+        node.focus = Some(self.focus);
+        node.tab_stop = Some(TabStop::new(0));
         let list = cx.semantic.push(node);
         cx.bind_hit(prepaint.hit, list);
 
         let on_event = self.on_event.clone();
-        let builder = prepaint.builder.clone();
-        cx.handlers.on_scroll(
-            list,
-            ScrollTarget {
-                builder: builder.clone(),
-                offset: self.scroll,
-                max: Some(self.max_scroll),
-            },
-        );
+        cx.handlers
+            .on_scroll_handle(list, self.scroll.clone(), LIST_AXES);
         let origin = (bounds.x, bounds.y);
         // Under a transform that flattens the list nothing can be pressed,
         // so it registers no drag.
@@ -1613,14 +1630,16 @@ impl Element for DocumentElement {
             AccessibilityNode::shared(list_key(), AccessibilityRole::List, bounds)
                 .label(label)
                 .set_size(self.row_count)
-                .action(AccessibilityAction::Scroll(builder)),
+                .focus(self.focus)
+                .action(AccessibilityAction::Scroll(self.scroll_builder())),
             list,
         );
         cx.push_semantic_parent(list);
         prepaint.scrollbars.register(list, cx);
 
         for row in &mut self.rows {
-            row.element.paint(engine, scene, cx);
+            row.element
+                .paint_with_offset(engine, scene, cx, 0.0, -self.shift);
         }
 
         prepaint.scrollbars.paint(scene, cx);

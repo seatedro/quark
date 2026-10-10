@@ -326,7 +326,13 @@ pub fn view(state: &mut State, scx: &SurfaceCx, vcx: &mut ViewContext) -> AnyEle
         style.font_size,
         scx.scale,
     );
-    tv.doc.prepare(doc_width, height, scx.now_ms, &mut measurer);
+    tv.doc.prepare(
+        doc_width,
+        height,
+        scx.now_ms,
+        scx.theme.reduced_motion,
+        &mut measurer,
+    );
     if tv.doc.is_measuring() || tv.doc.is_loading_images() {
         vcx.frame.request_frame();
     }
