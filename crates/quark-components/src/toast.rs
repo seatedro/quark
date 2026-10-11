@@ -228,6 +228,8 @@ pub fn retire_toast(table: &mut AnimationTable, id: u64) -> bool {
 /// Sonner-style stacking constants (unscaled).
 const STACK_PEEK: f32 = 10.0;
 const MAX_VISIBLE_BEHIND: usize = 2;
+/// How much narrower each collapsed toast is than the one in front of it.
+const STACK_SHRINK: f32 = 0.05;
 const TOAST_Z_BASE: i32 = 300;
 /// Vertical gap between toasts when fanned out.
 const FAN_GAP: f32 = 10.0;
@@ -343,6 +345,10 @@ struct ToastVisuals {
     /// When set, renders as an actual progress bar instead of a lifetime bar.
     /// The bar fills left-to-right as `external_progress` climbs from 0 to 1.
     external_progress: Option<f32>,
+    /// Whether the time-based bar shows when there is no external progress.
+    lifetime_bar: bool,
+    /// The message's opacity: toasts tucked behind the front one hide it.
+    content_opacity: f32,
     bottom: f32,
     left: f32,
     width: f32,
@@ -369,6 +375,7 @@ impl RenderOnce for ToastVisuals {
             .map(|p| p.clamp(0.0, 1.0))
             .unwrap_or_else(|| self.time_progress.clamp(0.0, 1.0));
         let progress_fill_w = progress_track_w * fill_fraction;
+        let show_bar = self.lifetime_bar || self.external_progress.is_some();
 
         let badge_bg = accent.with_alpha(Alpha::TINT);
         let track_bg = tc.border.with_alpha(Alpha::SOFT);
@@ -405,6 +412,7 @@ impl RenderOnce for ToastVisuals {
                 // Main row: leading badge | stacked title/description | close.
                 <div
                     class="flex-row items-center h-full w-full"
+                    opacity={self.content_opacity}
                     pl={Sp::MD}
                     pr={Sp::MD}
                     py={PAD_Y}
@@ -482,18 +490,20 @@ impl RenderOnce for ToastVisuals {
                 </div>
 
                 // Time-remaining progress bar — fills left→right.
-                <div
-                    class="absolute"
-                    bottom={3.0}
-                    left={progress_inset}
-                    h={PROGRESS_H}
-                    w={progress_track_w}
-                    rounded={PROGRESS_H / 2.0}
-                    bg={track_bg}
-                    overflow_hidden
-                >
-                    <div h_full w={progress_fill_w} bg={accent} />
-                </div>
+                if show_bar {
+                    <div
+                        class="absolute"
+                        bottom={3.0}
+                        left={progress_inset}
+                        h={PROGRESS_H}
+                        w={progress_track_w}
+                        rounded={PROGRESS_H / 2.0}
+                        bg={track_bg}
+                        overflow_hidden
+                    >
+                        <div h_full w={progress_fill_w} bg={accent} />
+                    </div>
+                }
             </div>
         }
     }
@@ -514,6 +524,8 @@ pub struct ToastStack<'a> {
     /// Builds the action a toast's button emits from the toast's id and the
     /// button's index. `None` emits the button's own action.
     pub on_action: Option<Box<dyn Fn(u64, usize) -> Action + 'a>>,
+    /// Draw the time-remaining bar; external progress always draws.
+    pub lifetime_bar: bool,
 }
 
 impl<'a> ToastStack<'a> {
@@ -542,7 +554,14 @@ impl<'a> ToastStack<'a> {
             layouts,
             on_dismiss: Box::new(on_dismiss),
             on_action: None,
+            lifetime_bar: true,
         }
+    }
+
+    /// Show or hide the time-remaining bar.
+    pub fn lifetime_bar(mut self, show: bool) -> Self {
+        self.lifetime_bar = show;
+        self
     }
 
     /// Route button presses through the app, as [`ToastQueue::activate`]
@@ -582,8 +601,8 @@ impl<'a> ToastStack<'a> {
         let fan_gap = (FAN_GAP * scale).round();
         let fan_t = self.animation.get(stack_key(), FAN).unwrap_or(0.0);
         let visible = count.min(MAX_VISIBLE_BEHIND + 1);
-        // Collapsed: front-toast height + MAX_VISIBLE_BEHIND peeks.
-        let collapsed = self.height_of(count - 1) + (MAX_VISIBLE_BEHIND as f32) * peek;
+        // Collapsed: front-toast height + a peek per toast behind it.
+        let collapsed = self.height_of(count - 1) + (visible - 1) as f32 * peek;
         // Fanned: visible toast heights + inter-toast gaps.
         let fanned = (0..visible)
             .map(|d| self.height_of(count - 1 - d))
@@ -644,14 +663,20 @@ impl<'a> ToastStack<'a> {
                 height: Sz::TOAST,
             });
 
-            // Fixed width across all depths — matches Sonner. Back toasts
-            // only differ by vertical offset (peek when collapsed, cumulative
-            // height when fanned).
-            let width = container_w;
+            // Collapsed, each toast behind the front one is 5% narrower, as
+            // Sonner scales them; fanned, all share the stack's width.
+            let shrink = (depth as f32) * STACK_SHRINK * (1.0 - fan_t);
+            let width = (container_w * (1.0 - shrink)).round();
+            // Collapsed, a toast behind the front one is a card of the
+            // front's height with its message hidden, as Sonner does, so a
+            // taller one never shows through above or behind it.
+            let front_h = self.height_of(count - 1);
+            let height = front_h + fan_t * (layout.height - front_h);
+            let content_opacity = if depth == 0 { 1.0 } else { fan_t };
             let collapsed_bottom = (depth as f32) * peek;
             let fanned_bottom = fanned_bottoms[depth];
             let bottom_raw = collapsed_bottom + fan_t * (fanned_bottom - collapsed_bottom);
-            let left = 0.0;
+            let left = ((container_w - width) / 2.0).round();
 
             let bottom = if depth == 0 {
                 let anim_t = self
@@ -696,10 +721,12 @@ impl<'a> ToastStack<'a> {
                 description_lines: layout.description_lines,
                 time_progress,
                 external_progress,
+                lifetime_bar: self.lifetime_bar,
+                content_opacity,
                 bottom,
                 left,
                 width,
-                height: layout.height,
+                height,
                 z,
             });
         }
@@ -732,11 +759,18 @@ pub struct ToastQueue {
     hovered: bool,
     /// The stack's rect from the last [`Self::stack`].
     bounds: Option<Rect>,
+    hide_lifetime_bar: bool,
 }
 
 impl ToastQueue {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Leave out the time-remaining bar, as Sonner does.
+    pub fn without_lifetime_bar(mut self) -> Self {
+        self.hide_lifetime_bar = true;
+        self
     }
 
     /// Oldest first; the newest is in front.
@@ -906,7 +940,8 @@ impl ToastQueue {
             layouts,
             on_dismiss,
         )
-        .on_action(on_action);
+        .on_action(on_action)
+        .lifetime_bar(!self.hide_lifetime_bar);
         let bounds = stack.bounds();
         let built = stack.build();
         self.bounds = Some(bounds);
