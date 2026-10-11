@@ -5,7 +5,8 @@
 use quark::scene::Primitive;
 use quark_ui::element::{
     AnyElement, CacheKey, Div, IntoAnyElement, SCROLLBAR_LINGER_MS, ScrollActionBuilder,
-    ScrollAlign, ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX, cached, div, inputs_hash,
+    ScrollAlign, ScrollAxes, ScrollHandle, ScrollbarVisibility, WHEEL_LINE_PX, cached, div,
+    inputs_hash,
 };
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
@@ -94,6 +95,33 @@ fn shift_wheel_and_sideways_trackpad_motion_scroll_horizontally() {
         ui.wheel(dx, dy);
         assert_eq!(offset(&ui), expected, "{name}");
     }
+}
+
+/// [`rows`] under a clickable overlay at its top left that passes wheel
+/// input through to the rows' handle.
+fn rows_under_overlay(handle: &ScrollHandle) -> Div {
+    div().size_full().child(rows(handle)).child(
+        div()
+            .absolute()
+            .left(0.0)
+            .top(0.0)
+            .w(100.0)
+            .h(100.0)
+            .scroll_through(handle, ScrollAxes { x: false, y: true })
+            .child(div().size_full().on_click(Action::new(()))),
+    )
+}
+
+// Catches wheel input that stops at an overlay above a list (a row's
+// hover controls): over the overlay's button it still scrolls the list.
+#[test]
+fn wheel_over_an_overlay_scrolls_the_container_beneath() {
+    let mut ui = harness(rows_under_overlay, Theme::default_dark());
+    ui.pointer_move((50.0, 50.0));
+    ui.wheel(0.0, 60.0);
+    assert_eq!(offset(&ui), (0.0, 60.0));
+    ui.wheel(0.0, -40.0);
+    assert_eq!(offset(&ui), (0.0, 20.0));
 }
 
 #[test]

@@ -43,6 +43,8 @@ pub struct Div {
     on_scroll_x: Option<ScrollActionBuilder>,
     scroll_handle: Option<ScrollHandle>,
     scroll_axes: ScrollAxes,
+    /// A container's handle that wheel input over this div moves.
+    scroll_through: Option<(ScrollHandle, ScrollAxes)>,
     hide_scrollbar: bool,
     scrollbar_auto_hide: bool,
     scrollbar_visibility: Option<ScrollbarVisibility>,
@@ -106,6 +108,7 @@ pub fn div() -> Div {
         on_scroll_x: None,
         scroll_handle: None,
         scroll_axes: ScrollAxes::default(),
+        scroll_through: None,
         hide_scrollbar: false,
         scrollbar_auto_hide: false,
         scrollbar_visibility: None,
@@ -499,6 +502,17 @@ impl Div {
         self
     }
 
+    /// Wheel input over this div moves `handle` on `axes`, as it would over
+    /// the container that tracks it. For an overlay above a scrolling
+    /// container (a row's hover controls, a floating pill): wheel input
+    /// goes to the innermost scroller under the pointer and its ancestors,
+    /// so without this it stops at the overlay. The div neither scrolls nor
+    /// clips itself.
+    pub fn scroll_through(mut self, handle: &ScrollHandle, axes: ScrollAxes) -> Self {
+        self.scroll_through = Some((handle.clone(), axes));
+        self
+    }
+
     /// Scroll horizontally with the [`Self::track_scroll`] handle.
     pub fn overflow_x_scroll(mut self) -> Self {
         self.scroll_axes.x = true;
@@ -759,6 +773,9 @@ impl Div {
         if let Some(handle) = &self.scroll_handle {
             cx.handlers
                 .on_scroll_handle(node, handle.clone(), self.scroll_axes);
+        }
+        if let Some((handle, axes)) = &self.scroll_through {
+            cx.handlers.on_scroll_handle(node, handle.clone(), *axes);
         }
         for (binding, action) in self.key_bindings.drain(..) {
             cx.handlers.on_key(node, binding, action);
@@ -1027,7 +1044,7 @@ impl Element for Div {
         if self.on_drag.is_some() {
             flags |= HitFlags::DRAG;
         }
-        if self.scrolls() {
+        if self.scrolls() || self.scroll_through.is_some() {
             flags |= HitFlags::SCROLL;
         }
         flags |= self.window_drag;
