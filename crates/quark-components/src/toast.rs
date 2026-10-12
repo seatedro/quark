@@ -480,25 +480,31 @@ impl RenderOnce for ToastVisuals {
                     </div>
 
                     <div class="flex-1 flex-col" min-w={0.0}>
+                        // Each line in a row: text truncates by shrinking
+                        // along a row, and a column would let it overflow.
                         for line in self.title_lines {
-                            <text
-                                class="font-medium truncate"
-                                size={title_size}
-                                color={tc.text_strong}
-                            >
-                                {line}
-                            </text>
+                            <div class="flex-row">
+                                <text
+                                    class="font-medium truncate"
+                                    size={title_size}
+                                    color={tc.text_strong}
+                                >
+                                    {line}
+                                </text>
+                            </div>
                         }
                         if has_description {
                             <div class="flex-col" pt={DESC_GAP} min-w={0.0}>
                                 for line in self.description_lines {
-                                    <text
-                                        class="truncate"
-                                        size={description_size}
-                                        color={tc.text_muted}
-                                    >
-                                        {line}
-                                    </text>
+                                    <div class="flex-row">
+                                        <text
+                                            class="truncate"
+                                            size={description_size}
+                                            color={tc.text_muted}
+                                        >
+                                            {line}
+                                        </text>
+                                    </div>
                                 }
                             </div>
                         }

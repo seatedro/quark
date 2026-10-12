@@ -167,6 +167,32 @@ fn surface_recipe_sets_radius_and_replaces_the_shadow_preset() {
     assert_eq!(surfaces(&paint(&theme, tip)), expected, "tooltip");
 }
 
+/// One toast `title` with a single title line, laid out for `theme`.
+fn toast(theme: &Theme, title: &str) -> Painted {
+    let toasts = [Toast {
+        id: 1,
+        ..Toast::info(title)
+    }];
+    let layouts = [ToastLayout {
+        title_lines: vec![title.into()],
+        description_lines: Vec::new(),
+        height: compute_toast_height(theme, 1, 0),
+    }];
+    let animation = AnimationTable::new();
+    let stack = ToastStack::new(
+        &toasts,
+        &animation,
+        1200.0,
+        900.0,
+        theme,
+        0.0,
+        0,
+        &layouts,
+        |_| Pick.into(),
+    );
+    paint(theme, stack.build().into_any())
+}
+
 #[test]
 fn toast_recipe_sets_width_padding_and_badge_once_at_every_zoom() {
     for zoom in [1.0, 1.25, 2.0] {
@@ -181,28 +207,7 @@ fn toast_recipe_sets_width_padding_and_badge_once_at_every_zoom() {
         };
         let at = |points: f32| (points * zoom).round();
 
-        let toasts = [Toast {
-            id: 1,
-            ..Toast::info("Copied.")
-        }];
-        let layouts = [ToastLayout {
-            title_lines: vec!["Copied.".into()],
-            description_lines: Vec::new(),
-            height: compute_toast_height(&theme, 1, 0),
-        }];
-        let animation = AnimationTable::new();
-        let stack = ToastStack::new(
-            &toasts,
-            &animation,
-            1200.0,
-            900.0,
-            &theme,
-            0.0,
-            0,
-            &layouts,
-            |_| Pick.into(),
-        );
-        let painted = paint(&theme, stack.build().into_any());
+        let painted = toast(&theme, "Copied.");
         let (toast, close) = (node(&painted, "toast:1"), node(&painted, "toast-dismiss:1"));
         // One 12-point line is shorter than the badge, so the badge sets
         // the height.
@@ -218,4 +223,34 @@ fn toast_recipe_sets_width_padding_and_badge_once_at_every_zoom() {
             "close inset at {zoom}"
         );
     }
+}
+
+// Catches a toast's last title line, which carries the text past two
+// lines, running over the close button instead of ending in an ellipsis.
+#[test]
+fn toast_title_wider_than_the_toast_truncates_before_the_close_button() {
+    let theme = Theme::default_light();
+    let painted = toast(&theme, &"Couldn't reach buildbox. ".repeat(8));
+    let close = node(&painted, "toast-dismiss:1");
+    let (text, right) = painted
+        .scene
+        .primitives
+        .iter()
+        .find_map(|p| match p {
+            Primitive::TextRun(run) => Some((
+                run.layout
+                    .downcast_ref::<quark_text::TextLayout>()?
+                    .text()
+                    .to_owned(),
+                run.rect.x + run.rect.width,
+            )),
+            _ => None,
+        })
+        .expect("title painted");
+    assert!(text.ends_with('\u{2026}'), "{text:?}");
+    assert!(
+        right <= close.x,
+        "title ends at {right}, close at {}",
+        close.x
+    );
 }
