@@ -266,6 +266,10 @@ view! {
   below. Pass a bottom input's height (a chat composer) so toasts clear its
   Send button.
 - `Toast::new(ToastKind::Success, ..)` shows a check in the success color.
+- `theme.components.toast` sizes toasts: `width` caps the stack, `padding_x`,
+  `padding_y`, `gap`, `font_size`, and `icon_size` (the badge; the close
+  button follows it). Wrap titles with `toast_inner_text_width(theme, ..)`
+  and size layouts with `compute_toast_height(theme, ..)` so they match.
 - `CommandPalette::width(w)`: panel width in points at 100% zoom (default
   640), narrowed to fit the window.
 - `CommandPalette::keycaps(true)`: each shortcut as one key cap per key.

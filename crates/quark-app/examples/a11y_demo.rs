@@ -67,13 +67,13 @@ impl UiApp for A11yDemo {
 
     fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
         let (width, height) = cx.frame.size();
-        let scale = cx.theme.metrics.ui_scale();
+        let theme = cx.theme;
         let toasts = ToastStack::new(
             &self.toasts,
             cx.animations(),
             width,
             height,
-            scale,
+            theme,
             0.0,
             0,
             &[],

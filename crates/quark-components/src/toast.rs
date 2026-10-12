@@ -8,7 +8,7 @@ use quark_ui::element::CursorHint;
 use quark_ui::element::*;
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
-use quark_ui::theme::{Color, Theme, ThemeColors};
+use quark_ui::theme::{Color, Theme, ThemeColors, scaled_or};
 
 /// A notification shown by [`ToastStack`]. Keep a list yourself or use
 /// [`ToastQueue`], which also expires, pauses, and retires toasts.
@@ -237,8 +237,12 @@ const FAN_GAP: f32 = 10.0;
 /// auto-dismiss on the same schedule.
 pub const TOAST_LIFETIME_MS: u64 = 5_000;
 
-/// Wide enough for actionable command/error detail without dominating the app.
+/// Default stack width: wide enough for actionable command/error detail
+/// without dominating the app. A theme's `components.toast.width` caps it
+/// instead.
 pub const TOAST_WIDTH: f32 = 460.0;
+/// Default badge and close button sizes; `components.toast.icon_size` sets
+/// the badge and scales the rest with it.
 pub const BADGE_SIZE: f32 = 26.0;
 pub const CLOSE_SIZE: f32 = 22.0;
 const PROGRESS_H: f32 = 2.0;
@@ -253,22 +257,69 @@ const PAD_Y: f32 = 12.0;
 /// Gap between title and description lines.
 const DESC_GAP: f32 = 2.0;
 
-/// Horizontal chrome (left pad, badge, gap, gap, close, right pad) — the
-/// remaining width is available for wrapped text.
-pub const CHROME_W: f32 = Sp::MD + BADGE_SIZE + Sp::MD + Sp::MD + CLOSE_SIZE + Sp::MD;
+/// A toast's chrome from the theme's recipe. Padding and gap are unscaled
+/// because the toast's view scales them; the sizes are window points.
+struct Chrome {
+    pad_x: f32,
+    pad_y: f32,
+    gap: f32,
+    badge: f32,
+    close: f32,
+    badge_glyph: f32,
+    close_glyph: f32,
+    scale: f32,
+}
+
+impl Chrome {
+    fn of(theme: &Theme) -> Self {
+        let recipe = theme.components.toast;
+        let scale = theme.metrics.ui_scale();
+        // Defaults stay unscaled, as they always were.
+        let badge = scaled_or(recipe.icon_size, scale, BADGE_SIZE);
+        let ratio = badge / BADGE_SIZE;
+        Self {
+            pad_x: recipe.padding_x.unwrap_or(Sp::MD),
+            pad_y: recipe.padding_y.unwrap_or(PAD_Y),
+            gap: recipe.gap.unwrap_or(Sp::MD),
+            badge,
+            close: (CLOSE_SIZE * ratio).round(),
+            badge_glyph: (Ico::SM * ratio).round(),
+            close_glyph: (Ico::XS * ratio).round(),
+            scale,
+        }
+    }
+
+    /// `v` as the view scales it.
+    fn scaled(&self, v: f32) -> f32 {
+        (v * self.scale).round()
+    }
+
+    /// Border, left pad, badge, gap, gap, close, right pad, border: the
+    /// rest of the width is the text's.
+    fn width(&self) -> f32 {
+        let border = 2.0;
+        border
+            + self.scaled(self.pad_x) * 2.0
+            + self.scaled(self.gap) * 2.0
+            + self.badge
+            + self.close
+    }
+}
 
 /// Width used by the stack after applying the current window constraints.
-pub fn toast_stack_width(window_width: f32, ui_scale: f32) -> f32 {
-    let side_margin = (Sp::XL * ui_scale).round();
+pub fn toast_stack_width(theme: &Theme, window_width: f32) -> f32 {
+    let scale = theme.metrics.ui_scale();
+    let side_margin = (Sp::XL * scale).round();
     let available = (window_width - side_margin * 2.0).max(1.0);
+    let max = scaled_or(theme.components.toast.width, scale, TOAST_WIDTH);
     available
-        .min(TOAST_WIDTH)
-        .max(available.min(Sz::TOAST_MIN_W))
+        .min(max)
+        .max(available.min(Sz::TOAST_MIN_W.min(max)))
 }
 
 /// Inner content width available for wrapped title / description.
-pub fn toast_inner_text_width(toast_width: f32) -> f32 {
-    (toast_width - CHROME_W).max(80.0)
+pub fn toast_inner_text_width(theme: &Theme, toast_width: f32) -> f32 {
+    (toast_width - Chrome::of(theme).width()).max(80.0)
 }
 
 /// Laid-out per-toast dimensions, computed in the shell where the font system
@@ -291,9 +342,9 @@ pub fn compute_toast_height(theme: &Theme, title_lines: usize, desc_lines: usize
     } else {
         DESC_GAP + desc_lines as f32 * desc_lh
     };
-    let content_h = title_h + desc_h;
-    let min_h = BADGE_SIZE + PAD_Y * 2.0;
-    (content_h + PAD_Y * 2.0).max(min_h)
+    let chrome = Chrome::of(theme);
+    let pad = chrome.scaled(chrome.pad_y) * 2.0;
+    (title_h + desc_h).max(chrome.badge) + pad
 }
 
 /// Title and description font sizes: the theme's toast recipe, or the
@@ -365,6 +416,7 @@ impl RenderOnce for ToastVisuals {
         let corner_radius = recipe.radius.unwrap_or(CORNER_RADIUS);
         let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::TOAST, scale);
         let (title_size, description_size) = toast_font_sizes(cx.theme);
+        let chrome = Chrome::of(cx.theme);
         let accent = severity_color(self.kind, tc);
         let icon_svg = severity_icon(self.kind);
 
@@ -413,19 +465,18 @@ impl RenderOnce for ToastVisuals {
                 <div
                     class="flex-row items-center h-full w-full"
                     opacity={self.content_opacity}
-                    pl={Sp::MD}
-                    pr={Sp::MD}
-                    py={PAD_Y}
-                    gap={Sp::MD}
+                    pl={chrome.pad_x}
+                    pr={chrome.pad_x}
+                    py={chrome.pad_y}
+                    gap={chrome.gap}
                 >
                     <div
-                        class="flex-row items-center justify-center shrink-0"
-                        w={BADGE_SIZE}
-                        h={BADGE_SIZE}
-                        rounded={BADGE_SIZE / 2.0}
+                        class="flex-row items-center justify-center shrink-0 rounded-full"
+                        w={chrome.badge}
+                        h={chrome.badge}
                         bg={badge_bg}
                     >
-                        <icon svg={icon_svg} size={Ico::SM} color={accent} />
+                        <icon svg={icon_svg} size={chrome.badge_glyph} color={accent} />
                     </div>
 
                     <div class="flex-1 flex-col" min-w={0.0}>
@@ -474,8 +525,8 @@ impl RenderOnce for ToastVisuals {
 
                     <div
                         class="flex-row items-center justify-center shrink-0"
-                        w={CLOSE_SIZE}
-                        h={CLOSE_SIZE}
+                        w={chrome.close}
+                        h={chrome.close}
                         rounded={Rad::MD}
                         hover_bg={tc.ghost_element_hover}
                         on:click={self.dismiss.clone()}
@@ -485,7 +536,7 @@ impl RenderOnce for ToastVisuals {
                         accessibility_role={accesskit::Role::Button}
                         aria-label={quark_ui::i18n::tr("quark-dismiss")}
                     >
-                        <icon svg={lucide::X} size={Ico::XS} color={tc.text_muted} />
+                        <icon svg={lucide::X} size={chrome.close_glyph} color={tc.text_muted} />
                     </div>
                 </div>
 
@@ -514,7 +565,8 @@ pub struct ToastStack<'a> {
     pub animation: &'a AnimationTable,
     pub window_width: f32,
     pub window_height: f32,
-    pub ui_scale: f32,
+    /// Sizes the stack: its zoom and toast recipe.
+    pub theme: &'a Theme,
     pub status_bar_height: f32,
     pub clock_ms: u64,
     /// Parallel to `toasts`: pre-wrapped lines + total height per toast.
@@ -537,7 +589,7 @@ impl<'a> ToastStack<'a> {
         animation: &'a AnimationTable,
         window_width: f32,
         window_height: f32,
-        ui_scale: f32,
+        theme: &'a Theme,
         status_bar_height: f32,
         clock_ms: u64,
         layouts: &'a [ToastLayout],
@@ -548,7 +600,7 @@ impl<'a> ToastStack<'a> {
             animation,
             window_width,
             window_height,
-            ui_scale,
+            theme,
             status_bar_height,
             clock_ms,
             layouts,
@@ -572,15 +624,15 @@ impl<'a> ToastStack<'a> {
     }
 
     fn container_left_width(&self) -> (f32, f32) {
-        let scale = self.ui_scale;
-        let container_w = toast_stack_width(self.window_width, scale);
+        let scale = self.theme.metrics.ui_scale();
+        let container_w = toast_stack_width(self.theme, self.window_width);
         let side_margin = (Sp::XL * scale).round();
         let container_left = (self.window_width - container_w - side_margin).max(side_margin);
         (container_left, container_w)
     }
 
     fn container_bottom(&self) -> f32 {
-        self.status_bar_height + (Sp::LG * self.ui_scale).round()
+        self.status_bar_height + (Sp::LG * self.theme.metrics.ui_scale()).round()
     }
 
     fn height_of(&self, index: usize) -> f32 {
@@ -596,7 +648,7 @@ impl<'a> ToastStack<'a> {
         if count == 0 {
             return 0.0;
         }
-        let scale = self.ui_scale;
+        let scale = self.theme.metrics.ui_scale();
         let peek = (STACK_PEEK * scale).round();
         let fan_gap = (FAN_GAP * scale).round();
         let fan_t = self.animation.get(stack_key(), FAN).unwrap_or(0.0);
@@ -624,7 +676,7 @@ impl<'a> ToastStack<'a> {
     }
 
     pub fn build(self) -> Div {
-        let scale = self.ui_scale;
+        let scale = self.theme.metrics.ui_scale();
         let peek = (STACK_PEEK * scale).round();
         let fan_gap = (FAN_GAP * scale).round();
         let (container_left, container_w) = self.container_left_width();
@@ -922,7 +974,7 @@ impl ToastQueue {
         &mut self,
         animation: &'a AnimationTable,
         window: (f32, f32),
-        ui_scale: f32,
+        theme: &'a Theme,
         status_bar_height: f32,
         clock_ms: u64,
         layouts: &'a [ToastLayout],
@@ -934,7 +986,7 @@ impl ToastQueue {
             animation,
             window.0,
             window.1,
-            ui_scale,
+            theme,
             status_bar_height,
             clock_ms,
             layouts,

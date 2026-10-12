@@ -31,14 +31,22 @@ fn toasts() -> [Toast; 1] {
 fn toast_top(table: &mut AnimationTable, now_ms: u64) -> f32 {
     table.tick(now_ms);
     let toasts = toasts();
-    let stack = ToastStack::new(&toasts, table, 800.0, 600.0, 1.0, 0.0, now_ms, &[], |_| {
-        Action::new(())
-    });
+    let theme = Theme::default_dark();
+    let stack = ToastStack::new(
+        &toasts,
+        table,
+        800.0,
+        600.0,
+        &theme,
+        0.0,
+        now_ms,
+        &[],
+        |_| Action::new(()),
+    );
     let mut root = stack.build().into_any();
     let mut text = quark_text::TextSystem::vendored_only(&Default::default());
     let mut layouts = quark_text::LayoutCache::default();
     let store = SignalStore::new();
-    let theme = Theme::default_dark();
     let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &store);
     render_element(&mut root, &mut Scene::default(), &mut cx, 800.0, 600.0);
     // The toast body is the first clickable node; its close button follows.
@@ -110,12 +118,13 @@ fn stacked_bodies(table: &mut AnimationTable, now_ms: u64) -> Vec<quark_render::
         height,
     };
     let layouts = [layout(2, 80.0), layout(1, 52.0)];
+    let theme = Theme::default_dark();
     let stack = ToastStack::new(
         &toasts,
         table,
         800.0,
         600.0,
-        1.0,
+        &theme,
         0.0,
         now_ms,
         &layouts,
@@ -125,7 +134,6 @@ fn stacked_bodies(table: &mut AnimationTable, now_ms: u64) -> Vec<quark_render::
     let mut text = quark_text::TextSystem::vendored_only(&Default::default());
     let mut layouts = quark_text::LayoutCache::default();
     let store = SignalStore::new();
-    let theme = Theme::default_dark();
     let mut cx = ElementContext::new(&theme, 1.0, &mut text, &mut layouts, None, &store);
     render_element(&mut root, &mut Scene::default(), &mut cx, 800.0, 600.0);
     // Each toast's body is clickable, then its close button.
