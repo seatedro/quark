@@ -6,16 +6,13 @@ members = [
   "crates/quark-view-syntax",
   "crates/quark-render",
   "crates/quark-text",
-  "crates/quark-diff",
   "crates/quark-i18n",
-  "crates/quark-syntax",
   "crates/quark-ui",
   "crates/quark-components",
   "crates/quark-terminal",
   "crates/quark-app",
   "crates/quark-update",
   "crates/quark-webview",
-  "tools/syntax-pack",
   "tools/quark-fmt",
   "examples/workbench",
   # A member so CI's fmt, clippy, and tests cover the patch.
@@ -42,8 +39,6 @@ quark-render = { path = "crates/quark-render" }
 # Without the bundled emoji and CJK fonts (about 14 MB); quark-app turns
 # them on by default.
 quark-text = { path = "crates/quark-text", default-features = false }
-quark-syntax = { path = "crates/quark-syntax" }
-quark-diff = { path = "crates/quark-diff" }
 quark-i18n = { path = "crates/quark-i18n" }
 quark-ui = { path = "crates/quark-ui" }
 quark-components = { path = "crates/quark-components" }

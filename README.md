@@ -9,6 +9,16 @@ stable identity. Subtrees inside cache boundaries replay their layout and
 paint, and tests hold a repeated frame of a cached list to zero
 allocations.
 
+Quark is an application platform, in the role Electron plays for web
+apps: windows, the event loop, GPU rendering, text shaping and layout,
+input and IME, accessibility, focus, theming, generic controls, documents,
+webviews, the updater, and platform services. Domain libraries live with
+the apps that need them. Diff computation, diff views, and tree-sitter
+highlighting are libraries in [Diffy](https://github.com/seatedro/diffy);
+an app plugs a highlighter into document code blocks through
+`quark_ui::document::CodeHighlighter`
+([guide](docs/guide/lists-and-documents.md#highlighting-code-blocks)).
+
 ## Crates
 
 | Crate | Contents | Quark crates it uses |
@@ -17,10 +27,8 @@ allocations.
 | [`quark-macros`](crates/quark-macros) | The `view!` macro and `#[derive(Store)]` | |
 | [`quark-text`](crates/quark-text) | Fonts, text shaping, layout, hit testing, and the layout cache | `quark` |
 | [`quark-render`](crates/quark-render) | The wgpu renderer for scenes | `quark`, `quark-text` |
-| [`quark-syntax`](crates/quark-syntax) | Tree-sitter highlighting with grammars loaded at runtime from signed packs | `quark-update` (feature `download`) |
-| [`quark-diff`](crates/quark-diff) | Unified diff parsing, line and word diffs, display projections | |
 | [`quark-ui`](crates/quark-ui) | Elements, layout, styling, themes, text input, virtual lists, the block document, markdown, accessibility | `quark`, `quark-text`, `quark-render` |
-| [`quark-components`](crates/quark-components) | Buttons, menus, popovers, select, combobox, command palette, split panes, dock, tree, table, diff view | `quark`, `quark-text`, `quark-render`, `quark-ui`, `quark-diff`, `quark-syntax` |
+| [`quark-components`](crates/quark-components) | Buttons, menus, popovers, select, combobox, command palette, split panes, dock, tree, table | `quark`, `quark-text`, `quark-render`, `quark-ui` |
 | [`quark-app`](crates/quark-app) | Windows, the event loop, input, `UiApp`, platform services, the test harness | `quark`, `quark-render`, `quark-text`, `quark-ui` (feature `ui`) |
 
 `vendor/accesskit_unix` is a patched copy of AccessKit's Linux adapter; see
@@ -142,10 +150,12 @@ lists what each one does where.
 | `profile-puffin`, `profile-tracy` | no | Profiler scopes around frame phases and text shaping; enable one at a time |
 
 Lower-level crates have their own: `quark-ui` has `images`, `devtools`,
-`profile`, `test-alloc`, and `integrity-checks`; `quark-text` has `emoji-font`, `cjk-font`, and
-`profile`; `quark-render` has `headless-render`; `quark-syntax` has
-`engine`, `download`, and `document`; `quark` has `integrity-checks`. Each is described
-next to its definition in the crate's `Cargo.toml`.
+`profile`, `test-alloc`, and `integrity-checks`; `quark-text` has
+`emoji-font`, `cjk-font`, and `profile`; `quark-render` has
+`headless-render`; `quark` has `integrity-checks`. Each is described next
+to its definition in the crate's `Cargo.toml`. Quark has no syntax
+highlighting feature: code blocks render plain unless the app supplies a
+`CodeHighlighter`.
 
 ## Building
 

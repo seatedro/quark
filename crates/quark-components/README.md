@@ -3,7 +3,7 @@
 Components for [Quark](../../README.md), built on `quark-ui`: buttons,
 checkbox, switch, select, combobox, radio group, segmented control, slider,
 menus, popovers, hover cards, modals, toasts, a command palette, split
-panes, a dock, and virtualized tree, table, and diff views.
+panes, a dock, and virtualized tree and table views.
 
 Components emit the app's actions through values or mappings the caller
 supplies and never see the app's state or action types. Each module's docs

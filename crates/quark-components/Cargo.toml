@@ -15,8 +15,6 @@ accesskit.workspace = true
 quark.workspace = true
 quark-render.workspace = true
 quark-ui.workspace = true
-quark-diff.workspace = true
-quark-syntax.workspace = true
 quark-text.workspace = true
 serde.workspace = true
 
