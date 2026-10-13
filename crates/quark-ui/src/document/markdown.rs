@@ -141,7 +141,7 @@ impl MarkdownBlocks {
             let converted = Converted {
                 hash,
                 highlight,
-                block: convert(doc, index, key, syntax, image),
+                block: convert(doc, index, key, syntax, highlight, image),
             };
             match self.converted.get_mut(index) {
                 Some(slot) => *slot = converted,
@@ -157,6 +157,7 @@ fn convert(
     index: usize,
     key: BlockKey,
     syntax: &SyntaxHighlighter,
+    highlight: u64,
     image: Option<ImageState>,
 ) -> Block {
     let style = block_style(doc, index);
@@ -164,8 +165,10 @@ fn convert(
         BlockKind::Paragraph | BlockKind::Heading(_) => {
             Block::toned_prose(key, styled_spans(doc, doc.spans(index), style.weight))
         }
-        BlockKind::CodeBlock => Block::toned_code(key, syntax.lines(key, doc.text(index)))
-            .with_label(Some(Arc::from(doc.lang(index)))),
+        BlockKind::CodeBlock => {
+            Block::toned_code(key, syntax.lines(key, highlight, doc.text(index)))
+                .with_label(Some(Arc::from(doc.lang(index))))
+        }
         BlockKind::Table => Block::table(key, table_rows(doc, index)),
         BlockKind::Rule => Block::rule(key),
         BlockKind::Image => Block::image(

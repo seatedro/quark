@@ -4,20 +4,18 @@
 //! Packs come from `quark_syntax::testing::pack_root` (build them with
 //! `cargo run -p syntax-pack -- build rust javascript html python`); a test
 //! whose packs are missing skips unless `QUARK_REQUIRE_SYNTAX_PACKS=1`.
-//! Run with `cargo test -p quark-app --features syntax --test diff_syntax`.
-#![cfg(feature = "syntax")]
-
+//! Run with `cargo test -p quark-app --test diff_syntax`.
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use std::ops::Range;
 
-use quark_app::quark_ui::quark_syntax::{
+use quark_components::diff_view::syntax::{DiffSyntax, SyntaxBudget, SyntaxStatus};
+use quark_diff::{DiffDocument, FileSources, Side, TextStore, diff_texts, parse_unified};
+use quark_syntax::{
     GrammarStore, HighlightKind, HighlightPart, HighlightSpan, HighlightWorker, Highlighted,
     testing,
 };
-use quark_components::diff_view::syntax::{DiffSyntax, SyntaxBudget, SyntaxStatus};
-use quark_diff::{DiffDocument, FileSources, Side, TextStore, diff_texts, parse_unified};
 
 const COLORS: &[HighlightKind] = &[
     HighlightKind::Keyword,

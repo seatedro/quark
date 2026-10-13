@@ -13,11 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 quark.workspace = true
-quark-app = { workspace = true, features = ["components", "syntax", "images"] }
-quark-ui = { workspace = true, features = ["syntax", "images"] }
+quark-app = { workspace = true, features = ["components", "images"] }
+quark-ui = { workspace = true, features = ["images"] }
 quark-components.workspace = true
 quark-text.workspace = true
-quark-syntax.workspace = true
+quark-syntax = { workspace = true, features = ["document"] }
 quark-terminal.workspace = true
 quark-diff.workspace = true
 accesskit.workspace = true
@@ -27,8 +27,8 @@ serde_json = "1.0"
 [dev-dependencies]
 # The headless harness (`quark_app::testing`) and the allocation counter
 # the perf tests wrap the global allocator in.
-quark-app = { workspace = true, features = ["components", "syntax", "images", "test-support"] }
-quark-ui = { workspace = true, features = ["syntax", "images", "test-alloc"] }
+quark-app = { workspace = true, features = ["components", "images", "test-support"] }
+quark-ui = { workspace = true, features = ["images", "test-alloc"] }
 
 [features]
 default = []

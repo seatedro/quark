@@ -64,7 +64,7 @@ pub use markdown::{BlockKeys, CODE_SCALE, MarkdownBlocks, heading_style};
 pub use measure::{TextGeometry, TextMeasurer};
 use row_style::RowGeometry;
 pub use row_style::{RowAlign, RowStyle};
-pub use syntax::SyntaxHighlighter;
+pub use syntax::{CodeHighlighter, SyntaxHighlighter, ToneSpan};
 pub use table::{TableCell, TableCells, TableGeometry, TableMetrics};
 
 use std::borrow::Cow;

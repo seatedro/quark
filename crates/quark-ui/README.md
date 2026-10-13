@@ -14,7 +14,6 @@ in [src/lib.rs](src/lib.rs) have runnable examples.
 
 | Feature | Effect |
 |---|---|
-| `syntax` | Highlights document code blocks with the built-in grammars |
 | `images` | Decodes PNG and JPEG markdown images on a worker |
 | `devtools` | The inspector overlay, frame HUD, and live style overrides |
 | `integrity-checks` | Full integrity checks after every mutation in debug builds |

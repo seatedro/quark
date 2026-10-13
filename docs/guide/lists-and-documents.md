@@ -61,12 +61,33 @@ assert_eq!(find.status(), "1 of 2");
 | Type | Role |
 |---|---|
 | `Document` | App-owned state: rows, block order, selection, on-screen row geometry. Text stays in the app's model, read through `DocumentSource` |
-| `MarkdownDocument` | Wraps `Document` for markdown rows: parses, converts, highlights code on a worker (feature `syntax` plus a grammar store, see [Syntax highlighting and grammar packs](syntax-packs.md)), loads images on a worker (feature `images`), and measures off-screen rows in the background so heights become exact while idle |
+| `MarkdownDocument` | Wraps `Document` for markdown rows: parses, converts, highlights code blocks through the app's `CodeHighlighter` (see [Highlighting code blocks](#highlighting-code-blocks)), loads images on a worker (feature `images`), and measures off-screen rows in the background so heights become exact while idle |
 | `IncrementalMarkdown` | Reparses only a streaming message's tail: the part after the last closed top-level code fence followed by a blank line |
 
 - Example: [chat_demo.rs](../../crates/quark-app/examples/chat_demo.rs), a
   chat with roles, author lines, jump to latest, 5,000 messages, a streaming
   answer, drag selection, copy, select all, and find.
+
+## Highlighting code blocks
+
+Quark has no highlighting engine. Code blocks render plain until the app
+supplies a `quark_ui::document::CodeHighlighter`, through
+`MarkdownDocument::set_code_highlighter` or `SyntaxHighlighter::with`.
+
+| Method | Contract |
+|---|---|
+| `version(slot, lang, code)` | Called for every code block each time its row is rebuilt. Requests a highlight when the block's source or language changed and returns the version that applies to `code` now, 0 for plain. A held result for an earlier source may apply while the source only grew, which keeps a streaming block colored. Must not allocate for an unchanged source |
+| `spans(slot)` | The `ToneSpan`s (byte range and `SyntaxTone`) of the version last reported. Read only when that version was nonzero. Sorted, disjoint, on char boundaries |
+| `poll()` | Takes finished results and returns their blocks. The app calls `MarkdownDocument::poll_highlights` each frame, which rebuilds those rows |
+| `finish_pending()` | Blocks until every requested result has arrived. For tests and screenshots |
+| `forget(slot)` | Drops a block's state when it leaves its row or the row is removed |
+| `len()` | Blocks with kept state |
+
+- Blocks with an unchanged version are reused as they are, so every new
+  result needs a distinct version.
+- `SyntaxTone` colors come from the theme's `syntax_*` colors.
+- The text editor has its own synchronous hook,
+  `text_input::SyntaxHighlighter`.
 
 ## Selection
 
