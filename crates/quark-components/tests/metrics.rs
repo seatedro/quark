@@ -7,11 +7,14 @@ use std::rc::Rc;
 
 use quark::reactive::SignalStore;
 use quark::{Color, Rect};
+use quark_components::toast::compute_toast_height;
 use quark_components::{
-    Button, Modal, SelectOption, SelectState, TooltipSide, popover_panel, select, tooltip_layer,
+    Button, Modal, SelectOption, SelectState, Toast, ToastLayout, ToastStack, TooltipSide,
+    popover_panel, select, tooltip_layer,
 };
 use quark_render::{Primitive, Scene};
 use quark_ui::Action;
+use quark_ui::animation::AnimationTable;
 use quark_ui::element::{AnyElement, ElementContext, IntoAnyElement, div, render_element};
 use quark_ui::style::Styled;
 use quark_ui::theme::{ComponentMetrics, ControlMetrics, Elevation, SurfaceMetrics, Theme};
@@ -53,6 +56,17 @@ fn bounds(painted: &Painted, test_id: &str) -> Rect {
         .find(|n| n.test_id.as_ref().is_some_and(|t| t.as_str() == test_id))
         .map(|n| n.bounds)
         .unwrap_or_else(|| panic!("no {test_id}"))
+}
+
+/// The bounds of the node with accessibility id `id`.
+fn node(painted: &Painted, id: &str) -> Rect {
+    painted
+        .frame
+        .nodes()
+        .iter()
+        .find(|n| n.id.as_ref().is_some_and(|i| i.as_str() == id))
+        .map(|n| n.bounds)
+        .unwrap_or_else(|| panic!("no {id}"))
 }
 
 fn compact() -> ComponentMetrics {
@@ -151,4 +165,92 @@ fn surface_recipe_sets_radius_and_replaces_the_shadow_preset() {
     );
     let tip = tooltip_layer("Copy", 10.0, 10.0, TooltipSide::Bottom, &theme);
     assert_eq!(surfaces(&paint(&theme, tip)), expected, "tooltip");
+}
+
+/// One toast `title` with a single title line, laid out for `theme`.
+fn toast(theme: &Theme, title: &str) -> Painted {
+    let toasts = [Toast {
+        id: 1,
+        ..Toast::info(title)
+    }];
+    let layouts = [ToastLayout {
+        title_lines: vec![title.into()],
+        description_lines: Vec::new(),
+        height: compute_toast_height(theme, 1, 0),
+    }];
+    let animation = AnimationTable::new();
+    let stack = ToastStack::new(
+        &toasts,
+        &animation,
+        1200.0,
+        900.0,
+        theme,
+        0.0,
+        0,
+        &layouts,
+        |_| Pick.into(),
+    );
+    paint(theme, stack.build().into_any())
+}
+
+#[test]
+fn toast_recipe_sets_width_padding_and_badge_once_at_every_zoom() {
+    for zoom in [1.0, 1.25, 2.0] {
+        let mut theme = Theme::default_light().with_ui_scale(zoom);
+        theme.components.toast = SurfaceMetrics {
+            width: Some(340.0),
+            padding_x: Some(10.0),
+            padding_y: Some(8.0),
+            font_size: Some(12.0),
+            icon_size: Some(20.0),
+            ..Default::default()
+        };
+        let at = |points: f32| (points * zoom).round();
+
+        let painted = toast(&theme, "Copied.");
+        let (toast, close) = (node(&painted, "toast:1"), node(&painted, "toast-dismiss:1"));
+        // One 12-point line is shorter than the badge, so the badge sets
+        // the height.
+        assert_eq!(
+            (toast.width, toast.height),
+            (at(340.0), at(20.0) + at(8.0) * 2.0),
+            "toast at {zoom}"
+        );
+        // Plus the toast's 1-point border.
+        assert_eq!(
+            toast.x + toast.width - (close.x + close.width),
+            at(10.0) + 1.0,
+            "close inset at {zoom}"
+        );
+    }
+}
+
+// Catches a toast's last title line, which carries the text past two
+// lines, running over the close button instead of ending in an ellipsis.
+#[test]
+fn toast_title_wider_than_the_toast_truncates_before_the_close_button() {
+    let theme = Theme::default_light();
+    let painted = toast(&theme, &"Couldn't reach buildbox. ".repeat(8));
+    let close = node(&painted, "toast-dismiss:1");
+    let (text, right) = painted
+        .scene
+        .primitives
+        .iter()
+        .find_map(|p| match p {
+            Primitive::TextRun(run) => Some((
+                run.layout
+                    .downcast_ref::<quark_text::TextLayout>()?
+                    .text()
+                    .to_owned(),
+                run.rect.x + run.rect.width,
+            )),
+            _ => None,
+        })
+        .expect("title painted");
+    assert!(text.ends_with('\u{2026}'), "{text:?}");
+    assert!(
+        right <= close.x,
+        "title ends at {right}, close at {}",
+        close.x
+    );
 }

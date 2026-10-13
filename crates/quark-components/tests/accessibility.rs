@@ -73,9 +73,18 @@ fn gallery() -> AnyElement {
         ..Default::default()
     }];
     let animation = AnimationTable::new();
-    let toast_stack = ToastStack::new(&toasts, &animation, 800.0, 600.0, 1.0, 0.0, 0, &[], |_| {
-        Pick("dismiss").into()
-    })
+    let theme = Theme::default_dark();
+    let toast_stack = ToastStack::new(
+        &toasts,
+        &animation,
+        800.0,
+        600.0,
+        &theme,
+        0.0,
+        0,
+        &[],
+        |_| Pick("dismiss").into(),
+    )
     .build();
     div()
         .w(800.0)

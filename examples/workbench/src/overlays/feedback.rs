@@ -107,11 +107,11 @@ impl Toasts {
             return None;
         }
         let window = vcx.frame.size();
-        let scale = vcx.theme.metrics.ui_scale();
+        let theme = vcx.theme;
         let stack = self.queue.stack(
             vcx.animations(),
             window,
-            scale,
+            theme,
             inset,
             now_ms,
             &[],

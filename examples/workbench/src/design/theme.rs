@@ -171,6 +171,8 @@ pub fn recipe(mode: ThemeMode) -> ComponentMetrics {
         font_size: Some(TYPE_CONTROL.0),
         title_font_size: None,
         shadow: Some(elevation(SHADOW_MENU, mode)),
+        width: None,
+        icon_size: None,
     };
     ComponentMetrics {
         button: control,
@@ -201,6 +203,7 @@ pub fn recipe(mode: ThemeMode) -> ComponentMetrics {
         toast: SurfaceMetrics {
             padding_x: Some(SPACE_12),
             padding_y: Some(SPACE_12),
+            gap: Some(SPACE_12),
             ..menu
         },
         modal: SurfaceMetrics {
@@ -211,6 +214,8 @@ pub fn recipe(mode: ThemeMode) -> ComponentMetrics {
             font_size: Some(TYPE_CONTROL.0),
             title_font_size: Some(TYPE_HEADING.0),
             shadow: Some(elevation(SHADOW_MODAL, mode)),
+            width: None,
+            icon_size: None,
         },
         // Three prose lines: 12-point bars on the 22-point line pitch.
         skeleton: ControlMetrics {

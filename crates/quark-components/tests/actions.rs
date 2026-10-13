@@ -159,9 +159,18 @@ fn toast_emits_on_dismiss_with_index() {
         ..Default::default()
     }];
     let animation = AnimationTable::new();
-    let stack = ToastStack::new(&toasts, &animation, 800.0, 600.0, 1.0, 0.0, 0, &[], |i| {
-        Demo::DismissToast(i).into()
-    });
+    let theme = Theme::default_dark();
+    let stack = ToastStack::new(
+        &toasts,
+        &animation,
+        800.0,
+        600.0,
+        &theme,
+        0.0,
+        0,
+        &[],
+        |i| Demo::DismissToast(i).into(),
+    );
     let (clicks, _) = hit_actions(stack.build().into_any());
     assert!(clicks.contains(&Demo::DismissToast(0).into()));
 }

@@ -255,6 +255,11 @@ pub struct SurfaceMetrics {
     pub font_size: Option<f32>,
     pub title_font_size: Option<f32>,
     pub shadow: Option<Elevation>,
+    /// Toasts: the stack's maximum width.
+    pub width: Option<f32>,
+    /// Toasts: the severity badge's diameter. The close button keeps its
+    /// default proportion to it.
+    pub icon_size: Option<f32>,
 }
 
 /// Per-component overrides an app sets once on its theme, so every

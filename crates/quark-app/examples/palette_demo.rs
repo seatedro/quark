@@ -293,7 +293,6 @@ impl UiApp for PaletteDemo {
         let now_ms = cx.frame.elapsed().as_millis() as u64;
         self.now_ms = now_ms;
         let window = cx.frame.size();
-        let scale = cx.theme.metrics.ui_scale();
         self.card.tick(now_ms);
         let toast_wake = self.toasts.tick(cx.animations(), now_ms);
         if let Some(at) = toast_wake.into_iter().chain(self.card.next_wake_ms()).min() {
@@ -301,17 +300,17 @@ impl UiApp for PaletteDemo {
                 .request_frame_in(Duration::from_millis(at.saturating_sub(now_ms)));
         }
 
+        let theme = cx.theme;
         let toasts = self.toasts.stack(
             cx.animations(),
             window,
-            scale,
+            theme,
             0.0,
             now_ms,
             &[],
             |index| Msg::DismissToast(index).into(),
             |id, button| Msg::ToastButton(id, button).into(),
         );
-        let theme = cx.theme;
         let colors = &theme.colors;
         let note = self.note.clone().unwrap_or_else(|| "No note".to_owned());
         let card_content = view! {
