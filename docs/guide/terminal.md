@@ -10,8 +10,7 @@ library) and a PTY.
   [lib.rs](../../crates/quark-terminal/src/lib.rs).
 - Examples:
   [terminal_demo](../../crates/quark-terminal/examples/terminal_demo.rs)
-  (one terminal in a window); the Workbench and Codex demos (terminals in
-  panels).
+  (one terminal in a window); the Workbench (terminals in panels).
 
 ## Building
 
@@ -34,9 +33,9 @@ library) and a PTY.
    output through the VT.
 4. No redraw follows a wake: request one when `read_pty` returns true.
 
-Excerpt of the Codex demo's
-[terminal.rs](../../examples/codex/src/terminal.rs), which starts the shell
-the first time the terminal is shown:
+Excerpt of the former Codex demo's
+[terminal.rs](https://github.com/seatedro/quark/blob/handoff/diffy-v1/examples/codex/src/terminal.rs),
+which starts the shell the first time the terminal is shown:
 
 ```rust
 pub fn init(&mut self, cx: &mut UiContext) {

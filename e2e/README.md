@@ -24,15 +24,14 @@ e2e/run.sh e2e/specs/hello_ui/*.py      # some specs
 - Path: `specs/<example>/<behavior>.py`, run against the binary named
   `<example>`.
 - Binary lookup: `QUARK_E2E_BIN_DIR` (default `target/debug/examples`), else
-  `target/debug`, where package binaries such as `workbench` and
-  `codex-demo` land:
+  `target/debug`, where package binaries such as `workbench` land:
 
 ```bash
 cargo build -p quark-workbench --bin workbench
 e2e/run.sh e2e/specs/workbench/*.py
 ```
 
-- The Workbench and Codex demos link `quark-terminal`, so they need Zig 0.16
+- The Workbench links `quark-terminal`, so it needs Zig 0.16
   to build ([Terminal](../docs/guide/terminal.md#building)).
 - The runner starts apps without arguments. Set the app's environment with
   header lines, applied before launch:
@@ -41,9 +40,6 @@ e2e/run.sh e2e/specs/workbench/*.py
 # quark-e2e-env: QUARK_WORKBENCH_SCENARIO=stress
 ```
 
-- `QUARK_SYNTAX_PACKS=target/syntax-packs` is exported when that directory
-  exists, so code is highlighted once the
-  [grammar packs](../docs/guide/syntax-packs.md#building-packs) are built.
 - [theme_motion.py](specs/workbench/theme_motion.py) reads screenshots with
   Pillow (`python3-pil`); the runner does not check for it.
 - Each spec starts with a docstring naming the regression it catches;

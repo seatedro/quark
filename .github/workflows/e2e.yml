@@ -119,7 +119,6 @@ jobs:
           # the other examples stay as apps without it build them.
           cargo build -p quark-app --example webview_demo --features ui,webview
           cargo build -p quark-workbench --bin workbench
-          cargo build -p quark-codex --bin codex-demo
 
       - name: Install cua driver
         run: e2e/install-cua.sh

@@ -110,7 +110,6 @@ fn repeated_frame(ui: &mut UiTestHarness<Workbench>) -> u64 {
 - `take_input` returns bytes queued for the program (keys, pastes, query
   replies).
 - Test backends built on those two:
-  - Replay a captured transcript: the Codex demo's `--terminal scripted`.
   - Answer typed commands from fixtures: the Workbench's `Shell` in
     [dock/terminal.rs](../../examples/workbench/src/dock/terminal.rs).
 - Read the user's Ghostty config only for real shells, so tests do not

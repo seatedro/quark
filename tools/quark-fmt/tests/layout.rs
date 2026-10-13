@@ -1,7 +1,7 @@
 //! Layout fixtures: each `tests/fixtures/layout/<case>.in.rs` formats to
 //! `<case>.out.rs` with the pass-through provider, and the expected output
 //! is already formatted. Inputs are excerpts of the real corpus
-//! (examples/codex, examples/workbench, crates/quark-components) or
+//! (the former Codex demo, examples/workbench, crates/quark-components) or
 //! synthetic cases named for the rule they pin. `QUARK_BLESS=1` rewrites
 //! the expected files locally; review the diff before committing.
 

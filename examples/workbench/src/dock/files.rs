@@ -1,6 +1,6 @@
 //! The files panel (stream E): the fixture project in the existing tree
 //! view, and the selected file in a read-only, selectable source view.
-//! Files a run or an applied diff changed carry a diff icon in the tree
+//! Files a run or applied changes touched carry a diff icon in the tree
 //! and a "Modified" badge over their source.
 
 use std::collections::HashMap;

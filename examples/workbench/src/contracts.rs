@@ -92,7 +92,6 @@ pub mod panels {
     pub const SIDEBAR: PanelId = PanelId(1);
     /// The active thread: timeline over composer (center).
     pub const THREAD: PanelId = PanelId(2);
-    pub const DIFF: PanelId = PanelId(10);
     pub const TERMINAL: PanelId = PanelId(11);
     pub const FILES: PanelId = PanelId(12);
     pub const PREVIEW: PanelId = PanelId(13);
@@ -115,7 +114,7 @@ pub struct PanelSpec {
 use quark_app::quark_ui::icons::lucide;
 
 /// Every panel, in default tab order.
-pub const PANELS: [PanelSpec; 6] = [
+pub const PANELS: [PanelSpec; 5] = [
     PanelSpec {
         id: panels::SIDEBAR,
         title: "Threads",
@@ -129,13 +128,6 @@ pub const PANELS: [PanelSpec; 6] = [
         icon: lucide::SPARKLES,
         region: DockRegion::Center,
         detachable: false,
-    },
-    PanelSpec {
-        id: panels::DIFF,
-        title: "Diff",
-        icon: lucide::FILE_DIFF,
-        region: DockRegion::Right,
-        detachable: true,
     },
     PanelSpec {
         id: panels::TERMINAL,
@@ -185,7 +177,6 @@ pub enum CommandId {
     FocusComposer,
     SendPrompt,
     StopRun,
-    ShowDiff,
     ShowFiles,
     ShowPreview,
     ApplyDiff,
@@ -280,7 +271,6 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     cmd(CommandId::SendPrompt, "composer.send", "Send prompt", None),
     cmd(CommandId::StopRun, "run.stop", "Stop run", None),
-    cmd(CommandId::ShowDiff, "dock.diff", "Show diff", None),
     cmd(CommandId::ShowFiles, "dock.files", "Show files", None),
     cmd(
         CommandId::ShowPreview,
@@ -360,8 +350,6 @@ pub enum Effect {
     },
     /// Show `path` from the fixture file store in the Files panel.
     OpenFile(String),
-    /// Show the diff panel, scrolled to `path` when given.
-    RevealDiff(Option<String>),
     /// Show `panel` in the right dock, opening the dock (through the
     /// shell's width policy) when it is hidden.
     RevealPanel(PanelId),

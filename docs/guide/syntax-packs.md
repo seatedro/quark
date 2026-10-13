@@ -20,8 +20,7 @@ and diffs.
 | Local pack roots | `StoreConfig::local_packs(root)` | `quark-syntax/engine` | Unsigned; the app opts in |
 | Signed index | `StoreConfig::downloads(Downloads::new(app_id, url, &keys))` | `quark-syntax/download` | Ed25519 signature over the index |
 
-From [chat_demo.rs](../../crates/quark-app/examples/chat_demo.rs) and
-[diff_demo.rs](../../crates/quark-app/examples/diff_demo.rs):
+For a markdown document and a diff view:
 
 ```rust
 use quark_syntax::{DocumentHighlighter, GrammarStore, StoreConfig};

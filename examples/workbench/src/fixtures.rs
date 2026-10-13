@@ -26,8 +26,20 @@ use crate::scenario::Script;
 
 pub const THREADS_JSON: &str = include_str!("../fixtures/threads.json");
 pub const RUN_JSON: &str = include_str!("../fixtures/run.json");
-pub const DIFF_PATCH: &str = include_str!("../fixtures/diff.patch");
 pub const TERMINAL_ANSI: &[u8] = include_bytes!("../fixtures/terminal.ansi");
+
+/// The run's proposed changes: new contents of the files it edits, which
+/// "Apply proposed changes" writes to the file store.
+pub const PROPOSED: &[(&str, &str)] = &[
+    (
+        "src/App.tsx",
+        include_str!("../fixtures/proposed/src/App.tsx"),
+    ),
+    (
+        "src/commands.ts",
+        include_str!("../fixtures/proposed/src/commands.ts"),
+    ),
+];
 
 /// The Atlas project's files, as the Files panel and `cat` see them.
 pub const FILES: &[(&str, &str)] = &[

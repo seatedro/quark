@@ -5,7 +5,7 @@ into the main window that leaves the floating window open, and a keyboard
 closed. With the main window at 1200x700, the Terminal tab dragged with
 the real pointer onto the desktop opens "Terminal - Quark Workbench"
 showing the fixture test run; `help` typed there answers in that window;
-dragged back onto the Diff panel, Terminal rejoins the right dock and its
+dragged back onto the Files panel, Terminal rejoins the right dock and its
 window closes. Then Shift+F10 on the Files tab and "Move to new window"
 open "Files - Quark Workbench", and closing it (Alt+F4) docks Files back.
 Saves dock-floating.png with the floating terminal over the main window."""

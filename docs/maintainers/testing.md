@@ -19,8 +19,6 @@ cargo test --doc -p quark-app                                 # doctests
   documents; local runs usually leave it off.
 - Without it, `BlockOrder`, the animation table, the row table, and the
   block document check only the entries a mutation touched.
-- Syntax tests read packs from `target/syntax-packs`, or
-  `$QUARK_SYNTAX_TEST_PACKS`.
 
 ## CI
 

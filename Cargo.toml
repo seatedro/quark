@@ -18,7 +18,6 @@ members = [
   "tools/syntax-pack",
   "tools/quark-fmt",
   "examples/workbench",
-  "examples/codex",
   # A member so CI's fmt, clippy, and tests cover the patch.
   "vendor/accesskit_unix",
   "vendor/cosmic-text",

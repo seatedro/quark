@@ -1,7 +1,7 @@
 //! The preview panel (stream E): a bundled snapshot of the fixture app,
 //! labelled "Snapshot preview" so it never passes for a browser, at 100%
 //! (scrolling) or fitted to the panel. Its status line follows the file
-//! store: once the proposed diff is applied it reads "Updated from
+//! store: once the proposed changes are applied it reads "Updated from
 //! proposed changes". A snapshot that fails to decode shows why, with
 //! Retry.
 

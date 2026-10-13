@@ -246,8 +246,7 @@ fn overlays_toast_undo_runs_command() {
     ui.key("enter");
     assert!(!ui.app().model.files.changed().is_empty(), "applied");
 
-    // Past the toast's entrance, so it is on screen; the Diff panel shows
-    // an Undo of its own.
+    // Past the toast's entrance, so it is on screen.
     ui.advance(300);
     let undo = toast_button(&ui, "Undo").center();
     ui.click(undo);

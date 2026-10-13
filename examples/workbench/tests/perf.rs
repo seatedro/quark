@@ -50,11 +50,17 @@ const SCROLL_ROW_CEILING: u64 = 160;
 const TRANSCRIPT_SCROLL_BASE_CEILING: u64 = 56;
 const TRANSCRIPT_SCROLL_ROW_CEILING: u64 = 8;
 
-/// A settled harness: accessibility as asked, nothing focused (no caret
-/// blink), warm-up frames drawn, the transcript's workers finished.
+/// A settled harness: accessibility as asked, the right dock closed,
+/// nothing focused (no caret blink), warm-up frames drawn, the
+/// transcript's workers finished.
 fn settled(options: Options, accessibility: bool) -> UiTestHarness<Workbench> {
     let mut ui = harness_with(options, WIDE);
     ui.set_accessibility_active(accessibility);
+    // The right dock stays closed: every panel left in it (Terminal, Files,
+    // Snapshot preview) still rebuilds each frame, 20 to 60 allocations
+    // these budgets do not cover. The Diff panel it used to show replayed
+    // from its cache.
+    ui.key("mod+alt+b");
     for _ in 0..4 {
         ui.run_until_idle();
         ui.frame();
