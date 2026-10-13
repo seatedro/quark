@@ -7,7 +7,7 @@ composer-suggestions.png."""
 # quark-e2e-env: QUARK_WORKBENCH_THEME=dark
 # quark-e2e-env: QUARK_WORKBENCH_TERMINAL=scripted
 
-from quark_e2e import STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
+from quark_e2e import ROLE, STATE_FOCUSED, Cua, app_pid, app_tree, main, resize_window, save_screenshot, wait_for
 
 TITLE = "Quark Workbench"
 
@@ -22,7 +22,9 @@ def draft():
 
 
 def option(name):
-    return next((n for n in app_tree().walk() if n.name == name and n.role != 79), None)
+    """The suggestion `name`: a list item, so the Files panel's tree row of
+    the same file does not count."""
+    return next((n for n in app_tree().walk() if n.name == name and n.role == ROLE["list item"]), None)
 
 
 def spec(cua: Cua):
