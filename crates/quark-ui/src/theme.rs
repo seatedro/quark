@@ -257,8 +257,8 @@ pub struct SurfaceMetrics {
     pub shadow: Option<Elevation>,
     /// Toasts: the stack's maximum width.
     pub width: Option<f32>,
-    /// Toasts: the severity badge's diameter. The close button and both
-    /// glyphs keep their default proportion to it.
+    /// Toasts: the severity badge's diameter. The close button keeps its
+    /// default proportion to it.
     pub icon_size: Option<f32>,
 }
 

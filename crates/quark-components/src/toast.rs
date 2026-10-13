@@ -242,7 +242,7 @@ pub const TOAST_LIFETIME_MS: u64 = 5_000;
 /// instead.
 pub const TOAST_WIDTH: f32 = 460.0;
 /// Default badge and close button sizes; `components.toast.icon_size` sets
-/// the badge and scales the rest with it.
+/// the badge and scales the close button with it.
 pub const BADGE_SIZE: f32 = 26.0;
 pub const CLOSE_SIZE: f32 = 22.0;
 const PROGRESS_H: f32 = 2.0;
@@ -276,15 +276,18 @@ impl Chrome {
         let scale = theme.metrics.ui_scale();
         // Defaults stay unscaled, as they always were.
         let badge = scaled_or(recipe.icon_size, scale, BADGE_SIZE);
-        let ratio = badge / BADGE_SIZE;
+        let close = (CLOSE_SIZE * badge / BADGE_SIZE).round();
+        // Glyphs keep their default size, shrinking only to fit a smaller
+        // box: in proportion they get too small to read.
+        let fit = |glyph: f32, size: f32| glyph.min((size * 0.7).round());
         Self {
             pad_x: recipe.padding_x.unwrap_or(Sp::MD),
             pad_y: recipe.padding_y.unwrap_or(PAD_Y),
             gap: recipe.gap.unwrap_or(Sp::MD),
             badge,
-            close: (CLOSE_SIZE * ratio).round(),
-            badge_glyph: (Ico::SM * ratio).round(),
-            close_glyph: (Ico::XS * ratio).round(),
+            close,
+            badge_glyph: fit(Ico::SM, badge),
+            close_glyph: fit(Ico::XS, close),
             scale,
         }
     }
@@ -417,6 +420,7 @@ impl RenderOnce for ToastVisuals {
         let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::TOAST, scale);
         let (title_size, description_size) = toast_font_sizes(cx.theme);
         let chrome = Chrome::of(cx.theme);
+        let badge_radius = chrome.badge / 2.0;
         let accent = severity_color(self.kind, tc);
         let icon_svg = severity_icon(self.kind);
 
@@ -471,7 +475,10 @@ impl RenderOnce for ToastVisuals {
                     gap={chrome.gap}
                 >
                     <div
-                        class="flex-row items-center justify-center shrink-0 rounded-full"
+                        class="flex-row items-center justify-center shrink-0"
+                        // A class, which the view leaves unscaled like the
+                        // badge's size.
+                        class="rounded-[badge_radius]"
                         w={chrome.badge}
                         h={chrome.badge}
                         bg={badge_bg}
