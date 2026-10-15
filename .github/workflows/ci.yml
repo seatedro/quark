@@ -136,14 +136,7 @@ jobs:
       - name: Check all features
         run: >-
           cargo check --workspace --all-targets --features
-          quark-app/hot-reload,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-app/autostart,quark-app/global-shortcut,quark-app/telemetry,quark-render/headless-render,quark-syntax/download,quark-ui/devtools,quark-ui/profile,quark-text/profile
-
-      # The grammar packs that quark-syntax's highlighting tests load,
-      # built from their pinned sources like released packs: Rust, plus
-      # HTML, JavaScript, CSS, and Markdown for embedded languages. The
-      # build also loads each and checks its sample.
-      - name: Build test grammar packs
-        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline python
+          quark-app/hot-reload,quark-app/notifications,quark-app/tray,quark-app/dialogs,quark-app/clipboard-image,quark-app/devtools,quark-app/profile-puffin,quark-app/autostart,quark-app/global-shortcut,quark-app/telemetry,quark-render/headless-render,quark-ui/devtools,quark-ui/profile,quark-text/profile
 
       # Compiled apart from the run so step timings separate the two.
       - name: Build tests
@@ -154,8 +147,6 @@ jobs:
           # Turns a missing wgpu adapter into a failure in the headless render
           # test instead of a silent skip; lavapipe provides the adapter.
           QUARK_REQUIRE_GPU: "1"
-          # Likewise a missing grammar pack in the highlighting tests.
-          QUARK_REQUIRE_SYNTAX_PACKS: "1"
           # Only takes effect once quark-render builds its Instance from env
           # (InstanceDescriptor::from_env_or_default); default backends already
           # include Vulkan.
@@ -336,18 +327,11 @@ jobs:
           path: target/debug/ghostty-vt
           key: ${{ steps.ghostty-vt.outputs.cache-primary-key }}
 
-      # Built with this platform's compiler and linker (MSVC on Windows), so
-      # the tests load a dylib or DLL the way apps do.
-      - name: Build test grammar packs
-        run: cargo run -p syntax-pack -- build rust html javascript css markdown markdown_inline python
-
       # Compiled apart from the run so step timings separate the two.
       - name: Build tests
         run: cargo test --workspace --features quark-ui/integrity-checks --no-run
 
       - name: Test
-        env:
-          QUARK_REQUIRE_SYNTAX_PACKS: "1"
         run: cargo test --workspace --features quark-ui/integrity-checks
 
       # The WKWebView backend against the local fixture. The script wraps
@@ -649,10 +633,6 @@ jobs:
           - name: quark-components split 2/1
             args: "-p quark-components --harness split_resize_pane2_flex1"
             package: quark-components
-          - name: quark-diff
-            args: -p quark-diff
-            package: quark-diff
-            cache-writer: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -734,9 +714,6 @@ jobs:
           - name: quark-components
             args: "-p quark-components --harness list_nav:: --harness slider::"
             package: quark-components
-          - name: quark-diff
-            args: -p quark-diff
-            package: quark-diff
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

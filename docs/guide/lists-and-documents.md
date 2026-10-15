@@ -129,7 +129,7 @@ assert_eq!(copy_text(&selection, &order, &text, "\n"), "world\nSecond");
 - `find_bar` renders the query field, match count, and previous, next, and
   close buttons.
 
-## Trees, tables, and diffs
+## Trees and tables
 
 From `quark-components`:
 
@@ -137,7 +137,6 @@ From `quark-components`:
 |---|---|---|
 | `tree_view` | `TreeState`: flat node table, lazy child loading, drag reordering, multi-select, type-ahead | [tree_table_demo.rs](../../crates/quark-app/examples/tree_table_demo.rs) |
 | `table_view` | `TableState` over the app's `TableData`: sorting, resizable and reorderable columns, sticky header | [tree_table_demo.rs](../../crates/quark-app/examples/tree_table_demo.rs) (100,000 rows) |
-| `diff_view` | `DiffViewState` over a `quark_diff::DiffDocument`: unified or side by side, word highlights, collapsed context, selection | [diff_demo.rs](https://github.com/seatedro/quark/blob/handoff/diffy-v1/crates/quark-app/examples/diff_demo.rs) (removed; moving to Diffy) |
 
 - Data lives in parallel columns; only visible rows are built.
 - Each row (diff view: each row's cells) is a cache boundary inside one
