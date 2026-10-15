@@ -3650,6 +3650,7 @@ dependencies = [
  "quark-components",
  "quark-diff",
  "quark-render",
+ "quark-syntax",
  "quark-text",
  "quark-ui",
  "quark-webview",
@@ -3682,6 +3683,7 @@ dependencies = [
  "quark-app",
  "quark-components",
  "quark-diff",
+ "quark-syntax",
  "quark-terminal",
  "quark-text",
  "quark-ui",
@@ -3782,7 +3784,9 @@ name = "quark-syntax"
 version = "0.1.0"
 dependencies = [
  "libloading",
+ "quark",
  "quark-syntax",
+ "quark-ui",
  "quark-update",
  "ring",
  "serde",
@@ -3842,7 +3846,6 @@ dependencies = [
  "quark",
  "quark-i18n",
  "quark-render",
- "quark-syntax",
  "quark-text",
  "serde",
  "serde_json",

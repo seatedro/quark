@@ -4,16 +4,13 @@
 //! peak memory. Fixtures are generated from fixed seeds.
 //!
 //! Run in release with
-//! `cargo test --release -p quark-app --features syntax --test diff_large -- --ignored --nocapture`;
+//! `cargo test --release -p quark-app --test diff_large -- --ignored --nocapture`;
 //! `QUARK_DIFF_FIXTURE_MIB` picks another size, `QUARK_DIFF_CASE` the
 //! cases whose names contain it, and `QUARK_DIFF_NO_SYNTAX` skips colors.
-#![cfg(feature = "syntax")]
-
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use quark_app::quark_ui::element::AnyElement;
-use quark_app::quark_ui::quark_syntax::{HighlightKind, testing};
 use quark_app::quark_ui::test_alloc::{self, Counting};
 use quark_app::quark_ui::{Action, FocusId};
 use quark_app::testing::UiTestHarness;
@@ -26,6 +23,7 @@ use quark_diff::fixtures::{
     scattered_edits,
 };
 use quark_diff::{Side, diff_texts};
+use quark_syntax::{HighlightKind, testing};
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;

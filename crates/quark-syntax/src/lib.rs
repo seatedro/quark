@@ -24,9 +24,10 @@
 //! an embedded grammar downloads, its region keeps the host's colors, and
 //! the worker sends a newer revision of the result when it arrives.
 //!
-//! Features: `engine` (the tree-sitter runtime and local packs) and
-//! `download` (fetching packs). Without `engine` every lookup is plain and
-//! the crate has no dependencies.
+//! Features: `engine` (the tree-sitter runtime and local packs),
+//! `download` (fetching packs), and `document` ([`DocumentHighlighter`]
+//! for the code blocks of Quark documents). Without `engine` every lookup
+//! is plain and the crate has no dependencies.
 //!
 //! # Threat model
 //!
@@ -57,6 +58,8 @@
 //!   takes the process down; a panic in the highlighter is caught by the
 //!   worker. Packs come from pinned, hashed grammar sources built in CI.
 
+#[cfg(feature = "document")]
+mod document;
 #[cfg(feature = "download")]
 mod download;
 #[cfg(feature = "engine")]
@@ -71,6 +74,8 @@ mod worker;
 
 use std::sync::Arc;
 
+#[cfg(feature = "document")]
+pub use document::DocumentHighlighter;
 #[cfg(feature = "download")]
 pub use download::{Downloads, default_cache_dir};
 #[cfg(feature = "download")]

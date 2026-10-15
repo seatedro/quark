@@ -15,12 +15,12 @@ use std::sync::Arc;
 
 use accesskit::Role;
 use quark::view;
+use quark_app::quark_ui::FocusId;
 use quark_app::quark_ui::element::*;
 use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::style::Styled;
 use quark_app::quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
 use quark_app::quark_ui::theme::Color;
-use quark_app::quark_ui::{FocusId, quark_syntax};
 use quark_app::{UiContext, ViewContext};
 use quark_components::diff_view::decorator::{
     AnnotationContext, DiffDecorator, GutterContext, HeaderContext, SeparatorContext,

@@ -30,6 +30,9 @@ tracing = { workspace = true, optional = true }
 # client (ureq with rustls), shared with the updater.
 quark-update = { workspace = true, optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+# The `CodeHighlighter` for Quark document code blocks, with `document`.
+quark = { workspace = true, optional = true }
+quark-ui = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -46,8 +49,11 @@ engine = [
 ]
 # Downloading packs on demand from a signed index.
 download = ["engine", "dep:quark-update", "dep:ureq"]
+# `DocumentHighlighter`, highlighting Quark document code blocks through
+# quark-ui's `CodeHighlighter`.
+document = ["engine", "dep:quark", "dep:quark-ui"]
 
 [dev-dependencies]
 tempfile = "3"
 # Unit tests cover pack loading and downloads, so they always build both.
-quark-syntax = { path = ".", features = ["download"] }
+quark-syntax = { path = ".", features = ["download", "document"] }

@@ -6,7 +6,10 @@ and diffs.
 - No grammar is compiled into the app.
 - A pack is a shared library exporting the tree-sitter language function,
   plus its highlight query, an optional injection query, and a manifest.
-- A `GrammarStore` feeds the markdown document and the diff view.
+- A `GrammarStore` feeds the markdown document (through
+  `quark_syntax::DocumentHighlighter`, feature `document`, a
+  [`CodeHighlighter`](lists-and-documents.md#highlighting-code-blocks)) and
+  the diff view.
 - A block whose grammar is missing or still downloading renders plain, then
   recolors when the grammar arrives.
 
@@ -14,18 +17,18 @@ and diffs.
 
 | Source | Configure with | Cargo feature | Trust |
 |---|---|---|---|
-| Local pack roots | `StoreConfig::local_packs(root)` | `quark-ui/syntax` (`quark-syntax/engine`) | Unsigned; the app opts in |
-| Signed index | `StoreConfig::downloads(Downloads::new(app_id, url, &keys))` | `quark-ui/syntax-download` (`quark-syntax/download`) | Ed25519 signature over the index |
+| Local pack roots | `StoreConfig::local_packs(root)` | `quark-syntax/engine` | Unsigned; the app opts in |
+| Signed index | `StoreConfig::downloads(Downloads::new(app_id, url, &keys))` | `quark-syntax/download` | Ed25519 signature over the index |
 
 From [chat_demo.rs](../../crates/quark-app/examples/chat_demo.rs) and
 [diff_demo.rs](../../crates/quark-app/examples/diff_demo.rs):
 
 ```rust
-use quark_app::quark_ui::quark_syntax::{GrammarStore, StoreConfig};
+use quark_syntax::{DocumentHighlighter, GrammarStore, StoreConfig};
 
 let store = GrammarStore::new(StoreConfig::new().local_packs(root));
-chat.set_grammar_store(store.clone()); // MarkdownDocument
-diff.enable_syntax(store);             // DiffViewState
+chat.set_code_highlighter(DocumentHighlighter::new(store.clone())); // MarkdownDocument
+diff.enable_syntax(store);                                          // DiffViewState
 ```
 
 - Search order: local roots (in the order added), then the download cache,

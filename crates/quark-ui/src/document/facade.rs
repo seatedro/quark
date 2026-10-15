@@ -16,7 +16,7 @@ use quark::selection::BlockKey;
 use super::background::BackgroundMeasure;
 use super::images::{ImageLoader, ImageStore};
 use super::markdown::{BlockKeys, MarkdownBlocks};
-use super::syntax::SyntaxHighlighter;
+use super::syntax::{CodeHighlighter, SyntaxHighlighter};
 use super::{
     BlockMeasurer, Document, DocumentElement, DocumentEvent, DocumentRow, DocumentStyle, FindMatch,
     RowAdornment, RowChrome, RowDecorator, TextGeometry,
@@ -103,11 +103,10 @@ impl MarkdownDocument {
         &self.syntax
     }
 
-    /// Highlights code blocks with `store`'s grammars; see
-    /// [`SyntaxHighlighter::set_grammar_store`].
-    #[cfg(feature = "syntax")]
-    pub fn set_grammar_store(&mut self, store: quark_syntax::GrammarStore) {
-        self.syntax.set_grammar_store(store);
+    /// Highlights code blocks with `highlighter`; see
+    /// [`SyntaxHighlighter::set`].
+    pub fn set_code_highlighter(&mut self, highlighter: impl CodeHighlighter + 'static) {
+        self.syntax.set(highlighter);
     }
 
     /// The markdown source of `row`.

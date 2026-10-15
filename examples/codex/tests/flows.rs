@@ -464,7 +464,7 @@ fn the_changes_view_highlights_javascript() {
         );
         return;
     }
-    use quark_app::quark_ui::quark_syntax::HighlightKind;
+    use quark_syntax::HighlightKind;
     let mut ui = harness("changes");
     ui.app_mut().changes.review.finish_syntax();
     ui.frame();

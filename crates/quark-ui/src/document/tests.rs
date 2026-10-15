@@ -1189,7 +1189,7 @@ fn streaming_markdown_reshapes_only_the_last_block() {
 
 #[test]
 fn unknown_fence_language_renders_plain_with_its_label() {
-    let mut syntax = SyntaxHighlighter::new();
+    let mut syntax = fake_highlighter();
     let mut markdown = MarkdownBlocks::new();
     let source = "```klingon\nqapla' \"batlh\" fn\n```";
     markdown_message(0, &mut markdown, source, &mut syntax);
@@ -1208,23 +1208,104 @@ fn unknown_fence_language_renders_plain_with_its_label() {
     );
 }
 
-/// A highlighter with the Rust pack `syntax-pack build rust` writes, or
-/// `None` (the test skips) when it has not been built.
-#[cfg(feature = "syntax")]
-fn rust_highlighter() -> Option<SyntaxHighlighter> {
-    let mut syntax = SyntaxHighlighter::new();
-    syntax.set_grammar_store(quark_syntax::testing::store_with("rust")?);
-    Some(syntax)
+/// Words [`FakeHighlighter`] tones as keywords.
+const KEYWORDS: &[&str] = &["fn", "let", "pub"];
+
+/// A deterministic stand-in for a highlighting engine: tones the
+/// [`KEYWORDS`] of any language but `klingon`, and like an engine on
+/// another thread delivers each result only on `poll` or
+/// `finish_pending`. A held result applies while the source only grew.
+#[derive(Default)]
+struct FakeHighlighter {
+    slots: HashMap<BlockKey, FakeSlot>,
+    version: u64,
 }
 
-#[cfg(feature = "syntax")]
+struct FakeSlot {
+    requested: String,
+    pending: bool,
+    /// Source, version, and spans of the newest delivered result.
+    done: Option<(String, u64, Vec<ToneSpan>)>,
+}
+
+impl CodeHighlighter for FakeHighlighter {
+    fn version(&mut self, slot: BlockKey, lang: &str, code: &str) -> u64 {
+        if lang == "klingon" {
+            return 0;
+        }
+        let entry = self.slots.entry(slot).or_insert_with(|| FakeSlot {
+            requested: String::new(),
+            pending: true,
+            done: None,
+        });
+        if entry.requested != code {
+            entry.requested = code.to_owned();
+            entry.pending = true;
+        }
+        entry
+            .done
+            .as_ref()
+            .filter(|(source, ..)| code.starts_with(source.as_str()))
+            .map_or(0, |(_, version, _)| *version)
+    }
+
+    fn spans(&self, slot: BlockKey) -> &[ToneSpan] {
+        self.slots
+            .get(&slot)
+            .and_then(|s| s.done.as_ref())
+            .map_or(&[], |(.., spans)| spans)
+    }
+
+    fn poll(&mut self) -> Vec<BlockKey> {
+        let mut keys: Vec<BlockKey> = self
+            .slots
+            .iter()
+            .filter(|(_, s)| s.pending)
+            .map(|(k, _)| *k)
+            .collect();
+        keys.sort_unstable_by_key(|k| k.0);
+        for key in &keys {
+            let slot = self.slots.get_mut(key).unwrap();
+            let mut spans = Vec::new();
+            let mut at = 0;
+            for word in slot.requested.split(|c: char| !c.is_ascii_alphanumeric()) {
+                if KEYWORDS.contains(&word) {
+                    spans.push(ToneSpan {
+                        range: at as u32..(at + word.len()) as u32,
+                        tone: SyntaxTone::Keyword,
+                    });
+                }
+                at += word.len() + 1;
+            }
+            self.version += 1;
+            slot.pending = false;
+            slot.done = Some((slot.requested.clone(), self.version, spans));
+        }
+        keys
+    }
+
+    fn finish_pending(&mut self) -> Vec<BlockKey> {
+        self.poll()
+    }
+
+    fn forget(&mut self, slot: BlockKey) {
+        self.slots.remove(&slot);
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+fn fake_highlighter() -> SyntaxHighlighter {
+    SyntaxHighlighter::with(FakeHighlighter::default())
+}
+
 #[test]
-fn rust_code_block_is_colored_once_its_highlight_arrives() {
-    let Some(mut syntax) = rust_highlighter() else {
-        return;
-    };
+fn code_block_is_colored_once_its_highlight_arrives() {
+    let mut syntax = fake_highlighter();
     let mut markdown = MarkdownBlocks::new();
-    let source = "```rust\nfn main() { let s = \"hi\"; }\n```";
+    let source = "```rust\nfn main() { let s = 1; }\n```";
     let first = markdown_message(0, &mut markdown, source, &mut syntax);
 
     syntax.finish_pending();
@@ -1235,17 +1316,13 @@ fn rust_code_block_is_colored_once_its_highlight_arrives() {
             highlighted_runs(&first.blocks[0]),
             highlighted_runs(&second.blocks[0])
         ),
-        (
-            vec![],
-            vec!["fn".into(), "main".into(), "let".into(), "\"hi\"".into()]
-        )
+        (vec![], vec!["fn".to_owned(), "let".to_owned()])
     );
 }
 
-#[cfg(feature = "syntax")]
 #[test]
 fn highlight_arrival_reports_the_block_it_is_for() {
-    let mut syntax = SyntaxHighlighter::new();
+    let mut syntax = fake_highlighter();
     let message = markdown_message(
         0,
         &mut MarkdownBlocks::new(),
@@ -1256,9 +1333,56 @@ fn highlight_arrival_reports_the_block_it_is_for() {
     assert_eq!(syntax.finish_pending(), vec![message.blocks[0].key]);
 }
 
+// Catches a streaming block flashing plain while its new highlight is
+// computed, or an edit keeping colors from a source it no longer has.
+#[test]
+fn a_held_highlight_applies_only_while_the_source_grows() {
+    let mut syntax = fake_highlighter();
+    let mut markdown = MarkdownBlocks::new();
+    let mut keys = BlockKeys::new();
+    let mut runs = |source: &str, syntax: &mut SyntaxHighlighter| {
+        let message = markdown_message_with(0, &mut markdown, source, syntax, &mut keys);
+        highlighted_runs(&message.blocks[0])
+    };
+    runs("```rust\nfn a", &mut syntax);
+    syntax.finish_pending();
+
+    let grown = runs("```rust\nfn a() { let", &mut syntax);
+    let edited = runs("```rust\nlet a", &mut syntax);
+
+    assert_eq!((grown, edited), (vec!["fn".to_owned()], vec![]));
+}
+
+// Catches blocks rebuilt (and reshaped) on every row build although
+// neither their source nor their highlight changed.
+#[test]
+fn an_unchanged_highlight_reuses_the_block() {
+    let mut syntax = fake_highlighter();
+    let mut markdown = MarkdownBlocks::new();
+    let mut keys = BlockKeys::new();
+    let source = "```rust\nfn main() {}\n```";
+    markdown_message_with(0, &mut markdown, source, &mut syntax, &mut keys);
+    syntax.finish_pending();
+
+    let first = markdown_message_with(0, &mut markdown, source, &mut syntax, &mut keys);
+    let second = markdown_message_with(0, &mut markdown, source, &mut syntax, &mut keys);
+
+    assert_eq!(first.blocks[0].revision(), second.blocks[0].revision());
+}
+
 /// A markdown view holding message 0 with `source`.
 fn markdown_document(source: &str) -> MarkdownDocument {
+    markdown_document_with(source, |_| {})
+}
+
+/// [`markdown_document`], with `setup` run on the view before the row is
+/// added.
+fn markdown_document_with(
+    source: &str,
+    setup: impl FnOnce(&mut MarkdownDocument),
+) -> MarkdownDocument {
     let mut md = MarkdownDocument::new(DocumentStyle::for_font_size(14.0));
+    setup(&mut md);
     md.push(MarkdownEntry {
         row: RowKey(0),
         chrome: RowChrome::default(),
@@ -1270,10 +1394,12 @@ fn markdown_document(source: &str) -> MarkdownDocument {
 
 // Catches highlighter state outliving its blocks: removing a message must
 // drop the highlights of its code blocks.
-#[cfg(feature = "syntax")]
 #[test]
 fn removing_a_message_forgets_its_highlights() {
-    let mut md = markdown_document("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+    let mut md =
+        markdown_document_with("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```", |md| {
+            md.set_code_highlighter(FakeHighlighter::default())
+        });
     md.finish_highlights();
     let kept = md.highlighter().len();
 
@@ -1283,38 +1409,18 @@ fn removing_a_message_forgets_its_highlights() {
 }
 
 // Catches truncation keeping the highlights of blocks a message lost.
-#[cfg(feature = "syntax")]
 #[test]
 fn shrinking_a_message_forgets_the_highlights_of_dropped_blocks() {
-    let mut md = markdown_document("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```");
+    let mut md =
+        markdown_document_with("```rust\nfn a() {}\n```\n\n```rust\nfn b() {}\n```", |md| {
+            md.set_code_highlighter(FakeHighlighter::default())
+        });
     md.finish_highlights();
 
     md.set_markdown(RowKey(0), "```rust\nfn a() {}\n```")
         .unwrap();
 
     assert_eq!(md.highlighter().len(), 1);
-}
-
-// Catches a dead worker leaving every later block plain, or hanging the
-// caller waiting for results that never come.
-#[cfg(feature = "syntax")]
-#[test]
-fn dead_highlight_worker_is_replaced_and_does_not_hang() {
-    let Some(mut syntax) = rust_highlighter() else {
-        return;
-    };
-    let mut markdown = MarkdownBlocks::new();
-    let source = "```rust\nfn main() {}\n```";
-    markdown_message(0, &mut markdown, source, &mut syntax);
-    syntax.kill_worker();
-
-    syntax.finish_pending();
-    let message = markdown_message(0, &mut markdown, source, &mut syntax);
-
-    assert_eq!(
-        highlighted_runs(&message.blocks[0]),
-        vec!["fn".to_owned(), "main".to_owned()]
-    );
 }
 
 // Catches a batch with a repeated row key being half adopted, or the

@@ -475,8 +475,8 @@ impl Codex {
 /// Grammar packs for the diff's syntax colors: `$QUARK_SYNTAX_PACKS`,
 /// else the workspace's `target/syntax-packs` when it holds packs for this
 /// target. Without packs, code shows in the plain code color.
-pub fn grammar_store() -> Option<quark_app::quark_ui::quark_syntax::GrammarStore> {
-    use quark_app::quark_ui::quark_syntax::{GrammarStore, StoreConfig, pack::TARGET};
+pub fn grammar_store() -> Option<quark_syntax::GrammarStore> {
+    use quark_syntax::{GrammarStore, StoreConfig, pack::TARGET};
     let root = std::env::var_os("QUARK_SYNTAX_PACKS")
         .map(std::path::PathBuf::from)
         .or_else(|| {

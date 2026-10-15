@@ -1,24 +1,70 @@
 //! Code block highlighting for markdown rows.
 //!
-//! With the `syntax` feature, highlighting runs on a `quark-syntax` worker
-//! thread with the grammars of the app's `quark_syntax::GrammarStore`
-//! ([`SyntaxHighlighter::set_grammar_store`]). A code block renders plain
-//! (or with its previous highlight, while its source only grew) until its
-//! result arrives, and stays plain while its grammar downloads (or keeps
-//! its own language's colors while grammars of languages embedded in it
-//! download, taking each newer result as they arrive); the app calls
-//! [`SyntaxHighlighter::poll`] each frame and rebuilds its markdown rows
-//! when it returns blocks. Without the feature, or without a store,
-//! every block is plain.
+//! Quark has no highlighting engine of its own. The app supplies one as a
+//! [`CodeHighlighter`] ([`SyntaxHighlighter::with`],
+//! [`super::MarkdownDocument::set_code_highlighter`]); without one every
+//! block renders plain. A code block renders plain (or with its previous
+//! highlight, while its source only grew) until its result arrives; the
+//! app calls [`SyntaxHighlighter::poll`] each frame and rebuilds its
+//! markdown rows when it returns blocks.
+
+use std::ops::Range;
 
 use quark::selection::BlockKey;
 use quark_render::FontKind;
 
-use super::SpanTone;
+use super::{SpanTone, SyntaxTone};
 use crate::element::StyledSpan;
 
 /// One line of code as spans with their tones.
 pub(crate) type CodeLine = Vec<(StyledSpan, SpanTone)>;
+
+/// The bytes `range` of a code block's source take the color of `tone`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToneSpan {
+    pub range: Range<u32>,
+    pub tone: SyntaxTone,
+}
+
+/// A highlighting engine for document code blocks, keyed by block.
+///
+/// The document calls [`Self::version`] for every code block each time it
+/// rebuilds the block's row, and reads [`Self::spans`] only when that
+/// returned a nonzero version, so `version` must not allocate when the
+/// source is unchanged. Engines that work off the UI thread deliver
+/// results through [`Self::poll`], which the app calls each frame.
+pub trait CodeHighlighter {
+    /// Requests a highlight of `code`, in the fence language `lang`, for
+    /// the block `slot` when its source or language changed, and returns
+    /// the version of the highlight that applies to `code` now: 0 for
+    /// plain. A held result for an earlier source may still apply while
+    /// the source only grew. Every result taken must get a distinct
+    /// version, since blocks with an unchanged version are reused as
+    /// they are.
+    fn version(&mut self, slot: BlockKey, lang: &str, code: &str) -> u64;
+
+    /// The spans of the highlight [`Self::version`] last reported for
+    /// `slot`: sorted, disjoint, and on char boundaries of the code it
+    /// was given. Spans reaching past the end of that code are clipped.
+    fn spans(&self, slot: BlockKey) -> &[ToneSpan];
+
+    /// Takes finished highlights and returns the blocks they are for.
+    fn poll(&mut self) -> Vec<BlockKey>;
+
+    /// Blocks until every requested highlight has arrived and been taken,
+    /// and returns the blocks that got one, as [`Self::poll`] does.
+    fn finish_pending(&mut self) -> Vec<BlockKey>;
+
+    /// Drops everything kept for the block `slot`.
+    fn forget(&mut self, slot: BlockKey);
+
+    /// Number of blocks with kept state.
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// Plain monospace lines of `code`.
 pub(crate) fn plain_lines(code: &str) -> Vec<CodeLine> {
@@ -34,454 +80,127 @@ fn mono(text: &str) -> StyledSpan {
     }
 }
 
-/// Highlights code blocks off the UI thread. One per app, shared by every
-/// markdown row.
+/// Highlights code blocks with the app's [`CodeHighlighter`]. One per
+/// app, shared by every markdown row.
 #[derive(Default)]
 pub struct SyntaxHighlighter {
-    #[cfg(feature = "syntax")]
-    inner: imp::Inner,
+    inner: Option<Box<dyn CodeHighlighter>>,
 }
 
 impl SyntaxHighlighter {
+    /// Renders every block plain.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Highlights with `store`'s grammars from now on. Blocks already
-    /// highlighted keep their colors; the rest are requested again when
-    /// their rows are next built.
-    #[cfg(feature = "syntax")]
-    pub fn set_grammar_store(&mut self, store: quark_syntax::GrammarStore) {
-        self.inner.set_store(store);
+    /// Highlights with `highlighter`.
+    pub fn with(highlighter: impl CodeHighlighter + 'static) -> Self {
+        Self {
+            inner: Some(Box::new(highlighter)),
+        }
+    }
+
+    /// Highlights with `highlighter` from now on. Blocks are requested
+    /// from it when their rows are next built.
+    pub fn set(&mut self, highlighter: impl CodeHighlighter + 'static) {
+        self.inner = Some(Box::new(highlighter));
     }
 
     /// Takes finished highlights and returns the code blocks they are
     /// for; rebuild those blocks' rows so they pick the colors up.
     pub fn poll(&mut self) -> Vec<BlockKey> {
-        #[cfg(feature = "syntax")]
-        {
-            self.inner.poll()
-        }
-        #[cfg(not(feature = "syntax"))]
-        {
-            Vec::new()
-        }
+        self.inner.as_mut().map_or_else(Vec::new, |h| h.poll())
     }
 
     /// Blocks until every requested highlight has arrived and been taken.
     /// For tests and screenshots, which need the colored state at once.
     /// Returns the blocks that got a highlight, as [`Self::poll`] does.
     pub fn finish_pending(&mut self) -> Vec<BlockKey> {
-        #[cfg(feature = "syntax")]
-        {
-            self.inner.finish_pending()
-        }
-        #[cfg(not(feature = "syntax"))]
-        {
-            Vec::new()
-        }
+        self.inner
+            .as_mut()
+            .map_or_else(Vec::new, |h| h.finish_pending())
     }
 
     /// Drops everything kept for the block `slot`: its source, its
     /// highlight, and any pending request's result. Call it when the block
     /// leaves its row or its row is removed.
     pub fn forget(&mut self, slot: BlockKey) {
-        #[cfg(feature = "syntax")]
-        self.inner.forget(slot);
-        #[cfg(not(feature = "syntax"))]
-        let _ = slot;
+        if let Some(h) = &mut self.inner {
+            h.forget(slot);
+        }
     }
 
     /// Number of blocks with kept state.
     pub fn len(&self) -> usize {
-        #[cfg(feature = "syntax")]
-        {
-            self.inner.len()
-        }
-        #[cfg(not(feature = "syntax"))]
-        {
-            0
-        }
+        self.inner.as_ref().map_or(0, |h| h.len())
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Requests a highlight of `code` for the block `slot` when its source
-    /// changed, and returns the version of the highlight that applies to
-    /// `code` now: 0 for plain. Blocks with an unchanged version can be
-    /// reused as they are.
+    /// See [`CodeHighlighter::version`].
     pub(crate) fn version(&mut self, slot: BlockKey, lang: &str, code: &str) -> u64 {
-        #[cfg(feature = "syntax")]
-        {
-            self.inner.version(slot, lang, code)
-        }
-        #[cfg(not(feature = "syntax"))]
-        {
-            let _ = (slot, lang, code);
-            0
-        }
+        self.inner
+            .as_mut()
+            .map_or(0, |h| h.version(slot, lang, code))
     }
 
-    /// The lines of `code` toned by the highlight [`Self::version`]
-    /// reported for `slot`.
-    pub(crate) fn lines(&self, slot: BlockKey, code: &str) -> Vec<CodeLine> {
-        #[cfg(feature = "syntax")]
-        {
-            self.inner.lines(slot, code)
-        }
-        #[cfg(not(feature = "syntax"))]
-        {
-            let _ = slot;
-            plain_lines(code)
-        }
-    }
-
-    /// Replaces the worker with one whose thread is gone.
-    #[cfg(all(test, feature = "syntax"))]
-    pub(crate) fn kill_worker(&mut self) {
-        self.inner.kill_worker();
-    }
-}
-
-#[cfg(feature = "syntax")]
-mod imp {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use quark::selection::BlockKey;
-    use quark_syntax::{GrammarStore, HighlightKind, HighlightSpan, HighlightWorker, LanguageId};
-
-    use super::{CodeLine, mono, plain_lines};
-    use crate::document::{SpanTone, SyntaxTone};
-
-    struct Done {
-        generation: u64,
-        /// Counts results for `generation`: each grammar that arrives
-        /// while it is pending recolors it with a higher revision.
-        revision: u32,
-        /// Distinct for every result taken, so rows rebuilt for a result
-        /// that recolors the same generation (a grammar that arrived)
-        /// see a new version.
-        version: u64,
-        source: Arc<str>,
-        spans: Arc<[HighlightSpan]>,
-    }
-
-    struct Slot {
-        /// Newest request.
-        generation: u64,
-        language: LanguageId,
-        requested: Arc<str>,
-        done: Option<Done>,
-    }
-
-    impl Slot {
-        fn pending(&self) -> bool {
-            self.done
-                .as_ref()
-                .is_none_or(|done| done.generation < self.generation)
-        }
-    }
-
-    impl Done {
-        /// Spans of an earlier source still fit a source that only grew,
-        /// which keeps a streaming block colored while its new highlight
-        /// is computed.
-        fn applies_to(&self, code: &str) -> bool {
-            code.starts_with(&*self.source)
-        }
-    }
-
-    #[derive(Default)]
-    pub(super) struct Inner {
-        store: GrammarStore,
-        worker: Option<HighlightWorker>,
-        slots: HashMap<BlockKey, Slot>,
-        generation: u64,
-        /// Last [`Done::version`] handed out.
-        version: u64,
-    }
-
-    impl Inner {
-        pub(super) fn set_store(&mut self, store: GrammarStore) {
-            self.store = store;
-            self.worker = None;
-            for slot in self.slots.values_mut() {
-                // Requested again by the next `version` call.
-                slot.generation = 0;
-            }
-        }
-
-        pub(super) fn version(&mut self, slot: BlockKey, lang: &str, code: &str) -> u64 {
-            // Checked without allocating when the block keeps its language,
-            // since this runs for every code block on every rebuild.
-            let language = match self.slots.get(&slot) {
-                Some(entry) if entry.language.matches(lang) => entry.language.clone(),
-                _ => match LanguageId::from_fence(lang) {
-                    Some(language) => language,
-                    None => return 0,
-                },
-            };
-            let entry = self.slots.entry(slot).or_insert_with(|| Slot {
-                generation: 0,
-                language: language.clone(),
-                requested: Arc::from(""),
-                done: None,
-            });
-            // Length first: a streaming block grows, so most changes show
-            // there without comparing the text.
-            let changed = entry.requested.len() != code.len() || *entry.requested != *code;
-            if entry.generation == 0 || entry.language != language || changed {
-                self.generation += 1;
-                entry.generation = self.generation;
-                entry.language = language.clone();
-                entry.requested = Arc::from(code);
-                let store = &self.store;
-                self.worker
-                    .get_or_insert_with(|| HighlightWorker::new(store.clone()))
-                    .request(slot.0, entry.generation, language, entry.requested.clone());
-            }
-            entry
-                .done
-                .as_ref()
-                .filter(|done| done.applies_to(code))
-                .map_or(0, |done| done.version)
-        }
-
-        pub(super) fn lines(&self, slot: BlockKey, code: &str) -> Vec<CodeLine> {
-            match self
-                .slots
-                .get(&slot)
-                .and_then(|s| s.done.as_ref())
-                .filter(|done| done.applies_to(code))
-            {
-                Some(done) => colored_lines(code, &done.spans),
-                None => plain_lines(code),
-            }
-        }
-
-        pub(super) fn forget(&mut self, slot: BlockKey) {
-            // A result still in flight finds no slot and is dropped.
-            self.slots.remove(&slot);
-        }
-
-        pub(super) fn len(&self) -> usize {
-            self.slots.len()
-        }
-
-        pub(super) fn poll(&mut self) -> Vec<BlockKey> {
-            let mut changed = Vec::new();
-            loop {
-                let Some(worker) = &self.worker else {
-                    return changed;
-                };
-                match worker.try_recv() {
-                    Ok(Some(result)) => {
-                        changed.extend(take(&mut self.slots, &mut self.version, result))
-                    }
-                    Ok(None) => return changed,
-                    Err(_) => {
-                        self.respawn();
-                        return changed;
-                    }
-                }
-            }
-        }
-
-        pub(super) fn finish_pending(&mut self) -> Vec<BlockKey> {
-            let mut changed = self.poll();
-            // One respawn per call: a worker that cannot be spawned again
-            // leaves the pending blocks plain instead of hanging.
-            let mut respawned = false;
-            while self.slots.values().any(Slot::pending) {
-                let Some(worker) = &self.worker else {
-                    break;
-                };
-                match worker.recv() {
-                    Ok(result) => changed.extend(take(&mut self.slots, &mut self.version, result)),
-                    Err(_) if !respawned => {
-                        respawned = true;
-                        self.respawn();
-                    }
-                    Err(_) => break,
-                }
-            }
-            changed
-        }
-
-        /// Replaces a dead worker and sends it every request still waiting
-        /// for a result.
-        fn respawn(&mut self) {
-            let worker = self.worker.insert(HighlightWorker::new(self.store.clone()));
-            for (slot, entry) in &self.slots {
-                if entry.pending() {
-                    worker.request(
-                        slot.0,
-                        entry.generation,
-                        entry.language.clone(),
-                        entry.requested.clone(),
-                    );
-                }
-            }
-        }
-
-        #[cfg(test)]
-        pub(super) fn kill_worker(&mut self) {
-            self.worker = Some(HighlightWorker::gone());
-        }
-    }
-
-    /// Keeps a result unless the slot already holds a newer one: a later
-    /// generation, or a later revision of the same one (results that
-    /// recolor a generation as its grammars arrive). A result older than
-    /// the newest request is still kept: it applies while the source only
-    /// grew, and the newest one may be dropped by the worker's coalescing
-    /// in favor of an even newer one.
-    fn take(
-        slots: &mut HashMap<BlockKey, Slot>,
-        version: &mut u64,
-        result: quark_syntax::Highlighted,
-    ) -> Option<BlockKey> {
-        let key = BlockKey(result.slot);
-        let slot = slots.get_mut(&key)?;
-        if slot.done.as_ref().is_some_and(|done| {
-            (done.generation, done.revision) >= (result.generation, result.revision)
-        }) {
-            return None;
-        }
-        *version += 1;
-        slot.done = Some(Done {
-            generation: result.generation,
-            revision: result.revision,
-            version: *version,
-            source: result.source,
-            spans: result.spans.into(),
-        });
-        Some(key)
-    }
-
-    fn tone(kind: HighlightKind) -> SpanTone {
-        let tone = match kind {
-            HighlightKind::Keyword | HighlightKind::Preprocessor => SyntaxTone::Keyword,
-            HighlightKind::String => SyntaxTone::String,
-            HighlightKind::Comment => SyntaxTone::Comment,
-            HighlightKind::Function => SyntaxTone::Function,
-            HighlightKind::Type | HighlightKind::Namespace => SyntaxTone::Type,
-            HighlightKind::Number | HighlightKind::Constant | HighlightKind::Builtin => {
-                SyntaxTone::Number
-            }
-            HighlightKind::Property
-            | HighlightKind::Attribute
-            | HighlightKind::Tag
-            | HighlightKind::Label => SyntaxTone::Property,
-            HighlightKind::Operator => SyntaxTone::Operator,
-            HighlightKind::Normal | HighlightKind::Punctuation | HighlightKind::Variable => {
-                return SpanTone::Plain;
-            }
-        };
-        SpanTone::Syntax(tone)
-    }
-
-    /// Splits `code` into lines of spans, toning the bytes each highlight
-    /// span covers. `spans` are sorted, disjoint, and on char boundaries;
-    /// spans reaching past the end of `code` are clipped to it.
-    pub(crate) fn colored_lines(code: &str, spans: &[HighlightSpan]) -> Vec<CodeLine> {
-        let mut lines = Vec::new();
-        let mut next = 0;
-        let mut line_start = 0;
-        for line in code.split('\n') {
-            let line_end = line_start + line.len();
-            let mut out = Vec::new();
-            let mut at = line_start;
-            while next < spans.len() && spans[next].range().end <= line_start {
-                next += 1;
-            }
-            for span in &spans[next..] {
-                let range = span.range();
-                if range.start >= line_end {
-                    break;
-                }
-                let (start, end) = (range.start.max(at), range.end.min(line_end));
-                if start > at {
-                    out.push((mono(&code[at..start]), SpanTone::Plain));
-                }
-                if end > start {
-                    out.push((mono(&code[start..end]), tone(span.kind)));
-                    at = end;
-                }
-            }
-            if at < line_end || out.is_empty() {
-                out.push((mono(&code[at..line_end]), SpanTone::Plain));
-            }
-            lines.push(out);
-            line_start = line_end + 1;
-        }
-        lines
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        // Catches progressive results being dropped or stale ones winning:
-        // later revisions of the held generation (grammars that arrived)
-        // and later generations replace what a block holds, while repeats,
-        // earlier revisions, and earlier generations do not.
-        #[test]
-        fn results_replace_a_block_only_when_newer() {
-            let code: Arc<str> = Arc::from("fn");
-            let key = BlockKey(1);
-            let mut slots = HashMap::from([(
-                key,
-                Slot {
-                    generation: 2,
-                    language: LanguageId::from_fence("rust").unwrap(),
-                    requested: code.clone(),
-                    done: None,
-                },
-            )]);
-            let mut version = 0;
-            let mut held = Vec::new();
-            for (generation, revision) in [(1, 0), (1, 1), (1, 1), (1, 0), (2, 0), (1, 2), (2, 1)] {
-                let result = quark_syntax::Highlighted {
-                    slot: key.0,
-                    generation,
-                    revision,
-                    source: code.clone(),
-                    spans: Vec::new(),
-                    pending: false,
-                    unresolved: Vec::new(),
-                    part: None,
-                };
-                take(&mut slots, &mut version, result);
-                let done = slots[&key].done.as_ref().unwrap();
-                held.push((done.generation, done.revision, done.version));
-            }
-
-            assert_eq!(
-                held,
-                [
-                    (1, 0, 1),
-                    (1, 1, 2),
-                    (1, 1, 2),
-                    (1, 1, 2),
-                    (2, 0, 3),
-                    (2, 0, 3),
-                    (2, 1, 4)
-                ]
-            );
+    /// The lines of `code` toned by the highlight `version`, which
+    /// [`Self::version`] just reported for `slot`.
+    pub(crate) fn lines(&self, slot: BlockKey, version: u64, code: &str) -> Vec<CodeLine> {
+        match &self.inner {
+            Some(h) if version != 0 => colored_lines(code, h.spans(slot)),
+            _ => plain_lines(code),
         }
     }
 }
 
-#[cfg(all(test, feature = "syntax"))]
+/// Splits `code` into lines of spans, toning the bytes each highlight
+/// span covers. `spans` are sorted and disjoint; spans reaching past the
+/// end of `code` are clipped to it, and span edges off a char boundary
+/// (an engine bug) leave that span plain instead of panicking.
+pub(crate) fn colored_lines(code: &str, spans: &[ToneSpan]) -> Vec<CodeLine> {
+    let range = |span: &ToneSpan| span.range.start as usize..span.range.end as usize;
+    let mut lines = Vec::new();
+    let mut next = 0;
+    let mut line_start = 0;
+    for line in code.split('\n') {
+        let line_end = line_start + line.len();
+        let mut out = Vec::new();
+        let mut at = line_start;
+        while next < spans.len() && range(&spans[next]).end <= line_start {
+            next += 1;
+        }
+        for span in &spans[next..] {
+            let range = range(span);
+            if range.start >= line_end {
+                break;
+            }
+            let (start, end) = (range.start.max(at), range.end.min(line_end));
+            if end <= start || !code.is_char_boundary(start) || !code.is_char_boundary(end) {
+                continue;
+            }
+            if start > at {
+                out.push((mono(&code[at..start]), SpanTone::Plain));
+            }
+            out.push((mono(&code[start..end]), SpanTone::Syntax(span.tone)));
+            at = end;
+        }
+        if at < line_end || out.is_empty() {
+            out.push((mono(&code[at..line_end]), SpanTone::Plain));
+        }
+        lines.push(out);
+        line_start = line_end + 1;
+    }
+    lines
+}
+
+#[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use quark_syntax::{HighlightKind, HighlightSpan};
 
-    use super::imp::colored_lines;
+    use super::*;
 
     /// 1- to 4-byte chars and newlines, so span edges land next to
     /// multibyte chars and line breaks.
@@ -501,14 +220,13 @@ mod tests {
             let mut cuts: Vec<usize> = cuts.iter().map(|c| bounds[c.index(bounds.len())]).collect();
             cuts.sort_unstable();
             cuts.dedup();
-            let spans: Vec<HighlightSpan> = cuts
+            let spans: Vec<ToneSpan> = cuts
                 .as_chunks::<2>()
                 .0
                 .iter()
-                .map(|&[start, end]| HighlightSpan {
-                    offset: start as u32,
-                    length: (end - start) as u32,
-                    kind: HighlightKind::Keyword,
+                .map(|&[start, end]| ToneSpan {
+                    range: start as u32..end as u32,
+                    tone: SyntaxTone::Keyword,
                 })
                 .collect();
 
@@ -520,5 +238,26 @@ mod tests {
                 .collect();
             prop_assert_eq!(joined.join("\n"), code);
         }
+    }
+
+    // Catches a span off a char boundary panicking on the slice instead
+    // of leaving its bytes plain.
+    #[test]
+    fn spans_off_char_boundaries_stay_plain() {
+        let code = "\u{e9}a";
+        let spans = [ToneSpan {
+            range: 1..3,
+            tone: SyntaxTone::Keyword,
+        }];
+
+        let lines = colored_lines(code, &spans);
+
+        assert_eq!(
+            lines[0]
+                .iter()
+                .map(|(span, tone)| (span.text.as_str(), *tone))
+                .collect::<Vec<_>>(),
+            [(code, SpanTone::Plain)]
+        );
     }
 }
