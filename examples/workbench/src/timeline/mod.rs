@@ -96,9 +96,6 @@ impl ThreadView {
         doc.set_image_loader(assets::image_loader());
         let (w, h) = assets::PREVIEW_SIZE;
         doc.hint_image_size("preview.png", w, h);
-        if let Some(store) = assets::grammar_store() {
-            doc.set_code_highlighter(quark_syntax::DocumentHighlighter::new(store));
-        }
         let mut view = Self {
             doc,
             seq: thread.transcript.last_seq(),

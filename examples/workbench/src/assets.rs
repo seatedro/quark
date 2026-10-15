@@ -1,7 +1,5 @@
-//! Local images and grammar-pack discovery. Nothing here touches the
-//! network.
+//! Bundled images. Nothing here touches the network.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use quark_app::quark_ui::document::{ImageLoader, LoadedImage};
@@ -29,31 +27,4 @@ pub fn image_bytes(src: &str) -> Option<&'static [u8]> {
 /// missing (the document shows its alt text and a retry state).
 pub fn image_loader() -> ImageLoader {
     Arc::new(|src: &str| image_bytes(src).map(|b| LoadedImage::Encoded(b.to_vec())))
-}
-
-/// Where grammar packs come from: `$QUARK_SYNTAX_PACKS`, else
-/// `assets/syntax-packs` beside the executable, else the workspace's
-/// `target/syntax-packs` (what `cargo run -p syntax-pack -- build` writes).
-/// Each is a pack root as the store reads it, holding
-/// `<target triple>/<language>/`, and counts only when it has packs for
-/// this target. `None` when none does: code renders as plain text.
-pub fn grammar_pack_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("QUARK_SYNTAX_PACKS") {
-        return Some(PathBuf::from(root));
-    }
-    use quark_syntax::pack::TARGET;
-    let has_packs = |root: &Path| root.join(TARGET).is_dir();
-    let beside_exe = std::env::current_exe().ok().and_then(|exe| {
-        let root = exe.parent()?.join("assets/syntax-packs");
-        has_packs(&root).then_some(root)
-    });
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/syntax-packs");
-    beside_exe.or_else(|| has_packs(&workspace).then_some(workspace))
-}
-
-/// A grammar store over the local packs, with downloads off.
-pub fn grammar_store() -> Option<quark_syntax::GrammarStore> {
-    use quark_syntax::{GrammarStore, StoreConfig};
-    let root = grammar_pack_root()?;
-    Some(GrammarStore::new(StoreConfig::new().local_packs(root)))
 }

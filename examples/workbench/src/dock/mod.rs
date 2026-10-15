@@ -1,6 +1,6 @@
 //! The dock (stream E): panel placement across windows through
-//! `DockState` and `DockWindows`, and the Diff, Terminal, Files, and
-//! Snapshot preview panels. Panel content state is keyed by `PanelId`, so
+//! `DockState` and `DockWindows`, and the Terminal, Files, and Snapshot
+//! preview panels. Panel content state is keyed by `PanelId`, so
 //! moving a panel to another window keeps it.
 //!
 //! `app.rs` renders the dock for every host and forwards the window hooks
@@ -13,7 +13,6 @@
 //! it can join and "Move to new window". Closing a floating window docks
 //! its panels back where they came from.
 
-pub mod diff;
 pub mod files;
 pub mod preview;
 pub mod terminal;
@@ -36,7 +35,6 @@ use crate::contracts::{
     panel_title, panels,
 };
 use crate::design::tokens;
-use crate::model::Model;
 
 /// The most a dock tab takes; shorter titles get narrower tabs.
 pub const TAB_MAX_WIDTH: f32 = 160.0;
@@ -102,7 +100,6 @@ impl TabLabels {
 /// one state per [`PanelId`], wherever the dock shows it.
 #[derive(Default)]
 pub struct Panels {
-    pub diff: diff::State,
     pub terminal: terminal::State,
     pub files: files::State,
     pub preview: preview::State,
@@ -123,7 +120,6 @@ impl Panels {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Dock(DockEvent),
-    Diff(diff::Action),
     Terminal(terminal::Action),
     Files(files::Action),
     Preview(preview::Action),
@@ -146,8 +142,9 @@ pub fn new_state(options: &Options) -> State {
     for PanelSpec { id, region, .. } in PANELS {
         layout.open(region, id);
     }
-    // The first right panel is the active tab.
-    layout.open(DockRegion::Right, panels::DIFF);
+    // Files is the active tab, so a real terminal's shell starts only
+    // once the user shows it.
+    layout.open(DockRegion::Right, panels::FILES);
     layout.set_policy(
         DockRegion::Left,
         TabPolicy {
@@ -180,7 +177,7 @@ pub fn known_panel(id: PanelId) -> bool {
     panel_spec(id).is_some()
 }
 
-/// Content of a dock-owned panel (`DIFF`, `TERMINAL`, `FILES`, `PREVIEW`).
+/// Content of a dock-owned panel (`TERMINAL`, `FILES`, `PREVIEW`).
 pub fn panel_view(
     panels: &mut Panels,
     id: PanelId,
@@ -188,7 +185,6 @@ pub fn panel_view(
     vcx: &mut ViewContext,
 ) -> AnyElement {
     let content = match id {
-        panels::DIFF => diff::view(&mut panels.diff, scx, vcx),
         panels::TERMINAL => terminal::view(&mut panels.terminal, scx, vcx),
         panels::FILES => files::view(&mut panels.files, scx, vcx),
         panels::PREVIEW => preview::view(&mut panels.preview, scx, vcx),
@@ -211,14 +207,8 @@ pub fn panel_view(
 }
 
 /// Dock events need the window context (they open and close windows), so
-/// this update takes `cx` and the model instead of a `SurfaceCx`.
-pub fn update(
-    state: &mut State,
-    action: Action,
-    model: &Model,
-    fx: &mut Effects,
-    cx: &mut UiContext,
-) {
+/// this update takes `cx` instead of a `SurfaceCx`.
+pub fn update(state: &mut State, action: Action, cx: &mut UiContext) {
     let panels = &mut state.panels;
     match action {
         Action::Dock(event) => {
@@ -229,7 +219,6 @@ pub fn update(
             }
             state.windows.apply(&mut state.layout, event, cx);
         }
-        Action::Diff(a) => diff::update(&mut panels.diff, a, model, fx, cx),
         Action::Terminal(a) => terminal::update(&mut panels.terminal, a, cx),
         Action::Files(a) => files::update(&mut panels.files, a, cx),
         Action::Preview(a) => preview::update(&mut panels.preview, a),
@@ -267,12 +256,11 @@ fn show(state: &mut State, panel: PanelId, focus: FocusId, fx: &mut Effects) {
     fx.push(Effect::Focus(Some(focus)));
 }
 
-/// Commands the dock owns (`ShowDiff`, `ShowFiles`, `ShowPreview`,
+/// Commands the dock owns (`ShowFiles`, `ShowPreview`,
 /// `ToggleTerminal`). True when handled. Apply and Undo stay with the app,
 /// which owns the file store.
 pub fn command(state: &mut State, id: CommandId, scx: &SurfaceCx, fx: &mut Effects) -> bool {
     match id {
-        CommandId::ShowDiff => fx.push(Effect::RevealDiff(None)),
         CommandId::ShowFiles => {
             let path = state.panels.files.open_path().to_owned();
             fx.push(Effect::OpenFile(path));
@@ -303,9 +291,6 @@ pub fn edit_text(
     command: TextEditCommand,
     ecx: &EditCx,
 ) -> Option<TextEditOutcome> {
-    if target == diff::FIND_FIELD {
-        return state.panels.diff.edit_find(command, ecx.now_ms);
-    }
     files::edit_text(&mut state.panels.files, target, command, ecx.now_ms)
 }
 
@@ -313,14 +298,6 @@ pub fn edit_text(
 pub fn open_file(state: &mut State, path: &str) {
     state.panels.files.open(path);
     state.layout.open(DockRegion::Right, panels::FILES);
-}
-
-/// Show the Diff panel, at `path` when given.
-pub fn reveal_diff(state: &mut State, path: Option<&str>) {
-    state.layout.open(DockRegion::Right, panels::DIFF);
-    if let Some(path) = path {
-        state.panels.diff.reveal(path);
-    }
 }
 
 /// Open the move menu for `panel`'s tab: every group that takes it, and a

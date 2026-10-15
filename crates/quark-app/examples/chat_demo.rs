@@ -8,9 +8,8 @@
 //! Enter and Shift+Enter step through them, Escape closes it. Escape
 //! without find open quits.
 //!
-//! Code blocks are highlighted once the grammar packs are built with
-//! `cargo run -p syntax-pack -- build` (`QUARK_SYNTAX_PACKS` names another
-//! pack root). Each answer
+//! Code blocks render plain: Quark has no highlighting engine, and an app
+//! plugs one in through `CodeHighlighter`. Each answer
 //! shows an image block, decoded on the image worker from a generated
 //! gradient; it reserves a placeholder until its pixels arrive.
 //!
@@ -111,8 +110,7 @@ const WORDS: &[&str] = &[
     "cache",
 ];
 
-/// Code samples, one per built-in grammar, plus one in an unknown language
-/// that renders plain.
+/// Code samples in several fence languages, one of them unknown.
 const SAMPLES: &[(&str, &str)] = &[
     (
         "rust",
@@ -132,7 +130,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ),
     (
         "bash",
-        "# Build the grammar packs, then run the demo with highlighted code blocks.\ncargo run -p syntax-pack -- build\ncargo run --release -p quark-app --example chat_demo",
+        "# Run the demo.\ncargo run --release -p quark-app --example chat_demo",
     ),
     (
         "go",
@@ -375,18 +373,6 @@ struct Demo {
     find: Option<TextField>,
 }
 
-/// Grammars from the pack root `$QUARK_SYNTAX_PACKS`, or the one
-/// `cargo run -p syntax-pack -- build` writes (`target/syntax-packs`).
-fn grammar_store() -> quark_syntax::GrammarStore {
-    use quark_syntax::{GrammarStore, StoreConfig};
-    let root = std::env::var_os("QUARK_SYNTAX_PACKS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/syntax-packs")
-        });
-    GrammarStore::new(StoreConfig::new().local_packs(root))
-}
-
 impl Demo {
     fn new() -> Self {
         let history_len = std::env::var("QUARK_CHAT_HISTORY")
@@ -414,7 +400,6 @@ impl Demo {
             .collect();
         let mut chat = MarkdownDocument::new(DocumentStyle::for_font_size(FONT_SIZE));
         chat.set_decorator(ChatChrome);
-        chat.set_code_highlighter(quark_syntax::DocumentHighlighter::new(grammar_store()));
         chat.set_image_loader(Arc::new(gradient_image));
         chat.extend(history).unwrap_or_else(|e| eprintln!("{e:?}"));
         Self {

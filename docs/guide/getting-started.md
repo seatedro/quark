@@ -63,7 +63,6 @@ All in [crates/quark-app/examples](../../crates/quark-app/examples):
 | `composer_demo` | A chat composer: completions, atomic chips, attachments, prompt history |
 | `chat_demo` | A chat on the block document: 5,000 markdown messages, a streaming answer, selection, find |
 | `tree_table_demo` | A lazy file tree and a 100,000-row sortable table |
-| `diff_demo` | A diff viewer over two files, a patch file, or a built-in sample |
 | `panels_demo` | A docked workspace from `Dock` and `Split` |
 | `palette_demo` | Command palette, undo toasts, context menus, hover cards |
 | `platform_demo` | Menus, notifications, badge, second window, single instance, window state (needs `--features notifications`) |

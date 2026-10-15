@@ -251,10 +251,6 @@ impl Workbench {
                 self.show_dock();
                 dock::open_file(&mut self.dock, &path);
             }
-            Effect::RevealDiff(path) => {
-                self.show_dock();
-                dock::reveal_diff(&mut self.dock, path.as_deref());
-            }
             Effect::RevealPanel(panel) => {
                 self.show_dock();
                 dock::reveal_panel(&mut self.dock, panel);
@@ -313,9 +309,7 @@ impl Workbench {
     }
 
     fn apply_diff(&mut self) {
-        let result = quark_diff::parse_unified(fixtures::DIFF_PATCH)
-            .map_err(|e| e.to_string())
-            .and_then(|patch| self.model.files.apply(&patch));
+        let result = self.model.files.apply(fixtures::PROPOSED);
         let toast = match result {
             Ok(()) => Toast {
                 kind: ToastKind::Success,
@@ -324,7 +318,7 @@ impl Workbench {
             },
             Err(e) => Toast {
                 kind: ToastKind::Error,
-                text: format!("Could not apply the diff: {e}"),
+                text: format!("Could not apply the changes: no file {e}"),
                 undo: None,
             },
         };
@@ -382,9 +376,6 @@ impl Workbench {
                 }
                 self.timeline = timeline::new_state();
                 self.composer = composer::new_state();
-            }
-            CommandId::ShowDiff | CommandId::ShowFiles | CommandId::ShowPreview => {
-                self.fx.push(Effect::RevealDiff(None));
             }
             CommandId::ApplyDiff => self.fx.push(Effect::ApplyDiff),
             CommandId::UndoDiff => self.fx.push(Effect::UndoDiff),
@@ -597,7 +588,7 @@ impl UiApp for Workbench {
     fn update(&mut self, msg: Msg, cx: &mut UiContext) {
         self.runner_ms = cx.window.elapsed().as_millis() as u64;
         if let Msg::Dock(action) = msg {
-            dock::update(&mut self.dock, action, &self.model, &mut self.fx, cx);
+            dock::update(&mut self.dock, action, cx);
             self.apply_effects(cx);
             return;
         }

@@ -9,7 +9,6 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-quark-diff = { path = "../crates/quark-diff" }
 quark-terminal = { path = "../crates/quark-terminal" }
 quark-text = { path = "../crates/quark-text" }
 quark-ui = { path = "../crates/quark-ui" }
@@ -36,13 +35,6 @@ bench = false
 [[bin]]
 name = "markdown"
 path = "fuzz_targets/markdown.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "unified_diff"
-path = "fuzz_targets/unified_diff.rs"
 test = false
 doc = false
 bench = false

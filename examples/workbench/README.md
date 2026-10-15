@@ -34,25 +34,11 @@ cargo run -p quark-workbench --bin workbench --features devtools -- --scenario r
 Flags win over the environment. The environment forms exist because the
 e2e runner starts binaries without arguments.
 
-### Grammar packs
+### Code highlighting
 
-Code blocks, tool output, and the diff are highlighted from local grammar
-packs only; the demo never downloads them. It reads the first pack root
-that has packs for its target triple: `$QUARK_SYNTAX_PACKS`, else
-`assets/syntax-packs/` beside the executable, else the workspace's
-`target/syntax-packs`. A root holds `<triple>/<language>/`, as the pack
-tool writes it. Build the languages the fixtures use once:
-
-```bash
-cargo run -p syntax-pack -- build rust typescript tsx javascript json markdown markdown_inline html css bash
-```
-
-That fetches each pinned grammar source. Offline, pass `--sources DIR`
-with one checkout per language under `DIR/<language>/` (`tsx` is the
-`tree-sitter-typescript` checkout again). Without packs, code renders as
-plain text. Keyword, string, number, and comment tones follow the accent,
-success, warning, and muted colors; functions and types have their own
-(see `assets/themes/workbench.json`).
+Code blocks and tool output render plain. Quark ships no highlighting
+engine; an app plugs one in through `CodeHighlighter` (see
+[Highlighting code blocks](../../docs/guide/lists-and-documents.md#highlighting-code-blocks)).
 
 ## Layout
 
@@ -70,7 +56,7 @@ signatures.
 | `src/model.rs` | Projects, threads, transcripts with a change log, runs, the in-memory file store |
 | `src/scenario.rs` | Scripted run playback and the demo clock |
 | `src/fixtures.rs` | Fixture loading (compiled in) and the seeded stress generator |
-| `fixtures/` | `threads.json` (3 projects, 24 threads, 120 rows), `run.json`, `diff.patch`, `terminal.ansi`, `files/` |
+| `fixtures/` | `threads.json` (3 projects, 24 threads, 120 rows), `run.json`, `terminal.ansi`, `files/`, `proposed/` (the files "Apply proposed changes" writes) |
 | `assets/` | Bundled images: a snapshot of the fixture app and an attachment |
 
 Stress history loads in batches of 2,000 rows, newest first, one batch per
@@ -106,10 +92,7 @@ the binary may need the shell's `LD_LIBRARY_PATH` (for the dlopened
 xkbcommon and Vulkan loader) and, without a GPU, Mesa's lavapipe through
 `VK_DRIVER_FILES`; wrap it in a script in `QUARK_E2E_BIN_DIR` that sets
 both and `exec`s the real binary, so the runner's recorded pid stays the
-app's. The runner exports `QUARK_SYNTAX_PACKS=target/syntax-packs` when
-that directory exists, so screenshots show highlighted code once the
-[grammar packs](#grammar-packs) are built; a wrapper for a binary built
-in another worktree sets it to that worktree's packs.
+app's.
 
 ## Profiling
 
@@ -143,6 +126,6 @@ profile-tracy`. The `devtools` feature adds the frame HUD and inspector
   shell never gets Ctrl+K, Ctrl+J, Ctrl+B, Ctrl+F, Ctrl+L, Ctrl+N, or
   Ctrl+,. Tab goes to a real shell for completion; Shift+Tab leaves the
   panel. With `--terminal scripted`, Tab leaves too.
-- Applying the diff changes only the in-memory file store, with Undo.
+- "Apply proposed changes" edits only the in-memory file store, with Undo.
 - On macOS the window uses custom chrome with native traffic lights; on
   Linux and Windows it keeps system decorations above the in-app top bar.

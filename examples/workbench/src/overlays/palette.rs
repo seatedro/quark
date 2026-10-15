@@ -100,7 +100,6 @@ fn command_icon(id: CommandId) -> &'static str {
         CommandId::FocusComposer => lucide::PENCIL,
         CommandId::SendPrompt => lucide::ARROW_UP,
         CommandId::StopRun => lucide::X,
-        CommandId::ShowDiff => lucide::FILE_DIFF,
         CommandId::ShowFiles => lucide::FOLDER,
         CommandId::ShowPreview => lucide::EYE,
         CommandId::ApplyDiff => lucide::CHECK,

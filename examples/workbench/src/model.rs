@@ -235,9 +235,9 @@ pub struct Run {
 #[derive(Debug, Default)]
 pub struct FileStore {
     files: BTreeMap<String, String>,
-    /// Contents before the last applied diff, for Undo.
+    /// Contents before the last applied change, for Undo.
     undo: Option<Vec<(String, String)>>,
-    /// Paths a run or an applied diff changed, for badges.
+    /// Paths a run or an applied change changed, for badges.
     changed: Vec<String>,
 }
 
@@ -266,16 +266,15 @@ impl FileStore {
         self.undo.is_some()
     }
 
-    /// Apply every file of `patch` to the store. All or nothing: a file
-    /// that does not match leaves the store unchanged and names it.
-    pub fn apply(&mut self, patch: &quark_diff::DiffDocument) -> Result<(), String> {
-        let mut next = Vec::new();
-        for file in 0..patch.file_count() {
-            let path = patch.path(file).to_owned();
-            let old = self.files.get(&path).ok_or_else(|| path.clone())?;
-            let new = quark_diff::apply(patch, file, old).map_err(|e| format!("{path}: {e}"))?;
-            next.push((path, new));
+    /// Write the new contents `proposed` gives each file. All or nothing:
+    /// a file missing from the store leaves it unchanged and is named.
+    pub fn apply(&mut self, proposed: &[(&str, &str)]) -> Result<(), String> {
+        if let Some((path, _)) = proposed.iter().find(|(p, _)| !self.files.contains_key(*p)) {
+            return Err((*path).to_owned());
         }
+        let next = proposed
+            .iter()
+            .map(|(p, new)| ((*p).to_owned(), (*new).to_owned()));
         let mut undo = Vec::with_capacity(next.len());
         for (path, new) in next {
             let old = self.files.insert(path.clone(), new).unwrap_or_default();

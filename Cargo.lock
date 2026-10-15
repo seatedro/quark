@@ -3648,9 +3648,7 @@ dependencies = [
  "quark",
  "quark-app",
  "quark-components",
- "quark-diff",
  "quark-render",
- "quark-syntax",
  "quark-text",
  "quark-ui",
  "quark-webview",
@@ -3672,22 +3670,6 @@ dependencies = [
  "x11-dl",
  "x11rb",
  "zbus",
-]
-
-[[package]]
-name = "quark-codex"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "quark",
- "quark-app",
- "quark-components",
- "quark-diff",
- "quark-syntax",
- "quark-terminal",
- "quark-text",
- "quark-ui",
- "unicode-linebreak",
 ]
 
 [[package]]
@@ -3918,8 +3900,6 @@ dependencies = [
  "quark",
  "quark-app",
  "quark-components",
- "quark-diff",
- "quark-syntax",
  "quark-terminal",
  "quark-text",
  "quark-ui",

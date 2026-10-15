@@ -1,4 +1,4 @@
-//! Dock behavior: the Diff, Terminal, and Files panels against the
+//! Dock behavior: the Terminal and Files panels against the
 //! fixture file store, and panels moving between windows with their state.
 
 mod common;
@@ -55,8 +55,15 @@ fn move_to_new_window(ui: &mut UiTestHarness<Workbench>, name: &str) -> WindowHa
     floating[0]
 }
 
+/// Run the palette command whose title starts with `title`.
+fn palette(ui: &mut UiTestHarness<Workbench>, title: &str) {
+    ui.key("mod+k");
+    ui.type_text(title);
+    ui.key("enter");
+}
+
 // Catches Apply and Undo that do not reach the file store, or a source
-// view that does not follow it: the Files panel shows the patched
+// view that does not follow it: the Files panel shows the changed
 // App.tsx after Apply and the original after Undo.
 #[test]
 fn dock_apply_and_undo_change_the_fixture_source() {
@@ -65,15 +72,9 @@ fn dock_apply_and_undo_change_the_fixture_source() {
     ui.click_node(tab("Files"));
     let before = source(&ui);
 
-    ui.click_node(tab("Diff"));
-    ui.click_node(By::role_name(Role::Button, "Apply"));
-    ui.click_node(tab("Files"));
+    palette(&mut ui, "Apply proposed");
     let applied = source(&ui);
-    ui.click_node(tab("Diff"));
-    // The panel's Undo, not the one on the "Applied" toast.
-    let undo = surface_button(&ui, "Undo").center();
-    ui.click(undo);
-    ui.click_node(tab("Files"));
+    palette(&mut ui, "Undo applied");
     let undone = source(&ui);
 
     assert!(!before.contains(added), "{before}");
@@ -141,18 +142,18 @@ fn dock_transfer_preserves_panel_state() {
 }
 
 // Catches a floating window whose close loses or duplicates its panel:
-// closing the Diff's window puts exactly one Diff tab back in the main
+// closing the Files window puts exactly one Files tab back in the main
 // window and leaves no other window.
 #[test]
 fn dock_closing_floating_host_redocks_once() {
     let mut ui = harness(ScenarioKind::Review);
-    let window = move_to_new_window(&mut ui, "Diff");
-    let while_floating = tab_count(&ui, "Diff");
+    let window = move_to_new_window(&mut ui, "Files");
+    let while_floating = tab_count(&ui, "Files");
 
     assert!(ui.window(window).request_close());
 
     assert_eq!(ui.windows(), [ui.main_window()]);
-    assert_eq!((while_floating, tab_count(&ui, "Diff")), (0, 1));
+    assert_eq!((while_floating, tab_count(&ui, "Files")), (0, 1));
 }
 
 /// The color painted in the terminal's padding in `window`, just inside
@@ -250,7 +251,7 @@ fn close_shown(ui: &UiTestHarness<Workbench>, name: &str) -> bool {
 fn dock_inactive_tab_shows_close_only_on_hover() {
     let mut ui = harness(ScenarioKind::Review);
     ui.pointer_move((10.0, 10.0));
-    let resting = (close_shown(&ui, "Terminal"), close_shown(&ui, "Diff"));
+    let resting = (close_shown(&ui, "Terminal"), close_shown(&ui, "Files"));
     ui.pointer_move(ui.find(tab("Terminal")).center());
     let hovered = close_shown(&ui, "Terminal");
 

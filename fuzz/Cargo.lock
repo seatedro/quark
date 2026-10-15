@@ -1705,18 +1705,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "quark-diff"
-version = "0.1.0"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
 name = "quark-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "quark-diff",
  "quark-terminal",
  "quark-text",
  "quark-ui",

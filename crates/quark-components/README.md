@@ -9,5 +9,4 @@ Components emit the app's actions through values or mappings the caller
 supplies and never see the app's state or action types. Each module's docs
 describe its wiring and keyboard behavior. The examples in
 [quark-app/examples](../quark-app/examples) use them; `controls_demo`,
-`palette_demo`, `panels_demo`, `tree_table_demo`, and `diff_demo` are
-the main ones.
+`palette_demo`, `panels_demo`, and `tree_table_demo` are the main ones.
