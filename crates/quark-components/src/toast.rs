@@ -1,4 +1,4 @@
-use quark::view;
+use quark::{Px, view};
 use quark_render::Rect;
 use quark_ui::Action;
 use quark_ui::accessibility::Politeness;
@@ -447,10 +447,10 @@ impl RenderOnce for ToastVisuals {
         view! { scale,
             <div
                 class="absolute"
-                h={self.height}
-                w={self.width}
-                bottom={self.bottom}
-                left={self.left}
+                h={Px(self.height)}
+                w={Px(self.width)}
+                bottom={Px(self.bottom)}
+                left={Px(self.left)}
                 bg={tc.elevated_surface}
                 rounded={corner_radius}
                 border={tc.border}
@@ -476,14 +476,12 @@ impl RenderOnce for ToastVisuals {
                 >
                     <div
                         class="flex-row items-center justify-center shrink-0"
-                        // A class, which the view leaves unscaled like the
-                        // badge's size.
-                        class="rounded-[badge_radius]"
-                        w={chrome.badge}
-                        h={chrome.badge}
+                        rounded={Px(badge_radius)}
+                        w={Px(chrome.badge)}
+                        h={Px(chrome.badge)}
                         bg={badge_bg}
                     >
-                        <icon svg={icon_svg} size={chrome.badge_glyph} color={accent} />
+                        <icon svg={icon_svg} size={Px(chrome.badge_glyph)} color={accent} />
                     </div>
 
                     <div class="flex-1 flex-col" min-w={0.0}>
@@ -493,7 +491,7 @@ impl RenderOnce for ToastVisuals {
                             <div class="flex-row">
                                 <text
                                     class="font-medium truncate"
-                                    size={title_size}
+                                    size={Px(title_size)}
                                     color={tc.text_strong}
                                 >
                                     {line}
@@ -506,7 +504,7 @@ impl RenderOnce for ToastVisuals {
                                     <div class="flex-row">
                                         <text
                                             class="truncate"
-                                            size={description_size}
+                                            size={Px(description_size)}
                                             color={tc.text_muted}
                                         >
                                             {line}
@@ -518,12 +516,11 @@ impl RenderOnce for ToastVisuals {
                     </div>
 
                     for (label, action) in self.actions {
-                        // Classes, not `px`/`rounded` attributes: this view scales
-                        // spatial attributes, and the action buttons are unscaled.
                         <div
                             class="flex-row items-center shrink-0"
-                            h={ACTION_H}
-                            class="px-[Sp::SM] rounded-[Rad::MD]"
+                            h={Px(ACTION_H)}
+                            px={Px(Sp::SM)}
+                            rounded={Px(Rad::MD)}
                             border={tc.border}
                             hover_bg={tc.ghost_element_hover}
                             on:click={action}
@@ -538,8 +535,8 @@ impl RenderOnce for ToastVisuals {
 
                     <div
                         class="flex-row items-center justify-center shrink-0"
-                        w={chrome.close}
-                        h={chrome.close}
+                        w={Px(chrome.close)}
+                        h={Px(chrome.close)}
                         rounded={Rad::MD}
                         hover_bg={tc.ghost_element_hover}
                         on:click={self.dismiss.clone()}
@@ -549,7 +546,7 @@ impl RenderOnce for ToastVisuals {
                         accessibility_role={accesskit::Role::Button}
                         aria-label={quark_ui::i18n::tr("quark-dismiss")}
                     >
-                        <icon svg={lucide::X} size={chrome.close_glyph} color={tc.text_muted} />
+                        <icon svg={lucide::X} size={Px(chrome.close_glyph)} color={tc.text_muted} />
                     </div>
                 </div>
 
@@ -557,15 +554,15 @@ impl RenderOnce for ToastVisuals {
                 if show_bar {
                     <div
                         class="absolute"
-                        bottom={3.0}
-                        left={progress_inset}
-                        h={PROGRESS_H}
-                        w={progress_track_w}
+                        bottom={Px(3.0)}
+                        left={Px(progress_inset)}
+                        h={Px(PROGRESS_H)}
+                        w={Px(progress_track_w)}
                         rounded={PROGRESS_H / 2.0}
                         bg={track_bg}
                         overflow_hidden
                     >
-                        <div h_full w={progress_fill_w} bg={accent} />
+                        <div h_full w={Px(progress_fill_w)} bg={accent} />
                     </div>
                 }
             </div>

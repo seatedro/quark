@@ -25,12 +25,11 @@ pub fn kbd_icon(svg: &'static str, theme: &Theme) -> AnyElement {
 fn label_text(label: String, theme: &Theme) -> AnyElement {
     let tc = &theme.colors;
     let scale = theme.metrics.ui_scale();
-    let font_size = theme.components.kbd.font_size.map(|s| s * scale);
     view! { scale,
         <text
             class="text-xs font-mono text-center"
             color={tc.text_muted}
-            @when {font_size.is_some()} { size={font_size.unwrap()} }
+            size={?theme.components.kbd.font_size}
         >
             {&label}
         </text>
@@ -42,8 +41,10 @@ fn keycap(content: AnyElement, theme: &Theme) -> AnyElement {
     let scale = theme.metrics.ui_scale();
     let recipe = theme.components.kbd;
     let px = recipe.padding_x.unwrap_or(Sp::SM);
-    let py = recipe.padding_y.unwrap_or(Sp::XXS);
-    let height = recipe.height.map(|h| (h * scale).round());
+    let py = match recipe.height {
+        Some(_) => 0.0,
+        None => recipe.padding_y.unwrap_or(Sp::XXS),
+    };
 
     view! { scale,
         <div
@@ -52,7 +53,7 @@ fn keycap(content: AnyElement, theme: &Theme) -> AnyElement {
             py={py}
             border={tc.border_variant}
             rounded={recipe.radius.unwrap_or(Rad::MD)}
-            @when {height.is_some()} { h={height.unwrap()} pt={0.0} pb={0.0} }
+            h={?recipe.height}
         >
             {content}
         </div>

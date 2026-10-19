@@ -89,6 +89,7 @@ calls the bound `text` and fails to compile. Rename the binding
 | `min-w={0.0}` | `.min_w(0.0)`: kebab-case and snake_case are the same name |
 | `shadow={(4.0, 2.0, c)}` | `.shadow(4.0, 2.0, c)`: a tuple splats into arguments |
 | `gap={@sig}` | `.gap(cx.read(sig))`, with `cx` in scope |
+| `w={?opt}` | `.w(v)` when `opt` is `Some(v)`, nothing when `None` |
 | `bg={if hot { a } else { b }}` | `.bg(if hot { a } else { b })`; with no `else` the call is skipped |
 | `@when {cond} { attrs }` | The attributes apply only when `cond` holds |
 | `@for pat in iter { attrs }` | The attributes apply once per item, as in `@for key in KEYS { on_key={(key, act)} }` |
@@ -118,9 +119,12 @@ calls the bound `text` and fails to compile. Rename the binding
   `accessibility_role={Role::Group}` for one.
 - `on:hover` expands to `.on_hover(..)`, which no builder has. Hover is a
   style state: use `hover:` classes or `hover_bg={..}`.
-- In `view! { scale, ... }`, `gap`, `p`, `px`, `py`, `pt`, `pb`, `pl`, `pr`,
-  the margins `m`, `mx`, `my`, `mt`, `mb`, `ml` (or `margin_left`), `mr`,
-  and `rounded` on a `div` are multiplied by `scale` and rounded.
+- In `view! { scale, ... }`, every length is in unscaled points and is
+  multiplied by `scale`, from attributes and classes alike: a `div`'s
+  sizes, padding, margins, gaps, offsets, radius, and border width (rounded
+  to whole points), and the `size` of `text` and `icon`. Wrap a value
+  already in window points in `Px(..)`, as in `w={Px(window_width)}`, to
+  pass it through unscaled.
 
 ## Classes
 
@@ -211,10 +215,10 @@ The tables below are generated from the macro's own tables.
 | `scrollbar-none` | `.hide_scrollbar()` | `<div>` |
 | `scrollbar-auto-hide` | `.scrollbar_auto_hide()` | `<div>` |
 | `rounded-none` | `.rounded_none()` | `<div>` |
-| `rounded-sm` | `.rounded_sm()` | `<div>` |
-| `rounded-md` | `.rounded_md()` | `<div>` |
-| `rounded-lg` | `.rounded_lg()` | `<div>` |
-| `rounded-xl` | `.rounded_xl()` | `<div>` |
+| `rounded-sm` | `.rounded(6.0)` | `<div>` |
+| `rounded-md` | `.rounded(8.0)` | `<div>` |
+| `rounded-lg` | `.rounded(12.0)` | `<div>` |
+| `rounded-xl` | `.rounded(16.0)` | `<div>` |
 | `rounded-full` | `.rounded_full()` | `<div>` |
 | `cursor-default` | `.cursor(CursorHint::Default)` | `<div>` |
 | `cursor-pointer` | `.cursor(CursorHint::Pointer)` | `<div>` |

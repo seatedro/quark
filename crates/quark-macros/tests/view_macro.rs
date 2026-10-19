@@ -149,7 +149,7 @@ mod dsl {
     record! {
         flex_row(); flex_col(); flex_grow(); flex_shrink_0(); items_center(); hidden();
         bold(); mono(); text_sm(); medium();
-        gap(v: f32); px(v: f32); p(v: f32); w(v: f32); min_w(v: f32); opacity(v: f32);
+        gap(v: f32); px(v: f32); p(v: f32); w(v: f32); h(v: f32); min_w(v: f32); opacity(v: f32);
         flex_grow_val(v: f32); size(v: f32);
         bg(c: &str); color(c: &str); test_id(v: &str); id(v: String); key(v: String);
         shadow(blur: f32, y: f32, c: &str);
@@ -982,8 +982,40 @@ fn reactive_attribute_reads_through_cx() {
 }
 
 #[test]
-fn scale_multiplies_spatial_attributes_only() {
+fn scale_multiplies_every_length_except_px() {
     let scale = 2.0f32;
-    let el = view! { scale, <div gap={3.0} w={10.0} p={if true { 1.5 } else { 0.0 }} /> };
-    assert_eq!(el.calls, ["gap(6.0)", "w(10.0)", "p(3.0)"]);
+    let el = view! { scale,
+        <div
+            gap={3.0}
+            w={10.25}
+            h={quark::Px(7.5)}
+            p={if true { 1.5 } else { 0.0 }}
+            opacity={0.5}
+            class="px-1"
+        >
+            <text size={6.5}>"t"</text>
+            <icon svg="i" size={8.0} />
+        </div>
+    };
+    assert_eq!(
+        el.calls,
+        [
+            "gap(6.0)",
+            "w(21.0)",
+            "h(7.5)",
+            "p(3.0)",
+            "opacity(0.5)",
+            "px(8.0)"
+        ]
+    );
+    assert_eq!(el.children[0].calls, ["size(13.0)"]);
+    assert_eq!(el.children[1].value.as_deref(), Some("i@16"));
+}
+
+#[test]
+fn optional_attribute_is_set_only_when_some() {
+    let scale = 2.0f32;
+    let (some, none) = (Some(4.0f32), None::<f32>);
+    let el = view! { scale, <div w={?some} h={?none} /> };
+    assert_eq!(el.calls, ["w(8.0)"]);
 }

@@ -1,5 +1,39 @@
 //! Pure geometry primitives used by quark hit-testing and scene emission.
 
+/// A length already in window points: `view! { scale, .. }` passes it
+/// through unscaled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Px(pub f32);
+
+/// A length attribute of `view! { scale, .. }`: `f32` in unscaled points,
+/// or [`Px`].
+pub trait ViewLength {
+    /// In window points at `scale`.
+    fn scaled(self, scale: f32) -> f32;
+    /// In window points at `scale`, rounded to whole points.
+    fn snapped(self, scale: f32) -> f32;
+}
+
+impl ViewLength for f32 {
+    fn scaled(self, scale: f32) -> f32 {
+        self * scale
+    }
+
+    fn snapped(self, scale: f32) -> f32 {
+        (self * scale).round()
+    }
+}
+
+impl ViewLength for Px {
+    fn scaled(self, _scale: f32) -> f32 {
+        self.0
+    }
+
+    fn snapped(self, _scale: f32) -> f32 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,

@@ -197,6 +197,8 @@ pub enum AttrForm {
     Expr,
     /// `name={@expr}`
     Reactive,
+    /// `name={?expr}`
+    Optional,
     /// `name={if ..}`: the whole `if` is one expression fragment.
     If,
     /// `class="..."`

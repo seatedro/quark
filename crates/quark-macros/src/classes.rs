@@ -26,6 +26,72 @@ pub(crate) enum On {
     Icon,
 }
 
+/// How `view! { scale, .. }` scales a length.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Length {
+    Scaled,
+    /// Scaled and rounded to whole points.
+    Snapped,
+}
+
+/// Box builder methods that take a length.
+const BOX_LENGTHS: &[&str] = &[
+    "gap",
+    "gap_x",
+    "gap_y",
+    "p",
+    "px",
+    "py",
+    "pt",
+    "pb",
+    "pl",
+    "pr",
+    "m",
+    "mx",
+    "my",
+    "mt",
+    "mb",
+    "ml",
+    "margin_left",
+    "mr",
+    "w",
+    "h",
+    "size",
+    "min_w",
+    "min_h",
+    "max_w",
+    "max_h",
+    "basis",
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "inset",
+    "rounded",
+    "border_w",
+    "blur",
+    "focus_ring_offset",
+];
+
+/// Whether `method` on a builder of kind `on` takes a length.
+pub(crate) fn length_of(method: &str, on: On) -> Option<Length> {
+    match (on, method) {
+        (On::Box, m) if BOX_LENGTHS.contains(&m) => Some(Length::Snapped),
+        (On::Text, "size" | "line_height_points") | (On::Icon, "size") => Some(Length::Scaled),
+        (On::Text, "hanging_indent" | "wrap_width") => Some(Length::Snapped),
+        _ => None,
+    }
+}
+
+impl Length {
+    pub(crate) fn apply(self, value: TokenStream2, scale: &Ident) -> TokenStream2 {
+        match self {
+            Length::Scaled => quote!(::quark::ViewLength::scaled(#value, #scale)),
+            Length::Snapped => quote!(::quark::ViewLength::snapped(#value, #scale)),
+        }
+    }
+}
+
 impl On {
     fn tag(self) -> &'static str {
         match self {
@@ -111,10 +177,10 @@ pub(crate) const KEYWORDS: &[Keyword] = &[
     kw("scrollbar-auto-hide", "scrollbar_auto_hide", "", On::Box),
     // Corners
     kw("rounded-none", "rounded_none", "", On::Box),
-    kw("rounded-sm", "rounded_sm", "", On::Box),
-    kw("rounded-md", "rounded_md", "", On::Box),
-    kw("rounded-lg", "rounded_lg", "", On::Box),
-    kw("rounded-xl", "rounded_xl", "", On::Box),
+    kw("rounded-sm", "rounded", "6.0", On::Box),
+    kw("rounded-md", "rounded", "8.0", On::Box),
+    kw("rounded-lg", "rounded", "12.0", On::Box),
+    kw("rounded-xl", "rounded", "16.0", On::Box),
     kw("rounded-full", "rounded_full", "", On::Box),
     // Cursor
     kw(
@@ -349,11 +415,12 @@ pub(crate) fn lower(
     classes: &str,
     span: Span,
     on: Option<On>,
+    scale: Option<&Ident>,
     errors: &mut Vec<syn::Error>,
 ) -> Lowered {
     let mut out = Lowered::default();
     for class in split_classes(classes) {
-        if let Err(message) = lower_one(class, span, on, &mut out) {
+        if let Err(message) = lower_one(class, span, on, scale, &mut out) {
             errors.push(syn::Error::new(span, message));
         }
     }
@@ -414,7 +481,13 @@ fn split_variants(class: &str) -> (Vec<&str>, &str) {
     }
 }
 
-fn lower_one(class: &str, span: Span, on: Option<On>, out: &mut Lowered) -> Result<(), String> {
+fn lower_one(
+    class: &str,
+    span: Span,
+    on: Option<On>,
+    scale: Option<&Ident>,
+    out: &mut Lowered,
+) -> Result<(), String> {
     let (variants, base) = split_variants(class);
     let mut state = None;
     for variant in variants {
@@ -470,6 +543,7 @@ fn lower_one(class: &str, span: Span, on: Option<On>, out: &mut Lowered) -> Resu
                  icon color, opacity, and `rounded-[..]`; `{base}` is none of these"
             ));
         };
+        let args = scaled(args, hover_method, class_on, scale);
         let m = Ident::new(hover_method, span);
         let calls = match state {
             "hover" => &mut out.hover,
@@ -477,10 +551,18 @@ fn lower_one(class: &str, span: Span, on: Option<On>, out: &mut Lowered) -> Resu
         };
         calls.push(quote!(.#m(#args)));
     } else {
+        let args = scaled(args, method, class_on, scale);
         let m = Ident::new(method, span);
         out.calls.push(quote!(.#m(#args)));
     }
     Ok(())
+}
+
+fn scaled(args: TokenStream2, method: &str, on: On, scale: Option<&Ident>) -> TokenStream2 {
+    match (scale, length_of(method, on)) {
+        (Some(scale), Some(length)) => length.apply(args, scale),
+        _ => args,
+    }
 }
 
 /// `Err(None)`: not in the vocabulary. `Err(Some(msg))`: a known family
@@ -727,7 +809,7 @@ pub(crate) fn vocabulary_check() -> TokenStream2 {
     let mut hover = Vec::new();
     for k in KEYWORDS {
         let mut out = Lowered::default();
-        lower_one(k.class, span, Some(k.on), &mut out).expect("keywords lower");
+        lower_one(k.class, span, Some(k.on), None, &mut out).expect("keywords lower");
         by_on
             .iter_mut()
             .find(|(on, _)| *on == k.on)
@@ -738,7 +820,7 @@ pub(crate) fn vocabulary_check() -> TokenStream2 {
     for f in FAMILIES {
         let mut out = Lowered::default();
         let class = format!("{}-{}", f.prefix, sample_value(f.value));
-        lower_one(&class, span, Some(f.on), &mut out)
+        lower_one(&class, span, Some(f.on), None, &mut out)
             .unwrap_or_else(|e| panic!("sample class {class}: {e}"));
         by_on
             .iter_mut()
@@ -748,7 +830,8 @@ pub(crate) fn vocabulary_check() -> TokenStream2 {
             .extend(out.calls);
         if f.hover.is_some() {
             let mut out = Lowered::default();
-            lower_one(&format!("hover:{class}"), span, Some(f.on), &mut out).expect("hover lowers");
+            lower_one(&format!("hover:{class}"), span, Some(f.on), None, &mut out)
+                .expect("hover lowers");
             hover.extend(out.hover);
         }
     }
@@ -822,7 +905,7 @@ mod tests {
 
     fn lowered(class: &str, on: On) -> Result<String, String> {
         let mut errors = Vec::new();
-        let out = lower(class, Span::call_site(), Some(on), &mut errors);
+        let out = lower(class, Span::call_site(), Some(on), None, &mut errors);
         if let Some(e) = errors.first() {
             return Err(e.to_string());
         }

@@ -1,4 +1,4 @@
-use quark::view;
+use quark::{Px, view};
 
 use quark_ui::Action;
 use quark_ui::design::{Ico, Rad, Shadow, Sp, Sz};
@@ -96,8 +96,6 @@ impl RenderOnce for Modal {
         let panel_width = self
             .max_width
             .min(self.window_width - (Sz::MODAL_MARGIN * scale).round());
-        // Unscaled: the panel's view scales its padding, gap, and radius
-        // once. Scaling them here as well grew them by the square.
         let padding_x = self.padding.or(recipe.padding_x).unwrap_or(Sp::XXL);
         let padding_y = self.padding.or(recipe.padding_y).unwrap_or(Sp::XXL);
         // The border takes layout space, so take it out of the padding.
@@ -105,8 +103,6 @@ impl RenderOnce for Modal {
         let gap = self.gap.or(recipe.gap).unwrap_or(Sp::LG);
         let radius = recipe.radius.unwrap_or(Rad::XXXL);
         let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::MODAL, scale);
-        let title_size = recipe.title_font_size.map(|s| s * scale);
-        let subtitle_size = recipe.font_size.map(|s| s * scale);
         let max_h = self.window_height - (Sz::MODAL_MARGIN * scale).round() * 2.0;
         let accessibility_label = self.title.clone();
 
@@ -117,17 +113,13 @@ impl RenderOnce for Modal {
                     <text
                         class="text-lg font-semibold"
                         color={tc.text_strong}
-                        @when {title_size.is_some()} { size={title_size.unwrap()} }
+                        size={?recipe.title_font_size}
                     >
                         {&self.title}
                     </text>
                 </div>
                 if !self.subtitle.is_empty() {
-                    <text
-                        class="text-sm"
-                        color={tc.text_muted}
-                        @when {subtitle_size.is_some()} { size={subtitle_size.unwrap()} }
-                    >
+                    <text class="text-sm" color={tc.text_muted} size={?recipe.font_size}>
                         {&self.subtitle}
                     </text>
                 }
@@ -137,7 +129,7 @@ impl RenderOnce for Modal {
         let panel = view! { scale,
             <div
                 class="flex-col overflow-hidden"
-                w={panel_width}
+                w={Px(panel_width)}
                 px={padding_x}
                 py={padding_y}
                 gap={gap}
@@ -153,9 +145,7 @@ impl RenderOnce for Modal {
                 trap_focus={true}
                 accessibility_id={format!("modal:{accessibility_label}")}
                 aria-label={accessibility_label}
-                @when {self.height.is_some()} {
-                    h={(self.height.unwrap() * scale).round().min(max_h)}
-                }
+                h={?self.height.map(|h| Px((h * scale).round().min(max_h)))}
             >
                 {header}
                 {...self.body}
@@ -171,8 +161,8 @@ impl RenderOnce for Modal {
                 class="absolute flex-col items-center"
                 top={0.0}
                 left={0.0}
-                w={self.window_width}
-                h={self.window_height}
+                w={Px(self.window_width)}
+                h={Px(self.window_height)}
                 z_index={100}
                 bg={tc.overlay_scrim}
                 id="overlay.backdrop"

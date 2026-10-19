@@ -780,6 +780,11 @@ fn parse_attr_value(input: ParseStream, rec: &mut Recorder) -> Result<(AttrValue
             punct(rec, "@", &at.spans);
             let expr = rust(&content, rec, RustContext::Expr, |i| i.parse())?;
             (AttrValue::Reactive(expr), AttrForm::Reactive)
+        } else if content.peek(Token![?]) {
+            let q = content.parse::<Token![?]>()?;
+            punct(rec, "?", &q.spans);
+            let expr = rust(&content, rec, RustContext::Expr, |i| i.parse())?;
+            (AttrValue::Optional(expr), AttrForm::Optional)
         } else {
             let expr = rust(&content, rec, RustContext::Expr, |i| i.parse())?;
             (AttrValue::Expr(expr), AttrForm::Expr)

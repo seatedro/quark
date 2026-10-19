@@ -1,4 +1,4 @@
-use quark::{SemanticRole, view};
+use quark::{Px, SemanticRole, view};
 
 use quark_ui::Action;
 use quark_ui::design::{Ico, Rad, Sp};
@@ -75,7 +75,7 @@ pub fn picker_list<T: PickerItem>(
         <div
             class="w-full flex-col"
             gap={Sp::XS}
-            h={list_h}
+            h={Px(list_h)}
             id="picker-list"
             test-id="picker-list"
             semantic_role={SemanticRole::ScrollArea}
@@ -88,11 +88,11 @@ pub fn picker_list<T: PickerItem>(
             hide_scrollbar
         >
             if first > 0 {
-                <div class="w-full shrink-0" h={top_spacer} />
+                <div class="w-full shrink-0" h={Px(top_spacer)} />
             }
             for (i, entry) in rows {
                 if entry.is_section_header() {
-                    <div class="w-full shrink-0 flex-row items-center" h={row_h} px={Sp::MD}>
+                    <div class="w-full shrink-0 flex-row items-center" h={Px(row_h)} px={Sp::MD}>
                         <text class="text-xs truncate" color={tc.text_muted}>{entry.label()}</text>
                     </div>
                 } else {
@@ -108,7 +108,7 @@ pub fn picker_list<T: PickerItem>(
                 }
             }
             if bottom_spacer > 0.0 {
-                <div class="w-full shrink-0" h={bottom_spacer} />
+                <div class="w-full shrink-0" h={Px(bottom_spacer)} />
             }
         </div>
     }
@@ -139,7 +139,7 @@ fn picker_row<T: PickerItem>(
             key={format!("{i}:{}", entry.label())}
             test-id="picker-row"
             role="option"
-            h={row_h}
+            h={Px(row_h)}
             gap={Sp::SM}
             px={Sp::MD}
             rounded={Rad::MD}

@@ -126,6 +126,8 @@ pub enum AttrValue {
     Expr(Expr),
     /// `name={@sig}`: lowers to `cx.read(sig)`.
     Reactive(Expr),
+    /// `name={?opt}`: the call only when `opt` is `Some`.
+    Optional(Expr),
     /// `name={if c { a } else { b }}`; with no `else` the call is skipped.
     If(ExprIf),
 }
