@@ -257,5 +257,5 @@ pub use runner::{
     WindowOptions, WindowPlacement, run, scene_to_physical,
 };
 #[cfg(feature = "ui")]
-pub use ui::{UiAdapter, UiApp, UiContext, UiSender, ViewContext, run_ui};
+pub use ui::{HoveredTooltip, UiAdapter, UiApp, UiContext, UiSender, ViewContext, run_ui};
 pub use winit;
