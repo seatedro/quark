@@ -374,7 +374,7 @@ impl RenderOnce for Select {
                     px={sz.px}
                     py={sz.py}
                     rounded={sz.radius}
-                    @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
+                    @when {let Some(h) = sz.height} { h={h} py={0.0} }
                     bg={tc.element_background}
                     border={if open {
                         tc.focus_border
@@ -535,7 +535,7 @@ fn option_row(
             gap={sz.gap}
             px={sz.px}
             py={sz.py}
-            @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
+            @when {let Some(h) = sz.height} { h={h} py={0.0} }
             accessibility_id={format!("{id}-option-{index}")}
             test_id="select-option"
             accessibility_role={accesskit::Role::ListBoxOption}

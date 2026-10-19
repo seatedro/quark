@@ -546,7 +546,7 @@ fn match_row(
             class="flex-row items-center w-full"
             px={sz.px}
             py={sz.py}
-            @when {sz.height.is_some()} { h={sz.height.unwrap()} py={0.0} }
+            @when {let Some(h) = sz.height} { h={h} py={0.0} }
             accessibility_role={accesskit::Role::ListBoxOption}
             aria-label={label.to_owned()}
             aria-selected={highlighted || selected}

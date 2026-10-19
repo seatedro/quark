@@ -15,7 +15,7 @@ use syn::{Expr, ExprIf, Ident, LitStr};
 
 use super::ast::*;
 use super::text::{Segment, join, segments};
-use crate::classes::{self, On};
+use crate::classes::{self, Length, On};
 use crate::suggest::closest;
 
 pub(crate) struct Emit {
@@ -101,29 +101,6 @@ enum Target {
 const BUILTIN_TAGS: &[&str] = &["div", "text", "p", "icon", "spacer", "fragment"];
 const INLINE_TAGS: &[&str] = &[
     "b", "strong", "i", "em", "code", "u", "s", "del", "a", "span", "br",
-];
-
-/// Spatial builder methods that `view! { scale, .. }` multiplies by scale.
-const SPATIAL_ATTRS: &[&str] = &[
-    "gap",
-    "gap_x",
-    "gap_y",
-    "p",
-    "px",
-    "py",
-    "pt",
-    "pb",
-    "pl",
-    "pr",
-    "m",
-    "mx",
-    "my",
-    "mt",
-    "mb",
-    "ml",
-    "mr",
-    "margin_left",
-    "rounded",
 ];
 
 /// `role="..."` values: ARIA role names and the `SemanticRole` they set.
@@ -906,6 +883,7 @@ impl Emit {
                 other => rest.push(other),
             }
         }
+        let size = self.scaled(size, self.scale.as_ref().map(|_| Length::Scaled));
         let f = Ident::new("svg_icon", el.span);
         let mut chain = quote!(#f(#svg, #size));
         for attr in rest {
@@ -1056,20 +1034,42 @@ impl Emit {
                     __w
                 })
             }
-            Attr::Method { name, value } => {
-                if let Some(event) = &name.event {
-                    return self.event(chain, name, event, value);
-                }
-                if name.written == "role" {
-                    return self.role(chain, name, value);
-                }
-                if name.written.starts_with("aria-") {
-                    return self.aria(chain, name, value);
-                }
-                let method = method_ident(&name.segments, name.first.span());
-                self.call(chain, &method, value, target)
+            Attr::Method {
+                name,
+                value: AttrValue::Optional(opt),
+            } => {
+                let some = AttrValue::Expr(syn::parse_quote!(__quark_value));
+                let inner = self.method(quote!(__quark_chain), name, &some, target);
+                quote!({
+                    let __quark_chain = #chain;
+                    match #opt {
+                        ::core::option::Option::Some(__quark_value) => #inner,
+                        ::core::option::Option::None => __quark_chain,
+                    }
+                })
             }
+            Attr::Method { name, value } => self.method(chain, name, value, target),
         }
+    }
+
+    fn method(
+        &self,
+        chain: TokenStream2,
+        name: &AttrName,
+        value: &AttrValue,
+        target: Target,
+    ) -> TokenStream2 {
+        if let Some(event) = &name.event {
+            return self.event(chain, name, event, value);
+        }
+        if name.written == "role" {
+            return self.role(chain, name, value);
+        }
+        if name.written.starts_with("aria-") {
+            return self.aria(chain, name, value);
+        }
+        let method = method_ident(&name.segments, name.first.span());
+        self.call(chain, &method, value, target)
     }
 
     /// `.method(value)`, with flags, tuples, `{@sig}`, `{if ..}`, and
@@ -1081,11 +1081,8 @@ impl Emit {
         value: &AttrValue,
         target: Target,
     ) -> TokenStream2 {
-        let scale = self.scale_for(method, target);
-        let scaled = |v: TokenStream2| match &scale {
-            Some(s) => quote!(((#v) * #s).round()),
-            None => v,
-        };
+        let length = self.length(method, target);
+        let scaled = |v: TokenStream2| self.scaled(v, length);
         match value {
             AttrValue::Flag if target == Target::Props => {
                 quote_spanned!(method.span()=> #chain.#method(true))
@@ -1105,14 +1102,28 @@ impl Emit {
                 let v = scaled(quote!(cx.read(#e)));
                 quote!(#chain.#method(#v))
             }
-            AttrValue::If(if_expr) => self.if_attr(chain, method, if_expr, &scale),
+            AttrValue::If(if_expr) => self.if_attr(chain, method, if_expr, length),
+            AttrValue::Optional(_) => unreachable!("lowered by `attr`"),
         }
     }
 
-    fn scale_for(&self, method: &Ident, target: Target) -> Option<Ident> {
-        let scale = self.scale.as_ref()?;
-        (target == Target::Div && SPATIAL_ATTRS.contains(&method.to_string().as_str()))
-            .then(|| scale.clone())
+    /// How `method`'s value is scaled; `None` outside a scaled view.
+    fn length(&self, method: &Ident, target: Target) -> Option<Length> {
+        self.scale.as_ref()?;
+        let on = match target {
+            Target::Div => On::Box,
+            Target::Text | Target::Rich | Target::Span => On::Text,
+            Target::Icon => On::Icon,
+            Target::Builder | Target::Props => return None,
+        };
+        classes::length_of(&method.to_string(), on)
+    }
+
+    fn scaled(&self, value: TokenStream2, length: Option<Length>) -> TokenStream2 {
+        match (&self.scale, length) {
+            (Some(scale), Some(length)) => length.apply(value, scale),
+            _ => value,
+        }
     }
 
     fn if_attr(
@@ -1120,13 +1131,10 @@ impl Emit {
         chain: TokenStream2,
         method: &Ident,
         if_expr: &ExprIf,
-        scale: &Option<Ident>,
+        length: Option<Length>,
     ) -> TokenStream2 {
         let cond = &if_expr.cond;
-        let scaled = |v: TokenStream2| match scale {
-            Some(s) => quote!(((#v) * #s).round()),
-            None => v,
-        };
+        let scaled = |v: TokenStream2| self.scaled(v, length);
         let then_val = block_value(&if_expr.then_branch);
         match &if_expr.else_branch {
             Some((_, else_expr)) => {
@@ -1159,7 +1167,13 @@ impl Emit {
             }
         };
         let mut errors = Vec::new();
-        let lowered = classes::lower(&lit.value(), lit.span(), on, &mut errors);
+        let lowered = classes::lower(
+            &lit.value(),
+            lit.span(),
+            on,
+            self.scale.as_ref(),
+            &mut errors,
+        );
         self.errors.borrow_mut().extend(errors);
         let calls = lowered.calls;
         let mut chain = quote!(#chain #(#calls)*);
@@ -1197,7 +1211,7 @@ impl Emit {
             // `on:click={if let Some(m) = msg { m }}`: no `else` leaves
             // the handler unset.
             AttrValue::If(if_expr) if event.binding.is_none() => {
-                return self.if_attr(chain, &method, if_expr, &None);
+                return self.if_attr(chain, &method, if_expr, None);
             }
             _ => {
                 self.error(

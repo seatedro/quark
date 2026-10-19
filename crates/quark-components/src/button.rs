@@ -132,15 +132,11 @@ impl RenderOnce for Button {
                 theme.components.button_compact,
             ),
         };
-        // Overrides are unscaled, like the defaults: this view scales its
-        // padding, gap, and radius attributes, and sizes are scaled here.
         let m = self.metrics.unwrap_or_default().or(recipe);
-        let icon_size = m.icon_size.map_or(icon_size, |s| s * scale);
+        let icon_size = m.icon_size.unwrap_or(icon_size);
         let unscaled_px = m.padding_x.unwrap_or(unscaled_px);
         let unscaled_py = m.padding_y.unwrap_or(unscaled_py);
         let gap = m.gap.unwrap_or(Sp::SM);
-        let height = m.height.map(|h| (h * scale).round());
-        let font_size = m.font_size.map(|s| s * scale);
 
         let (bg, hover_bg, icon_color, text_color) = match self.variant {
             ButtonStyle::Filled => (tc.accent, tc.accent_strong, tc.on_accent, tc.on_accent),
@@ -202,9 +198,7 @@ impl RenderOnce for Button {
         // A fixed size is the caller's own square: the theme's recipe
         // height does not resize it, this button's own metrics do.
         let own_height = self.metrics.and_then(|m| m.height);
-        let fixed = self
-            .fixed_size
-            .map(|s| (own_height.unwrap_or(s) * scale).round());
+        let fixed = self.fixed_size.map(|s| own_height.unwrap_or(s));
         let icon = self.icon;
         let action = if disabled {
             quark_ui::element::NoopAction.into()
@@ -259,11 +253,11 @@ impl RenderOnce for Button {
                 @when {!disabled} { on:click={action} }
                 @when {let Some(target) = focus_id} { focus_ring={target} }
                 @when {let Some((rest, _)) = border} { border={rest} }
-                @when {fixed.is_some()} {
+                @when {let Some(fixed) = fixed} {
                     items_center
                     justify_center
-                    w={fixed.unwrap()}
-                    h={fixed.unwrap()}
+                    w={fixed}
+                    h={fixed}
                     rounded={m.radius.unwrap_or(Rad::SM)}
                 }
                 @when {fixed.is_none()} {
@@ -273,15 +267,13 @@ impl RenderOnce for Button {
                     py={unscaled_py - border_inset}
                     rounded={m.radius.unwrap_or(Rad::XL)}
                 }
-                @when {fixed.is_none() && height.is_some()} {
-                    h={height.unwrap()}
+                @when {let (None, Some(height)) = (fixed, m.height)} {
+                    h={height}
                     pt={0.0}
                     pb={0.0}
                 }
                 @when {!disabled} { hover={hover} }
-                @when {tooltip_text.is_some()} {
-                    tooltip={tooltip_text.clone().unwrap_or_default()}
-                }
+                tooltip={?tooltip_text.clone()}
             >
                 if icon.is_some() {
                     <icon svg={icon.unwrap()} size={icon_size} color={icon_color} />
@@ -292,7 +284,7 @@ impl RenderOnce for Button {
                         color={text_color}
                         @when {self.size == ButtonSize::Default} { class="text-sm" }
                         @when {self.size == ButtonSize::Compact} { class="text-xs" }
-                        @when {font_size.is_some()} { size={font_size.unwrap()} }
+                        size={?m.font_size}
                     >
                         {label}
                     </text>

@@ -101,7 +101,7 @@ impl RenderOnce for Checkbox {
                 aria-label={accessibility_label}
                 aria-checked={self.checked}
                 aria-disabled={self.disabled}
-                @when {click_action.is_some()} { on:click={click_action.unwrap()} }
+                on:click={?click_action}
             >
                 {check_box}
                 if let Some(label_text) = label_text {

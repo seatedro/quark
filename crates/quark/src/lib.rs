@@ -78,7 +78,7 @@ pub use animation::{AnimKey, AnimKind, AnimationTable, Curve, Motion, PropId, Sp
 pub use color::Color;
 pub use event::{UiEventBinding, UiEventKind, UiEventPhase, UiEventPropagation, UiEventResult};
 pub use focus::{FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, TabStop};
-pub use geometry::Rect;
+pub use geometry::{Px, Rect, ViewLength};
 pub use hit::{
     ClickEvent, CursorHint, EMPTY_CLIP, HitFlags, HitId, HitIdentity, HitSpace, HitTable, Mods,
     TooltipRegion, UNCLIPPED,

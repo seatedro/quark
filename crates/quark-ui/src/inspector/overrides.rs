@@ -26,8 +26,7 @@ impl StyleEdit {
 
     /// The edit as `view!` attributes to paste into the element's source:
     /// `p={12.0} bg={Color::rgba(235, 87, 87, 255)}`. Values are the points
-    /// on screen; in a `view! { scale, .. }`, divide padding, gap, and
-    /// radius by the zoom.
+    /// on screen; in a `view! { scale, .. }`, divide them by the zoom.
     pub fn patch(&self) -> String {
         let color = |c: Color| format!("Color::rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a);
         let attrs = [

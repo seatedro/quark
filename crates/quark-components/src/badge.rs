@@ -1,4 +1,4 @@
-use quark::{Props, view};
+use quark::{Props, Px, view};
 
 use quark_ui::design::{Alpha, Rad, Sp, Sz};
 use quark_ui::element::{
@@ -87,14 +87,14 @@ impl RenderOnce for Badge {
         view! { scale,
             <div
                 class="flex-row shrink-0 items-center"
-                gap={m.spacing_xs}
-                px={m.spacing_sm}
+                gap={Px(m.spacing_xs)}
+                px={Px(m.spacing_sm)}
                 py={Sp::XXS}
                 bg={bg}
                 rounded={Rad::PILL}
             >
                 if let Some(svg) = self.icon {
-                    <icon svg={svg} size={icon_size} color={fg} />
+                    <icon svg={svg} size={Px(icon_size)} color={fg} />
                 }
                 <text class="text-xs font-medium" color={fg}>{self.label}</text>
             </div>

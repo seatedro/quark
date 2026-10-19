@@ -129,7 +129,7 @@ impl RenderOnce for SegmentedControl {
                         aria-checked={item.selected}
                         class="cursor-pointer"
                         on:click={item.action}
-                        @when {height.is_some()} { h={height.unwrap()} pt={0.0} pb={0.0} }
+                        @when {let Some(h) = height} { h={h} pt={0.0} pb={0.0} }
                         @when {item.selected} { bg={tc.element_hover} }
                         // One `hover` for both: each `hover_*` helper
                         // replaces the last one's style.
@@ -142,7 +142,7 @@ impl RenderOnce for SegmentedControl {
                         <div w={pad_x} flex_shrink_val={PAD_SHRINK} />
                         <text
                             class="text-sm font-medium truncate"
-                            @when {font_size.is_some()} { size={font_size.unwrap()} }
+                            size={?font_size}
                             color={if item.selected {
                                 tc.text
                             } else {

@@ -47,14 +47,13 @@ pub fn skeleton(width: f32, height: f32, theme: &Theme) -> AnyElement {
 pub fn skeleton_lines(count: usize, theme: &Theme) -> AnyElement {
     let scale = theme.metrics.ui_scale();
     let recipe = theme.components.skeleton;
-    let line_h = recipe.height.map_or(LINE_H, |h| (h * scale).round());
+    let line_h = recipe.height.unwrap_or(LINE_H);
     let lines: Vec<AnyElement> = LINE_WIDTHS
         .iter()
         .cycle()
         .take(count)
         .map(|w| skeleton(*w, line_h, theme))
         .collect();
-    // Unscaled: the view scales padding and gap.
     view! { scale,
         <div
             class="flex-col w-full"

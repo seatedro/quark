@@ -1,4 +1,4 @@
-use quark::view;
+use quark::{Px, view};
 
 use quark_ui::Action;
 use quark_ui::design::Sp;
@@ -36,23 +36,25 @@ impl RenderOnce for Breadcrumb {
         let last = self.segments.len().saturating_sub(1);
 
         view! { scale,
-            <div class="flex-row items-center" gap={m.spacing_xs}>
+            <div class="flex-row items-center" gap={Px(m.spacing_xs)}>
                 for (i, segment) in self.segments.into_iter().enumerate() {
                     <>
                         if i > 0 {
                             <icon
                                 svg={lucide::CHEVRON_RIGHT}
-                                size={icon_size}
+                                size={Px(icon_size)}
                                 color={tc.text_muted}
                             />
                         }
                         <div
-                            px={m.spacing_xs}
+                            px={Px(m.spacing_xs)}
                             py={Sp::XXS}
-                            rounded={m.control_radius - Sp::XS * scale}
-                            @when {i != last && self.on_click_segment.is_some()} {
-                                on:click={(self.on_click_segment.as_ref().unwrap())(i)}
-                            }
+                            rounded={Px(m.control_radius - Sp::XS * scale)}
+                            on:click={?self
+                                .on_click_segment
+                                .as_ref()
+                                .filter(|_| i != last)
+                                .map(|f| f(i))}
                             @when {i != last && self.on_click_segment.is_some()} {
                                 id={format!("breadcrumb:{i}:{segment}")}
                                 key={segment.clone()}

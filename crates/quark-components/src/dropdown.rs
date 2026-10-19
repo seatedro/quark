@@ -113,8 +113,8 @@ impl RenderOnce for Dropdown {
                     accessibility_id={trigger_id}
                     aria-label={trigger_label.clone()}
                     aria-expanded={self.open}
-                    @when {self.width.is_some()} { w={self.width.unwrap()} }
-                    @when {self.on_toggle.is_some()} { on:click={self.on_toggle.unwrap()} }
+                    w={?self.width}
+                    on:click={?self.on_toggle}
                 >
                     <div class="flex-1">
                         <text class="text-sm" color={tc.text}>{self.label}</text>
@@ -156,11 +156,7 @@ impl RenderOnce for Dropdown {
                                     format!("dropdown-item:{:?}:{}", item.action, item.label)
                                 }
                                 aria-label={item.label.clone()}
-                                @when {item.description.is_some()} {
-                                    aria-description={
-                                        item.description.as_deref().unwrap_or_default()
-                                    }
-                                }
+                                aria-description={?item.description.as_deref()}
                                 aria-selected={item.selected}
                                 on:click={item.action}
                             >

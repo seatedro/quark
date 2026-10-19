@@ -1,4 +1,4 @@
-use quark::view;
+use quark::{Px, view};
 
 use quark_ui::design::Sp;
 use quark_ui::element::*;
@@ -42,7 +42,7 @@ impl RenderOnce for Toolbar {
         view! { scale,
             <div
                 class="w-full flex-row items-center"
-                h={cx.theme.metrics.ui_row_height}
+                h={Px(cx.theme.metrics.ui_row_height)}
                 px={Sp::MD}
                 border_b={tc.border_variant}
             >
