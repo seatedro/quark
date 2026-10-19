@@ -264,6 +264,21 @@ impl<M: Send> UiSender<M> {
     }
 }
 
+/// The tooltip region (`Div::tooltip`) under the pointer, from the
+/// window's last painted frame. A press hides it until the pointer leaves
+/// the region.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoveredTooltip {
+    pub text: Arc<str>,
+    /// The element's bounds, in window points.
+    pub bounds: Rect,
+    /// Where the pointer entered the region.
+    pub pointer: (f32, f32),
+    /// When the pointer entered the region, on the
+    /// [`FrameContext::elapsed`] clock.
+    pub since: Duration,
+}
+
 /// What [`UiApp::view`] can see while building a frame of one window.
 pub struct ViewContext<'a, 'f> {
     pub frame: &'a mut FrameContext<'f>,
@@ -274,6 +289,7 @@ pub struct ViewContext<'a, 'f> {
     geometry: &'a LayoutSnapshot,
     handles: &'a mut ElementHandles,
     tooltips: &'a [TooltipRegion],
+    hovered_tooltip: Option<&'a HoveredTooltip>,
 }
 
 impl ViewContext<'_, '_> {
@@ -311,6 +327,13 @@ impl ViewContext<'_, '_> {
             .rev()
             .find(|t| t.bounds.contains(x, y))
             .map(|t| (&*t.text, t.bounds))
+    }
+
+    /// The tooltip under the pointer. The window redraws when it changes,
+    /// so an app shows it after a delay by requesting a frame at
+    /// `since + delay`.
+    pub fn hovered_tooltip(&self) -> Option<&HoveredTooltip> {
+        self.hovered_tooltip
     }
 
     /// The window's animation table, ticked to this frame's clock. Rows
@@ -726,6 +749,8 @@ enum Redraw {
     TextEdit,
     /// Input moved a scroll handle.
     Scroll,
+    /// The tooltip under the pointer changed.
+    Tooltip,
     Theme,
     /// The accessibility tree has something new to publish.
     Announce,
@@ -1061,6 +1086,16 @@ impl<U: UiApp> UiAdapter<U> {
         }
     }
 
+    fn update_tooltip(&mut self, cx: &mut EventContext) {
+        let win = &mut *self.win;
+        if win
+            .tooltip
+            .update(&win.spare_tooltip_regions, win.pointer, cx.elapsed())
+        {
+            redraw(Redraw::Tooltip, self.win_handle, cx);
+        }
+    }
+
     fn hovered_at(&self, pointer: Option<(f32, f32)>) -> Vec<HitId> {
         pointer.map_or_else(Vec::new, |(x, y)| {
             self.win.router.frame().hits.stack_at(x, y)
@@ -1248,12 +1283,14 @@ impl<U: UiApp> UiAdapter<U> {
                 let delivery = self.win.router.pointer_move(x, y);
                 self.deliver(delivery, cx);
                 self.update_hover(cx);
+                self.update_tooltip(cx);
             }
             // Capture survives the pointer leaving: a drag outside the
             // window keeps its moves and its release on every platform.
             UiInput::PointerLeave => {
                 self.win.pointer = None;
                 self.update_hover(cx);
+                self.update_tooltip(cx);
             }
             // macOS reads Ctrl-click as a secondary click where a context
             // menu takes it; elsewhere it stays a modified primary press.
@@ -1261,7 +1298,12 @@ impl<U: UiApp> UiAdapter<U> {
                 if cfg!(target_os = "macos")
                     && cx.modifiers().control_key()
                     && self.context_menu_click(cx) => {}
-            UiInput::PointerDown(PointerButton::Primary) => self.pointer_pressed(cx),
+            UiInput::PointerDown(PointerButton::Primary) => {
+                if self.win.tooltip.press() {
+                    redraw(Redraw::Tooltip, self.win_handle, cx);
+                }
+                self.pointer_pressed(cx);
+            }
             UiInput::PointerUp(PointerButton::Primary) => {
                 self.win.title_press.release();
                 let delivery = self.win.router.pointer_up();
@@ -1728,6 +1770,7 @@ impl<U: UiApp> App for UiAdapter<U> {
             handles: &mut win.element_handles,
             // Still the last frame's: this frame's paint takes them.
             tooltips: &win.spare_tooltip_regions,
+            hovered_tooltip: win.tooltip.current.as_ref(),
         });
         #[cfg(feature = "devtools")]
         let build_us = view_started.elapsed().as_micros() as u64;
@@ -1778,6 +1821,14 @@ impl<U: UiApp> App for UiAdapter<U> {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
         let (scene, ime) = self.finish_frame(painted);
+        // The frame may have moved a region under a still pointer.
+        let win = &mut *self.win;
+        if win
+            .tooltip
+            .update(&win.spare_tooltip_regions, win.pointer, cx.elapsed())
+        {
+            cx.request_frame();
+        }
         self.forward_material_regions(cx);
         if ime.reset {
             cx.reset_ime();
@@ -3249,5 +3300,76 @@ mod tests {
         ui.key("tab");
         ui.frame();
         assert_eq!((ui.focus(), rings(&ui)), (Some(RIGHT), 1));
+    }
+
+    /// Two 50-point rows with tooltips "a" and "b", below `scrolled` points
+    /// of space without one.
+    struct TooltipApp {
+        scrolled: f32,
+        seen: Option<HoveredTooltip>,
+    }
+
+    impl UiApp for TooltipApp {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+            self.seen = cx.hovered_tooltip().cloned();
+            div()
+                .flex_col()
+                .child(div().w(100.0).h(self.scrolled))
+                .child(div().w(100.0).h(50.0).tooltip("a"))
+                .child(div().w(100.0).h(50.0).tooltip("b"))
+                .into_any()
+        }
+
+        fn update(&mut self, _action: Msg, _cx: &mut UiContext) {}
+    }
+
+    #[test]
+    fn views_see_the_hovered_tooltip_and_redraw_only_when_it_changes() {
+        let app = TooltipApp {
+            scrolled: 0.0,
+            seen: None,
+        };
+        let mut ui = UiTestHarness::new(app, (400.0, 300.0), 1.0);
+        ui.frame();
+        let seen =
+            |ui: &UiTestHarness<TooltipApp>| ui.app().seen.as_ref().map(|t| t.text.to_string());
+
+        ui.advance(100);
+        ui.pointer_move((10.0, 10.0));
+        let hovered = ui.app().seen.clone().expect("tooltip a");
+        assert_eq!((&*hovered.text, hovered.pointer), ("a", (10.0, 10.0)));
+        assert_eq!(hovered.since, ui.now());
+
+        let frames = ui.frame_count();
+        ui.pointer_move((20.0, 20.0));
+        assert_eq!(
+            ui.frame_count(),
+            frames,
+            "moving within a region redraws nothing"
+        );
+
+        ui.pointer_move((10.0, 60.0));
+        assert_eq!(seen(&ui).as_deref(), Some("b"));
+
+        ui.pointer_down((10.0, 60.0));
+        ui.pointer_up((10.0, 60.0));
+        ui.pointer_move((12.0, 62.0));
+        assert_eq!(seen(&ui), None, "a press hides it until the pointer leaves");
+
+        ui.pointer_move((10.0, 10.0));
+        assert_eq!(seen(&ui).as_deref(), Some("a"));
+
+        ui.pointer_leave();
+        assert_eq!(seen(&ui), None);
+
+        // Scrolling moves "a" out from under a still pointer.
+        ui.pointer_move((10.0, 10.0));
+        ui.app_mut().scrolled = 50.0;
+        ui.frame();
+        ui.advance(16);
+        assert_eq!(seen(&ui), None);
     }
 }

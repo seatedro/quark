@@ -3,6 +3,7 @@
 //! The app, its messages, signals, theme, and key bindings are the
 //! adapter's and shared by every window.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use quark::Rect;
@@ -17,6 +18,7 @@ use quark_ui::element::{
 };
 use quark_ui::text_input::TextPointer;
 
+use super::HoveredTooltip;
 use crate::WindowHandle;
 
 /// The platform IME's composition, as IME events and focus left it.
@@ -86,14 +88,75 @@ pub(crate) struct WindowUiState {
     pub(super) spare_input: InputFrame,
     pub(super) spare_text_areas: Vec<TextInputHitArea>,
     pub(super) spare_ime_targets: Vec<ImeTarget>,
-    /// Last frame's scrollbar track buffer, reused by the next frame.
+    /// Last frame's tooltip regions, reused by the next frame.
     pub(super) spare_tooltip_regions: Vec<TooltipRegion>,
+    pub(super) tooltip: TooltipHover,
     /// The last press on window drag chrome, to tell a double-click.
     pub(super) title_press: TitlePress,
     /// The material regions last handed to the window.
     pub(super) material_regions: Vec<crate::platform::material::MaterialRect>,
     #[cfg(feature = "devtools")]
     pub(super) devtools: quark_ui::inspector::Devtools,
+}
+
+/// The tooltip region under the pointer.
+#[derive(Debug, Default)]
+pub(super) struct TooltipHover {
+    pub(super) current: Option<HoveredTooltip>,
+    /// The region a press hid its tooltip in: hidden until the pointer
+    /// leaves it.
+    pressed: Option<(Arc<str>, Rect)>,
+}
+
+impl TooltipHover {
+    /// Follow `pointer` over `regions`, in paint order. True when the
+    /// hovered tooltip changed.
+    pub(super) fn update(
+        &mut self,
+        regions: &[TooltipRegion],
+        pointer: Option<(f32, f32)>,
+        now: Duration,
+    ) -> bool {
+        let Some((x, y)) = pointer else {
+            self.pressed = None;
+            return self.current.take().is_some();
+        };
+        // A child's region comes after its parent's.
+        let region = regions.iter().rev().find(|t| t.bounds.contains(x, y));
+        let is = |text: &Arc<str>, bounds: Rect| {
+            region.is_some_and(|r| r.text == *text && r.bounds == bounds)
+        };
+        if let Some((text, bounds)) = &self.pressed {
+            if is(text, *bounds) {
+                return false;
+            }
+            self.pressed = None;
+        }
+        if let Some(current) = &self.current
+            && is(&current.text, current.bounds)
+        {
+            return false;
+        }
+        let next = region.map(|r| HoveredTooltip {
+            text: r.text.clone(),
+            bounds: r.bounds,
+            pointer: (x, y),
+            since: now,
+        });
+        let changed = next.is_some() || self.current.is_some();
+        self.current = next;
+        changed
+    }
+
+    /// Hide the tooltip until the pointer leaves its region. True when one
+    /// was showing.
+    pub(super) fn press(&mut self) -> bool {
+        let Some(current) = self.current.take() else {
+            return false;
+        };
+        self.pressed = Some((current.text, current.bounds));
+        true
+    }
 }
 
 /// Presses on app-drawn title chrome, told apart into drags and the
@@ -192,6 +255,7 @@ impl WindowUiState {
             spare_text_areas: Vec::new(),
             spare_ime_targets: Vec::new(),
             spare_tooltip_regions: Vec::new(),
+            tooltip: TooltipHover::default(),
             title_press: TitlePress::default(),
             material_regions: Vec::new(),
             #[cfg(feature = "devtools")]
