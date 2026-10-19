@@ -123,6 +123,7 @@ tokens! {
         empty_state_background,
         empty_state_border,
         scrollbar_thumb,
+        slider_track,
         status_info,
         status_warning,
         status_error,
@@ -171,12 +172,36 @@ tokens! {
         mono_font_size,
         ui_row_height,
         code_row_height,
+        zoom,
     }
 }
 
 impl ThemeMetrics {
+    /// Desktop density: 13-point text and 30-point rows.
+    pub fn compact() -> Self {
+        Self {
+            title_bar_height: 36.0,
+            status_bar_height: 24.0,
+            sidebar_width: 240.0,
+            panel_radius: 8.0,
+            control_radius: 6.0,
+            modal_radius: 12.0,
+            spacing_xs: 3.0,
+            spacing_sm: 4.0,
+            spacing_md: 8.0,
+            spacing_lg: 12.0,
+            ui_font_size: 13.0,
+            ui_small_font_size: 12.0,
+            heading_font_size: 16.0,
+            mono_font_size: 13.0,
+            ui_row_height: 30.0,
+            code_row_height: 20.0,
+            zoom: 1.0,
+        }
+    }
+
     pub fn ui_scale(&self) -> f32 {
-        (self.ui_font_size / 16.0).max(0.7)
+        self.zoom.max(0.7)
     }
 
     pub fn scaled(self, scale: f32) -> Self {
@@ -198,6 +223,7 @@ impl ThemeMetrics {
             mono_font_size: self.mono_font_size * scale,
             ui_row_height: self.ui_row_height * scale,
             code_row_height: self.code_row_height * scale,
+            zoom: self.zoom * scale,
         }
     }
 }
@@ -205,9 +231,7 @@ impl ThemeMetrics {
 /// Optional sizes for one kind of control, in logical points at 100% zoom.
 ///
 /// Components multiply a set value by [`ThemeMetrics::ui_scale`] once, as
-/// they do their own defaults, so a recipe can ask for 13-point control
-/// text while `ui_font_size` stays at the 16-point zoom anchor. `None`
-/// keeps the component's default.
+/// they do their own defaults. `None` keeps the component's default.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ControlMetrics {
     pub height: Option<f32>,
@@ -287,6 +311,77 @@ pub struct ComponentMetrics {
     /// Form fields: `font_size` for the label, `gap` between label, control,
     /// and message.
     pub field: ControlMetrics,
+    /// Segmented controls: `gap` is the track's inset around each segment.
+    pub segmented: ControlMetrics,
+    /// Keycaps, including search field hints.
+    pub kbd: ControlMetrics,
+}
+
+impl ComponentMetrics {
+    /// Recipes to pair with [`ThemeMetrics::compact`].
+    pub fn compact() -> Self {
+        let control = ControlMetrics {
+            height: Some(26.0),
+            radius: Some(6.0),
+            padding_x: Some(10.0),
+            padding_y: Some(4.0),
+            gap: Some(6.0),
+            font_size: Some(13.0),
+            icon_size: Some(14.0),
+        };
+        let surface = SurfaceMetrics {
+            radius: Some(8.0),
+            padding_x: Some(8.0),
+            padding_y: Some(4.0),
+            gap: Some(4.0),
+            font_size: Some(13.0),
+            ..SurfaceMetrics::default()
+        };
+        Self {
+            button: control,
+            button_compact: ControlMetrics {
+                height: Some(22.0),
+                padding_x: Some(6.0),
+                padding_y: Some(2.0),
+                gap: Some(4.0),
+                font_size: Some(12.0),
+                icon_size: Some(12.0),
+                ..control
+            },
+            select: control,
+            option: ControlMetrics {
+                padding_x: Some(8.0),
+                ..control
+            },
+            popover: surface,
+            tooltip: SurfaceMetrics {
+                radius: Some(6.0),
+                font_size: Some(12.0),
+                ..surface
+            },
+            toast: SurfaceMetrics {
+                padding_x: Some(12.0),
+                padding_y: Some(8.0),
+                gap: Some(8.0),
+                title_font_size: Some(13.0),
+                ..surface
+            },
+            modal: SurfaceMetrics {
+                radius: Some(12.0),
+                padding_x: Some(16.0),
+                padding_y: Some(16.0),
+                gap: Some(12.0),
+                title_font_size: Some(15.0),
+                ..surface
+            },
+            field: ControlMetrics {
+                gap: Some(4.0),
+                font_size: Some(12.0),
+                ..ControlMetrics::default()
+            },
+            ..Self::default()
+        }
+    }
 }
 
 /// `value`, in unscaled points, at `scale` and rounded to whole points; or
@@ -331,6 +426,13 @@ impl Theme {
 
     pub fn with_ui_scale(mut self, scale: f32) -> Self {
         self.metrics = self.metrics.scaled(scale);
+        self
+    }
+
+    /// Switch to the compact metrics, keeping zoom and colors.
+    pub fn compact(mut self) -> Self {
+        self.metrics = ThemeMetrics::compact().scaled(self.metrics.zoom);
+        self.components = ComponentMetrics::compact();
         self
     }
 
@@ -436,6 +538,7 @@ fn default_metrics() -> ThemeMetrics {
         mono_font_size: 15.0,
         ui_row_height: 40.0,
         code_row_height: 24.0,
+        zoom: 1.0,
     }
 }
 
@@ -481,6 +584,8 @@ fn dark_colors(
         element_hover: n[ElementActive],
         element_active: n[BorderSubtle],
         element_selected: b[BorderSubtle],
+        // A step above the brightest surface, `modal_surface`.
+        slider_track: n[BorderSubtle],
 
         // Ghost elements — accent-tinted so they feel integrated with the theme
         ghost_element_hover: b[ElementHover],
@@ -587,6 +692,8 @@ fn light_colors(
         element_hover: n[ElementActive],
         element_active: n[BorderSubtle],
         element_selected: b[ElementActive],
+        // A step below the darkest fill, `element_background`.
+        slider_track: n[ElementActive],
 
         // Ghost elements — accent-tinted so they feel integrated with the theme
         ghost_element_hover: b[Element],
@@ -735,6 +842,7 @@ fn high_contrast_dark_colors() -> ThemeColors {
         icon: rgb(0xe6e6e6),
         element_background: rgb(0x0f0f0f),
         element_hover: rgb(0x262626),
+        slider_track: rgb(0x7a7a7a),
         element_active: rgb(0x333333),
         element_selected: rgb(0x14375e),
         ghost_element_hover: rgb(0x102b4d),
@@ -806,6 +914,7 @@ fn high_contrast_light_colors() -> ThemeColors {
         icon: rgb(0x1f1f1f),
         element_background: rgb(0xf0f0f0),
         element_hover: rgb(0xe8e8e8),
+        slider_track: rgb(0x7a7a7a),
         element_active: rgb(0xdedede),
         element_selected: rgb(0xbfd9ff),
         ghost_element_hover: rgb(0xe6f0ff),
@@ -1060,6 +1169,7 @@ mod tests {
             "border_soft",
             "empty_state_border",
             "scrollbar_thumb",
+            "slider_track",
             "accent",
         ];
         const CONTROL_BACKGROUNDS: &[&str] = &[
@@ -1160,6 +1270,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn standard_slider_tracks_stand_apart_from_surfaces() {
+        for theme in [Theme::default_dark(), Theme::default_light()] {
+            let c = &theme.colors;
+            for bg in [
+                "background",
+                "surface",
+                "panel",
+                "element_background",
+                "elevated_surface",
+                "modal_surface",
+                "editor_surface",
+                "sidebar_background",
+            ] {
+                let ratio = contrast_ratio(c.slider_track, c.get(bg).expect(bg));
+                assert!(
+                    ratio >= 1.1,
+                    "{:?}: slider_track on {bg}: {ratio:.2}",
+                    theme.mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_is_independent_of_body_text_size() {
+        let mut theme = Theme::default_light();
+        theme.metrics.ui_font_size = 13.0;
+        assert_eq!(theme.metrics.ui_scale(), 1.0);
+
+        let zoomed = Theme::default_light().with_ui_scale(1.5);
+        assert_eq!(zoomed.metrics.ui_scale(), 1.5);
+        assert_eq!(zoomed.metrics.ui_font_size, 24.0);
+
+        let compact = Theme::default_light().with_ui_scale(1.25).compact();
+        assert_eq!(compact.metrics.ui_scale(), 1.25);
+        assert_eq!(compact.metrics.ui_font_size, 13.0 * 1.25);
+        assert_eq!(compact.metrics.ui_row_height, 30.0 * 1.25);
     }
 
     // Catches a standard theme's placeholder dropping below WCAG AA over

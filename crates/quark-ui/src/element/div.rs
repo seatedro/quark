@@ -55,6 +55,8 @@ pub struct Div {
     interaction_group: Option<GroupId>,
     show_when: Option<GroupCondition>,
     focus_target: Option<FocusId>,
+    /// False after [`Self::focus_target`]: focusable, but no ring.
+    paints_focus_ring: bool,
     focus_ring_offset: f32,
     tooltip: Option<std::sync::Arc<str>>,
     hit_identity: Option<HitIdentity>,
@@ -118,6 +120,7 @@ pub fn div() -> Div {
         interaction_group: None,
         show_when: None,
         focus_target: None,
+        paints_focus_ring: true,
         focus_ring_offset: 0.0,
         tooltip: None,
         hit_identity: None,
@@ -375,7 +378,9 @@ impl Div {
         self
     }
 
-    /// Convenience: set only the hover background.
+    /// Convenience: set only the hover background. To show child actions
+    /// only while a row is hovered or focused, use
+    /// [`Self::interaction_group`] and [`Self::show_when`].
     pub fn hover_bg(self, color: Color) -> Self {
         self.hover(|s| s.bg(color))
     }
@@ -558,6 +563,14 @@ impl Div {
 
     pub fn focus_ring(mut self, target: FocusId) -> Self {
         self.focus_target = Some(target);
+        self.paints_focus_ring = true;
+        self
+    }
+
+    /// [`Self::focus_ring`] without the ring.
+    pub fn focus_target(mut self, target: FocusId) -> Self {
+        self.focus_target = Some(target);
+        self.paints_focus_ring = false;
         self
     }
 
@@ -1242,7 +1255,7 @@ impl Element for Div {
 
         // Only focus that shows rings: a clicked or dragged control keeps
         // focus without one, as `:focus-visible` in browsers.
-        if focus_shown {
+        if focus_shown && self.paints_focus_ring {
             paint_focus_ring(scene, cx, bounds, radii, self.focus_ring_offset);
         }
 
@@ -1305,6 +1318,10 @@ impl Element for Div {
             style_state.insert(StyleState::EXPANDED);
         }
 
+        let accessibility_hidden = self.accessibility_extra.hidden();
+        if accessibility_hidden {
+            cx.push_accessibility_hidden();
+        }
         // The accessibility node copies what it shares with the semantic
         // node; the semantic node then takes the div's strings, since paint
         // runs once per frame.
@@ -1473,6 +1490,9 @@ impl Element for Div {
         }
 
         prepaint_state.scrollbars.paint(scene, cx);
+        if accessibility_hidden {
+            cx.pop_accessibility_hidden();
+        }
 
         if should_clip {
             cx.pop_paint_clip();

@@ -184,6 +184,20 @@ own pull request.
   `an_oversized_code_span_uses_ordinary_word_wrapping`, and
   `kept_ranges_keep_together_apart_across_line_breaks_and_directions`
   check it.
+- Hanging indent (`src/buffer_line.rs`, `src/shape.rs`):
+  `BufferLine::set_hanging_indent` sets how far every visual line after
+  the line's first starts in from its start edge (the right for a
+  right-to-left line), and `ShapeLine::layout_to_buffer_keeping` takes it
+  as a last argument (`layout_to_buffer` passes zero, so it behaves as
+  upstream's). Wrapped lines wrap at the width less the indent, align in
+  that room, and have their glyphs placed past it; `LayoutLine::w` stays
+  the glyphs' width. The first line with glyphs is the unindented one, so
+  an empty line a glyph wider than the width commits first does not count.
+  Keep-together groups must fit the narrower room. `reset_new` clears it
+  and `split_off` copies it. quark-text sets it for
+  `TextStyle::hanging_indent` (diff and list rows). Upstream has no
+  equivalent; it could go up as a per-line indent option. quark-text's
+  `hanging_indent_*` tests check it.
 
 ## Not patched: bidi analysis
 

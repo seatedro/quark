@@ -15,6 +15,18 @@ pub fn search_field(
     shortcut_hint: Option<&str>,
     theme: &Theme,
 ) -> AnyElement {
+    let hint = shortcut_hint.map(|hint| super::kbd(hint, theme));
+    search_field_with_hint(input, has_value, on_clear, hint, theme)
+}
+
+/// [`search_field`] with any element as the hint.
+pub fn search_field_with_hint(
+    input: impl IntoAnyElement,
+    has_value: bool,
+    on_clear: Option<Action>,
+    hint: Option<AnyElement>,
+    theme: &Theme,
+) -> AnyElement {
     let tc = &theme.colors;
     let m = &theme.metrics;
 
@@ -30,7 +42,7 @@ pub fn search_field(
             }
         })
     } else {
-        shortcut_hint.map(|hint| super::kbd(hint, theme).into_any())
+        hint
     };
 
     view! {

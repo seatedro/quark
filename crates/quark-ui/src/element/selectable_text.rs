@@ -1271,8 +1271,11 @@ impl Element for SelectableText {
                     .max_lines(self.max_lines),
             ),
             _ => {
-                let width =
-                    explicit.unwrap_or_else(|| layout.as_ref().map_or(0.0, |l| l.size().0.ceil()));
+                let width = explicit.unwrap_or_else(|| {
+                    layout
+                        .as_ref()
+                        .map_or(0.0, |l| ceil_to_pixels(l.size().0, l.scale_factor()))
+                });
                 let height = Self::paragraph_height(layout.as_deref(), &paragraph, self.max_lines);
                 engine.request_layout(
                     taffy::Style {

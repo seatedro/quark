@@ -1496,6 +1496,7 @@ impl ShapeLine {
             layout_lines,
             match_mono_width,
             &[],
+            0.0,
         );
     }
 
@@ -1505,6 +1506,10 @@ impl ShapeLine {
     /// moves them to the next line together instead. A range wider than a
     /// line wraps as if it were not there. Glyph wrapping and unwrapped
     /// layout ignore the ranges.
+    ///
+    /// Visual lines after the first start `hanging_indent` in from the
+    /// start edge and wrap that much sooner.
+    #[allow(clippy::too_many_arguments)]
     pub fn layout_to_buffer_keeping(
         &self,
         scratch: &mut ShapeBuffer,
@@ -1515,7 +1520,18 @@ impl ShapeLine {
         layout_lines: &mut Vec<LayoutLine>,
         match_mono_width: Option<f32>,
         keep_together: &[Range<usize>],
+        hanging_indent: f32,
     ) {
+        // The first line with glyphs gets the full width.
+        let hanging_indent = hanging_indent.max(0.0);
+        let limit = |visual_lines: &[VisualLine]| -> f32 {
+            let width = width_opt.unwrap_or(f32::INFINITY);
+            if visual_lines.iter().all(|line| line.ranges.is_empty()) {
+                width
+            } else {
+                (width - hanging_indent).max(0.0)
+            }
+        };
         fn add_to_visual_line(
             vl: &mut VisualLine,
             span_index: usize,
@@ -1567,7 +1583,9 @@ impl ShapeLine {
         if let (Some(width), Wrap::Word | Wrap::WordOrGlyph, false) =
             (width_opt, wrap, keep_together.is_empty())
         {
-            self.keep_groups(keep_together, font_size, width, &mut keep_groups);
+            // Groups must fit a wrapped line.
+            let room = (width - hanging_indent).max(0.0);
+            self.keep_groups(keep_together, font_size, room, &mut keep_groups);
         }
         let mut next_group = 0;
         let mut kept_until = 0;
@@ -1623,11 +1641,11 @@ impl ShapeLine {
                         // wrapping results.
                         if kept
                             || current_visual_line.w + (word_range_width + needed)
-                                <= width_opt.unwrap_or(f32::INFINITY)
+                                <= limit(&visual_lines)
                             // Include one blank word over the width limit since it won't be
                             // counted in the final width
                             || (group.is_none() && word.blank
-                                && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY))
+                                && (current_visual_line.w + word_range_width) <= limit(&visual_lines))
                         {
                             // fits
                             if word.blank {
@@ -1637,12 +1655,12 @@ impl ShapeLine {
                             word_range_width += word_width;
                         } else if wrap == Wrap::Glyph
                             // Make sure that the word is able to fit on it's own line, if not, fall back to Glyph wrapping.
-                            || (wrap == Wrap::WordOrGlyph && word_width > width_opt.unwrap_or(f32::INFINITY))
+                            || (wrap == Wrap::WordOrGlyph && word_width > limit(&visual_lines))
                         {
                             // Commit the current line so that the word starts on the next line.
                             if word_range_width > 0.
                                 && wrap == Wrap::WordOrGlyph
-                                && word_width > width_opt.unwrap_or(f32::INFINITY)
+                                && word_width > limit(&visual_lines)
                             {
                                 add_to_visual_line(
                                     &mut current_visual_line,
@@ -1665,7 +1683,7 @@ impl ShapeLine {
                             for (glyph_i, glyph) in word.glyphs.iter().enumerate().rev() {
                                 let glyph_width = glyph.width(font_size);
                                 if current_visual_line.w + (word_range_width + glyph_width)
-                                    <= width_opt.unwrap_or(f32::INFINITY)
+                                    <= limit(&visual_lines)
                                 {
                                     word_range_width += glyph_width;
                                 } else {
@@ -1763,11 +1781,11 @@ impl ShapeLine {
                         let needed = group.map_or(word_width, |group| group.width);
                         if kept
                             || current_visual_line.w + (word_range_width + needed)
-                                <= width_opt.unwrap_or(f32::INFINITY)
+                                <= limit(&visual_lines)
                             // Include one blank word over the width limit since it won't be
                             // counted in the final width.
                             || (group.is_none() && word.blank
-                                && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY))
+                                && (current_visual_line.w + word_range_width) <= limit(&visual_lines))
                         {
                             // fits
                             if word.blank {
@@ -1777,12 +1795,12 @@ impl ShapeLine {
                             word_range_width += word_width;
                         } else if wrap == Wrap::Glyph
                             // Make sure that the word is able to fit on it's own line, if not, fall back to Glyph wrapping.
-                            || (wrap == Wrap::WordOrGlyph && word_width > width_opt.unwrap_or(f32::INFINITY))
+                            || (wrap == Wrap::WordOrGlyph && word_width > limit(&visual_lines))
                         {
                             // Commit the current line so that the word starts on the next line.
                             if word_range_width > 0.
                                 && wrap == Wrap::WordOrGlyph
-                                && word_width > width_opt.unwrap_or(f32::INFINITY)
+                                && word_width > limit(&visual_lines)
                             {
                                 add_to_visual_line(
                                     &mut current_visual_line,
@@ -1805,7 +1823,7 @@ impl ShapeLine {
                             for (glyph_i, glyph) in word.glyphs.iter().enumerate() {
                                 let glyph_width = glyph.width(font_size);
                                 if current_visual_line.w + (word_range_width + glyph_width)
-                                    <= width_opt.unwrap_or(f32::INFINITY)
+                                    <= limit(&visual_lines)
                                 {
                                     word_range_width += glyph_width;
                                 } else {
@@ -1913,6 +1931,17 @@ impl ShapeLine {
             if visual_line.ranges.is_empty() {
                 continue;
             }
+            let indent = if layout_lines.is_empty() {
+                0.0
+            } else {
+                hanging_indent
+            };
+            let line_width = line_width - indent;
+            let start_x = if self.rtl {
+                start_x - indent
+            } else {
+                start_x + indent
+            };
             self.reorder(&visual_line.ranges, &mut reorder_levels, &mut new_order);
             let mut glyphs = cached_glyph_sets.pop().unwrap_or_default();
             // Room for the glyphs `process_range` below pushes, so a new line allocates once,
@@ -2068,7 +2097,7 @@ impl ShapeLine {
                 } else if self.rtl {
                     start_x - x
                 } else {
-                    x
+                    x - indent
                 },
                 max_ascent,
                 max_descent,

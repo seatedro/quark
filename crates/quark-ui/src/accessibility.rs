@@ -868,9 +868,14 @@ pub(crate) struct AccessibilityExtra {
     orientation: Option<Orientation>,
     position_in_set: Option<(usize, usize)>,
     collection: CollectionInfo,
+    hidden: bool,
 }
 
 impl AccessibilityExtra {
+    pub(crate) fn hidden(&self) -> bool {
+        self.hidden
+    }
+
     pub(crate) fn invalid(&self) -> bool {
         self.invalid
     }
@@ -908,6 +913,13 @@ impl AccessibilityExtra {
 }
 
 impl Div {
+    /// Hide this div and its descendants from assistive tech, like
+    /// `aria-hidden`.
+    pub fn accessibility_hidden(mut self, hidden: bool) -> Self {
+        self.accessibility_extra.hidden = hidden;
+        self
+    }
+
     /// Checked state "mixed": a checkbox whose children are partly
     /// checked. Overrides [`Div::accessibility_toggled`] for assistive tech.
     pub fn accessibility_mixed(mut self) -> Self {
@@ -1615,6 +1627,38 @@ mod tests {
              more | Button | More | collapsed\n\
              volume | Slider | Volume | disabled | range=30/0..100\n\
              confirm | Dialog | Confirm | modal\n"
+        );
+    }
+
+    #[test]
+    fn accessibility_hidden_drops_the_subtree() {
+        use crate::element::{div, text};
+        use crate::style::Styled;
+        let button = |id: &str, label: &str| {
+            div()
+                .w(40.0)
+                .h(20.0)
+                .accessibility_id(id)
+                .accessibility_role(Role::Button)
+                .accessibility_label(label)
+        };
+        let root = div()
+            .w(400.0)
+            .h(300.0)
+            .flex_col()
+            .child(button("shown", "Shown"))
+            .child(
+                div()
+                    .accessibility_id("decor")
+                    .accessibility_role(Role::Group)
+                    .accessibility_hidden(true)
+                    .child(button("inner", "Inner"))
+                    .child(text("Decoration")),
+            );
+        let update = painted(root).tree_update("Test", None);
+        assert_eq!(
+            dump_accessibility_states(&update),
+            "shown | Button | Shown\n"
         );
     }
 

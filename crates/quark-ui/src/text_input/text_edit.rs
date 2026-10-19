@@ -17,6 +17,7 @@ use super::view::HorizontalScroll;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextEditCommand {
     InsertText(String),
+    InsertNewline,
     Backspace,
     BackspaceWord,
     BackspaceLine,

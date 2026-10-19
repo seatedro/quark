@@ -40,9 +40,10 @@ images = ["dep:image"]
 # without it.
 devtools = []
 # Debug builds run full O(n) integrity checks of the row table and the
-# document (and quark's BlockOrder and AnimationTable) after every
-# mutation. Quadratic on large documents; CI's test job turns it on.
-integrity-checks = ["quark/integrity-checks"]
+# document (and quark's BlockOrder and AnimationTable, and quark-text's
+# layout cache) after every mutation. Quadratic on large documents; CI's
+# test job turns it on.
+integrity-checks = ["quark/integrity-checks", "quark-text/integrity-checks"]
 # `quark_ui::test_alloc`: a counting global allocator type for other crates'
 # frame-budget tests. Tests only; it adds nothing to normal builds.
 test-alloc = []

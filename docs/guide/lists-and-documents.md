@@ -129,6 +129,58 @@ assert_eq!(copy_text(&selection, &order, &text, "\n"), "world\nSecond");
 - `find_bar` renders the query field, match count, and previous, next, and
   close buttons.
 
+## Rows with hover actions
+
+Interaction groups show a row's actions while the row is hovered or holds
+focus.
+
+- `interaction_group(id)` on a `div` makes it a group.
+- `show_when(GroupCondition::HoveredOrFocusWithin(id))` on a descendant
+  shows it only while its nearest group with that id is active.
+  `GroupCondition::Idle(id)` is the inverse (a timestamp the actions
+  replace).
+- Every row can use the same `GroupId`: a slot follows its own row.
+- A hidden slot keeps its layout space, so the row does not reflow. It
+  paints nothing and takes no clicks or Tab focus.
+- Give the row a stable id and a click action so it is a Tab stop: focusing
+  it reveals its actions, which follow it in the Tab order.
+
+```rust
+use quark::view;
+use quark_components::{Button, ButtonSize};
+use quark_ui::Action;
+use quark_ui::element::*;
+use quark_ui::icons::lucide;
+use quark_ui::style::Styled;
+use quark_ui::theme::ThemeColors;
+
+const ROW: GroupId = GroupId::new("file-row");
+
+fn file_row(name: &str, open: Action, remove: Action, colors: &ThemeColors) -> AnyElement {
+    view! {
+        <div
+            class="flex-row items-center gap-2 px-2 h-[28]"
+            id={format!("file:{name}")}
+            interaction_group={ROW}
+            hover_bg={colors.ghost_element_hover}
+            on:click={open}
+        >
+            <div class="flex-1 min-w-0">
+                <text class="text-sm truncate" color={colors.text}>{name}</text>
+            </div>
+            <div show_when={GroupCondition::HoveredOrFocusWithin(ROW)}>
+                <Button
+                    on:click={remove}
+                    icon={lucide::X}
+                    tooltip="Remove"
+                    size={ButtonSize::Compact}
+                />
+            </div>
+        </div>
+    }
+}
+```
+
 ## Trees and tables
 
 From `quark-components`:

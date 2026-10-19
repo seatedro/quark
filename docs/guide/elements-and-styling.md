@@ -105,6 +105,9 @@ On a `div`:
 
 - A clickable div with a stable id is also a Tab stop
   ([Accessibility](accessibility-and-automation.md#ids)).
+- To show child actions only while a row is hovered or focused, use
+  `interaction_group` and `show_when`
+  ([Rows with hover actions](lists-and-documents.md#rows-with-hover-actions)).
 - The focus ring is 2 points wide (`Sz::FOCUS_RING_W`), drawn outside the
   element, `focus_ring_offset(gap)` points further out.
 - Checkboxes, switches, and radio rows use a 2-point gap

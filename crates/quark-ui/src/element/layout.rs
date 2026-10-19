@@ -30,6 +30,8 @@ pub(super) enum NodeMeasure {
 pub struct MeasureContext<'a> {
     pub text: &'a mut TextSystem,
     pub layouts: &'a mut LayoutCache,
+    /// Device pixels per point: layout snaps box edges to this grid.
+    pub scale: f32,
 }
 
 impl ElementContext<'_> {
@@ -38,8 +40,35 @@ impl ElementContext<'_> {
         MeasureContext {
             text: self.text,
             layouts: self.layouts,
+            scale: self.scale_factor,
         }
     }
+}
+
+/// `scale`, or 1 if it is not positive and finite.
+fn grid(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// `v` points rounded to the nearest device pixel at `scale`.
+pub(super) fn round_to_pixels(v: f32, scale: f32) -> f32 {
+    let scale = grid(scale);
+    (v * scale).round() / scale
+}
+
+/// `v` points rounded up to whole device pixels at `scale`.
+pub(super) fn ceil_to_pixels(v: f32, scale: f32) -> f32 {
+    let scale = grid(scale);
+    (v * scale).ceil() / scale
+}
+
+fn floor_to_pixels(v: f32, scale: f32) -> f32 {
+    let scale = grid(scale);
+    (v * scale).floor() / scale
 }
 
 impl MeasureContext<'_> {
@@ -78,15 +107,21 @@ impl TextMeasure {
         self
     }
 
+    /// Device pixels per point the text was shaped at.
+    fn scale(&self) -> f32 {
+        self.unwrapped.scale_factor()
+    }
+
     fn max_content(&self) -> f32 {
-        self.unwrapped.size().0.ceil()
+        ceil_to_pixels(self.unwrapped.size().0, self.scale())
     }
 
     fn min_content(&mut self) -> f32 {
         let max = self.max_content();
-        *self
-            .min_content
-            .get_or_insert_with(|| self.unwrapped.min_content_width().ceil().min(max))
+        let scale = self.scale();
+        *self.min_content.get_or_insert_with(|| {
+            ceil_to_pixels(self.unwrapped.min_content_width(), scale).min(max)
+        })
     }
 
     /// A known width as given, otherwise the width offered up to the
@@ -121,22 +156,22 @@ impl TextMeasure {
     /// The width the text is shaped at in a box `width` wide: `None` when
     /// it fits unwrapped.
     ///
-    /// The width is floored: taffy rounds a box to whole pixels after
-    /// measuring it, and the rounded width is never below the floor of the
+    /// The width is floored to device pixels: layout snaps box edges to
+    /// device pixels, and the snapped width is never below the floor of the
     /// measured one, so the wrapped lines fit the painted box.
     fn wrap_width(&self, width: f32) -> Option<f32> {
-        (width < self.max_content()).then(|| width.floor().max(1.0))
+        (width < self.max_content()).then(|| floor_to_pixels(width, self.scale()).max(1.0))
     }
 }
 
 /// Height of `layout` showing at most `max_lines`, never shorter than one
-/// line, in whole pixels.
+/// line, in whole device pixels.
 pub(super) fn text_height(layout: &TextLayout, max_lines: Option<usize>, line_height: f32) -> f32 {
     let height = match max_lines.and_then(|n| layout.line(n)) {
         Some(first_hidden) => first_hidden.top,
         None => layout.size().1,
     };
-    height.max(line_height).ceil()
+    ceil_to_pixels(height.max(line_height), layout.scale_factor())
 }
 
 /// One measure query a cache boundary answered: what the parent offered
@@ -212,16 +247,7 @@ impl Subtree {
                     .map_or(available.width, AvailableSpace::Definite),
                 height: known.height.map_or(open_height, AvailableSpace::Definite),
             };
-            // A sizing pass is not rounded: nothing reads its rounded
-            // layout, and the final pass rounds the whole subtree again.
-            let sizing = known.width.is_none() || known.height.is_none();
-            if sizing {
-                self.engine.tree.disable_rounding();
-            }
             self.engine.compute(root, available, cx);
-            if sizing {
-                self.engine.tree.enable_rounding();
-            }
             self.laid_out_at = Some(known);
         }
         let size = self.engine.tree.unrounded_layout(root).size;
@@ -310,6 +336,8 @@ pub struct LayoutEngine {
     replay_memo: Vec<MeasureMemo>,
     /// Cache slots whose replayed memo missed a query this frame.
     stale: Vec<u32>,
+    /// Device pixels per point of the last pass.
+    scale: f32,
 }
 
 impl Default for LayoutEngine {
@@ -320,8 +348,11 @@ impl Default for LayoutEngine {
 
 impl LayoutEngine {
     pub fn new() -> Self {
+        // `layout_bounds` snaps to device pixels itself.
+        let mut tree = taffy::TaffyTree::new();
+        tree.disable_rounding();
         Self {
-            tree: taffy::TaffyTree::new(),
+            tree,
             nodes: Vec::new(),
             cursor: 0,
             finished: 0,
@@ -332,6 +363,7 @@ impl LayoutEngine {
             live_subtrees: 0,
             replay_memo: Vec::new(),
             stale: Vec::new(),
+            scale: 1.0,
         }
     }
 
@@ -581,6 +613,7 @@ impl LayoutEngine {
     /// After the pass: lay every subtree out at its host's final size, and
     /// record absolute origins so [`Self::layout_bounds`] is a lookup.
     fn finish(&mut self, root: LayoutId, cx: &mut MeasureContext) {
+        self.scale = cx.scale;
         // Nodes past the cursor belong to a larger earlier frame. They stay,
         // so a frame that needs them again reuses them (and their child
         // lists) instead of creating nodes: no node of this frame has them
@@ -600,7 +633,7 @@ impl LayoutEngine {
             let (Some(host), Some(sub_root)) = (sub.host, sub.root) else {
                 continue;
             };
-            let size = self.tree.unrounded_layout(host).size;
+            let size = self.tree.layout(host).expect("invalid layout id").size;
             sub.layout(
                 taffy::Size {
                     width: Some(size.width),
@@ -632,9 +665,29 @@ impl LayoutEngine {
     }
 
     /// Get the resolved bounds for a layout node, in absolute coordinates.
+    /// Edges snap to device pixels, so boxes that touch share an edge.
     pub fn layout_bounds(&self, id: LayoutId) -> Bounds {
-        let layout = self.tree.layout(id).expect("invalid layout id");
-        let (x, y) = match self.origins.get(slot(id)) {
+        let size = self.tree.layout(id).expect("invalid layout id").size;
+        let (x, y) = self.origin(id);
+        let left = round_to_pixels(x, self.scale);
+        let top = round_to_pixels(y, self.scale);
+        Bounds {
+            x: left,
+            y: top,
+            width: round_to_pixels(x + size.width, self.scale) - left,
+            height: round_to_pixels(y + size.height, self.scale) - top,
+        }
+    }
+
+    /// `length` from absolute `start`, snapped as [`Self::layout_bounds`]
+    /// snaps a box's edges.
+    fn snapped_span(&self, start: f32, length: f32) -> f32 {
+        round_to_pixels(start + length, self.scale) - round_to_pixels(start, self.scale)
+    }
+
+    /// The exact absolute origin of `id`, before snapping.
+    fn origin(&self, id: LayoutId) -> (f32, f32) {
+        match self.origins.get(slot(id)) {
             Some(&(x, y)) if !x.is_nan() => (x, y),
             // Not reached from the computed root: walk up the parents.
             _ => {
@@ -648,12 +701,6 @@ impl LayoutEngine {
                 }
                 (x, y)
             }
-        };
-        Bounds {
-            x,
-            y,
-            width: layout.size.width,
-            height: layout.size.height,
         }
     }
 
@@ -662,10 +709,10 @@ impl LayoutEngine {
     /// measure made at the width layout resolved. Paint shapes the text
     /// here, so the painted lines are the measured ones.
     ///
-    /// It reads the unrounded width. The rounded box can be up to a pixel
-    /// wider or narrower than the width measured, which can cross a line
-    /// break: rewrapping at it would paint more or fewer lines than the
-    /// height layout reserved.
+    /// It reads the exact width. The snapped box can be up to a device
+    /// pixel wider or narrower than the width measured, which can cross a
+    /// line break: rewrapping at it would paint more or fewer lines than
+    /// the height layout reserved.
     pub(super) fn auto_wrap_width(&self, id: LayoutId) -> Option<f32> {
         let Some(NodeMeasure::Text(text)) = self.tree.get_node_context(id) else {
             return None;
@@ -676,12 +723,21 @@ impl LayoutEngine {
     /// Width and height of what a scroll container at `id` scrolls over:
     /// the far edges of its laid-out children plus its end padding, at
     /// least its own size.
+    /// Snapped like the container's bounds, so content that fits does not
+    /// scroll.
     pub fn scroll_content_size(&self, id: LayoutId) -> (f32, f32) {
         let layout = self.tree.layout(id).expect("invalid layout id");
         let content = layout.content_size;
+        let (x, y) = self.origin(id);
         (
-            (content.width + layout.padding.right).max(layout.size.width),
-            (content.height + layout.padding.bottom).max(layout.size.height),
+            self.snapped_span(
+                x,
+                (content.width + layout.padding.right).max(layout.size.width),
+            ),
+            self.snapped_span(
+                y,
+                (content.height + layout.padding.bottom).max(layout.size.height),
+            ),
         )
     }
 
@@ -884,6 +940,7 @@ mod tests {
         let mut cx = MeasureContext {
             text: &mut text,
             layouts: &mut layouts,
+            scale: 1.0,
         };
         let mut engine = LayoutEngine::new();
         let (last, warmup) = frames.split_last().unwrap();
@@ -905,15 +962,28 @@ mod tests {
         assert_eq!(last_frame_allocations(&frames), 0);
     }
 
-    /// A cache boundary's content lands on whole pixels at its final size,
-    /// after its parent sized it at fractional widths.
+    /// Whether `v` points is a whole number of device pixels at `scale`.
+    fn on_grid(v: f32, scale: f32) -> bool {
+        let px = v * scale;
+        (px - px.round()).abs() < 1e-3
+    }
+
+    /// A cache boundary's content lands on whole device pixels at its
+    /// final size, after its parent sized it at fractional widths.
     #[test]
     fn boundary_content_lands_on_whole_pixels() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            boundary_content_lands_on_whole_pixels_at(scale);
+        }
+    }
+
+    fn boundary_content_lands_on_whole_pixels_at(scale: f32) {
         let mut text = TextSystem::vendored_only(&Default::default());
         let mut layouts = LayoutCache::default();
         let mut cx = MeasureContext {
             text: &mut text,
             layouts: &mut layouts,
+            scale,
         };
         let mut engine = LayoutEngine::new();
         let index = engine.begin_subtree();
@@ -954,7 +1024,69 @@ mod tests {
         for &node in &sub.nodes[..sub.cursor] {
             let b = sub.layout_bounds(node);
             let edges = [b.x, b.y, b.width, b.height];
-            assert!(edges.iter().all(|v| v.fract() == 0.0), "{b:?}");
+            assert!(
+                edges.iter().all(|&v| on_grid(v, scale)),
+                "{b:?} at {scale}x"
+            );
         }
+    }
+
+    #[test]
+    fn fractional_padding_insets_evenly_on_the_device_grid() {
+        let mut text = TextSystem::vendored_only(&Default::default());
+        let mut layouts = LayoutCache::default();
+        let scale = 2.0;
+        let mut cx = MeasureContext {
+            text: &mut text,
+            layouts: &mut layouts,
+            scale,
+        };
+        let mut engine = LayoutEngine::new();
+        let child = engine.request_layout(
+            taffy::Style {
+                flex_grow: 1.0,
+                ..Default::default()
+            },
+            &[],
+        );
+        let padded = engine.request_layout(
+            taffy::Style {
+                size: taffy::Size {
+                    width: Dimension::length(100.0),
+                    height: Dimension::length(40.0),
+                },
+                padding: taffy::Rect::length(1.625_f32),
+                ..flex(taffy::FlexDirection::Row)
+            },
+            &[child],
+        );
+        let root = engine.request_layout(
+            taffy::Style {
+                padding: taffy::Rect::length(0.25_f32),
+                ..flex(taffy::FlexDirection::Row)
+            },
+            &[padded],
+        );
+        engine.compute_layout(root, 400.0, 300.0, &mut cx);
+
+        let outer = engine.layout_bounds(padded);
+        let inner = engine.layout_bounds(child);
+        let insets = [
+            inner.x - outer.x,
+            outer.right() - inner.right(),
+            inner.y - outer.y,
+            outer.bottom() - inner.bottom(),
+        ];
+        for b in [outer, inner] {
+            let edges = [b.x, b.y, b.width, b.height];
+            assert!(edges.iter().all(|&v| on_grid(v, scale)), "{b:?}");
+        }
+        let pixel = 1.0 / scale;
+        assert!(
+            insets.iter().all(|inset| (inset - 1.625).abs() <= pixel),
+            "{insets:?}"
+        );
+        assert!((insets[0] - insets[1]).abs() <= pixel, "{insets:?}");
+        assert!((insets[2] - insets[3]).abs() <= pixel, "{insets:?}");
     }
 }

@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn cancelling_a_drag_moves_no_row() {
         let mut reorder = Reorder::new();
-        let mut drag = Reorder::drag_start(2, crate::Action::new)(ClickEvent { x: 10.0, y: 100.0 });
+        let mut drag = Reorder::drag_start(2, crate::Action::new)(ClickEvent::at(10.0, 100.0));
         let msgs = |actions: Vec<Action>| -> Vec<ReorderMsg> {
             actions
                 .iter()

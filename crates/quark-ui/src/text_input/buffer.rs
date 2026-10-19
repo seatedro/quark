@@ -640,6 +640,15 @@ impl TextBuffer {
                 Styling::Inherit,
                 EditKind::Typing,
             ),
+            // Return during composition belongs to the IME.
+            InsertNewline if self.multiline && self.preedit.is_none() => self.replace(
+                self.selection(),
+                "\n",
+                &[],
+                Styling::Inherit,
+                EditKind::Typing,
+            ),
+            InsertNewline => false,
             Paste(value) => {
                 let pasted = match self.rich_clipboard.resolve(&value) {
                     Some(rich) => Insertion::Rich(rich),
@@ -728,6 +737,7 @@ impl TextBuffer {
             CancelPreedit => self.clear_preedit(),
             CursorUp | CursorDown | SelectUp | SelectDown => {}
             InsertText(_)
+            | InsertNewline
             | Paste(_)
             | Backspace
             | BackspaceWord

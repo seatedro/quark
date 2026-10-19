@@ -94,6 +94,11 @@ fn gallery(theme: &Theme) -> AnyElement {
                         .label("Skip")
                         .style(ButtonStyle::Ghost),
                 )
+                .child(
+                    Button::new(Pick("more"))
+                        .label("More")
+                        .style(ButtonStyle::Outline),
+                )
                 .child(badge("New").accent()),
         )
         .child(tab_bar(vec![

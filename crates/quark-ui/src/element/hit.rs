@@ -102,6 +102,9 @@ pub trait DragHandler {
     }
     fn on_move(&mut self, x: f32, y: f32) -> Vec<Action>;
     fn on_release(&mut self) -> DragReleaseResult;
+    /// The modifier keys held, before each [`Self::on_move`] and
+    /// [`Self::on_release`].
+    fn set_modifiers(&mut self, _modifiers: Mods) {}
     /// The drag ended without a release: the window lost focus, the app
     /// cancelled it (Escape), or the platform took the pointer for a
     /// native drag. Back out: commit nothing a release would (a drop, a

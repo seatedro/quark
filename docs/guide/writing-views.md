@@ -96,7 +96,7 @@ calls the bound `text` and fails to compile. Rename the binding
 | `on:key:mod+s={a}` | `.on_key("mod+s", a)`; unknown modifiers fail to compile |
 | `role="button"` | `.semantic_role(SemanticRole::Button)`, which also sets the platform role |
 | `aria-label`, `aria-description`, `aria-valuetext` | `.accessibility_label`, `_description`, `_value` |
-| `aria-selected`, `aria-checked`/`aria-pressed`, `aria-expanded`, `aria-disabled` | `.accessibility_selected`, `_toggled`, `_expanded`, `_disabled`; alone they mean `true` |
+| `aria-selected`, `aria-checked`/`aria-pressed`, `aria-expanded`, `aria-disabled`, `aria-hidden` | `.accessibility_selected`, `_toggled`, `_expanded`, `_disabled`, `_hidden`; alone they mean `true` |
 | `aria-invalid`, `aria-required`, `aria-readonly`, `aria-multiselectable`, `aria-level`, `aria-rowindex`, `aria-colindex`, `aria-sort`, `aria-live` | The matching `accessibility_*` builder, or `.live` |
 | `key={..}`, `id="..."`, `test-id="..."` | `.key(..)`, `.id(..)`, `.test_id(..)` |
 | `track_scroll={&handle}`, `scrollbar_visibility={&state}` | `.track_scroll(&handle)`, `.scrollbar_visibility(&state)`: the only handle attributes, because the builders have no others |
@@ -119,6 +119,7 @@ calls the bound `text` and fails to compile. Rename the binding
 - `on:hover` expands to `.on_hover(..)`, which no builder has. Hover is a
   style state: use `hover:` classes or `hover_bg={..}`.
 - In `view! { scale, ... }`, `gap`, `p`, `px`, `py`, `pt`, `pb`, `pl`, `pr`,
+  the margins `m`, `mx`, `my`, `mt`, `mb`, `ml` (or `margin_left`), `mr`,
   and `rounded` on a `div` are multiplied by `scale` and rounded.
 
 ## Classes
@@ -249,7 +250,13 @@ The tables below are generated from the macro's own tables.
 | `pb-*` | `.pb(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
 | `pl-*` | `.pl(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
 | `pr-*` | `.pr(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
+| `m-*` | `.m(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
+| `mx-*` | `.mx(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
+| `my-*` | `.my(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
+| `mt-*` | `.mt(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
+| `mb-*` | `.mb(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
 | `ml-*` | `.margin_left(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
+| `mr-*` | `.mr(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
 | `gap-*` | `.gap(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
 | `gap-x-*` | `.gap_x(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |
 | `gap-y-*` | `.gap_y(..)` | `N` (N x 4px, halves allowed), `px`, `[13px]`, `[expr]` | `<div>` | - |

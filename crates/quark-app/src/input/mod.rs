@@ -18,6 +18,8 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 pub use scroll::scroll_delta_to_px;
 #[cfg(feature = "ui")]
+pub(crate) use ui_input::mods_of;
+#[cfg(feature = "ui")]
 pub use ui_input::{PointerButton, UiInput};
 
 /// Pointer coordinates and wheel pixel deltas are logical points relative to

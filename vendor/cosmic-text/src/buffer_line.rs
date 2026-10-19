@@ -22,6 +22,8 @@ pub struct BufferLine {
     /// Byte ranges word wrapping keeps on one line when they fit on one;
     /// see [`Self::set_keep_together_ranges`].
     keep_together: Vec<Range<usize>>,
+    /// How far in wrapped lines start; see [`Self::set_hanging_indent`].
+    hanging_indent: f32,
 }
 
 impl BufferLine {
@@ -44,6 +46,7 @@ impl BufferLine {
             shaping,
             metadata: None,
             keep_together: Vec::new(),
+            hanging_indent: 0.0,
         }
     }
 
@@ -66,6 +69,7 @@ impl BufferLine {
         self.shaping = shaping;
         self.metadata = None;
         self.keep_together.clear();
+        self.hanging_indent = 0.0;
     }
 
     /// Heap bytes the line keeps, at capacity: its text, attributes, and
@@ -244,6 +248,7 @@ impl BufferLine {
         // To preserve line endings, it moves to the new line
         self.ending = LineEnding::None;
         new.align = self.align;
+        new.hanging_indent = self.hanging_indent;
         new
     }
 
@@ -346,6 +351,19 @@ impl BufferLine {
         true
     }
 
+    /// Sets how far every visual line after the first starts in from the
+    /// line's start edge, in the layout's units: wrapped lines then wrap at
+    /// the width less the indent. Resets layout if it changed.
+    /// Returns true if the line was reset
+    pub fn set_hanging_indent(&mut self, indent: f32) -> bool {
+        if indent.to_bits() == self.hanging_indent.to_bits() {
+            return false;
+        }
+        self.hanging_indent = indent;
+        self.reset_layout();
+        true
+    }
+
     /// Get line shaping cache
     pub const fn shape_opt(&self) -> Option<&ShapeLine> {
         self.shape_opt.get()
@@ -379,6 +397,7 @@ impl BufferLine {
                 &mut layout,
                 match_mono_width,
                 &self.keep_together,
+                self.hanging_indent,
             );
             self.layout_opt.set_used(layout);
         }
@@ -415,6 +434,7 @@ impl BufferLine {
             shaping: Shaping::Advanced,
             metadata: None,
             keep_together: Vec::new(),
+            hanging_indent: 0.0,
         }
     }
 

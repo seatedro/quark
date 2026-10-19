@@ -9,8 +9,8 @@ use quark::reactive::SignalStore;
 use quark::{Color, Rect};
 use quark_components::toast::compute_toast_height;
 use quark_components::{
-    Button, Modal, SelectOption, SelectState, Toast, ToastLayout, ToastStack, TooltipSide,
-    popover_panel, select, tooltip_layer,
+    Button, ButtonSize, ButtonStyle, Modal, SegmentedControl, SegmentedItem, SelectOption,
+    SelectState, Toast, ToastLayout, ToastStack, TooltipSide, popover_panel, select, tooltip_layer,
 };
 use quark_render::{Primitive, Scene};
 use quark_ui::Action;
@@ -124,6 +124,37 @@ fn recipe_sizes_scale_once_at_every_zoom() {
             at(20.0) + 1.0,
             "modal bottom padding at {zoom}"
         );
+    }
+}
+
+#[test]
+fn outlined_buttons_match_and_segmented_insets_are_whole_points() {
+    for zoom in [0.8125, 1.0, 1.25] {
+        let theme = Theme::default_light().with_ui_scale(zoom);
+        for size in [ButtonSize::Default, ButtonSize::Compact] {
+            let painted = |style| {
+                let button = Button::new(Pick).label("Send").style(style).size(size);
+                bounds(&paint(&theme, div().child(button).into_any()), "button")
+            };
+            let (subtle, outline) = (painted(ButtonStyle::Subtle), painted(ButtonStyle::Outline));
+            assert_eq!(
+                (outline.width, outline.height),
+                (subtle.width, subtle.height),
+                "{size:?} at {zoom}"
+            );
+        }
+
+        let control = SegmentedControl::new(vec![
+            SegmentedItem::new("Day", Pick, true),
+            SegmentedItem::new("Week", Pick, false),
+        ]);
+        let painted = paint(&theme, div().child(control).into_any());
+        let track = bounds(&painted, "segmented-control");
+        let first = bounds(&painted, "segmented-item");
+        // Inside the track's 1-point border.
+        let inset = first.x - track.x - 1.0;
+        assert_eq!(inset, inset.round(), "inset at {zoom}");
+        assert_eq!(first.y - track.y - 1.0, inset, "inset at {zoom}");
     }
 }
 

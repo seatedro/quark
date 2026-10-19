@@ -1,12 +1,12 @@
 use quark::{Props, view};
 
 use crate::Child;
-use quark_ui::Action;
 use quark_ui::design::{Alpha, Ico, Rad, Sp};
 use quark_ui::element::CursorHint;
 use quark_ui::element::*;
-use quark_ui::style::Styled;
+use quark_ui::style::{StyleOverride, Styled};
 use quark_ui::theme::{Color, ControlMetrics};
+use quark_ui::{Action, FocusId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonStyle {
@@ -14,6 +14,7 @@ pub enum ButtonStyle {
     Subtle,
     Ghost,
     Danger,
+    Outline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,9 @@ pub struct Button {
     /// recipe, field by field.
     #[prop(optional)]
     metrics: Option<ControlMetrics>,
+    /// The button's focus target; see [`Button::focus_id`].
+    #[prop(optional)]
+    focus_id: Option<FocusId>,
     /// Content after the icon and label. When it is all text and there is
     /// no label or tooltip, it is also the button's accessible name.
     #[prop(default)]
@@ -103,6 +107,12 @@ impl Button {
 
     pub fn metrics(mut self, metrics: ControlMetrics) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Lets the app move focus to the button.
+    pub fn focus_id(mut self, id: FocusId) -> Self {
+        self.focus_id = Some(id);
         self
     }
 }
@@ -163,7 +173,18 @@ impl RenderOnce for Button {
                 tc.status_error,
                 tc.status_error,
             ),
+            ButtonStyle::Outline => (
+                Color::TRANSPARENT,
+                tc.ghost_element_hover,
+                tc.text_muted,
+                tc.text,
+            ),
         };
+        // (rest, hover) border colors.
+        let border =
+            (self.variant == ButtonStyle::Outline).then_some((tc.border_variant, tc.border));
+        // The border takes layout space, so take it out of the padding.
+        let border_inset = if border.is_some() { 1.0 / scale } else { 0.0 };
 
         let disabled = self.disabled;
         let (bg, icon_color, text_color) = if disabled {
@@ -191,6 +212,7 @@ impl RenderOnce for Button {
             self.on_click
         };
         let tooltip_text = self.tooltip;
+        let focus_id = self.focus_id.filter(|_| !disabled);
         let cursor = if disabled {
             CursorHint::Default
         } else {
@@ -207,6 +229,20 @@ impl RenderOnce for Button {
             .or_else(|| Child::text_of(&children))
             .unwrap_or_default();
         let accessibility_id = format!("button:{action:?}:{accessibility_label}");
+        let hover_icon = tc.text;
+        // One `hover` for fill and border: each `hover_*` helper replaces
+        // the hover style the last one set.
+        let hover = move |s: StyleOverride| {
+            let s = if icon_only {
+                s.icon_color(hover_icon)
+            } else {
+                s.bg(hover_bg)
+            };
+            match border {
+                Some((_, strong)) => s.border_color(strong),
+                None => s,
+            }
+        };
 
         view! { scale,
             <div
@@ -221,6 +257,8 @@ impl RenderOnce for Button {
                 aria-selected={self.active}
                 aria-disabled={disabled}
                 @when {!disabled} { on:click={action} }
+                @when {let Some(target) = focus_id} { focus_ring={target} }
+                @when {let Some((rest, _)) = border} { border={rest} }
                 @when {fixed.is_some()} {
                     items_center
                     justify_center
@@ -231,8 +269,8 @@ impl RenderOnce for Button {
                 @when {fixed.is_none()} {
                     class="flex-row items-center"
                     gap={gap}
-                    px={actual_px}
-                    py={unscaled_py}
+                    px={actual_px - border_inset}
+                    py={unscaled_py - border_inset}
                     rounded={m.radius.unwrap_or(Rad::XL)}
                 }
                 @when {fixed.is_none() && height.is_some()} {
@@ -240,8 +278,7 @@ impl RenderOnce for Button {
                     pt={0.0}
                     pb={0.0}
                 }
-                @when {!disabled && icon_only} { hover_icon_color={tc.text} }
-                @when {!disabled && !icon_only} { hover_bg={hover_bg} }
+                @when {!disabled} { hover={hover} }
                 @when {tooltip_text.is_some()} {
                     tooltip={tooltip_text.clone().unwrap_or_default()}
                 }

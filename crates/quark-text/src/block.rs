@@ -284,6 +284,7 @@ mod tests {
         letter_spacing: 0.0,
         thicken: false,
         linear_correction: None,
+        hanging_indent: 0.0,
     };
 
     /// Everything a layout shows and hits against.

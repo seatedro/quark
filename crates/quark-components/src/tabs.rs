@@ -99,6 +99,7 @@ impl TabItem {
 pub struct TabBar {
     items: Vec<TabItem>,
     fill: bool,
+    full_width: bool,
     label: Option<String>,
 }
 
@@ -106,13 +107,22 @@ pub fn tab_bar(items: Vec<TabItem>) -> TabBar {
     TabBar {
         items,
         fill: false,
+        full_width: false,
         label: None,
     }
 }
 
 impl TabBar {
+    /// Stretch the tabs to share the bar's width. Implies `full_width`.
     pub fn fill(mut self) -> Self {
         self.fill = true;
+        self.full_width = true;
+        self
+    }
+
+    /// Make the bar as wide as its parent, so its border spans the row.
+    pub fn full_width(mut self) -> Self {
+        self.full_width = true;
         self
     }
 
@@ -138,6 +148,7 @@ impl RenderOnce for TabBar {
                 role="tablist"
                 accessibility_id={"tab-bar"}
                 @when {let Some(label) = self.label} { aria-label={label} }
+                @when {self.full_width} { w_full }
             >
                 for item in self.items {
                     {Self::tab(item, fill, cx)}

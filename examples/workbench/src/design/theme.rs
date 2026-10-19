@@ -20,8 +20,8 @@
 //!
 //! On top of the file the adapter sets the compact component recipe, the
 //! zoom, high contrast (quark's high-contrast colors, workbench sizes), and
-//! reduced motion. `ui_font_size` stays at quark's 16-point zoom anchor;
-//! 13- and 14-point text comes from the recipe and [`super::recipes`].
+//! reduced motion. `ui_font_size` stays at 16 points; 13- and 14-point
+//! text comes from the recipe and [`super::recipes`].
 
 use std::sync::OnceLock;
 
@@ -231,5 +231,7 @@ pub fn recipe(mode: ThemeMode) -> ComponentMetrics {
             gap: Some(SPACE_6),
             ..ControlMetrics::default()
         },
+        segmented: ControlMetrics::default(),
+        kbd: ControlMetrics::default(),
     }
 }

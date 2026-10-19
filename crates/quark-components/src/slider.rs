@@ -11,11 +11,13 @@ use std::rc::Rc;
 use quark::{Rect, view};
 use quark_render::Scene;
 use quark_ui::accessibility::NumericValue;
+use quark_ui::design::Alpha;
 use quark_ui::element::{
     AnyElement, Bounds, ClickEvent, CursorHint, DragHandler, DragReleaseResult, Element,
     ElementContext, IntoAnyElement, LayoutEngine, LayoutId, RenderOnce, div, text,
 };
 use quark_ui::style::Styled;
+use quark_ui::theme::Color;
 use quark_ui::{Action, FocusId};
 
 /// Focus target of the slider `id`.
@@ -46,6 +48,7 @@ pub fn slider(
         page: None,
         on_change: Rc::new(on_change),
         width: None,
+        track_color: None,
         disabled: false,
         show_value: true,
     }
@@ -59,6 +62,7 @@ pub struct Slider {
     page: Option<f32>,
     on_change: Rc<dyn Fn(f32) -> Action>,
     width: Option<f32>,
+    track_color: Option<Color>,
     disabled: bool,
     show_value: bool,
 }
@@ -80,6 +84,12 @@ impl Slider {
 
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
+        self
+    }
+
+    /// The unfilled part of the track.
+    pub fn track_color(mut self, color: Color) -> Self {
+        self.track_color = Some(color);
         self
     }
 
@@ -157,10 +167,16 @@ impl RenderOnce for Slider {
         let bar_h = (4.0 * scale).round();
         let width = self.width.unwrap_or((220.0 * scale).round());
         let value_text = format!("{value:.*}", range.decimals());
+        let rest = self.track_color.unwrap_or(tc.slider_track);
         let (fill, rest, knob) = if self.disabled {
-            (tc.text_disabled, tc.element_background, tc.text_disabled)
+            // Dimmed to stay distinct from the disabled fill.
+            (
+                tc.text_disabled,
+                rest.with_alpha(Alpha::MUTED),
+                tc.text_disabled,
+            )
         } else {
-            (tc.accent, tc.element_background, tc.text_strong)
+            (tc.accent, rest, tc.text_strong)
         };
 
         let probe = Rc::new(Cell::new(Rect::default()));

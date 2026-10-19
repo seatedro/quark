@@ -36,6 +36,9 @@ cjk-font = []
 # A profiler scope and tracing span around text shaping. quark-app's
 # profile-puffin and profile-tracy features pick the backend.
 profile = ["dep:profiling", "dep:tracing"]
+# Debug builds walk the whole layout cache after every miss to check its
+# invariants. O(entries) per miss; quark-ui's integrity-checks turns it on.
+integrity-checks = []
 
 [dev-dependencies]
 proptest.workspace = true
